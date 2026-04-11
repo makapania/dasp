@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -84,6 +85,15 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
     """
 
     def __init__(self, n_components: int | float = 5, alpha: float = 0.05):
+        # Reject out-of-range alpha at construction time. The chi² quantile
+        # used for the joint threshold (fit() at line 161) is undefined or
+        # NaN for alpha <= 0 or alpha >= 1, which would silently produce
+        # a model that flags everything (or nothing). All current GUI/grid
+        # callers pass valid alphas, but this guards the public API.
+        if not (isinstance(alpha, (int, float)) and 0 < float(alpha) < 1):
+            raise ValueError(
+                f"alpha must be in (0, 1), got {alpha!r}"
+            )
         self.n_components = n_components
         self.alpha = alpha
 
@@ -769,6 +779,43 @@ _VAL_OC_METRIC_KEY_TO_COLUMN = {
 }
 
 
+# build_preprocessing_pipeline accepts these names; everything else is a
+# display variant that has to be normalized first.
+_BUILDABLE_PREPROCESS_NAMES = frozenset({
+    'raw', 'snv', 'deriv', 'snv_deriv', 'deriv_snv',
+})
+
+
+def _normalize_preprocess_for_pipeline(name: str) -> str:
+    """Map a result-row Preprocess display name to the base name accepted by
+    build_preprocessing_pipeline.
+
+    Grid search writes display names like ``snv_deriv1_w11`` (method + window)
+    which the pipeline builder rejects with
+    ``ValueError("Unknown preprocess: snv_deriv1_w11")``. The proper fix is
+    for the producer to write a separate ``PreprocessBase`` column (see
+    search.py:5136 / unified_bayesian.py:1995). This function is the
+    defense-in-depth fallback for callers that don't.
+
+    Strips ``_w<digits>`` suffixes and digits attached to ``deriv``. Returns
+    the input unchanged if it is already a buildable base name."""
+    if not name:
+        return 'raw'
+    base = name.strip()
+    if base in _BUILDABLE_PREPROCESS_NAMES:
+        return base
+    # Drop trailing window suffix like '_w11'.
+    base = re.sub(r'_w\d+$', '', base)
+    # Drop digits glued to 'deriv' (deriv1 → deriv, snv_deriv2 → snv_deriv).
+    base = re.sub(r'deriv\d+', 'deriv', base)
+    if base in _BUILDABLE_PREPROCESS_NAMES:
+        return base
+    # Last resort: strip everything that isn't a known token. Anything not
+    # matching falls back to 'raw' so the helper can still produce metrics
+    # rather than silently dropping the row.
+    return 'raw'
+
+
 def compute_validation_metrics_for_top_one_class_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -906,10 +953,18 @@ def compute_validation_metrics_for_top_one_class_models(
         row = df_results.loc[idx]
         try:
             # === Parse preprocessing config ===
-            preprocess_name = row.get('PreprocessBase', row.get('Preprocess', 'raw'))
+            # PreprocessBase is the clean pipeline name written by both
+            # Bayesian (unified_bayesian.py:1995) and grid search
+            # (search.py:5136 — added April 2026 to fix the silent NaN
+            # val_* bug). Fall back to Preprocess (display name) and
+            # normalize, so any caller that forgets PreprocessBase still
+            # produces metrics instead of silently bailing.
+            preprocess_name = row.get('PreprocessBase')
+            if preprocess_name is None or (isinstance(preprocess_name, float) and pd.isna(preprocess_name)):
+                preprocess_name = row.get('Preprocess', 'raw')
             if preprocess_name is None or (isinstance(preprocess_name, float) and pd.isna(preprocess_name)):
                 preprocess_name = 'raw'
-            preprocess_name = str(preprocess_name)
+            preprocess_name = _normalize_preprocess_for_pipeline(str(preprocess_name))
 
             def _maybe_int(v, default=0):
                 try:

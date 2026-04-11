@@ -377,17 +377,22 @@ def build_model(model_name, params, task_type='regression'):
     >>> model.fit(X_train, y_train)
     """
     if task_type == "one_class":
-        # One-class model names go to build_one_class_model; standard model names
-        # (used for variable selection importance computation) fall back to classification.
+        # One-class model names go to build_one_class_model. Anything else
+        # is a typo/registry mismatch and must raise loudly — silently
+        # falling back to classification produces wrong-estimator-type
+        # results that are hard to diagnose downstream. If you actually
+        # need a classification surrogate (e.g. for variable-selection
+        # importance) call build_model with task_type='classification'
+        # directly.
         _OC_MODEL_NAMES = {'PCA-SIMCA', 'OneClassSVM', 'IsolationForest', 'EllipticEnvelope', 'LOF'}
         if model_name in _OC_MODEL_NAMES:
             from spectral_predict.contamination import build_one_class_model
             return build_one_class_model(model_name, params)
-        logging.warning(
-            "build_model() called with task_type='one_class' for model '%s'. "
-            "Falling back to task_type='classification'.", model_name
+        raise ValueError(
+            f"Unknown one-class model: {model_name!r}. "
+            f"Expected one of {sorted(_OC_MODEL_NAMES)}. "
+            f"For classification surrogates, pass task_type='classification' explicitly."
         )
-        task_type = "classification"
 
     if task_type == "regression":
         if model_name == "PLS":

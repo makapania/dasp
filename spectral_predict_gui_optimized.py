@@ -34430,7 +34430,7 @@ F1 Score:  {f1:.4f}
                         self.validation_X is not None and
                         self.validation_y is not None):
                     try:
-                        from sklearn.metrics import balanced_accuracy_score, recall_score, roc_auc_score
+                        from spectral_predict.contamination import one_class_metrics
 
                         # Preprocess validation data using same pipeline
                         X_val_raw = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
@@ -34460,30 +34460,38 @@ F1 Score:  {f1:.4f}
                         if cal_pca is not None:
                             X_val_transformed = cal_pca.transform(X_val_transformed)
 
-                        # Predict
+                        # Predict + score using the canonical helper. Going
+                        # through one_class_metrics() ensures parity with
+                        # the Results tab and the grid/Bayesian validation
+                        # paths: it negates decision_function for AUC so
+                        # outliers are the positive class, returns NaN for
+                        # clean-only validation sets instead of 1.0, and
+                        # uses the same sensitivity/specificity convention
+                        # everywhere. The previous inline raw-sklearn block
+                        # produced inconsistent metrics that disagreed with
+                        # the Results tab on the same model.
                         cal_model = cv_result['cal_model']
                         if cal_model is not None:
                             val_preds = cal_model.predict(X_val_transformed)
-                            val_bal_acc = balanced_accuracy_score(y_val_oc, val_preds)
-                            val_sens = recall_score(y_val_oc, val_preds, pos_label=-1, zero_division=0)
-                            val_spec = recall_score(y_val_oc, val_preds, pos_label=1, zero_division=0)
-
-                            # Try AUC if decision_function available
-                            val_auc_str = "N/A"
-                            try:
-                                if hasattr(cal_model, 'decision_function'):
+                            val_scores = None
+                            if hasattr(cal_model, 'decision_function'):
+                                try:
                                     val_scores = cal_model.decision_function(X_val_transformed)
-                                    val_auc = roc_auc_score(y_val_oc, val_scores)
-                                    val_auc_str = f"{val_auc:.3f}"
-                            except Exception:
-                                pass
+                                except Exception as score_err:
+                                    self._log_progress(
+                                        f"  [Warning] decision_function failed during refined OC validation: {score_err}"
+                                    )
+                            val_metrics = one_class_metrics(y_val_oc, val_preds, val_scores)
+
+                            def _fmt(val):
+                                return f"{val:.3f}" if val is not None and not (isinstance(val, float) and np.isnan(val)) else "N/A"
 
                             results_text += (
                                 f"\nExternal Validation ({len(y_val_oc)} samples):\n"
-                                f"  Balanced Accuracy: {val_bal_acc:.3f}\n"
-                                f"  Sensitivity:       {val_sens:.3f}\n"
-                                f"  Specificity:       {val_spec:.3f}\n"
-                                f"  AUC:               {val_auc_str}\n"
+                                f"  Balanced Accuracy: {_fmt(val_metrics.get('balanced_accuracy'))}\n"
+                                f"  Sensitivity:       {_fmt(val_metrics.get('sensitivity'))}\n"
+                                f"  Specificity:       {_fmt(val_metrics.get('specificity'))}\n"
+                                f"  AUC:               {_fmt(val_metrics.get('auc'))}\n"
                             )
                     except Exception as val_err:
                         results_text += f"\nExternal Validation: Failed ({val_err})\n"
@@ -35827,7 +35835,21 @@ External Validation Performance (n={n_val}):
                     'AUCcv': self.refined_performance.get('AUCcv'),
                 }
                 metadata['performance'] = perf
-                metadata['inlier_class_label'] = self.inlier_class_label.get()
+                # Prefer the RESOLVED inlier label captured by the
+                # refinement thread (line 34373) over the raw combobox
+                # value. When the user accepts auto-detect via the
+                # confirm dialog at line 21852, self.inlier_class_label
+                # remains an empty string and would round-trip into the
+                # saved model as ''. self.refined_config carries the
+                # actually-trained label.
+                resolved_inlier = (
+                    self.refined_config.get('inlier_class_label', '')
+                    if hasattr(self, 'refined_config') and self.refined_config
+                    else ''
+                )
+                metadata['inlier_class_label'] = (
+                    resolved_inlier if resolved_inlier else self.inlier_class_label.get()
+                )
                 # Attach fitted scaler/PCA reducer for one-class persistence
                 metadata['scaler'] = getattr(self, 'refined_oc_scaler', None)
                 metadata['pca_reducer'] = getattr(self, 'refined_oc_pca_reducer', None)

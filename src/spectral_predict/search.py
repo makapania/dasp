@@ -5164,6 +5164,14 @@ def run_one_class_search(
                     "n_inliers": n_inliers,
                     "n_outliers": n_outliers,
                     "inlier_class_label": str(inlier_class_label),
+                    # PreprocessBase is the clean pipeline name (e.g.
+                    # 'snv_deriv') accepted by build_preprocessing_pipeline.
+                    # Display name (Preprocess) carries the window suffix
+                    # ('snv_deriv1_w11') which the pipeline builder rejects.
+                    # Mirrors the classification grid path at search.py:4506-4507.
+                    "PreprocessBase": preprocess_cfg.get(
+                        "method", preprocess_cfg["name"]
+                    ),
                     "top_vars": "N/A",
                     "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths_current]),
                     "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
@@ -5648,6 +5656,13 @@ def run_one_class_search(
                                 "Model": model_name,
                                 "Params": str(params),
                                 "Preprocess": preprocess_cfg["name"],
+                                # See full-spectrum branch at search.py:5136
+                                # for why both Preprocess (display) and
+                                # PreprocessBase (clean pipeline name) are
+                                # required for downstream validation rebuild.
+                                "PreprocessBase": preprocess_cfg.get(
+                                    "method", preprocess_cfg["name"]
+                                ),
                                 "Deriv": preprocess_cfg["deriv"],
                                 "Window": preprocess_cfg["window"],
                                 "Poly": preprocess_cfg["polyorder"],
@@ -5689,6 +5704,19 @@ def run_one_class_search(
                                 "n_inliers": n_inliers,
                                 "n_outliers": n_outliers,
                                 "inlier_class_label": str(inlier_class_label),
+                                # Both top_vars and all_vars must store the
+                                # SELECTED subset (the wavelengths the model
+                                # was actually trained on). Downstream
+                                # consumers — Model Development reload at
+                                # spectral_predict_gui_optimized.py:30556 and
+                                # external validation at contamination.py:972
+                                # — read all_vars as "the trained wavelength
+                                # list". Storing the pre-subset working set
+                                # there caused variable-selected grid-search
+                                # one-class models to be reconstructed on the
+                                # full spectrum, producing wrong predictions.
+                                # Mirrors the Bayesian contract at
+                                # unified_bayesian.py:1046-1050.
                                 "top_vars": ','.join(
                                     [
                                         f"{float(w):.1f}"
@@ -5698,7 +5726,7 @@ def run_one_class_search(
                                 "all_vars": ','.join(
                                     [
                                         f"{float(w):.1f}"
-                                        for w in wavelengths_current
+                                        for w in wavelengths_subset
                                     ]
                                 ),
                                 "per_contaminant_sensitivity": cal_metrics.get(

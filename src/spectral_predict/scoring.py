@@ -253,8 +253,17 @@ def _compute_unified_complexity(row):
     # PCA-SIMCA stores dimensionality as n_components in Params; LVs may be 0 or missing
     if (pd.isna(lvs) or lvs == 0) and model == "PCA-SIMCA":
         try:
-            params_str = row.get("Params", "{}")
-            params_dict = ast.literal_eval(params_str) if isinstance(params_str, str) else {}
+            params_raw = row.get("Params", "{}")
+            # Params can be a dict (in-memory result rows) or a str
+            # (CSV-loaded rows). Handling only the str branch caused
+            # PCA-SIMCA n_components to be lost for in-memory results,
+            # which then collapsed lv_complexity to the median fallback.
+            if isinstance(params_raw, dict):
+                params_dict = params_raw
+            elif isinstance(params_raw, str):
+                params_dict = ast.literal_eval(params_raw) if params_raw.strip() else {}
+            else:
+                params_dict = {}
             lvs = params_dict.get("n_components", np.nan)
         except (ValueError, SyntaxError):
             lvs = np.nan

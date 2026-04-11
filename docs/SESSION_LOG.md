@@ -4,6 +4,55 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-11 — Grid-search OC validation silent NaN + final-merge cleanup (Claude Opus 4.6)
+
+### Bug: Grid-search one-class results show no `val_*` metrics, Bayesian works fine
+
+**Symptom:** User ran the final pre-merge verification of PR #3. Bayesian one-class displayed validation columns correctly, but grid-search one-class results had empty `val_*` columns even with the same validation set, same inlier label, same `validation_top_n`.
+
+**Root cause:** `compute_validation_metrics_for_top_one_class_models` (`contamination.py:909`) reads the preprocessing name from `row.get('PreprocessBase', row.get('Preprocess', 'raw'))` and passes it to `build_preprocessing_pipeline`. Bayesian writes a clean base name in `PreprocessBase` (`unified_bayesian.py:1995` — e.g. `'snv_deriv'`), but the one-class grid path at `search.py:5136-5174` and `:5640-5710` only wrote `Preprocess` (the *display* name like `'snv_deriv1_w11'`, including window suffix) and never set `PreprocessBase`. `build_preprocessing_pipeline` doesn't accept display names — it raises `ValueError("Unknown preprocess: snv_deriv1_w11")` at `preprocess.py:548`. The row-level `except Exception: continue` in the validation helper at `contamination.py:1058` swallowed every ValueError, logged a warning that never reached the GUI progress tab, and dropped val_* to NaN for every derivative-based grid-search row. The classification/regression grid path at `search.py:4506-4507` had the right contract all along — both `Preprocess` (display) and `PreprocessBase` (clean) — but nobody copied that to the one-class result-dict construction when it was added.
+
+**Fix:** Two layers, defense in depth:
+1. **Producer side** (`search.py:5136-5174` and `:5640-5710`) — added `"PreprocessBase": preprocess_cfg.get("method", preprocess_cfg["name"])` to both the full-spectrum and variable-selected one-class result dicts. Mirrors the classification grid contract at line 4506-4507. The key in the one-class `preprocess_cfg` is `'method'` rather than `'base_name'`, so the lookup uses the right name.
+2. **Consumer side** (`contamination.py`) — added `_normalize_preprocess_for_pipeline()` helper that strips `_w<digits>` suffixes and `deriv\d+` digits from a Preprocess display name, falling back to `'raw'` if it can't be normalized. The validation helper now invokes this on whatever name it ends up with so any caller that forgets `PreprocessBase` (older results CSV reload, third-party scripting) still produces metrics rather than silent NaN.
+
+Regression test: `tests/test_contamination_detection.py::TestGridSearchValidationMetricsParity` covers both the fixed-row case and the missing-PreprocessBase fallback. Before the fix the second test failed with the exact ValueError above, captured in pytest's log: `[OC Validation] Row 0 failed: Unknown preprocess: snv_deriv1_w11`.
+
+**Why it slipped past three rounds of CodeRabbit/Gemini review:** the validation helper had no test coverage at all (`grep compute_validation_metrics_for_top_one_class_models tests/` → no matches). The producer-side fix is two lines per call site, but no test wired the producer's output through the consumer's input, so the schema mismatch was invisible until manual GUI testing.
+
+### Bundled minimum-to-merge cleanup (same commit)
+
+Six other findings from the multi-reviewer pre-merge audit (Codex + Qwen3-235B + CodeRabbit/Gemini triage), all small and localized:
+
+1. **`search.py:5698-5703` — `all_vars`/`top_vars` swap for grid-search varsel rows.** Was storing the pre-subset working set (`wavelengths_current`) in `all_vars` and the selected subset (`wavelengths_subset`) in `top_vars`. Downstream consumers (`spectral_predict_gui_optimized.py:30556-30573` Model-Dev reload, `contamination.py:972-989` validation rebuild) read `all_vars` as "the trained wavelength list", so a variable-selected grid-search one-class model would be reconstructed on the full spectrum. Fixed: both fields now hold the selected subset, matching the Bayesian contract at `unified_bayesian.py:1046-1050`.
+
+2. **`spectral_predict_gui_optimized.py:34467-34478` — refined OC external validation bypassed `one_class_metrics()`.** Inline `balanced_accuracy_score(y_val_oc, val_preds)` and `roc_auc_score(y_val_oc, val_scores)` got the AUC sign convention wrong (rest of the codebase treats outliers as the positive class and negates `decision_function`) and didn't NaN-out clean-only validation sets. Same model could display different validation quality in Results tab vs. Model Development. Fixed: replaced with `metrics = one_class_metrics(y_val_oc, val_preds, val_scores)` and a small `_fmt` helper for the display string.
+
+3. **`spectral_predict_gui_optimized.py:35838` — `inlier_class_label` save wrote raw combobox value.** When the user accepted auto-detect via the confirm dialog at `21852`, `self.inlier_class_label.get()` was still the empty string and round-tripped that into the saved model. Fixed: prefer `self.refined_config.get('inlier_class_label')` (set by the refinement thread at line 34373 with the actually-trained label), fall back to combobox.
+
+4. **`models.py:379-390` — `build_model()` silent fallback to classification for unknown one-class names.** Typo'd or registry-mismatched one-class model names silently routed through the classification branch, eventually raising a confusing error. Fixed: raise `ValueError(f"Unknown one-class model: {model_name!r}")` immediately. No live caller relied on the surrogate fallback (verified by grep — `compute_one_class_importances` imports LightGBM directly).
+
+5. **`scoring.py:254-260` — `_compute_unified_complexity` lost PCA-SIMCA `n_components` when `Params` was a dict.** `isinstance(params_str, str)` was False for in-memory result rows where Params is already a dict, so `params_dict={}` and `n_components` defaulted to NaN, collapsing `lv_complexity` to the median fallback (50). Fixed: branch on `dict` vs `str` before calling `ast.literal_eval`.
+
+6. **`contamination.py:86` — `PCASIMCA.__init__` accepted out-of-range `alpha`.** `alpha=0` or `alpha=1` would feed `stats.chi2.ppf(1-alpha, ...)` undefined inputs, silently producing a model that flags everything (or nothing). Not reachable from any current GUI/grid/Bayesian entry point but a public API footgun. Fixed: one-line `if not 0 < alpha < 1: raise ValueError(...)` in `__init__`.
+
+### Follow-up flagged but NOT addressed in this PR — one-class hyperparameter exposure gap
+
+User noted during the same session: **none of the one-class model hyperparameter grids are exposed in the Model Config subtab**, unlike every regression/classification model. The Model Config tab (`_create_tab4c_model_configuration` at `spectral_predict_gui_optimized.py:11373`) has individual collapsible hyperparameter cards for each regression/classification model (Random Forest at line 11726, Ridge at 11854, Lasso at 11918, ElasticNet at 11978, PLS at 12053, etc.) where users edit min/max ranges, num steps, and per-model knobs. For one-class there is only a tiny `oc_hyperparams_frame` at `gui:6040-6054` with four single-value spinboxes (`oc_nu`, `oc_contamination`, `oc_alpha`, `oc_n_components`).
+
+Everything else is hardcoded in `ONE_CLASS_PARAM_GRIDS` inside `src/spectral_predict/contamination.py`:
+- OneClassSVM: `kernel`, `gamma`, additional `nu` values
+- IsolationForest: `n_estimators`, `max_samples`, `max_features`, additional `contamination` values
+- EllipticEnvelope: `support_fraction`, additional `contamination` values
+- LocalOutlierFactor: `n_neighbors`, `metric`, additional `contamination` values
+- PCA-SIMCA: additional `n_components` values, additional `alpha` values
+
+This violates the project rule from `CLAUDE.md`: *"All hyperparameters are exposed and user-editable."* It also means a user who wants to widen the search space for one-class (e.g. test n_neighbors=[10, 20, 35, 50] for LOF) has to edit Python source instead of clicking checkboxes/spinboxes.
+
+**Not blocking this PR's merge** (the four exposed scalars cover the most-tuned parameters and the hardcoded grids are sane defaults), but it's a design debt to pay down before claiming feature parity with regression/classification. Likely scope: add five collapsible hyperparameter cards to `_create_tab4c_model_configuration` (one per OC model family), thread the resulting per-model dicts through `run_one_class_search` and `run_unified_bayesian` instead of `ONE_CLASS_PARAM_GRIDS`, and gate the existing scalars on Custom tier the same way classification/regression do.
+
+---
+
 ## 2026-04-10 — One-Class Prediction Disaster: Order-of-Operations Bug (Claude Opus 4.6)
 
 ### Bug: Every specimen labeled "Outlier" at predict time, including training data

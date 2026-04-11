@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-10 by Claude (Opus 4.6) — second session of the day, after fixing the "every specimen labeled outlier" ship-blocker
+> **Last updated:** 2026-04-11 by Claude (Opus 4.6) — final pre-merge cleanup pass on PR #3 (grid-search OC validation silent NaN + bundled minimum-to-merge fixes)
 
 ---
 
@@ -10,7 +10,7 @@
 
 **Models:** OneClassSVM, IsolationForest, LOF (LocalOutlierFactor), EllipticEnvelope, PCA-SIMCA
 
-**⚠️ Prediction tab needs a manual end-to-end re-verification run before this branch can merge.** The save→load→predict-on-novel-specimens flow was ship-broken by an order-of-operations bug (refinement trained full-spectrum-first, but saved metadata declared subset-first). Fix landed 2026-04-10 with new regression test coverage, but the user must still exercise the real GUI flow (train with Bayesian → refine → save → predict on training samples → verify inliers come back as inliers) before this checkbox can be ticked again. See SESSION_LOG.md "One-Class Prediction Disaster" for the full root cause.
+**Prediction tab manual verification: PASSED 2026-04-11.** User confirmed one-class predictions correctly show inliers when they should after the 2026-04-10 order-of-operations fix. See SESSION_LOG.md 2026-04-10 entry for the original bug trace.
 
 ---
 
@@ -49,10 +49,12 @@
 - [x] ~~**Every specimen labeled "Outlier" at predict time, including training specimens**~~ — Fixed 2026-04-10 (second session). Root cause: one-class refinement thread in `_run_refined_model_thread` trained with full-spectrum preprocessing first then subset to selected wavelengths, but hardcoded `'use_full_spectrum_preprocessing': False` in the saved metadata and never populated `full_wavelengths`. At predict time `model_io.py` took the subset-first branch, which for SNV / SG derivatives / baseline correction produces feature values mathematically different from training, so the StandardScaler fit inside `run_one_class_cv` received distributionally alien inputs and `model.predict()` returned -1 on everything. Fix: assign `self.refined_full_wavelengths = list(original_wavelengths)` and flip the flag to `True`, matching the regression/classification refinement path. Regression test added: `tests/test_contamination_detection.py::TestOneClassRefinementRoundtrip`. See `docs/SESSION_LOG.md 2026-04-10 "One-Class Prediction Disaster"` for full trace.
 - [x] ~~**Uncertainty subtab always shows "Outlier" for one-class**~~ — Fixed 2026-04-10 (second session). `_display_uncertainty()` at line ~38318 read already-stringified predictions (`"Inlier (…)"` / `"Outlier"`) from `predictions_df` but compared them to the integer `1`, which always evaluated False. Would have silently contradicted the Results tab once the primary bug above was fixed. Replaced with an `isinstance(raw, str)` branch.
 - [x] ~~**Bayesian trials did not persist `cal_scaler`, `cal_pca_reducer`, `oc_score_stats`**~~ — Closed 2026-04-10 (second session). Latent bug: `unified_bayesian.py` stored metrics and preprocessing config but not the fitted calibration artifacts, so any future direct-save-from-results path would silently save `None`. Added `set_user_attr` calls mirroring `search.py:5171-5173` and propagated the three keys through `convert_study_to_dataframe`. Does not change current user-visible behavior because saves go through refinement, which re-runs CV from scratch.
+- [x] ~~**Grid-search one-class validation columns silently empty**~~ — Fixed 2026-04-11. Grid search wrote display name (`'snv_deriv1_w11'`) in `Preprocess` but never set `PreprocessBase`, so the validation helper passed an unparseable name to `build_preprocessing_pipeline`, the resulting `ValueError("Unknown preprocess: …")` was swallowed by the row-level except, and val_* dropped to NaN for every derivative grid-search row. Bayesian was unaffected because it already wrote `PreprocessBase`. Two-layer fix: search.py now writes `PreprocessBase` (mirrors classification at line 4506), and `compute_validation_metrics_for_top_one_class_models` now normalizes display names as a fallback. Regression test: `tests/test_contamination_detection.py::TestGridSearchValidationMetricsParity`. See `docs/SESSION_LOG.md 2026-04-11`.
 - [ ] **One-class grid search inherently slower than classification** — Expected due to two-phase CV+calibration design and LOF O(n²) complexity. Optimized but still slower by nature.
 - [ ] **Preprocessing importance dropdown has no effect for one-class** — All methods resolve to LightGBM. Per-model refinement never triggers because `models_to_test` isn't passed.
 - [ ] **Variable selection limited** — Only 'importance' method works. UVE/SPA/iPLS/CARS are PLS-specific and incompatible. This is by design but could use a UI hint.
 - [ ] **Residual correlation overlay** — Disabled for one-class (no continuous residuals). Shows zeros.
+- [ ] **One-class hyperparameter grids are NOT exposed in Model Config subtab** — violates the project rule "All hyperparameters are exposed and user-editable" (`CLAUDE.md`). Only four scalars are surfaced in `oc_hyperparams_frame` (`gui:6040`): `nu`, `contamination`, `alpha`, `n_components`. Everything else (kernel, gamma, n_estimators, max_samples, max_features, support_fraction, n_neighbors, metric, additional alpha/n_components values) lives in the hardcoded `ONE_CLASS_PARAM_GRIDS` constant in `src/spectral_predict/contamination.py`. Regression and classification have a per-model collapsible card each (`_create_tab4c_model_configuration`, lines 11726+) — one-class needs five equivalent cards (OCSVM, IF, EllipticEnvelope, LOF, PCA-SIMCA). See `SESSION_LOG.md 2026-04-11` for the full inventory.
 
 ## Architecture Decisions
 
@@ -79,9 +81,11 @@
 
 ## Next Steps
 
-1. End-to-end manual test: load data → create validation set → run one-class analysis → view results → load in Model Dev → run refined → save model → predict on new data
-2. Consider adding UI hint when variable selection methods are incompatible with one-class
-3. Merge to main
+1. ~~End-to-end manual test of save→load→predict~~ ✅ done 2026-04-11
+2. Re-run grid-search OC validation in the GUI to confirm `val_*` columns now populate (regression test passes; quick visual confirmation in the actual Results tab is the last thing keeping this from merge)
+3. Consider adding UI hint when variable selection methods are incompatible with one-class
+4. Merge to main
+5. **Follow-up PR** (post-merge): expose all one-class hyperparameter grids in Model Config subtab — see Known Issues entry for scope
 
 ## Follow-Ups (unclaimed)
 

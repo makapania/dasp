@@ -934,3 +934,175 @@ class TestOneClassRefinementRoundtrip:
             f"preprocessing is no longer order-sensitive — investigate "
             f"before deleting this test."
         )
+
+
+class TestGridSearchValidationMetricsParity:
+    """Regression coverage for the grid-search one-class validation pipeline.
+
+    The bug this guards against (caught during the merge review of PR #3):
+    `compute_validation_metrics_for_top_one_class_models` rebuilds the
+    preprocessing pipeline from the result-row's `PreprocessBase` column,
+    falling back to `Preprocess` when absent. The grid search path in
+    `run_one_class_search` only wrote `Preprocess` (a *display* name like
+    `"snv_deriv1_w11"`), never `PreprocessBase`. The display name is not a
+    valid `build_preprocessing_pipeline` key, so the helper raised
+    `ValueError("Unknown preprocess: snv_deriv1_w11")`, the row-level
+    `except Exception: continue` swallowed it, and every derivative-based
+    grid-search row got NaN `val_*` columns. Bayesian was unaffected because
+    `unified_bayesian.py` already wrote `PreprocessBase`.
+
+    The classification/regression grid search at `search.py:4506-4507`
+    writes both columns; this test enforces that the one-class grid search
+    follows the same contract."""
+
+    @pytest.fixture
+    def grid_search_oc_results_row(self):
+        """Build a result-row dict shaped exactly like one of grid search's
+        derivative-based one-class entries (matches the literal dict at
+        ``search.py:5136-5174`` after the fix). Uses ``IsolationForest`` so
+        the test stays focused on the preprocessing-name plumbing rather
+        than estimator-specific quirks."""
+        return {
+            'Task': 'one_class',
+            'Model': 'IsolationForest',
+            'Params': "{'n_estimators': 50, 'random_state': 42}",
+            'Preprocess': 'snv_deriv1_w11',
+            'PreprocessBase': 'snv_deriv',
+            'Deriv': 1,
+            'Window': 11,
+            'Poly': 2,
+            'LVs': None,
+            'n_vars': 50,
+            'full_vars': 50,
+            'SubsetTag': 'full',
+            'Imbalance': '—',
+            'Sensitivity': 0.85,
+            'Specificity': 0.90,
+            'Precision': 0.80,
+            'F1': 0.82,
+            'Accuracy': 0.88,
+            'BalancedAcc': 0.875,
+            'AUC': 0.91,
+            'Sensitivitycv': 0.80,
+            'Specificitycv': 0.88,
+            'Precisioncv': 0.78,
+            'F1cv': 0.79,
+            'Accuracycv': 0.85,
+            'BalancedAcccv': 0.84,
+            'AUCcv': 0.89,
+            'n_inliers': 60,
+            'n_outliers': 15,
+            'inlier_class_label': 'Clean',
+            'top_vars': 'N/A',
+            'all_vars': '',
+            'per_contaminant_sensitivity': {},
+            'Rank': 1,
+        }
+
+    @pytest.fixture
+    def synthetic_train_val(self):
+        """Train/validation split with inliers + outliers, sized to expose
+        the build_preprocessing_pipeline path (50 wavelengths, derivative
+        window of 11 fits comfortably)."""
+        rng = np.random.RandomState(0)
+        n_features = 50
+
+        clean_center = rng.randn(n_features) * 0.4
+        X_train_clean = clean_center + rng.randn(40, n_features) * 0.2
+        outlier_centers = rng.randn(2, n_features) * 1.5 + 2.0
+        X_train_out = np.vstack([
+            outlier_centers[0] + rng.randn(8, n_features) * 0.4,
+            outlier_centers[1] + rng.randn(7, n_features) * 0.4,
+        ])
+        X_train = np.vstack([X_train_clean, X_train_out])
+        y_train = np.array(['Clean'] * 40 + ['Contam'] * 15)
+
+        X_val_clean = clean_center + rng.randn(15, n_features) * 0.2
+        X_val_out = outlier_centers[0] + rng.randn(8, n_features) * 0.4
+        X_val = np.vstack([X_val_clean, X_val_out])
+        y_val = np.array(['Clean'] * 15 + ['Contam'] * 8)
+
+        wavelengths = np.linspace(1100.0, 2500.0, n_features)
+        return X_train, y_train, X_val, y_val, wavelengths
+
+    def test_grid_search_derivative_row_populates_val_columns(
+        self, grid_search_oc_results_row, synthetic_train_val
+    ):
+        """The validation helper must populate val_* columns for a grid-search
+        result row that uses a derivative-based preprocessing config. This
+        is the regression test for the silent NaN val_* bug — before the
+        fix, every derivative grid-search row failed inside
+        ``build_preprocessing_pipeline`` and the row-level except dropped
+        them to NaN."""
+        from spectral_predict.contamination import (
+            compute_validation_metrics_for_top_one_class_models,
+        )
+
+        X_train, y_train, X_val, y_val, wavelengths = synthetic_train_val
+        df = pd.DataFrame([grid_search_oc_results_row])
+
+        result_df = compute_validation_metrics_for_top_one_class_models(
+            df_results=df,
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            inlier_label='Clean',
+            wavelengths=wavelengths,
+            top_n=10,
+        )
+
+        # Spot-check the canonical val_* columns. The exact metric values
+        # depend on IsolationForest behavior on the synthetic fixture; the
+        # important assertion is that they ARE finite — i.e. the helper
+        # didn't silently bail inside its except clause.
+        for col in ('val_Sensitivity', 'val_Specificity', 'val_BalancedAcc',
+                    'val_Accuracy'):
+            assert col in result_df.columns, f"{col} missing from result frame"
+            value = result_df.loc[0, col]
+            assert pd.notna(value), (
+                f"{col} is NaN for a derivative grid-search row — the "
+                f"validation helper silently bailed. Likely cause: "
+                f"PreprocessBase missing from grid search result dict at "
+                f"search.py:5136-5174 or :5640-5710, OR the helper can't "
+                f"parse the Preprocess display name. See the docstring on "
+                f"TestGridSearchValidationMetricsParity for context."
+            )
+
+    def test_grid_search_row_without_preprocess_base_still_works(
+        self, grid_search_oc_results_row, synthetic_train_val
+    ):
+        """Defense-in-depth: even if a caller forgets to write
+        ``PreprocessBase`` (e.g. an older results CSV reloaded from disk,
+        or a third-party caller building a row directly), the helper must
+        not silently drop val_* metrics. This forces either the helper to
+        normalize the display name or the contract to require PreprocessBase
+        — whichever the maintainer picks, the failure mode must not be
+        'silent NaN'."""
+        from spectral_predict.contamination import (
+            compute_validation_metrics_for_top_one_class_models,
+        )
+
+        X_train, y_train, X_val, y_val, wavelengths = synthetic_train_val
+        row = dict(grid_search_oc_results_row)
+        row.pop('PreprocessBase')  # Simulate the pre-fix grid search output
+        df = pd.DataFrame([row])
+
+        result_df = compute_validation_metrics_for_top_one_class_models(
+            df_results=df,
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val,
+            y_val=y_val,
+            inlier_label='Clean',
+            wavelengths=wavelengths,
+            top_n=10,
+        )
+
+        value = result_df.loc[0, 'val_BalancedAcc']
+        assert pd.notna(value), (
+            "Helper silently produced NaN for a grid-search row missing "
+            "PreprocessBase. The contract should be either 'PreprocessBase "
+            "is required' (raise loudly) or 'normalize Preprocess as a "
+            "fallback' — silent NaN is a regression."
+        )
