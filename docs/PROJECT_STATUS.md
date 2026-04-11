@@ -22,7 +22,7 @@
 - [x] GUI task type selection: "One-Class" radio button shows one-class model checkboxes
 - [x] Inlier class selection UI with auto-detection
 - [x] Model save/load with scaler + PCA reducer persistence (`model_io.py`)
-- [ ] **Prediction tab: AWAITING MANUAL VERIFICATION** — code fix + automated regression tests in place (see `tests/test_contamination_detection.py::TestOneClassRefinementRoundtrip`). Do not re-mark as working until the user runs the real GUI save→load→predict flow on actual data and confirms training inliers come back as "Inlier (X)".
+- [x] Prediction tab: save→load→predict round-trip verified manually 2026-04-11. Training inliers come back as "Inlier (X)" as expected. Regression test: `tests/test_contamination_detection.py::TestOneClassRefinementRoundtrip`.
 - [x] External validation: label mapping, confusion matrix, balanced accuracy/sensitivity/specificity
 - [x] External validation metrics in Results tab — top N respects `validation_top_n` (default 700), matching classification/regression
 - [x] External validation produces full 7-metric set (Sensitivity, Specificity, Precision, F1, Accuracy, BalancedAcc, AUC) via `compute_validation_metrics_for_top_one_class_models()` in `contamination.py` — parity with cal/CV
@@ -82,11 +82,20 @@
 ## Next Steps
 
 1. ~~End-to-end manual test of save→load→predict~~ ✅ done 2026-04-11
-2. Re-run grid-search OC validation in the GUI to confirm `val_*` columns now populate (regression test passes; quick visual confirmation in the actual Results tab is the last thing keeping this from merge)
-3. Consider adding UI hint when variable selection methods are incompatible with one-class
-4. Merge to main
-5. **Follow-up PR** (post-merge): expose all one-class hyperparameter grids in Model Config subtab — see Known Issues entry for scope
+2. ~~Re-run grid-search OC validation in the GUI to confirm `val_*` columns now populate~~ ✅ done 2026-04-11 — user confirmed "the validation stats now appear in grid search"
+3. ~~Merge PR #3 to main~~ ✅ pending merge in this session
+4. Follow-up PRs (post-merge): see "Follow-Ups (unclaimed)" section below
 
 ## Follow-Ups (unclaimed)
+
+- **Expose all one-class hyperparameter grids in Model Config subtab.** Currently only four scalars (`nu`, `contamination`, `alpha`, `n_components`) are surfaced in `oc_hyperparams_frame` (`gui:6040`). Everything else (kernel, gamma, n_estimators, max_samples, max_features, support_fraction, n_neighbors, metric, additional alpha/n_components values) lives in the hardcoded `ONE_CLASS_PARAM_GRIDS` constant in `src/spectral_predict/contamination.py`. This violates the project rule from `CLAUDE.md`: *"All hyperparameters are exposed and user-editable."* Suggested scope: add 5 collapsible cards to `_create_tab4c_model_configuration` (one per OC model family — OCSVM, IF, EllipticEnvelope, LOF, PCA-SIMCA), thread the resulting per-model dicts through `run_one_class_search` and `run_unified_bayesian` instead of `ONE_CLASS_PARAM_GRIDS`, and gate them on Custom tier the same way classification/regression do. See `SESSION_LOG.md 2026-04-11` for the full per-model parameter inventory.
+
+- **OC validation helper silently uses default params on `ast.literal_eval` failure.** `compute_validation_metrics_for_top_one_class_models` at `contamination.py:1010-1019` falls back to `params={}` if the row's `Params` string can't be parsed (malformed CSV reload, unexpected dict format, etc.). The helper then validates the *default* estimator and reports believable-but-wrong `val_*` metrics for that row. Fix: skip the row with `logger.warning("[OC Validation] Params parse failed for row %s, skipping", idx)` and `continue`, mirroring the no-inliers branch a few lines down. Codex flagged this as MAJOR in the pre-merge review; not a ship-blocker because the GUI-produced rows always have well-formed `Params`, but a silent-wrong-result hazard for any external CSV reload.
+
+- **OC validation helper silently truncates / falls back to full-spectrum on wavelength-map miss.** `contamination.py:977-989` reads `all_vars`, parses to floats, looks up each in `wl_to_idx`, and quietly drops any wavelength that isn't found. If the lookup is partial → validates on a truncated feature set. If it's empty → silently validates on the full spectrum. Either way the saved `val_*` metrics don't correspond to the model the row claims to describe. Fix: require exact mapping (all model wavelengths present in `wl_to_idx`) or skip the row with a logged warning. Codex flagged this as MAJOR; same severity caveat as the Params parse fix.
+
+- **`predict_with_uncertainty` swallows one-class decision_function failures silently.** `model_io.py:854-860`: after `predict_with_model()` returns, the bare `except Exception: decision_scores = None` catches any score-extraction error and returns predictions with empty `uncertainty`/`applicability_domain` payloads. The GUI has no way to surface "predictions worked, uncertainty broke" — exactly the failure mode this PR has already hit once with the order-of-operations bug. Fix: log the exception with `logger.warning(...)` at minimum; ideally return a structured `decision_score_error` flag that the GUI can display alongside the predictions.
+
+- **OC validation helper can't recover the right `polyorder` for 2nd-derivative grid-search rows.** Grid search writes `polyorder=None` (delegating to `polyorder_map` inside `SavgolDerivative` which picks 3 for `deriv=2`), but the validation helper at `contamination.py:922-927` falls back to `min(2, window-1) if window > 2 else 0`, which gives `poly=2` for `deriv=2`. The pipeline then runs with the wrong polyorder and the resulting `val_*` metrics are slightly off vs. what training actually used. Fix: either store the resolved polyorder in the grid-search result dict (most direct), or import the same `polyorder_map` lookup into the validation helper, or have `_maybe_int` fall back to `polyorder_map[deriv]` when poly isn't set.
 
 - **Add Leave-One-Out CV as a CV-strategy option for all task types (regression, classification, one-class).** Small training sets (especially one-class, where only inliers count toward `k`) hit K-fold edge cases hard — e.g. 7 inliers with 5-fold leaves 5-6 per training fold, which stresses any model with a minimum-samples floor. LOO uses every sample, eliminates the "fold-too-small" failure mode entirely, and gives a less biased estimate for tiny datasets. Would slot into `run_one_class_cv` (swap `KFold(n_splits=n_folds)` for `LeaveOneOut()` behind a `cv_strategy='loo'` branch) and the equivalent paths in `search.py` / `unified_bayesian.py`. UI needs a new control in the CV-folds area ("Leave-one-out" as an alternative to numeric folds).
