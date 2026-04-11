@@ -36,8 +36,18 @@ CLASSIFICATION_MODELS = [
     'CatBoost',      # Categorical Boosting
 ]
 
-# All unique models (union of regression and classification)
-ALL_MODELS = sorted(list(set(REGRESSION_MODELS + CLASSIFICATION_MODELS)))
+# One-class models for anomaly screening (ordered by complexity)
+# These train ONLY on clean/inlier samples and flag anomalies
+ONE_CLASS_MODELS = [
+    'PCA-SIMCA',         # PCA residuals + Hotelling T² (classic chemometrics)
+    'OneClassSVM',       # Kernel-based boundary around clean data
+    'IsolationForest',   # Isolation-based anomaly detection
+    'EllipticEnvelope',  # Mahalanobis-based (Gaussian assumption)
+    'LOF',               # Local Outlier Factor (density-based)
+]
+
+# All unique models (union of regression, classification, and one-class)
+ALL_MODELS = sorted(list(set(REGRESSION_MODELS + CLASSIFICATION_MODELS + ONE_CLASS_MODELS)))
 
 # Models that support feature importance extraction
 # (Used for wavelength selection and subset analysis)
@@ -87,8 +97,10 @@ def get_supported_models(task_type='regression'):
         return REGRESSION_MODELS.copy()
     elif task_type == 'classification':
         return CLASSIFICATION_MODELS.copy()
+    elif task_type == 'one_class':
+        return ONE_CLASS_MODELS.copy()
     else:
-        raise ValueError(f"Unknown task_type: {task_type}. Must be 'regression' or 'classification'")
+        raise ValueError(f"Unknown task_type: {task_type}. Must be 'regression', 'classification', or 'one_class'")
 
 
 def supports_feature_importance(model_name):

@@ -537,6 +537,57 @@ def suggest_model_params(
         return {}
 
 
+def suggest_one_class_params(trial: Trial, model_name: str) -> dict:
+    """Suggest hyperparameters for one-class models via Optuna TPE.
+
+    Parameters
+    ----------
+    trial : optuna.Trial
+        Optuna trial object.
+    model_name : str
+        One-class model name (e.g., 'PCA-SIMCA', 'OneClassSVM').
+
+    Returns
+    -------
+    params : dict
+        Hyperparameters for the specified model.
+
+    Raises
+    ------
+    ValueError
+        If model_name is not a recognised one-class model.
+    """
+    if model_name == 'PCA-SIMCA':
+        return {
+            'n_components': trial.suggest_int('n_components', 2, 20),
+            'alpha': trial.suggest_float('alpha', 0.01, 0.20, log=True),
+        }
+    elif model_name == 'OneClassSVM':
+        return {
+            'nu': trial.suggest_float('nu', 0.001, 0.5, log=True),
+            'kernel': trial.suggest_categorical('kernel', ['rbf', 'poly', 'sigmoid']),
+            'gamma': trial.suggest_categorical('gamma', ['scale', 'auto']),
+        }
+    elif model_name == 'IsolationForest':
+        return {
+            'n_estimators': trial.suggest_int('n_estimators', 50, 500, step=50),
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+            'max_features': trial.suggest_float('max_features', 0.3, 1.0),
+        }
+    elif model_name == 'EllipticEnvelope':
+        return {
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+            'support_fraction': trial.suggest_float('support_fraction', 0.5, 1.0),
+        }
+    elif model_name == 'LOF':
+        return {
+            'n_neighbors': trial.suggest_int('n_neighbors', 5, 50),
+            'contamination': trial.suggest_float('contamination', 0.001, 0.3, log=True),
+        }
+    else:
+        raise ValueError(f"Unknown one-class model: {model_name}")
+
+
 def compute_importances(
     X: np.ndarray,
     y: np.ndarray,
@@ -607,7 +658,8 @@ def compute_importances(
                 monte_carlo_samples=60,  # Increased for better sampling with fewer iterations
                 random_state=random_state,
                 model_type=model_name,  # Enable model-aware evaluation
-                use_hybrid_importance=use_hybrid  # Use hybrid importance for tree models
+                use_hybrid_importance=use_hybrid,  # Use hybrid importance for tree models
+                task_type=task_type,
             )
             return importances
         except Exception as e:
@@ -682,6 +734,8 @@ def create_unified_objective(
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
     enable_uve: bool = False,
+    inlier_class_label=None,
+    y_original: np.ndarray | None = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -770,8 +824,17 @@ def create_unified_objective(
     # Guard against None params for imbalance handling
     _imbalance_params = imbalance_params if imbalance_params is not None else {}
 
+    # Compute one-class binary labels (+1 inlier, -1 outlier) for OC task
+    y_oc: np.ndarray | None = None
+    if task_type == 'one_class' and inlier_class_label is not None and y_original is not None:
+        # Compare as strings to handle both numeric and text labels consistently
+        y_str = np.asarray(y_original, dtype=str)
+        y_oc = np.where(y_str == str(inlier_class_label), 1, -1)
+
     # Cache regions by preprocessing config to avoid redundant computation
     region_cache = {}
+    importance_cache = {}  # Cache importances per (preprocessing_config, method, model_proxy)
+    preprocessing_cache = {}  # Cache preprocessed data per config
 
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
@@ -793,14 +856,18 @@ def create_unified_objective(
                 preprocess_config.get('apply_smoothing', False),
             )
 
-            # 2. Apply preprocessing
-            X_prep = apply_preprocessing(
-                X_raw, preprocess_config,
-                baseline_method=baseline_method,
-                baseline_params=baseline_params,
-                smoothing_window=smoothing_window,
-                smoothing_polyorder=smoothing_polyorder,
-            )
+            # 2. Apply preprocessing (cached per config — deterministic for same input)
+            if cache_key in preprocessing_cache:
+                X_prep = preprocessing_cache[cache_key]
+            else:
+                X_prep = apply_preprocessing(
+                    X_raw, preprocess_config,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                )
+                preprocessing_cache[cache_key] = X_prep
             n_features_prep = X_prep.shape[1]
 
             # Validate preprocessing didn't corrupt data
@@ -815,6 +882,178 @@ def create_unified_objective(
                     X_prep, wavelengths_for_trial, preprocess_config
                 )
                 n_features_prep = X_prep.shape[1]
+
+            # One-class branch: variable selection + one-class CV
+            if task_type == 'one_class':
+                from spectral_predict.contamination import run_one_class_cv
+
+                if y_oc is None:
+                    return float('inf')
+
+                # --- Variable selection (mirrors regression/classification logic) ---
+                subset_type = trial.suggest_categorical('subset_type', available_methods)
+                subset_size = trial.suggest_categorical('n_vars', SUBSET_SIZES)
+                region_idx = trial.suggest_int('region_id', 0, max(0, n_top_regions - 1))
+
+                # Use y_oc (+1/-1) for all variable selection operations
+                y_for_varsel = y_oc
+
+                top_indices = None
+                subset_tag = 'full'
+
+                if subset_type == 'region':
+                    # Check cache first
+                    if cache_key in region_cache:
+                        dynamic_regions = region_cache[cache_key]
+                    else:
+                        # Compute regions DYNAMICALLY on preprocessed data
+                        try:
+                            if n_features_prep == len(wavelengths_for_trial):
+                                wl_prep = wavelengths_for_trial
+                            else:
+                                wl_prep = np.linspace(
+                                    wavelengths_for_trial[0],
+                                    wavelengths_for_trial[-1],
+                                    n_features_prep,
+                                )
+
+                            dynamic_regions = create_region_subsets(
+                                X_prep, y_for_varsel, wl_prep.astype(float),
+                                n_top_regions=n_top_regions,
+                                test_all_individual=region_test_all_individual,
+                                test_pairwise=region_test_pairwise,
+                            )
+                            region_cache[cache_key] = dynamic_regions
+                        except Exception as e:
+                            logging.warning(
+                                f"Dynamic region creation failed for one-class: {e}, "
+                                "falling back to empty"
+                            )
+                            dynamic_regions = []
+                            region_cache[cache_key] = dynamic_regions
+
+                    # Use cached region count for index clamping
+                    if len(dynamic_regions) > 0:
+                        actual_region_idx = min(region_idx, len(dynamic_regions) - 1)
+                        top_indices = dynamic_regions[actual_region_idx]['indices']
+                        n_vars = len(top_indices)
+                        subset_tag = dynamic_regions[actual_region_idx]['tag']
+                    else:
+                        # Fallback to importance if no regions found
+                        actual_subset_size = subset_size if subset_size != 'full' else 100
+                        n_vars = min(actual_subset_size, n_features_prep - 1)
+                        if n_vars < 5:
+                            n_vars = min(5, n_features_prep - 1)
+                        imp_cache_key = (cache_key, 'importance', 'LightGBM', 'classification')
+                        if imp_cache_key in importance_cache:
+                            importances = importance_cache[imp_cache_key]
+                        else:
+                            importances = compute_importances(
+                                X_prep, y_for_varsel, 'importance',
+                                'LightGBM', cv_folds, random_state,
+                                task_type='classification',
+                            )
+                            importance_cache[imp_cache_key] = importances
+                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                        subset_tag = f"top{n_vars}_importance_fallback"
+                else:
+                    # Importance-based or CARS-based selection (region_idx is ignored)
+                    if subset_size == 'full':
+                        top_indices = None
+                        n_vars = n_features_prep
+                        subset_tag = 'full'
+                    else:
+                        n_vars = min(subset_size, n_features_prep - 1)
+                        if n_vars < 5:
+                            n_vars = min(5, n_features_prep - 1)
+
+                        # For one-class: use LightGBM as proxy model and
+                        # classification task_type so compute_importances builds
+                        # a standard classifier on the +1/-1 labels.
+                        # Cache per (preprocessing, method) — deterministic for same input.
+                        imp_cache_key = (cache_key, subset_type, 'LightGBM', 'classification')
+                        if imp_cache_key in importance_cache:
+                            importances = importance_cache[imp_cache_key]
+                        else:
+                            importances = compute_importances(
+                                X_prep, y_for_varsel, subset_type,
+                                'LightGBM', cv_folds, random_state,
+                                task_type='classification',
+                            )
+                            importance_cache[imp_cache_key] = importances
+
+                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                        subset_tag = f"top{n_vars}_{subset_type}"
+
+                # Apply subset
+                if top_indices is not None and len(top_indices) > 0:
+                    X_for_cv = X_prep[:, top_indices]
+                else:
+                    X_for_cv = X_prep
+
+                # --- Suggest one-class model params (after subsetting, feature count may differ) ---
+                oc_params = suggest_one_class_params(trial, model_name)
+
+                cv_result = run_one_class_cv(
+                    X_for_cv, y_oc, model_name, oc_params,
+                    n_folds=cv_folds, random_state=random_state, y_original=y_original,
+                    compute_calibration=True,
+                )
+
+                if cv_result.get('skipped', False):
+                    # Surface the skip reason so the GUI progress wrapper and
+                    # downstream diagnostics can explain WHY the trial bailed
+                    # (e.g. "Need at least 3 clean samples to fit DD-SIMCA").
+                    skip_reason = cv_result.get('skip_reason', 'unknown')
+                    trial.set_user_attr('skip_reason', skip_reason)
+                    return float('inf')
+
+                mean_m = cv_result['mean_metrics']
+                cal_m = cv_result['cal_metrics']  # Empty when compute_calibration=False
+
+                for key, val in mean_m.items():
+                    trial.set_user_attr(f'{key}_cv', val)
+                # cal_m is populated only on final calibration runs (not during optimization)
+                if cal_m:
+                    for key, val in cal_m.items():
+                        if key != 'per_contaminant':
+                            trial.set_user_attr(key, val)
+                    # Store fitted calibration artifacts so any future direct
+                    # save-from-results path can persist them without needing a
+                    # refinement round-trip. Mirrors search.py:5171-5173 for grid
+                    # search. See docs/SESSION_LOG.md 2026-04-10 "One-Class
+                    # Prediction Disaster" for context on why this matters.
+                    if 'cal_scaler' in cv_result:
+                        trial.set_user_attr('cal_scaler', cv_result['cal_scaler'])
+                    if 'cal_pca_reducer' in cv_result:
+                        trial.set_user_attr('cal_pca_reducer', cv_result['cal_pca_reducer'])
+                    if 'oc_score_stats' in cv_result:
+                        trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
+                trial.set_user_attr('preprocess', preprocess_config)
+                trial.set_user_attr('params', oc_params)
+                # Store preprocessing fields used by convert_study_to_dataframe
+                trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
+                trial.set_user_attr('window', preprocess_config.get('window', 0))
+                trial.set_user_attr('deriv', preprocess_config.get('deriv', 0))
+                trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
+                trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
+                trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
+                trial.set_user_attr('model_params', str(oc_params))
+                trial.set_user_attr('n_vars', X_for_cv.shape[1])
+                trial.set_user_attr('full_vars_masked', X_prep.shape[1])
+                trial.set_user_attr('subset_tag', subset_tag)
+                if top_indices is not None:
+                    selected_wl = wavelengths_for_trial[top_indices]
+                    trial.set_user_attr('all_wavelengths',
+                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                    trial.set_user_attr('selected_wavelengths',
+                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                else:
+                    trial.set_user_attr('all_wavelengths',
+                        ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+
+                balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
+                return -balanced_accuracy
 
             # 3. Suggest subset type and size
             # IMPORTANT: Always suggest ALL parameters to maintain consistent parameter space
@@ -862,9 +1101,14 @@ def create_unified_objective(
                     n_vars = min(actual_subset_size, n_features_prep - 1)
                     if n_vars < 5:
                         n_vars = min(5, n_features_prep - 1)
-                    importances = compute_importances(
-                        X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
-                    )
+                    imp_cache_key = (cache_key, 'importance', model_name, task_type)
+                    if imp_cache_key in importance_cache:
+                        importances = importance_cache[imp_cache_key]
+                    else:
+                        importances = compute_importances(
+                            X_prep, y, 'importance', model_name, cv_folds, random_state, task_type
+                        )
+                        importance_cache[imp_cache_key] = importances
                     top_indices = np.argsort(importances, kind='stable')[-n_vars:]
                     subset_tag = f"top{n_vars}_importance_fallback"
             else:
@@ -879,10 +1123,15 @@ def create_unified_objective(
                     if n_vars < 5:
                         n_vars = min(5, n_features_prep - 1)
 
-                    # Compute importances
-                    importances = compute_importances(
-                        X_prep, y, subset_type, model_name, cv_folds, random_state, task_type
-                    )
+                    # Compute importances (cached per preprocessing + method + model)
+                    imp_cache_key = (cache_key, subset_type, model_name, task_type)
+                    if imp_cache_key in importance_cache:
+                        importances = importance_cache[imp_cache_key]
+                    else:
+                        importances = compute_importances(
+                            X_prep, y, subset_type, model_name, cv_folds, random_state, task_type
+                        )
+                        importance_cache[imp_cache_key] = importances
 
                     # Select top variables
                     top_indices = np.argsort(importances, kind='stable')[-n_vars:]
@@ -1351,6 +1600,7 @@ def run_unified_bayesian(
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
     enable_uve: bool = False,
+    inlier_class_label=None,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1429,6 +1679,12 @@ def run_unified_bayesian(
         'svr': 'SVR',
         'svm': 'SVM',
         'mlp': 'MLP',
+        # One-class models
+        'pca-simca': 'PCA-SIMCA',
+        'oneclasssvm': 'OneClassSVM',
+        'isolationforest': 'IsolationForest',
+        'ellipticenvelope': 'EllipticEnvelope',
+        'lof': 'LOF',
     }
     model_name = model_name_map.get(model_name.lower(), model_name)
 
@@ -1486,9 +1742,13 @@ def run_unified_bayesian(
         print(f"Trials: {n_trials}")
         print(f"CV Folds: {cv_folds}")
         print(f"Samples: {n_samples}, Features: {n_features}")
-        print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
-        methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
-        print(f"Variable methods: {methods_str}")
+        if task_type == 'one_class':
+            print(f"Inlier class: {inlier_class_label}")
+            print(f"Variable selection: enabled (importance, CARS, region via LightGBM proxy)")
+        else:
+            print(f"Regional subsets: dynamically computed ({n_top_regions} regions)")
+            methods_str = "importance, CARS, region" + (", UVE" if enable_uve else "")
+            print(f"Variable methods: {methods_str}")
         # Show early stopping status for boosting models
         if model_name in ('XGBoost', 'LightGBM', 'CatBoost'):
             if early_stopping_rounds and early_stopping_rounds > 0:
@@ -1525,6 +1785,8 @@ def run_unified_bayesian(
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
         enable_uve=enable_uve,
+        inlier_class_label=inlier_class_label,
+        y_original=y,
     )
 
     # Create TPE sampler with good defaults
@@ -1564,6 +1826,15 @@ def run_unified_bayesian(
             if trial.value is not None:
                 if task_type == 'regression':
                     progress_info['message'] += f" - RMSEcv: {trial.value:.4f}"
+                elif task_type == 'one_class':
+                    # For skipped one-class trials, value is +inf (we return
+                    # float('inf') from the objective when CV is skipped).
+                    # Show the reason instead of a useless "-inf".
+                    if np.isinf(trial.value):
+                        reason = trial.user_attrs.get('skip_reason', 'skipped')
+                        progress_info['message'] += f" - SKIPPED ({reason})"
+                    else:
+                        progress_info['message'] += f" - BalancedAcccv: {-trial.value:.4f}"
                 else:
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
@@ -1573,17 +1844,19 @@ def run_unified_bayesian(
                 best_model = {
                     'Model': model_name,
                     'Preprocess': _build_display_preprocess_name(
-                        best.params.get('preprocessing', 'raw'),
+                        best.user_attrs.get('preprocessing', 'raw'),
                         apply_baseline=best.user_attrs.get('apply_baseline', False),
                         baseline_method=baseline_method,
                         apply_smoothing=best.user_attrs.get('apply_smoothing', False),
                     ),
-                    'n_vars': best.params.get('n_vars', 'N/A'),
+                    'n_vars': best.user_attrs.get('n_vars', 'N/A'),
                 }
                 if task_type == 'regression':
                     best_model['RMSEcv'] = best.value
                     # R²cv not available (only RMSE optimized), use placeholder
                     best_model['R2cv'] = 0.0
+                elif task_type == 'one_class':
+                    best_model['BalancedAcccv'] = -best.value
                 else:
                     best_model['Accuracycv'] = -best.value
                 progress_info['best_model'] = best_model
@@ -1594,6 +1867,8 @@ def run_unified_bayesian(
             if trial.value is not None and trial.value < 1e9:
                 if task_type == 'regression':
                     print(f"  Trial {trial.number + 1}/{n_trials}: RMSEcv={trial.value:.4f}")
+                elif task_type == 'one_class':
+                    print(f"  Trial {trial.number + 1}/{n_trials}: BalancedAcccv={-trial.value:.4f}")
                 else:
                     print(f"  Trial {trial.number + 1}/{n_trials}: Acccv={-trial.value:.4f}")
 
@@ -1631,6 +1906,9 @@ def run_unified_bayesian(
                 best_r2_cv = results_df.loc[results_df['RMSEcv'].idxmin(), 'R2cv']
                 print(f"Best RMSEcv: {best_rmse_cv:.6f}")
                 print(f"Best R2cv: {best_r2_cv:.6f}")
+            elif task_type == 'one_class':
+                best_ba = results_df['BalancedAcccv'].max()
+                print(f"Best BalancedAcccv: {best_ba:.6f}")
             else:
                 best_acc = results_df['Accuracy'].max()
                 print(f"Best Accuracy: {best_acc:.6f}")
@@ -1638,12 +1916,13 @@ def run_unified_bayesian(
             # Show best configuration
             if task_type == 'regression':
                 best_row = results_df.loc[results_df['RMSEcv'].idxmin()]
+            elif task_type == 'one_class':
+                best_row = results_df.loc[results_df['BalancedAcccv'].idxmax()]
             else:
                 best_row = results_df.loc[results_df['Accuracy'].idxmax()]
 
             print(f"\nBest Configuration:")
             print(f"  Preprocessing: {best_row['Preprocess']}")
-            print(f"  Subset: {best_row['SubsetTag']} ({best_row['n_vars']} vars)")
             print(f"  Params: {best_row['Params']}")
             print(f"{'='*70}\n")
 
@@ -1753,6 +2032,33 @@ def convert_study_to_dataframe(
             if regional_rmse:
                 for q in ['Q1', 'Q2', 'Q3', 'Q4']:
                     row[f'RMSE_{q}'] = regional_rmse.get(q, np.nan)
+        elif task_type == 'one_class':
+            # Calibration metrics (keys from run_one_class_cv cal_metrics via one_class_metrics)
+            row['Sensitivity'] = trial.user_attrs.get('sensitivity', np.nan)
+            row['Specificity'] = trial.user_attrs.get('specificity', np.nan)
+            row['Precision'] = trial.user_attrs.get('precision', np.nan)
+            row['F1'] = trial.user_attrs.get('f1', np.nan)
+            row['Accuracy'] = trial.user_attrs.get('accuracy', np.nan)
+            row['BalancedAcc'] = trial.user_attrs.get('balanced_accuracy', np.nan)
+            row['AUC'] = trial.user_attrs.get('auc', np.nan)
+            # Cross-validation metrics (stored with _cv suffix by objective)
+            row['Sensitivitycv'] = trial.user_attrs.get('sensitivity_cv', np.nan)
+            row['Specificitycv'] = trial.user_attrs.get('specificity_cv', np.nan)
+            row['Precisioncv'] = trial.user_attrs.get('precision_cv', np.nan)
+            row['F1cv'] = trial.user_attrs.get('f1_cv', np.nan)
+            row['Accuracycv'] = trial.user_attrs.get('accuracy_cv', np.nan)
+            balanced_acc_cv = trial.user_attrs.get('balanced_accuracy_cv', np.nan)
+            if balanced_acc_cv is None or (isinstance(balanced_acc_cv, float) and np.isnan(balanced_acc_cv)):
+                # Derive from objective value
+                balanced_acc_cv = -trial.value if (trial.value is not None and trial.value < 1e9) else np.nan
+            row['BalancedAcccv'] = balanced_acc_cv
+            row['AUCcv'] = trial.user_attrs.get('auc_cv', np.nan)
+            # Fitted calibration artifacts (defensive: refinement re-runs CV, so the
+            # only consumer of these today is any future direct-save-from-results
+            # path). Column names match search.py:5171-5173 for grid-search parity.
+            row['scaler'] = trial.user_attrs.get('cal_scaler')
+            row['pca_reducer'] = trial.user_attrs.get('cal_pca_reducer')
+            row['oc_score_stats'] = trial.user_attrs.get('oc_score_stats')
         else:
             # Calibration metrics
             row['Accuracy'] = trial.user_attrs.get('Accuracy', np.nan)
@@ -1813,7 +2119,13 @@ def convert_study_to_dataframe(
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
                 'early_stopping_rounds', 'trial_number', 'Folds', 'Optimization',
                 'imbalance_method', 'imbalance_params']
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            cols.extend([
+                'Sensitivity', 'Specificity', 'Precision', 'F1', 'Accuracy', 'BalancedAcc', 'AUC',
+                'Sensitivitycv', 'Specificitycv', 'Precisioncv', 'F1cv',
+                'Accuracycv', 'BalancedAcccv', 'AUCcv', 'CompositeScore', 'Score',
+            ])
+        elif task_type == 'classification':
             cols.extend(['Accuracy', 'Accuracycv', 'CV Error', 'ROC_AUC', 'ROC_AUCcv', 'CompositeScore', 'Score'])
         else:
             cols.extend(['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score'])
@@ -1823,6 +2135,8 @@ def convert_study_to_dataframe(
     # Sort by performance (use CV metrics for model selection)
     if task_type == 'regression':
         df = df.sort_values('RMSEcv', ascending=True)
+    elif task_type == 'one_class':
+        df = df.sort_values('BalancedAcccv', ascending=False)  # Higher balanced accuracy is better
     else:
         df = df.sort_values('CV Error', ascending=True)  # Lower CV Error is better
 
@@ -1832,15 +2146,19 @@ def convert_study_to_dataframe(
     df.insert(0, 'Rank', range(1, len(df) + 1))
 
     # Add CompositeScore column (required for report.py compatibility)
-    # Lower is better for both regression (RMSEcv) and classification (CV Error)
+    # Lower is better for regression/classification; for OC = 1 - BalancedAcccv
     if task_type == 'regression':
         df['CompositeScore'] = df['RMSEcv']
+    elif task_type == 'one_class':
+        df['CompositeScore'] = 1.0 - df['BalancedAcccv']
     else:
         df['CompositeScore'] = df['CV Error']
 
     # Add Score column for compatibility with Coupled format
     if task_type == 'classification':
         df['Score'] = df['CV Error']
+    elif task_type == 'one_class':
+        df['Score'] = df['CompositeScore']
     else:
         df['Score'] = df['RMSEcv']
 
@@ -1853,6 +2171,16 @@ def convert_study_to_dataframe(
     # Performance metrics
     if task_type == 'regression':
         perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
+    elif task_type == 'one_class':
+        perf_cols = [
+            # Calibration metrics
+            'Sensitivity', 'Specificity', 'Precision', 'F1', 'Accuracy', 'BalancedAcc', 'AUC',
+            # Cross-validation metrics
+            'Sensitivitycv', 'Specificitycv', 'Precisioncv', 'F1cv',
+            'Accuracycv', 'BalancedAcccv', 'AUCcv',
+            # Composite
+            'CompositeScore', 'Score',
+        ]
     else:
         perf_cols = [
             # Calibration metrics

@@ -1,5 +1,7 @@
 """Model definitions and grid search configurations."""
 
+import logging
+
 import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
@@ -18,6 +20,11 @@ from catboost import CatBoostRegressor, CatBoostClassifier
 
 # Import tiered configuration
 from .model_config import get_tier_models, get_hyperparameters
+
+# Import one-class models for anomaly detection
+from .contamination import (
+    get_one_class_model, build_one_class_model, get_one_class_model_grids
+)
 
 
 class PLSTransformer(BaseEstimator, TransformerMixin):
@@ -231,7 +238,7 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
 
-    else:  # classification
+    elif task_type == "classification":
         if model_name in ["PLS-DA", "PLS"]:
             # For classification, PLS is used as a transformer
             return PLSTransformer(n_components=n_components, scale=False)
@@ -335,6 +342,11 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
         else:
             raise ValueError(f"Unknown classification model: {model_name}")
 
+    elif task_type == "one_class":
+        return get_one_class_model(model_name)
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
+
     return model
 
 
@@ -364,6 +376,24 @@ def build_model(model_name, params, task_type='regression'):
     >>> model = build_model('XGBoost', params, task_type='regression')
     >>> model.fit(X_train, y_train)
     """
+    if task_type == "one_class":
+        # One-class model names go to build_one_class_model. Anything else
+        # is a typo/registry mismatch and must raise loudly — silently
+        # falling back to classification produces wrong-estimator-type
+        # results that are hard to diagnose downstream. If you actually
+        # need a classification surrogate (e.g. for variable-selection
+        # importance) call build_model with task_type='classification'
+        # directly.
+        _OC_MODEL_NAMES = {'PCA-SIMCA', 'OneClassSVM', 'IsolationForest', 'EllipticEnvelope', 'LOF'}
+        if model_name in _OC_MODEL_NAMES:
+            from spectral_predict.contamination import build_one_class_model
+            return build_one_class_model(model_name, params)
+        raise ValueError(
+            f"Unknown one-class model: {model_name!r}. "
+            f"Expected one of {sorted(_OC_MODEL_NAMES)}. "
+            f"For classification surrogates, pass task_type='classification' explicitly."
+        )
+
     if task_type == "regression":
         if model_name == "PLS":
             return PLSRegression(scale=False, **params)
@@ -434,7 +464,7 @@ def build_model(model_name, params, task_type='regression'):
         else:
             raise ValueError(f"Unknown regression model: {model_name}")
 
-    else:  # classification
+    elif task_type == "classification":
         if model_name in ["PLS-DA", "PLS"]:
             return PLSTransformer(scale=False, **params)
 
@@ -502,6 +532,11 @@ def build_model(model_name, params, task_type='regression'):
 
         else:
             raise ValueError(f"Unknown classification model: {model_name}")
+
+    elif task_type == "one_class":
+        return build_one_class_model(model_name, params)
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
 
 def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
@@ -592,7 +627,7 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
     # Determine which models to include
     if enabled_models is None:
         # Use tier defaults if no explicit model list provided
-        enabled_models = get_tier_models(tier)
+        enabled_models = get_tier_models(tier, task_type=task_type)
 
     # NeuralBoosted defaults (tier-aware)
     if n_estimators_list is None:
@@ -1308,7 +1343,7 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                 )
             grids["CatBoost"] = catboost_configs
 
-    else:  # classification
+    elif task_type == "classification":
         # PLS-DA (PLS + LogisticRegression) - tier-aware
         # Stage 1: PLSTransformer (n_components, max_iter, tol)
         # Stage 2: LogisticRegression (lr_C, lr_solver, lr_max_iter)
@@ -1654,6 +1689,19 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                     (CatBoostClassifier(**model_kwargs), params_dict)
                                                 )
             grids["CatBoost"] = catboost_configs
+
+    elif task_type == "one_class":
+        # One-class models use their own grid system from contamination module
+        oc_grids = get_one_class_model_grids()
+        for model_name, param_list in oc_grids.items():
+            if model_name in enabled_models:
+                configs = []
+                for params in param_list:
+                    model = build_one_class_model(model_name, params)
+                    configs.append((model, params))
+                grids[model_name] = configs
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
     return grids
 

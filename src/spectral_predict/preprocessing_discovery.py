@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import List, Dict, Callable, Optional, Tuple, Any
-from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_score, StratifiedKFold
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import LabelEncoder
 
@@ -575,7 +575,8 @@ def evaluate_preprocessing_config(
     importance_method: str,
     model_name: Optional[str],
     task_type: str,
-    cv_folds: int = 5
+    cv_folds: int = 5,
+    skip_importance: bool = False
 ) -> Dict[str, Any]:
     """
     Evaluate one preprocessing config using ALL wavelengths (like grid search does).
@@ -623,21 +624,23 @@ def evaluate_preprocessing_config(
         score = _quick_evaluate(X_eval, y, task_type, cv_folds)
 
         # 4. Compute importance for potential variable selection use
-        # (stored but not used for evaluation score)
-        try:
-            importance = compute_importance(
-                X_eval, y, method=importance_method,
-                model_name=model_name, task_type=task_type
-            )
-            # Select wavelengths using default subset size (200)
-            selected_wavelengths = select_wavelengths_by_importance(
-                importance, target_n=200, edge_zone=0  # Edge already applied
-            )
-            # Adjust indices to account for edge masking
-            if edge_zone > 0:
-                selected_wavelengths = selected_wavelengths + edge_zone
-        except Exception:
-            selected_wavelengths = None
+        # (stored but not used for evaluation score — skip during initial scan)
+        selected_wavelengths = None
+        if not skip_importance:
+            try:
+                importance = compute_importance(
+                    X_eval, y, method=importance_method,
+                    model_name=model_name, task_type=task_type
+                )
+                # Select wavelengths using default subset size (200)
+                selected_wavelengths = select_wavelengths_by_importance(
+                    importance, target_n=200, edge_zone=0  # Edge already applied
+                )
+                # Adjust indices to account for edge masking
+                if edge_zone > 0:
+                    selected_wavelengths = selected_wavelengths + edge_zone
+            except Exception:
+                selected_wavelengths = None
 
         # Parse deriv order from name
         deriv_order = None
@@ -677,7 +680,25 @@ def _quick_evaluate(
         cv_folds = min(cv_folds, n_samples // 2)
         cv_folds = max(2, cv_folds)
 
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            n_outliers = int(np.sum(y == -1))
+            if n_outliers < 2:
+                # Too few outliers for meaningful CV — return neutral score
+                # (training accuracy would be misleadingly inflated)
+                return 1.0  # Specificity-only: assume all inliers correctly classified
+            n_splits = min(cv_folds, n_outliers)
+            model = LGBMClassifier(
+                class_weight='balanced',
+                n_estimators=50,
+                max_depth=3,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=1,
+            )
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+            scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+            return scores.mean()  # Higher is better
+        elif task_type == 'classification':
             model = LGBMClassifier(
                 n_estimators=50,
                 max_depth=4,
@@ -823,7 +844,7 @@ def discover_preprocessing(
     models_to_test : list, optional
         Models that will be tested (for model-specific importance)
     task_type : str
-        'regression' or 'classification'
+        'regression', 'classification', or 'one_class'
     importance_method : str
         One of: 'cars_tree', 'model_specific', 'lightgbm', 'vip'
     n_top : int
@@ -884,7 +905,8 @@ def discover_preprocessing(
             importance_method=initial_importance_method,
             model_name=None,
             task_type=task_type,
-            cv_folds=cv_folds
+            cv_folds=cv_folds,
+            skip_importance=True,  # Importance is recomputed in expansion phase
         )
 
         if result is not None:

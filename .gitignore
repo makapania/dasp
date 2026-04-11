@@ -56,8 +56,14 @@ htmlcov/
 dist/
 build/
 
-# Archive folder (local documentation and temporary files)
+# Archive folder (local holding pen for clutter)
+archive/
 _archive/
+
+# Test outputs and coverage dumps
+test_output*.txt
+test_results*.txt
+coverage_report*.txt
 profile.stats
 *.log
 
@@ -67,6 +73,7 @@ catboost_info/
 # Claude Code session artifacts
 tmpclaude-*/
 nul
+.worktrees/
 
 # One-off outputs
 *.stats

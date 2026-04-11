@@ -1,5 +1,7 @@
 """Scoring and ranking functions."""
 
+import ast
+
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
@@ -54,6 +56,9 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Performance score (lower is better) — always use direct metric ranking
     if task_type == "regression":
         performance_score = -df["R2cv"]
+    elif task_type == "one_class":
+        bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
+        performance_score = -bal_acc_cv - 0.0001 * df["Sensitivitycv"].fillna(0)
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -61,6 +66,9 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Both penalties scale relative to this so same spinbox value = same max impact
     if task_type == "regression":
         perf_range = df["R2cv"].max() - df["R2cv"].min()
+    elif task_type == "one_class":
+        bal_acc_cv_range = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
+        perf_range = bal_acc_cv_range.max() - bal_acc_cv_range.min()
     else:
         perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
@@ -102,6 +110,17 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
 
             # Normalize: ratio 1.0 = no gap (0 penalty), ratio 5.0 = max penalty (1.0)
             gap_fraction = np.clip((gap_ratio - 1.0) / 4.0, 0.0, 1.0)
+
+        elif task_type == "one_class":
+            # One-class: use balanced accuracy for gap calculation
+            # Guard NaN: fall back to Specificity columns when BalancedAcc is NaN
+            bal_acc = df["BalancedAcc"].fillna(df.get("Specificity", np.nan)).astype(np.float64)
+            bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", np.nan)).astype(np.float64)
+            both_nan = bal_acc.isna() & bal_acc_cv.isna()
+            bal_acc = bal_acc.fillna(0.0)
+            bal_acc_cv = bal_acc_cv.fillna(0.0)
+            gap_ratio = np.where(bal_acc_cv > 1e-10, bal_acc / bal_acc_cv, 1.0)
+            gap_fraction = np.where(both_nan, 1.0, np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0))
 
         else:  # classification
             acc = df["Accuracy"].astype(np.float64)
@@ -210,11 +229,16 @@ def _compute_unified_complexity(row):
     model = row.get("Model", "")
     model_scores = {
         "PLS": 20,
+        "PCA-SIMCA": 20,
         "Ridge": 25,
+        "EllipticEnvelope": 30,
         "Lasso": 30,
+        "IsolationForest": 35,
+        "LOF": 45,
+        "OneClassSVM": 55,
         "RandomForest": 60,
         "MLP": 80,
-        "NeuralBoosted": 85
+        "NeuralBoosted": 85,
     }
     model_complexity = model_scores.get(model, 50)  # Default to 50 if unknown
 
@@ -226,6 +250,23 @@ def _compute_unified_complexity(row):
 
     # 3. Latent Variable Complexity (25% weight) - for PLS models
     lvs = row.get("LVs", np.nan)
+    # PCA-SIMCA stores dimensionality as n_components in Params; LVs may be 0 or missing
+    if (pd.isna(lvs) or lvs == 0) and model == "PCA-SIMCA":
+        try:
+            params_raw = row.get("Params", "{}")
+            # Params can be a dict (in-memory result rows) or a str
+            # (CSV-loaded rows). Handling only the str branch caused
+            # PCA-SIMCA n_components to be lost for in-memory results,
+            # which then collapsed lv_complexity to the median fallback.
+            if isinstance(params_raw, dict):
+                params_dict = params_raw
+            elif isinstance(params_raw, str):
+                params_dict = ast.literal_eval(params_raw) if params_raw.strip() else {}
+            else:
+                params_dict = {}
+            lvs = params_dict.get("n_components", np.nan)
+        except (ValueError, SyntaxError):
+            lvs = np.nan
     if pd.isna(lvs) or lvs == 0:
         # Non-PLS models: use median complexity (50)
         lv_complexity = 50
@@ -357,6 +398,16 @@ def create_results_dataframe(task_type):
     if task_type == "regression":
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
         metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
+    elif task_type == "one_class":
+        # One-class detection screening metrics
+        metric_cols = [
+            # Calibration metrics
+            "Sensitivity", "Specificity", "Precision", "F1",
+            "Accuracy", "BalancedAcc", "AUC",
+            # Cross-validation metrics
+            "Sensitivitycv", "Specificitycv", "Precisioncv", "F1cv",
+            "Accuracycv", "BalancedAcccv", "AUCcv",
+        ]
     else:
         # Calibration metrics first, then CV metrics, then advanced metrics
         metric_cols = [

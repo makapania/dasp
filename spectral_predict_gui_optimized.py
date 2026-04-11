@@ -1269,20 +1269,30 @@ TOOLTIP_CONTENT = {
         'Precisioncv': 'Precisioncv (Precision Cross-Validation)',
         'Recall': 'Recall (Sensitivity)\n\nOf actual positives, how many were found?\nHigh recall = few false negatives.',
         'Recallcv': 'Recallcv (Recall Cross-Validation)',
-        'ROC_AUC': 'ROC-AUC (Receiver Operating Characteristic - Area Under Curve)\n\nClassifier performance across thresholds.\nRange: 0.5 (random) to 1.0 (perfect)',
-        'ROC_AUCcv': 'ROC-AUCcv (ROC-AUC Cross-Validation)',
+        'ROC_AUC': 'ROC-AUC (Area Under the ROC Curve)\n\nHow well the classifier separates the classes across all decision thresholds.\nRange: 0.5 (random guessing) to 1.0 (perfect).\nRule of thumb: >0.8 good, >0.9 excellent.',
+        'ROC_AUCcv': 'ROC-AUCcv (ROC-AUC Cross-Validation)\n\nROC-AUC measured on held-out folds.\nMore reliable than calibration AUC — use this to judge real-world performance.',
         'Specificity': 'Specificity (True Negative Rate)\n\nOf actual negatives, how many were correctly identified?\nMacro-averaged for multi-class.',
         'Specificitycv': 'Specificitycv (Specificity Cross-Validation)\n\nSpecificity on held-out folds.',
-        'Kappa': 'Kappa (Cohen\'s Kappa)\n\nAgreement beyond chance.\nRange: -1 to 1 (1 = perfect agreement)\nAccounts for class imbalance.',
+        'Sensitivity': 'Sensitivity (True Positive Rate)\n\nOf the actual positives (e.g., contaminants or a target class), how many did the model catch?\nRange: 0-1 (higher = fewer missed).\nAlso called Recall.',
+        'Sensitivitycv': 'Sensitivitycv (Sensitivity Cross-Validation)\n\nSensitivity measured on held-out folds.\nMore reliable than calibration sensitivity.',
+        'AUC': 'AUC (Area Under the ROC Curve)\n\nHow well the model separates the two classes across all decision thresholds.\nRange: 0.5 (random guessing) to 1.0 (perfect separation).\nRule of thumb: >0.8 good, >0.9 excellent.',
+        'AUCcv': 'AUCcv (AUC Cross-Validation)\n\nAUC measured on held-out folds.\nMore reliable than calibration AUC — use this to judge real-world performance.',
+        'Kappa': 'Kappa (Cohen\'s Kappa)\n\nHow much better the predictions are than random guessing.\nRange: -1 to 1. 0 = no better than chance, 1 = perfect agreement.\nMore honest than plain accuracy when classes are imbalanced.',
         'Kappacv': 'Kappacv (Kappa Cross-Validation)\n\nKappa on held-out folds.',
-        'MCC': 'MCC (Matthews Correlation Coefficient)\n\nBest metric for imbalanced data.\nRange: -1 to 1 (1 = perfect prediction)\nBalances all confusion matrix categories.',
+        'MCC': 'MCC (Matthews Correlation Coefficient)\n\nA single balanced score that accounts for all four outcomes (true/false positives and negatives).\nRange: -1 (opposite) to 1 (perfect). 0 = random.\nThe most reliable single number when classes are imbalanced.',
         'MCCcv': 'MCCcv (MCC Cross-Validation)\n\nMCC on held-out folds.',
         'BalancedAcc': 'BalancedAcc (Balanced Accuracy)\n\nMean per-class recall.\nRange: 0-1 (higher is better)\nPreferred for imbalanced datasets.',
         'BalancedAcccv': 'BalancedAcccv (Balanced Accuracy Cross-Validation)\n\nBalanced Accuracy on held-out folds.',
-        'BER': 'BER (Balanced Error Rate)\n\n1 - Balanced Accuracy.\nRange: 0-1 (lower is better)\nStandard metric in PLS-DA.',
+        'BER': 'BER (Balanced Error Rate)\n\n1 minus Balanced Accuracy. Lower is better (0 = perfect).\nTreats every class equally — good when some classes have many more samples than others.',
         'BERcv': 'BERcv (BER Cross-Validation)\n\nBER on held-out folds.',
-        'LogLoss': 'LogLoss (Log Loss)\n\nProbabilistic prediction error.\nLower is better\nPenalizes confident wrong predictions.',
+        'LogLoss': 'LogLoss (Log Loss)\n\nMeasures how good the model\'s probability estimates are.\nLower is better. Heavily punishes predictions that are confidently wrong.',
         'LogLosscv': 'LogLosscv (Log Loss Cross-Validation)\n\nLog Loss on held-out folds.',
+        'RMSEP': 'RMSEP (Root Mean Square Error of Prediction)\n\nRMSE calculated on an external validation set (data the model never saw).\nThe most realistic estimate of field performance.\nLower is better.',
+        'R2pred': 'R2pred (R² on Prediction Set)\n\nR² calculated on an external validation set.\nMore trustworthy than calibration R² — use this to judge real-world fit.\nRange: 0-1 (higher = better).',
+        'val_Accuracy': 'val_Accuracy (Validation Accuracy)\n\nAccuracy on an external validation set the model never saw.\nMost realistic estimate of real-world classification performance.\nRange: 0-1 (higher = better).',
+        'val_Precision': 'val_Precision (Validation Precision)\n\nPrecision on an external validation set.\nOf predicted positives, how many were correct?\nHigh = few false alarms.',
+        'val_Recall': 'val_Recall (Validation Recall)\n\nRecall/Sensitivity on an external validation set.\nOf actual positives, how many did the model find?\nHigh = few missed detections.',
+        'val_F1': 'val_F1 (Validation F1 Score)\n\nF1 on an external validation set — harmonic mean of Precision and Recall.\nBalances false positives and false negatives in real-world data.',
         'CompositeScore': 'CompositeScore (Composite Score)\n\nWeighted combination of metrics for ranking.\nHigher is better.',
         'Rank': 'Rank (Model Rank)\n\nPosition in results sorted by CompositeScore.\n★ = Expert choice, ● = Good fit',
         'n_vars': 'n_vars (Number of Variables)\n\nSpectral variables used after variable selection.\nFewer = simpler model.',
@@ -2769,6 +2779,22 @@ class SpectralPredictApp:
         self.use_svm = tk.BooleanVar(value=False)          # Experimental (very slow) - for classification
         self.use_mlp = tk.BooleanVar(value=False)          # Experimental
 
+        # One-class model selection
+        self.use_ocsvm = tk.BooleanVar(value=True)
+        self.use_isolation_forest = tk.BooleanVar(value=True)
+        self.use_elliptic_envelope = tk.BooleanVar(value=False)
+        self.use_lof = tk.BooleanVar(value=False)
+        self.use_pca_simca = tk.BooleanVar(value=True)
+
+        # Inlier class label for one-class models
+        self.inlier_class_label = tk.StringVar(value="")
+
+        # One-class hyperparameter variables
+        self.oc_nu = tk.DoubleVar(value=0.05)           # OneClassSVM nu parameter
+        self.oc_contamination = tk.DoubleVar(value=0.05)  # IsolationForest/EllipticEnvelope/LOF
+        self.oc_alpha = tk.DoubleVar(value=0.05)         # PCA-SIMCA (DD-SIMCA) alpha
+        self.oc_n_components = tk.IntVar(value=5)        # PCA-SIMCA n_components
+
         # Create model name to checkbox mapping
         self.model_checkboxes = {
             'PLS': self.use_pls,
@@ -2786,8 +2812,21 @@ class SpectralPredictApp:
             'NeuralBoosted': self.use_neuralboosted
         }
 
+        # One-class model checkboxes
+        self.one_class_model_checkboxes = {
+            'OneClassSVM': self.use_ocsvm,
+            'IsolationForest': self.use_isolation_forest,
+            'EllipticEnvelope': self.use_elliptic_envelope,
+            'LOF': self.use_lof,
+            'PCA-SIMCA': self.use_pca_simca,
+        }
+
         # Add trace callbacks to model checkboxes to switch to Custom tier when manually changed
         for var in self.model_checkboxes.values():
+            var.trace_add('write', self._on_model_checkbox_changed)
+
+        # Add trace callbacks for one-class model checkboxes (same pattern)
+        for var in self.one_class_model_checkboxes.values():
             var.trace_add('write', self._on_model_checkbox_changed)
 
         # Preprocessing method selection
@@ -5979,8 +6018,40 @@ class SpectralPredictApp:
         ttk.Radiobutton(task_type_subframe, text="Auto-detect", variable=self.task_type, value="auto").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Regression", variable=self.task_type, value="regression").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Classification", variable=self.task_type, value="classification").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(task_type_subframe, text="One-Class", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
         self.task_type_detection_label = ttk.Label(task_type_subframe, text="", style='Caption.TLabel')
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
+        cfg_row += 1
+
+        # Inlier class selection (visible only for one-class task type)
+        self.inlier_class_frame = ttk.Frame(config_frame)
+        self.inlier_class_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
+        ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:").pack(side=tk.LEFT, padx=(0, 5))
+        self.inlier_class_combo = ttk.Combobox(
+            self.inlier_class_frame, textvariable=self.inlier_class_label, width=20, state='readonly'
+        )
+        self.inlier_class_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Label(self.inlier_class_frame, text="(leave empty to auto-detect most frequent class)",
+                 style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
+        self.inlier_class_frame.grid_remove()  # Hidden by default
+        cfg_row += 1
+
+        # One-class hyperparameters frame (visible only for one-class task type)
+        self.oc_hyperparams_frame = ttk.Frame(config_frame)
+        self.oc_hyperparams_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
+        ttk.Label(self.oc_hyperparams_frame, text="nu (OCSVM):").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_nu, from_=0.001, to=1.0,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="contamination:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_contamination, from_=0.001, to=0.5,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="alpha (DD-SIMCA):").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_alpha, from_=0.001, to=0.5,
+                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(self.oc_hyperparams_frame, text="n_components:").pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_n_components, from_=1, to=50,
+                    increment=1, width=5).pack(side=tk.LEFT, padx=(0, 10))
+        self.oc_hyperparams_frame.grid_remove()  # Hidden by default
         cfg_row += 1
 
         # Wavelength/Wavenumber Range
@@ -11101,6 +11172,7 @@ class SpectralPredictApp:
         varsel_card_outer, varsel_card = self._create_card(content_frame, title="Advanced Variable Selection",
                                                              subtitle="Sophisticated wavelength selection techniques")
         varsel_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        self.varsel_card_outer = varsel_card_outer
         row += 1
 
         # ===== VARIABLE SELECTION DECISION MATRIX (Collapsible) =====
@@ -11147,28 +11219,33 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
-                       variable=self.varsel_ipls).grid(row=4, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls = ttk.Checkbutton(varsel_frame, text="iPLS (Interval PLS)",
+                       variable=self.varsel_ipls)
+        self._cb_ipls.grid(row=4, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region-based analysis",
                  style='Caption.TLabel').grid(row=4, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
-                       variable=self.varsel_ipls_forward).grid(row=5, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls_forward = ttk.Checkbutton(varsel_frame, text="Forward iPLS (Interval Combination)",
+                       variable=self.varsel_ipls_forward)
+        self._cb_ipls_forward.grid(row=5, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Tests individual intervals + best combinations",
                  style='Caption.TLabel').grid(row=5, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
-                       variable=self.varsel_ipls_backward).grid(row=6, column=0, sticky=tk.W, pady=2)
+        self._cb_ipls_backward = ttk.Checkbutton(varsel_frame, text="Backward iPLS (Interval Elimination)",
+                       variable=self.varsel_ipls_backward)
+        self._cb_ipls_backward.grid(row=6, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Progressively removes worst intervals",
                  style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="MC-siPLS (Monte Carlo Synergy iPLS)",
-                       variable=self.varsel_mc_sipls).grid(row=7, column=0, sticky=tk.W, pady=2)
+        self._cb_mc_sipls = ttk.Checkbutton(varsel_frame, text="MC-siPLS (Monte Carlo Synergy iPLS)",
+                       variable=self.varsel_mc_sipls)
+        self._cb_mc_sipls.grid(row=7, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Random interval combinations for synergistic regions",
                  style='Caption.TLabel').grid(row=7, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="MWPLS (Moving Window PLS)",
-                       variable=self.varsel_mwpls).grid(row=8, column=0, sticky=tk.W, pady=2)
+        self._cb_mwpls = ttk.Checkbutton(varsel_frame, text="MWPLS (Moving Window PLS)",
+                       variable=self.varsel_mwpls)
+        self._cb_mwpls.grid(row=8, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Optimal contiguous spectral windows",
                  style='Caption.TLabel').grid(row=8, column=1, sticky=tk.W, padx=15)
 
@@ -11219,13 +11296,15 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
                  style='Caption.TLabel').grid(row=17, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
-                       variable=self.varsel_fipls_spa).grid(row=18, column=0, sticky=tk.W, pady=2)
+        self._cb_fipls_spa = ttk.Checkbutton(varsel_frame, text="Fwd iPLS-SPA",
+                       variable=self.varsel_fipls_spa)
+        self._cb_fipls_spa.grid(row=18, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region selection + collinearity reduction",
                  style='Caption.TLabel').grid(row=18, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
-                       variable=self.varsel_fipls_cars).grid(row=19, column=0, sticky=tk.W, pady=2)
+        self._cb_fipls_cars = ttk.Checkbutton(varsel_frame, text="Fwd iPLS-CARS",
+                       variable=self.varsel_fipls_cars)
+        self._cb_fipls_cars.grid(row=19, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Region selection + adaptive selection",
                  style='Caption.TLabel').grid(row=19, column=1, sticky=tk.W, padx=15)
 
@@ -11440,6 +11519,7 @@ class SpectralPredictApp:
         # Inner frame for grid layout within card
         models_frame = tk.Frame(models_card, bg=self.colors['card_bg'])
         models_frame.pack(fill='both', expand=True)
+        self.standard_models_frame = models_frame
 
         # Core Models (Column 1)
         ttk.Label(models_frame, text="Core Models", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
@@ -11534,6 +11614,29 @@ class SpectralPredictApp:
             'MLP': self.mlp_checkbox,
             'NeuralBoosted': self.neuralboosted_checkbox
         }
+
+        # One-Class Models Frame (hidden by default, shown when task_type is one_class)
+        self.oc_models_frame = tk.Frame(models_card, bg=self.colors['card_bg'])
+
+        ttk.Label(self.oc_models_frame, text="One-Class Models", style='Subheading.TLabel').grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 5))
+
+        oc_row = 1
+        oc_model_info = [
+            ("PCA-SIMCA", self.use_pca_simca, "DD-SIMCA (classic chemometrics)"),
+            ("OneClassSVM", self.use_ocsvm, "Kernel-based boundary"),
+            ("IsolationForest", self.use_isolation_forest, "Isolation-based anomaly detection"),
+            ("EllipticEnvelope", self.use_elliptic_envelope, "Mahalanobis-based (Gaussian)"),
+            ("LOF", self.use_lof, "Local Outlier Factor (density-based)"),
+        ]
+        self.oc_model_checkbox_widgets = {}
+        for name, var, desc in oc_model_info:
+            cb = ttk.Checkbutton(self.oc_models_frame, text=name, variable=var)
+            cb.grid(row=oc_row, column=0, sticky=tk.W, pady=5)
+            ttk.Label(self.oc_models_frame, text=desc, style='Caption.TLabel').grid(
+                row=oc_row, column=1, sticky=tk.W, padx=15)
+            self.oc_model_checkbox_widgets[name] = cb
+            oc_row += 1
 
         # === Advanced Model Options ===
         self._create_section_header(content_frame, "Advanced Model Options", row=row, columnspan=2)
@@ -13767,6 +13870,7 @@ class SpectralPredictApp:
         task_frame.grid(row=3, column=0, sticky=tk.W, pady=5)
         ttk.Radiobutton(task_frame, text="Regression", variable=self.refine_task_type, value='regression').pack(side='left', padx=5)
         ttk.Radiobutton(task_frame, text="Classification", variable=self.refine_task_type, value='classification').pack(side='left', padx=5)
+        ttk.Radiobutton(task_frame, text="One-Class", variable=self.refine_task_type, value='one_class').pack(side='left', padx=5)
 
         # === Model Hyperparameters (Dynamic per Model) ===
         hyperparams_outer_frame = ttk.LabelFrame(content_frame, text="Model Hyperparameters", padding="20")
@@ -14846,9 +14950,9 @@ class SpectralPredictApp:
             # Try to read and detect columns
             try:
                 if is_excel:
-                    X, y, metadata_df, metadata = read_combined_excel(combined_file, sheet_name=sheet_name)
+                    X, y, metadata_df, metadata = read_combined_excel(combined_file, sheet_name=sheet_name, drop_na_y=False)
                 else:
-                    X, y, metadata_df, metadata = read_combined_csv(combined_file)
+                    X, y, metadata_df, metadata = read_combined_csv(combined_file, drop_na_y=False)
 
                 # Store metadata for later use
                 self.combined_metadata = metadata
@@ -15036,11 +15140,11 @@ class SpectralPredictApp:
 
             # Try to read and validate the file
             if is_excel:
-                X, y, metadata_df, metadata = read_combined_excel(filepath)
+                X, y, metadata_df, metadata = read_combined_excel(filepath, drop_na_y=False)
                 self.detected_type = 'combined_excel'
                 self.combined_sheet_name = 0  # Default to first sheet
             else:
-                X, y, metadata_df, metadata = read_combined_csv(filepath)
+                X, y, metadata_df, metadata = read_combined_csv(filepath, drop_na_y=False)
                 self.detected_type = 'combined'
                 self.combined_sheet_name = 0  # Not used for CSV, but consistent
 
@@ -15224,29 +15328,38 @@ class SpectralPredictApp:
             actual_task = task_type
 
         # Get models for this tier and task type
+        if get_tier_models is None:
+            return
         try:
             tier_models = set(get_tier_models(tier, actual_task))
-        except ValueError:
-            # If tier not found, keep current selection
+        except (ValueError, TypeError):
+            # If tier not found or function unavailable, keep current selection
             return
-
-        # Get all supported models for this task type
-        if actual_task == "classification":
-            supported_models = set(get_supported_models("classification"))
-        else:
-            supported_models = set(get_supported_models("regression"))
 
         # Set flag to prevent triggering custom tier switch
         self._updating_from_tier = True
 
-        # Update checkboxes
-        for model_name, checkbox_var in self.model_checkboxes.items():
-            # Check if model should be selected for this tier AND is supported for task type
-            should_select = model_name in tier_models and model_name in supported_models
-            # Don't enable CatBoost if it's not available
-            if model_name == 'CatBoost' and not HAS_CATBOOST:
-                should_select = False
-            checkbox_var.set(1 if should_select else 0)
+        if actual_task == "one_class":
+            # Update one-class model checkboxes from ONE_CLASS_TIERS
+            supported_models = set(get_supported_models("one_class"))
+            for model_name, checkbox_var in self.one_class_model_checkboxes.items():
+                should_select = model_name in tier_models and model_name in supported_models
+                checkbox_var.set(1 if should_select else 0)
+        else:
+            # Get all supported models for this task type
+            if actual_task == "classification":
+                supported_models = set(get_supported_models("classification"))
+            else:
+                supported_models = set(get_supported_models("regression"))
+
+            # Update checkboxes
+            for model_name, checkbox_var in self.model_checkboxes.items():
+                # Check if model should be selected for this tier AND is supported for task type
+                should_select = model_name in tier_models and model_name in supported_models
+                # Don't enable CatBoost if it's not available
+                if model_name == 'CatBoost' and not HAS_CATBOOST:
+                    should_select = False
+                checkbox_var.set(1 if should_select else 0)
 
         # Reset flag
         self._updating_from_tier = False
@@ -15281,6 +15394,8 @@ class SpectralPredictApp:
             actual_task = task_type
 
         # Get supported models for this task type
+        if get_supported_models is None:
+            return
         supported_models = set(get_supported_models(actual_task))
 
         # Set flag to prevent triggering custom tier switch when we modify checkboxes
@@ -15311,6 +15426,61 @@ class SpectralPredictApp:
 
         # Update ensemble controls state (disabled for classification)
         self._update_ensemble_controls_state()
+
+        # Show/hide one-class controls based on task type
+        self._update_one_class_controls_visibility()
+
+    def _update_one_class_controls_visibility(self):
+        """Show/hide one-class specific controls based on task type."""
+        task_type = self.task_type.get()
+        if task_type == "one_class":
+            self.inlier_class_frame.grid()
+            self.oc_hyperparams_frame.grid()
+            # Populate inlier class combo with unique y values if data is loaded
+            if self.y is not None:
+                unique_vals = sorted([str(v) for v in np.unique(self.y.values)])
+                self.inlier_class_combo['values'] = [''] + unique_vals
+            # Swap model panels: hide standard, show one-class
+            if hasattr(self, 'standard_models_frame'):
+                self.standard_models_frame.pack_forget()
+            if hasattr(self, 'oc_models_frame'):
+                self.oc_models_frame.pack(fill='both', expand=True)
+            # Show variable selection card but disable iPLS-family methods
+            # (they require PLS internals not available for one-class)
+            if hasattr(self, 'varsel_card_outer'):
+                self.varsel_card_outer.grid()
+            ipls_family_checkboxes = [
+                '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
+                '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+            ]
+            ipls_family_vars = [
+                'varsel_ipls', 'varsel_ipls_forward', 'varsel_ipls_backward',
+                'varsel_mc_sipls', 'varsel_mwpls', 'varsel_fipls_spa', 'varsel_fipls_cars',
+            ]
+            for cb_attr, var_attr in zip(ipls_family_checkboxes, ipls_family_vars):
+                if hasattr(self, cb_attr):
+                    getattr(self, cb_attr).state(['disabled'])
+                if hasattr(self, var_attr):
+                    getattr(self, var_attr).set(False)
+        else:
+            self.inlier_class_frame.grid_remove()
+            self.oc_hyperparams_frame.grid_remove()
+            # Swap model panels: show standard, hide one-class
+            if hasattr(self, 'oc_models_frame'):
+                self.oc_models_frame.pack_forget()
+            if hasattr(self, 'standard_models_frame'):
+                self.standard_models_frame.pack(fill='both', expand=True)
+            # Re-enable variable selection methods
+            if hasattr(self, 'varsel_card_outer'):
+                self.varsel_card_outer.grid()
+            # Re-enable iPLS-family checkboxes
+            ipls_family_checkboxes = [
+                '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
+                '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+            ]
+            for cb_attr in ipls_family_checkboxes:
+                if hasattr(self, cb_attr):
+                    getattr(self, cb_attr).state(['!disabled'])
 
     def _update_ensemble_controls_state(self):
         """Enable/disable ensemble controls based on task type.
@@ -15484,7 +15654,9 @@ class SpectralPredictApp:
 
         # If current model is not supported for new task type, switch to default
         if current_model not in supported_models:
-            if task_type == 'classification':
+            if task_type == 'one_class':
+                self.refine_model_type.set('PCA-SIMCA')
+            elif task_type == 'classification':
                 self.refine_model_type.set('PLS-DA')
             else:
                 self.refine_model_type.set('PLS')
@@ -18585,7 +18757,7 @@ class SpectralPredictApp:
             if task_type_setting == "auto":
                 is_classification = y_available.nunique() < 10 or not pd.api.types.is_numeric_dtype(y_available.dtype)
             else:
-                is_classification = task_type_setting == "classification"
+                is_classification = task_type_setting in ("classification", "one_class")
 
             # For classification, check if stratified split is feasible
             if is_classification:
@@ -21588,33 +21760,42 @@ class SpectralPredictApp:
             return
 
         # Validate at least one model selected
-        selected_models = []
-        if self.use_pls.get():
-            selected_models.append("PLS")
-        if self.use_plsda.get():
-            selected_models.append("PLS-DA")
-        if self.use_ridge.get():
-            selected_models.append("Ridge")
-        if self.use_lasso.get():
-            selected_models.append("Lasso")
-        if self.use_elasticnet.get():
-            selected_models.append("ElasticNet")
-        if self.use_randomforest.get():
-            selected_models.append("RandomForest")
-        if self.use_mlp.get():
-            selected_models.append("MLP")
-        if self.use_neuralboosted.get():
-            selected_models.append("NeuralBoosted")
-        if self.use_svr.get():
-            selected_models.append("SVR")
-        if self.use_svm.get():
-            selected_models.append("SVM")
-        if self.use_xgboost.get():
-            selected_models.append("XGBoost")
-        if self.use_lightgbm.get():
-            selected_models.append("LightGBM")
-        if self.use_catboost.get():
-            selected_models.append("CatBoost")
+        task_type_check = self.task_type.get()
+
+        if task_type_check == "one_class":
+            # For one-class contamination screening, use one-class model checkboxes
+            selected_models = [
+                name for name, var in self.one_class_model_checkboxes.items()
+                if var.get()
+            ]
+        else:
+            selected_models = []
+            if self.use_pls.get():
+                selected_models.append("PLS")
+            if self.use_plsda.get():
+                selected_models.append("PLS-DA")
+            if self.use_ridge.get():
+                selected_models.append("Ridge")
+            if self.use_lasso.get():
+                selected_models.append("Lasso")
+            if self.use_elasticnet.get():
+                selected_models.append("ElasticNet")
+            if self.use_randomforest.get():
+                selected_models.append("RandomForest")
+            if self.use_mlp.get():
+                selected_models.append("MLP")
+            if self.use_neuralboosted.get():
+                selected_models.append("NeuralBoosted")
+            if self.use_svr.get():
+                selected_models.append("SVR")
+            if self.use_svm.get():
+                selected_models.append("SVM")
+            if self.use_xgboost.get():
+                selected_models.append("XGBoost")
+            if self.use_lightgbm.get():
+                selected_models.append("LightGBM")
+            if self.use_catboost.get():
+                selected_models.append("CatBoost")
 
         # Get tier selection
         tier = self.model_tier.get()
@@ -21658,8 +21839,32 @@ class SpectralPredictApp:
         self.search_controller = SearchController()
         self._update_search_buttons('running')
 
+        # Resolve inlier class label on main thread (messagebox is not thread-safe)
+        resolved_inlier_label = None
+        if task_type_check == "one_class":
+            inlier_label = self.inlier_class_label.get().strip()
+            if not inlier_label:
+                # Auto-detect most frequent class but require user confirmation
+                y_vals = self.y.values
+                unique_labels, counts = np.unique(y_vals, return_counts=True)
+                auto_label = unique_labels[np.argmax(counts)]
+                class_dist = dict(zip(unique_labels.tolist(), counts.tolist()))
+                confirm = messagebox.askyesno(
+                    "Confirm Inlier Class",
+                    f"No inlier class specified.\n\n"
+                    f"Auto-detected: '{auto_label}' ({counts[np.argmax(counts)]} samples)\n"
+                    f"All classes: {class_dist}\n\n"
+                    f"Use '{auto_label}' as the clean/inlier class?"
+                )
+                if not confirm:
+                    self._update_search_buttons('idle')
+                    return
+                resolved_inlier_label = auto_label
+            else:
+                resolved_inlier_label = inlier_label
+
         # Run in thread
-        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier))
+        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
         self.analysis_thread.start()
 
     def _reconstruct_models_from_results(self, top_models_df, X_train, y_train, task_type):
@@ -22786,7 +22991,7 @@ class SpectralPredictApp:
             self._log_progress(f"   Individual model results are still available")
             return None, None
 
-    def _run_analysis_thread(self, selected_models, tier):
+    def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
             from spectral_predict.search import run_search
@@ -24657,6 +24862,354 @@ class SpectralPredictApp:
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
 
+            # ═══════════════════════════════════════════════════════════════════
+            # ONE-CLASS CONTAMINATION SCREENING (separate pipeline)
+            # ═══════════════════════════════════════════════════════════════════
+            if task_type == "one_class":
+                # Use inlier label resolved on main thread (thread-safe)
+                inlier_label = resolved_inlier_label
+                if inlier_label is None:
+                    self._log_progress("ERROR: No inlier class label resolved.")
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
+                    return
+                self._log_progress(f"Inlier class: '{inlier_label}'")
+
+                # Check if label exists in filtered data (may differ from pre-filter)
+                if inlier_label not in y_filtered.values:
+                    # Try numeric conversion
+                    try:
+                        inlier_label_num = float(inlier_label)
+                        if inlier_label_num in y_filtered.values:
+                            inlier_label = inlier_label_num
+                    except (ValueError, TypeError):
+                        pass
+                if inlier_label not in y_filtered.values:
+                    self._log_progress(f"ERROR: Inlier class '{inlier_label}' not found in data!")
+                    self._log_progress(f"Available classes: {list(np.unique(y_filtered.values))}")
+                    self.root.after(0, lambda: messagebox.showerror("Invalid Inlier Class",
+                        f"Class '{inlier_label}' not found.\n"
+                        f"Available: {list(np.unique(y_filtered.values))}"))
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
+                    return
+
+                opt_method_oc = self.optimization_method.get()
+
+                if opt_method_oc == 'unified':
+                    # === BAYESIAN OPTIMIZATION FOR ONE-CLASS ===
+                    if not HAS_UNIFIED_BAYESIAN:
+                        self._log_progress("ERROR: Bayesian optimization module not available!")
+                        self.root.after(0, lambda: messagebox.showerror(
+                            "Module Missing", "Bayesian optimization module not found!"))
+                        self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                        if hasattr(self, 'running_figure'):
+                            self.root.after(0, lambda: self.running_figure.stop_animation())
+                        self.root.after(0, lambda: self._update_search_buttons('idle'))
+                        return
+
+                    # Collect selected one-class models
+                    enabled_oc_models = [
+                        name for name, var in self.one_class_model_checkboxes.items()
+                        if var.get()
+                    ]
+                    if not enabled_oc_models:
+                        enabled_oc_models = ['PCA-SIMCA', 'IsolationForest']
+
+                    # Get wavelengths
+                    oc_wavelengths = None
+                    if hasattr(X_filtered, 'columns'):
+                        try:
+                            oc_wavelengths = np.array([float(c) for c in X_filtered.columns])
+                        except (ValueError, TypeError):
+                            pass
+                    if oc_wavelengths is None:
+                        oc_wavelengths = np.arange(X_filtered.shape[1])
+
+                    X_oc_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
+                    y_oc_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
+
+                    if self.bayes_enable_baseline.get():
+                        bl_method_oc, bl_params_oc = self._get_baseline_params_for_method(
+                            self.bayes_baseline_method.get()
+                        )
+                    else:
+                        bl_method_oc, bl_params_oc = None, None
+
+                    if self.bayes_enable_smoothing.get():
+                        sm_enabled_oc = True
+                        sm_win_oc = self.smoothing_window.get()
+                        sm_poly_oc = self.smoothing_polyorder.get()
+                    else:
+                        sm_enabled_oc, sm_win_oc, sm_poly_oc = False, 17, 2
+
+                    self._log_progress("\nRunning Bayesian One-Class Optimization...")
+                    self._log_progress(f"   Models: {enabled_oc_models}")
+                    self._log_progress(f"   Inlier class: {inlier_label}")
+                    self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
+
+                    oc_all_results = []
+                    oc_best_overall = [None]
+
+                    def oc_progress_wrapper(info):
+                        best_model = info.get('best_model')
+                        if best_model:
+                            current_best = oc_best_overall[0]
+                            is_better = (
+                                current_best is None or
+                                best_model.get('BalancedAcccv', 0) >
+                                current_best.get('BalancedAcccv', 0)
+                            )
+                            if is_better:
+                                oc_best_overall[0] = best_model.copy()
+                            info['best_model'] = oc_best_overall[0]
+                        self._progress_callback(info)
+
+                    for oc_model_name in enabled_oc_models:
+                        self._log_progress(f"\n  Optimizing {oc_model_name}...")
+                        try:
+                            oc_results_df, _ = run_unified_bayesian(
+                                X=X_oc_np,
+                                y=y_oc_np,
+                                wavelengths=oc_wavelengths,
+                                model_name=oc_model_name,
+                                task_type='one_class',
+                                n_trials=self.n_unified_trials.get(),
+                                cv_folds=self.folds.get(),
+                                random_state=42,
+                                verbose=False,
+                                progress_callback=oc_progress_wrapper,
+                                controller=self.search_controller,
+                                baseline_method=bl_method_oc,
+                                baseline_params=bl_params_oc,
+                                smoothing=sm_enabled_oc,
+                                smoothing_window=sm_win_oc,
+                                smoothing_polyorder=sm_poly_oc,
+                                inlier_class_label=inlier_label,
+                                enable_uve=self.bayes_enable_uve.get(),
+                            )
+                            if oc_results_df is not None and len(oc_results_df) > 0:
+                                best = oc_results_df.iloc[0]
+                                self._log_progress(
+                                    f"    Best BalancedAcccv: {best['BalancedAcccv']:.4f}"
+                                )
+                                oc_results_df['Model'] = oc_model_name
+                                oc_all_results.append(oc_results_df)
+                            else:
+                                self._log_progress(f"    No results returned")
+                        except Exception as e:
+                            self._log_progress(f"    Error in {oc_model_name}: {e}")
+                            import traceback
+                            self._log_progress(traceback.format_exc())
+                            continue
+
+                    if oc_all_results:
+                        results_df = pd.concat(oc_all_results, ignore_index=True)
+                        # na_position='last' so failed trials with NaN BalancedAcccv
+                        # sink to the bottom instead of corrupting the ranking.
+                        results_df = results_df.sort_values(
+                            'BalancedAcccv', ascending=False, na_position='last'
+                        ).reset_index(drop=True)
+                        results_df['Rank'] = results_df.index + 1
+                    else:
+                        results_df = None
+
+                else:
+                    # === GRID SEARCH FOR ONE-CLASS (existing path) ===
+                    from spectral_predict.search import run_one_class_search
+
+                    # Collect selected one-class models
+                    selected_oc_models = [
+                        name for name, var in self.one_class_model_checkboxes.items()
+                        if var.get()
+                    ]
+                    if not selected_oc_models:
+                        selected_oc_models = None  # Use tier defaults
+
+                    # Collect preprocessing methods
+                    preprocess_list = []
+                    if self.use_raw.get():
+                        preprocess_list.append('raw')
+                    if self.use_snv.get():
+                        preprocess_list.append('snv')
+                    if self.use_sg1.get():
+                        preprocess_list.append('deriv1')
+                    if self.use_sg2.get():
+                        preprocess_list.append('deriv2')
+                    if not preprocess_list:
+                        preprocess_list = ['raw', 'snv', 'deriv1']
+
+                    # Collect window sizes
+                    window_sizes_oc = []
+                    if self.window_7.get(): window_sizes_oc.append(7)
+                    if self.window_11.get(): window_sizes_oc.append(11)
+                    if self.window_17.get(): window_sizes_oc.append(17)
+                    if self.window_23.get(): window_sizes_oc.append(23)
+                    if self.window_31.get(): window_sizes_oc.append(31)
+                    if not window_sizes_oc:
+                        window_sizes_oc = [17]
+
+                    baseline_method_oc, baseline_params_oc = self._get_baseline_params()
+
+                    self._log_progress("\nRunning One-Class Screening...")
+                    results_df = run_one_class_search(
+                        X=X_filtered,
+                        y=y_filtered,
+                        inlier_class_label=inlier_label,
+                        folds=self.folds.get(),
+                        preprocessing_methods=preprocess_list,
+                        window_sizes=window_sizes_oc,
+                        tier=tier,
+                        enabled_models=selected_oc_models,
+                        variable_penalty=self.variable_penalty.get(),
+                        gap_penalty=self.gap_penalty.get(),
+                        analysis_wl_min=analysis_wl_min_value,
+                        analysis_wl_max=analysis_wl_max_value,
+                        progress_callback=self._progress_callback,
+                        controller=self.search_controller,
+                        baseline_method=baseline_method_oc,
+                        baseline_params=baseline_params_oc,
+                        enable_smoothing=self.enable_smoothing.get(),
+                        smoothing_window=self.smoothing_window.get(),
+                        smoothing_polyorder=self.smoothing_polyorder.get(),
+                        oc_hyperparams={
+                            'nu': self.oc_nu.get(),
+                            'contamination': self.oc_contamination.get(),
+                            'alpha': self.oc_alpha.get(),
+                            'n_components': self.oc_n_components.get(),
+                        },
+                        # Variable selection parameters
+                        variable_selection_methods=selected_varsel_methods,
+                        variable_counts=variable_counts if variable_counts else None,
+                        apply_uve_prefilter=self.apply_uve_prefilter.get(),
+                        uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
+                        uve_n_components=uve_n_comp,
+                        spa_n_random_starts=self.spa_n_random_starts.get(),
+                        ga_population_size=self.ga_population_size.get(),
+                        ga_generations=self.ga_generations.get(),
+                        ga_n_runs=self.ga_n_runs.get(),
+                        # Smart preprocessing discovery parameters
+                        smart_preprocess=self.enable_smart_preprocessing.get(),
+                        smart_preprocess_importance=self.smart_preprocess_importance.get(),
+                        smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
+                    )
+
+                label_encoder = None
+                self.label_encoder = None
+
+                if results_df is not None and len(results_df) > 0:
+                    self._log_progress(f"\nOne-class search complete: {len(results_df)} configurations tested")
+                    self.results = results_df
+                    self.results_df = results_df
+
+                    # Add "Select" column for ensemble model selection
+                    if 'Select' not in results_df.columns:
+                        results_df.insert(0, 'Select', False)
+
+                    self.root.after(0, lambda: self._populate_results_table(results_df))
+                else:
+                    self._log_progress("\nNo valid one-class results.")
+                    self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
+
+                # Store training configuration (needed for Model Dev validation preservation)
+                self.last_training_config = {
+                    'folds': self.folds.get(),
+                    'n_samples_used': len(X_filtered),
+                    'excluded_count': n_excluded,
+                    'validation_count': n_validation,
+                    'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
+                }
+
+                # Compute validation metrics for one-class if enabled.
+                # Delegates to compute_validation_metrics_for_top_one_class_models
+                # so val_* columns match the cal/CV metric set (7 metrics) and the
+                # top-N cap respects self.validation_top_n (default 700) — parity
+                # with the classification/regression path.
+                if (self.validation_enabled.get() and
+                        self.show_validation_metrics.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None and
+                        results_df is not None and len(results_df) > 0):
+                    self._log_progress("\n> Computing validation metrics for one-class results...")
+                    try:
+                        from spectral_predict.contamination import (
+                            compute_validation_metrics_for_top_one_class_models,
+                        )
+
+                        X_val_np = (self.validation_X.values
+                                    if hasattr(self.validation_X, 'values')
+                                    else np.asarray(self.validation_X))
+                        y_val_np = (self.validation_y.values
+                                    if hasattr(self.validation_y, 'values')
+                                    else np.asarray(self.validation_y))
+                        X_train_np = (X_filtered.values
+                                      if hasattr(X_filtered, 'values')
+                                      else np.asarray(X_filtered))
+                        y_train_np = (y_filtered.values
+                                      if hasattr(y_filtered, 'values')
+                                      else np.asarray(y_filtered))
+
+                        wavelengths_oc = None
+                        if hasattr(X_filtered, 'columns'):
+                            try:
+                                wavelengths_oc = np.array([float(c) for c in X_filtered.columns])
+                            except (ValueError, TypeError):
+                                wavelengths_oc = None
+                        if wavelengths_oc is None:
+                            wavelengths_oc = np.arange(X_train_np.shape[1])
+
+                        top_n_val = self.validation_top_n.get()
+                        results_df = compute_validation_metrics_for_top_one_class_models(
+                            df_results=results_df,
+                            X_train=X_train_np,
+                            y_train=y_train_np,
+                            X_val=X_val_np,
+                            y_val=y_val_np,
+                            inlier_label=inlier_label,
+                            wavelengths=wavelengths_oc,
+                            top_n=top_n_val,
+                            progress_callback=self._progress_callback,
+                        )
+
+                        n_computed = min(top_n_val, len(results_df))
+                        self._log_progress(
+                            f"  [OK] Validation metrics computed for top {n_computed} one-class models"
+                        )
+                        self.results_df = results_df
+                        self.results = results_df
+                        self.root.after(0, lambda: self._populate_results_table(results_df))
+
+                    except Exception as val_err:
+                        self._log_progress(f"  [Warning] Validation metrics failed: {val_err}")
+                        import traceback
+                        self._log_progress(traceback.format_exc())
+
+                if results_df is not None and len(results_df) > 0:
+                    try:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_dir = Path(self.output_dir.get())
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+                        results_path = output_dir / f"results_{safe_target}_{timestamp}.csv"
+                        results_df.to_csv(results_path, index=False)
+                        self._log_progress(f"\n> Results saved: {results_path}")
+                    except Exception as exp_err:
+                        self._log_progress(f"  [Warning] Failed to save results CSV: {exp_err}")
+
+                # Cleanup: stop animation, play chime, reset buttons
+                self._log_progress(f"\n> Analysis complete!")
+                self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
+                self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
+                if hasattr(self, 'running_figure'):
+                    self.root.after(0, lambda: self.running_figure.stop_animation())
+                self.root.after(0, self._play_completion_chime)
+                self.root.after(0, lambda: self._update_search_buttons('idle'))
+                return
+
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
             optimization_method = self.optimization_method.get()
 
@@ -24670,7 +25223,11 @@ class SpectralPredictApp:
                 if not HAS_UNIFIED_BAYESIAN:
                     self._log_progress("❌ ERROR: Bayesian optimization module not available!")
                     self._log_progress("   Please ensure src/spectral_predict/unified_bayesian.py exists")
-                    messagebox.showerror("Module Missing", "Bayesian optimization module not found!")
+                    self.root.after(0, lambda: messagebox.showerror("Module Missing", "Bayesian optimization module not found!"))
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
 
                 # Get wavelengths for proper variable output
@@ -25469,6 +26026,20 @@ class SpectralPredictApp:
                 if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
                     top_vars = best_model['top_vars'].split(',')[:5]  # First 5
                     model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
+            elif 'BalancedAcccv' in best_model:
+                # One-class - show balanced accuracy CV metrics
+                model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
+                if best_model.get('Deriv'):
+                    model_text += f" (d{best_model['Deriv']})"
+                bal_acc = best_model.get('BalancedAcccv', 0)
+                model_text += f"\nBalAcccv: {bal_acc:.4f}"
+                sens = best_model.get('Sensitivitycv')
+                if sens is not None:
+                    model_text += f" | Senscv: {sens:.4f}"
+
+                if 'top_vars' in best_model and best_model['top_vars'] != 'N/A':
+                    top_vars = best_model['top_vars'].split(',')[:5]
+                    model_text += f"\nTop λ: {', '.join(top_vars)} {self._get_x_unit_short()}"
             else:
                 # Classification - show CV metrics
                 model_text = f"{best_model['Model']} | {best_model['Preprocess']}"
@@ -25817,8 +26388,9 @@ For detailed documentation, see the User Guide.
             self._regional_rankings = None
             self._class_rankings = None
 
-            # Determine task type (regression vs classification)
+            # Determine task type (regression vs classification vs one-class)
             is_classification = 'per_class_metrics' in results_df.columns
+            is_one_class = 'Task' in results_df.columns and (results_df['Task'] == 'one_class').any()
 
             if is_classification:
                 # Compute class rankings for top model highlighting (classification)
@@ -25911,7 +26483,7 @@ For detailed documentation, see the User Guide.
                     self.use_rmsep_gap.set(False)
 
             # Create active filter controls with new data's unique values
-            self._create_active_filter_controls(is_classification)
+            self._create_active_filter_controls(is_classification, is_one_class=is_one_class)
 
             # Pack active filter frame and sort hint above treeview (if not already packed)
             self.active_filter_frame.pack_forget()
@@ -26170,7 +26742,7 @@ For detailed documentation, see the User Guide.
             current_values[0] = '☑' if self.results_df.loc[resolved_idx, 'Select'] else '☐'
             self.results_tree.item(row_id, values=current_values)
 
-    def _create_active_filter_controls(self, is_classification: bool = False):
+    def _create_active_filter_controls(self, is_classification: bool = False, is_one_class: bool = False):
         """Build the active filter bar for hiding non-matching result rows.
 
         Creates Model/Preprocess combos, LVs/n_vars/R2cv spinboxes,
@@ -26178,6 +26750,7 @@ For detailed documentation, see the User Guide.
 
         Args:
             is_classification: True for classification tasks, False for regression
+            is_one_class: True for one-class tasks
         """
         # Remove old variable traces before rebuilding controls
         for var, trace_id in getattr(self, '_filter_trace_ids', []):
@@ -26192,6 +26765,7 @@ For detailed documentation, see the User Guide.
             widget.destroy()
 
         self._filter_is_classification = is_classification
+        self._filter_is_one_class = is_one_class
         df = self.results_df
         if df is None or len(df) == 0:
             return
@@ -26264,6 +26838,17 @@ For detailed documentation, see the User Guide.
                 command=self._apply_filters_debounced
             )
             acccv_spinbox.pack(side='left', padx=(2, 8))
+
+        # --- BalancedAcccv ≥ spinbox (one-class only) ---
+        if is_one_class and 'BalancedAcccv' in df.columns:
+            self.filter_min_r2cv_var.set(0.0)
+            ttk.Label(self.active_filter_frame, text="BalAcc_cv ≥").pack(side='left')
+            balacccv_spinbox = ttk.Spinbox(
+                self.active_filter_frame, from_=0.0, to=1.0, increment=0.01,
+                textvariable=self.filter_min_r2cv_var, width=5, format="%.2f",
+                command=self._apply_filters_debounced
+            )
+            balacccv_spinbox.pack(side='left', padx=(2, 8))
 
         # --- RMSEcv ≤ spinbox (when column exists) ---
         if 'RMSEcv' in df.columns:
@@ -26394,6 +26979,15 @@ For detailed documentation, see the User Guide.
             threshold = self.filter_min_r2cv_var.get()
             if threshold > 0.0 and 'Accuracycv' in df.columns:
                 numeric_metric = pd.to_numeric(df['Accuracycv'], errors='coerce')
+                mask = numeric_metric.isna() | (numeric_metric >= threshold)
+                df = df[mask]
+                any_active = True
+
+        # BalancedAcccv ≥ filter (one-class)
+        if getattr(self, '_filter_is_one_class', False):
+            threshold = self.filter_min_r2cv_var.get()
+            if threshold > 0.0 and 'BalancedAcccv' in df.columns:
+                numeric_metric = pd.to_numeric(df['BalancedAcccv'], errors='coerce')
                 mask = numeric_metric.isna() | (numeric_metric >= threshold)
                 df = df[mask]
                 any_active = True
@@ -30083,9 +30677,17 @@ Performance (Classification):
                 # Window from Bayesian (e.g., 31) not in radio buttons - use custom field
                 self.refine_window_custom.set(str(window))
 
-        # Set task type FIRST (auto-detect from data) - CRITICAL FIX for PLS-DA loading
+        # Set task type FIRST (auto-detect from data or config)
         # This must happen before model validation so we validate against the correct task type
-        if self.y is not None:
+        config_task = config.get('Task', '')
+        if config_task == 'one_class':
+            detected_task_type = 'one_class'
+            self.refine_task_type.set('one_class')
+            # Restore inlier class label from saved config
+            inlier_label_saved = config.get('inlier_class_label', '') or config.get('inlier_class', '')
+            if inlier_label_saved:
+                self.inlier_class_label.set(str(inlier_label_saved))
+        elif self.y is not None:
             if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
                 detected_task_type = 'classification'
                 self.refine_task_type.set('classification')
@@ -30331,10 +30933,80 @@ Performance (Classification):
 
         task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') and self.refined_config else 'regression'
 
-        if task_type == 'classification':
+        if task_type == 'one_class':
+            self._plot_one_class_predictions()
+        elif task_type == 'classification':
             self._plot_classification_predictions()
         else:
             self._plot_regression_predictions()
+
+    def _plot_one_class_predictions(self):
+        """Plot one-class detection results: metrics bar chart and prediction summary."""
+        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+            return
+        if not HAS_MATPLOTLIB:
+            return
+
+        # Clear existing plot
+        for widget in self.refine_plot_frame.winfo_children():
+            widget.destroy()
+
+        plot_frame = ttk.Frame(self.refine_plot_frame)
+        plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+        # Left: Metrics grouped bar chart (calibration + CV)
+        perf = self.refined_performance
+        metric_labels = ['Balanced\nAccuracy', 'Sensitivity', 'Specificity', 'AUC']
+        cal_names = ['BalancedAcc', 'Sensitivity', 'Specificity', 'AUC']
+        cv_names = ['BalancedAcccv', 'Sensitivitycv', 'Specificitycv', 'AUCcv']
+        cal_vals = [perf.get(m, np.nan) for m in cal_names]
+        cv_vals = [perf.get(m, np.nan) for m in cv_names]
+
+        x = np.arange(len(metric_labels))
+        width = 0.35
+        bars_cal = axes[0].bar(x - width/2, cal_vals, width, label='Calibration',
+                               color=['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6'], alpha=0.9,
+                               edgecolor='white', linewidth=0.5)
+        bars_cv = axes[0].bar(x + width/2, cv_vals, width, label='Cross-Validation',
+                              color=['#4a7abc', '#2ecc71', '#e74c3c', '#9b59b6'], alpha=0.5,
+                              edgecolor='white', linewidth=0.5, hatch='//')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(metric_labels)
+        axes[0].set_ylim(0, 1.05)
+        axes[0].set_ylabel('Score')
+        axes[0].set_title('Calibration vs CV Metrics')
+        axes[0].legend(fontsize=8)
+        for bar, val in zip(list(bars_cal) + list(bars_cv), cal_vals + cv_vals):
+            if not np.isnan(val):
+                axes[0].text(bar.get_x() + bar.get_width()/2., val + 0.02,
+                           f'{val:.3f}', ha='center', va='bottom', fontsize=7)
+
+        # Right: Prediction summary (inlier vs outlier counts)
+        y_true = self.refined_y_true
+        y_pred = self.refined_y_pred
+        n_true_inlier = np.sum(y_true == 1)
+        n_true_outlier = np.sum(y_true == -1)
+        n_pred_inlier = np.sum(y_pred == 1)
+        n_pred_outlier = np.sum(y_pred == -1)
+
+        x = np.arange(2)
+        width = 0.35
+        axes[1].bar(x - width/2, [n_true_inlier, n_true_outlier], width, label='True', color=['#2ecc71', '#e74c3c'], alpha=0.7)
+        axes[1].bar(x + width/2, [n_pred_inlier, n_pred_outlier], width, label='Predicted', color=['#2ecc71', '#e74c3c'], alpha=0.4, hatch='//')
+        axes[1].set_xticks(x)
+        axes[1].set_xticklabels(['Inlier', 'Outlier'])
+        axes[1].set_ylabel('Count')
+        axes[1].set_title('Inlier/Outlier Distribution')
+        axes[1].legend()
+
+        fig.tight_layout()
+
+        canvas = FigureCanvasTkAgg(fig, plot_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plt.close(fig)
 
     def _plot_regression_predictions(self):
         """Plot scatter of reference vs predicted for regression."""
@@ -30814,15 +31486,27 @@ F1 Score:  {f1:.4f}
                     # Use raw data as fallback
                     X_for_importance = self.refined_X_train
 
-            try:
-                from spectral_predict.models import get_feature_importances
-                importances = get_feature_importances(
-                    self.refined_model, model_name,
-                    X_for_importance, self.refined_y_train
-                )
-            except Exception as e:
-                print(f"Could not compute feature importances: {e}")
-                return
+            # One-class models: use surrogate classifier importance
+            task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') else 'regression'
+            if task_type == 'one_class':
+                try:
+                    from spectral_predict.contamination import compute_one_class_importances
+                    importances = compute_one_class_importances(
+                        X_for_importance, self.refined_y_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute one-class feature importances: {e}")
+                    return
+            else:
+                try:
+                    from spectral_predict.models import get_feature_importances
+                    importances = get_feature_importances(
+                        self.refined_model, model_name,
+                        X_for_importance, self.refined_y_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute feature importances: {e}")
+                    return
 
             wavelengths = np.array(self.refined_wavelengths)
 
@@ -30857,15 +31541,18 @@ F1 Score:  {f1:.4f}
             }
 
             # Compute residual correlation if we have predictions
-            # Use preprocessed data for consistent analysis
-            try:
-                y_pred_train = self.refined_model.predict(X_for_importance)
-                self.wavelength_residual_corr_data = self._compute_residual_contribution(
-                    X_for_importance, self.refined_y_train, y_pred_train
-                )
-            except Exception as e:
-                print(f"Could not compute residual correlation: {e}")
+            # Skip for one-class models (no continuous residuals)
+            if task_type == 'one_class':
                 self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
+            else:
+                try:
+                    y_pred_train = self.refined_model.predict(X_for_importance)
+                    self.wavelength_residual_corr_data = self._compute_residual_contribution(
+                        X_for_importance, self.refined_y_train, y_pred_train
+                    )
+                except Exception as e:
+                    print(f"Could not compute residual correlation: {e}")
+                    self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
 
             # Create figure
             fig, ax1 = plt.subplots(figsize=(12, 4), dpi=100)
@@ -30879,6 +31566,10 @@ F1 Score:  {f1:.4f}
                 vip_threshold = 1.0
                 colors = ['#d62728' if v > vip_threshold else '#1f77b4' for v in importances]
                 self.vip_threshold_label.config(text=f"PLS VIP > 1.0: {np.sum(importances > vip_threshold)} wavelengths")
+            elif task_type == 'one_class':
+                importance_label = 'Discriminative Importance (surrogate)'
+                colors = '#1f77b4'
+                self.vip_threshold_label.config(text="")
             else:
                 importance_label = 'Feature Importance'
                 colors = '#1f77b4'
@@ -31209,8 +31900,111 @@ F1 Score:  {f1:.4f}
 
         if task_type == 'classification':
             self._plot_classification_roc_curves()
+        elif task_type == 'one_class':
+            self._plot_one_class_diagnostics()
         else:
             self._plot_regression_residual_diagnostics()
+
+    def _plot_one_class_diagnostics(self):
+        """Plot decision score distribution for one-class models."""
+        if not HAS_MATPLOTLIB:
+            return
+
+        if not hasattr(self, 'refined_model') or self.refined_model is None:
+            return
+        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+            return
+        if not hasattr(self, 'refined_y_true') or self.refined_y_true is None:
+            return
+
+        # Clear existing plots in both frames
+        for frame in [self.residual_diagnostics_frame, self.leverage_plot_frame]:
+            for widget in frame.winfo_children():
+                widget.destroy()
+
+        try:
+            model = self.refined_model
+            X_data = self.refined_X_cv
+            y_oc = self.refined_y_true
+
+            # Apply scaler/PCA if needed
+            oc_scaler = getattr(self, 'refined_oc_scaler', None)
+            oc_pca = getattr(self, 'refined_oc_pca_reducer', None)
+            X_transformed = X_data.copy()
+            if oc_scaler is not None:
+                X_transformed = oc_scaler.transform(X_transformed)
+            if oc_pca is not None:
+                X_transformed = oc_pca.transform(X_transformed)
+
+            # Get decision scores
+            if hasattr(model, 'decision_function'):
+                scores = model.decision_function(X_transformed)
+            elif hasattr(model, 'score_samples'):
+                scores = model.score_samples(X_transformed)
+            else:
+                scores = model.predict(X_transformed).astype(float)
+
+            inlier_scores = scores[y_oc == 1]
+            outlier_scores = scores[y_oc == -1]
+
+            # Plot 1: Score distribution (in residual diagnostics frame)
+            fig1 = Figure(figsize=(8, 5))
+            ax1 = fig1.add_subplot(111)
+
+            bins = 30
+            if len(inlier_scores) > 0:
+                ax1.hist(inlier_scores, bins=bins, alpha=0.6, label=f'Inlier (n={len(inlier_scores)})',
+                         color='#2196F3', edgecolor='white')
+            if len(outlier_scores) > 0:
+                ax1.hist(outlier_scores, bins=bins, alpha=0.6, label=f'Outlier (n={len(outlier_scores)})',
+                         color='#F44336', edgecolor='white')
+
+            # Add decision boundary line at 0
+            ax1.axvline(x=0, color='black', linestyle='--', linewidth=1.5, label='Decision boundary')
+            ax1.set_xlabel('Decision Score', fontsize=10)
+            ax1.set_ylabel('Count', fontsize=10)
+            ax1.set_title('One-Class Decision Score Distribution', fontsize=11, fontweight='bold')
+            ax1.legend(fontsize=9)
+            fig1.tight_layout()
+
+            canvas1 = FigureCanvasTkAgg(fig1, self.residual_diagnostics_frame)
+            canvas1.draw()
+            canvas1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(self.residual_diagnostics_frame, fig1, "oc_score_distribution")
+
+            # Plot 2: Sorted scores with classification (in leverage frame)
+            fig2 = Figure(figsize=(8, 5))
+            ax2 = fig2.add_subplot(111)
+
+            sort_idx = np.argsort(scores)
+            sorted_scores = scores[sort_idx]
+            sorted_labels = y_oc[sort_idx]
+            colors = ['#2196F3' if l == 1 else '#F44336' for l in sorted_labels]
+
+            ax2.scatter(range(len(sorted_scores)), sorted_scores, c=colors, s=15, alpha=0.7)
+            ax2.axhline(y=0, color='black', linestyle='--', linewidth=1.5, label='Decision boundary')
+            ax2.set_xlabel('Sample Index (sorted by score)', fontsize=10)
+            ax2.set_ylabel('Decision Score', fontsize=10)
+            ax2.set_title('Sample Classification by Decision Score', fontsize=11, fontweight='bold')
+
+            # Add legend
+            from matplotlib.lines import Line2D
+            legend_elements = [
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='#2196F3', markersize=8, label='Inlier'),
+                Line2D([0], [0], marker='o', color='w', markerfacecolor='#F44336', markersize=8, label='Outlier'),
+                Line2D([0], [0], color='black', linestyle='--', label='Decision boundary'),
+            ]
+            ax2.legend(handles=legend_elements, fontsize=9)
+            fig2.tight_layout()
+
+            canvas2 = FigureCanvasTkAgg(fig2, self.leverage_plot_frame)
+            canvas2.draw()
+            canvas2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self._add_plot_export_button(self.leverage_plot_frame, fig2, "oc_sample_classification")
+
+        except Exception as e:
+            import traceback
+            print(f"One-class diagnostics error: {e}\n{traceback.format_exc()}")
 
     def _plot_regression_residual_diagnostics(self):
         """Plot residual diagnostics for regression."""
@@ -31643,6 +32437,8 @@ F1 Score:  {f1:.4f}
 
         if task_type == 'classification':
             self._plot_classification_confidence()
+        elif task_type == 'one_class':
+            self._plot_one_class_diagnostics()
         else:
             self._plot_regression_leverage_diagnostics()
 
@@ -31862,7 +32658,77 @@ F1 Score:  {f1:.4f}
             model_name = self.refined_config.get('model_name', 'Unknown')
 
             # Choose appropriate SHAP explainer based on model type
-            if model_name in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
+            task_type = self.refined_config.get('task_type', 'regression') if hasattr(self, 'refined_config') else 'regression'
+
+            if task_type == 'one_class':
+                # One-class models: use permutation importance for variable analysis
+                # KernelExplainer is too slow for high-dimensional spectral data
+                oc_scaler = getattr(self, 'refined_oc_scaler', None)
+                oc_pca = getattr(self, 'refined_oc_pca_reducer', None)
+
+                try:
+                    if model_name == 'IsolationForest' and oc_scaler is None and oc_pca is None:
+                        # IsolationForest is tree-based: TreeExplainer is fast
+                        self.shap_explainer = shap.TreeExplainer(model)
+                        self.shap_values = self.shap_explainer.shap_values(X_data)
+                    else:
+                        # For other one-class models, use permutation importance
+                        # This is much faster than KernelExplainer for spectral data
+                        from sklearn.inspection import permutation_importance
+
+                        # Build a wrapper estimator for permutation importance
+                        class _OCWrapper:
+                            """Wrapper to make one-class models compatible with permutation_importance."""
+                            def __init__(self, model, scaler, pca):
+                                self.model = model
+                                self.scaler = scaler
+                                self.pca = pca
+                            def fit(self, X, y=None):
+                                return self
+                            def predict(self, X):
+                                X_t = X.copy()
+                                if self.scaler is not None:
+                                    X_t = self.scaler.transform(X_t)
+                                if self.pca is not None:
+                                    X_t = self.pca.transform(X_t)
+                                if hasattr(self.model, 'decision_function'):
+                                    return self.model.decision_function(X_t)
+                                return self.model.predict(X_t).astype(float)
+
+                        wrapper = _OCWrapper(model, oc_scaler, oc_pca)
+                        y_oc = self.refined_y_true
+
+                        # Use decision scores as target for importance
+                        # Permute each feature and measure score change
+                        from sklearn.metrics import make_scorer
+
+                        def oc_score(estimator, X, y):
+                            """Score = correlation between decision scores and true labels."""
+                            scores = estimator.predict(X)
+                            return np.corrcoef(scores, y)[0, 1] if len(np.unique(y)) > 1 else 0.0
+
+                        perm_result = permutation_importance(
+                            wrapper, X_data, y_oc,
+                            scoring=oc_score,
+                            n_repeats=10,
+                            random_state=42,
+                            n_jobs=1,
+                        )
+                        # Convert permutation importance to SHAP-like format
+                        # Each sample gets the same importance (global, not local)
+                        mean_imp = perm_result.importances_mean
+                        mean_imp = np.maximum(mean_imp, 0)  # Clip negatives
+                        self.shap_values = np.tile(mean_imp, (len(X_data), 1))
+                        self.shap_explainer = None  # No explainer object for permutation
+
+                except Exception as e:
+                    import traceback
+                    print(f"One-class SHAP/importance failed: {e}\n{traceback.format_exc()}")
+                    if hasattr(self, 'shap_status_label'):
+                        self.shap_status_label.config(text=f"Failed: {e}")
+                    return
+
+            elif model_name in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
                 # Linear models - use LinearExplainer or KernelExplainer
                 try:
                     self.shap_explainer = shap.LinearExplainer(model, X_data)
@@ -31897,14 +32763,20 @@ F1 Score:  {f1:.4f}
             # Plot SHAP summary
             self._plot_shap_summary()
 
-            # Enable single sample explanation button
+            # Enable single sample explanation button (not for one-class permutation importance)
             if hasattr(self, 'shap_single_btn'):
-                self.shap_single_btn.config(state='normal')
-                # Update spinbox max
-                self.shap_sample_spinbox.config(to=len(X_data) - 1)
+                if task_type == 'one_class' and self.shap_explainer is None:
+                    # Permutation importance is global - single sample doesn't apply
+                    self.shap_single_btn.config(state='disabled')
+                else:
+                    self.shap_single_btn.config(state='normal')
+                    self.shap_sample_spinbox.config(to=len(X_data) - 1)
 
             if hasattr(self, 'shap_status_label'):
-                self.shap_status_label.config(text=f"SHAP computed for {len(X_data)} samples")
+                if task_type == 'one_class' and self.shap_explainer is None:
+                    self.shap_status_label.config(text=f"Permutation importance computed ({len(X_data)} samples, {X_data.shape[1]} features)")
+                else:
+                    self.shap_status_label.config(text=f"SHAP computed for {len(X_data)} samples")
 
         except Exception as e:
             if hasattr(self, 'shap_status_label'):
@@ -32812,7 +33684,6 @@ F1 Score:  {f1:.4f}
                 # Try to extract window from Params string
                 if params_str:
                     try:
-                        import ast
                         params = ast.literal_eval(params_str)
                         if 'savgol_window' in params:
                             result['window'] = params['savgol_window']
@@ -33389,6 +34260,247 @@ F1 Score:  {f1:.4f}
 
             # Prepare cross-validation
             y_array = y_series.values
+
+            # === ONE-CLASS EARLY-EXIT PATH ===
+            if task_type == 'one_class':
+                from spectral_predict.contamination import run_one_class_cv
+
+                # Parse hyperparameters from selected model config
+                params = {}
+                if self.selected_model_config is not None:
+                    params_str = self.selected_model_config.get('Params', '{}')
+                    try:
+                        params = ast.literal_eval(params_str) if isinstance(params_str, str) else {}
+                    except (ValueError, SyntaxError):
+                        params = {}
+
+                # Apply preprocessing to full spectrum first (matches standard path)
+                if not is_coupled_result:
+                    baseline_method, baseline_params_oc = self._get_baseline_params()
+                else:
+                    baseline_params_oc = {}
+                smoothing_enabled_oc, smoothing_window_oc, smoothing_poly_oc = self._get_smoothing_params()
+
+                prep_steps = build_preprocessing_pipeline(
+                    preprocess_name, deriv, window, polyorder,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params_oc,
+                    smoothing=smoothing_enabled_oc,
+                    smoothing_window=smoothing_window_oc,
+                    smoothing_polyorder=smoothing_poly_oc
+                )
+
+                X_full = X_base_df.values
+                if isinstance(prep_steps, list) and len(prep_steps) > 0:
+                    prep_pipeline_oc = Pipeline(prep_steps)
+                    X_full_preprocessed = prep_pipeline_oc.fit_transform(X_full)
+                else:
+                    X_full_preprocessed = X_full
+
+                # Subset to selected wavelengths
+                original_wavelengths = X_base_df.columns.astype(float).values
+                wavelength_indices = []
+                for wl in selected_wl:
+                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                X_work = X_full_preprocessed[:, wavelength_indices] if wavelength_indices else X_full_preprocessed
+
+                # Required for predict-time Mode A in model_io.py: training applies
+                # preprocessing (SNV, SG deriv, baseline) on the FULL spectrum then
+                # subsets wavelengths, so prediction must reproduce that order. Without
+                # this the predict path takes Mode B (subset-first) and produces feature
+                # values mathematically different from training, causing the model to
+                # flag even its own training data as outliers.
+                self.refined_full_wavelengths = list(original_wavelengths)
+
+                # Build binary labels: inlier=+1, outlier=-1
+                inlier_label = self.inlier_class_label.get()
+                if not inlier_label and self.selected_model_config:
+                    inlier_label = self.selected_model_config.get('inlier_class_label', '') or self.selected_model_config.get('inlier_class', '')
+                y_str = np.array([str(v) for v in y_array])
+                y_oc = np.where(y_str == str(inlier_label), 1, -1)
+
+                self.root.after(0, lambda: self.refine_status.config(text=f"Running one-class CV ({model_name})..."))
+
+                cv_result = run_one_class_cv(
+                    X_work, y_oc, model_name, params,
+                    n_folds=n_folds, random_state=42, y_original=y_str,
+                )
+
+                if cv_result.get('skipped', False):
+                    self.root.after(0, lambda: self._update_refined_results(
+                        "One-class CV failed: too few successful folds.\n\n"
+                        "This may happen when:\n"
+                        "- Too few inlier samples for the requested number of folds\n"
+                        "- The model fails to converge on most folds",
+                        is_error=True))
+                    return
+
+                mean_m = cv_result['mean_metrics']
+                cal_m = cv_result['cal_metrics']
+
+                # Store results in the same format the downstream code expects
+                results = {
+                    'BalancedAcc': cal_m.get('balanced_accuracy', np.nan),
+                    'Sensitivity': cal_m.get('sensitivity', np.nan),
+                    'Specificity': cal_m.get('specificity', np.nan),
+                    'AUC': cal_m.get('auc', np.nan),
+                    'BalancedAcccv': mean_m.get('balanced_accuracy', np.nan),
+                    'Sensitivitycv': mean_m.get('sensitivity', np.nan),
+                    'Specificitycv': mean_m.get('specificity', np.nan),
+                    'AUCcv': mean_m.get('auc', np.nan),
+                }
+
+                self.refined_model = cv_result['cal_model']
+                self.refined_preprocessor = prep_pipeline_oc if isinstance(prep_steps, list) and len(prep_steps) > 0 else None
+                self.refined_wavelengths = list(selected_wl)
+                self.refined_performance = results
+                self.refined_label_encoder = None
+                self.refined_X_train = X_work
+                self.refined_y_train = y_oc
+                self.refined_oc_scaler = cv_result['cal_scaler']
+                self.refined_oc_pca_reducer = cv_result['cal_pca_reducer']
+                self.refined_oc_score_stats = cv_result.get('oc_score_stats')
+                self.refined_config = {
+                    'model_name': model_name,
+                    'task_type': 'one_class',
+                    'preprocessing': preprocess,
+                    'window': window,
+                    'n_vars': X_work.shape[1],
+                    'n_samples': X_work.shape[0],
+                    'cv_folds': n_folds,
+                    'inlier_class_label': inlier_label,
+                    # Training is full-spectrum-first (fit_transform on X_full, then
+                    # wavelength subset), so predict-time must match via Mode A.
+                    'use_full_spectrum_preprocessing': True,
+                    'ga_genes': None,
+                    'ga_config': None,
+                    'ga_model_type': None,
+                }
+
+                # Predictions for display
+                cal_model = cv_result['cal_model']
+                if cal_model is not None:
+                    try:
+                        if cv_result['cal_scaler'] is not None:
+                            X_display = cv_result['cal_scaler'].transform(X_work)
+                            if cv_result['cal_pca_reducer'] is not None:
+                                X_display = cv_result['cal_pca_reducer'].transform(X_display)
+                        else:
+                            X_display = X_work
+                        self.refined_y_pred = cal_model.predict(X_display)
+                    except Exception as e:
+                        logger.warning("Calibration model predict failed: %s", e)
+                        self.refined_y_pred = np.zeros(len(y_oc))
+                else:
+                    X_display = X_work
+                    self.refined_y_pred = np.zeros(len(y_oc))
+                self.refined_y_true = y_oc
+                self.refined_cv_indices = np.arange(len(y_oc))
+                self.refined_specimen_ids = y_series.index.tolist()
+                self.refined_y_proba = None
+                self.refined_X_cv = X_work  # Needed for SHAP and diagnostics
+
+                # Build results text for display
+                perf = results
+                def _fmt(v):
+                    return f"{v:.3f}" if v is not None and not np.isnan(v) else "N/A"
+
+                results_text = (
+                    f"One-Class Model: {model_name}\n"
+                    f"{'='*50}\n\n"
+                    f"Calibration Metrics:\n"
+                    f"  Balanced Accuracy: {_fmt(perf['BalancedAcc'])}\n"
+                    f"  Sensitivity:       {_fmt(perf['Sensitivity'])}\n"
+                    f"  Specificity:       {_fmt(perf['Specificity'])}\n"
+                    f"  AUC:               {_fmt(perf['AUC'])}\n\n"
+                    f"Cross-Validation Metrics:\n"
+                    f"  Balanced Accuracy: {_fmt(perf['BalancedAcccv'])}\n"
+                    f"  Sensitivity:       {_fmt(perf['Sensitivitycv'])}\n"
+                    f"  Specificity:       {_fmt(perf['Specificitycv'])}\n"
+                    f"  AUC:               {_fmt(perf['AUCcv'])}\n\n"
+                    f"Variables: {X_work.shape[1]}\n"
+                    f"Samples: {X_work.shape[0]} (Inliers: {np.sum(y_oc == 1)}, Outliers: {np.sum(y_oc == -1)})\n"
+                    f"CV Folds: {n_folds}\n"
+                )
+
+                # Compute external validation metrics if enabled
+                if (self.validation_enabled.get() and
+                        self.validation_X is not None and
+                        self.validation_y is not None):
+                    try:
+                        from spectral_predict.contamination import one_class_metrics
+
+                        # Preprocess validation data using same pipeline
+                        X_val_raw = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
+                        y_val_raw = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+
+                        # Apply preprocessing
+                        if isinstance(prep_steps, list) and len(prep_steps) > 0:
+                            X_val_prep = prep_pipeline_oc.transform(X_val_raw)
+                        else:
+                            X_val_prep = X_val_raw
+
+                        # Subset to same wavelengths
+                        if wavelength_indices:
+                            X_val_work = X_val_prep[:, wavelength_indices]
+                        else:
+                            X_val_work = X_val_prep
+
+                        # Map validation labels to binary
+                        y_val_oc = np.where(np.asarray(y_val_raw, dtype=str) == str(inlier_label), 1, -1)
+
+                        # Apply scaler and PCA
+                        cal_scaler = cv_result.get('cal_scaler')
+                        cal_pca = cv_result.get('cal_pca_reducer')
+                        X_val_transformed = X_val_work.copy()
+                        if cal_scaler is not None:
+                            X_val_transformed = cal_scaler.transform(X_val_transformed)
+                        if cal_pca is not None:
+                            X_val_transformed = cal_pca.transform(X_val_transformed)
+
+                        # Predict + score using the canonical helper. Going
+                        # through one_class_metrics() ensures parity with
+                        # the Results tab and the grid/Bayesian validation
+                        # paths: it negates decision_function for AUC so
+                        # outliers are the positive class, returns NaN for
+                        # clean-only validation sets instead of 1.0, and
+                        # uses the same sensitivity/specificity convention
+                        # everywhere. The previous inline raw-sklearn block
+                        # produced inconsistent metrics that disagreed with
+                        # the Results tab on the same model.
+                        cal_model = cv_result['cal_model']
+                        if cal_model is not None:
+                            val_preds = cal_model.predict(X_val_transformed)
+                            val_scores = None
+                            if hasattr(cal_model, 'decision_function'):
+                                try:
+                                    val_scores = cal_model.decision_function(X_val_transformed)
+                                except Exception as score_err:
+                                    self._log_progress(
+                                        f"  [Warning] decision_function failed during refined OC validation: {score_err}"
+                                    )
+                            val_metrics = one_class_metrics(y_val_oc, val_preds, val_scores)
+
+                            def _fmt(val):
+                                return f"{val:.3f}" if val is not None and not (isinstance(val, float) and np.isnan(val)) else "N/A"
+
+                            results_text += (
+                                f"\nExternal Validation ({len(y_val_oc)} samples):\n"
+                                f"  Balanced Accuracy: {_fmt(val_metrics.get('balanced_accuracy'))}\n"
+                                f"  Sensitivity:       {_fmt(val_metrics.get('sensitivity'))}\n"
+                                f"  Specificity:       {_fmt(val_metrics.get('specificity'))}\n"
+                                f"  AUC:               {_fmt(val_metrics.get('auc'))}\n"
+                            )
+                    except Exception as val_err:
+                        results_text += f"\nExternal Validation: Failed ({val_err})\n"
+
+                # Update UI via _update_refined_results (re-enables buttons, resets cursor)
+                self.root.after(0, lambda: self._update_refined_results(results_text))
+                self.root.after(0, lambda: self.model_dev_notebook.select(2))
+                return  # Skip standard regression/classification CV
+
             if task_type == "regression":
                 cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
             else:
@@ -34581,7 +35693,8 @@ External Validation Performance (n={n_val}):
 
             # Ask for save location
             # Create prefix: C/R for Classification/Regression + number of variables
-            task_prefix = 'C' if self.refined_config['task_type'] == 'classification' else 'R'
+            task_type = self.refined_config['task_type']
+            task_prefix = 'OC' if task_type == 'one_class' else ('C' if task_type == 'classification' else 'R')
             n_vars = self.refined_config['n_vars']
             imbalance_suffix = _get_imbalance_suffix(
                 self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
@@ -34710,6 +35823,37 @@ External Validation Performance (n={n_val}):
                     metadata['regional_rmse'] = self.refined_performance['regional_rmse']
                 if 'y_quartiles' in self.refined_performance:
                     metadata['y_quartiles'] = self.refined_performance['y_quartiles']
+            elif self.refined_config['task_type'] == 'one_class':
+                perf = {
+                    'BalancedAcc': self.refined_performance.get('BalancedAcc'),
+                    'Sensitivity': self.refined_performance.get('Sensitivity'),
+                    'Specificity': self.refined_performance.get('Specificity'),
+                    'AUC': self.refined_performance.get('AUC'),
+                    'BalancedAcccv': self.refined_performance.get('BalancedAcccv'),
+                    'Sensitivitycv': self.refined_performance.get('Sensitivitycv'),
+                    'Specificitycv': self.refined_performance.get('Specificitycv'),
+                    'AUCcv': self.refined_performance.get('AUCcv'),
+                }
+                metadata['performance'] = perf
+                # Prefer the RESOLVED inlier label captured by the
+                # refinement thread (line 34373) over the raw combobox
+                # value. When the user accepts auto-detect via the
+                # confirm dialog at line 21852, self.inlier_class_label
+                # remains an empty string and would round-trip into the
+                # saved model as ''. self.refined_config carries the
+                # actually-trained label.
+                resolved_inlier = (
+                    self.refined_config.get('inlier_class_label', '')
+                    if hasattr(self, 'refined_config') and self.refined_config
+                    else ''
+                )
+                metadata['inlier_class_label'] = (
+                    resolved_inlier if resolved_inlier else self.inlier_class_label.get()
+                )
+                # Attach fitted scaler/PCA reducer for one-class persistence
+                metadata['scaler'] = getattr(self, 'refined_oc_scaler', None)
+                metadata['pca_reducer'] = getattr(self, 'refined_oc_pca_reducer', None)
+                metadata['oc_score_stats'] = getattr(self, 'refined_oc_score_stats', None)
             else:  # classification
                 perf = {
                     'Accuracy': self.refined_performance.get('accuracy_mean'),
@@ -36648,8 +37792,12 @@ External Validation Performance (n={n_val}):
                     # Debug output
                     print(f"DEBUG: Model {filename} - has_applicability_domain: {has_applicability_domain}")
                     if has_applicability_domain:
-                        print(f"  - PCA distance range: {applicability_domain['pca_distance'].min():.3f} - {applicability_domain['pca_distance'].max():.3f}")
-                        print(f"  - Status counts: {dict(zip(*np.unique(applicability_domain['distance_status'], return_counts=True)))}")
+                        if 'pca_distance' in applicability_domain:
+                            print(f"  - PCA distance range: {applicability_domain['pca_distance'].min():.3f} - {applicability_domain['pca_distance'].max():.3f}")
+                        if 'anomaly_score' in applicability_domain:
+                            print(f"  - Anomaly score range: {applicability_domain['anomaly_score'].min():.3f} - {applicability_domain['anomaly_score'].max():.3f}")
+                        if 'distance_status' in applicability_domain:
+                            print(f"  - Status counts: {dict(zip(*np.unique(applicability_domain['distance_status'], return_counts=True)))}")
                     print(f"  - has_uncertainty: {has_uncertainty}, keys: {list(uncertainty.keys())}")
 
                     # Store predictions with descriptive column name
@@ -36664,6 +37812,16 @@ External Validation Performance (n={n_val}):
                     while col_name in results.columns:
                         col_name = f"{original_col_name}_{counter}"
                         counter += 1
+
+                    # Map one-class +1/-1 to human-readable labels
+                    task_type = metadata.get('task_type', 'regression')
+                    if task_type == 'one_class':
+                        inlier_label = metadata.get('inlier_class_label', 'Inlier')
+                        predictions = np.where(
+                            np.asarray(predictions) == 1,
+                            f"Inlier ({inlier_label})",
+                            "Outlier"
+                        )
 
                     results[col_name] = predictions
 
@@ -36756,19 +37914,19 @@ External Validation Performance (n={n_val}):
 
         # Check if any models are classification models FIRST - consensus only works for regression
         # This prevents confusing warnings about non-numeric columns for classification predictions
-        has_classification = False
-        classification_count = 0
+        has_non_regression = False
+        non_regression_count = 0
         for col in pred_cols:
             if col in self.predictions_model_map:
                 metadata = self.predictions_model_map[col]
                 task_type = metadata.get('task_type', 'regression')
-                if task_type == 'classification':
-                    has_classification = True
-                    classification_count += 1
+                if task_type in ('classification', 'one_class'):
+                    has_non_regression = True
+                    non_regression_count += 1
 
-        # Skip consensus for classification models (can't average categorical predictions)
-        if has_classification:
-            print(f"\nSkipping consensus predictions: {classification_count} classification model(s) detected.")
+        # Skip consensus for classification/one-class models (can't average categorical predictions)
+        if has_non_regression:
+            print(f"\nSkipping consensus predictions: {non_regression_count} non-regression model(s) detected.")
             print("Consensus predictions are only computed for regression models.")
             return results_df
 
@@ -37095,6 +38253,79 @@ External Validation Performance (n={n_val}):
             self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')  # Orange
             self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')   # Red
 
+        elif 'decision_scores' in first_uncertainty:
+            # === ONE-CLASS: Show decision scores and status ===
+            print("DEBUG: Displaying one-class uncertainty table")
+            print(f"  - Number of models with uncertainty: {len(self.predictions_uncertainty)}")
+
+            columns = ['Sample', 'Model', 'Prediction', 'Decision Score', 'Confidence', 'Status']
+            self.uncertainty_tree['columns'] = columns
+
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=180, anchor='w')
+                elif col == 'Prediction':
+                    self.uncertainty_tree.column(col, width=100, anchor='center')
+                elif col == 'Status':
+                    self.uncertainty_tree.column(col, width=120, anchor='center')
+                else:
+                    self.uncertainty_tree.column(col, width=110, anchor='e')
+
+            has_applicability = hasattr(self, 'predictions_applicability') and self.predictions_applicability
+
+            for model_name in self.predictions_uncertainty.keys():
+                uncertainty = self.predictions_uncertainty[model_name]
+                decision_scores = uncertainty.get('decision_scores')
+                confidence = uncertainty.get('confidence')
+
+                ad_data = None
+                if has_applicability and model_name in self.predictions_applicability:
+                    ad_data = self.predictions_applicability[model_name]
+
+                predictions = self.predictions_df[model_name].values
+
+                for i, sample in enumerate(sample_names):
+                    # One-class predictions are pre-mapped to strings ("Inlier (<label>)"
+                    # / "Outlier") upstream in _run_predictions, so a raw `== 1` check
+                    # would silently compare str to int and always return False.
+                    raw = predictions[i]
+                    if isinstance(raw, str):
+                        pred_label = raw
+                    else:
+                        pred_label = "Inlier" if raw == 1 else "Outlier"
+                    row_values = [
+                        str(sample),
+                        model_name,
+                        pred_label,
+                        f"{decision_scores[i]:.4f}" if decision_scores is not None else "N/A",
+                        f"{confidence[i]:.3f}" if confidence is not None else "N/A",
+                    ]
+
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        status_display = {'good': '> Good', 'caution': '[!] Caution', 'extrapolation': '[!] Extrap'}
+                        row_values.append(status_display.get(status, status))
+                    else:
+                        row_values.append("N/A")
+
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+
+                    if ad_data and 'distance_status' in ad_data:
+                        status = ad_data['distance_status'][i]
+                        if status == 'good':
+                            self.uncertainty_tree.item(item_id, tags=('high_conf',))
+                        elif status == 'caution':
+                            self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                        else:
+                            self.uncertainty_tree.item(item_id, tags=('low_conf',))
+
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')
+
         else:
             # === REGRESSION: Show RMSECV and applicability domain ===
             print("DEBUG: Displaying regression uncertainty table")
@@ -37232,7 +38463,7 @@ External Validation Performance (n={n_val}):
                         task_type = metadata.get('task_type', None)
 
                         # Check metadata first
-                        if task_type == 'classification':
+                        if task_type in ('classification', 'one_class'):
                             is_classification = True
                         # Also check if values are strings (text labels)
                         elif len(values) > 0 and isinstance(values.iloc[0], str):
@@ -37266,6 +38497,17 @@ External Validation Performance (n={n_val}):
                             # Get actual values aligned with predictions
                             y_true = self.validation_y.loc[self.predictions_df['Sample']].values
                             y_pred = values.values
+
+                            # For one-class models, map actual labels to inlier/outlier format
+                            if task_type == 'one_class' and col in self.predictions_model_map:
+                                oc_metadata = self.predictions_model_map[col]
+                                inlier_label = str(oc_metadata.get('inlier_class_label', ''))
+                                y_true = np.where(
+                                    np.asarray(y_true, dtype=str) == inlier_label,
+                                    f"Inlier ({inlier_label})",
+                                    "Outlier"
+                                )
+                                is_classification = True
 
                             if is_classification:
                                 # Use classification metrics
@@ -37373,7 +38615,7 @@ External Validation Performance (n={n_val}):
         # Classification predictions are text labels, not numeric values
         is_classification = False
         for col, metadata in self.predictions_model_map.items():
-            if metadata.get('task_type') == 'classification':
+            if metadata.get('task_type') in ('classification', 'one_class'):
                 is_classification = True
                 break
 
@@ -37638,9 +38880,21 @@ External Validation Performance (n={n_val}):
 
             y_pred = self.predictions_df[col].values
 
+            # For one-class models, map actual labels to inlier/outlier format
+            y_true_mapped = y_true
+            if col in self.predictions_model_map:
+                col_metadata = self.predictions_model_map[col]
+                if col_metadata.get('task_type') == 'one_class':
+                    inlier_label = str(col_metadata.get('inlier_class_label', ''))
+                    y_true_mapped = np.where(
+                        np.asarray(y_true, dtype=str) == inlier_label,
+                        f"Inlier ({inlier_label})",
+                        "Outlier"
+                    )
+
             # Create confusion matrix
-            cm = confusion_matrix(y_true, y_pred)
-            class_labels = np.unique(np.concatenate([y_true, y_pred]))
+            cm = confusion_matrix(y_true_mapped, y_pred)
+            class_labels = np.unique(np.concatenate([y_true_mapped, y_pred]))
 
             # Plot confusion matrix as heatmap
             im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
@@ -37662,12 +38916,12 @@ External Validation Performance (n={n_val}):
                            fontsize=10, fontweight='bold')
 
             # Calculate metrics
-            accuracy = accuracy_score(y_true, y_pred)
+            accuracy = accuracy_score(y_true_mapped, y_pred)
             n_classes = len(class_labels)
             avg = 'binary' if n_classes == 2 else 'weighted'
-            precision = precision_score(y_true, y_pred, average=avg, zero_division=0)
-            recall = recall_score(y_true, y_pred, average=avg, zero_division=0)
-            f1 = f1_score(y_true, y_pred, average=avg, zero_division=0)
+            precision = precision_score(y_true_mapped, y_pred, average=avg, zero_division=0)
+            recall = recall_score(y_true_mapped, y_pred, average=avg, zero_division=0)
+            f1 = f1_score(y_true_mapped, y_pred, average=avg, zero_division=0)
 
             ax.set_xlabel('Predicted', fontsize=9)
             ax.set_ylabel('Actual', fontsize=9)
@@ -42512,7 +43766,7 @@ External Validation Performance (n={n_val}):
                 if file_ext == '.csv':
                     # Try combined format first
                     try:
-                        X_df, y, metadata_df, metadata = read_combined_csv(filepath)
+                        X_df, y, metadata_df, metadata = read_combined_csv(filepath, drop_na_y=False)
                         format_type = 'combined_csv'
                         wavelengths = np.array([float(col) for col in X_df.columns])
                         X = X_df.values
@@ -42542,7 +43796,7 @@ External Validation Performance (n={n_val}):
                             sample_ids = self._extract_sample_ids_from_dataframe(df, list(df.columns[1:]))
 
                 elif file_ext in ['.xlsx', '.xls']:
-                    X_df, y, metadata_df, metadata = read_combined_excel(filepath)
+                    X_df, y, metadata_df, metadata = read_combined_excel(filepath, drop_na_y=False)
                     format_type = 'excel'
                     wavelengths = np.array([float(col) for col in X_df.columns])
                     X = X_df.values
@@ -45887,7 +47141,7 @@ External Validation Performance (n={n_val}):
             primary_task = primary_metadata.get('task_type', 'unknown')
 
             # Add task type indicator to column name
-            task_indicator = "(Class)" if primary_task == 'classification' else "(Reg)"
+            task_indicator = "(OC)" if primary_task == 'one_class' else ("(Class)" if primary_task == 'classification' else "(Reg)")
             # Use filename instead of target_model_preprocessing
             primary_col_name = f"{primary_filename} {task_indicator}"
 
@@ -45895,6 +47149,14 @@ External Validation Performance (n={n_val}):
                 self.comparison_primary_model, comparison_data_transformed
             )
             primary_predictions = primary_result['predictions']
+            # Map one-class +1/-1 to human-readable labels
+            if primary_task == 'one_class':
+                inlier_label = primary_metadata.get('inlier_class_label', 'Inlier')
+                primary_predictions = np.where(
+                    np.asarray(primary_predictions) == 1,
+                    f"Inlier ({inlier_label})",
+                    "Outlier"
+                )
             results[primary_col_name] = primary_predictions
 
             # Collect domain results per model
@@ -45910,7 +47172,7 @@ External Validation Performance (n={n_val}):
                 aux_task = aux_metadata.get('task_type', 'unknown')
 
                 # Add task type indicator to column name
-                task_indicator = "(Class)" if aux_task == 'classification' else "(Reg)"
+                task_indicator = "(OC)" if aux_task == 'one_class' else ("(Class)" if aux_task == 'classification' else "(Reg)")
                 # Use filename instead of target_model_preprocessing
                 aux_col_name = f"{aux_filename} {task_indicator}"
 
@@ -45925,6 +47187,14 @@ External Validation Performance (n={n_val}):
                     aux_model, comparison_data_transformed
                 )
                 aux_predictions = aux_result['predictions']
+                # Map one-class +1/-1 to human-readable labels
+                if aux_task == 'one_class':
+                    inlier_label = aux_metadata.get('inlier_class_label', 'Inlier')
+                    aux_predictions = np.where(
+                        np.asarray(aux_predictions) == 1,
+                        f"Inlier ({inlier_label})",
+                        "Outlier"
+                    )
                 results[aux_col_name] = aux_predictions
                 aux_col_names.append(aux_col_name)
 
@@ -45953,7 +47223,7 @@ External Validation Performance (n={n_val}):
                         # Apply condition based on type
                         try:
                             # Detect if column is classification or regression
-                            is_classification = '(Class)' in col or pd.api.types.is_string_dtype(results[col].dtype)
+                            is_classification = '(Class)' in col or '(OC)' in col or pd.api.types.is_string_dtype(results[col].dtype)
 
                             if condition == '==':
                                 # Works for both text and numeric
@@ -46245,7 +47515,7 @@ External Validation Performance (n={n_val}):
             for col in columns:
                 val = row[col]
                 # Check if this is a classification column (by task indicator or dtype)
-                is_classification = '(Class)' in col or pd.api.types.is_string_dtype(self.comparison_results[col].dtype)
+                is_classification = '(Class)' in col or '(OC)' in col or pd.api.types.is_string_dtype(self.comparison_results[col].dtype)
 
                 # Format values based on type
                 if pd.isna(val):
@@ -49676,7 +50946,7 @@ External Validation Performance (n={n_val}):
             row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(15, 10))
         row += 1
 
-        ttk.Button(content_frame, text="🗑 Reset All Contamination Data",
+        ttk.Button(content_frame, text="🗑 Reset All One-Class Data",
                    command=self._contam_reset_all, style='Modern.TButton').grid(
             row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 10))
 
@@ -50224,7 +51494,7 @@ External Validation Performance (n={n_val}):
     # ========================================================================
 
     def _contam_reset_all(self) -> None:
-        """Reset all contamination analysis data, state, and UI to initial defaults."""
+        """Reset all one-class analysis data, state, and UI to initial defaults."""
         if not messagebox.askyesno(
             "Reset All",
             "Clear all loaded data, groups, and results?\n\n"

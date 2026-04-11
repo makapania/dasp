@@ -9,6 +9,9 @@ This module provides:
 - Custom pytest markers for test categorization
 """
 
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend — no plot windows during tests
+
 from pathlib import Path
 from typing import Tuple
 

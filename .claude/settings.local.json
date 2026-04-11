@@ -285,7 +285,14 @@
       "Bash(C:/Users/mspon/AppData/Roaming/npm/codex review:*)",
       "Bash(C:/Users/mspon/git/dasp/.venv312/Scripts/python.exe -m pip install -e C:/Users/mspon/git/dasp)",
       "Bash(C:/Users/mspon/git/dasp/.venv/Scripts/python.exe --version)",
-      "Bash(C:/Users/mspon/git/dasp/.venv311/Scripts/python.exe --version)"
+      "Bash(C:/Users/mspon/git/dasp/.venv311/Scripts/python.exe --version)",
+      "Bash(codex exec:*)",
+      "WebFetch(domain:api.github.com)",
+      "Skill(codex)",
+      "Bash(chmod +x:*)",
+      "Bash(rm:*)",
+      "Bash(gh.exe pr:*)",
+      "Bash(gh api:*)"
     ],
     "deny": [],
     "ask": []

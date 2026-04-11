@@ -195,6 +195,16 @@ def save_model(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmppath = Path(tmpdir)
 
+        # Extract one-class auxiliary objects BEFORE JSON serialization
+        # (sklearn objects are not JSON-serializable)
+        oc_scaler = None
+        oc_pca_reducer = None
+        if metadata_complete.get("task_type") == "one_class":
+            oc_scaler = metadata_complete.pop("scaler", None)
+            oc_pca_reducer = metadata_complete.pop("pca_reducer", None)
+            metadata_complete["has_scaler"] = oc_scaler is not None
+            metadata_complete["has_pca_reducer"] = oc_pca_reducer is not None
+
         # Save metadata as JSON
         metadata_path = tmppath / 'metadata.json'
         with open(metadata_path, 'w', encoding='utf-8') as f:
@@ -213,6 +223,12 @@ def save_model(
         label_encoder_path = tmppath / 'label_encoder.pkl'
         if label_encoder is not None:
             joblib.dump(label_encoder, label_encoder_path, compress=3)
+
+        # Save one-class auxiliary objects if present
+        if oc_scaler is not None:
+            joblib.dump(oc_scaler, tmppath / "scaler.pkl", compress=3)
+        if oc_pca_reducer is not None:
+            joblib.dump(oc_pca_reducer, tmppath / "pca_reducer.pkl", compress=3)
 
         # Save CV data if present (for uncertainty estimation)
         cv_data_path = tmppath / 'cv_data.npz'
@@ -340,6 +356,13 @@ def save_model(
                 zf.write(tmppath / 'pca_model.pkl', 'pca_model.pkl')
             if bias_correction_path.exists():
                 zf.write(bias_correction_path, 'bias_correction.json')
+            # One-class auxiliary files
+            scaler_zip_path = tmppath / "scaler.pkl"
+            if scaler_zip_path.exists():
+                zf.write(scaler_zip_path, "scaler.pkl")
+            pca_reducer_zip_path = tmppath / "pca_reducer.pkl"
+            if pca_reducer_zip_path.exists():
+                zf.write(pca_reducer_zip_path, "pca_reducer.pkl")
 
 
 def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
@@ -427,6 +450,17 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if label_encoder_path.exists():
             label_encoder = joblib.load(label_encoder_path)
 
+        # Load one-class auxiliary objects if present
+        scaler = None
+        scaler_path = tmppath / "scaler.pkl"
+        if scaler_path.exists():
+            scaler = joblib.load(scaler_path)
+
+        pca_reducer = None
+        pca_reducer_path = tmppath / "pca_reducer.pkl"
+        if pca_reducer_path.exists():
+            pca_reducer = joblib.load(pca_reducer_path)
+
         # Load CV data if present (for uncertainty estimation)
         cv_data = None
         cv_data_path = tmppath / 'cv_data.npz'
@@ -462,6 +496,8 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'ad_data': ad_data,
         'pca_model': pca_model,
         'bias_correction': bias_correction,
+        'scaler': scaler,
+        'pca_reducer': pca_reducer,
     }
 
 
@@ -532,7 +568,8 @@ def _compute_reliability_scores(
 def predict_with_model(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
-    validate_wavelengths: bool = True
+    validate_wavelengths: bool = True,
+    _internals: dict | None = None,
 ) -> np.ndarray:
     """
     Make predictions with a loaded model on new spectral data.
@@ -680,6 +717,27 @@ def predict_with_model(
     else:
         raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
 
+    # One-class prediction branch
+    task_type = metadata.get("task_type", "regression")
+    if task_type == "one_class":
+        # Apply one-class scaler if present
+        oc_scaler = model_dict.get("scaler")
+        if oc_scaler is not None:
+            X_processed = oc_scaler.transform(X_processed)
+
+        # Apply one-class PCA reducer if present
+        oc_pca_reducer = model_dict.get("pca_reducer")
+        if oc_pca_reducer is not None:
+            X_processed = oc_pca_reducer.transform(X_processed)
+
+        # Capture transformed X for decision score extraction (backward-compatible)
+        if _internals is not None:
+            _internals['X_processed'] = X_processed
+
+        # Predict labels (+1 inlier, -1 outlier)
+        predictions = model.predict(X_processed)
+        return predictions
+
     # Make predictions
     predictions = model.predict(X_processed)
 
@@ -769,9 +827,6 @@ def predict_with_uncertainty(
     warnings.filterwarnings("ignore", message="X does not have valid feature names")
     warnings.filterwarnings("ignore", message="This Pipeline instance is not fitted yet")
 
-    # Get standard predictions first
-    predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
-
     model = model_dict['model']
     metadata = model_dict['metadata']
     task_type = metadata.get('task_type', 'regression')
@@ -786,6 +841,75 @@ def predict_with_uncertainty(
                 f"Model trained on {model_data_type.upper()} data, "
                 f"but prediction data is {prediction_data_type.upper()}."
             )
+
+    # One-class models: extract decision scores for uncertainty/applicability domain
+    if task_type == 'one_class':
+        internals: dict = {}
+        predictions = predict_with_model(model_dict, X_new, validate_wavelengths, _internals=internals)
+
+        # Extract decision scores from the already-transformed data
+        decision_scores = None
+        X_proc = internals.get('X_processed')
+        if X_proc is not None:
+            try:
+                if hasattr(model, 'decision_function'):
+                    decision_scores = model.decision_function(X_proc)
+                elif hasattr(model, 'score_samples'):
+                    decision_scores = model.score_samples(X_proc)
+            except Exception:
+                decision_scores = None
+
+        result: dict = {
+            'predictions': predictions,
+            'uncertainty': {},
+            'applicability_domain': {},
+            'has_uncertainty': False,
+            'has_applicability_domain': False,
+            'data_type_warning': data_type_warning,
+        }
+
+        if decision_scores is not None:
+            scores = decision_scores
+
+            # Use training-derived thresholds when available, fall back to batch percentiles
+            oc_stats = metadata.get('oc_score_stats')
+            if oc_stats is not None:
+                q10, q25 = oc_stats['q10'], oc_stats['q25']
+            else:
+                q10, q25 = np.percentile(scores, [10, 25])
+
+            status = np.where(
+                scores >= q25, 'good',
+                np.where(scores >= q10, 'caution', 'extrapolation')
+            )
+
+            # Compute confidence: higher = more in-domain (positive scores = inlier)
+            if oc_stats is not None:
+                center = oc_stats['mean']
+                scale = max(oc_stats['std'], 1e-10)
+                confidence = 1.0 / (1.0 + np.exp(-(scores - center) / scale))
+            else:
+                s_min, s_max = scores.min(), scores.max()
+                if s_max > s_min:
+                    confidence = (scores - s_min) / (s_max - s_min)
+                else:
+                    confidence = np.full_like(scores, 0.5)
+
+            result['uncertainty'] = {
+                'decision_scores': scores,
+                'confidence': confidence,
+            }
+            result['applicability_domain'] = {
+                'anomaly_score': scores,
+                'distance_status': status,
+            }
+            result['has_uncertainty'] = True
+            result['has_applicability_domain'] = True
+
+        return result
+
+    # Get standard predictions for non-OC models
+    predictions = predict_with_model(model_dict, X_new, validate_wavelengths)
 
     uncertainty = {}
     has_uncertainty = False

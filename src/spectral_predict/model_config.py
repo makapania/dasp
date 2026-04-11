@@ -72,6 +72,35 @@ CLASSIFICATION_TIERS = {
     }
 }
 
+# One-class model tiers
+ONE_CLASS_TIERS = {
+    'quick': {
+        'description': 'Fast one-class screening with classic methods',
+        'models': ['PCA-SIMCA', 'IsolationForest'],
+        'recommended_for': 'Quick one-class screening, daily QC'
+    },
+
+    'standard': {
+        'description': 'Robust one-class detection with multiple approaches',
+        'models': ['PCA-SIMCA', 'OneClassSVM', 'IsolationForest'],
+        'recommended_for': 'Standard one-class screening, authentication'
+    },
+
+    'comprehensive': {
+        'description': 'Thorough one-class analysis with all methods',
+        'models': ['PCA-SIMCA', 'OneClassSVM', 'IsolationForest',
+                   'EllipticEnvelope', 'LOF'],
+        'recommended_for': 'Research, method comparison, validation studies'
+    },
+
+    'experimental': {
+        'description': 'All one-class models with extended grids',
+        'models': ['PCA-SIMCA', 'OneClassSVM', 'IsolationForest',
+                   'EllipticEnvelope', 'LOF'],
+        'recommended_for': 'Exploration, no time constraints'
+    }
+}
+
 # Default tier
 DEFAULT_TIER = 'standard'
 
@@ -144,8 +173,12 @@ def get_tier_models(tier: str = 'standard', task_type: str = 'regression') -> Li
     """
     if task_type == 'classification':
         tier_dict = CLASSIFICATION_TIERS
-    else:
+    elif task_type == 'one_class':
+        tier_dict = ONE_CLASS_TIERS
+    elif task_type == 'regression':
         tier_dict = MODEL_TIERS
+    else:
+        raise ValueError(f"Unknown task_type: {task_type}")
 
     if tier not in tier_dict:
         raise ValueError(f"Unknown tier: {tier}. Must be one of {list(tier_dict.keys())}")
