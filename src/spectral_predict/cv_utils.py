@@ -48,6 +48,54 @@ else:
     BOOSTING_MODELS = XGBOOST_MODELS + LIGHTGBM_MODELS
 
 
+def build_cv_splitter(
+    strategy: str,
+    n_folds: int,
+    task_type: str,
+    n_repeats: int = 5,
+    random_state: int = 42,
+):
+    """Build a sklearn CV splitter for the requested strategy.
+
+    Parameters
+    ----------
+    strategy : str
+        One of 'kfold', 'repeated_kfold', 'loo'.
+    n_folds : int
+        Number of folds. Ignored when strategy == 'loo'.
+    task_type : str
+        One of 'regression', 'classification', 'one_class'. Controls stratification.
+    n_repeats : int, default=5
+        Number of repeats. Used only when strategy == 'repeated_kfold'.
+    random_state : int, default=42
+        Random state for reproducibility.
+
+    Returns
+    -------
+    sklearn.model_selection.BaseCrossValidator
+        A splitter object usable with cross_validate, cross_val_predict, etc.
+    """
+    if strategy == 'loo':
+        from sklearn.model_selection import LeaveOneOut
+        return LeaveOneOut()
+    if strategy == 'repeated_kfold':
+        from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
+        if task_type == 'classification':
+            return RepeatedStratifiedKFold(
+                n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
+            )
+        return RepeatedKFold(
+            n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
+        )
+    if strategy == 'kfold':
+        if task_type == 'classification':
+            return StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        return KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    raise ValueError(
+        f"Unknown CV strategy: {strategy!r}. Expected 'kfold', 'repeated_kfold', or 'loo'."
+    )
+
+
 def is_boosting_model(model) -> bool:
     """Check if a model is a boosting model that supports early stopping.
 
@@ -257,6 +305,18 @@ def cross_validate_with_early_stopping(
         early_stopping_rounds is not None and
         early_stopping_rounds > 0
     )
+
+    # LeaveOneOut has 1-sample test folds that cannot serve as an eval_set for
+    # early stopping. Disable and warn so the boosting model trains normally.
+    from sklearn.model_selection import LeaveOneOut
+    if isinstance(cv, LeaveOneOut) and use_early_stopping:
+        warnings.warn(
+            "Early stopping disabled under LeaveOneOut CV: "
+            "single-sample test folds cannot serve as an eval_set. "
+            "Boosting model will train without early stopping.",
+            stacklevel=2,
+        )
+        use_early_stopping = False
 
     # If not a boosting model or early stopping disabled, use standard cross_validate
     if not use_early_stopping:
