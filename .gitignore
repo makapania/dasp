@@ -73,6 +73,7 @@ catboost_info/
 # Claude Code session artifacts
 tmpclaude-*/
 nul
+.worktrees/
 
 # One-off outputs
 *.stats
