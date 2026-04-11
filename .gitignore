@@ -74,6 +74,7 @@ catboost_info/
 tmpclaude-*/
 nul
 .worktrees/
+.claude/scheduled_tasks.lock
 
 # One-off outputs
 *.stats

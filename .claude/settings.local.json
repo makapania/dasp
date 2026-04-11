@@ -292,7 +292,16 @@
       "Bash(chmod +x:*)",
       "Bash(rm:*)",
       "Bash(gh.exe pr:*)",
-      "Bash(gh api:*)"
+      "Bash(gh api:*)",
+      "Bash(awk '/# ===== METRICS.*for results/,/^\\\\s+\\\\},$/ {print NR\": \"$0}' /c/Users/sponheim/git/dasp/spectral_predict_gui_optimized.py)",
+      "Read(//tmp/**)",
+      "Read(//c/Users/sponheim/.claude/skills/**)",
+      "Read(//c/Users/sponheim/.claude/plugins/**)",
+      "Bash(node:*)",
+      "Bash(awk 'NR>=24800 && NR<=25260' C:/Users/sponheim/git/dasp/spectral_predict_gui_optimized.py)",
+      "Bash(mkdir -p /tmp/dasp-review)",
+      "Bash(git diff:*)",
+      "Bash(git branch:*)"
     ],
     "deny": [],
     "ask": []
