@@ -279,3 +279,31 @@ User reported ~20-100x slower. Likely because one-class has fewer outliers → s
 ### Bug: Validation metrics fail with "Unknown preprocess: None"
 **Root cause:** Grid search results use column names `'Preprocess'`/`'PreprocessBase'`/`'Deriv'`/`'Window'`/`'Poly'`. Validation code used `'Preprocessing'`/`'Derivative'` — wrong column names, so all values were None.
 **Fix:** Use `row.get('PreprocessBase', row.get('Preprocess', row.get('preprocessing', 'raw')))` chain that handles both grid search and Bayesian column naming.
+
+---
+
+## 2026-04-11 — CV Strategy Overhaul (LOO + Repeated K-Fold)
+
+**Branch:** claude/cv-strategy-overhaul
+
+### Changes
+- Added `build_cv_splitter()` factory in `cv_utils.py` supporting kfold, repeated_kfold, loo
+- Fixed RMSEcv to use pooled predictions (was per-fold average; K-fold shift: ~1-4% on equal folds, up to ~12% on unequal folds; LOO was silently reporting MAE)
+- Fixed one-class CV metrics to use pooled computation (averaging-of-ratios != ratio-of-sums; K-fold shift: 0-3% typically)
+- Propagated cv_strategy through grid search, Bayesian search, and one-class search
+- Added CV strategy combobox + conditional controls to Analysis tab + Model Development
+- Refinement path fully wired (restore, validation, thread dispatch, sample-count guards, one-class)
+- Cost estimator + LOO/Repeated warnings + stochastic model warning
+- NSGA-II fallback: logs warning and uses K-fold when non-kfold strategy selected
+- Variable selection uses mixed regime (inner 5-fold K-fold regardless of outer strategy) with prominent GUI warning
+
+### Design decisions
+- **Option C for variable selection:** inner loops stay 5-fold K-fold, visible GUI warning when outer strategy != kfold. Phase 2 will propagate strategy into inner loops.
+- **training_config schema:** `cv_strategy` is source of truth; `folds` stored as integer (n_samples for LOO) for cross-machine backwards compatibility.
+- **Pooled metrics:** both RMSEcv (regression) and sensitivity/specificity/etc (one-class) now computed from pooled predictions, matching Unscrambler/IUPAC convention. This is a numerical shift for existing K-fold results -- intentional correctness fix.
+
+### Known limitations
+- LOO computationally infeasible for n > ~50 with full Bayesian search matrix
+- Variable selection inner CV doesn't respect outer strategy (Phase 2)
+- NSGA-II search always falls back to K-fold
+- Predictor screening / smart preprocessing internal CV sites left as hardcoded 5-fold

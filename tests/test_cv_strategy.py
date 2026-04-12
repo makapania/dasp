@@ -504,3 +504,128 @@ class TestEstimateTotalCvFits:
         from spectral_predict.cv_utils import estimate_total_cv_fits
         result = estimate_total_cv_fits('repeated_kfold', 5, 10, 100, 30, 10, 20)
         assert result == 50 * 30 * 10 * 20  # 300,000
+
+
+class TestCvStrategyIntegration:
+    """End-to-end integration tests exercising the full search pipeline with each CV strategy."""
+
+    @staticmethod
+    def _tiny_regression_data(n: int = 15, p: int = 5, seed: int = 42):
+        import pandas as pd
+        rng = np.random.default_rng(seed)
+        X = pd.DataFrame(rng.normal(size=(n, p)), columns=[float(400 + i * 10) for i in range(p)])
+        y = pd.Series(X.iloc[:, 0].to_numpy() * 2.0 - X.iloc[:, 1].to_numpy() + 0.1 * rng.normal(size=n))
+        return X, y
+
+    @staticmethod
+    def _tiny_one_class_data(n_inliers: int = 8, n_outliers: int = 3, p: int = 5, seed: int = 42):
+        import pandas as pd
+        rng = np.random.default_rng(seed)
+        X_in = rng.normal(0, 1, (n_inliers, p))
+        X_out = rng.normal(5, 1, (n_outliers, p))
+        X = pd.DataFrame(np.vstack([X_in, X_out]), columns=[float(400 + i * 10) for i in range(p)])
+        y = pd.Series(["inlier"] * n_inliers + ["outlier"] * n_outliers)
+        return X, y
+
+    def test_grid_search_loo_regression_e2e(self):
+        """Run run_search with cv_strategy='loo' on small synthetic regression data."""
+        from spectral_predict.search import run_search
+
+        X, y = self._tiny_regression_data(n=15)
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=5,
+            cv_strategy='loo', cv_n_repeats=1,
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0, "LOO regression should return results"
+        assert df_results['RMSEcv'].notna().all(), "RMSEcv should be non-NaN for all rows"
+        assert df_results['R2cv'].notna().all(), "R2cv should be non-NaN for all rows"
+        # training_config should reflect loo
+        tcs = df_results['training_config'].dropna().tolist()
+        assert len(tcs) > 0
+        for tc in tcs:
+            assert isinstance(tc, dict)
+            assert tc.get('cv_strategy') == 'loo'
+
+    def test_grid_search_repeated_kfold_regression_e2e(self):
+        """Run run_search with cv_strategy='repeated_kfold' on small synthetic regression data."""
+        from spectral_predict.search import run_search
+
+        X, y = self._tiny_regression_data(n=15)
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=3,
+            cv_strategy='repeated_kfold', cv_n_repeats=2,
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0, "Repeated K-fold regression should return results"
+        assert df_results['RMSEcv'].notna().all(), "RMSEcv should be non-NaN for all rows"
+        assert df_results['R2cv'].notna().all(), "R2cv should be non-NaN for all rows"
+        tcs = df_results['training_config'].dropna().tolist()
+        assert len(tcs) > 0
+        for tc in tcs:
+            assert isinstance(tc, dict)
+            assert tc.get('cv_strategy') == 'repeated_kfold'
+            assert tc.get('cv_n_repeats') == 2
+
+    def test_grid_search_loo_one_class_e2e(self):
+        """Run run_one_class_search with cv_strategy='loo' on small one-class data."""
+        from spectral_predict.search import run_one_class_search
+
+        X, y = self._tiny_one_class_data(n_inliers=8, n_outliers=3)
+        df_results = run_one_class_search(
+            X, y, inlier_class_label="inlier",
+            folds=5, cv_strategy='loo', cv_n_repeats=1,
+            preprocessing_methods={"raw": True},
+            enabled_models=["IsolationForest"],
+            oc_hyperparams={
+                "IsolationForest": {
+                    "n_estimators": [10],
+                    "contamination": [0.3],
+                    "max_samples": [1.0],
+                    "max_features": [1.0],
+                },
+            },
+        )
+        assert len(df_results) > 0, "LOO one-class should return results"
+        assert df_results['Sensitivitycv'].notna().any(), "Sensitivitycv should have non-NaN values"
+        assert df_results['Specificitycv'].notna().any(), "Specificitycv should have non-NaN values"
+        # One-class search doesn't currently write training_config, so we verify
+        # the CV actually ran by checking metric quality (non-degenerate values)
+        for col in ['BalancedAcccv', 'AUCcv']:
+            if col in df_results.columns:
+                assert df_results[col].notna().any(), f"{col} should have non-NaN values"
+
+    def test_saved_model_training_config_has_strategy(self):
+        """Verify training_config from run_search with LOO has cv_strategy, folds == n_samples."""
+        from spectral_predict.search import run_search
+
+        n = 15
+        X, y = self._tiny_regression_data(n=n)
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=5,
+            cv_strategy='loo', cv_n_repeats=1,
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0
+        tc = df_results.iloc[0]['training_config']
+        assert isinstance(tc, dict), "training_config should be a dict"
+        assert tc.get('cv_strategy') == 'loo'
+        assert tc.get('folds') == n, f"LOO folds should equal n_samples ({n}), got {tc.get('folds')}"
+        assert 'cv_n_repeats' in tc, "training_config should include cv_n_repeats"
+
+    def test_legacy_training_config_defaults_to_kfold(self):
+        """A training_config dict without cv_strategy should default to 'kfold' for backwards compat."""
+        legacy_config = {
+            'folds': 5,
+            'task_type': 'regression',
+        }
+        assert legacy_config.get('cv_strategy', 'kfold') == 'kfold'

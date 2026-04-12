@@ -37,6 +37,7 @@
 - [x] Basic preprocessing discovery works for one-class grid search (callback wrapper fixed)
 - [x] Variable selection: 'importance' method works for one-class
 - [x] Results Treeview tooltips: all one-class metrics (Sensitivity/AUC/cv) + validation metrics (RMSEP/R2pred/val_*) now covered; jargon-heavy tooltips (ROC_AUC, Kappa, MCC, BER, LogLoss) rewritten for non-technical audience
+- [x] CV strategy support: LOO, Repeated K-Fold, and standard K-Fold via `build_cv_splitter()` factory in `cv_utils.py`. Pooled RMSEcv (regression) and pooled sensitivity/specificity (one-class). GUI controls in Analysis tab + Model Development. Cost estimator with LOO/Repeated warnings. training_config stores cv_strategy for model save/load.
 
 ## Known Issues
 
@@ -98,4 +99,10 @@
 
 - **OC validation helper can't recover the right `polyorder` for 2nd-derivative grid-search rows.** Grid search writes `polyorder=None` (delegating to `polyorder_map` inside `SavgolDerivative` which picks 3 for `deriv=2`), but the validation helper at `contamination.py:922-927` falls back to `min(2, window-1) if window > 2 else 0`, which gives `poly=2` for `deriv=2`. The pipeline then runs with the wrong polyorder and the resulting `val_*` metrics are slightly off vs. what training actually used. Fix: either store the resolved polyorder in the grid-search result dict (most direct), or import the same `polyorder_map` lookup into the validation helper, or have `_maybe_int` fall back to `polyorder_map[deriv]` when poly isn't set.
 
-- **Add Leave-One-Out CV as a CV-strategy option for all task types (regression, classification, one-class).** Small training sets (especially one-class, where only inliers count toward `k`) hit K-fold edge cases hard — e.g. 7 inliers with 5-fold leaves 5-6 per training fold, which stresses any model with a minimum-samples floor. LOO uses every sample, eliminates the "fold-too-small" failure mode entirely, and gives a less biased estimate for tiny datasets. Would slot into `run_one_class_cv` (swap `KFold(n_splits=n_folds)` for `LeaveOneOut()` behind a `cv_strategy='loo'` branch) and the equivalent paths in `search.py` / `unified_bayesian.py`. UI needs a new control in the CV-folds area ("Leave-one-out" as an alternative to numeric folds).
+- **CV Strategy Phase 2: Propagate outer CV strategy into variable selection inner loops.** Currently inner loops (UVE, SPA, iPLS, CARS, GA-PLS) always use hardcoded 5-fold K-fold regardless of the outer CV strategy. A GUI warning is displayed when outer != kfold. Phase 2 would thread `cv_strategy`/`cv_n_repeats` into the variable selection internals.
+
+- **CV Strategy Phase 2: Propagate CV strategy into predictor screening and smart preprocessing.** These internal CV sites are currently hardcoded 5-fold and don't respect the user's chosen strategy.
+
+- **CV Strategy Phase 2: NSGA-II multi-objective search CV strategy support.** Currently falls back to K-fold with a logged warning when non-kfold strategy is selected. Needs native LOO/Repeated K-fold support.
+
+- **One-class search: Add `training_config` to result rows.** Regression/classification grid search writes `training_config` (with `cv_strategy`, `folds`, `cv_n_repeats`) but one-class search does not. This means one-class saved models don't preserve the CV strategy used during training.
