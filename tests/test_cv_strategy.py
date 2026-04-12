@@ -808,3 +808,96 @@ class TestCodeGeneratorCvStrategy:
         assert 'KFold(n_splits=5, shuffle=True, random_state=42)' in script
         assert 'LeaveOneOut' not in script
         assert 'RepeatedKFold' not in script
+
+    @pytest.mark.parametrize("task_type,cv_strategy,n_repeats", [
+        ('regression', 'kfold', 1),
+        ('regression', 'loo', 1),
+        ('regression', 'repeated_kfold', 3),
+        ('classification', 'kfold', 1),
+        ('classification', 'loo', 1),
+        ('classification', 'repeated_kfold', 3),
+    ])
+    def test_generated_script_compiles(self, task_type, cv_strategy, n_repeats):
+        """Every (task_type, cv_strategy) combo must produce valid Python."""
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {
+            'model_name': 'Ridge' if task_type == 'regression' else 'RandomForest',
+            'task_type': task_type, 'target_name': 'y',
+            'params': {}, 'metrics': {}, 'cv_folds': 4,
+            'cv_strategy': cv_strategy, 'cv_n_repeats': n_repeats,
+        }
+        script = CodeGenerator(cfg).generate_script()
+        compile(script, '<generated>', 'exec')
+
+
+class TestExportScriptMatchesBackend:
+    """Regression tests for: export templates concatenated repeated-CV
+    predictions and scored the expanded list, diverging from backend
+    cross_val_predict_pooled (which reduces to one prediction per sample
+    before scoring)."""
+
+    def test_regression_script_rmse_matches_backend_under_repeated_kfold(self):
+        from collections import defaultdict
+        from sklearn.linear_model import Ridge
+        from sklearn.base import clone
+        from sklearn.metrics import mean_squared_error
+        from spectral_predict.cv_utils import cross_val_predict_pooled
+
+        rng = np.random.default_rng(2)
+        X = rng.normal(size=(20, 3))
+        y = X[:, 0] * 1.2 + rng.normal(size=20) * 0.1
+        cv = build_cv_splitter('repeated_kfold', 4, 'regression',
+                                n_repeats=3, random_state=42)
+
+        backend = cross_val_predict_pooled(Ridge(), X, y, cv=cv)
+        backend_rmse = float(np.sqrt(mean_squared_error(y, backend)))
+
+        # Mirror the logic the export template emits
+        preds_per_sample = defaultdict(list)
+        truth_per_sample = {}
+        for tr, te in cv.split(X):
+            m = clone(Ridge()); m.fit(X[tr], y[tr]); p = m.predict(X[te]).ravel()
+            for local_i, sample_idx in enumerate(te):
+                preds_per_sample[int(sample_idx)].append(float(p[local_i]))
+                truth_per_sample[int(sample_idx)] = y[te][local_i]
+        idx = sorted(preds_per_sample.keys())
+        script_y = np.array([truth_per_sample[i] for i in idx])
+        script_pred = np.array([np.mean(preds_per_sample[i]) for i in idx])
+        script_rmse = float(np.sqrt(mean_squared_error(script_y, script_pred)))
+
+        assert abs(backend_rmse - script_rmse) < 1e-10, \
+            f"Script diverges from backend: {script_rmse} vs {backend_rmse}"
+
+    def test_classification_script_accuracy_matches_backend_under_repeated_kfold(self):
+        from collections import Counter, defaultdict
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.base import clone
+        from sklearn.metrics import accuracy_score
+        from spectral_predict.cv_utils import cross_val_predict_pooled
+
+        rng = np.random.default_rng(1)
+        X = rng.normal(size=(18, 2))
+        y = np.array([0, 1] * 9)
+        cv = build_cv_splitter('repeated_kfold', 3, 'classification',
+                                n_repeats=5, random_state=42)
+
+        backend = cross_val_predict_pooled(KNeighborsClassifier(n_neighbors=3), X, y, cv=cv)
+        backend_acc = accuracy_score(y, backend)
+
+        preds_per_sample = defaultdict(list)
+        truth_per_sample = {}
+        for tr, te in cv.split(X, y):
+            m = clone(KNeighborsClassifier(n_neighbors=3))
+            m.fit(X[tr], y[tr]); p = m.predict(X[te])
+            for local_i, sample_idx in enumerate(te):
+                preds_per_sample[int(sample_idx)].append(p[local_i])
+                truth_per_sample[int(sample_idx)] = y[te][local_i]
+        idx = sorted(preds_per_sample.keys())
+        script_y = np.array([truth_per_sample[i] for i in idx])
+        script_pred = np.array(
+            [Counter(preds_per_sample[i]).most_common(1)[0][0] for i in idx]
+        )
+        script_acc = accuracy_score(script_y, script_pred)
+
+        assert abs(backend_acc - script_acc) < 1e-10, \
+            f"Script diverges from backend: {script_acc} vs {backend_acc}"
