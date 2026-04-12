@@ -294,3 +294,109 @@ class TestRmseCvPooledFix:
         # fail if search.py reverted to the old computation.
         old_per_fold_rmse = float(np.mean([m["RMSE"] for m in cv_metrics]))
         assert abs(old_per_fold_rmse - pooled_rmse) > 1e-12
+
+
+class TestRunSearchCvStrategyPlumbing:
+    """Task 3: end-to-end plumbing of cv_strategy / cv_n_repeats through run_search.
+
+    Smoke tests that confirm the default-kwargs path still produces kfold results
+    and that passing cv_strategy='loo' threads through to training_config.
+    """
+
+    def _tiny_regression_data(self):
+        import pandas as pd
+        rng = np.random.default_rng(123)
+        n, p = 15, 5
+        X = pd.DataFrame(rng.normal(size=(n, p)))
+        # Make y depend on X so RMSEcv is meaningful (non-trivial regression)
+        y = pd.Series(
+            X.iloc[:, 0].to_numpy() * 1.5
+            - 0.7 * X.iloc[:, 1].to_numpy()
+            + 0.1 * rng.normal(size=n)
+        )
+        return X, y
+
+    def test_default_kwargs_preserves_kfold_behaviour(self):
+        """With no cv_strategy passed, search should default to kfold."""
+        from spectral_predict.search import run_search
+
+        X, y = self._tiny_regression_data()
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=3,
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0, "Default run_search should return results"
+        # At least one row must expose training_config with cv_strategy='kfold'
+        tcs = df_results['training_config'].dropna().tolist()
+        assert len(tcs) > 0, "training_config should be present in results"
+        strategies = {tc.get('cv_strategy') for tc in tcs if isinstance(tc, dict)}
+        assert strategies == {'kfold'}, (
+            f"Default path should only produce cv_strategy='kfold', got {strategies}"
+        )
+        # Sanity: RMSEcv / R2cv are finite
+        assert df_results['RMSEcv'].notna().any()
+        assert df_results['R2cv'].notna().any()
+
+    def test_loo_strategy_threads_through_to_training_config(self):
+        """cv_strategy='loo' should produce training_config['cv_strategy']='loo'
+        and non-NaN RMSEcv / R2cv on tiny synthetic data.
+        """
+        from spectral_predict.search import run_search
+
+        X, y = self._tiny_regression_data()
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=3,  # folds is irrelevant under LOO
+            cv_strategy='loo',
+            cv_n_repeats=1,  # ignored under LOO but set for clarity
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0, "LOO run_search should return results"
+        tcs = df_results['training_config'].dropna().tolist()
+        assert len(tcs) > 0, "training_config should be present"
+        strategies = {tc.get('cv_strategy') for tc in tcs if isinstance(tc, dict)}
+        assert 'loo' in strategies, (
+            f"LOO path should produce cv_strategy='loo' in at least one row, got {strategies}"
+        )
+        # Under LOO, effective folds == n_samples
+        n_samples = len(X)
+        loo_rows = [tc for tc in tcs if isinstance(tc, dict) and tc.get('cv_strategy') == 'loo']
+        for tc in loo_rows:
+            assert tc.get('folds') == n_samples, (
+                f"LOO training_config['folds'] should equal n_samples ({n_samples}), got {tc.get('folds')}"
+            )
+        # RMSEcv / R2cv must be finite under LOO (Task 1 + Task 2 fixes)
+        assert df_results['RMSEcv'].notna().any(), "LOO RMSEcv must be non-NaN"
+        assert df_results['R2cv'].notna().any(), "LOO R2cv must be non-NaN"
+
+    def test_repeated_kfold_strategy_threads_through_to_training_config(self):
+        """cv_strategy='repeated_kfold' should stamp training_config accordingly."""
+        from spectral_predict.search import run_search
+
+        X, y = self._tiny_regression_data()
+        df_results, _ = run_search(
+            X, y, task_type="regression", folds=3,
+            cv_strategy='repeated_kfold',
+            cv_n_repeats=2,
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        assert len(df_results) > 0
+        tcs = df_results['training_config'].dropna().tolist()
+        assert len(tcs) > 0
+        strategies = {tc.get('cv_strategy') for tc in tcs if isinstance(tc, dict)}
+        assert 'repeated_kfold' in strategies
+        repeats = {
+            tc.get('cv_n_repeats') for tc in tcs
+            if isinstance(tc, dict) and tc.get('cv_strategy') == 'repeated_kfold'
+        }
+        assert 2 in repeats, f"Expected cv_n_repeats=2 in training_config, got {repeats}"
+        assert df_results['RMSEcv'].notna().any()
+        assert df_results['R2cv'].notna().any()

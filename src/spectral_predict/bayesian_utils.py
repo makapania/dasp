@@ -31,6 +31,41 @@ from .regions import create_region_subsets
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
+# Module-level flag so the mixed-regime warning prints at most once per process.
+# When cv_strategy is LOO or Repeated K-Fold but the inner variable-selection
+# routines still use their hardcoded 5-fold K-fold (Option C mixed regime),
+# users need a visible signal. This prints to stdout so headless / log-diving
+# users see it without scraping Python logger config.
+_mixed_regime_warned = False
+
+
+def _warn_mixed_regime_once(cv_strategy: str) -> None:
+    """Print a one-time warning when outer CV diverges from inner 5-fold K-fold.
+
+    Variable selection routines (UVE, SPA, iPLS, CARS, GA-PLS) run their own
+    internal 5-fold K-fold regardless of the outer `cv_strategy`. Under LOO,
+    the inner K-fold sees n-1 samples per outer fold and may be unstable on
+    very small datasets. This warning surfaces that mixed regime so users are
+    aware their effective CV is not purely LOO / Repeated K-Fold.
+    """
+    global _mixed_regime_warned
+    if not _mixed_regime_warned and cv_strategy and cv_strategy != 'kfold':
+        print(
+            f"[CV] NOTE: Outer CV strategy = {cv_strategy!r}, but inner variable "
+            f"selection (UVE / SPA / iPLS / CARS / GA-PLS) uses 5-fold K-fold "
+            f"internally regardless. Under LOO, inner K-fold sees n-1 samples "
+            f"per outer fold and may be unstable on very small datasets."
+        )
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "Outer CV strategy = %s, but variable selection (UVE/SPA/iPLS/CARS/GA-PLS) "
+            "uses 5-fold K-fold internally regardless. Under LOO, inner K-fold sees n-1 "
+            "samples per outer fold, which may be unstable on very small datasets.",
+            cv_strategy,
+        )
+        _mixed_regime_warned = True
+
+
 def create_optuna_study(
     direction: str = 'minimize',
     sampler: str = 'TPE',
@@ -339,6 +374,10 @@ def create_objective_function(
 
             # === STEP 2: Test variable subsets (if enabled and model supports it) ===
             if enable_variable_subsets and supports_subset_analysis(model_name):
+                # Mixed-regime warning: outer CV may diverge from inner 5-fold K-fold
+                # used by SPA/UVE/iPLS/CARS/VCPA. Print once per process so
+                # headless / log-diving users know their inner CV is not LOO.
+                _warn_mixed_regime_once(filtered_kwargs.get('cv_strategy', 'kfold'))
                 # Fit model on full data to compute feature importances
                 from sklearn.pipeline import Pipeline
                 from sklearn.preprocessing import StandardScaler
@@ -643,6 +682,8 @@ def convert_optuna_result_to_dasp_format(
     validation_count: int = 0,
     total_samples_original: int = None,
     folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     imbalance_method: str = None,
     imbalance_params: dict = None
 ):
@@ -752,8 +793,20 @@ def convert_optuna_result_to_dasp_format(
             }
 
             # Add training configuration
+            # cv_strategy is the source of truth; `folds` here is an integer
+            # compat field (see search.py:4532 for the matching scheme).
+            if cv_strategy == 'loo':
+                _effective_folds = (
+                    total_samples_original - excluded_count - validation_count
+                    if total_samples_original else np.nan
+                )
+            else:
+                _effective_folds = folds
+
             result['training_config'] = {
-                'folds': folds,
+                'cv_strategy': cv_strategy,
+                'cv_n_repeats': cv_n_repeats,
+                'folds': _effective_folds,
                 'n_samples_used': total_samples_original - excluded_count - validation_count if total_samples_original else np.nan,
                 'n_samples_total': total_samples_original if total_samples_original else np.nan,
                 'excluded_count': excluded_count,

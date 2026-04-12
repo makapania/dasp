@@ -42,6 +42,7 @@ from sklearn.model_selection import cross_val_predict, KFold, StratifiedKFold
 
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
+    build_cv_splitter,
     cross_val_predict_with_early_stopping,
 )
 from sklearn.pipeline import Pipeline
@@ -717,6 +718,8 @@ def create_unified_objective(
     model_name: str,
     task_type: str = 'regression',
     cv_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     random_state: int = 42,
     n_top_regions: int = 10,
     progress_callback: Optional[Callable] = None,
@@ -806,11 +809,14 @@ def create_unified_objective(
     else:
         scoring = 'accuracy'
 
-    # Create CV splitter
-    if task_type == 'regression':
-        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    else:
-        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=cv_folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
     # Determine available subset types
     # Regional subsets are computed dynamically on preprocessed data
@@ -1558,6 +1564,8 @@ def run_unified_bayesian(
     task_type: str = 'regression',
     n_trials: int = 300,
     cv_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     n_top_regions: int = 10,
     random_state: int = 42,
     progress_callback: Optional[Callable] = None,
@@ -1745,6 +1753,8 @@ def run_unified_bayesian(
         model_name=model_name,
         task_type=task_type,
         cv_folds=cv_folds,
+        cv_strategy=cv_strategy,
+        cv_n_repeats=cv_n_repeats,
         random_state=random_state,
         n_top_regions=n_top_regions,
         progress_callback=progress_callback,

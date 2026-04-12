@@ -39,7 +39,7 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 from .constants import RANDOM_STATE
 
 # Import early stopping CV utilities
-from .cv_utils import is_boosting_model, _fit_with_early_stopping
+from .cv_utils import is_boosting_model, _fit_with_early_stopping, build_cv_splitter
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
@@ -791,7 +791,8 @@ def compute_validation_metrics_for_top_models(
     return df_results
 
 
-def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
+def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
+               excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=0, gap_penalty=0,
                max_n_components=10, max_iter=500, models_to_test=None, preprocessing_methods=None,
                interference_settings=None,
@@ -1771,13 +1772,16 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             configs_with_smooth.append(cfg_sm)
         preprocess_configs = configs_without_smooth + configs_with_smooth
 
-    # Create CV splitter
-    if task_type == "regression":
-        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
-    else:
-        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv_splitter = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
-    print(f"Running {task_type} search with {folds}-fold CV...")
+    print(f"Running {task_type} search with {cv_strategy} CV (folds={folds}, repeats={cv_n_repeats})...")
     print(f"Models: {list(model_grids.keys())}")
     print(f"Preprocessing configs: {len(preprocess_configs)}")
     print(f"\nPreprocessing breakdown:")
@@ -2139,6 +2143,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
+                    cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                     wavelength_restriction_active=wavelength_restriction_active,
@@ -2326,6 +2332,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2347,6 +2355,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2778,6 +2788,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2806,6 +2818,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
@@ -2864,6 +2878,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2885,6 +2901,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
@@ -2952,6 +2970,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             validation_count=validation_count,
                             total_samples_original=total_samples_original,
                             folds=folds,
+                            cv_strategy=cv_strategy,
+                            cv_n_repeats=cv_n_repeats,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
@@ -3057,7 +3077,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
 
 def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
-                        n_trials=None, folds=5, excluded_count=0, validation_count=0,
+                        n_trials=None, folds=5, cv_strategy='kfold', cv_n_repeats=5,
+                        excluded_count=0, validation_count=0,
                         total_samples_original=None, max_n_components=12, tier='standard',
                         imbalance_method=None, imbalance_params=None,
                         progress_callback=None,
@@ -3375,12 +3396,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         tier_config = get_tier_models(tier, task_type)
         models_to_test = [m for m, enabled in tier_config.items() if enabled]
 
-    # Create CV splitter
-    from sklearn.model_selection import StratifiedKFold, KFold
-    if task_type == "classification":
-        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
-    else:
-        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv_splitter = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
     # Track progress
     total_tasks = len(models_to_test) * len(preprocessing_methods)
@@ -3398,7 +3421,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     print(f"  → Total trials per model: {n_trials * len(preprocessing_methods)}")
     print(f"  → Total trials overall: {total_trials}")
     print(f"Total optimizations: {total_tasks} (models × preprocessing)")
-    print(f"CV folds: {folds}")
+    print(f"CV strategy: {cv_strategy} (folds={folds}, repeats={cv_n_repeats})")
     print(f"Tier: {tier}")
     print(f"{'='*70}\n")
 
@@ -3527,6 +3550,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 validation_count=validation_count,
                 total_samples_original=total_samples_original,
                 folds=folds,
+                cv_strategy=cv_strategy,
+                cv_n_repeats=cv_n_repeats,
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,
                 progress_callback=progress_callback,
@@ -3575,6 +3600,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
+                    cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats,
                     imbalance_method=imbalance_method,
                     imbalance_params=imbalance_params
                 )
@@ -4003,6 +4030,8 @@ def _run_single_config(
     validation_count=0,
     total_samples_original=None,
     folds=5,
+    cv_strategy='kfold',
+    cv_n_repeats=5,
     imbalance_method=None,
     imbalance_params=None,
     full_vars_original=None,
@@ -4529,8 +4558,23 @@ def _run_single_config(
 
     # Add training configuration for tracking data state
     # This helps identify when Model Development tab uses different data
+    #
+    # cv_strategy is the source of truth; effective_folds is a cross-machine
+    # compat field that lets old binaries read a sane integer even for LOO /
+    # repeated K-fold. Never rely on getattr(cv_splitter, 'n_splits', folds) —
+    # LeaveOneOut has no n_splits attribute, so that fallback would return the
+    # stale `folds` kwarg (typically 5) which is wrong under LOO.
+    if cv_strategy == 'loo':
+        effective_folds = len(X)
+    else:
+        # 'kfold' and 'repeated_kfold' both carry the same per-fold semantics;
+        # repeat count is stored separately in cv_n_repeats.
+        effective_folds = folds
+
     result["training_config"] = {
-        "folds": cv_splitter.n_splits if hasattr(cv_splitter, 'n_splits') else folds,
+        "cv_strategy": cv_strategy,
+        "cv_n_repeats": cv_n_repeats,
+        "folds": effective_folds,
         "n_samples_used": len(X),  # Number of samples used for training (after filtering)
         "n_samples_total": total_samples_original if total_samples_original else len(X),
         "excluded_count": excluded_count,  # Number of excluded samples
@@ -4685,7 +4729,8 @@ def _run_single_config(
 
 def run_one_class_search(
     X, y, inlier_class_label,
-    folds=5, preprocessing_methods=None, window_sizes=None,
+    folds=5, cv_strategy='kfold', cv_n_repeats=5,
+    preprocessing_methods=None, window_sizes=None,
     tier='standard', enabled_models=None,
     variable_penalty=0, gap_penalty=0,
     analysis_wl_min=None, analysis_wl_max=None,
@@ -5012,7 +5057,10 @@ def run_one_class_search(
     if varsel_configs > 0:
         logger.info("Variable selection configurations (estimated): %d", varsel_configs)
     logger.info("Total configurations: %d", total_configs)
-    logger.info("CV: %d-fold on inlier data (outliers in test only)", folds)
+    logger.info(
+        "CV strategy: %s (folds=%d, repeats=%d) on inlier data (outliers in test only)",
+        cv_strategy, folds, cv_n_repeats,
+    )
     if progress_callback:
         progress_callback({
             'stage': 'info',
@@ -5026,8 +5074,9 @@ def run_one_class_search(
     best_result = None
     skipped_configs = 0  # 2g: track skipped configurations
 
-    # KFold for splitting inlier samples
-    kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # Note: the actual inlier-CV splitter is built inside contamination.run_one_class_cv,
+    # which is updated by Task 4 to accept cv_strategy + cv_n_repeats. For now, Task 3
+    # only accepts and logs the kwargs; Task 4 wires them into run_one_class_cv.
 
     # Cache preprocessed data to avoid recomputing in the variable selection loop
     _preprocess_result_cache = {}
