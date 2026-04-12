@@ -5235,6 +5235,16 @@ def run_one_class_search(
                     "oc_score_stats": cv_result.get('oc_score_stats'),
                 }
 
+                # Training config for model reproducibility (mirrors regression/classification)
+                _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                result["training_config"] = {
+                    "cv_strategy": cv_strategy,
+                    "cv_n_repeats": cv_n_repeats,
+                    "folds": _eff_folds,
+                    "n_samples_used": len(X),
+                    "random_state": random_state,
+                }
+
                 # Add per-contaminant columns for display
                 per_contam = cal_metrics.get('per_contaminant', {})
                 for contam_label, contam_sens in per_contam.items():
@@ -5791,6 +5801,16 @@ def run_one_class_search(
                                 "scaler": cv_result.get('cal_scaler'),
                                 "pca_reducer": cv_result.get('cal_pca_reducer'),
                                 "oc_score_stats": cv_result.get('oc_score_stats'),
+                            }
+
+                            # Training config for model reproducibility
+                            _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                            result["training_config"] = {
+                                "cv_strategy": cv_strategy,
+                                "cv_n_repeats": cv_n_repeats,
+                                "folds": _eff_folds,
+                                "n_samples_used": len(X),
+                                "random_state": random_state,
                             }
 
                             # Add per-contaminant columns

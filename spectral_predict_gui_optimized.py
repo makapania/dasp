@@ -10676,6 +10676,17 @@ class SpectralPredictApp:
         self.cv_mixed_regime_label.grid_remove()  # Hidden by default
 
         # Update controls when strategy changes
+        _LOO_WARNING = (
+            "\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+            "internally regardless of outer strategy. Under LOO, inner K-fold will see "
+            "n\u22121 samples per fold \u2014 may be unstable on very small datasets."
+        )
+        _REPEATED_WARNING = (
+            "\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+            "internally regardless of outer strategy. Repeated K-Fold outer CV is more "
+            "expensive but inner loops are unaffected."
+        )
+
         def _on_cv_strategy_changed(*args):
             strategy = self.cv_strategy.get()
             if strategy == 'loo':
@@ -10683,12 +10694,14 @@ class SpectralPredictApp:
                 self.cv_folds_spinbox.grid_remove()
                 self.cv_repeats_label.grid_remove()
                 self.cv_repeats_spinbox.grid_remove()
+                self.cv_mixed_regime_label.config(text=_LOO_WARNING)
                 self.cv_mixed_regime_label.grid()
             elif strategy == 'repeated_kfold':
                 cv_folds_label.grid()
                 self.cv_folds_spinbox.grid()
                 self.cv_repeats_label.grid()
                 self.cv_repeats_spinbox.grid()
+                self.cv_mixed_regime_label.config(text=_REPEATED_WARNING)
                 self.cv_mixed_regime_label.grid()
             else:  # kfold
                 cv_folds_label.grid()
@@ -22043,6 +22056,23 @@ class SpectralPredictApp:
                     self._update_search_buttons('idle')
                     return
 
+        # --- LOO + classification: guard against single-sample minority class ---
+        if cv_strategy == 'loo' and self.task_type.get() in ('classification', 'auto'):
+            if self.y is not None:
+                class_counts = self.y.value_counts()
+                min_count = class_counts.min()
+                if min_count < 2:
+                    min_class = class_counts.idxmin()
+                    messagebox.showerror(
+                        "LOO Not Possible",
+                        f"Class '{min_class}' has only {min_count} sample(s). "
+                        "LOO CV requires at least 2 samples per class so every "
+                        "training fold contains all classes.\n\n"
+                        "Use K-Fold instead, or add more samples."
+                    )
+                    self._update_search_buttons('idle')
+                    return
+
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
         self.analysis_thread.start()
@@ -25300,10 +25330,12 @@ class SpectralPredictApp:
                     self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
 
                 # Store training configuration (needed for Model Dev validation preservation)
+                # Under LOO, effective folds = number of samples (not the spinbox value)
+                _eff_folds = len(X_filtered) if self.cv_strategy.get() == 'loo' else self.folds.get()
                 self.last_training_config = {
                     'cv_strategy': self.cv_strategy.get(),
                     'cv_n_repeats': self.cv_n_repeats.get(),
-                    'folds': self.folds.get(),
+                    'folds': _eff_folds,
                     'n_samples_used': len(X_filtered),
                     'excluded_count': n_excluded,
                     'validation_count': n_validation,
@@ -26005,10 +26037,12 @@ class SpectralPredictApp:
 
             # Store training configuration for validation when transferring to Model Dev
             # This captures the exact data configuration used for training
+            # Under LOO, effective folds = number of samples (not the spinbox value)
+            _eff_folds = len(X_filtered) if self.cv_strategy.get() == 'loo' else self.folds.get()
             self.last_training_config = {
                 'cv_strategy': self.cv_strategy.get(),
                 'cv_n_repeats': self.cv_n_repeats.get(),
-                'folds': self.folds.get(),
+                'folds': _eff_folds,
                 'n_samples_used': len(X_filtered),  # Actual calibration samples used
                 'excluded_count': n_excluded,
                 'validation_count': n_validation,

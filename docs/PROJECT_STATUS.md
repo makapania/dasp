@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-11 by Claude (Opus 4.6) — final pre-merge cleanup pass on PR #3 (grid-search OC validation silent NaN + bundled minimum-to-merge fixes)
+> **Last updated:** 2026-04-12 by Claude (Opus 4.6) — post-review bugfixes for CV strategy (RepeatedKFold crash, one-class Bayesian cv_strategy, GUI LOO folds)
 
 ---
 
@@ -37,7 +37,7 @@
 - [x] Basic preprocessing discovery works for one-class grid search (callback wrapper fixed)
 - [x] Variable selection: 'importance' method works for one-class
 - [x] Results Treeview tooltips: all one-class metrics (Sensitivity/AUC/cv) + validation metrics (RMSEP/R2pred/val_*) now covered; jargon-heavy tooltips (ROC_AUC, Kappa, MCC, BER, LogLoss) rewritten for non-technical audience
-- [x] CV strategy support: LOO, Repeated K-Fold, and standard K-Fold via `build_cv_splitter()` factory in `cv_utils.py`. Pooled RMSEcv (regression) and pooled sensitivity/specificity (one-class). GUI controls in Analysis tab + Model Development. Cost estimator with LOO/Repeated warnings. training_config stores cv_strategy for model save/load.
+- [x] CV strategy support: LOO, Repeated K-Fold, and standard K-Fold via `build_cv_splitter()` factory in `cv_utils.py`. Pooled RMSEcv (regression) and pooled sensitivity/specificity (one-class). GUI controls in Analysis tab + Model Development. Cost estimator with LOO/Repeated warnings. training_config stores cv_strategy for model save/load. Post-review fixes (2026-04-12): RepeatedKFold crash via `cross_val_predict_pooled`, one-class Bayesian cv_strategy forwarding, GUI LOO folds metadata, LOO classification minority-class guard, differentiated mixed-regime warnings.
 
 ## Known Issues
 

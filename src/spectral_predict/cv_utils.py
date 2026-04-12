@@ -22,6 +22,7 @@ from sklearn.metrics import (
 )
 from typing import Optional, Dict, Any, Union, List
 import warnings
+from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
 
 # Import boosting model types for detection
 from xgboost import XGBRegressor, XGBClassifier
@@ -136,6 +137,76 @@ def build_cv_splitter(
     raise ValueError(
         f"Unknown CV strategy: {strategy!r}. Expected 'kfold', 'repeated_kfold', or 'loo'."
     )
+
+
+def _is_repeated_cv(cv) -> bool:
+    """Check if a CV splitter produces overlapping test sets (repeated splits)."""
+    return isinstance(cv, (RepeatedKFold, RepeatedStratifiedKFold))
+
+
+def cross_val_predict_pooled(
+    model,
+    X: np.ndarray,
+    y: np.ndarray,
+    cv,
+    n_jobs: int = 1,
+    method: str = 'predict',
+) -> np.ndarray:
+    """Cross-validated predictions that work for all CV strategies including repeated CV.
+
+    For standard CV (KFold, StratifiedKFold, LOO), this delegates to sklearn's
+    cross_val_predict. For repeated CV (RepeatedKFold, RepeatedStratifiedKFold),
+    it runs a manual loop and averages predictions per sample across repeats.
+
+    Parameters
+    ----------
+    model : estimator
+        Model to cross-validate.
+    X : ndarray
+        Feature matrix.
+    y : ndarray
+        Target vector.
+    cv : cross-validator
+        CV splitter (any sklearn splitter).
+    n_jobs : int, default=1
+        Number of parallel jobs (only for non-repeated CV).
+    method : str, default='predict'
+        Prediction method ('predict' or 'predict_proba').
+
+    Returns
+    -------
+    ndarray
+        Per-sample predictions, averaged across repeats for repeated CV.
+    """
+    if not _is_repeated_cv(cv):
+        return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
+
+    # Repeated CV: accumulate predictions and average per sample
+    n_samples = X.shape[0]
+    if method == 'predict_proba':
+        n_classes = len(np.unique(y))
+        pred_sum = np.zeros((n_samples, n_classes))
+    else:
+        pred_sum = np.zeros(n_samples)
+    pred_count = np.zeros(n_samples)
+
+    for train_idx, test_idx in cv.split(X, y):
+        model_clone = clone(model)
+        model_clone.fit(X[train_idx], y[train_idx])
+        if method == 'predict_proba':
+            preds = model_clone.predict_proba(X[test_idx])
+        else:
+            preds = np.ravel(model_clone.predict(X[test_idx]))
+        pred_sum[test_idx] += preds
+        pred_count[test_idx] += 1
+
+    # Average predictions (every sample should have been tested n_repeats times)
+    mask = pred_count > 0
+    if method == 'predict_proba':
+        pred_sum[mask] /= pred_count[mask, np.newaxis]
+    else:
+        pred_sum[mask] /= pred_count[mask]
+    return pred_sum
 
 
 def is_boosting_model(model) -> bool:
@@ -404,19 +475,17 @@ def cross_validate_with_early_stopping(
 
         if hasattr(model_clone, 'steps'):
             # It's a pipeline - fit preprocessing steps first
-            X_train_transformed = X_train.copy()
-            X_val_transformed = X_val.copy()
+            X_train_transformed = X_train
+            X_val_transformed = X_val
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
-                    # Don't transform validation data - resampling only applies to training
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
                     X_val_transformed = step.transform(X_val_transformed)
 
-            # Fit final model with early stopping
             _fit_with_early_stopping(
                 final_model_clone,
                 X_train_transformed, y_train,
@@ -424,7 +493,6 @@ def cross_validate_with_early_stopping(
                 early_stopping_rounds
             )
         else:
-            # Direct model - fit with early stopping
             _fit_with_early_stopping(
                 model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds
             )
@@ -436,11 +504,10 @@ def cross_validate_with_early_stopping(
         score_start = time.time()
 
         if hasattr(model_clone, 'steps'):
-            # Transform test data through pipeline
-            X_val_transformed = X_val.copy()
+            X_val_transformed = X_val
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
-                    continue  # Resamplers don't transform test data
+                    continue
                 X_val_transformed = step.transform(X_val_transformed)
             y_pred = final_model_clone.predict(X_val_transformed)
         else:
@@ -454,10 +521,10 @@ def cross_validate_with_early_stopping(
 
         if return_train_score:
             if hasattr(model_clone, 'steps'):
-                X_train_transformed = X_train.copy()
+                X_train_transformed = X_train
                 for step_name, step in model_clone.steps[:-1]:
                     if hasattr(step, 'fit_resample'):
-                        continue  # Resamplers don't transform test/train scoring data
+                        continue
                     X_train_transformed = step.transform(X_train_transformed)
                 y_train_pred = final_model_clone.predict(X_train_transformed)
             else:
@@ -527,20 +594,22 @@ def cross_val_predict_with_early_stopping(
         early_stopping_rounds > 0
     )
 
-    # If not a boosting model, use standard cross_val_predict
+    # If not a boosting model, use pooled cross_val_predict (handles repeated CV)
     if not use_early_stopping:
-        return cross_val_predict(model, X, y, cv=cv, method=method)
+        return cross_val_predict_pooled(model, X, y, cv=cv, method=method)
 
-    # Manual CV loop
+    # Manual CV loop with early stopping (handles repeated CV via accumulation)
+    repeated = _is_repeated_cv(cv)
     n_samples = X.shape[0]
 
     # Determine output shape
     if method == 'predict_proba':
-        # Get number of classes
         n_classes = len(np.unique(y))
         predictions = np.zeros((n_samples, n_classes))
     else:
         predictions = np.zeros(n_samples)
+    if repeated:
+        pred_count = np.zeros(n_samples)
 
     for train_idx, val_idx in cv.split(X, y):
         X_train, X_val = X[train_idx], X[val_idx]
@@ -550,14 +619,13 @@ def cross_val_predict_with_early_stopping(
         final_model_clone = _get_model_from_pipeline(model_clone)
 
         if hasattr(model_clone, 'steps'):
-            # Pipeline
-            X_train_transformed = X_train.copy()
-            X_val_transformed = X_val.copy()
+            # Pipeline — transform through preprocessing steps
+            X_train_transformed = X_train
+            X_val_transformed = X_val
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
-                    # Don't transform validation data - resampling only applies to training
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
@@ -584,10 +652,21 @@ def cross_val_predict_with_early_stopping(
             else:
                 preds = model_clone.predict(X_val)
 
-        # Flatten predictions for non-proba case (some models return 2D arrays)
         if method != 'predict_proba':
             preds = np.ravel(preds)
-        predictions[val_idx] = preds
+
+        if repeated:
+            predictions[val_idx] += preds
+            pred_count[val_idx] += 1
+        else:
+            predictions[val_idx] = preds
+
+    if repeated:
+        mask = pred_count > 0
+        if method == 'predict_proba':
+            predictions[mask] /= pred_count[mask, np.newaxis]
+        else:
+            predictions[mask] /= pred_count[mask]
 
     return predictions
 

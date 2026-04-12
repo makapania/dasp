@@ -307,3 +307,26 @@ User reported ~20-100x slower. Likely because one-class has fewer outliers → s
 - Variable selection inner CV doesn't respect outer strategy (Phase 2)
 - NSGA-II search always falls back to K-fold
 - Predictor screening / smart preprocessing internal CV sites left as hardcoded 5-fold
+
+---
+
+## 2026-04-12 — CV Strategy Bugfixes (Qwen Max + Codex review)
+
+**Branch:** claude/cv-strategy-overhaul
+
+### Critical bug found by Codex: RepeatedKFold + cross_val_predict crash
+sklearn's `cross_val_predict` raises `ValueError: cross_val_predict only works for partitions` when passed `RepeatedKFold` (overlapping test sets). Affected all Bayesian search trials using repeated K-fold. Grid search was unaffected (uses own manual fold loop).
+
+**Fix:** Added `cross_val_predict_pooled()` in `cv_utils.py` — for repeated CV, runs a manual loop that accumulates predictions per sample and averages across repeats. Updated `cross_val_predict_with_early_stopping` with the same accumulation logic. Replaced all `cross_val_predict` calls in `unified_bayesian.py` with `cross_val_predict_pooled`.
+
+### High bug found by Codex: One-class Bayesian ignored cv_strategy
+`unified_bayesian.py:1000` called `run_one_class_cv(...)` without forwarding `cv_strategy`/`cv_n_repeats`, so one-class Bayesian always used default K-fold regardless of GUI selection. Fixed by threading both params through.
+
+### High bug found by Codex: GUI last_training_config wrong folds under LOO
+Two sites in GUI stored `self.folds.get()` (spinbox value, typically 5) instead of computing effective folds (`len(X)` for LOO). This overwrote the correct per-result training_config from the search layer. Fixed both sites.
+
+### Other fixes
+- Differentiated mixed-regime warning text for LOO vs Repeated K-Fold
+- Added LOO + classification minority-class preflight guard (blocks LOO when any class has < 2 samples)
+- Removed unnecessary `.copy()` calls in early-stopping CV helper (saves memory per fold)
+- Added `training_config` to one-class grid search results (was missing, unlike regression/classification)

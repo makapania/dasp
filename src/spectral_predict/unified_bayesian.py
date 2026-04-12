@@ -43,6 +43,7 @@ from sklearn.model_selection import cross_val_predict
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
     build_cv_splitter,
+    cross_val_predict_pooled,
     cross_val_predict_with_early_stopping,
 )
 from sklearn.pipeline import Pipeline
@@ -999,8 +1000,9 @@ def create_unified_objective(
 
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
-                    n_folds=cv_folds, random_state=random_state, y_original=y_original,
-                    compute_calibration=True,
+                    n_folds=cv_folds, cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats, random_state=random_state,
+                    y_original=y_original, compute_calibration=True,
                 )
 
                 if cv_result.get('skipped', False):
@@ -1255,7 +1257,7 @@ def create_unified_objective(
                         early_stopping_rounds=early_stopping_rounds
                     )
                 else:
-                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
@@ -1302,7 +1304,7 @@ def create_unified_objective(
                         early_stopping_rounds=early_stopping_rounds
                     )
                 else:
-                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
                 accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
@@ -1314,7 +1316,7 @@ def create_unified_objective(
                             method='predict_proba'
                         )
                     else:
-                        y_proba = cross_val_predict(
+                        y_proba = cross_val_predict_pooled(
                             model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
                         )
                     n_classes = len(np.unique(y))
