@@ -48,6 +48,48 @@ else:
     BOOSTING_MODELS = XGBOOST_MODELS + LIGHTGBM_MODELS
 
 
+def estimate_total_cv_fits(
+    strategy: str,
+    n_folds: int,
+    n_repeats: int,
+    n_samples: int,
+    n_trials: int = 1,
+    n_models: int = 1,
+    n_preprocessing: int = 1,
+) -> int:
+    """Estimate total model fits for a CV-based search.
+
+    Parameters
+    ----------
+    strategy : str
+        CV strategy: 'kfold', 'repeated_kfold', or 'loo'.
+    n_folds : int
+        Number of folds (ignored for 'loo').
+    n_repeats : int
+        Number of repeats (used only for 'repeated_kfold').
+    n_samples : int
+        Number of training samples.
+    n_trials : int
+        Number of Bayesian trials or grid configurations.
+    n_models : int
+        Number of model types being tested.
+    n_preprocessing : int
+        Number of preprocessing configurations.
+
+    Returns
+    -------
+    int
+        Estimated total number of individual model fits.
+    """
+    if strategy == 'loo':
+        cv_fits = n_samples
+    elif strategy == 'repeated_kfold':
+        cv_fits = n_folds * n_repeats
+    else:
+        cv_fits = n_folds
+    return cv_fits * max(1, n_trials) * max(1, n_models) * max(1, n_preprocessing)
+
+
 def build_cv_splitter(
     strategy: str,
     n_folds: int,

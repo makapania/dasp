@@ -21975,6 +21975,74 @@ class SpectralPredictApp:
             else:
                 resolved_inlier_label = inlier_label
 
+        # --- CV cost warning (Task 7) ---
+        cv_strategy = self.cv_strategy.get()
+        if cv_strategy != 'kfold':
+            from spectral_predict.cv_utils import estimate_total_cv_fits
+
+            n_samples = len(self.X) if self.X is not None else 0
+            n_models = len(selected_models)
+            # Rough preprocessing count: grid search tests ~10-20 configs; use 10 as default
+            n_preprocessing = 10
+            n_trials = 1
+            if self.optimization_method.get() == 'unified':
+                try:
+                    n_trials = self.n_unified_trials.get()
+                except Exception:
+                    n_trials = 300
+
+            total_fits = estimate_total_cv_fits(
+                cv_strategy,
+                self.folds.get(),
+                self.cv_n_repeats.get(),
+                n_samples,
+                n_trials,
+                n_models,
+                n_preprocessing,
+            )
+
+            # Check for stochastic models under LOO
+            stochastic_models = {'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'MLP'}
+            stochastic_selected = [m for m in selected_models if m in stochastic_models]
+            stochastic_note = ""
+            if cv_strategy == 'loo' and stochastic_selected:
+                stochastic_note = (
+                    "\n\nNote: LOO CV is unreliable for stochastic models "
+                    f"({', '.join(stochastic_selected)}) because each fold trains on "
+                    "nearly identical data, amplifying random seed variance."
+                )
+
+            if total_fits > 50_000:
+                if not messagebox.askyesno(
+                    "Very High Compute Cost",
+                    f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
+                    f"This is very computationally expensive. Consider using K-Fold instead."
+                    f"{stochastic_note}\n\nContinue anyway?",
+                    icon='warning',
+                ):
+                    self._update_search_buttons('idle')
+                    return
+            elif total_fits > 10_000:
+                if not messagebox.askyesno(
+                    "High Compute Cost",
+                    f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
+                    f"This may take a while."
+                    f"{stochastic_note}\n\nContinue?",
+                ):
+                    self._update_search_buttons('idle')
+                    return
+            elif stochastic_note:
+                # Low fit count but stochastic + LOO — still warn
+                if not messagebox.askyesno(
+                    "LOO + Stochastic Models",
+                    f"LOO CV is unreliable for stochastic models "
+                    f"({', '.join(stochastic_selected)}) because each fold trains on "
+                    "nearly identical data, amplifying random seed variance.\n\n"
+                    "Continue anyway?",
+                ):
+                    self._update_search_buttons('idle')
+                    return
+
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
         self.analysis_thread.start()

@@ -1715,6 +1715,8 @@ def run_nsga2_search(
     imbalance_method: Optional[str] = None,
     imbalance_params: Optional[Dict[str, Any]] = None,
     early_stopping_rounds: Optional[int] = 40,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
 ) -> Dict[str, Any]:
     """
     Run NSGA-II multi-objective optimization for spectral calibration.
@@ -1775,6 +1777,15 @@ def run_nsga2_search(
         - 'n_evaluations': int, total fitness evaluations
         - 'history': list, best objective per generation
     """
+    # CV strategy fallback for NSGA-II (LOO/Repeated K-Fold not yet supported)
+    if cv_strategy not in ('kfold', None):
+        logger.warning(
+            "NSGA-II search does not yet support %s CV strategy; falling back to K-fold for this run.",
+            cv_strategy,
+        )
+        print(f"Warning: NSGA-II search does not support {cv_strategy} CV; falling back to K-fold.")
+        cv_strategy = 'kfold'
+
     # Use user-specified models or defaults
     if models is None:
         models = MODEL_TYPES

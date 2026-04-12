@@ -484,3 +484,23 @@ class TestOneClassCvStrategy:
         for key in ('sensitivity', 'specificity', 'balanced_accuracy'):
             assert not np.isnan(mm[key]), f"{key} is NaN"
             assert 0 <= mm[key] <= 1, f"{key}={mm[key]} out of [0, 1]"
+
+
+class TestEstimateTotalCvFits:
+    """Task 7: Cost estimator."""
+
+    def test_kfold_n100(self):
+        from spectral_predict.cv_utils import estimate_total_cv_fits
+        # n=100, 30 trials, 10 models, 20 preprocessing
+        result = estimate_total_cv_fits('kfold', 5, 5, 100, 30, 10, 20)
+        assert result == 5 * 30 * 10 * 20  # 30,000
+
+    def test_loo_n100(self):
+        from spectral_predict.cv_utils import estimate_total_cv_fits
+        result = estimate_total_cv_fits('loo', 5, 5, 100, 30, 10, 20)
+        assert result == 100 * 30 * 10 * 20  # 600,000
+
+    def test_repeated_kfold_n100(self):
+        from spectral_predict.cv_utils import estimate_total_cv_fits
+        result = estimate_total_cv_fits('repeated_kfold', 5, 10, 100, 30, 10, 20)
+        assert result == 50 * 30 * 10 * 20  # 300,000
