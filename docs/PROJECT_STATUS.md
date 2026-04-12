@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-12 by Claude (Opus 4.6) — post-review bugfixes for CV strategy (RepeatedKFold crash, one-class Bayesian cv_strategy, GUI LOO folds)
+> **Last updated:** 2026-04-12 by Claude (Opus 4.6) — pre-merge review pass on cv-strategy-overhaul: fixed 5 correctness bugs caught by Codex (repeated-CV classifier label averaging, Bayesian cv_strategy not persisted, backend LOO guard missing, export templates hardcoded KFold, export templates diverged from backend pooled-per-sample semantics). 52/52 tests pass.
 
 ---
 
