@@ -400,3 +400,87 @@ class TestRunSearchCvStrategyPlumbing:
         assert 2 in repeats, f"Expected cv_n_repeats=2 in training_config, got {repeats}"
         assert df_results['RMSEcv'].notna().any()
         assert df_results['R2cv'].notna().any()
+
+
+class TestOneClassCvStrategy:
+    """Tests for cv_strategy support in one-class CV with pooled metrics."""
+
+    @staticmethod
+    def _make_synthetic_data(
+        n_inliers: int = 20, n_outliers: int = 10, n_features: int = 5, seed: int = 42
+    ):
+        rng = np.random.default_rng(seed)
+        X_inlier = rng.normal(0, 1, (n_inliers, n_features))
+        X_outlier = rng.normal(5, 1, (n_outliers, n_features))
+        X = np.vstack([X_inlier, X_outlier])
+        y_oc = np.array([1] * n_inliers + [-1] * n_outliers)
+        return X, y_oc
+
+    def test_loo_one_class_non_nan_metrics(self):
+        """LOO on one-class should produce non-degenerate pooled metrics."""
+        from spectral_predict.contamination import run_one_class_cv
+
+        X, y_oc = self._make_synthetic_data(n_inliers=8, n_outliers=3)
+        result = run_one_class_cv(
+            X, y_oc, 'IsolationForest',
+            params={'n_estimators': 10, 'contamination': 0.3},
+            n_folds=5, cv_strategy='loo', random_state=42,
+            compute_calibration=False,
+        )
+        assert not result.get('skipped', False), f"Skipped: {result.get('skip_reason')}"
+        mm = result['mean_metrics']
+        for key in ('sensitivity', 'specificity', 'precision', 'f1', 'accuracy', 'balanced_accuracy'):
+            assert not np.isnan(mm[key]), f"{key} is NaN"
+        # Pooled sensitivity should be in [0, 1]
+        assert 0 <= mm['sensitivity'] <= 1, f"Sensitivity {mm['sensitivity']} out of range"
+
+    def test_kfold_pooled_vs_averaged_one_class(self):
+        """Pooled metrics should differ slightly from per-fold averaged metrics."""
+        from spectral_predict.contamination import run_one_class_cv
+
+        X, y_oc = self._make_synthetic_data(n_inliers=20, n_outliers=10)
+        result = run_one_class_cv(
+            X, y_oc, 'IsolationForest',
+            params={'n_estimators': 10, 'contamination': 0.3},
+            n_folds=5, cv_strategy='kfold', random_state=42,
+            compute_calibration=False,
+        )
+        assert not result.get('skipped', False), f"Skipped: {result.get('skip_reason')}"
+
+        pooled_metrics = result['mean_metrics']
+        fold_metrics = result['fold_metrics']
+
+        # Compute per-fold averaged metrics for comparison
+        def _safe_mean(key):
+            vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
+            return float(np.mean(vals)) if vals else np.nan
+
+        averaged_metrics = {k: _safe_mean(k) for k in pooled_metrics}
+
+        # They should be close but not necessarily identical because
+        # one-class CV has unequal fold sizes (outliers in every test fold)
+        for key in ('sensitivity', 'specificity', 'balanced_accuracy'):
+            if np.isnan(averaged_metrics[key]):
+                continue
+            diff = abs(pooled_metrics[key] - averaged_metrics[key])
+            assert diff < 0.15, (
+                f"{key}: pooled={pooled_metrics[key]:.4f} vs "
+                f"averaged={averaged_metrics[key]:.4f}, diff={diff:.4f} > 0.15"
+            )
+
+    def test_repeated_kfold_one_class(self):
+        """Repeated K-fold should produce reasonable one-class metrics."""
+        from spectral_predict.contamination import run_one_class_cv
+
+        X, y_oc = self._make_synthetic_data(n_inliers=20, n_outliers=10)
+        result = run_one_class_cv(
+            X, y_oc, 'IsolationForest',
+            params={'n_estimators': 10, 'contamination': 0.3},
+            n_folds=3, cv_strategy='repeated_kfold', cv_n_repeats=2,
+            random_state=42, compute_calibration=False,
+        )
+        assert not result.get('skipped', False), f"Skipped: {result.get('skip_reason')}"
+        mm = result['mean_metrics']
+        for key in ('sensitivity', 'specificity', 'balanced_accuracy'):
+            assert not np.isnan(mm[key]), f"{key} is NaN"
+            assert 0 <= mm[key] <= 1, f"{key}={mm[key]} out of [0, 1]"

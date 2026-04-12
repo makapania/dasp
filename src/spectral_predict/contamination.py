@@ -40,6 +40,8 @@ import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
+
+from spectral_predict.cv_utils import build_cv_splitter
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
@@ -522,6 +524,8 @@ def run_one_class_cv(
     model_name: str,
     params: dict,
     n_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     random_state: int = 42,
     y_original: np.ndarray | None = None,
     compute_calibration: bool = True,
@@ -542,6 +546,10 @@ def run_one_class_cv(
         Hyperparameters for the model.
     n_folds : int
         Number of CV folds (applied to inlier data only).
+    cv_strategy : str
+        Cross-validation strategy: 'kfold', 'repeated_kfold', or 'loo'.
+    cv_n_repeats : int
+        Number of repeats for 'repeated_kfold' strategy.
     random_state : int
         Random state for reproducibility.
     y_original : np.ndarray, optional
@@ -566,15 +574,41 @@ def run_one_class_cv(
     # returning +inf from the Bayesian objective.
     fold_errors: list[str] = []
 
-    if len(inlier_indices) < n_folds:
-        msg = f"Too few inliers ({len(inlier_indices)}) for {n_folds}-fold CV"
+    # Determine minimum inlier count based on CV strategy
+    if cv_strategy == 'loo':
+        min_inliers = 2  # At least 2 to leave one out and still train
+    elif cv_strategy == 'repeated_kfold':
+        min_inliers = n_folds  # Same as K-fold
+    else:
+        min_inliers = n_folds
+
+    if len(inlier_indices) < min_inliers:
+        strategy_label = {
+            'kfold': f'{n_folds}-fold CV',
+            'repeated_kfold': f'repeated {n_folds}-fold CV',
+            'loo': 'LOO CV',
+        }
+        msg = (
+            f"Too few inliers ({len(inlier_indices)}) for "
+            f"{strategy_label.get(cv_strategy, cv_strategy)}"
+        )
         logger.warning(msg)
         return {'skipped': True, 'fold_metrics': [], 'skip_reason': msg, 'fold_errors': [msg]}
 
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    kf = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=n_folds,
+        task_type='one_class',
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
-    # --- Per-fold CV ---
+    # --- Per-fold CV: collect predictions for pooled metric computation ---
     fold_metrics = []
+    all_test_labels: list[np.ndarray] = []
+    all_y_pred: list[np.ndarray] = []
+    all_scores: list[np.ndarray] = []
+
     for fold_i, (train_inlier_idx, test_inlier_idx) in enumerate(kf.split(inlier_indices)):
         train_idx = inlier_indices[train_inlier_idx]
         test_inlier = inlier_indices[test_inlier_idx]
@@ -618,18 +652,27 @@ def run_one_class_cv(
             else:
                 y_pred = model.predict(X_test)
 
+            # Per-fold metrics retained for debugging/display
             fold_result = one_class_metrics(test_labels, y_pred, scores)
             fold_metrics.append(fold_result)
+
+            # Collect for pooled computation
+            all_test_labels.append(test_labels)
+            all_y_pred.append(y_pred)
+            if scores is not None:
+                all_scores.append(scores)
         except (np.linalg.LinAlgError, ValueError) as e:
             err_msg = f"fold {fold_i} train_n={len(train_idx)}: {type(e).__name__}: {e}"
             fold_errors.append(err_msg)
             logger.warning("Fold failed for %s (%s)", model_name, err_msg)
             continue
 
-    # Skip guard
-    if len(fold_metrics) < max(2, n_folds // 2):
+    # Skip guard — check how many folds succeeded
+    n_successful = len(all_y_pred)
+    n_actual_splits = kf.get_n_splits(inlier_indices) if hasattr(kf, 'get_n_splits') else n_folds
+    if n_successful < max(2, n_actual_splits // 2):
         reason = (
-            f"{len(fold_metrics)}/{n_folds} folds succeeded; first error: "
+            f"{n_successful}/{n_actual_splits} folds succeeded; first error: "
             f"{fold_errors[0] if fold_errors else 'unknown'}"
         )
         return {
@@ -639,20 +682,15 @@ def run_one_class_cv(
             'fold_errors': fold_errors,
         }
 
-    # NaN-safe mean of fold metrics
-    def _safe_mean(key):
-        vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
-        return float(np.mean(vals)) if vals else np.nan
+    # Compute metrics from POOLED predictions across all folds.
+    # Matches chemometrics convention: ratio-of-sums, not averaging-of-ratios.
+    # Under LOO, per-fold sensitivity degenerates to 0/1. Pooling fixes this.
+    pooled_labels = np.concatenate(all_test_labels)
+    pooled_preds = np.concatenate(all_y_pred)
+    pooled_scores = np.concatenate(all_scores) if all_scores else None
 
-    mean_metrics = {
-        'sensitivity': _safe_mean('sensitivity'),
-        'specificity': _safe_mean('specificity'),
-        'precision': _safe_mean('precision'),
-        'f1': _safe_mean('f1'),
-        'accuracy': _safe_mean('accuracy'),
-        'balanced_accuracy': _safe_mean('balanced_accuracy'),
-        'auc': _safe_mean('auc'),
-    }
+    mean_metrics = one_class_metrics(pooled_labels, pooled_preds, pooled_scores)
+
     # NaN guard for balanced_accuracy in zero-outlier case
     if np.isnan(mean_metrics['balanced_accuracy']):
         mean_metrics['balanced_accuracy'] = mean_metrics['specificity']

@@ -5072,9 +5072,8 @@ def run_one_class_search(
     best_result = None
     skipped_configs = 0  # 2g: track skipped configurations
 
-    # Note: the actual inlier-CV splitter is built inside contamination.run_one_class_cv,
-    # which is updated by Task 4 to accept cv_strategy + cv_n_repeats. For now, Task 3
-    # only accepts and logs the kwargs; Task 4 wires them into run_one_class_cv.
+    # cv_strategy and cv_n_repeats are forwarded to contamination.run_one_class_cv
+    # which builds the appropriate CV splitter via build_cv_splitter().
 
     # Cache preprocessed data to avoid recomputing in the variable selection loop
     _preprocess_result_cache = {}
@@ -5166,7 +5165,9 @@ def run_one_class_search(
                 # Run one-class CV
                 cv_result = run_one_class_cv(
                     X_preprocessed, y_oc, model_name, params,
-                    n_folds=folds, random_state=42, y_original=y_np,
+                    n_folds=folds, cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats, random_state=42,
+                    y_original=y_np,
                 )
 
                 if cv_result.get('skipped', False):
@@ -5686,7 +5687,8 @@ def run_one_class_search(
 
                             cv_result = run_one_class_cv(
                                 X_subset, y_oc, model_name, params,
-                                n_folds=folds, random_state=42,
+                                n_folds=folds, cv_strategy=cv_strategy,
+                                cv_n_repeats=cv_n_repeats, random_state=42,
                                 y_original=y_np,
                             )
 
