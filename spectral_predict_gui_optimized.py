@@ -1231,10 +1231,11 @@ TOOLTIP_CONTENT = {
     # ===== CROSS-VALIDATION =====
     'cross_validation': {
         'cv_folds': (
-            "Number of cross-validation folds (K) for model evaluation. Data is split into K parts; each "
-            "part is held out once for testing while the others train the model. More folds = less bias "
-            "but more variance and computation. Recommendations: 5 folds for 50-100 samples, "
-            "10 folds for 100+ samples, Leave-One-Out for <50 samples."
+            "Number of cross-validation folds (K). Used with K-Fold and Repeated K-Fold strategies.\n\n"
+            "Data is split into K parts; each part is held out once for testing while the others "
+            "train the model. More folds = less bias but more variance and computation.\n"
+            "Recommendations: 5 folds for 50-100 samples, 10 folds for 100+ samples.\n\n"
+            "For Leave-One-Out CV, folds are determined automatically (one per sample)."
         ),
         'stratified': (
             "Stratified cross-validation ensures each fold has similar target value distribution. "
@@ -2594,6 +2595,8 @@ class SpectralPredictApp:
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
+        self.cv_strategy = tk.StringVar(value='kfold')
+        self.cv_n_repeats = tk.IntVar(value=5)
         self.task_type = tk.StringVar(value="auto")  # auto, regression, or classification
         self.task_type.trace_add('write', lambda *args: self._on_task_type_changed())
 
@@ -10621,30 +10624,96 @@ class SpectralPredictApp:
         self.analysis_target_combo.grid(row=0, column=1, sticky=tk.W)
         self.analysis_target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
 
-        # CV Folds
-        cv_folds_label = ttk.Label(options_frame, text="CV Folds:")
-        cv_folds_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        CreateToolTip(cv_folds_label, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
-        ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=1, column=1, sticky=tk.W)
+        # --- CV Strategy ---
+        cv_strategy_label = ttk.Label(options_frame, text="CV Strategy:")
+        cv_strategy_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        CreateToolTip(cv_strategy_label, text=(
+            "Cross-validation strategy for model evaluation.\n\n"
+            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
+            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
+            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
+            "LOO is computationally expensive on large datasets and unreliable for stochastic "
+            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
+        ), delay=500)
 
-        # CV Folds inline hint
-        ttk.Label(options_frame, text="50+ samples: 5-fold | 100+ samples: 10-fold | <50 samples: Leave-One-Out",
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+        self.cv_strategy_combo = ttk.Combobox(
+            options_frame, textvariable=self.cv_strategy, width=18,
+            values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
+        )
+        self.cv_strategy_combo.grid(row=1, column=1, sticky=tk.W)
+
+        # CV Folds spinbox (hidden under LOO)
+        cv_folds_label = ttk.Label(options_frame, text="Folds:")
+        cv_folds_label.grid(row=1, column=2, sticky=tk.W, padx=(15, 5))
+        CreateToolTip(cv_folds_label, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
+        self.cv_folds_spinbox = ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=6)
+        self.cv_folds_spinbox.grid(row=1, column=3, sticky=tk.W)
+
+        # Repeats spinbox (shown only for repeated_kfold)
+        self.cv_repeats_label = ttk.Label(options_frame, text="Repeats:")
+        self.cv_repeats_label.grid(row=1, column=4, sticky=tk.W, padx=(15, 5))
+        self.cv_repeats_spinbox = ttk.Spinbox(options_frame, from_=2, to=20, textvariable=self.cv_n_repeats, width=6)
+        self.cv_repeats_spinbox.grid(row=1, column=5, sticky=tk.W)
+
+        # CV strategy inline hint
+        self.cv_hint_label = ttk.Label(
+            options_frame,
+            text="n > 100: K-Fold | 30 < n < 100: Repeated K-Fold | n < 30: LOO",
+            style='Caption.TLabel', foreground=self.colors['text_light']
+        )
+        self.cv_hint_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+
+        # Mixed-regime warning (visible only when strategy != kfold)
+        self.cv_mixed_regime_label = ttk.Label(
+            options_frame,
+            text="\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+                 "internally regardless of outer strategy. Under LOO, inner K-fold will see "
+                 "n-1 samples per fold \u2014 may be unstable on very small datasets.",
+            style='Caption.TLabel', foreground='#e67e22',
+            wraplength=600
+        )
+        self.cv_mixed_regime_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        self.cv_mixed_regime_label.grid_remove()  # Hidden by default
+
+        # Update controls when strategy changes
+        def _on_cv_strategy_changed(*args):
+            strategy = self.cv_strategy.get()
+            if strategy == 'loo':
+                cv_folds_label.grid_remove()
+                self.cv_folds_spinbox.grid_remove()
+                self.cv_repeats_label.grid_remove()
+                self.cv_repeats_spinbox.grid_remove()
+                self.cv_mixed_regime_label.grid()
+            elif strategy == 'repeated_kfold':
+                cv_folds_label.grid()
+                self.cv_folds_spinbox.grid()
+                self.cv_repeats_label.grid()
+                self.cv_repeats_spinbox.grid()
+                self.cv_mixed_regime_label.grid()
+            else:  # kfold
+                cv_folds_label.grid()
+                self.cv_folds_spinbox.grid()
+                self.cv_repeats_label.grid_remove()
+                self.cv_repeats_spinbox.grid_remove()
+                self.cv_mixed_regime_label.grid_remove()
+
+        self.cv_strategy.trace_add('write', _on_cv_strategy_changed)
+        _on_cv_strategy_changed()  # Set initial state
 
         # NEW: Variable Count Penalty (0-10 scale)
         var_penalty_label = ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel')
-        var_penalty_label.grid(row=2, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        var_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(var_penalty_label, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
         var_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10)
-        var_penalty_spinbox.grid(row=3, column=0, sticky=tk.W, padx=(0, 10))
+        var_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(var_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
 
         # Cal-CV Gap Penalty (0-10 scale)
         gap_penalty_label = ttk.Label(options_frame, text="Cal-CV Gap Penalty (0-10):", style='Subheading.TLabel')
-        gap_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        gap_penalty_label.grid(row=6, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(gap_penalty_label, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
         gap_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.gap_penalty, width=10)
-        gap_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
+        gap_penalty_spinbox.grid(row=7, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(gap_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
 
         # RMSEP/validation gap checkbox (next to gap penalty)
@@ -10652,7 +10721,7 @@ class SpectralPredictApp:
             options_frame, text="Use validation gap instead of calibration gap",
             variable=self.use_rmsep_gap, state='disabled'
         )
-        self.use_rmsep_gap_checkbox.grid(row=5, column=1, sticky=tk.W, padx=(15, 0))
+        self.use_rmsep_gap_checkbox.grid(row=7, column=1, sticky=tk.W, padx=(15, 0))
         CreateToolTip(self.use_rmsep_gap_checkbox,
                       text="When checked, gap penalty uses validation metrics (RMSEP/RMSEcv for regression, "
                            "Validation Accuracy/CV Accuracy for classification) instead of calibration-CV gap. "
@@ -10660,7 +10729,7 @@ class SpectralPredictApp:
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="Both penalties scale relative to actual performance range. 0 = rank only by performance, 5 = balanced, 10 = max shift = 50% of perf range",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
         # Bind penalty controls to live re-ranking
         self.variable_penalty.trace_add('write', self._rerank_results_debounced)
@@ -24980,6 +25049,8 @@ class SpectralPredictApp:
                                 task_type='one_class',
                                 n_trials=self.n_unified_trials.get(),
                                 cv_folds=self.folds.get(),
+                                cv_strategy=self.cv_strategy.get(),
+                                cv_n_repeats=self.cv_n_repeats.get(),
                                 random_state=42,
                                 verbose=False,
                                 progress_callback=oc_progress_wrapper,
@@ -25061,6 +25132,8 @@ class SpectralPredictApp:
                         y=y_filtered,
                         inlier_class_label=inlier_label,
                         folds=self.folds.get(),
+                        cv_strategy=self.cv_strategy.get(),
+                        cv_n_repeats=self.cv_n_repeats.get(),
                         preprocessing_methods=preprocess_list,
                         window_sizes=window_sizes_oc,
                         tier=tier,
@@ -25117,6 +25190,8 @@ class SpectralPredictApp:
 
                 # Store training configuration (needed for Model Dev validation preservation)
                 self.last_training_config = {
+                    'cv_strategy': self.cv_strategy.get(),
+                    'cv_n_repeats': self.cv_n_repeats.get(),
                     'folds': self.folds.get(),
                     'n_samples_used': len(X_filtered),
                     'excluded_count': n_excluded,
@@ -25311,6 +25386,8 @@ class SpectralPredictApp:
                             task_type=task_type,
                             n_trials=self.n_unified_trials.get(),
                             cv_folds=self.folds.get(),
+                            cv_strategy=self.cv_strategy.get(),
+                            cv_n_repeats=self.cv_n_repeats.get(),
                             random_state=42,  # Fixed seed (hardcoded throughout codebase)
                             verbose=False,
                             progress_callback=unified_progress_wrapper,
@@ -25662,6 +25739,8 @@ class SpectralPredictApp:
                 y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
+                cv_strategy=self.cv_strategy.get(),
+                cv_n_repeats=self.cv_n_repeats.get(),
                 excluded_count=n_excluded,
                 validation_count=n_validation,
                 total_samples_original=n_total_original,
@@ -25816,6 +25895,8 @@ class SpectralPredictApp:
             # Store training configuration for validation when transferring to Model Dev
             # This captures the exact data configuration used for training
             self.last_training_config = {
+                'cv_strategy': self.cv_strategy.get(),
+                'cv_n_repeats': self.cv_n_repeats.get(),
                 'folds': self.folds.get(),
                 'n_samples_used': len(X_filtered),  # Actual calibration samples used
                 'excluded_count': n_excluded,
