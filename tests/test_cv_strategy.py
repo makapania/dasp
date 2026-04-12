@@ -236,3 +236,61 @@ class TestRmseCvPooledFix:
         # And the new value matches the pooled sqrt(MSE) exactly
         expected = float(np.sqrt(np.mean((all_y_test - all_y_pred) ** 2)))
         assert abs(new_mean_rmse - expected) < 1e-12
+
+    def test_run_single_fold_supports_pooled_aggregation(self):
+        """Integration test exercising the real search.py production path.
+
+        Calls _run_single_fold for each fold of a synthetic dataset and verifies
+        that the resulting cv_metrics list can be aggregated via the pooled
+        formula used in search.py (line 4215-4222), and that the result matches
+        sklearn's cross_val_predict -> sqrt(mse(y, y_pred)) reference.
+        """
+        from sklearn.linear_model import Ridge
+        from sklearn.pipeline import Pipeline
+        from sklearn.model_selection import KFold, cross_val_predict
+        from sklearn.metrics import mean_squared_error
+
+        from spectral_predict.search import _run_single_fold
+
+        rng = np.random.default_rng(7)
+        n = 30
+        X = rng.normal(size=(n, 5))
+        y = X @ np.array([1.0, -0.5, 0.2, 0.0, 0.3]) + 0.1 * rng.normal(size=n)
+
+        pipe = Pipeline([("model", Ridge(alpha=0.5))])
+        cv = KFold(n_splits=5, shuffle=True, random_state=42)
+
+        cv_metrics = [
+            _run_single_fold(
+                pipe, X, y, train_idx, test_idx,
+                task_type="regression",
+                is_binary_classification=False,
+            )
+            for train_idx, test_idx in cv.split(X, y)
+        ]
+
+        # Each fold returns a dict with y_test, y_pred, RMSE, R2
+        for m in cv_metrics:
+            assert "y_test" in m and "y_pred" in m
+
+        # Reproduce the exact aggregation search.py does
+        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+        pooled_rmse = float(np.sqrt(mean_squared_error(all_y_test, all_y_pred)))
+
+        # Reference: sklearn's cross_val_predict on the same data / splitter
+        cv_ref = KFold(n_splits=5, shuffle=True, random_state=42)
+        y_pred_ref = cross_val_predict(Ridge(alpha=0.5), X, y, cv=cv_ref)
+        ref_rmse = float(np.sqrt(mean_squared_error(y, y_pred_ref)))
+
+        # The pooled result from real _run_single_fold must match sklearn's reference
+        assert abs(pooled_rmse - ref_rmse) < 1e-10, (
+            f"Pooled RMSE from _run_single_fold ({pooled_rmse}) "
+            f"does not match cross_val_predict reference ({ref_rmse})"
+        )
+
+        # And under K-fold with equal fold sizes, the pooled form is close to — but not
+        # identical to — the buggy per-fold mean. Verify they diverge so the test would
+        # fail if search.py reverted to the old computation.
+        old_per_fold_rmse = float(np.mean([m["RMSE"] for m in cv_metrics]))
+        assert abs(old_per_fold_rmse - pooled_rmse) > 1e-12

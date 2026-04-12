@@ -1444,6 +1444,7 @@ for train_idx, test_idx in cv.split({x_var}, y):
 
     all_y_true.extend(y_test)
     all_y_pred.extend(y_pred_fold)
+    # Per-fold metrics kept for reference only — not used in headline numbers.
     fold_acc.append(accuracy_score(y_test, y_pred_fold))
     fold_f1.append(f1_score(y_test, y_pred_fold, average=average_method, zero_division=0))
 
@@ -1453,12 +1454,13 @@ all_y_pred_arr = np.array(all_y_pred)
 # Keep y_pred_cv for compatibility with metrics template
 y_pred_cv = all_y_pred_arr
 
-accuracy = np.mean(fold_acc)
-f1 = np.mean(fold_f1)
+# Pooled metrics (matches Model Development / scikit-learn cross_val_predict convention).
+accuracy = float(accuracy_score(all_y_true_arr, all_y_pred_arr))
+f1 = float(f1_score(all_y_true_arr, all_y_pred_arr, average=average_method, zero_division=0))
 
 print(f"\\nCross-validation Results ({self.cv_folds}-fold):")
-print(f"  Accuracy: {{accuracy:.4f}} (per-fold mean)")
-print(f"  F1 Score (weighted): {{f1:.4f}} (per-fold mean)")
+print(f"  Accuracy: {{accuracy:.4f}} (pooled across folds — matches Model Development)")
+print(f"  F1 Score (weighted): {{f1:.4f}} (pooled across folds)")
 print("\\nConfusion Matrix:")
 print(confusion_matrix(all_y_true_arr, all_y_pred_arr))
 print("\\nClassification Report:")
@@ -1513,15 +1515,19 @@ for train_idx, test_idx in cv.split({x_var}):
     all_y_true.extend(y_test)
     all_y_pred.extend(y_pred_fold)
 
+    # Per-fold metrics kept for reference only — not used in headline numbers.
     fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
     fold_r2.append(r2_score(y_test, y_pred_fold))
     fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
 
-rmse = np.mean(fold_rmse)
+# Pooled metrics (matches Model Development / IUPAC / chemometrics convention).
+# Pooled RMSE/MAE are required under LOO (per-fold RMSE on 1-sample folds
+# degenerates to |y-ŷ| and averaging gives MAE, not RMSE).
 all_y_true_arr = np.array(all_y_true)
 all_y_pred_arr = np.array(all_y_pred)
-r2 = r2_score(all_y_true_arr, all_y_pred_arr)
-mae = np.mean(fold_mae)
+rmse = float(np.sqrt(mean_squared_error(all_y_true_arr, all_y_pred_arr)))
+r2 = float(r2_score(all_y_true_arr, all_y_pred_arr))
+mae = float(mean_absolute_error(all_y_true_arr, all_y_pred_arr))
 rpd = np.std(y) / rmse
 
 # Keep y_pred_cv for compatibility with visualization

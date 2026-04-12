@@ -3869,6 +3869,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         else:
             y_pred = pipe_clone.predict(X_test)
         y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+        # Per-fold RMSE/R² are kept for debugging and tests only — headline metrics
+        # are computed from pooled y_test/y_pred in the caller (see _aggregate_metrics
+        # at search.py:4212+) to match IUPAC/chemometrics convention.
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
         return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}

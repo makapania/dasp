@@ -48,19 +48,20 @@ for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     all_y_true.extend(y_test)
     all_y_pred.extend(y_pred_fold)
 
-    # Calculate per-fold metrics
+    # Per-fold metrics kept for the per-fold printout only — not used in headline numbers.
     fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
     fold_r2.append(r2_score(y_test, y_pred_fold))
     fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
 
-# Calculate final metrics (SAME AS MODEL DEVELOPMENT)
-# RMSE: per-fold average
-# R²: aggregated across all predictions (not per-fold average)
-rmse = np.mean(fold_rmse)
+# Calculate final metrics from pooled predictions (matches Model Development /
+# IUPAC / chemometrics convention: Unscrambler, PLS_Toolbox, SIMCA).
+# Pooled RMSE/MAE are required under LOO (per-fold RMSE on 1-sample folds
+# degenerates to |y-ŷ| and averaging gives MAE, not RMSE).
 all_y_true_arr = np.array(all_y_true)
 all_y_pred_arr = np.array(all_y_pred)
-r2 = r2_score(all_y_true_arr, all_y_pred_arr)
-mae = np.mean(fold_mae)
+rmse = float(np.sqrt(mean_squared_error(all_y_true_arr, all_y_pred_arr)))
+r2 = float(r2_score(all_y_true_arr, all_y_pred_arr))
+mae = float(mean_absolute_error(all_y_true_arr, all_y_pred_arr))
 rpd = np.std(y) / rmse
 
 # Also keep y_pred_cv for compatibility with visualization
@@ -100,15 +101,22 @@ for train_idx, test_idx in cv.split(X_final, y):
     all_y_true.extend(y_test)
     all_y_pred.extend(y_pred_fold)
 
+    # Per-fold metrics kept for the per-fold printout only — not used in headline numbers.
     fold_acc.append(accuracy_score(y_test, y_pred_fold))
     fold_f1.append(f1_score(y_test, y_pred_fold, average=average_method, zero_division=0))
 
-# Final metrics (per-fold mean, matches Model Development)
-accuracy = np.mean(fold_acc)
-f1 = np.mean(fold_f1)
+# Final metrics from pooled predictions (matches Model Development).
+# Pooled accuracy (sample-weighted) differs slightly from per-fold averaged
+# accuracy when folds have unequal sizes — pooled matches how regression
+# metrics above are computed and matches scikit-learn's cross_val_predict
+# convention.
+all_y_true_arr = np.array(all_y_true)
+all_y_pred_arr = np.array(all_y_pred)
+accuracy = float(accuracy_score(all_y_true_arr, all_y_pred_arr))
+f1 = float(f1_score(all_y_true_arr, all_y_pred_arr, average=average_method, zero_division=0))
 
 # Keep y_pred_cv for compatibility with visualization
-y_pred_cv = np.array(all_y_pred)
+y_pred_cv = all_y_pred_arr
 '''
 
 METRICS_TEMPLATE = '''
@@ -117,12 +125,12 @@ METRICS_TEMPLATE = '''
 # =============================================================================
 
 print(f"\\nCross-validation Results ({cv_folds}-fold):")
-print(f"  RMSE: {{rmse:.4f}} (per-fold average)")
-print(f"  R²:   {{r2:.4f}} (aggregated)")
-print(f"  MAE:  {{mae:.4f}} (per-fold average)")
+print(f"  RMSE: {{rmse:.4f}} (pooled across folds — matches Model Development)")
+print(f"  R²:   {{r2:.4f}} (pooled across folds)")
+print(f"  MAE:  {{mae:.4f}} (pooled across folds)")
 print(f"  RPD:  {{rpd:.2f}}")
 
-# Per-fold details
+# Per-fold details (for reference only — not used in headline numbers)
 print(f"\\nPer-fold RMSE: {{[f'{{x:.4f}}' for x in fold_rmse]}}")
 print(f"Per-fold R²:   {{[f'{{x:.4f}}' for x in fold_r2]}} (for reference only)")
 '''
@@ -135,8 +143,8 @@ METRICS_CLASSIFICATION_TEMPLATE = '''
 from sklearn.metrics import confusion_matrix, classification_report
 
 print(f"\\nCross-validation Results ({cv_folds}-fold):")
-print(f"  Accuracy: {{accuracy:.4f}} (per-fold mean)")
-print(f"  F1 Score (weighted): {{f1:.4f}} (per-fold mean)")
+print(f"  Accuracy: {{accuracy:.4f}} (pooled across folds — matches Model Development)")
+print(f"  F1 Score (weighted): {{f1:.4f}} (pooled across folds)")
 
 print("\\nConfusion Matrix:")
 print(confusion_matrix(np.array(all_y_true), y_pred_cv))

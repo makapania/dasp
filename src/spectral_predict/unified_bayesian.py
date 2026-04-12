@@ -38,14 +38,11 @@ import pandas as pd
 import optuna
 from optuna import Trial
 from optuna.samplers import TPESampler
-from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
+from sklearn.model_selection import cross_val_predict, KFold, StratifiedKFold
 
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
-    cross_validate_with_early_stopping,
     cross_val_predict_with_early_stopping,
-    cross_val_score_with_early_stopping,
-    is_boosting_model,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
@@ -1290,8 +1287,9 @@ def create_unified_objective(
                 # Compute pooled CV predictions once and derive accuracy + other metrics from them.
                 # Pooled accuracy (sample-weighted across all folds) differs slightly from
                 # per-fold-averaged accuracy when folds have unequal sizes — the pooled form
-                # is the chemometrics/IUPAC convention and matches how R² is computed above.
-                # This also saves a full CV pass per trial (was 2 passes: cross_val_score + cross_val_predict).
+                # matches how RMSE/R² are computed above and matches scikit-learn's
+                # cross_val_predict convention. (IUPAC's CV guidance is regression-specific.)
+                # This also saves a full CV pass per trial (was 2 passes: score + predict).
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
