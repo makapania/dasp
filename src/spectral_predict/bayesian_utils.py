@@ -795,11 +795,15 @@ def convert_optuna_result_to_dasp_format(
             # Add training configuration
             # cv_strategy is the source of truth; `folds` here is an integer
             # compat field (see search.py:4532 for the matching scheme).
+            _n_samples_used = (
+                int(total_samples_original - excluded_count - validation_count)
+                if total_samples_original is not None
+                else np.nan
+            )
             if cv_strategy == 'loo':
-                _effective_folds = (
-                    total_samples_original - excluded_count - validation_count
-                    if total_samples_original else np.nan
-                )
+                # LOO folds == number of training samples; must be int so old
+                # binaries don't crash (mirrors search.py:4567-4568).
+                _effective_folds = _n_samples_used if total_samples_original is not None else folds
             else:
                 _effective_folds = folds
 
@@ -807,7 +811,7 @@ def convert_optuna_result_to_dasp_format(
                 'cv_strategy': cv_strategy,
                 'cv_n_repeats': cv_n_repeats,
                 'folds': _effective_folds,
-                'n_samples_used': total_samples_original - excluded_count - validation_count if total_samples_original else np.nan,
+                'n_samples_used': _n_samples_used,
                 'n_samples_total': total_samples_original if total_samples_original else np.nan,
                 'excluded_count': excluded_count,
                 'validation_count': validation_count,

@@ -38,7 +38,7 @@ import pandas as pd
 import optuna
 from optuna import Trial
 from optuna.samplers import TPESampler
-from sklearn.model_selection import cross_val_predict, KFold, StratifiedKFold
+from sklearn.model_selection import cross_val_predict
 
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (

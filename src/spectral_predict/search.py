@@ -6,7 +6,6 @@ import inspect
 import logging
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
@@ -4827,7 +4826,6 @@ def run_one_class_search(
     df_results : pd.DataFrame
         Results dataframe ranked by balanced accuracy.
     """
-    from sklearn.model_selection import KFold
     from sklearn.base import clone
     from sklearn.preprocessing import StandardScaler
     from .contamination import (
