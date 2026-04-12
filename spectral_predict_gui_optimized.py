@@ -22057,21 +22057,30 @@ class SpectralPredictApp:
                     return
 
         # --- LOO + classification: guard against single-sample minority class ---
+        # Only applies when the resolved task is classification — under 'auto'
+        # with a continuous regression target, every float becomes its own
+        # 'class' with count 1 and this check would fire spuriously.
         if cv_strategy == 'loo' and self.task_type.get() in ('classification', 'auto'):
             if self.y is not None:
-                class_counts = self.y.value_counts()
-                min_count = class_counts.min()
-                if min_count < 2:
-                    min_class = class_counts.idxmin()
-                    messagebox.showerror(
-                        "LOO Not Possible",
-                        f"Class '{min_class}' has only {min_count} sample(s). "
-                        "LOO CV requires at least 2 samples per class so every "
-                        "training fold contains all classes.\n\n"
-                        "Use K-Fold instead, or add more samples."
-                    )
-                    self._update_search_buttons('idle')
-                    return
+                task_setting = self.task_type.get()
+                resolved_is_classification = task_setting == 'classification' or (
+                    task_setting == 'auto'
+                    and (self.y.nunique() < 10 or not pd.api.types.is_numeric_dtype(self.y.dtype))
+                )
+                if resolved_is_classification:
+                    class_counts = self.y.value_counts()
+                    min_count = class_counts.min()
+                    if min_count < 2:
+                        min_class = class_counts.idxmin()
+                        messagebox.showerror(
+                            "LOO Not Possible",
+                            f"Class '{min_class}' has only {min_count} sample(s). "
+                            "LOO CV requires at least 2 samples per class so every "
+                            "training fold contains all classes.\n\n"
+                            "Use K-Fold instead, or add more samples."
+                        )
+                        self._update_search_buttons('idle')
+                        return
 
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
