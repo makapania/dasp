@@ -1717,6 +1717,16 @@ def run_unified_bayesian(
             n_folds=cv_folds
         )
 
+    # Backend guard for CV strategy vs class distribution (runs regardless of
+    # imbalance_method — scripted callers can bypass the GUI).
+    from .cv_utils import validate_cv_strategy_for_task
+    validate_cv_strategy_for_task(
+        strategy=cv_strategy,
+        task_type=task_type,
+        y=y,
+        n_folds=cv_folds,
+    )
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"Unified Bayesian Optimization")
@@ -1875,6 +1885,9 @@ def run_unified_bayesian(
         smoothing=smoothing,
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
+        cv_strategy=cv_strategy,
+        cv_n_repeats=cv_n_repeats,
+        n_samples_used=n_samples,
     )
 
     if verbose:
@@ -1928,6 +1941,9 @@ def convert_study_to_dataframe(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
+    n_samples_used: Optional[int] = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -1997,6 +2013,19 @@ def convert_study_to_dataframe(
             'early_stopping_rounds': trial.user_attrs.get('early_stopping_rounds', None),
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
+            # training_config mirrors search.py so model save/load can restore
+            # the exact CV strategy used. `folds` is an integer fallback for
+            # old readers that don't know about cv_strategy (LOO reports the
+            # effective sample count).
+            'training_config': {
+                'cv_strategy': cv_strategy,
+                'cv_n_repeats': cv_n_repeats,
+                'folds': (n_samples_used if cv_strategy == 'loo' and n_samples_used
+                          else cv_folds),
+                'n_samples_used': n_samples_used,
+                'n_features_used': n_features,
+                'random_state': 42,
+            },
         }
 
         # Add metrics - both calibration and CV

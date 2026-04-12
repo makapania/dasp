@@ -990,6 +990,20 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             # Re-raise with clear indication this is an upfront validation error
             raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
 
+    # Backend guard for CV strategy vs class distribution (runs regardless of
+    # imbalance_method — GUI can't be the only layer of defense for scripted
+    # callers that bypass the GUI).
+    from .cv_utils import validate_cv_strategy_for_task
+    try:
+        validate_cv_strategy_for_task(
+            strategy=cv_strategy,
+            task_type=task_type,
+            y=y_np if task_type == 'classification' else np.asarray(y),
+            n_folds=folds,
+        )
+    except ValueError as e:
+        raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
+
     # Create results container
     df_results = create_results_dataframe(task_type)
 

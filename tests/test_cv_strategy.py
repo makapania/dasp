@@ -629,3 +629,182 @@ class TestCvStrategyIntegration:
             'task_type': 'regression',
         }
         assert legacy_config.get('cv_strategy', 'kfold') == 'kfold'
+
+
+class TestRepeatedCvClassifierMajorityVote:
+    """Regression tests for: averaging integer class labels under repeated CV
+    produced fractional 'predictions' like 0.5 that poisoned classification
+    metrics."""
+
+    def test_repeated_cv_classifier_returns_integer_labels(self):
+        from sklearn.neighbors import KNeighborsClassifier
+        from spectral_predict.cv_utils import cross_val_predict_pooled
+
+        rng = np.random.default_rng(1)
+        X = rng.normal(size=(18, 2))
+        y = np.array([0, 1] * 9)
+        cv = build_cv_splitter('repeated_kfold', 3, 'classification',
+                                n_repeats=5, random_state=42)
+        preds = cross_val_predict_pooled(KNeighborsClassifier(n_neighbors=3), X, y, cv=cv)
+        # Every prediction must be an actual class label, not an average
+        assert np.all(preds == np.round(preds)), \
+            f"Classifier predict under repeated CV produced fractional labels: {preds}"
+        assert set(preds).issubset({0, 1})
+
+    def test_repeated_cv_regressor_still_averages(self):
+        """Regression predictions SHOULD be averaged across repeats."""
+        from sklearn.linear_model import Ridge
+        from spectral_predict.cv_utils import cross_val_predict_pooled
+
+        rng = np.random.default_rng(2)
+        X = rng.normal(size=(20, 3))
+        y = X[:, 0] * 1.2 + rng.normal(size=20) * 0.1
+        cv = build_cv_splitter('repeated_kfold', 4, 'regression',
+                                n_repeats=3, random_state=42)
+        preds = cross_val_predict_pooled(Ridge(), X, y, cv=cv)
+        assert preds.dtype.kind == 'f'  # floating-point output
+        assert preds.shape == (20,)
+
+    def test_repeated_cv_classifier_predict_proba_still_averages(self):
+        """predict_proba across repeats SHOULD be averaged (probabilities compose)."""
+        from sklearn.linear_model import LogisticRegression
+        from spectral_predict.cv_utils import cross_val_predict_pooled
+
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(24, 3))
+        y = (X[:, 0] > 0).astype(int)
+        cv = build_cv_splitter('repeated_kfold', 3, 'classification',
+                                n_repeats=4, random_state=42)
+        proba = cross_val_predict_pooled(
+            LogisticRegression(max_iter=500), X, y, cv=cv, method='predict_proba'
+        )
+        assert proba.shape == (24, 2)
+        assert np.allclose(proba.sum(axis=1), 1.0, atol=1e-6)
+
+
+class TestBayesianPersistsCvStrategy:
+    """Regression tests for: unified Bayesian dropped cv_strategy/cv_n_repeats
+    from result rows, breaking save/load round-trip."""
+
+    def test_loo_bayesian_writes_training_config(self):
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(20, 6))
+        y = X[:, 0] * 1.2 - X[:, 1] * 0.7 + rng.normal(size=20) * 0.1
+        w = np.array([400, 410, 420, 430, 440, 450], dtype=float)
+        df, _ = run_unified_bayesian(
+            X, y, w, model_name='Ridge', task_type='regression',
+            n_trials=2, cv_folds=3, cv_strategy='loo', cv_n_repeats=1,
+            verbose=False,
+        )
+        assert 'training_config' in df.columns
+        tc = df['training_config'].iloc[0]
+        assert tc['cv_strategy'] == 'loo'
+        assert tc['folds'] == 20  # LOO's effective fold count == n_samples
+        assert tc['cv_n_repeats'] == 1
+
+    def test_repeated_kfold_bayesian_writes_training_config(self):
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(30, 5))
+        y = X[:, 0] * 1.2 + rng.normal(size=30) * 0.1
+        w = np.array([400, 410, 420, 430, 440], dtype=float)
+        df, _ = run_unified_bayesian(
+            X, y, w, model_name='Ridge', task_type='regression',
+            n_trials=2, cv_folds=3, cv_strategy='repeated_kfold', cv_n_repeats=2,
+            verbose=False,
+        )
+        tc = df['training_config'].iloc[0]
+        assert tc['cv_strategy'] == 'repeated_kfold'
+        assert tc['cv_n_repeats'] == 2
+        assert tc['folds'] == 3
+
+
+class TestBackendLooMinorityClassGuard:
+    """Regression tests for: LOO/minority-class protection only existed in the
+    GUI; scripted callers hit fold-level single-class training failures."""
+
+    def test_run_search_rejects_loo_with_minority_class_of_one(self):
+        import pandas as pd
+        from spectral_predict.search import run_search
+
+        X = pd.DataFrame(np.random.RandomState(0).randn(6, 4))
+        y = pd.Series(['A', 'A', 'A', 'A', 'A', 'B'])
+        with pytest.raises(ValueError, match="LOO CV requires at least 2 samples per class"):
+            run_search(
+                X, y, task_type='classification',
+                folds=5, cv_strategy='loo',
+                models_to_test=['RandomForest'],
+                preprocessing_methods={'raw': True},
+                enable_variable_subsets=False, enable_region_subsets=False,
+            )
+
+    def test_run_unified_bayesian_rejects_loo_with_minority_class_of_one(self):
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+
+        X = np.random.RandomState(0).randn(6, 4)
+        y = np.array(['A', 'A', 'A', 'A', 'A', 'B'])
+        w = np.array([400, 410, 420, 430], dtype=float)
+        with pytest.raises(ValueError, match="LOO CV requires at least 2 samples per class"):
+            run_unified_bayesian(
+                X, y, w, model_name='RandomForest', task_type='classification',
+                n_trials=1, cv_folds=5, cv_strategy='loo', verbose=False,
+            )
+
+    def test_kfold_with_minority_class_smaller_than_folds_rejected(self):
+        import pandas as pd
+        from spectral_predict.search import run_search
+
+        X = pd.DataFrame(np.random.RandomState(0).randn(10, 4))
+        y = pd.Series(['A'] * 8 + ['B', 'B'])  # only 2 'B' but 5 folds requested
+        with pytest.raises(ValueError, match="5-fold CV requires at least 5 samples per class"):
+            run_search(
+                X, y, task_type='classification',
+                folds=5, cv_strategy='kfold',
+                models_to_test=['RandomForest'],
+                preprocessing_methods={'raw': True},
+                enable_variable_subsets=False, enable_region_subsets=False,
+            )
+
+
+class TestCodeGeneratorCvStrategy:
+    """Regression tests for: exported scripts hardcoded KFold/StratifiedKFold
+    regardless of cv_strategy, silently breaking LOO/Repeated reproducibility."""
+
+    def test_loo_regression_emits_leave_one_out(self):
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {'model_name': 'Ridge', 'task_type': 'regression', 'target_name': 'y',
+               'params': {}, 'metrics': {}, 'cv_folds': 12, 'cv_strategy': 'loo'}
+        script = CodeGenerator(cfg).generate_script()
+        assert 'LeaveOneOut()' in script
+        assert 'cv = LeaveOneOut()' in script
+
+    def test_repeated_kfold_classification_emits_repeated_stratified(self):
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {'model_name': 'RandomForest', 'task_type': 'classification',
+               'target_name': 'y', 'params': {}, 'metrics': {},
+               'cv_folds': 5, 'cv_strategy': 'repeated_kfold', 'cv_n_repeats': 3}
+        script = CodeGenerator(cfg).generate_script()
+        assert 'RepeatedStratifiedKFold' in script
+        assert 'n_splits=5, n_repeats=3' in script
+
+    def test_repeated_kfold_regression_emits_repeated_kfold(self):
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {'model_name': 'Ridge', 'task_type': 'regression', 'target_name': 'y',
+               'params': {}, 'metrics': {},
+               'cv_folds': 4, 'cv_strategy': 'repeated_kfold', 'cv_n_repeats': 2}
+        script = CodeGenerator(cfg).generate_script()
+        assert 'RepeatedKFold' in script
+        assert 'RepeatedStratifiedKFold' not in script
+        assert 'n_splits=4, n_repeats=2' in script
+
+    def test_kfold_default_unchanged(self):
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {'model_name': 'Ridge', 'task_type': 'regression', 'target_name': 'y',
+               'params': {}, 'metrics': {}, 'cv_folds': 5}  # no cv_strategy
+        script = CodeGenerator(cfg).generate_script()
+        assert 'KFold(n_splits=5, shuffle=True, random_state=42)' in script
+        assert 'LeaveOneOut' not in script
+        assert 'RepeatedKFold' not in script

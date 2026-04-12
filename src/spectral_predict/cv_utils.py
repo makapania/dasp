@@ -22,6 +22,7 @@ from sklearn.metrics import (
 )
 from typing import Optional, Dict, Any, Union, List
 import warnings
+from collections import Counter
 from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
 
 # Import boosting model types for detection
@@ -47,6 +48,56 @@ if CATBOOST_AVAILABLE:
 else:
     CATBOOST_MODELS = ()
     BOOSTING_MODELS = XGBOOST_MODELS + LIGHTGBM_MODELS
+
+
+def validate_cv_strategy_for_task(
+    strategy: str,
+    task_type: str,
+    y: np.ndarray,
+    n_folds: int,
+) -> None:
+    """Upfront guard for CV strategies that can fail inside fold loops.
+
+    Catches cases where LOO / K-fold will hit a single-class training fold —
+    the sklearn error comes out as an opaque ValueError deep in the fit loop,
+    which gets swallowed by pooled helpers or degrades into silent NaN metrics
+    in the Bayesian objective. Validation must run BEFORE training starts.
+
+    Raises
+    ------
+    ValueError
+        If the dataset is too small or imbalanced for the requested strategy.
+    """
+    if task_type not in ('classification', 'one_class'):
+        return
+
+    y_arr = np.asarray(y)
+    n = len(y_arr)
+    if n < 2:
+        raise ValueError(f"Need at least 2 samples for {task_type} CV (got {n}).")
+
+    if task_type == 'classification':
+        # Enumerate class counts — sklearn needs ≥2 classes in every train fold
+        classes, counts = np.unique(y_arr, return_counts=True)
+        if len(classes) < 2:
+            raise ValueError(
+                f"Classification requires at least 2 classes, got only {len(classes)} "
+                f"({classes.tolist()})."
+            )
+        min_class = int(counts.min())
+        if strategy == 'loo' and min_class < 2:
+            rarest = classes[int(counts.argmin())]
+            raise ValueError(
+                f"LOO CV requires at least 2 samples per class (class {rarest!r} has "
+                f"{min_class}). Leaving out its only sample yields a single-class "
+                f"training fold. Use K-fold or add more samples for that class."
+            )
+        if strategy in ('kfold', 'repeated_kfold') and min_class < n_folds:
+            rarest = classes[int(counts.argmin())]
+            raise ValueError(
+                f"{n_folds}-fold CV requires at least {n_folds} samples per class "
+                f"(class {rarest!r} has {min_class}). Reduce folds or add samples."
+            )
 
 
 def estimate_total_cv_fits(
@@ -144,6 +195,29 @@ def _is_repeated_cv(cv) -> bool:
     return isinstance(cv, (RepeatedKFold, RepeatedStratifiedKFold))
 
 
+def _model_is_classifier(model) -> bool:
+    """Detect whether an estimator (possibly wrapped in a Pipeline) is a classifier."""
+    inner = _get_model_from_pipeline(model) if hasattr(model, 'steps') else model
+    try:
+        return is_classifier(inner)
+    except Exception:
+        return False
+
+
+def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
+    """Reduce a list of vote-lists to a single prediction per sample via mode.
+
+    Used for repeated-CV classifier predictions where numeric averaging would
+    produce nonsensical fractional labels (e.g. averaging [0, 1] → 0.5).
+    """
+    n_samples = len(votes_per_sample)
+    out = np.empty(n_samples, dtype=dtype)
+    for i, votes in enumerate(votes_per_sample):
+        if votes:
+            out[i] = Counter(votes).most_common(1)[0][0]
+    return out
+
+
 def cross_val_predict_pooled(
     model,
     X: np.ndarray,
@@ -181,8 +255,23 @@ def cross_val_predict_pooled(
     if not _is_repeated_cv(cv):
         return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
 
-    # Repeated CV: accumulate predictions and average per sample
+    # Repeated CV: accumulate predictions per sample, then reduce.
+    # For classifier predict, reduce by majority vote (averaging integer class
+    # labels produces nonsensical fractional "predictions"). For regression or
+    # predict_proba, average across repeats.
     n_samples = X.shape[0]
+    use_majority_vote = method == 'predict' and _model_is_classifier(model)
+
+    if use_majority_vote:
+        votes_per_sample: List[list] = [[] for _ in range(n_samples)]
+        for train_idx, test_idx in cv.split(X, y):
+            model_clone = clone(model)
+            model_clone.fit(X[train_idx], y[train_idx])
+            preds = np.ravel(model_clone.predict(X[test_idx]))
+            for i, sample_idx in enumerate(test_idx):
+                votes_per_sample[sample_idx].append(preds[i])
+        return _majority_vote(votes_per_sample, dtype=np.asarray(y).dtype)
+
     if method == 'predict_proba':
         n_classes = len(np.unique(y))
         pred_sum = np.zeros((n_samples, n_classes))
@@ -200,7 +289,6 @@ def cross_val_predict_pooled(
         pred_sum[test_idx] += preds
         pred_count[test_idx] += 1
 
-    # Average predictions (every sample should have been tested n_repeats times)
     mask = pred_count > 0
     if method == 'predict_proba':
         pred_sum[mask] /= pred_count[mask, np.newaxis]
@@ -601,6 +689,7 @@ def cross_val_predict_with_early_stopping(
     # Manual CV loop with early stopping (handles repeated CV via accumulation)
     repeated = _is_repeated_cv(cv)
     n_samples = X.shape[0]
+    use_majority_vote = repeated and method == 'predict' and _model_is_classifier(model)
 
     # Determine output shape
     if method == 'predict_proba':
@@ -610,6 +699,8 @@ def cross_val_predict_with_early_stopping(
         predictions = np.zeros(n_samples)
     if repeated:
         pred_count = np.zeros(n_samples)
+        if use_majority_vote:
+            votes_per_sample: List[list] = [[] for _ in range(n_samples)]
 
     for train_idx, val_idx in cv.split(X, y):
         X_train, X_val = X[train_idx], X[val_idx]
@@ -656,12 +747,18 @@ def cross_val_predict_with_early_stopping(
             preds = np.ravel(preds)
 
         if repeated:
-            predictions[val_idx] += preds
+            if use_majority_vote:
+                for i, sample_idx in enumerate(val_idx):
+                    votes_per_sample[sample_idx].append(preds[i])
+            else:
+                predictions[val_idx] += preds
             pred_count[val_idx] += 1
         else:
             predictions[val_idx] = preds
 
     if repeated:
+        if use_majority_vote:
+            return _majority_vote(votes_per_sample, dtype=np.asarray(y).dtype)
         mask = pred_count > 0
         if method == 'predict_proba':
             predictions[mask] /= pred_count[mask, np.newaxis]

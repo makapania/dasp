@@ -106,6 +106,8 @@ class CodeGenerator:
         self.variable_indices = model_config.get('variable_indices', None)
         self.wavelengths = model_config.get('wavelengths', None)
         self.cv_folds = model_config.get('cv_folds', 5)
+        self.cv_strategy = model_config.get('cv_strategy', 'kfold')
+        self.cv_n_repeats = model_config.get('cv_n_repeats', 5)
         self.imbalance_method = model_config.get('imbalance_method', None)
 
         # Update options with target column from config
@@ -1210,7 +1212,10 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         else:
             x_var = 'X'
 
-        cv_code = get_cross_validation_template(self.task_type, self.cv_folds)
+        cv_code = get_cross_validation_template(
+            self.task_type, self.cv_folds,
+            cv_strategy=self.cv_strategy, cv_n_repeats=self.cv_n_repeats,
+        )
 
         # Replace X_final with appropriate variable
         cv_code = cv_code.replace('X_final', x_var)
