@@ -1036,6 +1036,11 @@ def create_unified_objective(
                         trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
+                # CV strategy must be on the trial so raw-study consumers (not just
+                # the converted result row) can reconstruct the run — fixes codex
+                # finding that Bayesian persistence was incomplete.
+                trial.set_user_attr('cv_strategy', cv_strategy)
+                trial.set_user_attr('cv_n_repeats', cv_n_repeats)
                 # Store preprocessing fields used by convert_study_to_dataframe
                 trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
                 trial.set_user_attr('window', preprocess_config.get('window', 0))
@@ -1412,6 +1417,10 @@ def create_unified_objective(
             trial.set_user_attr('n_vars', n_vars)
             trial.set_user_attr('early_stopping_rounds', early_stopping_rounds if use_early_stopping else None)
             trial.set_user_attr('model_params', str(model_params))
+            # CV strategy + n_repeats on every trial so raw-study consumers don't
+            # lose the run configuration (converted result rows carry these too).
+            trial.set_user_attr('cv_strategy', cv_strategy)
+            trial.set_user_attr('cv_n_repeats', cv_n_repeats)
 
             # Fit on full training data for calibration metrics
             model.fit(X_final, y)
@@ -1718,13 +1727,16 @@ def run_unified_bayesian(
         )
 
     # Backend guard for CV strategy vs class distribution (runs regardless of
-    # imbalance_method — scripted callers can bypass the GUI).
+    # imbalance_method — scripted callers can bypass the GUI). Also validates
+    # n_repeats for Repeated K-Fold and inlier counts for one-class.
     from .cv_utils import validate_cv_strategy_for_task
     validate_cv_strategy_for_task(
         strategy=cv_strategy,
         task_type=task_type,
         y=y,
         n_folds=cv_folds,
+        n_repeats=cv_n_repeats,
+        inlier_label=inlier_class_label if task_type == 'one_class' else None,
     )
 
     if verbose:

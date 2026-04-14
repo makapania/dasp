@@ -4,6 +4,76 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-14 — PR #4 round-2 review fixes: Repeated K-Fold backend pooling + exported-script correctness (Claude Opus 4.6)
+
+### Context
+
+PR #4 (`claude/cv-strategy-overhaul`) went through a second pre-merge review with codex + code-reviewer agent. Both flagged significant correctness bugs that survived the first-round fixes. CI was red but from pre-existing infrastructure (no `$DISPLAY` for tkinter on Ubuntu runners), not from this PR. The findings below were the actual merge blockers.
+
+### Bug: Backend Repeated-K-Fold regression RMSEcv double-counts duplicated samples
+
+**Root cause:** `search.py:4260` aggregated CV predictions by `np.concatenate([m["y_test"] for m in cv_metrics])` + concat of `y_pred`, then computed `RMSE = sqrt(mean_squared_error(all_y_test, all_y_pred))`. Under `RepeatedKFold` (the whole point of this PR), each sample appears in `n_repeats` different test folds, so flat concatenation duplicates every sample row `n_repeats` times. The resulting RMSE scores duplicates as independent observations and diverges from the per-sample-pooled RMSE that `cv_utils.cross_val_predict_pooled` computes — the number shown in the Results tab was quietly incorrect whenever the user picked Repeated K-Fold.
+
+Same class of bug for classification (`search.py:4312`): headline metrics were `np.mean([m["Accuracy"] ...])` across folds (duplicated samples each contribute to `n_repeats` fold accuracies), and the per-class `classification_report` ran on the concatenated-duplicated predictions. The majority-vote semantics in `cv_utils._majority_vote` were never reached from the grid-search path.
+
+The helper the PR already shipped (`cross_val_predict_pooled`) had the correct per-sample reduction, but `search.py` had its own fold-aggregation path and never routed through it.
+
+**Fix:** Added `reduce_repeated_cv_predictions(cv_metrics, splits, n_samples, task_type)` in `cv_utils.py`. Post-hoc reduction from the already-collected fold dicts — no re-fitting. Regression averages per-sample predictions; classification majority-votes per-sample via `Counter.most_common(1)` (deterministic for fixed split order + random state). `search.py` now realises `splits = list(cv_splitter.split(X, y))` once, passes to both serial/parallel fold execution, and under repeated CV pools per-sample before computing RMSE / R² / regional RMSE (regression) and Accuracy / F1 / Precision / Recall / BalancedAcc / Kappa / MCC / Specificity-for-binary (classification). AUC / LogLoss / BER still come from mean-of-folds because those need probabilities, not labels. Non-repeated paths (KFold, LOO) are unchanged — concat is per-sample-natural when each sample appears in exactly one fold.
+
+Regression tests added: `TestPostMergeReviewFixes::test_backend_regression_pools_under_repeated_kfold`, `test_reduce_repeated_cv_regression_matches_manual_pool`, `test_reduce_repeated_cv_classification_majority_vote`.
+
+### Bug: Exported classification script raised `NameError: name 'all_y_true' is not defined`
+
+**Root cause:** `templates/validation.py:190,193` (`METRICS_CLASSIFICATION_TEMPLATE`) printed `confusion_matrix(np.array(all_y_true), y_pred_cv)` and `classification_report(np.array(all_y_true), y_pred_cv)`, but the new per-sample-pooling CV block at lines 151-156 defines `all_y_true_arr` and `all_y_pred_arr`. Any exported classification script crashed on the first metric print — never triggered by the existing test suite because `tests/test_cv_strategy.py::TestExportScriptMatchesBackend` reimplemented the pooling logic inline rather than rendering + executing the template.
+
+**Fix:** changed both references to `all_y_true_arr` / `all_y_pred_arr`. Added `TestPostMergeReviewFixes::test_classification_metrics_template_has_no_nameerror` that renders the template and `exec()`s it against a synthetic dataset.
+
+### Bug: `code_generator.py` imbalance path hardcoded K-Fold and flat-extended predictions
+
+**Root cause:** `_render_cross_validation_with_imbalance` (`code_generator.py:1413-1540`) had two hardcoded literal blocks (one per task type) that emitted `cv = StratifiedKFold(n_splits={cv_folds}, ...)` / `cv = KFold(...)` regardless of `self.cv_strategy`. When the user selected LOO or Repeated K-Fold AND enabled any imbalance method (SMOTE / RegressionUndersampler / class_weight / etc.), the exported script silently ran plain K-Fold while the backend ran the chosen strategy. Also extended predictions flat (`all_y_true.extend(y_test); all_y_pred.extend(y_pred_fold)`) instead of per-sample reduction, so the classification accuracy would scale duplicates under Repeated K-Fold.
+
+**Fix:** both branches now import `_cv_splitter_code` from `templates.validation` (single source of truth for CV emission across normal and imbalance paths) and mirror the per-sample reduction pattern (`preds_per_sample` / `truth_per_sample` dicts → sorted keys → mean or majority-vote). Regression test: `test_imbalance_code_generator_honors_cv_strategy`.
+
+### Bug: Pre-existing indentation bug in imbalance-regression final-model template
+
+**Root cause:** `_render_final_model_with_imbalance` had `fit_kwargs = {{}}` at column 0 followed by `    if sample_weight is not None:` at column 4 — Python `IndentationError: unexpected indent`. Every imbalance-regression export script failed to compile. Pre-existed since commit `44af5545` (2026-01-23), so not actually introduced by this PR — but the compile-check in the new test caught it. Fixed while touching adjacent code: de-indented the `if sample_weight is not None` block to match the flat layout.
+
+### Bug: PCA-SIMCA + LOO with tiny inlier sets still failed silently
+
+**Root cause:** `contamination.py:578-583` set `min_inliers = 2` for LOO regardless of model. PCA-SIMCA requires 3 training samples (`PCASIMCA.fit` hard floor at `:128`). With 3 inliers and LOO, every training fold has only 2 samples → every fold fails → skip guard fires → trial returns +inf silently (the same class of bug the prior PCA-SIMCA small-sample fix tried to kill).
+
+**Fix:** model-aware minimum: `SIMCA_FIT_FLOOR = 3`. Under LOO, require `min_inliers = 4` for PCA-SIMCA (so every leave-one-out training fold has ≥ 3 samples); under K-fold / Repeated K-fold, require `n_inliers >= ceil(3 * n_folds / (n_folds - 1))`. Emits a clear skip_reason ("PCA-SIMCA needs N+ so every training fold has >= 3 samples"). Regression test: `test_one_class_loo_rejects_pca_simca_with_three_inliers`.
+
+### Bug: `validate_cv_strategy_for_task` didn't reject `n_repeats <= 0` or validate one-class inlier counts
+
+**Root cause:** The validator ran before training for classification but was a no-op for one-class, and never checked `n_repeats` at all. `RepeatedKFold(n_repeats=0)` would construct happily and the fold loop would yield zero folds, leading to empty `cv_metrics` and downstream division-by-zero or all-NaN metrics.
+
+**Fix:** `validate_cv_strategy_for_task` now accepts `n_repeats` and `inlier_label` parameters. Rejects `n_repeats < 1` upfront. For `task_type='one_class'`, validates inlier count against the strategy's minimum (LOO: 2, K-fold: `n_folds`). Wired into all three callers: `search.run_search`, `search.run_one_class_search`, and `unified_bayesian.run_unified_bayesian`. Regression tests: `test_validate_cv_strategy_rejects_zero_repeats`, `test_validate_cv_strategy_rejects_one_class_too_few_inliers`.
+
+### Bug: `cv_strategy` / `cv_n_repeats` not persisted on Bayesian `trial.user_attrs`
+
+**Root cause:** Both the non-one-class Bayesian objective (`unified_bayesian.py:1404-1414`) and the one-class objective (`:1037-1056`) wrote trial user_attrs for preprocessing config, n_vars, model_params, subset_tag — but never for `cv_strategy` / `cv_n_repeats`. Converted result rows carried them (via `convert_study_to_dataframe`), but any raw-study consumer reading `study.trials_dataframe()` or `trial.user_attrs` directly would lose the CV configuration.
+
+**Fix:** two-line addition to both objective function user-attr blocks. Noticed by code-reviewer; not a ship-blocker on its own but closes a silent landmine.
+
+### Minor: `cv_utils._model_is_classifier` had bare `except Exception`
+
+**Root cause:** `try: return is_classifier(inner) except Exception: return False`. If a custom estimator's `_estimator_type` tag raised for any reason, the repeated-CV predict path would silently fall back to numeric averaging of integer class labels — which is exactly the bug the majority-vote code exists to prevent.
+
+**Fix:** narrowed to `except (AttributeError, TypeError)` and added a `warnings.warn` with the class name + error so the silent fallback becomes visible. Low risk under current sklearn but closes a known-silent-failure path.
+
+### Gotcha: splits generator must be realised before pooling
+
+`KFold.split()` / `RepeatedKFold.split()` return generators. The existing code in `search.py` called `cv_splitter.split(X, y)` once inside the list comprehension that built `cv_metrics`. To pool per-sample after the fact, we need the test indices from each split. Solution: `splits = list(cv_splitter.split(X, y))` once before the fold loop, pass the same realised list to both serial and parallel fold executors and to `reduce_repeated_cv_predictions`. A second call to `cv_splitter.split()` would produce a fresh generator with the same seed — but would not align with the `cv_metrics` order under any parallel joblib backend that reorders futures.
+
+### Results
+
+- 60/60 tests in `tests/test_cv_strategy.py` pass (8 new regression tests added under `TestPostMergeReviewFixes`).
+- 138/138 adjacent tests pass: `test_contamination_detection`, `test_bayesian_utils`, `test_search_comprehensive`, `test_unified_bayesian_baseline`, `test_nsga2_search`.
+- Net diff: +383 / -65 across 7 files.
+
+---
+
 ## 2026-04-11 — Grid-search OC validation silent NaN + final-merge cleanup (Claude Opus 4.6)
 
 ### Bug: Grid-search one-class results show no `val_*` metrics, Bayesian works fine

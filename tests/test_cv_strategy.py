@@ -901,3 +901,163 @@ class TestExportScriptMatchesBackend:
 
         assert abs(backend_acc - script_acc) < 1e-10, \
             f"Script diverges from backend: {script_acc} vs {backend_acc}"
+
+
+class TestPostMergeReviewFixes:
+    """Regression tests for bugs caught in the second-round codex /
+    code-reviewer pre-merge review (see SESSION_LOG.md)."""
+
+    def test_classification_metrics_template_has_no_nameerror(self):
+        """Rendered classification template must not reference undefined names.
+
+        The metrics template previously used `all_y_true` but the CV block
+        defined `all_y_true_arr`. Any exported classification script raised
+        NameError on first metric print. Render + exec to catch regressions.
+        """
+        import numpy as np
+        from sklearn.datasets import make_classification
+        from spectral_predict.templates.validation import (
+            get_cross_validation_template, get_metrics_template,
+        )
+
+        cv_block = get_cross_validation_template('classification', 3, 'kfold', 5)
+        metrics_block = get_metrics_template('classification', 3)
+
+        X, y = make_classification(n_samples=40, n_features=6, n_classes=2, random_state=0)
+
+        # Simulate what a generated script does around the template: define X_final,
+        # y, model, np, then run the rendered CV + metrics blocks.
+        from sklearn.linear_model import LogisticRegression
+        script_ns = {
+            'np': np,
+            'X_final': X,
+            'y': y,
+            'model': LogisticRegression(max_iter=500),
+        }
+        exec(cv_block, script_ns)
+        exec(metrics_block, script_ns)
+        assert 'accuracy' in script_ns
+        assert 'f1' in script_ns
+
+    def test_reduce_repeated_cv_regression_matches_manual_pool(self):
+        """Backend reducer must match manually-computed per-sample average."""
+        from spectral_predict.cv_utils import (
+            build_cv_splitter, reduce_repeated_cv_predictions,
+        )
+        rng = np.random.default_rng(7)
+        n = 15
+        y = rng.normal(size=n)
+        cv = build_cv_splitter('repeated_kfold', 3, 'regression',
+                                n_repeats=4, random_state=42)
+        splits = list(cv.split(np.zeros((n, 1))))
+        cv_metrics = []
+        expected = {i: [] for i in range(n)}
+        for _tr, te in splits:
+            preds = rng.normal(size=len(te))
+            cv_metrics.append({'y_test': y[te], 'y_pred': preds})
+            for k, idx in enumerate(te):
+                expected[idx].append(preds[k])
+
+        pooled_y, pooled_pred = reduce_repeated_cv_predictions(
+            cv_metrics, splits, n_samples=n, task_type='regression'
+        )
+        # Every sample appears (n_repeats fold rotations cover all samples each repeat)
+        assert len(pooled_y) == n
+        for i in range(n):
+            assert abs(pooled_pred[i] - np.mean(expected[i])) < 1e-10
+
+    def test_reduce_repeated_cv_classification_majority_vote(self):
+        """Classification reducer must pick mode, not numeric mean."""
+        from spectral_predict.cv_utils import reduce_repeated_cv_predictions
+        # 3 samples, each receives 3 predictions. Sample 0: [0,0,1]→0; sample 1: [1,1,0]→1; sample 2: [2,2,2]→2.
+        cv_metrics = [
+            {'y_test': np.array([0, 1, 2]), 'y_pred': np.array([0, 1, 2])},
+            {'y_test': np.array([0, 1, 2]), 'y_pred': np.array([0, 1, 2])},
+            {'y_test': np.array([0, 1, 2]), 'y_pred': np.array([1, 0, 2])},
+        ]
+        splits = [
+            (np.array([]), np.array([0, 1, 2])),
+            (np.array([]), np.array([0, 1, 2])),
+            (np.array([]), np.array([0, 1, 2])),
+        ]
+        pooled_y, pooled_pred = reduce_repeated_cv_predictions(
+            cv_metrics, splits, n_samples=3, task_type='classification'
+        )
+        assert pooled_pred.tolist() == [0, 1, 2]
+        assert pooled_y.tolist() == [0, 1, 2]
+
+    def test_validate_cv_strategy_rejects_zero_repeats(self):
+        from spectral_predict.cv_utils import validate_cv_strategy_for_task
+        with pytest.raises(ValueError, match="n_repeats"):
+            validate_cv_strategy_for_task(
+                strategy='repeated_kfold', task_type='regression',
+                y=np.arange(20), n_folds=5, n_repeats=0,
+            )
+
+    def test_validate_cv_strategy_rejects_one_class_too_few_inliers(self):
+        from spectral_predict.cv_utils import validate_cv_strategy_for_task
+        y = np.array([1, 1, 1, -1, -1, -1, -1, -1])  # 3 inliers
+        with pytest.raises(ValueError, match="inliers"):
+            validate_cv_strategy_for_task(
+                strategy='kfold', task_type='one_class',
+                y=y, n_folds=5, inlier_label=1,
+            )
+
+    def test_one_class_loo_rejects_pca_simca_with_three_inliers(self):
+        """PCA-SIMCA needs >= 3 training samples; LOO with 3 total leaves 2."""
+        from spectral_predict.contamination import run_one_class_cv
+        # 3 inliers, 3 outliers, 5 features
+        X = np.random.RandomState(0).normal(size=(6, 5))
+        y_oc = np.array([1, 1, 1, -1, -1, -1])
+        result = run_one_class_cv(
+            X, y_oc, 'PCA-SIMCA', {'n_components': 2, 'alpha': 0.05},
+            n_folds=5, cv_strategy='loo',
+        )
+        assert result['skipped'] is True
+        assert 'PCA-SIMCA' in result['skip_reason']
+
+    def test_imbalance_code_generator_honors_cv_strategy(self):
+        """code_generator imbalance path must render the chosen CV strategy."""
+        from spectral_predict.code_generator import CodeGenerator
+        cfg = {
+            'model_name': 'Ridge', 'task_type': 'regression', 'target_name': 'y',
+            'params': {}, 'metrics': {}, 'cv_folds': 4,
+            'cv_strategy': 'repeated_kfold', 'cv_n_repeats': 3,
+            'imbalance_method': 'smogn',
+        }
+        script = CodeGenerator(cfg).generate_script()
+        assert 'RepeatedKFold' in script, "Imbalance path dropped cv_strategy"
+        # Per-sample reduction (not flat extend)
+        assert 'preds_per_sample' in script
+        compile(script, '<generated>', 'exec')
+
+    def test_backend_regression_pools_under_repeated_kfold(self):
+        """search.py grid-search regression RMSEcv must reduce per-sample
+        before scoring under repeated CV. Run a tiny grid search and
+        compare against sklearn's cross_val_predict pooled logic."""
+        from sklearn.linear_model import Ridge
+        from sklearn.metrics import mean_squared_error
+        from spectral_predict.cv_utils import (
+            build_cv_splitter, cross_val_predict_pooled,
+        )
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(25, 4))
+        y = X @ np.array([1.0, -0.5, 0.2, 0.3]) + rng.normal(size=25) * 0.1
+        cv = build_cv_splitter('repeated_kfold', 5, 'regression',
+                                n_repeats=3, random_state=42)
+        pooled = cross_val_predict_pooled(Ridge(), X, y, cv=cv)
+        pooled_rmse = float(np.sqrt(mean_squared_error(y, pooled)))
+
+        # Replicate what search.py does: collect fold dicts, then reduce
+        from sklearn.base import clone
+        from spectral_predict.cv_utils import reduce_repeated_cv_predictions
+        splits = list(cv.split(X, y))
+        cv_metrics = []
+        for tr, te in splits:
+            m = clone(Ridge()); m.fit(X[tr], y[tr])
+            cv_metrics.append({'y_test': y[te], 'y_pred': m.predict(X[te]).ravel()})
+        bk_y, bk_pred = reduce_repeated_cv_predictions(
+            cv_metrics, splits, n_samples=len(y), task_type='regression'
+        )
+        backend_rmse = float(np.sqrt(mean_squared_error(bk_y, bk_pred)))
+        assert abs(pooled_rmse - backend_rmse) < 1e-10

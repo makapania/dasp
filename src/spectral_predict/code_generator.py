@@ -1402,6 +1402,8 @@ def _regression_resample(X_vals, y_vals, method_name, params):
 
     def _render_cross_validation_with_imbalance(self) -> str:
         """Render cross-validation code with imbalance handling inside folds."""
+        from spectral_predict.templates.validation import _cv_splitter_code
+
         # Determine X variable name
         if self.variable_indices is not None:
             x_var = 'X_final'
@@ -1410,25 +1412,33 @@ def _regression_resample(X_vals, y_vals, method_name, params):
         else:
             x_var = 'X'
 
+        cv_import, cv_constructor = _cv_splitter_code(
+            self.task_type, self.cv_strategy, self.cv_folds, self.cv_n_repeats
+        )
+
         if self.task_type == 'classification':
             return f'''
 # =============================================================================
 # CROSS-VALIDATION (with imbalance handling)
 # =============================================================================
 
-from sklearn.model_selection import StratifiedKFold
+{cv_import}
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 from sklearn.base import clone
+from collections import Counter
 
-cv = StratifiedKFold(n_splits={self.cv_folds}, shuffle=True, random_state=42)
+cv = {cv_constructor}
 
 unique_classes = np.unique(y)
 average_method = 'binary' if len(unique_classes) == 2 else 'macro'
 
+# Per-sample prediction lists — under Repeated K-Fold each sample appears in
+# multiple test folds; majority-vote reduction before scoring matches the
+# backend (cv_utils.cross_val_predict_pooled).
 fold_acc = []
 fold_f1 = []
-all_y_true = []
-all_y_pred = []
+preds_per_sample = {{}}
+truth_per_sample = {{}}
 
 for train_idx, test_idx in cv.split({x_var}, y):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
@@ -1442,24 +1452,28 @@ for train_idx, test_idx in cv.split({x_var}, y):
         if resampler is not None:
             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
 
-    # Fit and predict
     fold_model = clone(model)
     fold_model.fit(X_train_fold, y_train_fold)
     y_pred_fold = fold_model.predict(X_test)
 
-    all_y_true.extend(y_test)
-    all_y_pred.extend(y_pred_fold)
+    for local_i, sample_idx in enumerate(test_idx):
+        preds_per_sample.setdefault(int(sample_idx), []).append(y_pred_fold[local_i])
+        truth_per_sample[int(sample_idx)] = y_test[local_i]
+
     # Per-fold metrics kept for reference only — not used in headline numbers.
     fold_acc.append(accuracy_score(y_test, y_pred_fold))
     fold_f1.append(f1_score(y_test, y_pred_fold, average=average_method, zero_division=0))
 
-all_y_true_arr = np.array(all_y_true)
-all_y_pred_arr = np.array(all_y_pred)
+# Majority-vote reduction (no-op for plain K-Fold / LOO since each sample appears once)
+sorted_idx = sorted(preds_per_sample.keys())
+all_y_true_arr = np.array([truth_per_sample[i] for i in sorted_idx])
+all_y_pred_arr = np.array(
+    [Counter(preds_per_sample[i]).most_common(1)[0][0] for i in sorted_idx]
+)
 
 # Keep y_pred_cv for compatibility with metrics template
 y_pred_cv = all_y_pred_arr
 
-# Pooled metrics (matches Model Development / scikit-learn cross_val_predict convention).
 accuracy = float(accuracy_score(all_y_true_arr, all_y_pred_arr))
 f1 = float(f1_score(all_y_true_arr, all_y_pred_arr, average=average_method, zero_division=0))
 
@@ -1477,17 +1491,20 @@ print(classification_report(all_y_true_arr, all_y_pred_arr))
 # CROSS-VALIDATION (with imbalance handling; matches Model Development)
 # =============================================================================
 
-from sklearn.model_selection import KFold
+{cv_import}
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.base import clone
 
-cv = KFold(n_splits={self.cv_folds}, shuffle=True, random_state=42)
+cv = {cv_constructor}
 
+# Per-sample prediction lists — under Repeated K-Fold each sample appears in
+# multiple test folds; average repeated predictions before scoring so pooled
+# RMSE/R²/MAE match the backend (cv_utils.cross_val_predict_pooled).
 fold_rmse = []
 fold_r2 = []
 fold_mae = []
-all_y_true = []
-all_y_pred = []
+preds_per_sample = {{}}
+truth_per_sample = {{}}
 
 for train_idx, test_idx in cv.split({x_var}):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
@@ -1517,19 +1534,20 @@ for train_idx, test_idx in cv.split({x_var}):
     fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
     y_pred_fold = fold_model.predict(X_test).ravel()
 
-    all_y_true.extend(y_test)
-    all_y_pred.extend(y_pred_fold)
+    for local_i, sample_idx in enumerate(test_idx):
+        preds_per_sample.setdefault(int(sample_idx), []).append(float(y_pred_fold[local_i]))
+        truth_per_sample[int(sample_idx)] = y_test[local_i]
 
     # Per-fold metrics kept for reference only — not used in headline numbers.
     fold_rmse.append(np.sqrt(mean_squared_error(y_test, y_pred_fold)))
     fold_r2.append(r2_score(y_test, y_pred_fold))
     fold_mae.append(mean_absolute_error(y_test, y_pred_fold))
 
-# Pooled metrics (matches Model Development / IUPAC / chemometrics convention).
-# Pooled RMSE/MAE are required under LOO (per-fold RMSE on 1-sample folds
-# degenerates to |y-ŷ| and averaging gives MAE, not RMSE).
-all_y_true_arr = np.array(all_y_true)
-all_y_pred_arr = np.array(all_y_pred)
+# Mean-per-sample reduction (no-op for plain K-Fold / LOO since each sample appears once)
+sorted_idx = sorted(preds_per_sample.keys())
+all_y_true_arr = np.array([truth_per_sample[i] for i in sorted_idx])
+all_y_pred_arr = np.array([np.mean(preds_per_sample[i]) for i in sorted_idx])
+
 rmse = float(np.sqrt(mean_squared_error(all_y_true_arr, all_y_pred_arr)))
 r2 = float(r2_score(all_y_true_arr, all_y_pred_arr))
 mae = float(mean_absolute_error(all_y_true_arr, all_y_pred_arr))
@@ -1580,16 +1598,16 @@ elif IMBALANCE_METHOD in ['binning', 'rare_boost', 'balanced']:
     sample_weight = _compute_regression_weights(y_train_full, IMBALANCE_METHOD, IMBALANCE_PARAMS)
 
 fit_kwargs = {{}}
-    if sample_weight is not None:
-        if hasattr(model, 'named_steps'):
-            if 'model' in model.named_steps:
-                fit_kwargs['model__sample_weight'] = sample_weight
-            elif 'lr' in model.named_steps:
-                fit_kwargs['lr__sample_weight'] = sample_weight
-            else:
-                fit_kwargs['sample_weight'] = sample_weight
+if sample_weight is not None:
+    if hasattr(model, 'named_steps'):
+        if 'model' in model.named_steps:
+            fit_kwargs['model__sample_weight'] = sample_weight
+        elif 'lr' in model.named_steps:
+            fit_kwargs['lr__sample_weight'] = sample_weight
         else:
             fit_kwargs['sample_weight'] = sample_weight
+    else:
+        fit_kwargs['sample_weight'] = sample_weight
 
 model.fit(X_train_full, y_train_full, **fit_kwargs)
 print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")

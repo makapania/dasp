@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-12 by Claude (Opus 4.6) — pre-merge review pass on cv-strategy-overhaul: fixed 5 correctness bugs caught by Codex (repeated-CV classifier label averaging, Bayesian cv_strategy not persisted, backend LOO guard missing, export templates hardcoded KFold, export templates diverged from backend pooled-per-sample semantics). 52/52 tests pass.
+> **Last updated:** 2026-04-14 by Claude (Opus 4.6) — round-2 pre-merge review on PR #4 (`claude/cv-strategy-overhaul`): fixed 6 correctness bugs + 1 pre-existing indentation bug caught by codex + code-reviewer agent. Backend Repeated-K-Fold regression/classification now pools per-sample before scoring (headline Results-tab metrics were quietly wrong under Repeated K-Fold). Exported classification script no longer crashes with NameError. Imbalance-path code_generator honors `cv_strategy`. PCA-SIMCA + LOO gets model-aware min-inlier guard. `validate_cv_strategy_for_task` rejects `n_repeats<=0` and validates one-class inliers. Bayesian `trial.user_attrs` now carries `cv_strategy` / `cv_n_repeats`. 60/60 cv-strategy tests + 138/138 adjacent tests pass.
 
 ---
 

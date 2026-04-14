@@ -55,6 +55,8 @@ def validate_cv_strategy_for_task(
     task_type: str,
     y: np.ndarray,
     n_folds: int,
+    n_repeats: int | None = None,
+    inlier_label=None,
 ) -> None:
     """Upfront guard for CV strategies that can fail inside fold loops.
 
@@ -63,11 +65,33 @@ def validate_cv_strategy_for_task(
     which gets swallowed by pooled helpers or degrades into silent NaN metrics
     in the Bayesian objective. Validation must run BEFORE training starts.
 
+    Parameters
+    ----------
+    strategy : str
+        'kfold', 'repeated_kfold', or 'loo'.
+    task_type : str
+        'regression', 'classification', or 'one_class'.
+    y : ndarray
+        Target vector. For one-class, the original labels (used with `inlier_label`).
+    n_folds : int
+        Number of folds.
+    n_repeats : int, optional
+        Number of repeats. Required (and must be >= 1) when strategy=='repeated_kfold'.
+    inlier_label : optional
+        Inlier class label for one-class tasks. If provided, validates inlier count
+        is sufficient for the strategy.
+
     Raises
     ------
     ValueError
         If the dataset is too small or imbalanced for the requested strategy.
     """
+    if strategy == 'repeated_kfold':
+        if n_repeats is None or int(n_repeats) < 1:
+            raise ValueError(
+                f"Repeated K-Fold requires n_repeats >= 1 (got {n_repeats!r})."
+            )
+
     if task_type not in ('classification', 'one_class'):
         return
 
@@ -97,6 +121,27 @@ def validate_cv_strategy_for_task(
             raise ValueError(
                 f"{n_folds}-fold CV requires at least {n_folds} samples per class "
                 f"(class {rarest!r} has {min_class}). Reduce folds or add samples."
+            )
+        return
+
+    # One-class: validate inlier count against strategy
+    # Caller may pass either an explicit inlier_label or already-encoded +1/-1 labels.
+    if inlier_label is not None:
+        n_inliers = int(np.sum(y_arr == inlier_label))
+    else:
+        # Assume +1/-1 encoding (matches contamination.run_one_class_cv convention)
+        n_inliers = int(np.sum(y_arr == 1))
+    if strategy == 'loo':
+        # 2 inliers minimum; PCA-SIMCA needs more (enforced model-side in contamination.py)
+        if n_inliers < 2:
+            raise ValueError(
+                f"LOO one-class CV requires at least 2 inliers (got {n_inliers})."
+            )
+    elif strategy in ('kfold', 'repeated_kfold'):
+        if n_inliers < n_folds:
+            raise ValueError(
+                f"{n_folds}-fold one-class CV requires at least {n_folds} inliers "
+                f"(got {n_inliers}). Reduce folds or use LOO."
             )
 
 
@@ -200,8 +245,83 @@ def _model_is_classifier(model) -> bool:
     inner = _get_model_from_pipeline(model) if hasattr(model, 'steps') else model
     try:
         return is_classifier(inner)
-    except Exception:
+    except (AttributeError, TypeError) as e:
+        # Custom estimator with broken tags — surface so we don't silently fall back
+        # to numeric averaging of integer labels under repeated CV.
+        warnings.warn(
+            f"Could not determine classifier status for {type(inner).__name__}: {e}. "
+            "Treating as non-classifier; check if repeated-CV predict averaging is safe.",
+            stacklevel=2,
+        )
         return False
+
+
+def reduce_repeated_cv_predictions(
+    cv_metrics: list,
+    splits: list,
+    n_samples: int,
+    task_type: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce per-fold (y_test, y_pred) outputs to one prediction per sample.
+
+    Used by the grid-search aggregation path in search.py. Under repeated CV
+    each sample appears in multiple test folds; flat concatenation duplicates
+    rows and biases pooled metrics. For regression we average repeated
+    predictions; for classification we take the majority vote (averaging
+    integer labels would yield fractional pseudo-labels).
+
+    Parameters
+    ----------
+    cv_metrics : list of dict
+        Per-fold output from `_run_single_fold` — each must have 'y_test', 'y_pred'.
+    splits : list of (train_idx, test_idx)
+        Realized fold indices (same order as cv_metrics).
+    n_samples : int
+        Total samples in the original X (not the pooled count).
+    task_type : str
+        'regression' or 'classification'. Drives reduction strategy.
+
+    Returns
+    -------
+    all_y_test, all_y_pred : ndarray
+        One row per sample that received at least one prediction, in sample-index order.
+    """
+    if len(cv_metrics) != len(splits):
+        raise ValueError(
+            f"cv_metrics ({len(cv_metrics)}) and splits ({len(splits)}) length mismatch"
+        )
+
+    if task_type == 'regression':
+        pred_sum = np.zeros(n_samples, dtype=float)
+        truth = np.full(n_samples, np.nan, dtype=float)
+        pred_count = np.zeros(n_samples, dtype=int)
+        for m, (_train_idx, test_idx) in zip(cv_metrics, splits):
+            preds = np.asarray(m['y_pred']).ravel()
+            tests = np.asarray(m['y_test']).ravel()
+            pred_sum[test_idx] += preds
+            pred_count[test_idx] += 1
+            truth[test_idx] = tests
+        mask = pred_count > 0
+        return truth[mask], pred_sum[mask] / pred_count[mask]
+
+    # Classification: majority vote per sample
+    votes_per_sample: List[list] = [[] for _ in range(n_samples)]
+    truth_label = [None] * n_samples
+    for m, (_train_idx, test_idx) in zip(cv_metrics, splits):
+        preds = np.asarray(m['y_pred']).ravel()
+        tests = np.asarray(m['y_test']).ravel()
+        for i, sample_idx in enumerate(test_idx):
+            votes_per_sample[sample_idx].append(preds[i])
+            truth_label[sample_idx] = tests[i]
+    mask = [len(v) > 0 for v in votes_per_sample]
+    # Determine output dtype from first non-empty truth label
+    sample_truth = next((t for t, k in zip(truth_label, mask) if k), None)
+    truth_arr = np.array([t for t, k in zip(truth_label, mask) if k])
+    pred_arr = np.array([
+        Counter(v).most_common(1)[0][0]
+        for v, k in zip(votes_per_sample, mask) if k
+    ])
+    return truth_arr, pred_arr
 
 
 def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:

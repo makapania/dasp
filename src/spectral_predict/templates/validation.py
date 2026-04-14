@@ -187,10 +187,10 @@ print(f"  Accuracy: {{accuracy:.4f}} (pooled across folds — matches Model Deve
 print(f"  F1 Score (weighted): {{f1:.4f}} (pooled across folds)")
 
 print("\\nConfusion Matrix:")
-print(confusion_matrix(np.array(all_y_true), y_pred_cv))
+print(confusion_matrix(all_y_true_arr, all_y_pred_arr))
 
 print("\\nClassification Report:")
-print(classification_report(np.array(all_y_true), y_pred_cv))
+print(classification_report(all_y_true_arr, all_y_pred_arr))
 '''
 
 FINAL_MODEL_TEMPLATE = '''

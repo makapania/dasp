@@ -1000,6 +1000,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             task_type=task_type,
             y=y_np if task_type == 'classification' else np.asarray(y),
             n_folds=folds,
+            n_repeats=cv_n_repeats,
         )
     except ValueError as e:
         raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
@@ -4220,6 +4221,10 @@ def _run_single_config(
     else:
         pipe = model
 
+    # Realize splits once so we can both run folds AND pool by sample later.
+    # Generators get consumed; we need the test indices for repeated-CV pooling.
+    splits = list(cv_splitter.split(X, y))
+
     # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
     if n_jobs_cv == 1:
         # Serial execution for reproducibility (deterministic fold ordering)
@@ -4229,7 +4234,7 @@ def _run_single_config(
                 use_sample_weight_for_classification,
                 early_stopping_rounds=early_stopping_rounds
             )
-            for train_idx, test_idx in cv_splitter.split(X, y)
+            for train_idx, test_idx in splits
         ]
     else:
         # Parallel execution for speed
@@ -4244,7 +4249,7 @@ def _run_single_config(
                 use_sample_weight_for_classification,
                 early_stopping_rounds=early_stopping_rounds
             )
-            for train_idx, test_idx in cv_splitter.split(X, y)
+            for train_idx, test_idx in splits
         )
 
     # Print summary if imbalance handling was used
@@ -4254,11 +4259,23 @@ def _run_single_config(
         else:
             print(f"  [OK] Imbalance handling: {imbalance_method} applied successfully")
 
+    # Pool predictions per sample so repeated-CV (RepeatedKFold/RepeatedStratifiedKFold)
+    # produces one prediction per sample before scoring. Under plain K-Fold / LOO this
+    # is a no-op (each sample appears in exactly one test fold). Under repeated CV,
+    # naive concatenation duplicates rows and biases the pooled metrics — see codex
+    # pre-merge review and docs/SESSION_LOG.md "Repeated K-Fold pooled metric fix".
+    from spectral_predict.cv_utils import _is_repeated_cv, reduce_repeated_cv_predictions
+    repeated_cv = _is_repeated_cv(cv_splitter)
+
     # Average metrics
     if task_type == "regression":
-        # Collect all CV predictions and true values
-        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
-        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+        if repeated_cv:
+            all_y_test, all_y_pred = reduce_repeated_cv_predictions(
+                cv_metrics, splits, n_samples=len(y), task_type='regression'
+            )
+        else:
+            all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+            all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
 
         # Compute RMSE from aggregated predictions (not per-fold averages).
         # Matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC).
@@ -4309,25 +4326,57 @@ def _run_single_config(
             else:
                 regional_rmse[f'Q{i+1}'] = np.nan
     else:
-        mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
-        mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
-        mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
-        mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
-        mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
+        # Headline label-based metrics: under repeated CV, derive from
+        # majority-vote-pooled predictions per sample (averaging fold metrics
+        # double-counts samples that appear in multiple test folds). AUC/LogLoss/BER
+        # require probabilities and stay as mean-of-folds.
+        if repeated_cv:
+            all_y_test, all_y_pred = reduce_repeated_cv_predictions(
+                cv_metrics, splits, n_samples=len(y), task_type='classification'
+            )
+            from sklearn.metrics import (
+                accuracy_score as _acc, f1_score as _f1, precision_score as _ps,
+                recall_score as _rs, balanced_accuracy_score as _bas,
+                cohen_kappa_score as _kappa, matthews_corrcoef as _mcc,
+            )
+            avg = 'binary' if is_binary_classification else 'macro'
+            mean_acc = float(_acc(all_y_test, all_y_pred))
+            mean_f1 = float(_f1(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_precision = float(_ps(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_recall = float(_rs(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_balanced_acc = float(_bas(all_y_test, all_y_pred))
+            mean_kappa = float(_kappa(all_y_test, all_y_pred))
+            mean_mcc = float(_mcc(all_y_test, all_y_pred))
+            # Specificity is only defined for binary; derive from confusion matrix
+            if is_binary_classification:
+                from sklearn.metrics import confusion_matrix as _cm
+                tn, fp, fn, tp = _cm(all_y_test, all_y_pred).ravel()
+                mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float('nan')
+            else:
+                mean_specificity = float(
+                    np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+                )
+        else:
+            mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
+            mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
+            mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
+            mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
+            mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+            mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
+            mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
+            mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
 
-        # New classification metrics
-        mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
-        mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
-        mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
-        mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
+        # AUC, BER, LogLoss require probabilities (or per-fold confusion shape) — keep as mean-of-folds
+        mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
         mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
         mean_logloss = np.mean([m["LogLoss"] for m in cv_metrics if not np.isnan(m["LogLoss"])])
 
         regional_rmse = None  # Not applicable for classification
 
-        # Collect all CV predictions and true values (same as regression)
-        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
-        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+        # Per-class report uses pooled predictions (one per sample under repeated CV)
+        if not repeated_cv:
+            all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+            all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
 
         # Compute per-class metrics for classification (analogous to regional RMSE for regression)
         per_class_metrics = {}
@@ -4881,11 +4930,17 @@ def run_one_class_search(
         logger.warning("No outlier samples! Evaluation will only measure specificity.")
     logger.info("=" * 70)
 
-    if n_inliers < folds:
-        raise ValueError(
-            f"Not enough inlier samples ({n_inliers}) for {folds}-fold CV. "
-            f"Need at least {folds}."
-        )
+    # Upfront CV-strategy guard (n_repeats >= 1, one-class inlier counts,
+    # LOO min-2 inlier rule). Raises ValueError before any training starts.
+    from .cv_utils import validate_cv_strategy_for_task
+    validate_cv_strategy_for_task(
+        strategy=cv_strategy,
+        task_type='one_class',
+        y=y_oc,
+        n_folds=folds,
+        n_repeats=cv_n_repeats,
+        inlier_label=1,  # y_oc is already +1/-1 encoded above
+    )
 
     # Store full wavelengths before any masking (2a)
     wavelengths_full = wavelengths.copy()

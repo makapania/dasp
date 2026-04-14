@@ -574,13 +574,24 @@ def run_one_class_cv(
     # returning +inf from the Bayesian objective.
     fold_errors: list[str] = []
 
-    # Determine minimum inlier count based on CV strategy
+    # Determine minimum inlier count based on CV strategy AND model.
+    # PCA-SIMCA has a hard floor of 3 training samples (contamination.py
+    # PCASIMCA.fit ~line 128), so under LOO with 3 inliers every training fold
+    # has only 2 samples and every fold fails silently. Guard upfront.
+    SIMCA_FIT_FLOOR = 3
     if cv_strategy == 'loo':
-        min_inliers = 2  # At least 2 to leave one out and still train
-    elif cv_strategy == 'repeated_kfold':
-        min_inliers = n_folds  # Same as K-fold
+        base_min = 2  # Leave one out and still train
+        if model_name == 'PCA-SIMCA':
+            min_inliers = SIMCA_FIT_FLOOR + 1  # Training fold size = n_inliers - 1
+        else:
+            min_inliers = base_min
     else:
-        min_inliers = n_folds
+        # K-fold and Repeated K-fold: each training fold has ~(n_inliers * (k-1)/k)
+        # samples. PCA-SIMCA needs SIMCA_FIT_FLOOR in the training fold.
+        if model_name == 'PCA-SIMCA':
+            min_inliers = max(n_folds, int(np.ceil(SIMCA_FIT_FLOOR * n_folds / (n_folds - 1))))
+        else:
+            min_inliers = n_folds
 
     if len(inlier_indices) < min_inliers:
         strategy_label = {
@@ -588,10 +599,17 @@ def run_one_class_cv(
             'repeated_kfold': f'repeated {n_folds}-fold CV',
             'loo': 'LOO CV',
         }
-        msg = (
-            f"Too few inliers ({len(inlier_indices)}) for "
-            f"{strategy_label.get(cv_strategy, cv_strategy)}"
-        )
+        if model_name == 'PCA-SIMCA':
+            msg = (
+                f"Too few inliers ({len(inlier_indices)}) for PCA-SIMCA under "
+                f"{strategy_label.get(cv_strategy, cv_strategy)} — needs {min_inliers}+ "
+                f"so every training fold has >= {SIMCA_FIT_FLOOR} samples"
+            )
+        else:
+            msg = (
+                f"Too few inliers ({len(inlier_indices)}) for "
+                f"{strategy_label.get(cv_strategy, cv_strategy)}"
+            )
         logger.warning(msg)
         return {'skipped': True, 'fold_metrics': [], 'skip_reason': msg, 'fold_errors': [msg]}
 
