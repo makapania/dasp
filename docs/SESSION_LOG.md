@@ -4,6 +4,76 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-14 — PR #4 round-3 review fixes: BER pool consistency + one-class repeated-CV per-sample reduction (Claude Opus 4.6)
+
+### Context
+
+Round-2 commit (`75a1eb5`) fixed bugs from the prior review cleanly. Round-3 review by 4 specialized agents (code-reviewer, silent-failure-hunter, test-analyzer, comment-analyzer) + codex + peer-review panel (MiniMax + DeepSeek) found two real bugs, one defensive fix, and a test-coverage gap. Plan: `~/.claude/plans/swirling-zooming-frost.md`.
+
+### Bug: Backend BER inconsistent with BalancedAcc under Repeated K-Fold
+
+**Root cause:** Round-2 commit pooled per-sample for Accuracy/F1/Precision/Recall/BalancedAcc/Kappa/MCC/Specificity under repeated CV but kept BER as mean-of-folds with a comment claiming "BER requires probabilities." BER is actually `1 - balanced_accuracy_score(y_test, y_pred)` at `search.py:4012-4015` — label-based, not probability-based. Under repeated CV the two metrics diverged (BER was mean-of-fold-BERs, BalancedAcc was from pooled labels), so the invariant `BER = 1 - BalancedAcc` broke.
+
+**Fix:** Move BER into the pooled branch with `mean_ber = 1.0 - mean_balanced_acc`. Keep mean-of-folds for AUC and LogLoss (those genuinely need probabilities). Regression test `test_ber_pools_under_repeated_kfold` asserts the invariant numerically on a repeated-K-Fold classification run.
+
+### Bug: One-class `run_one_class_cv` pools correlated observations under repeated CV
+
+**Root cause:** Every fold's test set includes ALL outliers (`contamination.py:633`: `test_idx = np.concatenate([test_inlier, outlier_indices])`). Under Repeated K-Fold with `k` folds × `r` repeats, inliers appear r times in the pool, outliers appear k*r times. The metric EXPECTED VALUES don't change (TP/FP/TN/FN all scale together so ratios are preserved — codex was correct that the original "double-counts → inflates metrics" framing was wrong). The REAL issue is statistical: pooled metrics come from CORRELATED observations (the same sample's r predictions come from related models). Inconsistent with the regression/classification path which now per-sample-reduces under repeated CV.
+
+**Fix — scope-limited to repeated CV:** After the fold loop, if `_is_repeated_cv(kf)`, reduce pool to one prediction per original sample index (majority vote via `np.unique + np.argmax` for preds; mean for scores). Added `all_test_idx` instrumentation alongside existing `all_test_labels`/`all_y_pred`/`all_scores`. Plain K-Fold and LOO unchanged.
+
+**Plain K-Fold preserved by design:** codex correctly noted plain K-Fold one-class has the same correlated-prediction structure. NOT fixed here because:
+1. Plain K-Fold one-class behavior baked since commit `057d9f6` — changing it rebaselines all existing user models.
+2. Repeated K-Fold is NEW in this PR — no downstream deps.
+3. Follow-up: migrate plain K-Fold one-class to per-sample-pooled in a separate PR with explicit changelog entry.
+
+Regression test: `test_one_class_repeated_kfold_matches_reference_reduction` replays the same splits manually, reduces per-sample, computes reference Sensitivity/Specificity, and asserts backend matches to 1e-10. Sanity test: `test_one_class_plain_kfold_still_works_after_loop_restructure` pins that the `all_test_idx` instrumentation and `_is_repeated_cv` branch don't break non-repeated paths (catches missing imports).
+
+### Defensive: binary specificity `labels=` kwarg
+
+**Root cause:** The round-2 pooled-specificity block at `search.py:~4341-4353` unpacks `tn, fp, fn, tp = confusion_matrix(all_y_test, all_y_pred).ravel()`. If both y_true and y_pred are single-class, the matrix is 1×1 and unpack crashes with `ValueError: not enough values to unpack`. In practice the upstream classification validator rejects single-class y, so y_true always has both classes and the unpack works (cm is 2×2 via sklearn's union-of-labels). Bug is theoretical but a future refactor could break that invariant.
+
+**Fix:** Pass `labels=np.unique(y)` to `confusion_matrix` so the shape is always 2×2. Codex corrected my original plan: `y_np` is not in scope inside `_run_single_config` — use the function-arg `y`. Regression test `test_pooled_binary_specificity_survives_degenerate_predictions` pins the sklearn contract.
+
+### Gotcha: `run_search` returns a tuple, not a DataFrame
+
+While writing tests I hit `AttributeError: 'tuple' object has no attribute 'iloc'`. `run_search` returns `(df_ranked, label_encoder)` (line 3090). My initial tests did `df = run_search(...)`. Pattern across existing tests is either `df, _ = run_search(...)` or a test that doesn't need the return (e.g. `pytest.raises`). Fixed all new tests to unpack.
+
+### Gotcha: `confusion_matrix` shape depends on BOTH y_true and y_pred
+
+My initial binary-specificity sklearn test asserted `cm.shape == (1, 1)` for `y_true=[0,0,0,0,1,1], y_pred=[0,0,0,0,0,0]` — wrong. sklearn uses the union of unique labels from BOTH inputs, so the matrix is 2×2 when either array has multiple classes. The 1×1 case requires BOTH arrays to be single-class — which is precisely the (theoretical) degenerate case the `labels=` kwarg protects against.
+
+### Gotcha: editable install roots at main repo, pytest respects worktree
+
+`python -c 'from spectral_predict.search import run_search; inspect.getsourcefile(...)'` from the worktree returned the MAIN repo's `search.py`, not the worktree's. Why: `pip install -e` was run against the main repo, so ad-hoc imports use the installed path. pytest, however, respects the worktree via `pyproject.toml`'s `pythonpath=["src"]`. Not a bug, just a surprise when debugging imports — always route verification through pytest in worktrees.
+
+### Minor cleanups (same commit)
+
+- `contamination.py:583` — tightened fall-through `else: min_inliers = n_folds` to `raise ValueError(f"Unknown cv_strategy: {cv_strategy!r}")`. Codex noted `build_cv_splitter` already rejects unknown strategies (`cv_utils.py:188`) — belt-and-suspenders against future additions that bypass the constructor path.
+- `cv_utils.py` — `validate_cv_strategy_for_task` one-class branch now str-coerces both sides of `inlier_label` comparison (matches the convention in `search.py:~4878`). Prevents silent "too few inliers" errors on dtype mismatches.
+- `search.py:~4262` — guard `if not cv_metrics: raise ValueError("All CV folds failed")`. Prevents silent `accuracy_score([], [])` → 0.0. Used `ValueError` not `RuntimeError` because no caller catches `RuntimeError` specially (codex grep).
+- `cv_utils.py` — deleted unused `sample_truth` variable in `reduce_repeated_cv_predictions`.
+- Tightened 3 stale-prone comments (dropped "codex" refs, dropped line-number refs).
+- `reduce_repeated_cv_predictions` docstring — added explicit "ORDER MUST MATCH" line warning about silent miscorrespondence.
+
+### What still doesn't have a test
+
+- Direct unit test of `reduce_repeated_cv_predictions` on regression is strong; classification only tested at integration level. The 3 existing `TestExportScriptMatchesBackend` tests cover the parity contract at the template/reducer level, which is sufficient.
+- Plain K-Fold one-class K-fold-bias is preserved-by-design; no test asserts this. Documented in Follow-Ups instead.
+
+### Follow-Ups
+
+- **Plain K-Fold one-class metric rebaseline** — plain K-Fold one-class has the same correlated-prediction structure as repeated K-Fold (outliers appear k times, inliers once). Fixing would rebaseline all existing user one-class models. Separate PR with changelog entry. `contamination.py:633,703-720`. Proposed fix: always per-sample-reduce for one-class regardless of `_is_repeated_cv`.
+- **More aggressive e2e classification parity test** — current test only asserts `BER = 1 - BalancedAcc`. A parity test that runs `run_search` with known model + compares to `cross_val_predict_pooled` directly (same model) would catch wire-up bugs more reliably. PLS-DA is a custom pipeline that can't trivially be swapped for sklearn's LogisticRegression.
+
+### Results
+
+- 60 (from round-2) + 10 (round-3) = **70/70 tests in `tests/test_cv_strategy.py` pass**.
+- **138/138 adjacent suites** pass (contamination_detection, bayesian_utils, search_comprehensive, unified_bayesian_baseline, nsga2_search).
+- Net diff: ~+200 / -30 across 5 code files + 1 test file.
+
+---
+
 ## 2026-04-14 — PR #4 round-2 review fixes: Repeated K-Fold backend pooling + exported-script correctness (Claude Opus 4.6)
 
 ### Context

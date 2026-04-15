@@ -1036,9 +1036,8 @@ def create_unified_objective(
                         trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
-                # CV strategy must be on the trial so raw-study consumers (not just
-                # the converted result row) can reconstruct the run — fixes codex
-                # finding that Bayesian persistence was incomplete.
+                # Raw-study consumers need cv_strategy to reconstruct the run
+                # (converted result rows already carry it via training_config).
                 trial.set_user_attr('cv_strategy', cv_strategy)
                 trial.set_user_attr('cv_n_repeats', cv_n_repeats)
                 # Store preprocessing fields used by convert_study_to_dataframe

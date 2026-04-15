@@ -124,12 +124,17 @@ def validate_cv_strategy_for_task(
             )
         return
 
-    # One-class: validate inlier count against strategy
-    # Caller may pass either an explicit inlier_label or already-encoded +1/-1 labels.
+    # One-class: validate inlier count against strategy.
+    # If inlier_label is provided, caller is passing raw labels — coerce both
+    # sides to str for comparison (matches search.py:~4878's convention for
+    # one-class label encoding; prevents "too few inliers" errors when
+    # inlier_label dtype differs from y_arr dtype, e.g. int vs numpy string).
+    # If inlier_label is None, labels are assumed to be +1/-1 encoded (matches
+    # contamination.run_one_class_cv after conversion).
     if inlier_label is not None:
-        n_inliers = int(np.sum(y_arr == inlier_label))
+        y_str = np.asarray(y_arr, dtype=str)
+        n_inliers = int(np.sum(y_str == str(inlier_label)))
     else:
-        # Assume +1/-1 encoding (matches contamination.run_one_class_cv convention)
         n_inliers = int(np.sum(y_arr == 1))
     if strategy == 'loo':
         # 2 inliers minimum; PCA-SIMCA needs more (enforced model-side in contamination.py)
@@ -270,6 +275,9 @@ def reduce_repeated_cv_predictions(
     predictions; for classification we take the majority vote (averaging
     integer labels would yield fractional pseudo-labels).
 
+    ORDER MUST MATCH: cv_metrics[i] must correspond to splits[i]. Silent
+    miscorrespondence corrupts per-sample attribution without raising.
+
     Parameters
     ----------
     cv_metrics : list of dict
@@ -314,8 +322,6 @@ def reduce_repeated_cv_predictions(
             votes_per_sample[sample_idx].append(preds[i])
             truth_label[sample_idx] = tests[i]
     mask = [len(v) > 0 for v in votes_per_sample]
-    # Determine output dtype from first non-empty truth label
-    sample_truth = next((t for t, k in zip(truth_label, mask) if k), None)
     truth_arr = np.array([t for t, k in zip(truth_label, mask) if k])
     pred_arr = np.array([
         Counter(v).most_common(1)[0][0]

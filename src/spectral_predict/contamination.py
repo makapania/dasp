@@ -41,7 +41,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
 
-from spectral_predict.cv_utils import build_cv_splitter
+from spectral_predict.cv_utils import build_cv_splitter, _is_repeated_cv
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
@@ -575,8 +575,8 @@ def run_one_class_cv(
     fold_errors: list[str] = []
 
     # Determine minimum inlier count based on CV strategy AND model.
-    # PCA-SIMCA has a hard floor of 3 training samples (contamination.py
-    # PCASIMCA.fit ~line 128), so under LOO with 3 inliers every training fold
+    # PCA-SIMCA has a hard floor of 3 training samples (PCASIMCA.fit's
+    # n_samples<3 guard), so under LOO with 3 inliers every training fold
     # has only 2 samples and every fold fails silently. Guard upfront.
     SIMCA_FIT_FLOOR = 3
     if cv_strategy == 'loo':
@@ -585,13 +585,17 @@ def run_one_class_cv(
             min_inliers = SIMCA_FIT_FLOOR + 1  # Training fold size = n_inliers - 1
         else:
             min_inliers = base_min
-    else:
+    elif cv_strategy in ('kfold', 'repeated_kfold'):
         # K-fold and Repeated K-fold: each training fold has ~(n_inliers * (k-1)/k)
         # samples. PCA-SIMCA needs SIMCA_FIT_FLOOR in the training fold.
         if model_name == 'PCA-SIMCA':
             min_inliers = max(n_folds, int(np.ceil(SIMCA_FIT_FLOOR * n_folds / (n_folds - 1))))
         else:
             min_inliers = n_folds
+    else:
+        # build_cv_splitter already rejects unknown strategies, but belt-and-
+        # suspenders against future additions that bypass it.
+        raise ValueError(f"Unknown cv_strategy: {cv_strategy!r}")
 
     if len(inlier_indices) < min_inliers:
         strategy_label = {
@@ -626,6 +630,11 @@ def run_one_class_cv(
     all_test_labels: list[np.ndarray] = []
     all_y_pred: list[np.ndarray] = []
     all_scores: list[np.ndarray] = []
+    # Original sample indices for each fold's test rows — enables per-sample
+    # reduction under repeated CV (outliers appear in every fold, inliers
+    # appear r times across repeats; without per-sample reduction the pooled
+    # metrics come from correlated observations).
+    all_test_idx: list[np.ndarray] = []
 
     for fold_i, (train_inlier_idx, test_inlier_idx) in enumerate(kf.split(inlier_indices)):
         train_idx = inlier_indices[train_inlier_idx]
@@ -677,6 +686,7 @@ def run_one_class_cv(
             # Collect for pooled computation
             all_test_labels.append(test_labels)
             all_y_pred.append(y_pred)
+            all_test_idx.append(test_idx)
             if scores is not None:
                 all_scores.append(scores)
         except (np.linalg.LinAlgError, ValueError) as e:
@@ -703,9 +713,42 @@ def run_one_class_cv(
     # Compute metrics from POOLED predictions across all folds.
     # Matches chemometrics convention: ratio-of-sums, not averaging-of-ratios.
     # Under LOO, per-fold sensitivity degenerates to 0/1. Pooling fixes this.
-    pooled_labels = np.concatenate(all_test_labels)
-    pooled_preds = np.concatenate(all_y_pred)
-    pooled_scores = np.concatenate(all_scores) if all_scores else None
+    #
+    # Under repeated CV, inliers appear r times and outliers appear k*r times
+    # in the flat pool — pooled metrics would come from correlated observations
+    # (same sample's r predictions come from related models). Reduce per-sample
+    # by majority vote first, matching the regression/classification path's
+    # cross_val_predict_pooled semantic. Plain K-Fold and LOO are unchanged.
+    # TODO: plain K-Fold one-class has the same correlated-prediction
+    # structure (outliers appear k times), but changing it would break
+    # user-memorized numbers from existing models — rebaseline in a separate PR.
+    if _is_repeated_cv(kf) and all_test_idx:
+        pooled_idx_flat = np.concatenate(all_test_idx)
+        pooled_labels_flat = np.concatenate(all_test_labels)
+        pooled_preds_flat = np.concatenate(all_y_pred)
+        pooled_scores_flat = np.concatenate(all_scores) if all_scores else None
+
+        unique_samples = np.unique(pooled_idx_flat)
+        pooled_labels = np.empty(len(unique_samples), dtype=pooled_labels_flat.dtype)
+        pooled_preds = np.empty(len(unique_samples), dtype=pooled_preds_flat.dtype)
+        pooled_scores = (
+            np.empty(len(unique_samples), dtype=float)
+            if pooled_scores_flat is not None else None
+        )
+        for i, s in enumerate(unique_samples):
+            sample_mask = pooled_idx_flat == s
+            # Label is deterministic per sample (same row in y_oc), take first
+            pooled_labels[i] = pooled_labels_flat[sample_mask][0]
+            # Majority vote via np.unique + argmax (deterministic tie-break
+            # by sort order; avoids Counter + tolist() overhead)
+            vals, counts = np.unique(pooled_preds_flat[sample_mask], return_counts=True)
+            pooled_preds[i] = vals[np.argmax(counts)]
+            if pooled_scores is not None:
+                pooled_scores[i] = float(np.mean(pooled_scores_flat[sample_mask]))
+    else:
+        pooled_labels = np.concatenate(all_test_labels)
+        pooled_preds = np.concatenate(all_y_pred)
+        pooled_scores = np.concatenate(all_scores) if all_scores else None
 
     mean_metrics = one_class_metrics(pooled_labels, pooled_preds, pooled_scores)
 

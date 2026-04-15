@@ -4259,11 +4259,20 @@ def _run_single_config(
         else:
             print(f"  [OK] Imbalance handling: {imbalance_method} applied successfully")
 
+    # Guard against all-folds-failed state: empty cv_metrics means no valid
+    # predictions to aggregate. Fail loudly instead of silently reporting 0.0
+    # accuracy / NaN RMSE.
+    if not cv_metrics:
+        raise ValueError(
+            "All CV folds failed — cannot compute metrics. "
+            "Check upstream fold errors for root cause."
+        )
+
     # Pool predictions per sample so repeated-CV (RepeatedKFold/RepeatedStratifiedKFold)
-    # produces one prediction per sample before scoring. Under plain K-Fold / LOO this
-    # is a no-op (each sample appears in exactly one test fold). Under repeated CV,
-    # naive concatenation duplicates rows and biases the pooled metrics — see codex
-    # pre-merge review and docs/SESSION_LOG.md "Repeated K-Fold pooled metric fix".
+    # produces one prediction per sample before scoring. Under plain K-Fold / LOO
+    # this is a no-op (each sample appears in exactly one test fold). Under
+    # repeated CV, naive concatenation duplicates rows and computes metrics from
+    # correlated observations.
     from spectral_predict.cv_utils import _is_repeated_cv, reduce_repeated_cv_predictions
     repeated_cv = _is_repeated_cv(cv_splitter)
 
@@ -4347,15 +4356,23 @@ def _run_single_config(
             mean_balanced_acc = float(_bas(all_y_test, all_y_pred))
             mean_kappa = float(_kappa(all_y_test, all_y_pred))
             mean_mcc = float(_mcc(all_y_test, all_y_pred))
-            # Specificity is only defined for binary; derive from confusion matrix
+            # Specificity is only defined for binary; derive from confusion matrix.
+            # Pass labels= explicitly so the matrix is always 2x2 even when
+            # pooled predictions collapse to a single class (upstream y
+            # validation guarantees both labels exist in y_true, but model
+            # degeneracy can make y_pred single-class).
             if is_binary_classification:
                 from sklearn.metrics import confusion_matrix as _cm
-                tn, fp, fn, tp = _cm(all_y_test, all_y_pred).ravel()
+                binary_labels = np.unique(y)
+                cm = _cm(all_y_test, all_y_pred, labels=binary_labels)
+                tn, fp, fn, tp = cm.ravel()
                 mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float('nan')
             else:
                 mean_specificity = float(
                     np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
                 )
+            # BER = 1 - BalancedAccuracy, label-based, pools alongside BalancedAcc
+            mean_ber = 1.0 - mean_balanced_acc
         else:
             mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
             mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
@@ -4365,10 +4382,10 @@ def _run_single_config(
             mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
             mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
             mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
+            mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
 
-        # AUC, BER, LogLoss require probabilities (or per-fold confusion shape) — keep as mean-of-folds
+        # AUC and LogLoss require probabilities — keep as mean-of-folds
         mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
-        mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
         mean_logloss = np.mean([m["LogLoss"] for m in cv_metrics if not np.isnan(m["LogLoss"])])
 
         regional_rmse = None  # Not applicable for classification
