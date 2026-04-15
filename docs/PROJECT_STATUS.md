@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-14 by Claude (Opus 4.6) — round-3 pre-merge review on PR #4 (`claude/cv-strategy-overhaul`): 2 real fixes + 1 defensive + minors after a 3rd-round review pass (4 claude agents + codex + peer-review MiniMax/DeepSeek panel). Backend BER now pools alongside BalancedAcc under Repeated K-Fold (invariant `BER = 1 - BalancedAcc` restored). One-class `run_one_class_cv` per-sample-reduces under Repeated K-Fold before metric computation (plain K-Fold kept by design for backward-compat; rebaseline as separate PR). Binary specificity `labels=` kwarg added defensively against 1×1 confusion matrix. Minor: empty-cv_metrics `ValueError` guard, str-coerced one-class `inlier_label` comparison, unknown-cv_strategy explicit raise, dead var deletion, stale-comment tightening. **70/70 cv-strategy tests** + **138/138 adjacent tests** pass.
+> **Last updated:** 2026-04-14 by Claude (Opus 4.6) — round-4 pre-merge review fix on PR #4 (`claude/cv-strategy-overhaul`): AUC under repeated-CV one-class now stays as mean-of-fold-AUCs, not from per-sample-averaged decision-function scores (those scores aren't comparable across independently-fitted OCSVM/IF/EllipticEnvelope/LOF folds — averaging destroys AUC semantics). Labels-based metrics still per-sample-majority-voted. Majority-vote tie-break bias toward outlier documented (conservative default for contamination detection). **71/71 cv-strategy tests** + **138/138 adjacent tests** pass.
 
 ---
 

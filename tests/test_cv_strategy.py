@@ -1219,6 +1219,66 @@ class TestRoundThreeReviewFixes:
         assert abs(result['mean_metrics']['sensitivity'] - ref_metrics['sensitivity']) < 1e-10
         assert abs(result['mean_metrics']['specificity'] - ref_metrics['specificity']) < 1e-10
 
+    def test_one_class_repeated_kfold_auc_is_mean_of_fold_aucs(self):
+        """Round-4 BLOCKER pin: under repeated CV, AUC must come from per-fold
+        AUCs (mean), NOT from per-sample-averaged decision_function scores.
+        Scores from independently-fitted OCSVM/IF/EllipticEnvelope/LOF are not
+        on a common scale across folds, so averaging them produces a
+        meaningless ranking. This test fails if AUC is silently pooled."""
+        from spectral_predict.contamination import run_one_class_cv, one_class_metrics
+        from spectral_predict.cv_utils import build_cv_splitter
+        from sklearn.svm import OneClassSVM
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.RandomState(0)
+        inliers = rng.normal(loc=0.0, scale=1.0, size=(10, 5))
+        outliers = rng.normal(loc=5.0, scale=1.0, size=(5, 5))
+        X = np.vstack([inliers, outliers])
+        y_oc = np.concatenate([np.ones(10), -np.ones(5)])
+        inlier_indices = np.where(y_oc == 1)[0]
+        outlier_indices = np.where(y_oc == -1)[0]
+
+        result = run_one_class_cv(
+            X, y_oc, 'OneClassSVM', {'kernel': 'linear', 'nu': 0.3},
+            n_folds=3, cv_strategy='repeated_kfold', cv_n_repeats=2,
+            random_state=42,
+        )
+        assert not result.get('skipped', False)
+
+        # Reference: compute per-fold AUCs manually using the same splits
+        kf = build_cv_splitter(
+            strategy='repeated_kfold', n_folds=3, task_type='one_class',
+            n_repeats=2, random_state=42,
+        )
+        fold_aucs = []
+        for train_inlier_idx, test_inlier_idx in kf.split(inlier_indices):
+            train_idx = inlier_indices[train_inlier_idx]
+            test_inlier = inlier_indices[test_inlier_idx]
+            test_idx = np.concatenate([test_inlier, outlier_indices])
+            test_labels = np.concatenate([
+                np.ones(len(test_inlier), dtype=int),
+                -np.ones(len(outlier_indices), dtype=int),
+            ])
+            scaler = StandardScaler()
+            X_train = scaler.fit_transform(X[train_idx])
+            X_test = scaler.transform(X[test_idx])
+            m = OneClassSVM(kernel='linear', nu=0.3)
+            m.fit(X_train)
+            scores = m.decision_function(X_test)
+            preds = np.where(scores >= 0, 1, -1)
+            fold_m = one_class_metrics(test_labels, preds, scores)
+            if not np.isnan(fold_m.get('auc', np.nan)):
+                fold_aucs.append(fold_m['auc'])
+
+        ref_mean_auc = float(np.mean(fold_aucs))
+        backend_auc = result['mean_metrics']['auc']
+        assert abs(backend_auc - ref_mean_auc) < 1e-10, (
+            f"AUC must be mean-of-fold-AUCs under repeated CV. "
+            f"Backend={backend_auc}, Reference={ref_mean_auc}. "
+            f"If backend comes from per-sample-averaged scores, those scores "
+            f"are not comparable across independently-fitted folds."
+        )
+
     def test_one_class_plain_kfold_still_works_after_loop_restructure(self):
         """Peer-review sanity: after adding all_test_idx instrumentation and
         the if _is_repeated_cv branch, plain K-Fold one-class must still

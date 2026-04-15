@@ -4,6 +4,37 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-14 — PR #4 round-4 review fix: one-class repeated-CV AUC stays as mean-of-folds (Claude Opus 4.6)
+
+### Bug: Pooled AUC under repeated CV uses decision scores not comparable across folds
+
+**Root cause (caught by codex in round-4 review of commit `5ca0886`):** The round-3 per-sample reduction in `run_one_class_cv` averaged `decision_function` / `score_samples` outputs across folds before passing to `roc_auc_score`. For `OneClassSVM`, `IsolationForest`, `EllipticEnvelope`, `LOF` — scores from independently-fitted models are NOT on a common scale (SVM margins depend on support vectors selected; IF path lengths depend on tree ensemble; EllipticEnvelope Mahalanobis depends on covariance fit). Averaging them produces a meaningless ranking and destroys AUC semantics. Labels-based metrics (Sensitivity/Specificity/Accuracy/BalancedAcc/F1/Precision) pool correctly via majority vote because each label is a self-consistent binary decision per fold; AUC is not.
+
+**Fix:** Under `_is_repeated_cv(kf)`:
+1. Drop `pooled_scores` entirely (pass `None` to `one_class_metrics`, which returns NaN for AUC).
+2. Override `mean_metrics['auc']` with `np.mean([m['auc'] for m in fold_metrics])` — per-fold AUCs are self-contained and comparable across folds.
+
+Plain K-Fold and LOO paths unchanged (each sample has 1 prediction/score per fold; scores within a fold are self-consistent).
+
+Regression test: `test_one_class_repeated_kfold_auc_is_mean_of_fold_aucs` — replays the exact splits manually, computes per-fold AUCs, asserts backend AUC equals mean-of-fold-AUCs within 1e-10.
+
+### Gotcha: majority vote tie-break policy is implicit "favor outlier"
+
+`np.unique([-1, 1])` returns `[-1, 1]` sorted, and `np.argmax(counts)` picks the first max → ties go to `-1` (outlier). Under even `cv_n_repeats`, exact ties become a silent "flag as outlier" policy. Flagged by codex + all three peer-review models. Kept as-is because it's a sensible conservative default for contamination detection (when ambiguous, screen); documented in an inline comment. Callers who want a different tie-break can pick odd `cv_n_repeats` to eliminate ties.
+
+### Non-issues caught by peer-review but wrong
+
+- MiniMax claimed `np.unique(y)` in binary-specificity fix could return >2 labels for multi-class. Wrong — the fix is inside `if is_binary_classification:` which by definition means exactly 2 classes.
+- DeepSeek flagged BER semantic change as potential regression. Already addressed by the round-3 correlation-argument design.
+- All three models flagged the unknown-`cv_strategy` → `ValueError` change as "breaking." Not really — typos previously silently defaulted to K-fold, producing wrong numbers without warning. Raising is correct.
+
+### Results
+
+- **71/71 `tests/test_cv_strategy.py` tests pass** (added `test_one_class_repeated_kfold_auc_is_mean_of_fold_aucs`).
+- **138/138 adjacent suites** pass.
+
+---
+
 ## 2026-04-14 — PR #4 round-3 review fixes: BER pool consistency + one-class repeated-CV per-sample reduction (Claude Opus 4.6)
 
 ### Context

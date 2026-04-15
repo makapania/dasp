@@ -726,31 +726,47 @@ def run_one_class_cv(
         pooled_idx_flat = np.concatenate(all_test_idx)
         pooled_labels_flat = np.concatenate(all_test_labels)
         pooled_preds_flat = np.concatenate(all_y_pred)
-        pooled_scores_flat = np.concatenate(all_scores) if all_scores else None
+        # NOTE: pooled_scores is intentionally dropped under repeated CV.
+        # decision_function / score_samples outputs from independently fitted
+        # OCSVM/IsolationForest/EllipticEnvelope/LOF are NOT on a common scale
+        # across folds — averaging them produces a meaningless ranking and
+        # destroys AUC semantics. Labels-based metrics pool correctly via
+        # per-sample majority vote below; AUC is computed separately as the
+        # mean of per-fold AUCs (see pooled_scores=None handling in
+        # one_class_metrics — it returns NaN for auc — then we override it
+        # with the fold-mean).
 
         unique_samples = np.unique(pooled_idx_flat)
         pooled_labels = np.empty(len(unique_samples), dtype=pooled_labels_flat.dtype)
         pooled_preds = np.empty(len(unique_samples), dtype=pooled_preds_flat.dtype)
-        pooled_scores = (
-            np.empty(len(unique_samples), dtype=float)
-            if pooled_scores_flat is not None else None
-        )
         for i, s in enumerate(unique_samples):
             sample_mask = pooled_idx_flat == s
             # Label is deterministic per sample (same row in y_oc), take first
             pooled_labels[i] = pooled_labels_flat[sample_mask][0]
-            # Majority vote via np.unique + argmax (deterministic tie-break
-            # by sort order; avoids Counter + tolist() overhead)
+            # Majority vote via np.unique + argmax. Deterministic but
+            # tie-breaks TOWARD THE LOWER-SORTED LABEL (-1 = outlier), which
+            # is the conservative default for contamination detection: when
+            # the model is ambiguous about a sample, flag it as an outlier.
+            # Callers who need a different tie-break policy should use an
+            # odd cv_n_repeats to avoid exact ties.
             vals, counts = np.unique(pooled_preds_flat[sample_mask], return_counts=True)
             pooled_preds[i] = vals[np.argmax(counts)]
-            if pooled_scores is not None:
-                pooled_scores[i] = float(np.mean(pooled_scores_flat[sample_mask]))
+        # Pass None for scores — AUC overridden below from per-fold AUCs
+        pooled_scores = None
     else:
         pooled_labels = np.concatenate(all_test_labels)
         pooled_preds = np.concatenate(all_y_pred)
         pooled_scores = np.concatenate(all_scores) if all_scores else None
 
     mean_metrics = one_class_metrics(pooled_labels, pooled_preds, pooled_scores)
+
+    # Under repeated CV, override AUC with mean-of-fold-AUCs because
+    # decision_function scores are not comparable across independently-fitted
+    # folds. Per-fold AUCs are self-contained (scored within the same model).
+    if _is_repeated_cv(kf) and fold_metrics:
+        fold_aucs = [m.get('auc', np.nan) for m in fold_metrics]
+        fold_aucs = [a for a in fold_aucs if a is not None and not np.isnan(a)]
+        mean_metrics['auc'] = float(np.mean(fold_aucs)) if fold_aucs else float('nan')
 
     # NaN guard for balanced_accuracy in zero-outlier case
     if np.isnan(mean_metrics['balanced_accuracy']):
