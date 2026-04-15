@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-14 by Claude (Opus 4.6) — round-4 pre-merge review fix on PR #4 (`claude/cv-strategy-overhaul`): AUC under repeated-CV one-class now stays as mean-of-fold-AUCs, not from per-sample-averaged decision-function scores (those scores aren't comparable across independently-fitted OCSVM/IF/EllipticEnvelope/LOF folds — averaging destroys AUC semantics). Labels-based metrics still per-sample-majority-voted. Majority-vote tie-break bias toward outlier documented (conservative default for contamination detection). **71/71 cv-strategy tests** + **138/138 adjacent tests** pass.
+> **Last updated:** 2026-04-14 by Claude (Opus 4.6) — **PR #4 round-5 review verdict: ship-with-followup.** Commit `4248c83` on `claude/cv-strategy-overhaul`. Codex reviewed the round-4 AUC fix + prior cumulative work and cleared it as mergeable with no BLOCKER/MAJOR issues, only two MINOR test-coverage suggestions (parametrize AUC test across one-class model families; add plain-K-Fold AUC parity test). Peer-review panel (MiniMax + DeepSeek) speculated about "other pooled metrics sharing the AUC scale bug" — codex verified via `one_class_metrics` source that labels-based metrics (sensitivity/specificity/precision/f1/accuracy/BalancedAcc) don't use scores, so the concern was baseless. **71/71 cv-strategy tests + 138/138 adjacent tests pass.** Pending: numeric parity validation on main-vs-branch for PLS + LightGBM × regression + classification (see Follow-Ups).
 
 ---
 

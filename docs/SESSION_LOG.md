@@ -4,6 +4,45 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-14 — PR #4 round-5 review: ship-with-followup (Claude Opus 4.6)
+
+### Outcome
+
+Commit `4248c83` reviewed by codex + peer-review panel (MiniMax M2.7 + DeepSeek V3.2 + MiniMax M2.5 free). **Codex verdict: ship-with-followup, no BLOCKERS, no MAJORs.** Only two MINOR test-coverage suggestions (not ship-blockers):
+
+1. `test_one_class_repeated_kfold_auc_is_mean_of_fold_aucs` only exercises `OneClassSVM(kernel='linear')`. Parametrize across IsolationForest / EllipticEnvelope / LOF / PCA-SIMCA.
+2. `test_one_class_plain_kfold_still_works_after_loop_restructure` is a smoke test only. Add a plain-K-Fold AUC parity test that asserts non-repeated AUC follows pooled-score semantics (guards against accidental routing through the repeated-CV override).
+
+### Codex confirmations that rebutted peer-review panel speculation
+
+Peer-review panel (all 3 models) flagged "CRITICAL: same incomparable-scores bug likely affects other pooled metrics (accuracy, precision, recall, F1, specificity)." Codex verified the claim is false by reading `one_class_metrics` at `contamination.py:442`:
+
+- `one_class_metrics` uses `scores` ONLY for AUC (line 506-516). Every other metric (sensitivity/specificity/precision/f1/accuracy/balanced_accuracy) is label-based — computed from `y_true` and `y_pred`. Passing `scores=None` is safe: no crash, `auc = np.nan`, other metrics unaffected.
+- No other score-based metric exists in the codebase's one_class path (no `average_precision_score`, no `log_loss`, etc.).
+- Downstream consumers (`unified_bayesian.py:1016`, `search.py:5296`) read `mean_metrics['auc']` and trial `auc_cv` attribute — they see the override correctly.
+- Calibration path (`contamination.py:775`) fits ONE model on ALL inliers, so scores there are self-consistent — repeated-CV comparability issue does not apply.
+- `fold_metrics` is appended only for successful folds → AUC override and pooled outputs consistently exclude fold failures.
+- All-NaN fold-AUC edge case correctly handled: filtered list empties → override returns `float('nan')`.
+- Tie-break-to-outlier bias exists only in repeated-CV per-sample majority vote; plain K-Fold has no per-sample reduction so no semantic mismatch.
+
+### Lesson: peer-review default mode lacks code access
+
+The peer-review panel ran in default mode (no librarian) and worked from a text summary doc. All three models correctly flagged "I cannot see the actual diff" but still produced speculative CRITICAL findings without that verification. Codex, running with file-read tools on the actual code, resolved all speculation correctly. For high-stakes correctness reviews, either pair peer-review with a tool-enabled reviewer (codex, or peer-review deep mode) or expect the panel's findings to need secondary verification. Default peer-review is best as a cheap breadth sweep, not a ship-gate.
+
+### Non-fixed (explicitly decided)
+
+- Parametrize AUC test across model families — worth doing but not a ship-blocker. Listed as Follow-Up.
+- Plain-K-Fold AUC parity test — same.
+- Tie-break bias toward outlier — documented in inline comment, conservative default for contamination detection. Callers who need different semantics should use odd `cv_n_repeats`.
+
+### Results
+
+- **71/71 cv-strategy tests pass** (unchanged from round-4).
+- **138/138 adjacent suites pass**.
+- Commit `4248c83` on `claude/cv-strategy-overhaul`, **PR #4 ready to merge**.
+
+---
+
 ## 2026-04-14 — PR #4 round-4 review fix: one-class repeated-CV AUC stays as mean-of-folds (Claude Opus 4.6)
 
 ### Bug: Pooled AUC under repeated CV uses decision scores not comparable across folds
