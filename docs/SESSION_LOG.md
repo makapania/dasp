@@ -4,6 +4,28 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-15 — PR #4 RMSEcv pooling is the only numeric drift vs main
+
+**Context:** Overnight parity validation between `main` (`fa39504`) and `claude/cv-strategy-overhaul` (`c091c93`). Ran PLS/PLS-DA/LightGBM × regression/classification with `folds=5`, plain K-Fold, `preprocessing_methods={'raw': True}`.
+
+**Finding:** 3 of 4 combos bit-identical on 34+ numeric keys. Both regression combos differ *only* in `RMSEcv` (and derived `RPD`, `RER`). `R2cv`, `MAEcv`, `Bias`, `CompositeScore`, all calibration metrics, all classification metrics, per-quartile `RMSE_Q1..Q4`: identical to float64 precision. Predictions themselves are byte-identical (proven by R2cv matching to 16dp).
+
+**Root cause (search.py):**
+- `main:4214` — `mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])` (mean of per-fold RMSEs)
+- `branch:4293` — `mean_rmse = float(np.sqrt(mean_squared_error(all_y_test, all_y_pred)))` (pooled RMSE)
+
+Branch's inline comment documents the motivation: pooled RMSE matches Unscrambler/PLS_Toolbox/SIMCA/IUPAC convention, and under LOO per-fold RMSE on a 1-sample fold mathematically degenerates to `|y-ŷ|` (making mean-of-fold RMSE actually equal MAE). Change was bundled into the round-2 "backend Repeated-KFold pooling" commit but applies to plain K-Fold too.
+
+**Important implication:** `main` had an internal inconsistency — `R2cv`, `MAEcv`, `Bias` all used concatenated predictions, but `RMSEcv` used mean-of-fold. Branch makes it uniform.
+
+**Gotcha for future parity work:** The validation plan only anticipated classification-metric drift (F1 averaging, specificity labels) under repeated CV. It missed the regression RMSE pooling change because that commit landed separately. Enumerate *all* commits in the PR range and reason about each one's numeric surface — don't rely on the PR description's "expected diffs" list.
+
+**LOO classification degeneracy (branch only):** PLS-DA and LightGBM collapse to majority-class predictions on this 3-class imbalanced dataset (Kappa/MCC/Specificity=0, F1=Accuracy≈base rate). Not a plumbing bug — tiny 48-sample training folds with imbalanced 3-class targets don't leave room for minority-class learning at default hyperparameters. Worth a GUI tooltip warning.
+
+**Full report:** `docs/pr4_parity_report.md`. JSON artifacts in `docs/pr4_parity/`.
+
+---
+
 ## 2026-04-14 — PR #4 round-5 review: ship-with-followup (Claude Opus 4.6)
 
 ### Outcome
