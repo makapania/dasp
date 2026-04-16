@@ -1,6 +1,48 @@
 # Project Status
 
-> **Last updated:** 2026-04-15 by Claude (Opus 4.6) — **PR #4 numeric parity validation complete. Verdict: PARTIAL → merge with release note.** Calibration metrics bit-identical across all four (model, task) combos. Classification CV metrics bit-identical (PLS-DA + LightGBM, 34/34 numeric keys each). Regression CV: `R2cv`, `MAEcv`, `Bias`, `CompositeScore`, per-quartile RMSE bit-identical — **only `RMSEcv` (and derived `RPD`/`RER`) differ by ~7.5%**. Root cause: deliberate pooling-strategy change at `search.py:4214` (main mean-of-fold) vs `search.py:4293` (branch pooled `sqrt(MSE)`), motivated by LOO degeneracy + chemometrics-convention alignment (Unscrambler/PLS_Toolbox/SIMCA). Predictions themselves are identical (proven by R2cv matching to 16dp). LOO sanity: regression sensible; classification degenerates to majority-class voting (data/model issue, not plumbing). Full report: `docs/pr4_parity_report.md`. Pending user review.
+> **Last updated:** 2026-04-16 by Claude (Opus 4.6) — see 🔴 priority note below. PR #4 parity work stands (see `docs/pr4_parity_report.md`).
+
+---
+
+## 🔴 PRIORITY FOR NEXT SESSION — fix shared-model-state bug before PyInstaller release
+
+**The bundled app (Python 3.11 + sklearn 1.5.2, required by PyInstaller) crashes the LightGBM calibration metrics when grid search runs with variable subsets + region subsets enabled.** User confirmed 2026-04-16 that switching to `.venv312` (sklearn 1.7.2) masks the symptom — but bundling must use 3.11, so the bug will ship unless we fix the code.
+
+### Symptoms on `.venv311`:
+- Warning per subset fit: `Could not fit model for parameter capture: X has <subset_n> features, but LGBMRegressor is expecting 2135 features as input.`
+- LightGBM rows in results: `NaN` for calibration `RMSE` / `R2` (CV metrics fine).
+
+### Root cause (confirmed from user's GUI stdout):
+- `src/spectral_predict/search.py:~2215` (branch) / `:~2195` (main): the importance-computation step does `pipe = Pipeline([("model", model)])` then `pipe.fit(X_for_models, y_np)` on the preprocessed, edge-masked X (e.g., 2135 features after SG2 window=17).
+- That fit leaves the **shared `model` object** with `n_features_in_ = 2135`.
+- Later, `_run_single_config(..., subset_indices=top_indices)` does `pipe.fit(X_subset, y)` for the refit at `~line 4439`. The shared model carries `n_features_in_=2135`, and sklearn 1.5.2's `_check_n_features(reset=False)` raises before the reset happens.
+- `try/except Exception` at `~4437-4596` swallows it → `cal_rmse=None`, `cal_r2=None` → `NaN`.
+
+### Why it was clean for 5 months:
+User was running on `.venv312` (sklearn 1.7.2). sklearn 1.7.2's pre-fit feature-count check is more lenient. PyInstaller requires 3.11, so `.venv311` (sklearn 1.5.2) is the ship environment — that's where the latent bug fires.
+
+### Proposed fix — two sites, `clone` already imported:
+1. **Primary** (`search.py:~2215` branch / `:~2195` main), the outer importance-pipe fit:
+   ```python
+   pipe_steps = []
+   pipe_steps.append(("model", clone(model)))   # was: model
+   pipe = Pipeline(pipe_steps)
+   pipe.fit(X_for_models, y_np)
+   ```
+2. **Defense in depth** (`_run_single_config()` pipe construction, `search.py:~4209`): same pattern — `pipe_steps.append(("model", clone(model)))` so every config call gets a fresh estimator.
+
+### Verification plan:
+1. New branch off `main` (keep separate from `cv-strategy-overhaul`).
+2. Run `docs/pr4_parity/repro_lightgbm_regression_v2.py` with `.venv311/Scripts/python.exe` — must show zero warnings, zero NaN calibration.
+3. Re-run on `.venv312` to confirm no regression.
+4. GUI smoke test on `.venv311` (flip RUN_SPECTRAL_PREDICT.bat back to `.venv311`) with BoneCollagen + SG2 + variable_subsets + region_subsets ON.
+5. Rebase `cv-strategy-overhaul` once merged so PR #4 picks up the fix.
+
+### Artifacts:
+- `docs/pr4_parity/repro_lightgbm_regression.py` — narrow repro (does NOT trigger without region_subsets)
+- `docs/pr4_parity/repro_lightgbm_regression_v2.py` — full-GUI-defaults repro, should trigger on .venv311
+- Full trace: `docs/SESSION_LOG.md 2026-04-16`
+- Launcher note: `RUN_SPECTRAL_PREDICT.bat` currently points at `.venv312` as a workaround; revert to `.venv311` once the code fix lands.
 
 ---
 
