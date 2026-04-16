@@ -2,12 +2,6 @@
 
 ---
 
-## 🔴 TOP PRIORITY (added 2026-04-16)
-
-**Fix shared-model-state bug before next PyInstaller bundle.** The bundled app runs on Python 3.11 + sklearn 1.5.2; under that sklearn the grid-search refit block fails with `"X has N features, but LGBMRegressor is expecting 2135"` when variable subsets + region subsets are enabled, and LightGBM calibration metrics come back NaN. Root cause + two-site fix (both `clone(model)`) are documented in full in `docs/PROJECT_STATUS.md` under the "🔴 PRIORITY FOR NEXT SESSION" heading. Do this on a fresh branch off `main`, not on `cv-strategy-overhaul`. Do not ship the bundled app until this is fixed.
-
----
-
 ## Session Protocol (MANDATORY — READ THIS FIRST)
 
 > **CRITICAL:** This project is worked on across multiple computers. All project knowledge MUST be stored in the repo, not in local memory. Failure to maintain these docs wastes the user's time re-explaining context.

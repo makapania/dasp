@@ -50,6 +50,8 @@ LightGBM result rows: `RMSE=NaN, R2=NaN` for calibration; CV metrics (`RMSEcv`, 
 
 **Gotcha for future parity / repro work:** always pin the sklearn version when attempting to reproduce a user-reported bug. Matching the user's Python version is not enough — `.venv311` on this machine has sklearn 1.5.2, but `pip install -e .` on a fresh Python 3.11 elsewhere could pull 1.6+ or 1.7+, which would mask the bug.
 
+**Fix shipped 2026-04-16 (same-day resolution):** branch `fix/lightgbm-shared-model-state`, commit `129bf46`. Three `clone(model)` calls at `search.py:2191`, `:4161`, `:4163`. Verified on both `.venv311` and `.venv312` using GUI-default kwargs on BoneCollagen via `scripts/verify_shared_model_fix.py`. Post-fix numerics bit-identical across both venvs (`LightGBM.best_cv_rmse=0.9702327793086989` to 16 sig figs, PLS untouched). Observed severity on main turned out to be worse than the plan expected: the shared-state collision on `.venv311` raises a ValueError mid-grid that kills the ENTIRE LightGBM run (`n_rows=0`), not just individual NaN rows. See `docs/plans/artifacts/2026-04-16/COMPARISON.md` for the full 4-run matrix.
+
 ---
 
 ## 2026-04-11 — Grid-search OC validation silent NaN + final-merge cleanup (Claude Opus 4.6)
