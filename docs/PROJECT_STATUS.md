@@ -1,8 +1,69 @@
 # Project Status
 
-> **Last updated:** 2026-04-11 by Claude (Opus 4.6) — final pre-merge cleanup pass on PR #3 (grid-search OC validation silent NaN + bundled minimum-to-merge fixes)
+> **Last updated:** 2026-04-16 by Claude (Opus 4.6) — investigation closed for the LightGBM "parameter capture" warning + NaN calibration regression. See **Priority for next session** below.
 
 ---
+
+## 🔴 PRIORITY FOR NEXT SESSION (2026-04-16+)
+
+**Fix the shared-model-state bug in `search.py` so the bundled PyInstaller app (Python 3.11 + sklearn 1.5.2) stops throwing `"X has N features, but LGBMRegressor is expecting 2135 features as input"` during grid search with variable subsets + region subsets enabled.**
+
+### Symptoms users see on `.venv311` (bundled app):
+- `Warning: Could not fit model for parameter capture: X has <subset_n> features, but LGBMRegressor is expecting <preprocessed_n> features as input.` prints once per subset fit.
+- LightGBM rows in results have `NaN` for calibration `RMSE`/`R2` (CV metrics are fine).
+
+### Root cause (confirmed 2026-04-16):
+- `search.py:~2195` (main) / `:~2215` (cv-strategy-overhaul branch): the importance-computation step does `pipe = Pipeline([("model", model)])` then `pipe.fit(X_for_models, y_np)` on the preprocessed, edge-masked X (e.g., 2135 features after SG2+window=17 edge masking).
+- That fit leaves the **shared `model` object** with `n_features_in_ = 2135`.
+- Later, `_run_single_config(X, ..., subset_indices=top_indices)` slices X to subset (e.g., 10/50/100 features) and does `pipe.fit(X_subset, y)` for the refit at `~line 4439`. The shared model carries `n_features_in_=2135`, and sklearn 1.5.2's `_check_n_features(reset=False)` raises before the fit reset happens.
+- Swallowed by the `try/except Exception` → `cal_rmse=None, cal_r2=None` → `NaN` in results.
+
+### Why it was clean for 5 months:
+User was on `.venv312` (Python 3.12, sklearn 1.7.2). sklearn 1.7.2's pre-fit feature-count check is more lenient. Switching to `.venv311` (Python 3.11, sklearn 1.5.2) for PyInstaller bundling surfaced the latent bug.
+
+### Proposed fix (two-site minimal change):
+1. **Primary fix** (outer importance pipe, `search.py:~2195` main / `:~2215` branch):
+   ```python
+   # Before:
+   pipe_steps = []
+   pipe_steps.append(("model", model))
+   pipe = Pipeline(pipe_steps)
+   pipe.fit(X_for_models, y_np)
+
+   # After:
+   pipe_steps = []
+   pipe_steps.append(("model", clone(model)))   # <-- clone prevents shared-state mutation
+   pipe = Pipeline(pipe_steps)
+   pipe.fit(X_for_models, y_np)
+   ```
+
+2. **Defense in depth** (`_run_single_config()`, `search.py:~4209`):
+   ```python
+   # Before:
+   pipe_steps.append(("model", model))
+
+   # After:
+   pipe_steps.append(("model", clone(model)))
+   ```
+
+`clone` is already imported at the top of `search.py`.
+
+### Verification steps:
+1. Apply both changes on a new branch off `main` (keep separate from `cv-strategy-overhaul` so PR review stays focused).
+2. Activate `.venv311`: `C:\Users\sponheim\git\dasp\.venv311\Scripts\python.exe` — confirms sklearn 1.5.2.
+3. Run: `python docs/pr4_parity/repro_lightgbm_regression_v2.py` on the 159-sample dataset OR the BoneCollagen dataset (49 samples). The latter reliably triggered the bug in the user's GUI session.
+4. Expected: zero "Could not fit model for parameter capture" warnings; zero NaN calibration metrics; all LightGBM rows have finite `RMSE`/`R2`.
+5. Repeat on `.venv312` to confirm no regression on the newer sklearn.
+6. Merge to main, rebase `cv-strategy-overhaul` so the fix flows to that branch too.
+
+### Artifacts from today's investigation:
+- `docs/pr4_parity/repro_lightgbm_regression.py` — narrow repro (already verified bug is config-dependent)
+- `docs/pr4_parity/repro_lightgbm_regression_v2.py` — broader config closer to GUI defaults
+- Four prior investigation agents produced conflicting diagnoses (all rejected by user); only direct repro via `.venv311` + BoneCollagen + variable_subsets ON + region_subsets ON + sg2 triggered the bug. Full trace in SESSION_LOG.md 2026-04-16.
+
+---
+
+## Active Branch context (secondary)
 
 ## Active Branch: `claude/contamination-detection-model-PrntN`
 
