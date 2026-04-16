@@ -103,7 +103,6 @@ def run_one_model(model_name, X, y):
         enable_region_subsets=True,
         variable_counts=[10, 20, 50, 100, 250],  # gui:2856-2860 default
         variable_selection_methods=["importance"],
-        random_state=42,
     )
 
     captured = io.StringIO()
@@ -155,7 +154,10 @@ def main():
     import sklearn
     import lightgbm
 
-    X, y = load_bone_collagen()
+    # Redirect loader stdout (ASD reader prints) so it doesn't contaminate JSON output
+    load_silence = io.StringIO()
+    with redirect_stdout(load_silence):
+        X, y = load_bone_collagen()
     print(f"[verify] dataset X={X.shape}, y={y.shape}", file=sys.stderr)
 
     lgbm_rec = run_one_model("LightGBM", X, y)

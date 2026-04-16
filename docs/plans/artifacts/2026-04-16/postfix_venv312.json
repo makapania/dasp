@@ -1,0 +1,35 @@
+{
+  "env": {
+    "python": "3.12.0",
+    "sklearn": "1.7.2",
+    "lightgbm": "4.6.0",
+    "git_sha": "129bf46ab6fd30bf6dd7fe0a447210c3eca12609"
+  },
+  "LightGBM": {
+    "model": "LightGBM",
+    "error": null,
+    "warning_feature_mismatch_count": 0,
+    "warning_sample": [],
+    "n_rows": 9408,
+    "n_nan_cal_rmse": 0,
+    "n_nan_cv_rmse": 0,
+    "best_cal_rmse": 0.025748032302456404,
+    "median_cal_rmse": 0.39028291920559643,
+    "best_cv_rmse": 0.9702327793086989,
+    "median_cv_rmse": 2.1131579119266095
+  },
+  "PLS": {
+    "model": "PLS",
+    "error": null,
+    "warning_feature_mismatch_count": 0,
+    "warning_sample": [],
+    "n_rows": 973,
+    "n_nan_cal_rmse": 0,
+    "n_nan_cv_rmse": 0,
+    "best_cal_rmse": 0.5242968634854136,
+    "median_cal_rmse": 2.0301053440415253,
+    "best_cv_rmse": 1.5053957426145248,
+    "median_cv_rmse": 2.55499132402149
+  },
+  "bug_present": false
+}
