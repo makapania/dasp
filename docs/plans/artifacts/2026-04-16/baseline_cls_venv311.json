@@ -1,0 +1,39 @@
+{
+  "env": {
+    "python": "3.11.9",
+    "sklearn": "1.5.2",
+    "lightgbm": "4.6.0",
+    "git_sha": "19d9346adefae68bc46ba24f5254ff3a75196885"
+  },
+  "PLS-DA": {
+    "model": "PLS-DA",
+    "task_type": "classification",
+    "error": null,
+    "warning_feature_mismatch_count": 0,
+    "warning_sample": [],
+    "n_rows": 973,
+    "n_nan_cal_acc": 0,
+    "n_nan_cv_acc": 0,
+    "best_cal_acc": 1.0,
+    "median_cal_acc": 0.8979591836734694,
+    "best_cv_acc": 0.9377777777777776,
+    "median_cv_acc": 0.7355555555555556,
+    "best_cv_f1": 0.9348917748917749
+  },
+  "LightGBM_classification": {
+    "model": "LightGBM",
+    "task_type": "classification",
+    "error": null,
+    "warning_feature_mismatch_count": 0,
+    "warning_sample": [],
+    "n_rows": 9408,
+    "n_nan_cal_acc": 0,
+    "n_nan_cv_acc": 0,
+    "best_cal_acc": 1.0,
+    "median_cal_acc": 1.0,
+    "best_cv_acc": 0.9800000000000001,
+    "median_cv_acc": 0.8533333333333333,
+    "best_cv_f1": 0.9733333333333334
+  },
+  "bug_present": false
+}

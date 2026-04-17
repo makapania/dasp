@@ -36,7 +36,8 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 EXAMPLE_DIR = REPO_ROOT / "example"
 
 
-def load_bone_collagen():
+def load_bone_collagen(target_col="%Collagen"):
+    """Load BoneCollagen spectra + target. target_col='%Collagen' (regression) or 'CollagenCat' (classification)."""
     from spectral_predict.io import read_asd_dir
 
     spectra, _meta = read_asd_dir(EXAMPLE_DIR)
@@ -51,12 +52,13 @@ def load_bone_collagen():
         .str.replace(".spc", "", regex=False)
     )
     joined = spectra.join(
-        ref.set_index("__key__")[["%Collagen"]], how="inner"
+        ref.set_index("__key__")[[target_col]], how="inner"
     )
-    joined = joined.dropna(subset=["%Collagen"])
+    joined = joined.dropna(subset=[target_col])
 
-    y = joined["%Collagen"].astype(float)
-    X = joined.drop(columns=["%Collagen"]).astype(float)
+    y_raw = joined[target_col]
+    y = y_raw.astype(float) if target_col == "%Collagen" else y_raw.astype(str)
+    X = joined.drop(columns=[target_col]).astype(float)
     return X, y
 
 
@@ -82,7 +84,7 @@ def _finite_stat(series, stat):
     return float(getattr(finite, stat)())
 
 
-def run_one_model(model_name, X, y):
+def run_one_model(model_name, X, y, task_type="regression"):
     from spectral_predict.search import run_search
 
     kwargs = dict(
@@ -110,7 +112,7 @@ def run_one_model(model_name, X, y):
     df_out = None
     try:
         with redirect_stdout(captured):
-            df_out, _ = run_search(X, y, task_type="regression", **kwargs)
+            df_out, _ = run_search(X, y, task_type=task_type, **kwargs)
     except Exception as e:
         error = f"{type(e).__name__}: {e}"
 
@@ -119,21 +121,34 @@ def run_one_model(model_name, X, y):
 
     record = {
         "model": model_name,
+        "task_type": task_type,
         "error": error,
         "warning_feature_mismatch_count": len(warning_lines),
         "warning_sample": warning_lines[:5],
     }
 
     if df_out is not None and len(df_out):
-        rmse = df_out.get("RMSE")
-        rmsecv = df_out.get("RMSEcv")
         record["n_rows"] = int(len(df_out))
-        record["n_nan_cal_rmse"] = _nan_count(rmse)
-        record["n_nan_cv_rmse"] = _nan_count(rmsecv)
-        record["best_cal_rmse"] = _finite_stat(rmse, "min")
-        record["median_cal_rmse"] = _finite_stat(rmse, "median")
-        record["best_cv_rmse"] = _finite_stat(rmsecv, "min")
-        record["median_cv_rmse"] = _finite_stat(rmsecv, "median")
+        if task_type == "regression":
+            rmse = df_out.get("RMSE")
+            rmsecv = df_out.get("RMSEcv")
+            record["n_nan_cal_rmse"] = _nan_count(rmse)
+            record["n_nan_cv_rmse"] = _nan_count(rmsecv)
+            record["best_cal_rmse"] = _finite_stat(rmse, "min")
+            record["median_cal_rmse"] = _finite_stat(rmse, "median")
+            record["best_cv_rmse"] = _finite_stat(rmsecv, "min")
+            record["median_cv_rmse"] = _finite_stat(rmsecv, "median")
+        else:  # classification
+            acc = df_out.get("Accuracy")
+            acccv = df_out.get("Accuracycv")
+            f1cv = df_out.get("F1cv")
+            record["n_nan_cal_acc"] = _nan_count(acc)
+            record["n_nan_cv_acc"] = _nan_count(acccv)
+            record["best_cal_acc"] = _finite_stat(acc, "max")
+            record["median_cal_acc"] = _finite_stat(acc, "median")
+            record["best_cv_acc"] = _finite_stat(acccv, "max")
+            record["median_cv_acc"] = _finite_stat(acccv, "median")
+            record["best_cv_f1"] = _finite_stat(f1cv, "max") if f1cv is not None else None
     else:
         record["n_rows"] = 0
 
@@ -150,18 +165,15 @@ def git_sha():
 
 
 def main():
+    import argparse
     import platform
     import sklearn
     import lightgbm
 
-    # Redirect loader stdout (ASD reader prints) so it doesn't contaminate JSON output
-    load_silence = io.StringIO()
-    with redirect_stdout(load_silence):
-        X, y = load_bone_collagen()
-    print(f"[verify] dataset X={X.shape}, y={y.shape}", file=sys.stderr)
-
-    lgbm_rec = run_one_model("LightGBM", X, y)
-    pls_rec = run_one_model("PLS", X, y)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", choices=["regression", "classification", "both"], default="regression",
+                        help="Which task types to run. Default 'regression' preserves legacy behavior.")
+    args = parser.parse_args()
 
     result = {
         "env": {
@@ -170,18 +182,43 @@ def main():
             "lightgbm": lightgbm.__version__,
             "git_sha": git_sha(),
         },
-        "LightGBM": lgbm_rec,
-        "PLS": pls_rec,
     }
+    records = []
 
-    bug_present = any(
-        (r.get("error") is not None)
-        or ((r.get("n_rows") or 0) == 0)
-        or ((r.get("warning_feature_mismatch_count") or 0) > 0)
-        or ((r.get("n_nan_cal_rmse") or 0) > 0)
-        or ((r.get("n_nan_cv_rmse") or 0) > 0)
-        for r in (lgbm_rec, pls_rec)
-    )
+    if args.task in ("regression", "both"):
+        load_silence = io.StringIO()
+        with redirect_stdout(load_silence):
+            X_reg, y_reg = load_bone_collagen("%Collagen")
+        print(f"[verify] regression dataset X={X_reg.shape}, y={y_reg.shape}", file=sys.stderr)
+        lgbm_rec = run_one_model("LightGBM", X_reg, y_reg, task_type="regression")
+        pls_rec = run_one_model("PLS", X_reg, y_reg, task_type="regression")
+        result["LightGBM"] = lgbm_rec
+        result["PLS"] = pls_rec
+        records.extend([lgbm_rec, pls_rec])
+
+    if args.task in ("classification", "both"):
+        load_silence = io.StringIO()
+        with redirect_stdout(load_silence):
+            X_cls, y_cls = load_bone_collagen("CollagenCat")
+        print(f"[verify] classification dataset X={X_cls.shape}, y={y_cls.shape}, classes={sorted(y_cls.unique().tolist())}", file=sys.stderr)
+        plsda_rec = run_one_model("PLS-DA", X_cls, y_cls, task_type="classification")
+        lgbmcls_rec = run_one_model("LightGBM", X_cls, y_cls, task_type="classification")
+        result["PLS-DA"] = plsda_rec
+        result["LightGBM_classification"] = lgbmcls_rec
+        records.extend([plsda_rec, lgbmcls_rec])
+
+    bug_present = False
+    for r in records:
+        if r.get("error") is not None:
+            bug_present = True
+        elif (r.get("n_rows") or 0) == 0:
+            bug_present = True
+        elif (r.get("warning_feature_mismatch_count") or 0) > 0:
+            bug_present = True
+        elif (r.get("n_nan_cal_rmse") or 0) > 0 or (r.get("n_nan_cv_rmse") or 0) > 0:
+            bug_present = True
+        elif (r.get("n_nan_cal_acc") or 0) > 0 or (r.get("n_nan_cv_acc") or 0) > 0:
+            bug_present = True
     result["bug_present"] = bool(bug_present)
 
     print(json.dumps(result, indent=2, default=str))

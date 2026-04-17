@@ -4136,7 +4136,7 @@ def _run_single_config(
     # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
     # StandardScaler normalizes PLS scores to fix numerical instability with derivatives
     if model_name == "PLS-DA":
-        pipe_steps.append(("pls", model))
+        pipe_steps.append(("pls", clone(model)))
         pipe_steps.append(("scaler", StandardScaler()))  # Scale PLS scores for LogisticRegression
 
         # Extract LogisticRegression parameters from config (prefixed with lr_)

@@ -24,14 +24,16 @@
 | Location | Current code | Fix |
 |---|---|---|
 | `search.py:2191` (inside importance-capture block) | `pipe_steps.append(("model", model))` | `pipe_steps.append(("model", clone(model)))` |
+| `search.py:4139` (PLS-DA branch in `_run_single_config`) | `pipe_steps.append(("pls", model))` | `pipe_steps.append(("pls", clone(model)))` |
 | `search.py:4161` (scale-sensitive branch in `_run_single_config`) | `pipe_steps.append(("model", model))` | `pipe_steps.append(("model", clone(model)))` |
 | `search.py:4163` (default branch in `_run_single_config`) | `pipe_steps.append(("model", model))` | `pipe_steps.append(("model", clone(model)))` |
 
 `clone` is imported at `search.py:19` (`from sklearn.base import clone`). No new imports needed.
 
+**PLS-DA added mid-review:** originally deferred to a follow-up PR since the observed regression failure was regression-only. Review (Claude pr-reviewer) flagged that `.venv311` classification grid search with variable+region subsets hits the same latent failure, so it was included here — one line, same pattern.
+
 **Deliberately NOT touching:**
-- `search.py:4136` (`pipe_steps.append(("pls", model))` for PLS-DA) — different code path, not involved in the reported failure. Left alone to keep diff minimal and reviewable. Can be follow-up.
-- Any other `pipe.fit(model)` site — not in the pathway to the observed bug.
+- Any other `pipe.fit(model)` site — verified safe (`bayesian_utils.py:353`, `unified_bayesian.py:1201/1215/1218`, `nsga2_search.py:1427/1430`, `models.py:346` all build fresh estimators per call).
 
 ---
 
@@ -105,7 +107,7 @@ The harness must:
    - `n_nan_cal_rmse > 0`
    - `n_nan_cv_rmse > 0` (a broken run can manifest here even if calibration stays finite)
 
-Seed everything: `random_state=42` passed through `run_search`.
+(Note: `run_search` does not accept a `random_state` kwarg — the as-shipped harness omits it. Determinism comes from fixed data + fixed kwargs.)
 
 Full code:
 ```python
@@ -189,7 +191,6 @@ def run_one_model(model_name, X, y):
         enable_region_subsets=True,
         variable_counts=[10, 20, 50, 100, 250],  # GUI default (gui:2856-2862)
         variable_selection_methods=["importance"],
-        random_state=42,
     )
 
     captured = io.StringIO()
