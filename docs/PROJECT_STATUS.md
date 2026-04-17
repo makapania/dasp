@@ -1,65 +1,18 @@
 # Project Status
 
-> **Last updated:** 2026-04-16 by Claude (Opus 4.6) — investigation closed for the LightGBM "parameter capture" warning + NaN calibration regression. See **Priority for next session** below.
+> **Last updated:** 2026-04-16 by Claude (Opus 4.7) — LightGBM shared-model-state bug **FIXED** on branch `fix/lightgbm-shared-model-state`. Commit `129bf46`. Before/after verified on both venvs with bit-identical numerics — see `docs/plans/artifacts/2026-04-16/COMPARISON.md`.
 
 ---
 
-## 🔴 PRIORITY FOR NEXT SESSION (2026-04-16+)
+## Recently resolved
 
-**Fix the shared-model-state bug in `search.py` so the bundled PyInstaller app (Python 3.11 + sklearn 1.5.2) stops throwing `"X has N features, but LGBMRegressor is expecting 2135 features as input"` during grid search with variable subsets + region subsets enabled.**
+### LightGBM "parameter capture" warning + NaN / crash on `.venv311` — FIXED 2026-04-16
 
-### Symptoms users see on `.venv311` (bundled app):
-- `Warning: Could not fit model for parameter capture: X has <subset_n> features, but LGBMRegressor is expecting <preprocessed_n> features as input.` prints once per subset fit.
-- LightGBM rows in results have `NaN` for calibration `RMSE`/`R2` (CV metrics are fine).
+Fix: `clone(model)` at four pipe-construction sites in `search.py` (`:2191`, `:4161`, `:4163` for the regression bug, plus `:4139` PLS-DA defensive). Root cause: shared estimator instance being fit first on full preprocessed X (setting `n_features_in_=2151`), then reused in subset-feature fits; sklearn 1.5.2's pre-fit `_check_n_features(reset=False)` fires before the refit would reset the count, raising. sklearn 1.7.2's pre-fit check is more lenient and doesn't raise on the same pattern. The PLS-DA `:4139` site was added after Claude pr-reviewer flagged it as the same pattern; classification baseline run on `.venv311` with PLS-DA un-cloned proved PLS-DA doesn't actually hit the bug (importance-capture at `:2191` doesn't fire for PLS-DA), so the clone there is purely defensive/symmetric. (The separate sklearn 1.7.2 `"X does not have valid feature names"` UserWarning flood seen on `.venv312` comes from a DataFrame-fit / ndarray-predict transition in the pipeline; it's unrelated to the shared-state bug and is NOT changed by this fix — see COMPARISON.md.)
 
-### Root cause (confirmed 2026-04-16):
-- `search.py:~2195` (main) / `:~2215` (cv-strategy-overhaul branch): the importance-computation step does `pipe = Pipeline([("model", model)])` then `pipe.fit(X_for_models, y_np)` on the preprocessed, edge-masked X (e.g., 2135 features after SG2+window=17 edge masking).
-- That fit leaves the **shared `model` object** with `n_features_in_ = 2135`.
-- Later, `_run_single_config(X, ..., subset_indices=top_indices)` slices X to subset (e.g., 10/50/100 features) and does `pipe.fit(X_subset, y)` for the refit at `~line 4439`. The shared model carries `n_features_in_=2135`, and sklearn 1.5.2's `_check_n_features(reset=False)` raises before the fit reset happens.
-- Swallowed by the `try/except Exception` → `cal_rmse=None, cal_r2=None` → `NaN` in results.
+Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults on BoneCollagen — 4-run before/after matrix on both venvs. Post-fix `.venv311` produces 9408 LightGBM rows with `best_cv_rmse=0.9702327793086989`, bit-identical to `.venv312`. See `docs/plans/2026-04-16-lightgbm-shared-model-fix.md` for the plan and `docs/plans/artifacts/2026-04-16/COMPARISON.md` for the metrics matrix.
 
-### Why it was clean for 5 months:
-User was on `.venv312` (Python 3.12, sklearn 1.7.2). sklearn 1.7.2's pre-fit feature-count check is more lenient. Switching to `.venv311` (Python 3.11, sklearn 1.5.2) for PyInstaller bundling surfaced the latent bug.
-
-### Proposed fix (two-site minimal change):
-1. **Primary fix** (outer importance pipe, `search.py:~2195` main / `:~2215` branch):
-   ```python
-   # Before:
-   pipe_steps = []
-   pipe_steps.append(("model", model))
-   pipe = Pipeline(pipe_steps)
-   pipe.fit(X_for_models, y_np)
-
-   # After:
-   pipe_steps = []
-   pipe_steps.append(("model", clone(model)))   # <-- clone prevents shared-state mutation
-   pipe = Pipeline(pipe_steps)
-   pipe.fit(X_for_models, y_np)
-   ```
-
-2. **Defense in depth** (`_run_single_config()`, `search.py:~4209`):
-   ```python
-   # Before:
-   pipe_steps.append(("model", model))
-
-   # After:
-   pipe_steps.append(("model", clone(model)))
-   ```
-
-`clone` is already imported at the top of `search.py`.
-
-### Verification steps:
-1. Apply both changes on a new branch off `main` (keep separate from `cv-strategy-overhaul` so PR review stays focused).
-2. Activate `.venv311`: `C:\Users\sponheim\git\dasp\.venv311\Scripts\python.exe` — confirms sklearn 1.5.2.
-3. Run: `python docs/pr4_parity/repro_lightgbm_regression_v2.py` on the 159-sample dataset OR the BoneCollagen dataset (49 samples). The latter reliably triggered the bug in the user's GUI session.
-4. Expected: zero "Could not fit model for parameter capture" warnings; zero NaN calibration metrics; all LightGBM rows have finite `RMSE`/`R2`.
-5. Repeat on `.venv312` to confirm no regression on the newer sklearn.
-6. Merge to main, rebase `cv-strategy-overhaul` so the fix flows to that branch too.
-
-### Artifacts from today's investigation:
-- `docs/pr4_parity/repro_lightgbm_regression.py` — narrow repro (already verified bug is config-dependent)
-- `docs/pr4_parity/repro_lightgbm_regression_v2.py` — broader config closer to GUI defaults
-- Four prior investigation agents produced conflicting diagnoses (all rejected by user); only direct repro via `.venv311` + BoneCollagen + variable_subsets ON + region_subsets ON + sg2 triggered the bug. Full trace in SESSION_LOG.md 2026-04-16.
+Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to that branch too.
 
 ---
 
