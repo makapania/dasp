@@ -88,7 +88,7 @@ fi
 echo -e "${GREEN}Launching Spectral Predict GUI...${NC}"
 echo ""
 
-$PYTHON spectral_predict_gui.py
+$PYTHON spectral_predict_gui_optimized.py
 
 # Check exit code
 if [ $? -ne 0 ]; then

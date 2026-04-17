@@ -162,13 +162,6 @@ except ImportError:
     HAS_ENSEMBLE_PREPROCESSING = False
     StackedPreprocessingRegressor = None
 
-try:
-    from spectral_predict.learned_preprocessing import SpectralPreprocessorWithRegressor, PYTORCH_AVAILABLE
-    HAS_LEARNED_PREPROCESSING = PYTORCH_AVAILABLE  # Check actual PyTorch availability, not just import
-except ImportError:
-    HAS_LEARNED_PREPROCESSING = False
-    SpectralPreprocessorWithRegressor = None
-
 # Check for CatBoost availability
 try:
     from catboost import CatBoostRegressor

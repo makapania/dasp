@@ -1,6 +1,24 @@
 # Project Status
 
-> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — PR #5 (LightGBM shared-model-state fix) and PR #4 (LOO + Repeated K-Fold CV strategies) both merged to `main`. See "Recently resolved" + "Known follow-ups" below.
+> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — Repo-distribution prep: added `install.bat`/`install.sh`/`INSTALL.md`, audited `pyproject.toml` for missing required deps (added Pillow, shap, re-enabled jcamp), bumped sklearn/numpy/pandas/scipy floors. Earlier today: PR #5 (LightGBM shared-model-state fix) and PR #4 (LOO + Repeated K-Fold CV strategies) both merged to `main`. See "Recently resolved" + "Known follow-ups" below.
+
+---
+
+## Repo-distribution install path (added 2026-04-17)
+
+Goal: enable a small group to clone the repo and run the GUI without dealing with venv setup themselves. Bundled-app limitations (PyInstaller forces Python 3.11, multiprocessing falls back to threading-only) led to deciding to share the source for now.
+
+**What's in place:**
+- `install.bat` (Windows) / `install.sh` (mac/linux): detects Python 3.12, creates `.venv312`, runs `pip install -e . --upgrade`. Idempotent.
+- `INSTALL.md`: GUI-focused walkthrough with troubleshooting for the three real failure modes (Python missing, proxy/firewall, missing C++ build tools).
+- `pyproject.toml` deps audited via AST scan vs declared deps. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1` (the old "Python 3.11 bug" comment was stale; jcamp 1.2.x imports cleanly on 3.12). Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11` (sklearn floor traces to PR #5 evidence).
+- `run_gui.sh`: fixed stale `spectral_predict_gui.py` filename (was `spectral_predict_gui_optimized.py`).
+
+**Intentionally NOT declared as required:**
+- **`torch`** — `src/spectral_predict/learned_preprocessing.py` exists and imports torch, but is **not wired into the GUI**. The dead import block at `gui:165-170` was removed 2026-04-17. The module itself is preserved because there may be a future place for learned-preprocessing models. **If/when learned_preprocessing is wired into the GUI**, decide: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch — install with `pip install torch`" message in the GUI when the user tries to use it.
+- **`agilent-ir-formats`** — no Python 3.12 wheel exists on PyPI. Stays in optional `[agilent]` extra. .seq file loading will raise a clear ImportError from `agilent_reader.py:62` until the upstream package ships a 3.12 wheel.
+
+**Next:** PyInstaller-on-3.12 experiment to retire the 3.11 bundled-app constraint and recover real multiprocessing parallelism (currently `search.py:4244-4249` falls back to `threading` when `sys.frozen` is detected).
 
 ---
 

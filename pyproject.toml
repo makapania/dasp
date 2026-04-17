@@ -21,10 +21,13 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "numpy>=1.21.0",
-    "pandas>=1.3.0",
-    "scikit-learn>=1.0.0",
-    "scipy>=1.7.0",
+    # Floors reflect actually-tested versions on .venv312 (2026-04-17).
+    # numpy: 2.x ABI break vs 1.x. scikit-learn: PR #5 (LightGBM clone fix)
+    # was validated against >=1.5; older sklearn missed n_features_in_ checks.
+    "numpy>=2.0.0",
+    "pandas>=2.0.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.11.0",
     "tabulate>=0.9.0",
     "matplotlib>=3.5.0",
     "xgboost>=2.0.0",
@@ -34,9 +37,12 @@ dependencies = [
     "xlsxwriter>=3.2.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
-    # Note: jcamp has dependency bug on Python 3.11+ (incorrectly requires "re")
-    # "jcamp>=1.3.0",
+    "jcamp>=1.2.1",
     "spc-io>=0.2.0",
+    # GUI image rendering (app icon, embedded images)
+    "Pillow>=10.0.0",
+    # Model interpretability (SHAP plots in Diagnostics tab)
+    "shap>=0.44.0",
     "joblib>=1.3.0",
     # Resampling and utilities
     "imbalanced-learn>=0.11.0",
