@@ -4,7 +4,7 @@
 
 **Goal:** Eliminate the shared-`model` state leak in `search.py` that causes `LGBMRegressor` to raise `"X has N features, but LGBMRegressor is expecting 2135 features as input"` during grid search with variable + region subsets enabled on sklearn 1.5.2 (bundled `.venv311`).
 
-**Architecture:** Two-site minimal fix — wrap the shared `model` in `sklearn.base.clone()` at the importance-capture pipe construction (`search.py:2191`) and at the `_run_single_config` pipe construction (`search.py:4161`, `:4163`). `clone` is already imported at `search.py:19`. Verify with a before/after harness that runs LightGBM + PLS grid searches on the BoneCollagen dataset (`example/`) against **both** `.venv311` (sklearn 1.5.2, where bug triggers) and `.venv312` (sklearn 1.7.2, where bug is latent).
+**Architecture:** Four-site minimal fix — wrap the shared `model` in `sklearn.base.clone()` at the importance-capture pipe construction (`search.py:2191`) and at the `_run_single_config` pipe construction (`search.py:4139` PLS-DA branch, `:4161` scale-sensitive branch, `:4163` default branch). `clone` is already imported at `search.py:19`. Verify with a before/after harness that runs LightGBM + PLS grid searches (and PLS-DA + LightGBM-classification) on the BoneCollagen dataset (`example/`) against **both** `.venv311` (sklearn 1.5.2, where bug triggers) and `.venv312` (sklearn 1.7.2, where bug is latent).
 
 **Tech Stack:** Python 3.11/3.12, scikit-learn 1.5.2/1.7.2, LightGBM 4.6.0, existing `spectral_predict.search.run_search`, `spectral_predict.io.read_asd_dir`, BoneCollagen example data.
 
@@ -13,7 +13,7 @@
 ## Background
 
 - **Root cause:** at `search.py:2191`, `model` (a single instance) is put into a Pipeline and fit on the full preprocessed X (e.g. 2135 features). The fit leaves `model.n_features_in_ = 2135`. Later, `_run_single_config` reuses that **same** `model` reference in a new pipeline and calls `pipe.fit(X_subset, y)` on a 10/20/50/… feature slice. sklearn 1.5.2's pre-fit validation runs `_check_n_features(reset=False)` **before** the fit body would reset `n_features_in_`, so it raises. sklearn 1.7.2 relaxed that pre-fit check and the bug is silently tolerated.
-- **Scope of impact:** confirmed LightGBM (user reproed). Any estimator with sklearn's strict `_check_n_features` path is vulnerable in principle (LightGBM's sklearn wrapper inherits it). PLS is historically robust — included in verification as a control to confirm we don't perturb its metrics.
+- **Scope of impact:** confirmed LightGBM (user reproduced). Any estimator with sklearn's strict `_check_n_features` path is vulnerable in principle (LightGBM's sklearn wrapper inherits it). PLS is historically robust — included in verification as a control to confirm we don't perturb its metrics. PLS-DA verified empirically as NOT vulnerable (importance-capture pre-fit at `:2191` doesn't fire for it), but cloned for symmetry.
 - **Why shipping without fix is unsafe:** the bundled PyInstaller app runs `.venv311`. Users would see NaN calibration metrics + stdout warnings for LightGBM whenever variable subsets + region subsets are both enabled (GUI default).
 - **Evidence / prior artifacts:** `docs/SESSION_LOG.md` entry `2026-04-16`, `docs/pr4_parity/repro_lightgbm_regression_v2.py` (on `cv-strategy-overhaul` worktree).
 
@@ -41,12 +41,12 @@
 
 Each run executes the same harness script against the same dataset (`example/` BoneCollagen + ASD files), capturing a deterministic JSON summary.
 
-| # | Venv | sklearn | Stage | Expectation |
-|---|---|---|---|---|
-| 1 | `.venv311` | 1.5.2 | **before** fix | LightGBM has NaN calibration rows + feature-count warnings. PLS clean. |
-| 2 | `.venv312` | 1.7.2 | **before** fix | Both models clean (bug is latent). |
-| 3 | `.venv311` | 1.5.2 | **after** fix | Both models clean. Zero feature-count warnings. |
-| 4 | `.venv312` | 1.7.2 | **after** fix | Both models clean. Metrics match run #2 within tolerance. |
+| # | Venv | sklearn | Stage | Expectation | Observed |
+|---|---|---|---|---|---|
+| 1 | `.venv311` | 1.5.2 | **before** fix | LightGBM crash or NaN rows + feature-count warnings. PLS clean. | LightGBM raised `ValueError`, `n_rows=0` (1249 warnings). PLS clean. |
+| 2 | `.venv312` | 1.7.2 | **before** fix | Both models clean (bug is latent). | Both clean (9408 LightGBM rows, 973 PLS rows). |
+| 3 | `.venv311` | 1.5.2 | **after** fix | Both models clean. Zero feature-count warnings. | Both clean, bit-identical to run #2. |
+| 4 | `.venv312` | 1.7.2 | **after** fix | Both models clean. Metrics match run #2 within tolerance. | Bit-identical to run #2. |
 
 Tolerance rule: CV RMSE / R² should match to 1e-9 across before/after runs within the same venv (since fit() already resets `n_features_in_`, `clone()` shouldn't change numerics unless there was an actual stale-state effect). We'll sanity-check this in the report.
 
@@ -467,8 +467,8 @@ git commit -m "test: add before/after verification artifacts for shared-model fi
 **Step 1:** Edit PROJECT_STATUS.md top section: replace the "🔴 PRIORITY FOR NEXT SESSION" block with a dated "Recently resolved" note pointing to the fix SHA and the verification artifacts.
 
 **Step 2:** Append to SESSION_LOG.md under the 2026-04-16 entry:
-```
-**Fix shipped 2026-04-16 (post-investigation):** two sites wrapped in `clone()` on branch `fix/lightgbm-shared-model-state`. Verified before/after on both venvs. See `docs/plans/artifacts/2026-04-16/COMPARISON.md`.
+```text
+**Fix shipped 2026-04-16 (post-investigation):** four sites wrapped in `clone()` on branch `fix/lightgbm-shared-model-state`. Verified before/after on both venvs. See `docs/plans/artifacts/2026-04-16/COMPARISON.md`.
 ```
 
 **Step 3:** Remove the 🔴 TOP PRIORITY block at the top of `CLAUDE.md` (the whole "added 2026-04-16" section).
