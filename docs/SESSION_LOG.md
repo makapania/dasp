@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-17 — PR #4 (CV strategies) merged after pre-merge review surfaced a real export-path bug
+
+**Context:** PR #4 (`claude/cv-strategy-overhaul`) had been through 5 prior review rounds. After PR #5 (LightGBM clone fix) merged, this branch was brought up to date by merging `main` back in (commit `058e110`) — clean except for two doc files (PROJECT_STATUS.md and SESSION_LOG.md) where conflicts were resolved by taking main's "fixed" status note + keeping both 2026-04-15 and 2026-04-16 SESSION_LOG entries chronologically.
+
+**Pre-merge dual review (codex + GLM-5.1 via direct z.ai subscription):**
+- GLM approved outright. Verified all 4 PR #5 clone sites intact at the merged offsets (`search.py:2214`, `:4185` PLS-DA, `:4210`, `:4212`), confirmed merge integrity, validated LOO/RepeatedKFold mechanics (early-stopping guard, single-class fold guard, BER consistency, AUC mean-of-folds vs pooled distinction), found only minor non-blocking nits (dead `KFold` import in `contamination.py:42`, LOO O(n²) memory edge case, duplicate import).
+- Codex requested changes — found a real blocker GLM missed: `code_generator.py:108-110` only read `cv_strategy`/`cv_n_repeats` from top-level config keys, but `search.py:4656-4665` stores the canonical CV metadata under `training_config`. Codex verified directly: `CodeGenerator(model_config={'training_config': {'cv_strategy': 'loo'}}, options)` produced `cv_strategy='kfold'` (the default fallback). Result: any caller passing a search-results dict directly to `CodeGenerator` would get the wrong CV regime in exported scripts/notebooks. The current GUI export path at `gui:36412` happens to dodge this because it builds model_config explicitly with top-level keys from `self.refined_config`, but the library API was incorrect. Fix in commit `ac19363`: 3-line training_config fallback in the constructor. Verified safe with three test cases (training_config-only, legacy top-level, default fallback) — all pass.
+
+**Reviewer-finding tally on PR #4 across the day:**
+| Reviewer | Verdict | Notes |
+|---|---|---|
+| codex (gpt-5.4) | request changes → resolved | Caught the export-path bug + 4 non-blocking nits |
+| GLM-5.1 (direct z.ai sub) | approve | Thorough merge integrity check + correctness review |
+
+**Merged via merge-commit `6357aeb` (24 cv-strategy commits + merge from main + export fix). Cleanup: local worktree `.worktrees/cv-strategy-overhaul/` removed, branch `claude/cv-strategy-overhaul` deleted both locally and on remote. Stale local untracked `tests/test_cv_strategy.py` (dated 2026-04-14, missing the `TestPostMergeReviewFixes` class added later in the branch) was deleted before pulling — was a leftover from an earlier session.**
+
+**Known follow-ups deferred to subsequent PRs** (see `docs/PROJECT_STATUS.md` "Known follow-ups" section): `run_bayesian_search()` missing preflight `validate_cv_strategy_for_task()` call (one-line fix at `search.py:3096`); minor style nits in `cv_utils.py` / `templates/validation.py` / `_majority_vote`; LOO O(n²) memory note for very large datasets; sklearn 1.7.2 UserWarning flood suppression on `.venv312`.
+
+---
+
 ## 2026-04-15 — PR #4 RMSEcv pooling is the only numeric drift vs main
 
 **Context:** Overnight parity validation between `main` (`fa39504`) and `claude/cv-strategy-overhaul` (`c091c93`). Ran PLS/PLS-DA/LightGBM × regression/classification with `folds=5`, plain K-Fold, `preprocessing_methods={'raw': True}`.

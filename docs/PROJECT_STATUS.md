@@ -1,18 +1,26 @@
 # Project Status
 
-> **Last updated:** 2026-04-16 by Claude (Opus 4.7) — LightGBM shared-model-state bug **FIXED** on `main` via PR #5. Branch `cv-strategy-overhaul` merged main back in to inherit the fix. See `docs/plans/artifacts/2026-04-16/COMPARISON.md`. PR #4 (this branch) parity work still stands; revisit `docs/pr4_parity_report.md` after merge.
+> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — PR #5 (LightGBM shared-model-state fix) and PR #4 (LOO + Repeated K-Fold CV strategies) both merged to `main`. See "Recently resolved" + "Known follow-ups" below.
 
 ---
 
 ## Recently resolved
 
-### LightGBM "parameter capture" warning + NaN / crash on `.venv311` — FIXED 2026-04-16
+### LOO + Repeated K-Fold cross-validation strategies — MERGED 2026-04-17 (PR #4)
+
+Added `LeaveOneOut`, `RepeatedKFold`, and `RepeatedStratifiedKFold` as first-class CV options across regression / classification / one-class. Backend: `src/spectral_predict/cv_utils.py` — factory `build_cv_splitter`, `validate_cv_strategy_for_task`, `cross_val_predict_pooled`, `reduce_repeated_cv_predictions`. Pooled RMSEcv (regression — fixes the LOO degeneracy where mean-of-fold-RMSE = MAE); pooled sensitivity/specificity (one-class); BER consistency under repeated CV; AUC kept as mean-of-fold-AUCs (scores not comparable across independently-fit folds). GUI: Analysis-tab + Model-Development controls, cost estimator with LOO/Repeated warnings. `training_config` stores `cv_strategy` for save/load. Includes a code-export fallback in `code_generator.py:108-115` so exported scripts/notebooks honor the user's CV regime when callers pass `training_config` rather than top-level keys (caught in pre-merge codex review). 1456-line test suite at `tests/test_cv_strategy.py`, 5 prior review rounds visible in commit history.
+
+### LightGBM "parameter capture" warning + NaN / crash on `.venv311` — FIXED 2026-04-16 (PR #5)
 
 Fix: `clone(model)` at four pipe-construction sites in `search.py` (`:2191`, `:4161`, `:4163` for the regression bug, plus `:4139` PLS-DA defensive). Root cause: shared estimator instance being fit first on full preprocessed X (setting `n_features_in_=2151`), then reused in subset-feature fits; sklearn 1.5.2's pre-fit `_check_n_features(reset=False)` fires before the refit would reset the count, raising. sklearn 1.7.2's pre-fit check is more lenient and doesn't raise on the same pattern. The PLS-DA `:4139` site was added after Claude pr-reviewer flagged it as the same pattern; classification baseline run on `.venv311` with PLS-DA un-cloned proved PLS-DA doesn't actually hit the bug (importance-capture at `:2191` doesn't fire for PLS-DA), so the clone there is purely defensive/symmetric. (The separate sklearn 1.7.2 `"X does not have valid feature names"` UserWarning flood seen on `.venv312` comes from a DataFrame-fit / ndarray-predict transition in the pipeline; it's unrelated to the shared-state bug and is NOT changed by this fix — see COMPARISON.md.)
 
 Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults on BoneCollagen — 4-run before/after matrix on both venvs. Post-fix `.venv311` produces 9408 LightGBM rows with `best_cv_rmse=0.9702327793086989`, bit-identical to `.venv312`. See `docs/plans/2026-04-16-lightgbm-shared-model-fix.md` for the plan and `docs/plans/artifacts/2026-04-16/COMPARISON.md` for the metrics matrix.
 
-Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to that branch too.
+## Known follow-ups (deferred from PR #4 reviews, non-blocking)
+
+- **`run_bayesian_search()` does not call `validate_cv_strategy_for_task()` upfront.** Located in `src/spectral_predict/search.py:3096`. Unlike `run_search()` and `run_unified_bayesian()` which validate the CV-strategy / task-type / class-count combination before any trials run, `run_bayesian_search()` accepts `cv_strategy` / `cv_n_repeats` and proceeds directly. Result: a bad CV config (e.g. LOO requested with task='classification' and a class with <2 samples) would only fail mid-trial inside the Bayesian objective rather than producing a clean preflight error. Codex flagged this as non-blocking in the PR #4 review. Fix is a one-liner: add `validate_cv_strategy_for_task(...)` at the top of the function, mirroring the other two entry points.
+- **Style nits in CV code**: `cv_utils.py` duplicates the `RepeatedKFold` import (module-level + inside `build_cv_splitter`); `templates/validation.py` prints `({cv_folds}-fold)` even for `loo`/`repeated_kfold` (misleading once strategy-specific exports are working); `_majority_vote` should default to NaN in the empty-votes else-branch for safety; LOO `splits = list(...)` materialization at `search.py:~4228` is O(n²) memory for very large datasets (fine for n<5000 spectral data but worth a comment).
+- **Suppress sklearn 1.7.2 `"X does not have valid feature names"` UserWarning flood** on `.venv312` — cosmetic noise, ~12MB stderr per grid run, unrelated to any bug. Consider `warnings.filterwarnings(...)` in the GUI entry point.
 
 ---
 
