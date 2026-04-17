@@ -2,7 +2,7 @@
 
 **Dataset:** BoneCollagen (49 ASD files + `%Collagen` target, 49 samples × 2151 wavelengths, 350–2500 nm).
 **Harness:** `scripts/verify_shared_model_fix.py` — runs `run_search` with GUI-default kwargs for LightGBM and PLS. See script header for the defaults.
-**Fix SHA:** `129bf46` (clone(model) at `search.py:2191,:4161,:4163`).
+**Initial regression-fix SHA:** `129bf46` (three `clone(model)` sites at `search.py:2191,:4161,:4163`). The PLS-DA site at `:4139` was added later in `1fd222c` after pr-review feedback — see the Classification matrix section below.
 
 ## Results matrix
 

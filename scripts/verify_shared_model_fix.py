@@ -36,8 +36,16 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 EXAMPLE_DIR = REPO_ROOT / "example"
 
 
-def load_bone_collagen(target_col="%Collagen"):
-    """Load BoneCollagen spectra + target. target_col='%Collagen' (regression) or 'CollagenCat' (classification)."""
+def load_bone_collagen(target_col: str = "%Collagen") -> tuple[pd.DataFrame, pd.Series]:
+    """Load BoneCollagen spectra + target.
+
+    Args:
+        target_col: '%Collagen' (regression) or 'CollagenCat' (classification).
+
+    Returns:
+        Tuple of (X, y) where X is the wide spectral DataFrame
+        (rows=samples, columns=wavelengths) and y is the target series.
+    """
     from spectral_predict.io import read_asd_dir
 
     spectra, _meta = read_asd_dir(EXAMPLE_DIR)
@@ -62,20 +70,23 @@ def load_bone_collagen(target_col="%Collagen"):
     return X, y
 
 
-def _is_finite(v):
+def _is_finite(v: object) -> bool:
+    """Return True if v is a finite numeric scalar (not NaN, not inf)."""
     if not isinstance(v, (int, float, np.integer, np.floating)):
         return False
     f = float(v)
     return not (np.isnan(f) or np.isinf(f))
 
 
-def _nan_count(series):
+def _nan_count(series: pd.Series | None) -> int | None:
+    """Return number of non-finite entries in series, or None if series is None."""
     if series is None:
         return None
     return int(len(series) - int(series.apply(_is_finite).sum()))
 
 
-def _finite_stat(series, stat):
+def _finite_stat(series: pd.Series | None, stat: str) -> float | None:
+    """Apply a pandas reduction (e.g. 'min', 'max', 'median') to finite entries only."""
     if series is None or len(series) == 0:
         return None
     finite = series[series.apply(_is_finite)]
@@ -84,7 +95,19 @@ def _finite_stat(series, stat):
     return float(getattr(finite, stat)())
 
 
-def run_one_model(model_name, X, y, task_type="regression"):
+def run_one_model(model_name: str, X: pd.DataFrame, y: pd.Series, task_type: str = "regression") -> dict:
+    """Run run_search for a single model and capture metrics + warning counts.
+
+    Args:
+        model_name: Identifier accepted by run_search (e.g. 'LightGBM', 'PLS', 'PLS-DA').
+        X: Spectral feature matrix.
+        y: Target (numeric for regression, string labels for classification).
+        task_type: 'regression' or 'classification'.
+
+    Returns:
+        Dict summarizing the run: error string (or None), warning counts,
+        n_rows, NaN counts, and best/median metrics for the appropriate task.
+    """
     from spectral_predict.search import run_search
 
     kwargs = dict(
@@ -144,6 +167,7 @@ def run_one_model(model_name, X, y, task_type="regression"):
             f1cv = df_out.get("F1cv")
             record["n_nan_cal_acc"] = _nan_count(acc)
             record["n_nan_cv_acc"] = _nan_count(acccv)
+            record["n_nan_cv_f1"] = _nan_count(f1cv) if f1cv is not None else None
             record["best_cal_acc"] = _finite_stat(acc, "max")
             record["median_cal_acc"] = _finite_stat(acc, "median")
             record["best_cv_acc"] = _finite_stat(acccv, "max")
@@ -155,7 +179,8 @@ def run_one_model(model_name, X, y, task_type="regression"):
     return record
 
 
-def git_sha():
+def git_sha() -> str | None:
+    """Return the current HEAD commit SHA, or None if git lookup fails."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT
@@ -164,7 +189,8 @@ def git_sha():
         return None
 
 
-def main():
+def main() -> None:
+    """CLI entry point. Runs regression and/or classification verification and prints JSON."""
     import argparse
     import platform
     import sklearn
@@ -218,6 +244,8 @@ def main():
         elif (r.get("n_nan_cal_rmse") or 0) > 0 or (r.get("n_nan_cv_rmse") or 0) > 0:
             bug_present = True
         elif (r.get("n_nan_cal_acc") or 0) > 0 or (r.get("n_nan_cv_acc") or 0) > 0:
+            bug_present = True
+        elif (r.get("n_nan_cv_f1") or 0) > 0:
             bug_present = True
     result["bug_present"] = bool(bug_present)
 
