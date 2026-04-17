@@ -1231,10 +1231,11 @@ TOOLTIP_CONTENT = {
     # ===== CROSS-VALIDATION =====
     'cross_validation': {
         'cv_folds': (
-            "Number of cross-validation folds (K) for model evaluation. Data is split into K parts; each "
-            "part is held out once for testing while the others train the model. More folds = less bias "
-            "but more variance and computation. Recommendations: 5 folds for 50-100 samples, "
-            "10 folds for 100+ samples, Leave-One-Out for <50 samples."
+            "Number of cross-validation folds (K). Used with K-Fold and Repeated K-Fold strategies.\n\n"
+            "Data is split into K parts; each part is held out once for testing while the others "
+            "train the model. More folds = less bias but more variance and computation.\n"
+            "Recommendations: 5 folds for 50-100 samples, 10 folds for 100+ samples.\n\n"
+            "For Leave-One-Out CV, folds are determined automatically (one per sample)."
         ),
         'stratified': (
             "Stratified cross-validation ensures each fold has similar target value distribution. "
@@ -2594,6 +2595,8 @@ class SpectralPredictApp:
         # Analysis variables
         self.output_dir = tk.StringVar(value="outputs")
         self.folds = tk.IntVar(value=5)
+        self.cv_strategy = tk.StringVar(value='kfold')
+        self.cv_n_repeats = tk.IntVar(value=5)
         self.task_type = tk.StringVar(value="auto")  # auto, regression, or classification
         self.task_type.trace_add('write', lambda *args: self._on_task_type_changed())
 
@@ -10621,30 +10624,109 @@ class SpectralPredictApp:
         self.analysis_target_combo.grid(row=0, column=1, sticky=tk.W)
         self.analysis_target_combo.bind('<<ComboboxSelected>>', self._on_target_column_changed)
 
-        # CV Folds
-        cv_folds_label = ttk.Label(options_frame, text="CV Folds:")
-        cv_folds_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        CreateToolTip(cv_folds_label, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
-        ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=12).grid(row=1, column=1, sticky=tk.W)
+        # --- CV Strategy ---
+        cv_strategy_label = ttk.Label(options_frame, text="CV Strategy:")
+        cv_strategy_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
+        CreateToolTip(cv_strategy_label, text=(
+            "Cross-validation strategy for model evaluation.\n\n"
+            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
+            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
+            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
+            "LOO is computationally expensive on large datasets and unreliable for stochastic "
+            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
+        ), delay=500)
 
-        # CV Folds inline hint
-        ttk.Label(options_frame, text="50+ samples: 5-fold | 100+ samples: 10-fold | <50 samples: Leave-One-Out",
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+        self.cv_strategy_combo = ttk.Combobox(
+            options_frame, textvariable=self.cv_strategy, width=18,
+            values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
+        )
+        self.cv_strategy_combo.grid(row=1, column=1, sticky=tk.W)
+
+        # CV Folds spinbox (hidden under LOO)
+        cv_folds_label = ttk.Label(options_frame, text="Folds:")
+        cv_folds_label.grid(row=1, column=2, sticky=tk.W, padx=(15, 5))
+        CreateToolTip(cv_folds_label, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
+        self.cv_folds_spinbox = ttk.Spinbox(options_frame, from_=3, to=10, textvariable=self.folds, width=6)
+        self.cv_folds_spinbox.grid(row=1, column=3, sticky=tk.W)
+
+        # Repeats spinbox (shown only for repeated_kfold)
+        self.cv_repeats_label = ttk.Label(options_frame, text="Repeats:")
+        self.cv_repeats_label.grid(row=1, column=4, sticky=tk.W, padx=(15, 5))
+        self.cv_repeats_spinbox = ttk.Spinbox(options_frame, from_=2, to=20, textvariable=self.cv_n_repeats, width=6)
+        self.cv_repeats_spinbox.grid(row=1, column=5, sticky=tk.W)
+
+        # CV strategy inline hint
+        self.cv_hint_label = ttk.Label(
+            options_frame,
+            text="n > 100: K-Fold | 30 < n < 100: Repeated K-Fold | n < 30: LOO",
+            style='Caption.TLabel', foreground=self.colors['text_light']
+        )
+        self.cv_hint_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+
+        # Mixed-regime warning (visible only when strategy != kfold)
+        self.cv_mixed_regime_label = ttk.Label(
+            options_frame,
+            text="\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+                 "internally regardless of outer strategy. Under LOO, inner K-fold will see "
+                 "n-1 samples per fold \u2014 may be unstable on very small datasets.",
+            style='Caption.TLabel', foreground='#e67e22',
+            wraplength=600
+        )
+        self.cv_mixed_regime_label.grid(row=3, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
+        self.cv_mixed_regime_label.grid_remove()  # Hidden by default
+
+        # Update controls when strategy changes
+        _LOO_WARNING = (
+            "\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+            "internally regardless of outer strategy. Under LOO, inner K-fold will see "
+            "n\u22121 samples per fold \u2014 may be unstable on very small datasets."
+        )
+        _REPEATED_WARNING = (
+            "\u26a0\ufe0f Variable selection (UVE, SPA, iPLS, CARS, GA-PLS) uses 5-fold K-fold "
+            "internally regardless of outer strategy. Repeated K-Fold outer CV is more "
+            "expensive but inner loops are unaffected."
+        )
+
+        def _on_cv_strategy_changed(*args):
+            strategy = self.cv_strategy.get()
+            if strategy == 'loo':
+                cv_folds_label.grid_remove()
+                self.cv_folds_spinbox.grid_remove()
+                self.cv_repeats_label.grid_remove()
+                self.cv_repeats_spinbox.grid_remove()
+                self.cv_mixed_regime_label.config(text=_LOO_WARNING)
+                self.cv_mixed_regime_label.grid()
+            elif strategy == 'repeated_kfold':
+                cv_folds_label.grid()
+                self.cv_folds_spinbox.grid()
+                self.cv_repeats_label.grid()
+                self.cv_repeats_spinbox.grid()
+                self.cv_mixed_regime_label.config(text=_REPEATED_WARNING)
+                self.cv_mixed_regime_label.grid()
+            else:  # kfold
+                cv_folds_label.grid()
+                self.cv_folds_spinbox.grid()
+                self.cv_repeats_label.grid_remove()
+                self.cv_repeats_spinbox.grid_remove()
+                self.cv_mixed_regime_label.grid_remove()
+
+        self.cv_strategy.trace_add('write', _on_cv_strategy_changed)
+        _on_cv_strategy_changed()  # Set initial state
 
         # NEW: Variable Count Penalty (0-10 scale)
         var_penalty_label = ttk.Label(options_frame, text="Variable Count Penalty (0-10):", style='Subheading.TLabel')
-        var_penalty_label.grid(row=2, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        var_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(var_penalty_label, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
         var_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.variable_penalty, width=10)
-        var_penalty_spinbox.grid(row=3, column=0, sticky=tk.W, padx=(0, 10))
+        var_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(var_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['variable_penalty'], delay=500)
 
         # Cal-CV Gap Penalty (0-10 scale)
         gap_penalty_label = ttk.Label(options_frame, text="Cal-CV Gap Penalty (0-10):", style='Subheading.TLabel')
-        gap_penalty_label.grid(row=4, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
+        gap_penalty_label.grid(row=6, column=0, sticky=tk.W, pady=(15, 5), padx=(0, 10))
         CreateToolTip(gap_penalty_label, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
         gap_penalty_spinbox = ttk.Spinbox(options_frame, from_=0, to=10, textvariable=self.gap_penalty, width=10)
-        gap_penalty_spinbox.grid(row=5, column=0, sticky=tk.W, padx=(0, 10))
+        gap_penalty_spinbox.grid(row=7, column=0, sticky=tk.W, padx=(0, 10))
         CreateToolTip(gap_penalty_spinbox, text=TOOLTIP_CONTENT['ranking']['gap_penalty'], delay=500)
 
         # RMSEP/validation gap checkbox (next to gap penalty)
@@ -10652,7 +10734,7 @@ class SpectralPredictApp:
             options_frame, text="Use validation gap instead of calibration gap",
             variable=self.use_rmsep_gap, state='disabled'
         )
-        self.use_rmsep_gap_checkbox.grid(row=5, column=1, sticky=tk.W, padx=(15, 0))
+        self.use_rmsep_gap_checkbox.grid(row=7, column=1, sticky=tk.W, padx=(15, 0))
         CreateToolTip(self.use_rmsep_gap_checkbox,
                       text="When checked, gap penalty uses validation metrics (RMSEP/RMSEcv for regression, "
                            "Validation Accuracy/CV Accuracy for classification) instead of calibration-CV gap. "
@@ -10660,7 +10742,7 @@ class SpectralPredictApp:
 
         # Info label explaining the penalty system
         ttk.Label(options_frame, text="Both penalties scale relative to actual performance range. 0 = rank only by performance, 5 = balanced, 10 = max shift = 50% of perf range",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=8, column=0, columnspan=6, sticky=tk.W, pady=(10, 0))
 
         # Bind penalty controls to live re-ranking
         self.variable_penalty.trace_add('write', self._rerank_results_debounced)
@@ -14217,13 +14299,56 @@ class SpectralPredictApp:
         training_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
-        # CV Folds
-        ttk.Label(training_frame, text="Cross-Validation Folds:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        # CV Strategy
+        ttk.Label(training_frame, text="Cross-Validation Strategy:", style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        self.refine_cv_strategy = tk.StringVar(value='kfold')
+        self.refine_cv_n_repeats = tk.IntVar(value=5)
         self.refine_folds = tk.IntVar(value=5)
         cv_frame = ttk.Frame(training_frame)
         cv_frame.grid(row=1, column=0, sticky=tk.W, pady=5)
-        ttk.Spinbox(cv_frame, from_=3, to=10, textvariable=self.refine_folds, width=12).pack(side='left', padx=(0, 5))
-        ttk.Label(cv_frame, text="(3-10 folds recommended)", style='Caption.TLabel').pack(side='left')
+
+        self.refine_strategy_combo = ttk.Combobox(
+            cv_frame, textvariable=self.refine_cv_strategy, width=16,
+            values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
+        )
+        self.refine_strategy_combo.pack(side='left', padx=(0, 8))
+
+        self.refine_folds_label = ttk.Label(cv_frame, text="Folds:")
+        self.refine_folds_label.pack(side='left', padx=(0, 3))
+        self.refine_folds_spinbox = ttk.Spinbox(cv_frame, from_=3, to=10, textvariable=self.refine_folds, width=5)
+        self.refine_folds_spinbox.pack(side='left', padx=(0, 8))
+
+        self.refine_repeats_label = ttk.Label(cv_frame, text="Repeats:")
+        self.refine_repeats_label.pack(side='left', padx=(0, 3))
+        self.refine_repeats_spinbox = ttk.Spinbox(cv_frame, from_=2, to=50, textvariable=self.refine_cv_n_repeats, width=5)
+        self.refine_repeats_spinbox.pack(side='left', padx=(0, 8))
+
+        self.refine_cv_hint = ttk.Label(cv_frame, text="(3-10 folds recommended)", style='Caption.TLabel')
+        self.refine_cv_hint.pack(side='left')
+
+        def _on_refine_cv_strategy_changed(*args):
+            strategy = self.refine_cv_strategy.get()
+            if strategy == 'loo':
+                self.refine_folds_label.pack_forget()
+                self.refine_folds_spinbox.pack_forget()
+                self.refine_repeats_label.pack_forget()
+                self.refine_repeats_spinbox.pack_forget()
+                self.refine_cv_hint.config(text="(one sample held out per iteration)")
+            elif strategy == 'repeated_kfold':
+                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
+                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
+                self.refine_repeats_label.pack(side='left', padx=(0, 3), before=self.refine_repeats_spinbox)
+                self.refine_repeats_spinbox.pack(side='left', padx=(0, 8), before=self.refine_cv_hint)
+                self.refine_cv_hint.config(text="(folds x repeats iterations)")
+            else:  # kfold
+                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
+                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
+                self.refine_repeats_label.pack_forget()
+                self.refine_repeats_spinbox.pack_forget()
+                self.refine_cv_hint.config(text="(3-10 folds recommended)")
+
+        self.refine_cv_strategy.trace_add('write', _on_refine_cv_strategy_changed)
+        _on_refine_cv_strategy_changed()  # Set initial state
 
         # Max iterations (for neural models)
         ttk.Label(training_frame, text="Max Iterations (neural models):", style='Subheading.TLabel').grid(row=2, column=0, sticky=tk.W, pady=(15, 5))
@@ -21863,6 +21988,100 @@ class SpectralPredictApp:
             else:
                 resolved_inlier_label = inlier_label
 
+        # --- CV cost warning (Task 7) ---
+        cv_strategy = self.cv_strategy.get()
+        if cv_strategy != 'kfold':
+            from spectral_predict.cv_utils import estimate_total_cv_fits
+
+            n_samples = len(self.X) if self.X is not None else 0
+            n_models = len(selected_models)
+            # Rough preprocessing count: grid search tests ~10-20 configs; use 10 as default
+            n_preprocessing = 10
+            n_trials = 1
+            if self.optimization_method.get() == 'unified':
+                try:
+                    n_trials = self.n_unified_trials.get()
+                except Exception:
+                    n_trials = 300
+
+            total_fits = estimate_total_cv_fits(
+                cv_strategy,
+                self.folds.get(),
+                self.cv_n_repeats.get(),
+                n_samples,
+                n_trials,
+                n_models,
+                n_preprocessing,
+            )
+
+            # Check for stochastic models under LOO
+            stochastic_models = {'RandomForest', 'LightGBM', 'XGBoost', 'CatBoost', 'MLP'}
+            stochastic_selected = [m for m in selected_models if m in stochastic_models]
+            stochastic_note = ""
+            if cv_strategy == 'loo' and stochastic_selected:
+                stochastic_note = (
+                    "\n\nNote: LOO CV is unreliable for stochastic models "
+                    f"({', '.join(stochastic_selected)}) because each fold trains on "
+                    "nearly identical data, amplifying random seed variance."
+                )
+
+            if total_fits > 50_000:
+                if not messagebox.askyesno(
+                    "Very High Compute Cost",
+                    f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
+                    f"This is very computationally expensive. Consider using K-Fold instead."
+                    f"{stochastic_note}\n\nContinue anyway?",
+                    icon='warning',
+                ):
+                    self._update_search_buttons('idle')
+                    return
+            elif total_fits > 10_000:
+                if not messagebox.askyesno(
+                    "High Compute Cost",
+                    f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
+                    f"This may take a while."
+                    f"{stochastic_note}\n\nContinue?",
+                ):
+                    self._update_search_buttons('idle')
+                    return
+            elif stochastic_note:
+                # Low fit count but stochastic + LOO — still warn
+                if not messagebox.askyesno(
+                    "LOO + Stochastic Models",
+                    f"LOO CV is unreliable for stochastic models "
+                    f"({', '.join(stochastic_selected)}) because each fold trains on "
+                    "nearly identical data, amplifying random seed variance.\n\n"
+                    "Continue anyway?",
+                ):
+                    self._update_search_buttons('idle')
+                    return
+
+        # --- LOO + classification: guard against single-sample minority class ---
+        # Only applies when the resolved task is classification — under 'auto'
+        # with a continuous regression target, every float becomes its own
+        # 'class' with count 1 and this check would fire spuriously.
+        if cv_strategy == 'loo' and self.task_type.get() in ('classification', 'auto'):
+            if self.y is not None:
+                task_setting = self.task_type.get()
+                resolved_is_classification = task_setting == 'classification' or (
+                    task_setting == 'auto'
+                    and (self.y.nunique() < 10 or not pd.api.types.is_numeric_dtype(self.y.dtype))
+                )
+                if resolved_is_classification:
+                    class_counts = self.y.value_counts()
+                    min_count = class_counts.min()
+                    if min_count < 2:
+                        min_class = class_counts.idxmin()
+                        messagebox.showerror(
+                            "LOO Not Possible",
+                            f"Class '{min_class}' has only {min_count} sample(s). "
+                            "LOO CV requires at least 2 samples per class so every "
+                            "training fold contains all classes.\n\n"
+                            "Use K-Fold instead, or add more samples."
+                        )
+                        self._update_search_buttons('idle')
+                        return
+
         # Run in thread
         self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
         self.analysis_thread.start()
@@ -24980,6 +25199,8 @@ class SpectralPredictApp:
                                 task_type='one_class',
                                 n_trials=self.n_unified_trials.get(),
                                 cv_folds=self.folds.get(),
+                                cv_strategy=self.cv_strategy.get(),
+                                cv_n_repeats=self.cv_n_repeats.get(),
                                 random_state=42,
                                 verbose=False,
                                 progress_callback=oc_progress_wrapper,
@@ -25061,6 +25282,8 @@ class SpectralPredictApp:
                         y=y_filtered,
                         inlier_class_label=inlier_label,
                         folds=self.folds.get(),
+                        cv_strategy=self.cv_strategy.get(),
+                        cv_n_repeats=self.cv_n_repeats.get(),
                         preprocessing_methods=preprocess_list,
                         window_sizes=window_sizes_oc,
                         tier=tier,
@@ -25116,8 +25339,12 @@ class SpectralPredictApp:
                     self.root.after(0, lambda: messagebox.showwarning("No Results", "One-class search produced no valid results."))
 
                 # Store training configuration (needed for Model Dev validation preservation)
+                # Under LOO, effective folds = number of samples (not the spinbox value)
+                _eff_folds = len(X_filtered) if self.cv_strategy.get() == 'loo' else self.folds.get()
                 self.last_training_config = {
-                    'folds': self.folds.get(),
+                    'cv_strategy': self.cv_strategy.get(),
+                    'cv_n_repeats': self.cv_n_repeats.get(),
+                    'folds': _eff_folds,
                     'n_samples_used': len(X_filtered),
                     'excluded_count': n_excluded,
                     'validation_count': n_validation,
@@ -25311,6 +25538,8 @@ class SpectralPredictApp:
                             task_type=task_type,
                             n_trials=self.n_unified_trials.get(),
                             cv_folds=self.folds.get(),
+                            cv_strategy=self.cv_strategy.get(),
+                            cv_n_repeats=self.cv_n_repeats.get(),
                             random_state=42,  # Fixed seed (hardcoded throughout codebase)
                             verbose=False,
                             progress_callback=unified_progress_wrapper,
@@ -25662,6 +25891,8 @@ class SpectralPredictApp:
                 y_filtered,
                 task_type=task_type,
                 folds=self.folds.get(),
+                cv_strategy=self.cv_strategy.get(),
+                cv_n_repeats=self.cv_n_repeats.get(),
                 excluded_count=n_excluded,
                 validation_count=n_validation,
                 total_samples_original=n_total_original,
@@ -25815,8 +26046,12 @@ class SpectralPredictApp:
 
             # Store training configuration for validation when transferring to Model Dev
             # This captures the exact data configuration used for training
+            # Under LOO, effective folds = number of samples (not the spinbox value)
+            _eff_folds = len(X_filtered) if self.cv_strategy.get() == 'loo' else self.folds.get()
             self.last_training_config = {
-                'folds': self.folds.get(),
+                'cv_strategy': self.cv_strategy.get(),
+                'cv_n_repeats': self.cv_n_repeats.get(),
+                'folds': _eff_folds,
                 'n_samples_used': len(X_filtered),  # Actual calibration samples used
                 'excluded_count': n_excluded,
                 'validation_count': n_validation,
@@ -29620,11 +29855,28 @@ For detailed documentation, see the User Guide.
         """Validate that current state matches training configuration and warn about mismatches."""
         warnings = []
 
-        # Check fold count
-        current_folds = self.refine_folds.get()
-        saved_folds = training_config.get("folds", 5)
-        if current_folds != saved_folds:
-            warnings.append(f"CV folds: trained with {saved_folds}, current setting is {current_folds}")
+        # Check CV strategy
+        current_strategy = self.refine_cv_strategy.get()
+        saved_strategy = training_config.get("cv_strategy", "kfold")
+        if current_strategy != saved_strategy:
+            warnings.append(f"CV strategy: trained with {saved_strategy}, current setting is {current_strategy}")
+
+        # Check fold count (only meaningful for kfold/repeated_kfold)
+        if current_strategy in ('kfold', 'repeated_kfold') and saved_strategy in ('kfold', 'repeated_kfold'):
+            current_folds = self.refine_folds.get()
+            try:
+                saved_folds = int(training_config.get("folds", 5))
+            except (TypeError, ValueError):
+                saved_folds = 5
+            if current_folds != saved_folds:
+                warnings.append(f"CV folds: trained with {saved_folds}, current setting is {current_folds}")
+
+        # Check repeats (only for repeated_kfold)
+        if current_strategy == 'repeated_kfold':
+            current_repeats = self.refine_cv_n_repeats.get()
+            saved_repeats = training_config.get("cv_n_repeats", 5)
+            if current_repeats != saved_repeats:
+                warnings.append(f"CV repeats: trained with {saved_repeats}, current setting is {current_repeats}")
 
         # Calculate current data state using set operations that mirror the training filter
         # Training applies exclusions first, then validation from remainder (handles overlap)
@@ -29723,6 +29975,8 @@ For detailed documentation, see the User Guide.
         self.refine_task_type.set('regression')
         self.refine_preprocess.set('raw')
         self.refine_window.set(17)
+        self.refine_cv_strategy.set('kfold')
+        self.refine_cv_n_repeats.set(5)
         self.refine_folds.set(5)
         self.refine_max_iter.set(100)
 
@@ -29768,9 +30022,10 @@ For detailed documentation, see the User Guide.
             if model_type not in valid_models:
                 errors.append(f"Invalid model type selected: '{model_type}' for {task_type}")
 
-        # Validate CV folds
-        if self.refine_folds.get() < 3:
-            errors.append("CV folds must be at least 3")
+        # Validate CV folds (LOO doesn't need fold count validation)
+        if self.refine_cv_strategy.get() in ('kfold', 'repeated_kfold'):
+            if self.refine_folds.get() < 3:
+                errors.append("CV folds must be at least 3")
 
         if errors:
             messagebox.showerror("Validation Error", "\n".join(errors))
@@ -30462,13 +30717,18 @@ For detailed documentation, see the User Guide.
             # Only update if explicitly provided in config
             pass
 
-        # Restore fold count from training config BEFORE validation check
+        # Restore CV strategy + folds from training config BEFORE validation check
         # Without this, models trained with folds != 5 always trigger a mismatch
         if 'training_config' in config:
+            saved_strategy = config['training_config'].get('cv_strategy', 'kfold')
+            saved_n_repeats = config['training_config'].get('cv_n_repeats', 5)
             saved_folds = config['training_config'].get('folds')
-            if saved_folds is not None and 3 <= saved_folds <= 10:
-                self.refine_folds.set(saved_folds)
-                print(f"> Restored CV folds from training config: {saved_folds}")
+
+            self.refine_cv_strategy.set(saved_strategy)
+            self.refine_cv_n_repeats.set(saved_n_repeats)
+            if saved_folds is not None and isinstance(saved_folds, (int, float)) and 3 <= saved_folds <= 10:
+                self.refine_folds.set(int(saved_folds))
+            print(f"> Restored CV strategy: {saved_strategy} (folds={saved_folds}, repeats={saved_n_repeats})")
 
         # Check for training configuration mismatch
         if 'training_config' in config:
@@ -33174,19 +33434,24 @@ F1 Score:  {f1:.4f}
         """Background thread for learning curve computation."""
         try:
             from spectral_predict.diagnostics import compute_learning_curve
-            from sklearn.model_selection import KFold, StratifiedKFold
+            from spectral_predict.cv_utils import build_cv_splitter
             from sklearn.base import clone
 
             X = self.refined_X_train
             y = self.refined_y_train
             task_type = self.refined_config.get('task_type', 'regression')
             n_folds = self.refined_config.get('cv_folds', 5)
+            cv_strategy = self.refined_config.get('cv_strategy', 'kfold')
+            cv_n_repeats = self.refined_config.get('cv_n_repeats', 5)
 
             # Create CV splitter
-            if task_type == 'regression':
-                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-            else:
-                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            cv = build_cv_splitter(
+                strategy=cv_strategy,
+                n_folds=n_folds,
+                task_type=task_type,
+                n_repeats=cv_n_repeats,
+                random_state=42,
+            )
 
             # Clone the model/pipeline
             estimator = clone(self.refined_model)
@@ -33310,7 +33575,7 @@ F1 Score:  {f1:.4f}
         try:
             from spectral_predict.models import get_model
             from spectral_predict.preprocess import SavgolDerivative, SNV
-            from sklearn.model_selection import KFold, StratifiedKFold
+            from spectral_predict.cv_utils import build_cv_splitter
             from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
@@ -33435,7 +33700,9 @@ F1 Score:  {f1:.4f}
             if not selected_cols:
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
 
-            # Determine how many folds we'll run so we can validate sample counts
+            # Determine CV strategy and how many folds we'll run
+            cv_strategy = self.refine_cv_strategy.get()
+            cv_n_repeats = self.refine_cv_n_repeats.get()
             n_folds = self.refine_folds.get()
 
             # Validate CV folds match original training if available
@@ -33464,10 +33731,11 @@ F1 Score:  {f1:.4f}
             if self.active_indices is not None:
                 ag_mask = X_source.index.isin(self.active_indices)
                 n_active = ag_mask.sum()
-                if n_active < n_folds:
+                min_samples = 2 if cv_strategy == 'loo' else n_folds
+                if n_active < min_samples:
                     raise ValueError(
                         f"Only {n_active} sample(s) in the active group; "
-                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                        f"{cv_strategy} CV requires at least {min_samples} samples."
                     )
                 X_source = X_source[ag_mask]
                 y_source = self.y[ag_mask]
@@ -33482,10 +33750,11 @@ F1 Score:  {f1:.4f}
                 mask = ~X_source.index.isin(self.excluded_spectra)
                 n_excluded = (~mask).sum()
                 n_remaining = mask.sum()
-                if n_remaining < n_folds:
+                min_samples = 2 if cv_strategy == 'loo' else n_folds
+                if n_remaining < min_samples:
                     raise ValueError(
                         f"Only {n_remaining} samples remain after exclusions; "
-                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                        f"{cv_strategy} CV requires at least {min_samples} samples."
                     )
                 print(f"DEBUG: Applying {n_excluded} excluded spectra for refinement "
                       f"({n_remaining} samples remain).")
@@ -33507,10 +33776,11 @@ F1 Score:  {f1:.4f}
                 n_removed = initial_samples - len(X_base_df)
                 n_cal = len(X_base_df)
 
-                if n_cal < n_folds:
+                min_samples = 2 if cv_strategy == 'loo' else n_folds
+                if n_cal < min_samples:
                     raise ValueError(
                         f"Only {n_cal} calibration samples remain after validation set exclusion; "
-                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                        f"{cv_strategy} CV requires at least {min_samples} samples."
                     )
 
                 print(f"DEBUG: Excluding {n_removed} validation samples from Model Development")
@@ -33524,10 +33794,11 @@ F1 Score:  {f1:.4f}
                 print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values.")
                 X_base_df = X_base_df[~nan_mask]
                 y_series = y_series[~nan_mask]
-                if len(y_series) < n_folds:
+                min_samples_nan = 2 if cv_strategy == 'loo' else n_folds
+                if len(y_series) < min_samples_nan:
                     raise ValueError(
                         f"Only {len(y_series)} samples remain after dropping NaN targets; "
-                        f"{n_folds}-fold CV requires at least {n_folds} samples."
+                        f"{cv_strategy} CV requires at least {min_samples_nan} samples."
                     )
 
             # Add comprehensive diagnostic output for debugging R² discrepancies
@@ -33535,7 +33806,9 @@ F1 Score:  {f1:.4f}
             print(f"MODEL DEVELOPMENT - DATASET STATE DIAGNOSTIC")
             print(f"{'='*80}")
             print(f"Configuration:")
+            print(f"  CV Strategy: {cv_strategy}")
             print(f"  CV Folds: {n_folds}")
+            print(f"  CV Repeats: {cv_n_repeats}" if cv_strategy == 'repeated_kfold' else "")
             print(f"  Random State: 42 (fixed)")
             print(f"\nData Filtering:")
             print(f"  Total samples in dataset: {total_samples}")
@@ -33549,7 +33822,9 @@ F1 Score:  {f1:.4f}
             if hasattr(self, 'loaded_model_config') and self.loaded_model_config and 'training_config' in self.loaded_model_config:
                 training_config = self.loaded_model_config['training_config']
                 print(f"\nOriginal Training Configuration (from Results):")
+                print(f"  CV Strategy: {training_config.get('cv_strategy', 'kfold')}")
                 print(f"  CV Folds: {training_config.get('folds', 'NOT SAVED')}")
+                print(f"  CV Repeats: {training_config.get('cv_n_repeats', 'N/A')}")
                 print(f"  Calibration samples: {training_config.get('n_samples_used', 'NOT SAVED')}")
                 print(f"  Excluded count: {training_config.get('excluded_count', 'NOT SAVED')}")
                 print(f"  Validation count: {training_config.get('validation_count', 'NOT SAVED')}")
@@ -34325,7 +34600,9 @@ F1 Score:  {f1:.4f}
 
                 cv_result = run_one_class_cv(
                     X_work, y_oc, model_name, params,
-                    n_folds=n_folds, random_state=42, y_original=y_str,
+                    n_folds=n_folds, cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats, random_state=42,
+                    y_original=y_str,
                 )
 
                 if cv_result.get('skipped', False):
@@ -34370,6 +34647,8 @@ F1 Score:  {f1:.4f}
                     'n_vars': X_work.shape[1],
                     'n_samples': X_work.shape[0],
                     'cv_folds': n_folds,
+                    'cv_strategy': cv_strategy,
+                    'cv_n_repeats': cv_n_repeats,
                     'inlier_class_label': inlier_label,
                     # Training is full-spectrum-first (fit_transform on X_full, then
                     # wavelength subset), so predict-time must match via Mode A.
@@ -34422,7 +34701,9 @@ F1 Score:  {f1:.4f}
                     f"  AUC:               {_fmt(perf['AUCcv'])}\n\n"
                     f"Variables: {X_work.shape[1]}\n"
                     f"Samples: {X_work.shape[0]} (Inliers: {np.sum(y_oc == 1)}, Outliers: {np.sum(y_oc == -1)})\n"
-                    f"CV Folds: {n_folds}\n"
+                    f"CV Strategy: {cv_strategy}"
+                    f"{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}"
+                    f"{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}\n"
                 )
 
                 # Compute external validation metrics if enabled
@@ -34501,10 +34782,13 @@ F1 Score:  {f1:.4f}
                 self.root.after(0, lambda: self.model_dev_notebook.select(2))
                 return  # Skip standard regression/classification CV
 
-            if task_type == "regression":
-                cv = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-            else:
-                cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+            cv = build_cv_splitter(
+                strategy=cv_strategy,
+                n_folds=n_folds,
+                task_type=task_type,
+                n_repeats=cv_n_repeats,
+                random_state=42,
+            )
 
             # Get baseline and smoothing parameters
             # For coupled results, baseline_method is already set from parsing
@@ -35226,7 +35510,7 @@ Regional Performance (by quartile):
 
                 results_text_part1 = f"""Refined Model Results:
 
-Cross-Validation Performance ({self.refine_folds.get()} folds):
+Cross-Validation Performance ({cv_strategy}{f', {n_folds} folds' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}):
   RMSE: {results['rmse_mean']:.4f} ± {results['rmse_std']:.4f}
   R²: {results['r2_mean']:.4f} ± {results['r2_std']:.4f}
   MAE: {results['mae_mean']:.4f} ± {results['mae_std']:.4f}
@@ -35248,7 +35532,7 @@ Configuration:
   Wavelengths: {wl_summary}
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
-  CV Folds: {self.refine_folds.get()}
+  CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
   n_components: {n_components}
 
 DEBUG INFO:
@@ -35278,7 +35562,7 @@ NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match
 
                 results_text_part1 = f"""Refined Model Results:
 
-Cross-Validation Performance ({self.refine_folds.get()} folds):
+Cross-Validation Performance ({cv_strategy}{f', {n_folds} folds' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}):
   Accuracy:  {results['accuracy_mean']:.4f} ± {results['accuracy_std']:.4f}
   Precision: {results['precision_mean']:.4f} ± {results['precision_std']:.4f}
   Recall:    {results['recall_mean']:.4f} ± {results['recall_std']:.4f}
@@ -35299,7 +35583,7 @@ Configuration:
   Wavelengths: {wl_summary}
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
-  CV Folds: {self.refine_folds.get()}
+  CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
 """
 
             # Fit final pipeline on full dataset for model persistence
@@ -35523,6 +35807,8 @@ External Validation Performance (n={n_val}):
                 'n_vars': len(selected_wl),
                 'n_samples': X_raw.shape[0],
                 'cv_folds': n_folds,
+                'cv_strategy': cv_strategy,
+                'cv_n_repeats': cv_n_repeats,
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
                 'ga_genes': self.refined_ga_genes,
                 'ga_config': self.refined_ga_config,
@@ -35764,6 +36050,8 @@ External Validation Performance (n={n_val}):
                 'n_vars': self.refined_config['n_vars'],
                 'n_samples': self.refined_config['n_samples'],
                 'cv_folds': self.refined_config['cv_folds'],
+                'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
+                'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
                 'performance': {},
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
@@ -36078,6 +36366,8 @@ External Validation Performance (n={n_val}):
                     },
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
+                    'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
+                    'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
                     # Preprocessing window size (critical for SG derivatives)
                     'window_size': self.refined_config.get('window', 17),
                     # Derivative order / polyorder (for deriv_snv variants)

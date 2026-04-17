@@ -6,7 +6,6 @@ import inspect
 import logging
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
@@ -39,7 +38,7 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 from .constants import RANDOM_STATE
 
 # Import early stopping CV utilities
-from .cv_utils import is_boosting_model, _fit_with_early_stopping
+from .cv_utils import is_boosting_model, _fit_with_early_stopping, build_cv_splitter
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
@@ -791,7 +790,8 @@ def compute_validation_metrics_for_top_models(
     return df_results
 
 
-def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
+def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
+               excluded_count=0, validation_count=0,
                total_samples_original=None, variable_penalty=0, gap_penalty=0,
                max_n_components=10, max_iter=500, models_to_test=None, preprocessing_methods=None,
                interference_settings=None,
@@ -989,6 +989,21 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
         except ValueError as e:
             # Re-raise with clear indication this is an upfront validation error
             raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
+
+    # Backend guard for CV strategy vs class distribution (runs regardless of
+    # imbalance_method — GUI can't be the only layer of defense for scripted
+    # callers that bypass the GUI).
+    from .cv_utils import validate_cv_strategy_for_task
+    try:
+        validate_cv_strategy_for_task(
+            strategy=cv_strategy,
+            task_type=task_type,
+            y=y_np if task_type == 'classification' else np.asarray(y),
+            n_folds=folds,
+            n_repeats=cv_n_repeats,
+        )
+    except ValueError as e:
+        raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
 
     # Create results container
     df_results = create_results_dataframe(task_type)
@@ -1771,13 +1786,16 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
             configs_with_smooth.append(cfg_sm)
         preprocess_configs = configs_without_smooth + configs_with_smooth
 
-    # Create CV splitter
-    if task_type == "regression":
-        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
-    else:
-        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv_splitter = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
-    print(f"Running {task_type} search with {folds}-fold CV...")
+    print(f"Running {task_type} search with {cv_strategy} CV (folds={folds}, repeats={cv_n_repeats})...")
     print(f"Models: {list(model_grids.keys())}")
     print(f"Preprocessing configs: {len(preprocess_configs)}")
     print(f"\nPreprocessing breakdown:")
@@ -2139,6 +2157,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
+                    cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats,
                     full_vars_original=n_original_wavelengths,
                     n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                     wavelength_restriction_active=wavelength_restriction_active,
@@ -2329,6 +2349,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2350,6 +2372,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2781,6 +2805,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2809,6 +2835,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
@@ -2867,6 +2895,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
                                             n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
                                             wavelength_restriction_active=wavelength_restriction_active,
@@ -2888,6 +2918,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                                             validation_count=validation_count,
                                             total_samples_original=total_samples_original,
                                             folds=folds,
+                                            cv_strategy=cv_strategy,
+                                            cv_n_repeats=cv_n_repeats,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
@@ -2955,6 +2987,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
                             validation_count=validation_count,
                             total_samples_original=total_samples_original,
                             folds=folds,
+                            cv_strategy=cv_strategy,
+                            cv_n_repeats=cv_n_repeats,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
@@ -3060,7 +3094,8 @@ def run_search(X, y, task_type, folds=5, excluded_count=0, validation_count=0,
 
 
 def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
-                        n_trials=None, folds=5, excluded_count=0, validation_count=0,
+                        n_trials=None, folds=5, cv_strategy='kfold', cv_n_repeats=5,
+                        excluded_count=0, validation_count=0,
                         total_samples_original=None, max_n_components=12, tier='standard',
                         imbalance_method=None, imbalance_params=None,
                         progress_callback=None,
@@ -3378,12 +3413,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
         tier_config = get_tier_models(tier, task_type)
         models_to_test = [m for m, enabled in tier_config.items() if enabled]
 
-    # Create CV splitter
-    from sklearn.model_selection import StratifiedKFold, KFold
-    if task_type == "classification":
-        cv_splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=random_state)
-    else:
-        cv_splitter = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv_splitter = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
     # Track progress
     total_tasks = len(models_to_test) * len(preprocessing_methods)
@@ -3401,7 +3438,7 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     print(f"  → Total trials per model: {n_trials * len(preprocessing_methods)}")
     print(f"  → Total trials overall: {total_trials}")
     print(f"Total optimizations: {total_tasks} (models × preprocessing)")
-    print(f"CV folds: {folds}")
+    print(f"CV strategy: {cv_strategy} (folds={folds}, repeats={cv_n_repeats})")
     print(f"Tier: {tier}")
     print(f"{'='*70}\n")
 
@@ -3530,6 +3567,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                 validation_count=validation_count,
                 total_samples_original=total_samples_original,
                 folds=folds,
+                cv_strategy=cv_strategy,
+                cv_n_repeats=cv_n_repeats,
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,
                 progress_callback=progress_callback,
@@ -3578,6 +3617,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                     validation_count=validation_count,
                     total_samples_original=total_samples_original,
                     folds=folds,
+                    cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats,
                     imbalance_method=imbalance_method,
                     imbalance_params=imbalance_params
                 )
@@ -3872,6 +3913,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         else:
             y_pred = pipe_clone.predict(X_test)
         y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+        # Per-fold RMSE/R² are kept for debugging and tests only — headline metrics
+        # are computed from pooled y_test/y_pred in the caller (see _aggregate_metrics
+        # at search.py:4212+) to match IUPAC/chemometrics convention.
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
         return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
@@ -4003,6 +4047,8 @@ def _run_single_config(
     validation_count=0,
     total_samples_original=None,
     folds=5,
+    cv_strategy='kfold',
+    cv_n_repeats=5,
     imbalance_method=None,
     imbalance_params=None,
     full_vars_original=None,
@@ -4178,6 +4224,10 @@ def _run_single_config(
     else:
         pipe = model
 
+    # Realize splits once so we can both run folds AND pool by sample later.
+    # Generators get consumed; we need the test indices for repeated-CV pooling.
+    splits = list(cv_splitter.split(X, y))
+
     # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
     if n_jobs_cv == 1:
         # Serial execution for reproducibility (deterministic fold ordering)
@@ -4187,7 +4237,7 @@ def _run_single_config(
                 use_sample_weight_for_classification,
                 early_stopping_rounds=early_stopping_rounds
             )
-            for train_idx, test_idx in cv_splitter.split(X, y)
+            for train_idx, test_idx in splits
         ]
     else:
         # Parallel execution for speed
@@ -4202,7 +4252,7 @@ def _run_single_config(
                 use_sample_weight_for_classification,
                 early_stopping_rounds=early_stopping_rounds
             )
-            for train_idx, test_idx in cv_splitter.split(X, y)
+            for train_idx, test_idx in splits
         )
 
     # Print summary if imbalance handling was used
@@ -4212,14 +4262,38 @@ def _run_single_config(
         else:
             print(f"  [OK] Imbalance handling: {imbalance_method} applied successfully")
 
+    # Guard against all-folds-failed state: empty cv_metrics means no valid
+    # predictions to aggregate. Fail loudly instead of silently reporting 0.0
+    # accuracy / NaN RMSE.
+    if not cv_metrics:
+        raise ValueError(
+            "All CV folds failed — cannot compute metrics. "
+            "Check upstream fold errors for root cause."
+        )
+
+    # Pool predictions per sample so repeated-CV (RepeatedKFold/RepeatedStratifiedKFold)
+    # produces one prediction per sample before scoring. Under plain K-Fold / LOO
+    # this is a no-op (each sample appears in exactly one test fold). Under
+    # repeated CV, naive concatenation duplicates rows and computes metrics from
+    # correlated observations.
+    from spectral_predict.cv_utils import _is_repeated_cv, reduce_repeated_cv_predictions
+    repeated_cv = _is_repeated_cv(cv_splitter)
+
     # Average metrics
     if task_type == "regression":
-        mean_rmse = np.mean([m["RMSE"] for m in cv_metrics])
+        if repeated_cv:
+            all_y_test, all_y_pred = reduce_repeated_cv_predictions(
+                cv_metrics, splits, n_samples=len(y), task_type='regression'
+            )
+        else:
+            all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+            all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
 
-        # Compute regional performance (quartile-based) for consensus predictions
-        # Collect all CV predictions and true values
-        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
-        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+        # Compute RMSE from aggregated predictions (not per-fold averages).
+        # Matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC).
+        # Under LOO this is required — per-fold RMSE on 1-sample folds degenerates to |y-ŷ|,
+        # and averaging those gives MAE, not RMSE.
+        mean_rmse = float(np.sqrt(mean_squared_error(all_y_test, all_y_pred)))
 
         # Compute R² from aggregated predictions (not per-fold averages)
         # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
@@ -4264,25 +4338,65 @@ def _run_single_config(
             else:
                 regional_rmse[f'Q{i+1}'] = np.nan
     else:
-        mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
-        mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
-        mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
-        mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
-        mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
+        # Headline label-based metrics: under repeated CV, derive from
+        # majority-vote-pooled predictions per sample (averaging fold metrics
+        # double-counts samples that appear in multiple test folds). AUC/LogLoss/BER
+        # require probabilities and stay as mean-of-folds.
+        if repeated_cv:
+            all_y_test, all_y_pred = reduce_repeated_cv_predictions(
+                cv_metrics, splits, n_samples=len(y), task_type='classification'
+            )
+            from sklearn.metrics import (
+                accuracy_score as _acc, f1_score as _f1, precision_score as _ps,
+                recall_score as _rs, balanced_accuracy_score as _bas,
+                cohen_kappa_score as _kappa, matthews_corrcoef as _mcc,
+            )
+            avg = 'binary' if is_binary_classification else 'macro'
+            mean_acc = float(_acc(all_y_test, all_y_pred))
+            mean_f1 = float(_f1(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_precision = float(_ps(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_recall = float(_rs(all_y_test, all_y_pred, average=avg, zero_division=0))
+            mean_balanced_acc = float(_bas(all_y_test, all_y_pred))
+            mean_kappa = float(_kappa(all_y_test, all_y_pred))
+            mean_mcc = float(_mcc(all_y_test, all_y_pred))
+            # Specificity is only defined for binary; derive from confusion matrix.
+            # Pass labels= explicitly so the matrix is always 2x2 even when
+            # pooled predictions collapse to a single class (upstream y
+            # validation guarantees both labels exist in y_true, but model
+            # degeneracy can make y_pred single-class).
+            if is_binary_classification:
+                from sklearn.metrics import confusion_matrix as _cm
+                binary_labels = np.unique(y)
+                cm = _cm(all_y_test, all_y_pred, labels=binary_labels)
+                tn, fp, fn, tp = cm.ravel()
+                mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float('nan')
+            else:
+                mean_specificity = float(
+                    np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+                )
+            # BER = 1 - BalancedAccuracy, label-based, pools alongside BalancedAcc
+            mean_ber = 1.0 - mean_balanced_acc
+        else:
+            mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
+            mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
+            mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
+            mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
+            mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+            mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
+            mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
+            mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
+            mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
 
-        # New classification metrics
-        mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
-        mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
-        mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
-        mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
-        mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
+        # AUC and LogLoss require probabilities — keep as mean-of-folds
+        mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
         mean_logloss = np.mean([m["LogLoss"] for m in cv_metrics if not np.isnan(m["LogLoss"])])
 
         regional_rmse = None  # Not applicable for classification
 
-        # Collect all CV predictions and true values (same as regression)
-        all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
-        all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+        # Per-class report uses pooled predictions (one per sample under repeated CV)
+        if not repeated_cv:
+            all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
+            all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
 
         # Compute per-class metrics for classification (analogous to regional RMSE for regression)
         per_class_metrics = {}
@@ -4526,8 +4640,23 @@ def _run_single_config(
 
     # Add training configuration for tracking data state
     # This helps identify when Model Development tab uses different data
+    #
+    # cv_strategy is the source of truth; effective_folds is a cross-machine
+    # compat field that lets old binaries read a sane integer even for LOO /
+    # repeated K-fold. Never rely on getattr(cv_splitter, 'n_splits', folds) —
+    # LeaveOneOut has no n_splits attribute, so that fallback would return the
+    # stale `folds` kwarg (typically 5) which is wrong under LOO.
+    if cv_strategy == 'loo':
+        effective_folds = len(X)
+    else:
+        # 'kfold' and 'repeated_kfold' both carry the same per-fold semantics;
+        # repeat count is stored separately in cv_n_repeats.
+        effective_folds = folds
+
     result["training_config"] = {
-        "folds": cv_splitter.n_splits if hasattr(cv_splitter, 'n_splits') else folds,
+        "cv_strategy": cv_strategy,
+        "cv_n_repeats": cv_n_repeats,
+        "folds": effective_folds,
         "n_samples_used": len(X),  # Number of samples used for training (after filtering)
         "n_samples_total": total_samples_original if total_samples_original else len(X),
         "excluded_count": excluded_count,  # Number of excluded samples
@@ -4682,7 +4811,8 @@ def _run_single_config(
 
 def run_one_class_search(
     X, y, inlier_class_label,
-    folds=5, preprocessing_methods=None, window_sizes=None,
+    folds=5, cv_strategy='kfold', cv_n_repeats=5,
+    preprocessing_methods=None, window_sizes=None,
     tier='standard', enabled_models=None,
     variable_penalty=0, gap_penalty=0,
     analysis_wl_min=None, analysis_wl_max=None,
@@ -4779,7 +4909,6 @@ def run_one_class_search(
     df_results : pd.DataFrame
         Results dataframe ranked by balanced accuracy.
     """
-    from sklearn.model_selection import KFold
     from sklearn.base import clone
     from sklearn.preprocessing import StandardScaler
     from .contamination import (
@@ -4821,11 +4950,17 @@ def run_one_class_search(
         logger.warning("No outlier samples! Evaluation will only measure specificity.")
     logger.info("=" * 70)
 
-    if n_inliers < folds:
-        raise ValueError(
-            f"Not enough inlier samples ({n_inliers}) for {folds}-fold CV. "
-            f"Need at least {folds}."
-        )
+    # Upfront CV-strategy guard (n_repeats >= 1, one-class inlier counts,
+    # LOO min-2 inlier rule). Raises ValueError before any training starts.
+    from .cv_utils import validate_cv_strategy_for_task
+    validate_cv_strategy_for_task(
+        strategy=cv_strategy,
+        task_type='one_class',
+        y=y_oc,
+        n_folds=folds,
+        n_repeats=cv_n_repeats,
+        inlier_label=1,  # y_oc is already +1/-1 encoded above
+    )
 
     # Store full wavelengths before any masking (2a)
     wavelengths_full = wavelengths.copy()
@@ -5009,7 +5144,10 @@ def run_one_class_search(
     if varsel_configs > 0:
         logger.info("Variable selection configurations (estimated): %d", varsel_configs)
     logger.info("Total configurations: %d", total_configs)
-    logger.info("CV: %d-fold on inlier data (outliers in test only)", folds)
+    logger.info(
+        "CV strategy: %s (folds=%d, repeats=%d) on inlier data (outliers in test only)",
+        cv_strategy, folds, cv_n_repeats,
+    )
     if progress_callback:
         progress_callback({
             'stage': 'info',
@@ -5023,8 +5161,8 @@ def run_one_class_search(
     best_result = None
     skipped_configs = 0  # 2g: track skipped configurations
 
-    # KFold for splitting inlier samples
-    kf = KFold(n_splits=folds, shuffle=True, random_state=random_state)
+    # cv_strategy and cv_n_repeats are forwarded to contamination.run_one_class_cv
+    # which builds the appropriate CV splitter via build_cv_splitter().
 
     # Cache preprocessed data to avoid recomputing in the variable selection loop
     _preprocess_result_cache = {}
@@ -5116,7 +5254,9 @@ def run_one_class_search(
                 # Run one-class CV
                 cv_result = run_one_class_cv(
                     X_preprocessed, y_oc, model_name, params,
-                    n_folds=folds, random_state=42, y_original=y_np,
+                    n_folds=folds, cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats, random_state=42,
+                    y_original=y_np,
                 )
 
                 if cv_result.get('skipped', False):
@@ -5182,6 +5322,16 @@ def run_one_class_search(
                     "scaler": cv_result.get('cal_scaler'),
                     "pca_reducer": cv_result.get('cal_pca_reducer'),
                     "oc_score_stats": cv_result.get('oc_score_stats'),
+                }
+
+                # Training config for model reproducibility (mirrors regression/classification)
+                _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                result["training_config"] = {
+                    "cv_strategy": cv_strategy,
+                    "cv_n_repeats": cv_n_repeats,
+                    "folds": _eff_folds,
+                    "n_samples_used": len(X),
+                    "random_state": random_state,
                 }
 
                 # Add per-contaminant columns for display
@@ -5636,7 +5786,8 @@ def run_one_class_search(
 
                             cv_result = run_one_class_cv(
                                 X_subset, y_oc, model_name, params,
-                                n_folds=folds, random_state=42,
+                                n_folds=folds, cv_strategy=cv_strategy,
+                                cv_n_repeats=cv_n_repeats, random_state=42,
                                 y_original=y_np,
                             )
 
@@ -5739,6 +5890,16 @@ def run_one_class_search(
                                 "scaler": cv_result.get('cal_scaler'),
                                 "pca_reducer": cv_result.get('cal_pca_reducer'),
                                 "oc_score_stats": cv_result.get('oc_score_stats'),
+                            }
+
+                            # Training config for model reproducibility
+                            _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                            result["training_config"] = {
+                                "cv_strategy": cv_strategy,
+                                "cv_n_repeats": cv_n_repeats,
+                                "folds": _eff_folds,
+                                "n_samples_used": len(X),
+                                "random_state": random_state,
                             }
 
                             # Add per-contaminant columns

@@ -38,14 +38,13 @@ import pandas as pd
 import optuna
 from optuna import Trial
 from optuna.samplers import TPESampler
-from sklearn.model_selection import cross_val_score, cross_validate, cross_val_predict, KFold, StratifiedKFold
+from sklearn.model_selection import cross_val_predict
 
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
-    cross_validate_with_early_stopping,
+    build_cv_splitter,
+    cross_val_predict_pooled,
     cross_val_predict_with_early_stopping,
-    cross_val_score_with_early_stopping,
-    is_boosting_model,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.base import clone
@@ -720,6 +719,8 @@ def create_unified_objective(
     model_name: str,
     task_type: str = 'regression',
     cv_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     random_state: int = 42,
     n_top_regions: int = 10,
     progress_callback: Optional[Callable] = None,
@@ -809,11 +810,14 @@ def create_unified_objective(
     else:
         scoring = 'accuracy'
 
-    # Create CV splitter
-    if task_type == 'regression':
-        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    else:
-        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
+    cv = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=cv_folds,
+        task_type=task_type,
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
     # Determine available subset types
     # Regional subsets are computed dynamically on preprocessed data
@@ -996,8 +1000,9 @@ def create_unified_objective(
 
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
-                    n_folds=cv_folds, random_state=random_state, y_original=y_original,
-                    compute_calibration=True,
+                    n_folds=cv_folds, cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats, random_state=random_state,
+                    y_original=y_original, compute_calibration=True,
                 )
 
                 if cv_result.get('skipped', False):
@@ -1031,6 +1036,10 @@ def create_unified_objective(
                         trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
+                # Raw-study consumers need cv_strategy to reconstruct the run
+                # (converted result rows already carry it via training_config).
+                trial.set_user_attr('cv_strategy', cv_strategy)
+                trial.set_user_attr('cv_n_repeats', cv_n_repeats)
                 # Store preprocessing fields used by convert_study_to_dataframe
                 trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
                 trial.set_user_attr('window', preprocess_config.get('window', 0))
@@ -1241,36 +1250,19 @@ def create_unified_objective(
 
             # 7. Compute metrics
             if task_type == 'regression':
-                # Use cross_validate for RMSE (averaging is valid for RMSE)
-                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
-                if use_early_stopping:
-                    cv_results = cross_validate_with_early_stopping(
-                        model, X_final, y,
-                        cv=cv,
-                        scoring={'rmse': 'neg_root_mean_squared_error'},
-                        early_stopping_rounds=early_stopping_rounds,
-                        n_jobs=n_jobs_cv,
-                    )
-                else:
-                    cv_results = cross_validate(
-                        model, X_final, y,
-                        cv=cv,
-                        scoring={'rmse': 'neg_root_mean_squared_error'},
-                        n_jobs=n_jobs_cv,
-                        error_score='raise'
-                    )
-                rmse = -cv_results['test_rmse'].mean()
-
-                # R² must use aggregated predictions (not per-fold averages)
-                # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
-                # This matches the method used in search.py for consistency with Model Development
+                # Compute pooled CV predictions once and derive both RMSE and R² from them.
+                # Averaging per-fold R² is mathematically incorrect (different SS_tot per fold),
+                # and averaging per-fold RMSE degenerates to MAE under LOO (1-sample test folds).
+                # This matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC)
+                # and the method used in search.py for consistency with Model Development.
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
                         early_stopping_rounds=early_stopping_rounds
                     )
                 else:
-                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
                 # Compute additional NIR spectroscopy metrics from CV predictions
@@ -1304,26 +1296,20 @@ def create_unified_objective(
                 metric = rmse  # Minimize RMSE
             else:
                 # Classification: use accuracy and ROC_AUC
-                # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
-                if use_early_stopping:
-                    scores = cross_val_score_with_early_stopping(
-                        model, X_final, y, cv=cv, scoring='accuracy',
-                        early_stopping_rounds=early_stopping_rounds, n_jobs=n_jobs_cv
-                    )
-                else:
-                    scores = cross_val_score(
-                        model, X_final, y, cv=cv, scoring='accuracy', n_jobs=n_jobs_cv, error_score='raise'
-                    )
-                accuracy = scores.mean()
-
-                # Get CV predictions for comprehensive metrics
+                # Compute pooled CV predictions once and derive accuracy + other metrics from them.
+                # Pooled accuracy (sample-weighted across all folds) differs slightly from
+                # per-fold-averaged accuracy when folds have unequal sizes — the pooled form
+                # matches how RMSE/R² are computed above and matches scikit-learn's
+                # cross_val_predict convention. (IUPAC's CV guidance is regression-specific.)
+                # This also saves a full CV pass per trial (was 2 passes: score + predict).
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
                         early_stopping_rounds=early_stopping_rounds
                     )
                 else:
-                    y_pred_cv = cross_val_predict(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
                 try:
@@ -1334,7 +1320,7 @@ def create_unified_objective(
                             method='predict_proba'
                         )
                     else:
-                        y_proba = cross_val_predict(
+                        y_proba = cross_val_predict_pooled(
                             model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
                         )
                     n_classes = len(np.unique(y))
@@ -1430,6 +1416,10 @@ def create_unified_objective(
             trial.set_user_attr('n_vars', n_vars)
             trial.set_user_attr('early_stopping_rounds', early_stopping_rounds if use_early_stopping else None)
             trial.set_user_attr('model_params', str(model_params))
+            # CV strategy + n_repeats on every trial so raw-study consumers don't
+            # lose the run configuration (converted result rows carry these too).
+            trial.set_user_attr('cv_strategy', cv_strategy)
+            trial.set_user_attr('cv_n_repeats', cv_n_repeats)
 
             # Fit on full training data for calibration metrics
             model.fit(X_final, y)
@@ -1584,6 +1574,8 @@ def run_unified_bayesian(
     task_type: str = 'regression',
     n_trials: int = 300,
     cv_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     n_top_regions: int = 10,
     random_state: int = 42,
     progress_callback: Optional[Callable] = None,
@@ -1733,6 +1725,19 @@ def run_unified_bayesian(
             n_folds=cv_folds
         )
 
+    # Backend guard for CV strategy vs class distribution (runs regardless of
+    # imbalance_method — scripted callers can bypass the GUI). Also validates
+    # n_repeats for Repeated K-Fold and inlier counts for one-class.
+    from .cv_utils import validate_cv_strategy_for_task
+    validate_cv_strategy_for_task(
+        strategy=cv_strategy,
+        task_type=task_type,
+        y=y,
+        n_folds=cv_folds,
+        n_repeats=cv_n_repeats,
+        inlier_label=inlier_class_label if task_type == 'one_class' else None,
+    )
+
     if verbose:
         print(f"\n{'='*70}")
         print(f"Unified Bayesian Optimization")
@@ -1771,6 +1776,8 @@ def run_unified_bayesian(
         model_name=model_name,
         task_type=task_type,
         cv_folds=cv_folds,
+        cv_strategy=cv_strategy,
+        cv_n_repeats=cv_n_repeats,
         random_state=random_state,
         n_top_regions=n_top_regions,
         progress_callback=progress_callback,
@@ -1889,6 +1896,9 @@ def run_unified_bayesian(
         smoothing=smoothing,
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
+        cv_strategy=cv_strategy,
+        cv_n_repeats=cv_n_repeats,
+        n_samples_used=n_samples,
     )
 
     if verbose:
@@ -1942,6 +1952,9 @@ def convert_study_to_dataframe(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
+    n_samples_used: Optional[int] = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -2011,6 +2024,19 @@ def convert_study_to_dataframe(
             'early_stopping_rounds': trial.user_attrs.get('early_stopping_rounds', None),
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
+            # training_config mirrors search.py so model save/load can restore
+            # the exact CV strategy used. `folds` is an integer fallback for
+            # old readers that don't know about cv_strategy (LOO reports the
+            # effective sample count).
+            'training_config': {
+                'cv_strategy': cv_strategy,
+                'cv_n_repeats': cv_n_repeats,
+                'folds': (n_samples_used if cv_strategy == 'loo' and n_samples_used
+                          else cv_folds),
+                'n_samples_used': n_samples_used,
+                'n_features_used': n_features,
+                'random_state': 42,
+            },
         }
 
         # Add metrics - both calibration and CV

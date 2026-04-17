@@ -79,3 +79,4 @@ nul
 
 # One-off outputs
 *.stats
+.codex-gitconfig

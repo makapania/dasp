@@ -22,6 +22,8 @@ from sklearn.metrics import (
 )
 from typing import Optional, Dict, Any, Union, List
 import warnings
+from collections import Counter
+from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
 
 # Import boosting model types for detection
 from xgboost import XGBRegressor, XGBClassifier
@@ -46,6 +48,379 @@ if CATBOOST_AVAILABLE:
 else:
     CATBOOST_MODELS = ()
     BOOSTING_MODELS = XGBOOST_MODELS + LIGHTGBM_MODELS
+
+
+def validate_cv_strategy_for_task(
+    strategy: str,
+    task_type: str,
+    y: np.ndarray,
+    n_folds: int,
+    n_repeats: int | None = None,
+    inlier_label=None,
+) -> None:
+    """Upfront guard for CV strategies that can fail inside fold loops.
+
+    Catches cases where LOO / K-fold will hit a single-class training fold —
+    the sklearn error comes out as an opaque ValueError deep in the fit loop,
+    which gets swallowed by pooled helpers or degrades into silent NaN metrics
+    in the Bayesian objective. Validation must run BEFORE training starts.
+
+    Parameters
+    ----------
+    strategy : str
+        'kfold', 'repeated_kfold', or 'loo'.
+    task_type : str
+        'regression', 'classification', or 'one_class'.
+    y : ndarray
+        Target vector. For one-class, the original labels (used with `inlier_label`).
+    n_folds : int
+        Number of folds.
+    n_repeats : int, optional
+        Number of repeats. Required (and must be >= 1) when strategy=='repeated_kfold'.
+    inlier_label : optional
+        Inlier class label for one-class tasks. If provided, validates inlier count
+        is sufficient for the strategy.
+
+    Raises
+    ------
+    ValueError
+        If the dataset is too small or imbalanced for the requested strategy.
+    """
+    if strategy == 'repeated_kfold':
+        if n_repeats is None or int(n_repeats) < 1:
+            raise ValueError(
+                f"Repeated K-Fold requires n_repeats >= 1 (got {n_repeats!r})."
+            )
+
+    if task_type not in ('classification', 'one_class'):
+        return
+
+    y_arr = np.asarray(y)
+    n = len(y_arr)
+    if n < 2:
+        raise ValueError(f"Need at least 2 samples for {task_type} CV (got {n}).")
+
+    if task_type == 'classification':
+        # Enumerate class counts — sklearn needs ≥2 classes in every train fold
+        classes, counts = np.unique(y_arr, return_counts=True)
+        if len(classes) < 2:
+            raise ValueError(
+                f"Classification requires at least 2 classes, got only {len(classes)} "
+                f"({classes.tolist()})."
+            )
+        min_class = int(counts.min())
+        if strategy == 'loo' and min_class < 2:
+            rarest = classes[int(counts.argmin())]
+            raise ValueError(
+                f"LOO CV requires at least 2 samples per class (class {rarest!r} has "
+                f"{min_class}). Leaving out its only sample yields a single-class "
+                f"training fold. Use K-fold or add more samples for that class."
+            )
+        if strategy in ('kfold', 'repeated_kfold') and min_class < n_folds:
+            rarest = classes[int(counts.argmin())]
+            raise ValueError(
+                f"{n_folds}-fold CV requires at least {n_folds} samples per class "
+                f"(class {rarest!r} has {min_class}). Reduce folds or add samples."
+            )
+        return
+
+    # One-class: validate inlier count against strategy.
+    # If inlier_label is provided, caller is passing raw labels — coerce both
+    # sides to str for comparison (matches search.py:~4878's convention for
+    # one-class label encoding; prevents "too few inliers" errors when
+    # inlier_label dtype differs from y_arr dtype, e.g. int vs numpy string).
+    # If inlier_label is None, labels are assumed to be +1/-1 encoded (matches
+    # contamination.run_one_class_cv after conversion).
+    if inlier_label is not None:
+        y_str = np.asarray(y_arr, dtype=str)
+        n_inliers = int(np.sum(y_str == str(inlier_label)))
+    else:
+        n_inliers = int(np.sum(y_arr == 1))
+    if strategy == 'loo':
+        # 2 inliers minimum; PCA-SIMCA needs more (enforced model-side in contamination.py)
+        if n_inliers < 2:
+            raise ValueError(
+                f"LOO one-class CV requires at least 2 inliers (got {n_inliers})."
+            )
+    elif strategy in ('kfold', 'repeated_kfold'):
+        if n_inliers < n_folds:
+            raise ValueError(
+                f"{n_folds}-fold one-class CV requires at least {n_folds} inliers "
+                f"(got {n_inliers}). Reduce folds or use LOO."
+            )
+
+
+def estimate_total_cv_fits(
+    strategy: str,
+    n_folds: int,
+    n_repeats: int,
+    n_samples: int,
+    n_trials: int = 1,
+    n_models: int = 1,
+    n_preprocessing: int = 1,
+) -> int:
+    """Estimate total model fits for a CV-based search.
+
+    Parameters
+    ----------
+    strategy : str
+        CV strategy: 'kfold', 'repeated_kfold', or 'loo'.
+    n_folds : int
+        Number of folds (ignored for 'loo').
+    n_repeats : int
+        Number of repeats (used only for 'repeated_kfold').
+    n_samples : int
+        Number of training samples.
+    n_trials : int
+        Number of Bayesian trials or grid configurations.
+    n_models : int
+        Number of model types being tested.
+    n_preprocessing : int
+        Number of preprocessing configurations.
+
+    Returns
+    -------
+    int
+        Estimated total number of individual model fits.
+    """
+    if strategy == 'loo':
+        cv_fits = n_samples
+    elif strategy == 'repeated_kfold':
+        cv_fits = n_folds * n_repeats
+    else:
+        cv_fits = n_folds
+    return cv_fits * max(1, n_trials) * max(1, n_models) * max(1, n_preprocessing)
+
+
+def build_cv_splitter(
+    strategy: str,
+    n_folds: int,
+    task_type: str,
+    n_repeats: int = 5,
+    random_state: int = 42,
+):
+    """Build a sklearn CV splitter for the requested strategy.
+
+    Parameters
+    ----------
+    strategy : str
+        One of 'kfold', 'repeated_kfold', 'loo'.
+    n_folds : int
+        Number of folds. Ignored when strategy == 'loo'.
+    task_type : str
+        One of 'regression', 'classification', 'one_class'. Controls stratification.
+    n_repeats : int, default=5
+        Number of repeats. Used only when strategy == 'repeated_kfold'.
+    random_state : int, default=42
+        Random state for reproducibility.
+
+    Returns
+    -------
+    sklearn.model_selection.BaseCrossValidator
+        A splitter object usable with cross_validate, cross_val_predict, etc.
+    """
+    if strategy == 'loo':
+        from sklearn.model_selection import LeaveOneOut
+        return LeaveOneOut()
+    if strategy == 'repeated_kfold':
+        from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
+        if task_type == 'classification':
+            return RepeatedStratifiedKFold(
+                n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
+            )
+        return RepeatedKFold(
+            n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
+        )
+    if strategy == 'kfold':
+        if task_type == 'classification':
+            return StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        return KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    raise ValueError(
+        f"Unknown CV strategy: {strategy!r}. Expected 'kfold', 'repeated_kfold', or 'loo'."
+    )
+
+
+def _is_repeated_cv(cv) -> bool:
+    """Check if a CV splitter produces overlapping test sets (repeated splits)."""
+    return isinstance(cv, (RepeatedKFold, RepeatedStratifiedKFold))
+
+
+def _model_is_classifier(model) -> bool:
+    """Detect whether an estimator (possibly wrapped in a Pipeline) is a classifier."""
+    inner = _get_model_from_pipeline(model) if hasattr(model, 'steps') else model
+    try:
+        return is_classifier(inner)
+    except (AttributeError, TypeError) as e:
+        # Custom estimator with broken tags — surface so we don't silently fall back
+        # to numeric averaging of integer labels under repeated CV.
+        warnings.warn(
+            f"Could not determine classifier status for {type(inner).__name__}: {e}. "
+            "Treating as non-classifier; check if repeated-CV predict averaging is safe.",
+            stacklevel=2,
+        )
+        return False
+
+
+def reduce_repeated_cv_predictions(
+    cv_metrics: list,
+    splits: list,
+    n_samples: int,
+    task_type: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce per-fold (y_test, y_pred) outputs to one prediction per sample.
+
+    Used by the grid-search aggregation path in search.py. Under repeated CV
+    each sample appears in multiple test folds; flat concatenation duplicates
+    rows and biases pooled metrics. For regression we average repeated
+    predictions; for classification we take the majority vote (averaging
+    integer labels would yield fractional pseudo-labels).
+
+    ORDER MUST MATCH: cv_metrics[i] must correspond to splits[i]. Silent
+    miscorrespondence corrupts per-sample attribution without raising.
+
+    Parameters
+    ----------
+    cv_metrics : list of dict
+        Per-fold output from `_run_single_fold` — each must have 'y_test', 'y_pred'.
+    splits : list of (train_idx, test_idx)
+        Realized fold indices (same order as cv_metrics).
+    n_samples : int
+        Total samples in the original X (not the pooled count).
+    task_type : str
+        'regression' or 'classification'. Drives reduction strategy.
+
+    Returns
+    -------
+    all_y_test, all_y_pred : ndarray
+        One row per sample that received at least one prediction, in sample-index order.
+    """
+    if len(cv_metrics) != len(splits):
+        raise ValueError(
+            f"cv_metrics ({len(cv_metrics)}) and splits ({len(splits)}) length mismatch"
+        )
+
+    if task_type == 'regression':
+        pred_sum = np.zeros(n_samples, dtype=float)
+        truth = np.full(n_samples, np.nan, dtype=float)
+        pred_count = np.zeros(n_samples, dtype=int)
+        for m, (_train_idx, test_idx) in zip(cv_metrics, splits):
+            preds = np.asarray(m['y_pred']).ravel()
+            tests = np.asarray(m['y_test']).ravel()
+            pred_sum[test_idx] += preds
+            pred_count[test_idx] += 1
+            truth[test_idx] = tests
+        mask = pred_count > 0
+        return truth[mask], pred_sum[mask] / pred_count[mask]
+
+    # Classification: majority vote per sample
+    votes_per_sample: List[list] = [[] for _ in range(n_samples)]
+    truth_label = [None] * n_samples
+    for m, (_train_idx, test_idx) in zip(cv_metrics, splits):
+        preds = np.asarray(m['y_pred']).ravel()
+        tests = np.asarray(m['y_test']).ravel()
+        for i, sample_idx in enumerate(test_idx):
+            votes_per_sample[sample_idx].append(preds[i])
+            truth_label[sample_idx] = tests[i]
+    mask = [len(v) > 0 for v in votes_per_sample]
+    truth_arr = np.array([t for t, k in zip(truth_label, mask) if k])
+    pred_arr = np.array([
+        Counter(v).most_common(1)[0][0]
+        for v, k in zip(votes_per_sample, mask) if k
+    ])
+    return truth_arr, pred_arr
+
+
+def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
+    """Reduce a list of vote-lists to a single prediction per sample via mode.
+
+    Used for repeated-CV classifier predictions where numeric averaging would
+    produce nonsensical fractional labels (e.g. averaging [0, 1] → 0.5).
+    """
+    n_samples = len(votes_per_sample)
+    out = np.empty(n_samples, dtype=dtype)
+    for i, votes in enumerate(votes_per_sample):
+        if votes:
+            out[i] = Counter(votes).most_common(1)[0][0]
+    return out
+
+
+def cross_val_predict_pooled(
+    model,
+    X: np.ndarray,
+    y: np.ndarray,
+    cv,
+    n_jobs: int = 1,
+    method: str = 'predict',
+) -> np.ndarray:
+    """Cross-validated predictions that work for all CV strategies including repeated CV.
+
+    For standard CV (KFold, StratifiedKFold, LOO), this delegates to sklearn's
+    cross_val_predict. For repeated CV (RepeatedKFold, RepeatedStratifiedKFold),
+    it runs a manual loop and averages predictions per sample across repeats.
+
+    Parameters
+    ----------
+    model : estimator
+        Model to cross-validate.
+    X : ndarray
+        Feature matrix.
+    y : ndarray
+        Target vector.
+    cv : cross-validator
+        CV splitter (any sklearn splitter).
+    n_jobs : int, default=1
+        Number of parallel jobs (only for non-repeated CV).
+    method : str, default='predict'
+        Prediction method ('predict' or 'predict_proba').
+
+    Returns
+    -------
+    ndarray
+        Per-sample predictions, averaged across repeats for repeated CV.
+    """
+    if not _is_repeated_cv(cv):
+        return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
+
+    # Repeated CV: accumulate predictions per sample, then reduce.
+    # For classifier predict, reduce by majority vote (averaging integer class
+    # labels produces nonsensical fractional "predictions"). For regression or
+    # predict_proba, average across repeats.
+    n_samples = X.shape[0]
+    use_majority_vote = method == 'predict' and _model_is_classifier(model)
+
+    if use_majority_vote:
+        votes_per_sample: List[list] = [[] for _ in range(n_samples)]
+        for train_idx, test_idx in cv.split(X, y):
+            model_clone = clone(model)
+            model_clone.fit(X[train_idx], y[train_idx])
+            preds = np.ravel(model_clone.predict(X[test_idx]))
+            for i, sample_idx in enumerate(test_idx):
+                votes_per_sample[sample_idx].append(preds[i])
+        return _majority_vote(votes_per_sample, dtype=np.asarray(y).dtype)
+
+    if method == 'predict_proba':
+        n_classes = len(np.unique(y))
+        pred_sum = np.zeros((n_samples, n_classes))
+    else:
+        pred_sum = np.zeros(n_samples)
+    pred_count = np.zeros(n_samples)
+
+    for train_idx, test_idx in cv.split(X, y):
+        model_clone = clone(model)
+        model_clone.fit(X[train_idx], y[train_idx])
+        if method == 'predict_proba':
+            preds = model_clone.predict_proba(X[test_idx])
+        else:
+            preds = np.ravel(model_clone.predict(X[test_idx]))
+        pred_sum[test_idx] += preds
+        pred_count[test_idx] += 1
+
+    mask = pred_count > 0
+    if method == 'predict_proba':
+        pred_sum[mask] /= pred_count[mask, np.newaxis]
+    else:
+        pred_sum[mask] /= pred_count[mask]
+    return pred_sum
 
 
 def is_boosting_model(model) -> bool:
@@ -258,6 +633,18 @@ def cross_validate_with_early_stopping(
         early_stopping_rounds > 0
     )
 
+    # LeaveOneOut has 1-sample test folds that cannot serve as an eval_set for
+    # early stopping. Disable and warn so the boosting model trains normally.
+    from sklearn.model_selection import LeaveOneOut
+    if isinstance(cv, LeaveOneOut) and use_early_stopping:
+        warnings.warn(
+            "Early stopping disabled under LeaveOneOut CV: "
+            "single-sample test folds cannot serve as an eval_set. "
+            "Boosting model will train without early stopping.",
+            stacklevel=2,
+        )
+        use_early_stopping = False
+
     # If not a boosting model or early stopping disabled, use standard cross_validate
     if not use_early_stopping:
         return cross_validate(
@@ -302,19 +689,17 @@ def cross_validate_with_early_stopping(
 
         if hasattr(model_clone, 'steps'):
             # It's a pipeline - fit preprocessing steps first
-            X_train_transformed = X_train.copy()
-            X_val_transformed = X_val.copy()
+            X_train_transformed = X_train
+            X_val_transformed = X_val
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
-                    # Don't transform validation data - resampling only applies to training
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
                     X_val_transformed = step.transform(X_val_transformed)
 
-            # Fit final model with early stopping
             _fit_with_early_stopping(
                 final_model_clone,
                 X_train_transformed, y_train,
@@ -322,7 +707,6 @@ def cross_validate_with_early_stopping(
                 early_stopping_rounds
             )
         else:
-            # Direct model - fit with early stopping
             _fit_with_early_stopping(
                 model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds
             )
@@ -334,11 +718,10 @@ def cross_validate_with_early_stopping(
         score_start = time.time()
 
         if hasattr(model_clone, 'steps'):
-            # Transform test data through pipeline
-            X_val_transformed = X_val.copy()
+            X_val_transformed = X_val
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
-                    continue  # Resamplers don't transform test data
+                    continue
                 X_val_transformed = step.transform(X_val_transformed)
             y_pred = final_model_clone.predict(X_val_transformed)
         else:
@@ -352,10 +735,10 @@ def cross_validate_with_early_stopping(
 
         if return_train_score:
             if hasattr(model_clone, 'steps'):
-                X_train_transformed = X_train.copy()
+                X_train_transformed = X_train
                 for step_name, step in model_clone.steps[:-1]:
                     if hasattr(step, 'fit_resample'):
-                        continue  # Resamplers don't transform test/train scoring data
+                        continue
                     X_train_transformed = step.transform(X_train_transformed)
                 y_train_pred = final_model_clone.predict(X_train_transformed)
             else:
@@ -425,20 +808,25 @@ def cross_val_predict_with_early_stopping(
         early_stopping_rounds > 0
     )
 
-    # If not a boosting model, use standard cross_val_predict
+    # If not a boosting model, use pooled cross_val_predict (handles repeated CV)
     if not use_early_stopping:
-        return cross_val_predict(model, X, y, cv=cv, method=method)
+        return cross_val_predict_pooled(model, X, y, cv=cv, method=method)
 
-    # Manual CV loop
+    # Manual CV loop with early stopping (handles repeated CV via accumulation)
+    repeated = _is_repeated_cv(cv)
     n_samples = X.shape[0]
+    use_majority_vote = repeated and method == 'predict' and _model_is_classifier(model)
 
     # Determine output shape
     if method == 'predict_proba':
-        # Get number of classes
         n_classes = len(np.unique(y))
         predictions = np.zeros((n_samples, n_classes))
     else:
         predictions = np.zeros(n_samples)
+    if repeated:
+        pred_count = np.zeros(n_samples)
+        if use_majority_vote:
+            votes_per_sample: List[list] = [[] for _ in range(n_samples)]
 
     for train_idx, val_idx in cv.split(X, y):
         X_train, X_val = X[train_idx], X[val_idx]
@@ -448,14 +836,13 @@ def cross_val_predict_with_early_stopping(
         final_model_clone = _get_model_from_pipeline(model_clone)
 
         if hasattr(model_clone, 'steps'):
-            # Pipeline
-            X_train_transformed = X_train.copy()
-            X_val_transformed = X_val.copy()
+            # Pipeline — transform through preprocessing steps
+            X_train_transformed = X_train
+            X_val_transformed = X_val
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
-                    # Don't transform validation data - resampling only applies to training
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
@@ -482,10 +869,27 @@ def cross_val_predict_with_early_stopping(
             else:
                 preds = model_clone.predict(X_val)
 
-        # Flatten predictions for non-proba case (some models return 2D arrays)
         if method != 'predict_proba':
             preds = np.ravel(preds)
-        predictions[val_idx] = preds
+
+        if repeated:
+            if use_majority_vote:
+                for i, sample_idx in enumerate(val_idx):
+                    votes_per_sample[sample_idx].append(preds[i])
+            else:
+                predictions[val_idx] += preds
+            pred_count[val_idx] += 1
+        else:
+            predictions[val_idx] = preds
+
+    if repeated:
+        if use_majority_vote:
+            return _majority_vote(votes_per_sample, dtype=np.asarray(y).dtype)
+        mask = pred_count > 0
+        if method == 'predict_proba':
+            predictions[mask] /= pred_count[mask, np.newaxis]
+        else:
+            predictions[mask] /= pred_count[mask]
 
     return predictions
 

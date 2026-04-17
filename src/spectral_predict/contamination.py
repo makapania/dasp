@@ -39,7 +39,8 @@ import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.decomposition import PCA
-from sklearn.model_selection import KFold
+
+from spectral_predict.cv_utils import build_cv_splitter, _is_repeated_cv
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import OneClassSVM
 from sklearn.ensemble import IsolationForest
@@ -522,6 +523,8 @@ def run_one_class_cv(
     model_name: str,
     params: dict,
     n_folds: int = 5,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
     random_state: int = 42,
     y_original: np.ndarray | None = None,
     compute_calibration: bool = True,
@@ -542,6 +545,10 @@ def run_one_class_cv(
         Hyperparameters for the model.
     n_folds : int
         Number of CV folds (applied to inlier data only).
+    cv_strategy : str
+        Cross-validation strategy: 'kfold', 'repeated_kfold', or 'loo'.
+    cv_n_repeats : int
+        Number of repeats for 'repeated_kfold' strategy.
     random_state : int
         Random state for reproducibility.
     y_original : np.ndarray, optional
@@ -566,15 +573,68 @@ def run_one_class_cv(
     # returning +inf from the Bayesian objective.
     fold_errors: list[str] = []
 
-    if len(inlier_indices) < n_folds:
-        msg = f"Too few inliers ({len(inlier_indices)}) for {n_folds}-fold CV"
+    # Determine minimum inlier count based on CV strategy AND model.
+    # PCA-SIMCA has a hard floor of 3 training samples (PCASIMCA.fit's
+    # n_samples<3 guard), so under LOO with 3 inliers every training fold
+    # has only 2 samples and every fold fails silently. Guard upfront.
+    SIMCA_FIT_FLOOR = 3
+    if cv_strategy == 'loo':
+        base_min = 2  # Leave one out and still train
+        if model_name == 'PCA-SIMCA':
+            min_inliers = SIMCA_FIT_FLOOR + 1  # Training fold size = n_inliers - 1
+        else:
+            min_inliers = base_min
+    elif cv_strategy in ('kfold', 'repeated_kfold'):
+        # K-fold and Repeated K-fold: each training fold has ~(n_inliers * (k-1)/k)
+        # samples. PCA-SIMCA needs SIMCA_FIT_FLOOR in the training fold.
+        if model_name == 'PCA-SIMCA':
+            min_inliers = max(n_folds, int(np.ceil(SIMCA_FIT_FLOOR * n_folds / (n_folds - 1))))
+        else:
+            min_inliers = n_folds
+    else:
+        # build_cv_splitter already rejects unknown strategies, but belt-and-
+        # suspenders against future additions that bypass it.
+        raise ValueError(f"Unknown cv_strategy: {cv_strategy!r}")
+
+    if len(inlier_indices) < min_inliers:
+        strategy_label = {
+            'kfold': f'{n_folds}-fold CV',
+            'repeated_kfold': f'repeated {n_folds}-fold CV',
+            'loo': 'LOO CV',
+        }
+        if model_name == 'PCA-SIMCA':
+            msg = (
+                f"Too few inliers ({len(inlier_indices)}) for PCA-SIMCA under "
+                f"{strategy_label.get(cv_strategy, cv_strategy)} — needs {min_inliers}+ "
+                f"so every training fold has >= {SIMCA_FIT_FLOOR} samples"
+            )
+        else:
+            msg = (
+                f"Too few inliers ({len(inlier_indices)}) for "
+                f"{strategy_label.get(cv_strategy, cv_strategy)}"
+            )
         logger.warning(msg)
         return {'skipped': True, 'fold_metrics': [], 'skip_reason': msg, 'fold_errors': [msg]}
 
-    kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    kf = build_cv_splitter(
+        strategy=cv_strategy,
+        n_folds=n_folds,
+        task_type='one_class',
+        n_repeats=cv_n_repeats,
+        random_state=random_state,
+    )
 
-    # --- Per-fold CV ---
+    # --- Per-fold CV: collect predictions for pooled metric computation ---
     fold_metrics = []
+    all_test_labels: list[np.ndarray] = []
+    all_y_pred: list[np.ndarray] = []
+    all_scores: list[np.ndarray] = []
+    # Original sample indices for each fold's test rows — enables per-sample
+    # reduction under repeated CV (outliers appear in every fold, inliers
+    # appear r times across repeats; without per-sample reduction the pooled
+    # metrics come from correlated observations).
+    all_test_idx: list[np.ndarray] = []
+
     for fold_i, (train_inlier_idx, test_inlier_idx) in enumerate(kf.split(inlier_indices)):
         train_idx = inlier_indices[train_inlier_idx]
         test_inlier = inlier_indices[test_inlier_idx]
@@ -618,18 +678,28 @@ def run_one_class_cv(
             else:
                 y_pred = model.predict(X_test)
 
+            # Per-fold metrics retained for debugging/display
             fold_result = one_class_metrics(test_labels, y_pred, scores)
             fold_metrics.append(fold_result)
+
+            # Collect for pooled computation
+            all_test_labels.append(test_labels)
+            all_y_pred.append(y_pred)
+            all_test_idx.append(test_idx)
+            if scores is not None:
+                all_scores.append(scores)
         except (np.linalg.LinAlgError, ValueError) as e:
             err_msg = f"fold {fold_i} train_n={len(train_idx)}: {type(e).__name__}: {e}"
             fold_errors.append(err_msg)
             logger.warning("Fold failed for %s (%s)", model_name, err_msg)
             continue
 
-    # Skip guard
-    if len(fold_metrics) < max(2, n_folds // 2):
+    # Skip guard — check how many folds succeeded
+    n_successful = len(all_y_pred)
+    n_actual_splits = kf.get_n_splits(inlier_indices) if hasattr(kf, 'get_n_splits') else n_folds
+    if n_successful < max(2, n_actual_splits // 2):
         reason = (
-            f"{len(fold_metrics)}/{n_folds} folds succeeded; first error: "
+            f"{n_successful}/{n_actual_splits} folds succeeded; first error: "
             f"{fold_errors[0] if fold_errors else 'unknown'}"
         )
         return {
@@ -639,20 +709,64 @@ def run_one_class_cv(
             'fold_errors': fold_errors,
         }
 
-    # NaN-safe mean of fold metrics
-    def _safe_mean(key):
-        vals = [fm[key] for fm in fold_metrics if not np.isnan(fm[key])]
-        return float(np.mean(vals)) if vals else np.nan
+    # Compute metrics from POOLED predictions across all folds.
+    # Matches chemometrics convention: ratio-of-sums, not averaging-of-ratios.
+    # Under LOO, per-fold sensitivity degenerates to 0/1. Pooling fixes this.
+    #
+    # Under repeated CV, inliers appear r times and outliers appear k*r times
+    # in the flat pool — pooled metrics would come from correlated observations
+    # (same sample's r predictions come from related models). Reduce per-sample
+    # by majority vote first, matching the regression/classification path's
+    # cross_val_predict_pooled semantic. Plain K-Fold and LOO are unchanged.
+    # TODO: plain K-Fold one-class has the same correlated-prediction
+    # structure (outliers appear k times), but changing it would break
+    # user-memorized numbers from existing models — rebaseline in a separate PR.
+    if _is_repeated_cv(kf) and all_test_idx:
+        pooled_idx_flat = np.concatenate(all_test_idx)
+        pooled_labels_flat = np.concatenate(all_test_labels)
+        pooled_preds_flat = np.concatenate(all_y_pred)
+        # NOTE: pooled_scores is intentionally dropped under repeated CV.
+        # decision_function / score_samples outputs from independently fitted
+        # OCSVM/IsolationForest/EllipticEnvelope/LOF are NOT on a common scale
+        # across folds — averaging them produces a meaningless ranking and
+        # destroys AUC semantics. Labels-based metrics pool correctly via
+        # per-sample majority vote below; AUC is computed separately as the
+        # mean of per-fold AUCs (see pooled_scores=None handling in
+        # one_class_metrics — it returns NaN for auc — then we override it
+        # with the fold-mean).
 
-    mean_metrics = {
-        'sensitivity': _safe_mean('sensitivity'),
-        'specificity': _safe_mean('specificity'),
-        'precision': _safe_mean('precision'),
-        'f1': _safe_mean('f1'),
-        'accuracy': _safe_mean('accuracy'),
-        'balanced_accuracy': _safe_mean('balanced_accuracy'),
-        'auc': _safe_mean('auc'),
-    }
+        unique_samples = np.unique(pooled_idx_flat)
+        pooled_labels = np.empty(len(unique_samples), dtype=pooled_labels_flat.dtype)
+        pooled_preds = np.empty(len(unique_samples), dtype=pooled_preds_flat.dtype)
+        for i, s in enumerate(unique_samples):
+            sample_mask = pooled_idx_flat == s
+            # Label is deterministic per sample (same row in y_oc), take first
+            pooled_labels[i] = pooled_labels_flat[sample_mask][0]
+            # Majority vote via np.unique + argmax. Deterministic but
+            # tie-breaks TOWARD THE LOWER-SORTED LABEL (-1 = outlier), which
+            # is the conservative default for contamination detection: when
+            # the model is ambiguous about a sample, flag it as an outlier.
+            # Callers who need a different tie-break policy should use an
+            # odd cv_n_repeats to avoid exact ties.
+            vals, counts = np.unique(pooled_preds_flat[sample_mask], return_counts=True)
+            pooled_preds[i] = vals[np.argmax(counts)]
+        # Pass None for scores — AUC overridden below from per-fold AUCs
+        pooled_scores = None
+    else:
+        pooled_labels = np.concatenate(all_test_labels)
+        pooled_preds = np.concatenate(all_y_pred)
+        pooled_scores = np.concatenate(all_scores) if all_scores else None
+
+    mean_metrics = one_class_metrics(pooled_labels, pooled_preds, pooled_scores)
+
+    # Under repeated CV, override AUC with mean-of-fold-AUCs because
+    # decision_function scores are not comparable across independently-fitted
+    # folds. Per-fold AUCs are self-contained (scored within the same model).
+    if _is_repeated_cv(kf) and fold_metrics:
+        fold_aucs = [m.get('auc', np.nan) for m in fold_metrics]
+        fold_aucs = [a for a in fold_aucs if a is not None and not np.isnan(a)]
+        mean_metrics['auc'] = float(np.mean(fold_aucs)) if fold_aucs else float('nan')
+
     # NaN guard for balanced_accuracy in zero-outlier case
     if np.isnan(mean_metrics['balanced_accuracy']):
         mean_metrics['balanced_accuracy'] = mean_metrics['specificity']

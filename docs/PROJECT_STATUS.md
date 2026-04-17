@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-16 by Claude (Opus 4.7) — LightGBM shared-model-state bug **FIXED** on branch `fix/lightgbm-shared-model-state`. Commit `129bf46`. Before/after verified on both venvs with bit-identical numerics — see `docs/plans/artifacts/2026-04-16/COMPARISON.md`.
+> **Last updated:** 2026-04-16 by Claude (Opus 4.7) — LightGBM shared-model-state bug **FIXED** on `main` via PR #5. Branch `cv-strategy-overhaul` merged main back in to inherit the fix. See `docs/plans/artifacts/2026-04-16/COMPARISON.md`. PR #4 (this branch) parity work still stands; revisit `docs/pr4_parity_report.md` after merge.
 
 ---
 
@@ -51,6 +51,7 @@ Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to t
 - [x] Basic preprocessing discovery works for one-class grid search (callback wrapper fixed)
 - [x] Variable selection: 'importance' method works for one-class
 - [x] Results Treeview tooltips: all one-class metrics (Sensitivity/AUC/cv) + validation metrics (RMSEP/R2pred/val_*) now covered; jargon-heavy tooltips (ROC_AUC, Kappa, MCC, BER, LogLoss) rewritten for non-technical audience
+- [x] CV strategy support: LOO, Repeated K-Fold, and standard K-Fold via `build_cv_splitter()` factory in `cv_utils.py`. Pooled RMSEcv (regression) and pooled sensitivity/specificity (one-class). GUI controls in Analysis tab + Model Development. Cost estimator with LOO/Repeated warnings. training_config stores cv_strategy for model save/load. Post-review fixes (2026-04-12): RepeatedKFold crash via `cross_val_predict_pooled`, one-class Bayesian cv_strategy forwarding, GUI LOO folds metadata, LOO classification minority-class guard, differentiated mixed-regime warnings.
 
 ## Known Issues
 
@@ -69,6 +70,7 @@ Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to t
 - [ ] **Variable selection limited** — Only 'importance' method works. UVE/SPA/iPLS/CARS are PLS-specific and incompatible. This is by design but could use a UI hint.
 - [ ] **Residual correlation overlay** — Disabled for one-class (no continuous residuals). Shows zeros.
 - [ ] **One-class hyperparameter grids are NOT exposed in Model Config subtab** — violates the project rule "All hyperparameters are exposed and user-editable" (`CLAUDE.md`). Only four scalars are surfaced in `oc_hyperparams_frame` (`gui:6040`): `nu`, `contamination`, `alpha`, `n_components`. Everything else (kernel, gamma, n_estimators, max_samples, max_features, support_fraction, n_neighbors, metric, additional alpha/n_components values) lives in the hardcoded `ONE_CLASS_PARAM_GRIDS` constant in `src/spectral_predict/contamination.py`. Regression and classification have a per-model collapsible card each (`_create_tab4c_model_configuration`, lines 11726+) — one-class needs five equivalent cards (OCSVM, IF, EllipticEnvelope, LOF, PCA-SIMCA). See `SESSION_LOG.md 2026-04-11` for the full inventory.
+- [ ] **LOO / Repeated K-Fold results may not auto-populate the Results tab** — observed 2026-04-12 during manual testing of PR #4 (cv-strategy-overhaul). User ran LOO on a 49-sample regression dataset; analysis completed without errors, but the Results tab did not display the completed runs as expected. Repeated K-Fold uncertain — not explicitly tested for the same behavior. Save/load/predict round-trip from a refined LOO model works. Possible causes to investigate: (a) Results tab's Treeview populate path is gated on `Folds` matching a specific integer range or on `training_config['cv_strategy'] == 'kfold'`; (b) progress callback's final "completion" signal isn't wired for non-kfold strategies; (c) sort/filter logic in `_populate_results_treeview` (or equivalent) drops rows where `Folds == n_samples` (LOO case). Needs repro + trace before fixing.
 
 ## Architecture Decisions
 
@@ -114,4 +116,10 @@ Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to t
 
 - **OC validation helper can't recover the right `polyorder` for 2nd-derivative grid-search rows.** Grid search writes `polyorder=None` (delegating to `polyorder_map` inside `SavgolDerivative` which picks 3 for `deriv=2`), but the validation helper at `contamination.py:922-927` falls back to `min(2, window-1) if window > 2 else 0`, which gives `poly=2` for `deriv=2`. The pipeline then runs with the wrong polyorder and the resulting `val_*` metrics are slightly off vs. what training actually used. Fix: either store the resolved polyorder in the grid-search result dict (most direct), or import the same `polyorder_map` lookup into the validation helper, or have `_maybe_int` fall back to `polyorder_map[deriv]` when poly isn't set.
 
-- **Add Leave-One-Out CV as a CV-strategy option for all task types (regression, classification, one-class).** Small training sets (especially one-class, where only inliers count toward `k`) hit K-fold edge cases hard — e.g. 7 inliers with 5-fold leaves 5-6 per training fold, which stresses any model with a minimum-samples floor. LOO uses every sample, eliminates the "fold-too-small" failure mode entirely, and gives a less biased estimate for tiny datasets. Would slot into `run_one_class_cv` (swap `KFold(n_splits=n_folds)` for `LeaveOneOut()` behind a `cv_strategy='loo'` branch) and the equivalent paths in `search.py` / `unified_bayesian.py`. UI needs a new control in the CV-folds area ("Leave-one-out" as an alternative to numeric folds).
+- **CV Strategy Phase 2: Propagate outer CV strategy into variable selection inner loops.** Currently inner loops (UVE, SPA, iPLS, CARS, GA-PLS) always use hardcoded 5-fold K-fold regardless of the outer CV strategy. A GUI warning is displayed when outer != kfold. Phase 2 would thread `cv_strategy`/`cv_n_repeats` into the variable selection internals.
+
+- **CV Strategy Phase 2: Propagate CV strategy into predictor screening and smart preprocessing.** These internal CV sites are currently hardcoded 5-fold and don't respect the user's chosen strategy.
+
+- **CV Strategy Phase 2: NSGA-II multi-objective search CV strategy support.** Currently falls back to K-fold with a logged warning when non-kfold strategy is selected. Needs native LOO/Repeated K-fold support.
+
+- **One-class search: Add `training_config` to result rows.** Regression/classification grid search writes `training_config` (with `cv_strategy`, `folds`, `cv_n_repeats`) but one-class search does not. This means one-class saved models don't preserve the CV strategy used during training.
