@@ -1237,14 +1237,13 @@ def create_unified_objective(
             model = pipeline
 
             # Enable CV parallelism (safe - Bayesian trials are sequential)
-            import sys
-            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            from spectral_predict.search import _frozen_needs_threading_fallback
 
             # Models that are slower with parallel CV (threading conflicts or low overhead)
             # SVM: threading conflicts; PLS/PLS-DA: so fast that joblib overhead dominates
             # Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
             models_prefer_serial_cv = {'SVM', 'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
-            use_serial = is_frozen or model_name in models_prefer_serial_cv
+            use_serial = _frozen_needs_threading_fallback() or model_name in models_prefer_serial_cv
 
             n_jobs_cv = 1 if use_serial else -1
 

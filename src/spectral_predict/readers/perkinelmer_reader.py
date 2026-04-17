@@ -44,7 +44,7 @@ def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     >>> print(f"Wavelength range: {spectrum.index.min()}-{spectrum.index.max()}")
     >>> print(f"Number of points: {len(spectrum)}")
     """
-    from specio import specread
+    from specio_py310 import specread
 
     filepath = Path(filepath)
 

@@ -438,9 +438,8 @@ def _run_single_ga_lgbm(
                     fitness_scores[i] = fitness
             else:
                 # Parallel evaluation - use threading in frozen apps
-                import sys
-                is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-                backend = 'threading' if is_frozen else 'loky'
+                from spectral_predict.search import _frozen_needs_threading_fallback
+                backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
                 results = Parallel(n_jobs=n_jobs, backend=backend)(
                     delayed(_fitness_function_lgbm)(
                         population[i], X, y, cv, task_type,

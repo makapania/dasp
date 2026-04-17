@@ -4,6 +4,34 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-17 — PyInstaller 3.12 bundle: pandas/util/__init__.py intermittently corrupted by TOC collision
+
+**Bug:** 3.12 bundle launched with `--test` crashed with `ImportError: cannot import name 'capitalize_first_letter' from 'pandas.util'`. `capitalize_first_letter` is a real function in pandas 2.3.x — so the bundled `pandas/util/__init__.py` is the wrong file.
+
+**Root cause:** PyInstaller's dist-info collection has a duplicate-key race where `pandas/util/__init__.py` gets overwritten with the contents of `packaging/_structures.py` (the pypa/packaging vendored copy that setuptools aliases as `setuptools._vendor.packaging`). Happens roughly 1 in 3 rebuilds — non-deterministic based on file system iteration order and PyInstaller TOC resolution. Earlier opencode/GLM rebuild also hit this class of bug when they attempted `a.binaries`/`a.datas` filtering inside the spec; reverting that didn't fully eliminate the underlying collision risk.
+
+**Symptom check:** bundled `dist/SpectralPredict-py312/_internal/pandas/util/__init__.py` starts with `"# Vendored from https://github.com/pypa/packaging/blob/main/packaging/_structures.py"` instead of the real pandas content.
+
+**Fix:** Post-build self-healing step in `build_installer_py312.py` after the COLLECT phase — byte-compare `pandas/util/__init__.py` in the bundle against `.venv312/Lib/site-packages/pandas/util/__init__.py`; if mismatched, `shutil.copy2` the venv version over the bundled one. Logs `[REPAIR] Restored pandas/util/__init__.py` when triggered. If other files start exhibiting the same corruption pattern, add them to the `repair_targets` list at `build_installer_py312.py:~225`.
+
+**Upstream:** This is PyInstaller 6.18.0 behavior — no obvious open issue. The clean fix would be for PyInstaller to detect package-name collisions at TOC-insertion time, but the workaround is cheap.
+
+---
+
+## 2026-04-17 — PyInstaller 3.12 bundle: loky spawn crash → threading fallback revert
+
+**Bug:** The Python 3.12 PyInstaller windowed bundle crashed when LightGBM (or any joblib/loky parallel code) tried to spawn workers. Child process ran `multiprocessing.freeze_support()` inside the frozen runtime hook and crashed on argv parsing: `ValueError: not enough values to unpack (expected 2, got 1)`. The parent kept retrying spawn → fork-bomb of GUI windows.
+
+**Root cause:** The version gate `is_frozen and sys.version_info < (3, 12)` in `_frozen_needs_threading_fallback()` was incorrect. Loky's spawn method is broken in ALL PyInstaller windowed bundles, not just 3.11. The frozen runtime hook's `multiprocessing.freeze_support()` crashes on argv parsing regardless of Python version.
+
+**Fix (two files):**
+1. `src/spectral_predict/search.py`: Reverted `_frozen_needs_threading_fallback()` to return `is_frozen` (any frozen build → threading backend). Updated docstring.
+2. `spectral_predict_gui_optimized.py`: Wrapped bare `multiprocessing.freeze_support()` in `if __name__ == "__main__": try/except` so child-process argv parsing failures exit silently instead of cascading into GUI windows.
+
+**Result:** 3.12 bundle rebuilt, smoke test 31/31 imports OK, bundle size ~1.4 GB (after torch removal).
+
+---
+
 ## 2026-04-17 — PR #4 (CV strategies) merged after pre-merge review surfaced a real export-path bug
 
 **Context:** PR #4 (`claude/cv-strategy-overhaul`) had been through 5 prior review rounds. After PR #5 (LightGBM clone fix) merged, this branch was brought up to date by merging `main` back in (commit `058e110`) — clean except for two doc files (PROJECT_STATUS.md and SESSION_LOG.md) where conflicts were resolved by taking main's "fixed" status note + keeping both 2026-04-15 and 2026-04-16 SESSION_LOG entries chronologically.

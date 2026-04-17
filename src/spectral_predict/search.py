@@ -4,6 +4,20 @@ import os
 import sys
 import inspect
 import logging
+
+
+def _frozen_needs_threading_fallback() -> bool:
+    """Whether the current frozen build needs the threading-backend workaround.
+
+    PyInstaller windowed bundles cannot safely use loky's spawn method
+    regardless of Python version.  The frozen runtime hook's
+    multiprocessing.freeze_support() crashes on argv parsing in child
+    processes ("ValueError: not enough values to unpack (expected 2, got
+    1)"), and the parent retries spawning → fork-bomb of GUI windows.
+    Falling back to the threading backend avoids the broken spawn entirely.
+    """
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    return is_frozen
 import numpy as np
 import pandas as pd
 from sklearn.pipeline import Pipeline
@@ -933,10 +947,10 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # Fixed random state used throughout codebase
     random_state = RANDOM_STATE
 
-    # Use all cores for parallel execution. In frozen apps, threading backend (line 4087-4092)
-    # handles parallelism correctly without process spawning.
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    n_jobs_default = (os.cpu_count() or -1) if is_frozen else -1
+    # Use all cores for parallel execution. Python 3.11 frozen builds need
+    # cpu_count() because loky's process spawn is broken there; 3.12 frozen
+    # builds work like dev mode (n_jobs=-1).
+    n_jobs_default = (os.cpu_count() or -1) if _frozen_needs_threading_fallback() else -1
 
     # Drop rows where y is NaN (safety net for data with empty rows)
     nan_mask = y.isna()
@@ -4240,12 +4254,11 @@ def _run_single_config(
             for train_idx, test_idx in splits
         ]
     else:
-        # Parallel execution for speed
-        # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
-        # Use 'loky' in dev mode (faster multiprocessing)
-        import sys
-        is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-        backend = 'threading' if is_frozen else 'loky'
+        # Parallel execution for speed.
+        # 3.11 frozen builds must use 'threading' — loky's process spawn is
+        # broken in PyInstaller 5.x bundles on 3.11. Dev mode and 3.12 frozen
+        # builds use 'loky' for real multiprocessing.
+        backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
         cv_metrics = Parallel(n_jobs=n_jobs_cv, backend=backend)(
             delayed(_run_single_fold)(
                 pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,

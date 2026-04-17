@@ -20,7 +20,11 @@ OPTIMIZED VERSION:
 # MUST be called before any other imports that might spawn processes
 import multiprocessing
 if __name__ == "__main__":
-    multiprocessing.freeze_support()
+    try:
+        multiprocessing.freeze_support()
+    except Exception:
+        import sys
+        sys.exit(0)
 
 import sys
 import os
@@ -10743,22 +10747,23 @@ class SpectralPredictApp:
         self.use_rmsep_gap.trace_add('write', self._rerank_results_debounced)
 
         # === Wavelength Restriction for Analysis ===
-        ttk.Separator(options_frame, orient='horizontal').grid(row=7, column=0, columnspan=3, sticky='ew', pady=(20, 10))
+        # Rows 6-8 are used above (label, spinbox+checkbox, info text). Start at row 9.
+        ttk.Separator(options_frame, orient='horizontal').grid(row=9, column=0, columnspan=3, sticky='ew', pady=(20, 10))
 
         # Enable/disable checkbox
         self.wl_restrict_checkbox = ttk.Checkbutton(options_frame,
                                                      text="Restrict wavelengths for model training",
                                                      variable=self.enable_analysis_wl_restriction)
-        self.wl_restrict_checkbox.grid(row=8, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+        self.wl_restrict_checkbox.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
         # Help text explaining the difference from import filter
         ttk.Label(options_frame,
                  text="Further restrict wavelength range for analysis only (does not affect data import or plots)",
-                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=9, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['text_light']).grid(row=11, column=0, columnspan=3, sticky=tk.W, padx=(20, 0))
 
         # Wavelength range inputs
         wl_restrict_subframe = ttk.Frame(options_frame)
-        wl_restrict_subframe.grid(row=10, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        wl_restrict_subframe.grid(row=12, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
         ttk.Label(wl_restrict_subframe, text="Analysis Range:").pack(side=tk.LEFT, padx=(0, 5))
         ttk.Entry(wl_restrict_subframe, textvariable=self.analysis_wl_min, width=12).pack(side=tk.LEFT, padx=2)
         ttk.Label(wl_restrict_subframe, text="to").pack(side=tk.LEFT, padx=5)
@@ -10789,7 +10794,7 @@ class SpectralPredictApp:
 
         # Preset buttons for common ranges
         preset_frame = ttk.Frame(options_frame)
-        preset_frame.grid(row=12, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
+        preset_frame.grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
         ttk.Label(preset_frame, text="Presets:", style='Caption.TLabel').pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(preset_frame, text="UV (10-400)",
                   command=lambda: self._set_analysis_wl_preset(10, 400),
@@ -10806,7 +10811,7 @@ class SpectralPredictApp:
 
         # Custom regions input
         custom_wl_frame = ttk.Frame(options_frame)
-        custom_wl_frame.grid(row=11, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
+        custom_wl_frame.grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=(8, 0), padx=(20, 0))
         ttk.Label(custom_wl_frame, text="Custom Regions:").pack(side=tk.LEFT, padx=(0, 5))
         self.analysis_wl_custom_entry = ttk.Entry(custom_wl_frame, textvariable=self.analysis_wl_custom, width=45)
         self.analysis_wl_custom_entry.pack(side=tk.LEFT, padx=2)
@@ -10819,7 +10824,7 @@ class SpectralPredictApp:
         self.wl_custom_preview_label = ttk.Label(options_frame,
                  text="",
                  style='Caption.TLabel', foreground=self.colors['accent'])
-        self.wl_custom_preview_label.grid(row=13, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
+        self.wl_custom_preview_label.grid(row=15, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
 
         # Auto-check and update preview when custom field changes
         def on_custom_wl_change(*args):
@@ -10837,16 +10842,16 @@ class SpectralPredictApp:
         # Performance note
         ttk.Label(options_frame,
                  text="💡 Tip: Restricting wavelengths speeds up training (fewer features = faster models)",
-                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=14, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=16, column=0, columnspan=3, sticky=tk.W, pady=(0, 0), padx=(20, 0))
 
-        ttk.Separator(options_frame, orient='horizontal').grid(row=15, column=0, columnspan=3, sticky='ew', pady=(15, 10))
+        ttk.Separator(options_frame, orient='horizontal').grid(row=17, column=0, columnspan=3, sticky='ew', pady=(15, 10))
 
         # Output directory
-        ttk.Label(options_frame, text="Output Directory:").grid(row=16, column=0, sticky=tk.W, pady=(0, 8), padx=(0, 10))
-        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=16, column=1, sticky=tk.W)
+        ttk.Label(options_frame, text="Output Directory:").grid(row=18, column=0, sticky=tk.W, pady=(0, 8), padx=(0, 10))
+        ttk.Entry(options_frame, textvariable=self.output_dir, width=25).grid(row=18, column=1, sticky=tk.W)
 
         # Progress monitor
-        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=17, column=0, columnspan=3, sticky=tk.W, pady=10)
+        ttk.Checkbutton(options_frame, text="Show live progress monitor", variable=self.show_progress).grid(row=19, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # === Preprocessing Methods ===
         self._create_section_header(content_frame, "Preprocessing Methods", row=row, columnspan=2)

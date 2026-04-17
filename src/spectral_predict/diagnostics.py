@@ -28,8 +28,8 @@ def _get_safe_n_jobs():
     Returns -1 (all cores) for source code, 1 (serial) for bundled apps.
     This prevents PyInstaller's multiprocessing issues on Windows.
     """
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    return 1 if is_frozen else -1
+    from spectral_predict.search import _frozen_needs_threading_fallback
+    return 1 if _frozen_needs_threading_fallback() else -1
 
 
 def compute_residuals(y_true, y_pred):

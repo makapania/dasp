@@ -13,9 +13,8 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 def _get_cv_n_jobs():
     """Get n_jobs for CV, respecting frozen app constraints."""
-    import sys
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    return 1 if is_frozen else -1
+    from spectral_predict.search import _frozen_needs_threading_fallback
+    return 1 if _frozen_needs_threading_fallback() else -1
 
 
 def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):

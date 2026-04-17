@@ -394,9 +394,8 @@ def _run_single_ga(
                     fitness_scores[i] = fitness
             else:
                 # Parallel evaluation - use threading in frozen apps
-                import sys
-                is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-                backend = 'threading' if is_frozen else 'loky'
+                from spectral_predict.search import _frozen_needs_threading_fallback
+                backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
                 results = Parallel(n_jobs=n_jobs, backend=backend)(
                     delayed(_fitness_function)(
                         population[i], X, y, cv, task_type, n_components, min_wavelengths
@@ -610,9 +609,8 @@ def ga_pls_selection(
 
     # Determine parallelization strategy for runs
     import os
-    import sys
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
-    run_backend = 'threading' if is_frozen else 'loky'
+    from spectral_predict.search import _frozen_needs_threading_fallback
+    run_backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
     n_cores = os.cpu_count() or 1
 
     # Parallelize runs when we have multiple runs and cores available.

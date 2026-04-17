@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — Repo-distribution prep: added `install.bat`/`install.sh`/`INSTALL.md`, audited `pyproject.toml` for missing required deps (added Pillow, shap, re-enabled jcamp), bumped sklearn/numpy/pandas/scipy floors. Earlier today: PR #5 (LightGBM shared-model-state fix) and PR #4 (LOO + Repeated K-Fold CV strategies) both merged to `main`. See "Recently resolved" + "Known follow-ups" below.
+> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — experimental Python 3.12 PyInstaller build path complete. Produces `dist/SpectralPredict-py312/SpectralPredict-py312.exe` (~1.4 GB folder) + `dist/installer/SpectralPredict_Setup_py312_0.4.0.exe` (299 MB single-file Inno Setup installer). Threading backend in frozen mode (loky spawn broken on all windowed bundles). Two pre-existing bugs surfaced + fixed: specio import name (`from specio import` never worked on .venv312 — was `specio_py310`), Analysis Config tab grid-row collisions (separator overlapping spinbox; wl checkbox overlapping info label). Post-build pandas self-repair added to build_installer_py312.py for the intermittent PyInstaller TOC corruption (pandas/util/__init__.py getting overwritten with packaging/_structures.py content). The 3.11 production build path is UNCHANGED.
 
 ---
 
@@ -18,7 +18,7 @@ Goal: enable a small group to clone the repo and run the GUI without dealing wit
 - **`torch`** — `src/spectral_predict/learned_preprocessing.py` exists and imports torch, but is **not wired into the GUI**. The dead import block at `gui:165-170` was removed 2026-04-17. The module itself is preserved because there may be a future place for learned-preprocessing models. **If/when learned_preprocessing is wired into the GUI**, decide: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch — install with `pip install torch`" message in the GUI when the user tries to use it.
 - **`agilent-ir-formats`** — no Python 3.12 wheel exists on PyPI. Stays in optional `[agilent]` extra. .seq file loading will raise a clear ImportError from `agilent_reader.py:62` until the upstream package ships a 3.12 wheel.
 
-**Next:** PyInstaller-on-3.12 experiment to retire the 3.11 bundled-app constraint and recover real multiprocessing parallelism (currently `search.py:4244-4249` falls back to `threading` when `sys.frozen` is detected).
+**Next:** Test the 3.12 bundle GUI with actual analysis (user-verified). The threading fallback means no multiprocessing parallelism in the bundle, but no crash either.
 
 ---
 
