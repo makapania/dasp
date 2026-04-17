@@ -105,9 +105,15 @@ class CodeGenerator:
         self.metrics = model_config.get('metrics', {})
         self.variable_indices = model_config.get('variable_indices', None)
         self.wavelengths = model_config.get('wavelengths', None)
-        self.cv_folds = model_config.get('cv_folds', 5)
-        self.cv_strategy = model_config.get('cv_strategy', 'kfold')
-        self.cv_n_repeats = model_config.get('cv_n_repeats', 5)
+        # CV metadata may live at the top level (legacy) or under training_config
+        # (canonical, set by search.py since the cv-strategy-overhaul work). Fall
+        # back to training_config so exported scripts/notebooks/R wrappers always
+        # reproduce the user's selected CV regime — otherwise an LOO model would
+        # silently emit KFold(...) on export.
+        _training_config = model_config.get('training_config') or {}
+        self.cv_folds = model_config.get('cv_folds', _training_config.get('folds', 5))
+        self.cv_strategy = model_config.get('cv_strategy', _training_config.get('cv_strategy', 'kfold'))
+        self.cv_n_repeats = model_config.get('cv_n_repeats', _training_config.get('cv_n_repeats', 5))
         self.imbalance_method = model_config.get('imbalance_method', None)
 
         # Update options with target column from config
