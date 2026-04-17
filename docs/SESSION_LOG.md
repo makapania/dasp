@@ -236,6 +236,56 @@ Regression tests added: `TestPostMergeReviewFixes::test_backend_regression_pools
 
 ---
 
+## 2026-04-16 — LightGBM "parameter capture" warning + NaN calibration: root cause = sklearn 1.5.2 strict `_check_n_features`, not a recent commit
+
+**Symptoms** (seen by user in GUI on `.venv311`, running cv-strategy-overhaul worktree, BoneCollagen dataset + SG2 window=17 + variable_subsets ON + region_subsets ON):
+```
+Warning: Could not fit model for parameter capture: X has 10 features, but LGBMRegressor is expecting 2135 features as input.
+(repeats for each top-N subset and each region subset)
+```
+LightGBM result rows: `RMSE=NaN, R2=NaN` for calibration; CV metrics (`RMSEcv`, `R2cv`) fine.
+
+**False-path investigations** (all rejected by user; useful as negative evidence):
+1. Opus agent #1 blamed `8a48ec2` (Nov 2025 "fix: Improve R² reproducibility") — 5 months of clean usage refuted.
+2. Opus agent #2 blamed the `try/except Exception` at `search.py:4437-4596` swallowing silently — correct as a symptom amplifier, not a cause.
+3. Codex blamed `d97ce19` (Feb 2026 hybrid variable selection) — rejected: user wasn't using hybrid methods.
+4. Kimi K2.5 concurred with Codex — same rejection.
+5. `feature-dev:code-reviewer` agent blamed `35b6d69` (LOO GUI combobox) — rejected: LOO wasn't selected and dataset (159 samples) is above the auto-LOO threshold.
+6. My own first programmatic repro on a different venv (sklearn 1.8.0) could NOT reproduce — because 1.8.0 doesn't fire the same check.
+
+**Actual root cause** (identified after user reported `.venv311` vs `.venv312`):
+- `src/spectral_predict/search.py:~2215` (branch) / `:~2195` (main), commit `89454d3` (Nov 20 2025 "fix: Critical fixes for wavelength filtering and sample weight passing"):
+  ```python
+  pipe_steps = []
+  pipe_steps.append(("model", model))   # <-- shared model instance
+  pipe = Pipeline(pipe_steps)
+  pipe.fit(X_for_models, y_np)          # fits shared model on 2135-feature preprocessed X
+  ```
+- This leaves `model.n_features_in_ = 2135`.
+- Later, `_run_single_config(..., subset_indices=top_indices)` slices X to subset (10, 20, 50...) and does `pipe.fit(X_subset, y)` at `:~4439`. sklearn 1.5.2 runs `_check_n_features(reset=False)` during the pre-fit path and raises — **before** the fit resets `n_features_in_`.
+- `try/except Exception` at line 4437 swallows → `cal_rmse=None`, `cal_r2=None` → NaN in result.
+- **sklearn 1.7.2+** (in `.venv312`) handles this more leniently — the pre-fit check doesn't raise for this pattern, so the bug silently didn't surface.
+
+**Why 5 months clean:** user was on `.venv312` (Python 3.12, sklearn 1.7.2). Recently switched to `.venv311` (sklearn 1.5.2) because PyInstaller bundling requires Python 3.11.
+
+**Immediate workaround applied 2026-04-16:** `RUN_SPECTRAL_PREDICT.bat` switched from `.venv311` → `.venv312`. User confirmed symptom resolved. But the bundled release app will revert to 3.11 and must carry a real code fix.
+
+**Fix plan** (see `docs/PROJECT_STATUS.md` "🔴 PRIORITY FOR NEXT SESSION"):
+1. `clone(model)` in the outer importance-pipe fit (prevents the shared-state mutation).
+2. `clone(model)` in `_run_single_config` pipe construction (defense in depth).
+3. Verify on both `.venv311` and `.venv312`.
+4. Land on a fresh branch off main, not on cv-strategy-overhaul.
+
+**Evidence artifacts:**
+- `docs/pr4_parity/repro_lightgbm_regression_v2.py` — full-GUI-config repro
+- User's raw GUI stdout showing 13 distinct "X has N features, but LGBMRegressor is expecting 2135" warnings across top-10/20/50/100/250 and all 8 regions, for all 4 LightGBM hyperparameter combos.
+
+**Gotcha for future parity / repro work:** always pin the sklearn version when attempting to reproduce a user-reported bug. Matching the user's Python version is not enough — `.venv311` on this machine has sklearn 1.5.2, but `pip install -e .` on a fresh Python 3.11 elsewhere could pull 1.6+ or 1.7+, which would mask the bug.
+
+**Fix shipped 2026-04-16 (same-day resolution):** branch `fix/lightgbm-shared-model-state`, PR #5. Initial fix commit `129bf46` had three `clone(model)` calls at `search.py:2191`, `:4161`, `:4163` (the regression bug). After Claude pr-reviewer flagged PLS-DA as the same pattern, a fourth defensive clone was added at `:4139` in commit `1fd222c` — classification baseline on `.venv311` with PLS-DA un-cloned proved PLS-DA does NOT actually hit the bug (importance-capture pre-fit at `:2191` doesn't fire for it), so that clone is purely defensive/symmetric. Verified on both `.venv311` and `.venv312` using GUI-default kwargs on BoneCollagen via `scripts/verify_shared_model_fix.py` — 7 runs total (regression baseline+postfix+rerun on both venvs, plus classification baseline+postfix). Post-fix numerics bit-identical across all passing runs (`LightGBM.best_cv_rmse=0.9702327793086989` to 16 sig figs, PLS untouched). Observed severity on main turned out to be worse than the plan expected: the shared-state collision on `.venv311` raises a ValueError mid-grid that kills the ENTIRE LightGBM run (`n_rows=0`), not just individual NaN rows. See `docs/plans/artifacts/2026-04-16/COMPARISON.md` for the full matrix.
+
+---
+
 ## 2026-04-11 — Grid-search OC validation silent NaN + final-merge cleanup (Claude Opus 4.6)
 
 ### Bug: Grid-search one-class results show no `val_*` metrics, Bayesian works fine

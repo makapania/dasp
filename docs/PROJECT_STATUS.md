@@ -1,50 +1,22 @@
 # Project Status
 
-> **Last updated:** 2026-04-16 by Claude (Opus 4.6) — see 🔴 priority note below. PR #4 parity work stands (see `docs/pr4_parity_report.md`).
+> **Last updated:** 2026-04-16 by Claude (Opus 4.7) — LightGBM shared-model-state bug **FIXED** on `main` via PR #5. Branch `cv-strategy-overhaul` merged main back in to inherit the fix. See `docs/plans/artifacts/2026-04-16/COMPARISON.md`. PR #4 (this branch) parity work still stands; revisit `docs/pr4_parity_report.md` after merge.
 
 ---
 
-## 🔴 PRIORITY FOR NEXT SESSION — fix shared-model-state bug before PyInstaller release
+## Recently resolved
 
-**The bundled app (Python 3.11 + sklearn 1.5.2, required by PyInstaller) crashes the LightGBM calibration metrics when grid search runs with variable subsets + region subsets enabled.** User confirmed 2026-04-16 that switching to `.venv312` (sklearn 1.7.2) masks the symptom — but bundling must use 3.11, so the bug will ship unless we fix the code.
+### LightGBM "parameter capture" warning + NaN / crash on `.venv311` — FIXED 2026-04-16
 
-### Symptoms on `.venv311`:
-- Warning per subset fit: `Could not fit model for parameter capture: X has <subset_n> features, but LGBMRegressor is expecting 2135 features as input.`
-- LightGBM rows in results: `NaN` for calibration `RMSE` / `R2` (CV metrics fine).
+Fix: `clone(model)` at four pipe-construction sites in `search.py` (`:2191`, `:4161`, `:4163` for the regression bug, plus `:4139` PLS-DA defensive). Root cause: shared estimator instance being fit first on full preprocessed X (setting `n_features_in_=2151`), then reused in subset-feature fits; sklearn 1.5.2's pre-fit `_check_n_features(reset=False)` fires before the refit would reset the count, raising. sklearn 1.7.2's pre-fit check is more lenient and doesn't raise on the same pattern. The PLS-DA `:4139` site was added after Claude pr-reviewer flagged it as the same pattern; classification baseline run on `.venv311` with PLS-DA un-cloned proved PLS-DA doesn't actually hit the bug (importance-capture at `:2191` doesn't fire for PLS-DA), so the clone there is purely defensive/symmetric. (The separate sklearn 1.7.2 `"X does not have valid feature names"` UserWarning flood seen on `.venv312` comes from a DataFrame-fit / ndarray-predict transition in the pipeline; it's unrelated to the shared-state bug and is NOT changed by this fix — see COMPARISON.md.)
 
-### Root cause (confirmed from user's GUI stdout):
-- `src/spectral_predict/search.py:~2215` (branch) / `:~2195` (main): the importance-computation step does `pipe = Pipeline([("model", model)])` then `pipe.fit(X_for_models, y_np)` on the preprocessed, edge-masked X (e.g., 2135 features after SG2 window=17).
-- That fit leaves the **shared `model` object** with `n_features_in_ = 2135`.
-- Later, `_run_single_config(..., subset_indices=top_indices)` does `pipe.fit(X_subset, y)` for the refit at `~line 4439`. The shared model carries `n_features_in_=2135`, and sklearn 1.5.2's `_check_n_features(reset=False)` raises before the reset happens.
-- `try/except Exception` at `~4437-4596` swallows it → `cal_rmse=None`, `cal_r2=None` → `NaN`.
+Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults on BoneCollagen — 4-run before/after matrix on both venvs. Post-fix `.venv311` produces 9408 LightGBM rows with `best_cv_rmse=0.9702327793086989`, bit-identical to `.venv312`. See `docs/plans/2026-04-16-lightgbm-shared-model-fix.md` for the plan and `docs/plans/artifacts/2026-04-16/COMPARISON.md` for the metrics matrix.
 
-### Why it was clean for 5 months:
-User was running on `.venv312` (sklearn 1.7.2). sklearn 1.7.2's pre-fit feature-count check is more lenient. PyInstaller requires 3.11, so `.venv311` (sklearn 1.5.2) is the ship environment — that's where the latent bug fires.
-
-### Proposed fix — two sites, `clone` already imported:
-1. **Primary** (`search.py:~2215` branch / `:~2195` main), the outer importance-pipe fit:
-   ```python
-   pipe_steps = []
-   pipe_steps.append(("model", clone(model)))   # was: model
-   pipe = Pipeline(pipe_steps)
-   pipe.fit(X_for_models, y_np)
-   ```
-2. **Defense in depth** (`_run_single_config()` pipe construction, `search.py:~4209`): same pattern — `pipe_steps.append(("model", clone(model)))` so every config call gets a fresh estimator.
-
-### Verification plan:
-1. New branch off `main` (keep separate from `cv-strategy-overhaul`).
-2. Run `docs/pr4_parity/repro_lightgbm_regression_v2.py` with `.venv311/Scripts/python.exe` — must show zero warnings, zero NaN calibration.
-3. Re-run on `.venv312` to confirm no regression.
-4. GUI smoke test on `.venv311` (flip RUN_SPECTRAL_PREDICT.bat back to `.venv311`) with BoneCollagen + SG2 + variable_subsets + region_subsets ON.
-5. Rebase `cv-strategy-overhaul` once merged so PR #4 picks up the fix.
-
-### Artifacts:
-- `docs/pr4_parity/repro_lightgbm_regression.py` — narrow repro (does NOT trigger without region_subsets)
-- `docs/pr4_parity/repro_lightgbm_regression_v2.py` — full-GUI-defaults repro, should trigger on .venv311
-- Full trace: `docs/SESSION_LOG.md 2026-04-16`
-- Launcher note: `RUN_SPECTRAL_PREDICT.bat` currently points at `.venv312` as a workaround; revert to `.venv311` once the code fix lands.
+Next: merge PR to `main` and rebase `cv-strategy-overhaul` so the fix flows to that branch too.
 
 ---
+
+## Active Branch context (secondary)
 
 ## Active Branch: `claude/contamination-detection-model-PrntN`
 
@@ -131,6 +103,8 @@ User was running on `.venv312` (sklearn 1.7.2). sklearn 1.7.2's pre-fit feature-
 4. Follow-up PRs (post-merge): see "Follow-Ups (unclaimed)" section below
 
 ## Follow-Ups (unclaimed)
+
+- **Change default `n_components` for one-class PCA-SIMCA spinbox from 5 to 10.** `spectral_predict_gui_optimized.py:2796` currently has `self.oc_n_components = tk.IntVar(value=5)`. Bump the default to 10. The user can still change it via the spinbox in `oc_hyperparams_frame` (`gui:6051`); this is just a more sensible starting point for typical NIR datasets where 5 components often under-fits the inlier manifold. Trivial one-line change.
 
 - **Expose all one-class hyperparameter grids in Model Config subtab.** Currently only four scalars (`nu`, `contamination`, `alpha`, `n_components`) are surfaced in `oc_hyperparams_frame` (`gui:6040`). Everything else (kernel, gamma, n_estimators, max_samples, max_features, support_fraction, n_neighbors, metric, additional alpha/n_components values) lives in the hardcoded `ONE_CLASS_PARAM_GRIDS` constant in `src/spectral_predict/contamination.py`. This violates the project rule from `CLAUDE.md`: *"All hyperparameters are exposed and user-editable."* Suggested scope: add 5 collapsible cards to `_create_tab4c_model_configuration` (one per OC model family — OCSVM, IF, EllipticEnvelope, LOF, PCA-SIMCA), thread the resulting per-model dicts through `run_one_class_search` and `run_unified_bayesian` instead of `ONE_CLASS_PARAM_GRIDS`, and gate them on Custom tier the same way classification/regression do. See `SESSION_LOG.md 2026-04-11` for the full per-model parameter inventory.
 

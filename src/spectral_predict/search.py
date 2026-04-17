@@ -2207,8 +2207,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 print(f"     Note: Capped PLS n_components to {capped} for importance computation (only {n_features_filtered} features)")
 
                         # Build model-only pipeline (data is already preprocessed and filtered)
+                        # clone() prevents the importance-capture fit from mutating the shared
+                        # `model` reference (leaving n_features_in_ set to the full-spectrum
+                        # count, which then collides with subset fits downstream on sklearn 1.5.2).
                         pipe_steps = []
-                        pipe_steps.append(("model", model))
+                        pipe_steps.append(("model", clone(model)))
                         pipe = Pipeline(pipe_steps)
 
                         # Fit on preprocessed+filtered data
@@ -4179,7 +4182,7 @@ def _run_single_config(
     # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
     # StandardScaler normalizes PLS scores to fix numerical instability with derivatives
     if model_name == "PLS-DA":
-        pipe_steps.append(("pls", model))
+        pipe_steps.append(("pls", clone(model)))
         pipe_steps.append(("scaler", StandardScaler()))  # Scale PLS scores for LogisticRegression
 
         # Extract LogisticRegression parameters from config (prefixed with lr_)
@@ -4204,9 +4207,9 @@ def _run_single_config(
     # These use gradient descent or kernel methods that are sensitive to feature scale
     elif model_name in SCALE_SENSITIVE_MODELS:
         pipe_steps.append(("scaler", StandardScaler()))
-        pipe_steps.append(("model", model))
+        pipe_steps.append(("model", clone(model)))
     else:
-        pipe_steps.append(("model", model))
+        pipe_steps.append(("model", clone(model)))
 
     # Choose correct Pipeline class based on whether resampling is needed
     # Standard sklearn Pipeline doesn't support fit_resample() methods

@@ -1,0 +1,35 @@
+{
+  "env": {
+    "python": "3.11.9",
+    "sklearn": "1.5.2",
+    "lightgbm": "4.6.0",
+    "git_sha": "085ef5cc7c9f2895a354f0f6f5fda064f5233893"
+  },
+  "LightGBM": {
+    "model": "LightGBM",
+    "error": "ValueError: X has 2135 features, but LGBMRegressor is expecting 2151 features as input.",
+    "warning_feature_mismatch_count": 1249,
+    "warning_sample": [
+      "Warning: Could not fit model for parameter capture: X has 10 features, but LGBMRegressor is expecting 2151 features as input.",
+      "  -> Testing top-20 vars (importance)... Warning: Could not fit model for parameter capture: X has 20 features, but LGBMRegressor is expecting 2151 features as input.",
+      "  -> Testing top-50 vars (importance)... Warning: Could not fit model for parameter capture: X has 50 features, but LGBMRegressor is expecting 2151 features as input.",
+      "  -> Testing top-100 vars (importance)... Warning: Could not fit model for parameter capture: X has 100 features, but LGBMRegressor is expecting 2151 features as input.",
+      "  -> Testing top-250 vars (importance)... Warning: Could not fit model for parameter capture: X has 250 features, but LGBMRegressor is expecting 2151 features as input."
+    ],
+    "n_rows": 0
+  },
+  "PLS": {
+    "model": "PLS",
+    "error": null,
+    "warning_feature_mismatch_count": 0,
+    "warning_sample": [],
+    "n_rows": 973,
+    "n_nan_cal_rmse": 0,
+    "n_nan_cv_rmse": 0,
+    "best_cal_rmse": 0.5242968634854136,
+    "median_cal_rmse": 2.0301053440415253,
+    "best_cv_rmse": 1.5053957426145248,
+    "median_cv_rmse": 2.55499132402149
+  },
+  "bug_present": true
+}
