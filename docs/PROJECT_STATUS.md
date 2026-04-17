@@ -38,25 +38,21 @@ The 3.12 PyInstaller bundle is now functional and superior on every dimension th
 
 ---
 
-## Tooltip coverage gaps (2026-04-17 GLM audit)
+## Tooltip coverage — RESOLVED 2026-04-17 (GLM 5.1 implementation)
 
-CV strategy and one-class additions from PR #4 left some tooltips behind. **GLM 5.1 audit found 6 missing-tooltip items + 1 codebase discrepancy.** Suggested follow-up scope: small (~2 hours of work). Items:
+Originally an audit-only finding (6 missing-tooltip items + 1 codebase discrepancy); GLM then implemented the fixes in the same session. **All 16 missing `CreateToolTip()` calls added** + new `TOOLTIP_CONTENT['one_class']` section (10 entries) + new `cross_validation['repeats']` key. Tooltips are research-backed (sklearn docs + chemometrics literature with citations: Bouckaert & Frank 2004, Schölkopf et al. 2001, Liu/Ting/Zhou 2008, Breunig et al. 2000, Rousseeuw & Van Driessen 1999, Wold 1976, Oliveri & Downey 2012).
 
-**Missing tooltips:**
-1. `cv_repeats_label` / `cv_repeats_spinbox` (`gui:10662-10665`) — no tooltip on either. Suggested: "Number of times K-Fold is repeated with different random splits. More repeats = lower-variance RMSEcv but longer runtime. 3–5 usually sufficient; 10+ for final published results."
-2. `cv_strategy_combo` (`gui:10648-10652`) — only the label has a tooltip, not the combobox itself. Low priority.
-3. Refine tab CV controls (`gui:14320-14337`) — `refine_strategy_combo`, `refine_folds_spinbox`, `refine_repeats_spinbox` all have zero `CreateToolTip()` calls. Mirror main-tab tooltips here.
-4. One-class model checkboxes (`gui:11725-11731`) — the 5 checkboxes (PCA-SIMCA, OneClassSVM, IsolationForest, EllipticEnvelope, LOF) have inline `desc` captions but no hover tooltips. **No `'one_class'` key in `TOOLTIP_CONTENT` at all.** Add proper multi-line tooltips comparable to regression-model tooltips.
-5. Inlier class label/combobox (`gui:6041-6048`) — no tooltip. Suggested: "Select which class represents normal/clean samples. The model learns this class's pattern and flags everything else as anomalous. Leave empty to auto-select the most frequent class."
-6. One-class hyperparameters (`gui:6054-6065`) — `nu`, `contamination`, `alpha`, `n_components` labels/spinboxes have no `CreateToolTip()`. Each needs a tooltip explaining what it controls and typical ranges.
+**Coverage now includes:**
+- CV repeats label + spinbox (main tab + refine tab)
+- CV strategy combobox (main tab + refine tab)
+- All 5 one-class model checkboxes (PCA-SIMCA, OneClassSVM, IsolationForest, EllipticEnvelope, LOF)
+- Inlier class label + combobox
+- All 4 one-class hyperparameter controls (`nu`, `contamination`, `alpha`, `n_components`)
 
-**Codebase discrepancy worth verifying:** `repeated_stratified_kfold` is mentioned in PROJECT_STATUS PR #4 description but does NOT appear in any `.py` file (`grep` finds zero hits). The CV Strategy dropdown values at `gui:10650` are `['kfold', 'repeated_kfold', 'loo']` only. Either the strategy was deferred or the status doc overstated. Confirm before drafting the tooltip follow-up.
+**Verification: passed.** GUI imports cleanly, TOOLTIP_CONTENT['one_class'] dict has all 10 expected keys, no key shorter than 50 chars (sanity guard against placeholder text).
 
-**Already covered (good news):**
-- CV Strategy label tooltip (`gui:10639`), CV Folds via `TOOLTIP_CONTENT['cross_validation']['cv_folds']`, regime-guidance hint (`gui:10670`), mixed-regime variable-selection warning (`gui:10676-10685`), cost-estimator messagebox warnings (`gui:22038-22067`), all Results Treeview metric column tooltips (one-class + validation metrics in `TOOLTIP_CONTENT['metrics']`).
-- `TOOLTIP_CONTENT` has 12 sections: `models`, `preprocessing`, `hyperparameters`, `ranking`, `calibration_transfer`, `variable_selection`, `outlier_detection`, `ensemble`, `results`, `data_management`, `cross_validation`, `metrics`. **Gap: no `one_class` section.** Recommend adding one and consolidating items #4-#6 there.
-
-**Suggested follow-up:** single PR titled "feat(gui): add tooltips for CV strategy controls + one-class TOOLTIP_CONTENT section"; ~2 hours scope; no behavior changes, only `CreateToolTip()` calls + a new `TOOLTIP_CONTENT['one_class']` dict.
+### `repeated_stratified_kfold` — clarified (was a documentation issue, not a bug)
+Earlier audit said `RepeatedStratifiedKFold` doesn't appear in the codebase. **Refined finding:** the *string value* `'repeated_stratified_kfold'` is not in the dropdown — but the *class* `RepeatedStratifiedKFold` IS imported and used in `cv_utils.py`. The CV factory `build_cv_splitter` auto-selects between `RepeatedKFold` and `RepeatedStratifiedKFold` based on task type (classification → stratified, regression → unstratified) when the user selects `repeated_kfold`. So users see one dropdown option, get the right splitter under the hood. No user action needed; status doc PR #4 description was technically accurate, just misleading without that context.
 
 ---
 

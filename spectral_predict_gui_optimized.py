@@ -1257,6 +1257,90 @@ TOOLTIP_CONTENT = {
             "(e.g., measured sequentially). Set random_state for reproducibility. Not needed if data "
             "is already randomized."
         ),
+        'repeats': (
+            "Number of CV repeats (RepeatedKFold / RepeatedStratifiedKFold). Each repeat reshuffles "
+            "the data with a different random seed before splitting into folds, then averages the metric "
+            "across all repeats x folds. Reduces variance of the RMSEcv / AUCcv estimate; does NOT reduce "
+            "bias. Typical: 3-5 repeats for exploratory work, 10+ for publication-quality estimates. "
+            "Cost is linear: 5 repeats x 5 folds = 25 model fits per CV run. "
+            "Reference: Bouckaert and Frank (2004) on the replicability of significance tests for "
+            "comparing learning algorithms."
+        ),
+    },
+
+    # ===== ONE-CLASS MODELS =====
+    'one_class': {
+        'pca_simca_checkbox': (
+            "Classical chemometrics method. Builds a PCA model on the clean/inlier class only, "
+            "then tests new samples by their distance to the PCA subspace using Hotelling T-squared "
+            "(in-model variance) and Q residuals (out-of-model variance), combined via Fisher "
+            "chi-squared statistic. Highly interpretable: wavelength loadings reveal what defines "
+            "the clean class. Standard in food authentication and spectroscopic class modeling. "
+            "Best when the clean class has well-defined PCA structure. "
+            "References: Wold (1976); Oliveri and Downey (2012)."
+        ),
+        'ocsvm_checkbox': (
+            "One-Class Support Vector Machine. Learns a kernel-based decision boundary that encloses "
+            "the clean class in feature space. Best when the clean class is roughly convex or unimodal. "
+            "Sensitive to nu (upper bound on training-set outlier fraction; lower bound on "
+            "support-vector fraction) and the RBF gamma. Computational cost grows with sample size "
+            "(O(n^2) to O(n^3)). Reference: Schoelkopf et al. (2001)."
+        ),
+        'iforest_checkbox': (
+            "Isolation Forest. Ensemble of random trees that isolates anomalies by random feature "
+            "splits: anomalies require fewer splits to isolate. Fast and scalable on "
+            "high-dimensional data, well suited to full-spectrum NIR. Makes no assumption about "
+            "cluster shape. Tune n_estimators (more = stable but slower) and contamination "
+            "(decision threshold). Reference: Liu, Ting and Zhou (2008)."
+        ),
+        'lof_checkbox': (
+            "Local Outlier Factor. Density-based: compares each point local density to that of "
+            "its k nearest neighbors. Effective when the clean class has multiple sub-clusters "
+            "or varying density. IMPORTANT: must be used with novelty=True for one-class screening "
+            "(this app handles that automatically). Sensitive to n_neighbors (typical 20). "
+            "Reference: Breunig et al. (2000)."
+        ),
+        'elliptic_checkbox': (
+            "Elliptic Envelope. Fits a robust covariance estimate (Minimum Covariance Determinant, "
+            "MCD) to the clean class, then flags samples with large Mahalanobis distance. Assumes "
+            "the clean class is approximately Gaussian: fails on multimodal or strongly skewed data. "
+            "support_fraction controls robustness vs. efficiency. "
+            "Reference: Rousseeuw and Van Driessen (1999)."
+        ),
+        'inlier_class': (
+            "Specifies which class label represents the normal / clean / authentic samples. "
+            "The one-class model learns this class pattern only and treats every other class as "
+            "anomalous at scoring time. Auto-selects the most frequent class if you do not choose "
+            "one. Use the class that you trust to be a clean reference (e.g. authentic product, "
+            "in-spec batch)."
+        ),
+        'nu': (
+            "(OneClassSVM only.) Upper bound on the fraction of training samples allowed to fall "
+            "outside the learned boundary, AND lower bound on the fraction of samples that become "
+            "support vectors. Range (0, 1]; default 0.5. Lower nu means tighter boundary, more "
+            "sensitive to anomalies but more risk of false positives. For very clean calibration "
+            "sets, try 0.05 to 0.2. If your training data is itself noisy, use 0.3 to 0.5."
+        ),
+        'contamination': (
+            "(IsolationForest, LOF, EllipticEnvelope.) Expected fraction of anomalies in the "
+            "training data. Sets the decision threshold for inlier/outlier classification but "
+            "does NOT change the underlying anomaly score. Range [0, 0.5]; sklearn default auto. "
+            "For clean calibration data: 0.01 to 0.1. Misestimating contamination shifts the "
+            "cutoff but is recoverable post-hoc by using the raw score."
+        ),
+        'alpha': (
+            "(PCA-SIMCA.) Significance level for the chi-squared confidence boundary on combined "
+            "T-squared + Q residuals. Standard chemometric default 0.05 (95 percent acceptance "
+            "region). Lower alpha (e.g. 0.01) yields a stricter inlier criterion (fewer false "
+            "rejects of clean samples, more false accepts of anomalies). Range (0, 0.5)."
+        ),
+        'n_components': (
+            "(PCA-SIMCA.) Number of principal components retained for the SIMCA model. Should "
+            "capture the dominant systematic variance in the clean spectra without absorbing noise. "
+            "Typical NIR: 5 to 15. Use a scree plot or cumulative explained variance >= 95 percent "
+            "as a guide. Too few PCs under-fits the clean class (legitimate samples flagged); "
+            "too many absorbs noise (anomalies pass through)."
+        ),
     },
 
     # ===== METRICS (for results table column headers) =====
@@ -6038,11 +6122,14 @@ class SpectralPredictApp:
         # Inlier class selection (visible only for one-class task type)
         self.inlier_class_frame = ttk.Frame(config_frame)
         self.inlier_class_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
-        ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:").pack(side=tk.LEFT, padx=(0, 5))
+        self.inlier_class_label = ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:")
+        self.inlier_class_label.pack(side=tk.LEFT, padx=(0, 5))
         self.inlier_class_combo = ttk.Combobox(
             self.inlier_class_frame, textvariable=self.inlier_class_label, width=20, state='readonly'
         )
         self.inlier_class_combo.pack(side=tk.LEFT, padx=5)
+        CreateToolTip(self.inlier_class_label, text=TOOLTIP_CONTENT['one_class']['inlier_class'], delay=500)
+        CreateToolTip(self.inlier_class_combo, text=TOOLTIP_CONTENT['one_class']['inlier_class'], delay=500)
         ttk.Label(self.inlier_class_frame, text="(leave empty to auto-detect most frequent class)",
                  style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
         self.inlier_class_frame.grid_remove()  # Hidden by default
@@ -6051,18 +6138,34 @@ class SpectralPredictApp:
         # One-class hyperparameters frame (visible only for one-class task type)
         self.oc_hyperparams_frame = ttk.Frame(config_frame)
         self.oc_hyperparams_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
-        ttk.Label(self.oc_hyperparams_frame, text="nu (OCSVM):").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_nu, from_=0.001, to=1.0,
-                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(self.oc_hyperparams_frame, text="contamination:").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_contamination, from_=0.001, to=0.5,
-                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(self.oc_hyperparams_frame, text="alpha (DD-SIMCA):").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_alpha, from_=0.001, to=0.5,
-                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(self.oc_hyperparams_frame, text="n_components:").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_n_components, from_=1, to=50,
-                    increment=1, width=5).pack(side=tk.LEFT, padx=(0, 10))
+        oc_nu_label = ttk.Label(self.oc_hyperparams_frame, text="nu (OCSVM):")
+        oc_nu_label.pack(side=tk.LEFT, padx=(0, 2))
+        oc_nu_spinbox = ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_nu, from_=0.001, to=1.0,
+                    increment=0.01, width=6)
+        oc_nu_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        CreateToolTip(oc_nu_label, text=TOOLTIP_CONTENT['one_class']['nu'], delay=500)
+        CreateToolTip(oc_nu_spinbox, text=TOOLTIP_CONTENT['one_class']['nu'], delay=500)
+        oc_contam_label = ttk.Label(self.oc_hyperparams_frame, text="contamination:")
+        oc_contam_label.pack(side=tk.LEFT, padx=(0, 2))
+        oc_contam_spinbox = ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_contamination, from_=0.001, to=0.5,
+                    increment=0.01, width=6)
+        oc_contam_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        CreateToolTip(oc_contam_label, text=TOOLTIP_CONTENT['one_class']['contamination'], delay=500)
+        CreateToolTip(oc_contam_spinbox, text=TOOLTIP_CONTENT['one_class']['contamination'], delay=500)
+        oc_alpha_label = ttk.Label(self.oc_hyperparams_frame, text="alpha (DD-SIMCA):")
+        oc_alpha_label.pack(side=tk.LEFT, padx=(0, 2))
+        oc_alpha_spinbox = ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_alpha, from_=0.001, to=0.5,
+                    increment=0.01, width=6)
+        oc_alpha_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        CreateToolTip(oc_alpha_label, text=TOOLTIP_CONTENT['one_class']['alpha'], delay=500)
+        CreateToolTip(oc_alpha_spinbox, text=TOOLTIP_CONTENT['one_class']['alpha'], delay=500)
+        oc_ncomp_label = ttk.Label(self.oc_hyperparams_frame, text="n_components:")
+        oc_ncomp_label.pack(side=tk.LEFT, padx=(0, 2))
+        oc_ncomp_spinbox = ttk.Spinbox(self.oc_hyperparams_frame, textvariable=self.oc_n_components, from_=1, to=50,
+                    increment=1, width=5)
+        oc_ncomp_spinbox.pack(side=tk.LEFT, padx=(0, 10))
+        CreateToolTip(oc_ncomp_label, text=TOOLTIP_CONTENT['one_class']['n_components'], delay=500)
+        CreateToolTip(oc_ncomp_spinbox, text=TOOLTIP_CONTENT['one_class']['n_components'], delay=500)
         self.oc_hyperparams_frame.grid_remove()  # Hidden by default
         cfg_row += 1
 
@@ -10650,6 +10753,14 @@ class SpectralPredictApp:
             values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
         )
         self.cv_strategy_combo.grid(row=1, column=1, sticky=tk.W)
+        CreateToolTip(self.cv_strategy_combo, text=(
+            "Cross-validation strategy for model evaluation.\n\n"
+            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
+            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
+            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
+            "LOO is computationally expensive on large datasets and unreliable for stochastic "
+            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
+        ), delay=500)
 
         # CV Folds spinbox (hidden under LOO)
         cv_folds_label = ttk.Label(options_frame, text="Folds:")
@@ -10661,8 +10772,10 @@ class SpectralPredictApp:
         # Repeats spinbox (shown only for repeated_kfold)
         self.cv_repeats_label = ttk.Label(options_frame, text="Repeats:")
         self.cv_repeats_label.grid(row=1, column=4, sticky=tk.W, padx=(15, 5))
+        CreateToolTip(self.cv_repeats_label, text=TOOLTIP_CONTENT['cross_validation']['repeats'], delay=500)
         self.cv_repeats_spinbox = ttk.Spinbox(options_frame, from_=2, to=20, textvariable=self.cv_n_repeats, width=6)
         self.cv_repeats_spinbox.grid(row=1, column=5, sticky=tk.W)
+        CreateToolTip(self.cv_repeats_spinbox, text=TOOLTIP_CONTENT['cross_validation']['repeats'], delay=500)
 
         # CV strategy inline hint
         self.cv_hint_label = ttk.Label(
@@ -11715,19 +11828,20 @@ class SpectralPredictApp:
 
         oc_row = 1
         oc_model_info = [
-            ("PCA-SIMCA", self.use_pca_simca, "DD-SIMCA (classic chemometrics)"),
-            ("OneClassSVM", self.use_ocsvm, "Kernel-based boundary"),
-            ("IsolationForest", self.use_isolation_forest, "Isolation-based anomaly detection"),
-            ("EllipticEnvelope", self.use_elliptic_envelope, "Mahalanobis-based (Gaussian)"),
-            ("LOF", self.use_lof, "Local Outlier Factor (density-based)"),
+            ("PCA-SIMCA", self.use_pca_simca, "DD-SIMCA (classic chemometrics)", "pca_simca_checkbox"),
+            ("OneClassSVM", self.use_ocsvm, "Kernel-based boundary", "ocsvm_checkbox"),
+            ("IsolationForest", self.use_isolation_forest, "Isolation-based anomaly detection", "iforest_checkbox"),
+            ("EllipticEnvelope", self.use_elliptic_envelope, "Mahalanobis-based (Gaussian)", "elliptic_checkbox"),
+            ("LOF", self.use_lof, "Local Outlier Factor (density-based)", "lof_checkbox"),
         ]
         self.oc_model_checkbox_widgets = {}
-        for name, var, desc in oc_model_info:
+        for name, var, desc, tooltip_key in oc_model_info:
             cb = ttk.Checkbutton(self.oc_models_frame, text=name, variable=var)
             cb.grid(row=oc_row, column=0, sticky=tk.W, pady=5)
             ttk.Label(self.oc_models_frame, text=desc, style='Caption.TLabel').grid(
                 row=oc_row, column=1, sticky=tk.W, padx=15)
             self.oc_model_checkbox_widgets[name] = cb
+            CreateToolTip(cb, text=TOOLTIP_CONTENT['one_class'][tooltip_key], delay=500)
             oc_row += 1
 
         # === Advanced Model Options ===
@@ -14322,16 +14436,26 @@ class SpectralPredictApp:
             values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
         )
         self.refine_strategy_combo.pack(side='left', padx=(0, 8))
+        CreateToolTip(self.refine_strategy_combo, text=(
+            "Cross-validation strategy for model evaluation.\n\n"
+            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
+            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
+            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
+            "LOO is computationally expensive on large datasets and unreliable for stochastic "
+            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
+        ), delay=500)
 
         self.refine_folds_label = ttk.Label(cv_frame, text="Folds:")
         self.refine_folds_label.pack(side='left', padx=(0, 3))
         self.refine_folds_spinbox = ttk.Spinbox(cv_frame, from_=3, to=10, textvariable=self.refine_folds, width=5)
         self.refine_folds_spinbox.pack(side='left', padx=(0, 8))
+        CreateToolTip(self.refine_folds_spinbox, text=TOOLTIP_CONTENT['cross_validation']['cv_folds'], delay=500)
 
         self.refine_repeats_label = ttk.Label(cv_frame, text="Repeats:")
         self.refine_repeats_label.pack(side='left', padx=(0, 3))
         self.refine_repeats_spinbox = ttk.Spinbox(cv_frame, from_=2, to=50, textvariable=self.refine_cv_n_repeats, width=5)
         self.refine_repeats_spinbox.pack(side='left', padx=(0, 8))
+        CreateToolTip(self.refine_repeats_spinbox, text=TOOLTIP_CONTENT['cross_validation']['repeats'], delay=500)
 
         self.refine_cv_hint = ttk.Label(cv_frame, text="(3-10 folds recommended)", style='Caption.TLabel')
         self.refine_cv_hint.pack(side='left')
