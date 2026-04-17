@@ -28,6 +28,18 @@ if __name__ == "__main__":
 
 import sys
 import os
+
+# Suppress joblib/loky's CPU-count subprocess probe in PyInstaller windowed
+# bundles. Without this, the first joblib.Parallel call briefly flashes a
+# cmd.exe console window (loky spawns a child process to detect cpu_count).
+# In dev mode this is invisible because the parent terminal absorbs the
+# console; in a windowed bundle it pops a black window for ~50ms. Setting
+# LOKY_MAX_CPU_COUNT early tells loky the count up-front so no probe runs.
+if getattr(sys, 'frozen', False):
+    # os.cpu_count() is a pure Python call — does not spawn anything.
+    # multiprocessing.cpu_count() can call out to subprocess on some platforms.
+    _cpu_count = os.cpu_count() or 4
+    os.environ.setdefault('LOKY_MAX_CPU_COUNT', str(_cpu_count))
 import ast
 import re
 from pathlib import Path

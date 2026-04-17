@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — experimental Python 3.12 PyInstaller build path complete. Produces `dist/SpectralPredict-py312/SpectralPredict-py312.exe` (~1.4 GB folder) + `dist/installer/SpectralPredict_Setup_py312_0.4.0.exe` (299 MB single-file Inno Setup installer). Threading backend in frozen mode (loky spawn broken on all windowed bundles). Two pre-existing bugs surfaced + fixed: specio import name (`from specio import` never worked on .venv312 — was `specio_py310`), Analysis Config tab grid-row collisions (separator overlapping spinbox; wl checkbox overlapping info label). Post-build pandas self-repair added to build_installer_py312.py for the intermittent PyInstaller TOC corruption (pandas/util/__init__.py getting overwritten with packaging/_structures.py content). The 3.11 production build path is UNCHANGED.
+> **Last updated:** 2026-04-17 by Claude (Opus 4.7) — experimental Python 3.12 PyInstaller build path complete + verified. Produces `dist/SpectralPredict-py312/SpectralPredict-py312.exe` (~1.4 GB folder) + `dist/installer/SpectralPredict_Setup_py312_0.4.0.exe` (299 MB single-file Inno Setup installer). New build guide at `docs/BUNDLED_APP_BUILD_GUIDE_PY312.md`. User-verified that LightGBM analysis runs without the historical fork-bomb crash. Threading backend in frozen mode (loky spawn broken on all windowed bundles regardless of Python version). Two pre-existing bugs surfaced + fixed: specio import name (`from specio import` never worked on .venv312 — was `specio_py310`), Analysis Config tab grid-row collisions (separator overlapping spinbox; wl checkbox overlapping info label). Post-build pandas self-repair added to build_installer_py312.py for the intermittent PyInstaller TOC corruption (pandas/util/__init__.py getting overwritten with packaging/_structures.py content). LOKY_MAX_CPU_COUNT env var now set in the GUI entry point (frozen-only) to suppress a brief cmd.exe console flash from loky's CPU-count subprocess probe. Pytest focused subset (10 test files covering all modified modules): 285/285 passed. The 3.11 production build path is UNCHANGED.
 
 ---
 
@@ -19,6 +19,44 @@ Goal: enable a small group to clone the repo and run the GUI without dealing wit
 - **`agilent-ir-formats`** — no Python 3.12 wheel exists on PyPI. Stays in optional `[agilent]` extra. .seq file loading will raise a clear ImportError from `agilent_reader.py:62` until the upstream package ships a 3.12 wheel.
 
 **Next:** Test the 3.12 bundle GUI with actual analysis (user-verified). The threading fallback means no multiprocessing parallelism in the bundle, but no crash either.
+
+---
+
+## 3.11 build retirement — pending real-world soak (2026-04-17)
+
+The 3.12 PyInstaller bundle is now functional and superior on every dimension that matters (newer wheels, cleaner dep set, working installer, fork-bomb fix). The 3.11 bundle is now redundant *technically*. **Recommendation: keep the 3.11 build path in-repo for ~2 weeks of real-user soak before retiring.** The 3.12 path has only been verified by the maintainer on one machine; new edge cases may surface when the limited-share group exercises it. Once the 3.12 bundle has run cleanly for a few weeks across the audience:
+
+1. Delete `spectral_predict.spec`, `spectral_predict_mac.spec`, `build_installer.py`, `installer/spectral_predict.iss`, `docs/BUNDLED_APP_BUILD_GUIDE.md`, `RUN_SPECTRAL_PREDICT.bat`, `run_v3.bat`
+2. Rename `spectral_predict_py312.spec` → `spectral_predict.spec`, `build_installer_py312.py` → `build_installer.py`, etc. (drop the `_py312` suffix everywhere)
+3. Adjust the spec/build script for the rename (the `APP_NAME` constant, the .iss `OutputBaseFilename` — current values keep `-py312`/`_py312` suffixes to coexist with the 3.11 path)
+4. Update `docs/BUNDLED_APP_BUILD_GUIDE_PY312.md` → `docs/BUNDLED_APP_BUILD_GUIDE.md`
+5. Delete `.venv311/` (or leave for occasional 3.11 reproduction if needed)
+
+**Risk of retiring now (today):** if the 3.12 bundle has an undiscovered issue specific to a user's machine (different antivirus interaction, missing C++ runtime, etc.), there's no fallback. The 3.11 path is well-traveled.
+
+**Cost of keeping the 3.11 path another 2 weeks:** essentially zero — the two paths are independent files, no maintenance overhead, no risk of cross-contamination.
+
+---
+
+## Tooltip coverage gaps (2026-04-17 GLM audit)
+
+CV strategy and one-class additions from PR #4 left some tooltips behind. **GLM 5.1 audit found 6 missing-tooltip items + 1 codebase discrepancy.** Suggested follow-up scope: small (~2 hours of work). Items:
+
+**Missing tooltips:**
+1. `cv_repeats_label` / `cv_repeats_spinbox` (`gui:10662-10665`) — no tooltip on either. Suggested: "Number of times K-Fold is repeated with different random splits. More repeats = lower-variance RMSEcv but longer runtime. 3–5 usually sufficient; 10+ for final published results."
+2. `cv_strategy_combo` (`gui:10648-10652`) — only the label has a tooltip, not the combobox itself. Low priority.
+3. Refine tab CV controls (`gui:14320-14337`) — `refine_strategy_combo`, `refine_folds_spinbox`, `refine_repeats_spinbox` all have zero `CreateToolTip()` calls. Mirror main-tab tooltips here.
+4. One-class model checkboxes (`gui:11725-11731`) — the 5 checkboxes (PCA-SIMCA, OneClassSVM, IsolationForest, EllipticEnvelope, LOF) have inline `desc` captions but no hover tooltips. **No `'one_class'` key in `TOOLTIP_CONTENT` at all.** Add proper multi-line tooltips comparable to regression-model tooltips.
+5. Inlier class label/combobox (`gui:6041-6048`) — no tooltip. Suggested: "Select which class represents normal/clean samples. The model learns this class's pattern and flags everything else as anomalous. Leave empty to auto-select the most frequent class."
+6. One-class hyperparameters (`gui:6054-6065`) — `nu`, `contamination`, `alpha`, `n_components` labels/spinboxes have no `CreateToolTip()`. Each needs a tooltip explaining what it controls and typical ranges.
+
+**Codebase discrepancy worth verifying:** `repeated_stratified_kfold` is mentioned in PROJECT_STATUS PR #4 description but does NOT appear in any `.py` file (`grep` finds zero hits). The CV Strategy dropdown values at `gui:10650` are `['kfold', 'repeated_kfold', 'loo']` only. Either the strategy was deferred or the status doc overstated. Confirm before drafting the tooltip follow-up.
+
+**Already covered (good news):**
+- CV Strategy label tooltip (`gui:10639`), CV Folds via `TOOLTIP_CONTENT['cross_validation']['cv_folds']`, regime-guidance hint (`gui:10670`), mixed-regime variable-selection warning (`gui:10676-10685`), cost-estimator messagebox warnings (`gui:22038-22067`), all Results Treeview metric column tooltips (one-class + validation metrics in `TOOLTIP_CONTENT['metrics']`).
+- `TOOLTIP_CONTENT` has 12 sections: `models`, `preprocessing`, `hyperparameters`, `ranking`, `calibration_transfer`, `variable_selection`, `outlier_detection`, `ensemble`, `results`, `data_management`, `cross_validation`, `metrics`. **Gap: no `one_class` section.** Recommend adding one and consolidating items #4-#6 there.
+
+**Suggested follow-up:** single PR titled "feat(gui): add tooltips for CV strategy controls + one-class TOOLTIP_CONTENT section"; ~2 hours scope; no behavior changes, only `CreateToolTip()` calls + a new `TOOLTIP_CONTENT['one_class']` dict.
 
 ---
 
