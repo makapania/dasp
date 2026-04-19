@@ -2891,6 +2891,50 @@ class SpectralPredictApp:
         self.oc_alpha = tk.DoubleVar(value=0.05)         # PCA-SIMCA (DD-SIMCA) alpha
         self.oc_n_components = tk.IntVar(value=10)        # PCA-SIMCA n_components
 
+        # One-class per-model config variables (Tab 4C cards)
+        # OneClassSVM
+        self.ocsvm_kernel_rbf = tk.BooleanVar(value=True)
+        self.ocsvm_kernel_poly = tk.BooleanVar(value=True)
+        self.ocsvm_gamma_scale = tk.BooleanVar(value=True)
+        self.ocsvm_gamma_auto = tk.BooleanVar(value=True)
+        self.ocsvm_nu_001 = tk.BooleanVar(value=True)
+        self.ocsvm_nu_005 = tk.BooleanVar(value=True)
+        self.ocsvm_nu_01 = tk.BooleanVar(value=True)
+        self.ocsvm_nu_custom = tk.StringVar(value="")
+        self.ocsvm_degree_2 = tk.BooleanVar(value=True)
+        self.ocsvm_degree_custom = tk.StringVar(value="")
+        # IsolationForest
+        self.if_n_estimators_100 = tk.BooleanVar(value=True)
+        self.if_n_estimators_custom = tk.StringVar(value="")
+        self.if_contamination_001 = tk.BooleanVar(value=True)
+        self.if_contamination_005 = tk.BooleanVar(value=True)
+        self.if_contamination_01 = tk.BooleanVar(value=True)
+        self.if_contamination_custom = tk.StringVar(value="")
+        self.if_max_features_05 = tk.BooleanVar(value=True)
+        self.if_max_features_10 = tk.BooleanVar(value=True)
+        self.if_max_features_custom = tk.StringVar(value="")
+        # EllipticEnvelope
+        self.ee_contamination_001 = tk.BooleanVar(value=True)
+        self.ee_contamination_005 = tk.BooleanVar(value=True)
+        self.ee_contamination_01 = tk.BooleanVar(value=True)
+        self.ee_contamination_custom = tk.StringVar(value="")
+        # LOF
+        self.lof_n_neighbors_10 = tk.BooleanVar(value=True)
+        self.lof_n_neighbors_20 = tk.BooleanVar(value=True)
+        self.lof_n_neighbors_30 = tk.BooleanVar(value=True)
+        self.lof_n_neighbors_custom = tk.StringVar(value="")
+        self.lof_contamination_005 = tk.BooleanVar(value=True)
+        self.lof_contamination_custom = tk.StringVar(value="")
+        # PCA-SIMCA
+        self.simca_n_components_3 = tk.BooleanVar(value=True)
+        self.simca_n_components_5 = tk.BooleanVar(value=True)
+        self.simca_n_components_7 = tk.BooleanVar(value=True)
+        self.simca_n_components_095 = tk.BooleanVar(value=True)
+        self.simca_n_components_custom = tk.StringVar(value="")
+        self.simca_alpha_001 = tk.BooleanVar(value=True)
+        self.simca_alpha_005 = tk.BooleanVar(value=True)
+        self.simca_alpha_custom = tk.StringVar(value="")
+
         # Create model name to checkbox mapping
         self.model_checkboxes = {
             'PLS': self.use_pls,
@@ -13088,6 +13132,211 @@ class SpectralPredictApp:
         ttk.Label(svr_content_frame, text="💡 Can speed up training",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=20, column=0, columnspan=6, sticky=tk.W, pady=(5, 0))
 
+        # ===================================================================
+        # ONE-CLASS MODEL CONFIG CARDS (shown only for one_class task type)
+        # ===================================================================
+        self._create_section_header(content_frame, "One-Class Model Configuration", row=row, columnspan=2)
+        row += 1
+
+        self.oc_model_config_container = tk.Frame(content_frame, bg=self.colors['bg'])
+
+        oc_row_counter = [0]
+
+        def _oc_next_row():
+            r = oc_row_counter[0]
+            oc_row_counter[0] += 1
+            return r
+
+        # --- OneClassSVM Card ---
+        ocsvm_section, ocsvm_content = self._create_collapsible_section(
+            self.oc_model_config_container, "OneClassSVM Hyperparameters", expanded=False,
+        )
+        ocsvm_section.grid(row=_oc_next_row(), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ocsvm_card_outer, ocsvm_frame = self._create_card(ocsvm_content, subtitle="Kernel, gamma, nu, and degree")
+        ocsvm_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        ocsvm_inner = ttk.Frame(ocsvm_frame)
+        ocsvm_inner.pack(fill='both', expand=True)
+
+        r = 0
+        ttk.Label(ocsvm_inner, text="Kernel:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        r += 1
+        kf = ttk.Frame(ocsvm_inner)
+        kf.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(kf, text="rbf", variable=self.ocsvm_kernel_rbf).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(kf, text="poly", variable=self.ocsvm_kernel_poly).grid(row=0, column=1, padx=5)
+        ttk.Label(kf, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+        r += 1
+
+        ttk.Label(ocsvm_inner, text="Gamma:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        gf = ttk.Frame(ocsvm_inner)
+        gf.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(gf, text="scale", variable=self.ocsvm_gamma_scale).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(gf, text="auto", variable=self.ocsvm_gamma_auto).grid(row=0, column=1, padx=5)
+        ttk.Label(gf, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=2, padx=10)
+        r += 1
+
+        ttk.Label(ocsvm_inner, text="Nu:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        nf = ttk.Frame(ocsvm_inner)
+        nf.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(nf, text="0.01", variable=self.ocsvm_nu_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(nf, text="0.05", variable=self.ocsvm_nu_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(nf, text="0.1", variable=self.ocsvm_nu_01).grid(row=0, column=2, padx=5)
+        ttk.Label(nf, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(nf, textvariable=self.ocsvm_nu_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(nf, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(ocsvm_inner, text="Degree (poly only):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        df = ttk.Frame(ocsvm_inner)
+        df.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(df, text="2", variable=self.ocsvm_degree_2).grid(row=0, column=0, padx=5)
+        ttk.Label(df, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(df, textvariable=self.ocsvm_degree_custom, width=10).grid(row=0, column=2, padx=5)
+        ttk.Label(df, text="(default: 2 checked)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        r += 1
+        ttk.Label(ocsvm_inner, text="Degree only applies to poly kernel. Default unchanged uses curated grid.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(5, 0))
+
+        # --- IsolationForest Card ---
+        if_section, if_content = self._create_collapsible_section(
+            self.oc_model_config_container, "IsolationForest Hyperparameters", expanded=False,
+        )
+        if_section.grid(row=_oc_next_row(), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        if_card_outer, if_frame = self._create_card(if_content, subtitle="Trees, contamination, and max features")
+        if_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        if_inner = ttk.Frame(if_frame)
+        if_inner.pack(fill='both', expand=True)
+
+        r = 0
+        ttk.Label(if_inner, text="Number of Trees (n_estimators):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        r += 1
+        ne_frame = ttk.Frame(if_inner)
+        ne_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(ne_frame, text="100", variable=self.if_n_estimators_100).grid(row=0, column=0, padx=5)
+        ttk.Label(ne_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(ne_frame, textvariable=self.if_n_estimators_custom, width=10).grid(row=0, column=2, padx=5)
+        ttk.Label(ne_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        r += 1
+
+        ttk.Label(if_inner, text="Contamination:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        ic_frame = ttk.Frame(if_inner)
+        ic_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(ic_frame, text="0.01", variable=self.if_contamination_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ic_frame, text="0.05", variable=self.if_contamination_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ic_frame, text="0.1", variable=self.if_contamination_01).grid(row=0, column=2, padx=5)
+        ttk.Label(ic_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ic_frame, textvariable=self.if_contamination_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ic_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(if_inner, text="Max Features:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        mf_frame = ttk.Frame(if_inner)
+        mf_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(mf_frame, text="0.5", variable=self.if_max_features_05).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mf_frame, text="1.0", variable=self.if_max_features_10).grid(row=0, column=1, padx=5)
+        ttk.Label(mf_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(mf_frame, textvariable=self.if_max_features_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(mf_frame, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        # --- EllipticEnvelope Card ---
+        ee_section, ee_content = self._create_collapsible_section(
+            self.oc_model_config_container, "EllipticEnvelope Hyperparameters", expanded=False,
+        )
+        ee_section.grid(row=_oc_next_row(), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        ee_card_outer, ee_frame = self._create_card(ee_content, subtitle="Contamination threshold")
+        ee_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        ee_inner = ttk.Frame(ee_frame)
+        ee_inner.pack(fill='both', expand=True)
+
+        r = 0
+        ttk.Label(ee_inner, text="Contamination:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        r += 1
+        ec_frame = ttk.Frame(ee_inner)
+        ec_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(ec_frame, text="0.01", variable=self.ee_contamination_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ec_frame, text="0.05", variable=self.ee_contamination_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ec_frame, text="0.1", variable=self.ee_contamination_01).grid(row=0, column=2, padx=5)
+        ttk.Label(ec_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ec_frame, textvariable=self.ee_contamination_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ec_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+
+        # --- LOF Card ---
+        lof_section, lof_content = self._create_collapsible_section(
+            self.oc_model_config_container, "LOF Hyperparameters", expanded=False,
+        )
+        lof_section.grid(row=_oc_next_row(), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        lof_card_outer, lof_frame = self._create_card(lof_content, subtitle="Neighbors and contamination")
+        lof_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        lof_inner = ttk.Frame(lof_frame)
+        lof_inner.pack(fill='both', expand=True)
+
+        r = 0
+        ttk.Label(lof_inner, text="Number of Neighbors (n_neighbors):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        r += 1
+        nn_frame = ttk.Frame(lof_inner)
+        nn_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(nn_frame, text="10", variable=self.lof_n_neighbors_10).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(nn_frame, text="20", variable=self.lof_n_neighbors_20).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(nn_frame, text="30", variable=self.lof_n_neighbors_30).grid(row=0, column=2, padx=5)
+        ttk.Label(nn_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(nn_frame, textvariable=self.lof_n_neighbors_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(nn_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(lof_inner, text="Contamination:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        lc_frame = ttk.Frame(lof_inner)
+        lc_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lc_frame, text="0.05", variable=self.lof_contamination_005).grid(row=0, column=0, padx=5)
+        ttk.Label(lc_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
+        ttk.Entry(lc_frame, textvariable=self.lof_contamination_custom, width=10).grid(row=0, column=2, padx=5)
+        ttk.Label(lc_frame, text="(default: 0.05)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+
+        # --- PCA-SIMCA Card ---
+        simca_section, simca_content = self._create_collapsible_section(
+            self.oc_model_config_container, "PCA-SIMCA Hyperparameters", expanded=False,
+        )
+        simca_section.grid(row=_oc_next_row(), column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        simca_card_outer, simca_frame = self._create_card(simca_content, subtitle="Components and significance level")
+        simca_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        simca_inner = ttk.Frame(simca_frame)
+        simca_inner.pack(fill='both', expand=True)
+
+        r = 0
+        ttk.Label(simca_inner, text="Number of Components (n_components):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        r += 1
+        nc_frame = ttk.Frame(simca_inner)
+        nc_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(nc_frame, text="3", variable=self.simca_n_components_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(nc_frame, text="5", variable=self.simca_n_components_5).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(nc_frame, text="7", variable=self.simca_n_components_7).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(nc_frame, text="0.95 (variance)", variable=self.simca_n_components_095).grid(row=0, column=3, padx=5)
+        ttk.Label(nc_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(nc_frame, textvariable=self.simca_n_components_custom, width=10).grid(row=0, column=5, padx=5)
+        ttk.Label(nc_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
+        r += 1
+
+        ttk.Label(simca_inner, text="Alpha (significance level):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        al_frame = ttk.Frame(simca_inner)
+        al_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(al_frame, text="0.01", variable=self.simca_alpha_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(al_frame, text="0.05", variable=self.simca_alpha_005).grid(row=0, column=1, padx=5)
+        ttk.Label(al_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(al_frame, textvariable=self.simca_alpha_custom, width=10).grid(row=0, column=3, padx=5)
+        ttk.Label(al_frame, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+
+        self.oc_model_config_container.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        row += 1
+
+        # Initially hidden — shown only when task_type == 'one_class'
+        self.oc_model_config_container.grid_remove()
+
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
                        variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
@@ -15695,6 +15944,8 @@ class SpectralPredictApp:
         if task_type == "one_class":
             self.inlier_class_frame.grid()
             self.oc_hyperparams_frame.grid()
+            if hasattr(self, 'oc_model_config_container'):
+                self.oc_model_config_container.grid()
             # Populate inlier class combo with unique y values if data is loaded
             if self.y is not None:
                 unique_vals = sorted([str(v) for v in np.unique(self.y.values)])
@@ -15724,6 +15975,8 @@ class SpectralPredictApp:
         else:
             self.inlier_class_frame.grid_remove()
             self.oc_hyperparams_frame.grid_remove()
+            if hasattr(self, 'oc_model_config_container'):
+                self.oc_model_config_container.grid_remove()
             # Swap model panels: show standard, hide one-class
             if hasattr(self, 'oc_models_frame'):
                 self.oc_models_frame.pack_forget()
@@ -23344,6 +23597,339 @@ class SpectralPredictApp:
             self._log_progress(f"   Individual model results are still available")
             return None, None
 
+    def _one_class_model_card_defaults(self):
+        return {
+            'OneClassSVM': {
+                'kernel_rbf': True, 'kernel_poly': True,
+                'gamma_scale': True, 'gamma_auto': True,
+                'nu_001': True, 'nu_005': True, 'nu_01': True, 'nu_custom': '',
+                'degree_2': True, 'degree_custom': '',
+            },
+            'IsolationForest': {
+                'n_estimators_100': True, 'n_estimators_custom': '',
+                'contamination_001': True, 'contamination_005': True,
+                'contamination_01': True, 'contamination_custom': '',
+                'max_features_05': True, 'max_features_10': True,
+                'max_features_custom': '',
+            },
+            'EllipticEnvelope': {
+                'contamination_001': True, 'contamination_005': True,
+                'contamination_01': True, 'contamination_custom': '',
+            },
+            'LOF': {
+                'n_neighbors_10': True, 'n_neighbors_20': True,
+                'n_neighbors_30': True, 'n_neighbors_custom': '',
+                'contamination_005': True, 'contamination_custom': '',
+            },
+            'PCA-SIMCA': {
+                'n_components_3': True, 'n_components_5': True,
+                'n_components_7': True, 'n_components_095': True,
+                'n_components_custom': '',
+                'alpha_001': True, 'alpha_005': True,
+                'alpha_custom': '',
+            },
+        }
+
+    def _one_class_model_card_matches_default(self, model_name):
+        defaults = self._one_class_model_card_defaults()
+        if model_name not in defaults:
+            return True
+        model_defaults = defaults[model_name]
+        var_map = {
+            'OneClassSVM': {
+                'kernel_rbf': self.ocsvm_kernel_rbf,
+                'kernel_poly': self.ocsvm_kernel_poly,
+                'gamma_scale': self.ocsvm_gamma_scale,
+                'gamma_auto': self.ocsvm_gamma_auto,
+                'nu_001': self.ocsvm_nu_001,
+                'nu_005': self.ocsvm_nu_005,
+                'nu_01': self.ocsvm_nu_01,
+                'nu_custom': self.ocsvm_nu_custom,
+                'degree_2': self.ocsvm_degree_2,
+                'degree_custom': self.ocsvm_degree_custom,
+            },
+            'IsolationForest': {
+                'n_estimators_100': self.if_n_estimators_100,
+                'n_estimators_custom': self.if_n_estimators_custom,
+                'contamination_001': self.if_contamination_001,
+                'contamination_005': self.if_contamination_005,
+                'contamination_01': self.if_contamination_01,
+                'contamination_custom': self.if_contamination_custom,
+                'max_features_05': self.if_max_features_05,
+                'max_features_10': self.if_max_features_10,
+                'max_features_custom': self.if_max_features_custom,
+            },
+            'EllipticEnvelope': {
+                'contamination_001': self.ee_contamination_001,
+                'contamination_005': self.ee_contamination_005,
+                'contamination_01': self.ee_contamination_01,
+                'contamination_custom': self.ee_contamination_custom,
+            },
+            'LOF': {
+                'n_neighbors_10': self.lof_n_neighbors_10,
+                'n_neighbors_20': self.lof_n_neighbors_20,
+                'n_neighbors_30': self.lof_n_neighbors_30,
+                'n_neighbors_custom': self.lof_n_neighbors_custom,
+                'contamination_005': self.lof_contamination_005,
+                'contamination_custom': self.lof_contamination_custom,
+            },
+            'PCA-SIMCA': {
+                'n_components_3': self.simca_n_components_3,
+                'n_components_5': self.simca_n_components_5,
+                'n_components_7': self.simca_n_components_7,
+                'n_components_095': self.simca_n_components_095,
+                'n_components_custom': self.simca_n_components_custom,
+                'alpha_001': self.simca_alpha_001,
+                'alpha_005': self.simca_alpha_005,
+                'alpha_custom': self.simca_alpha_custom,
+            },
+        }
+        if model_name not in var_map:
+            return True
+        for key, default_val in model_defaults.items():
+            var = var_map[model_name][key]
+            current = var.get()
+            if isinstance(default_val, bool):
+                if bool(current) != default_val:
+                    return False
+            else:
+                if str(current).strip() != str(default_val).strip():
+                    return False
+        return True
+
+    @staticmethod
+    def _parse_oc_float(val, lo=0.0, hi=1.0):
+        try:
+            f = float(val)
+            if lo < f <= hi:
+                return f
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _parse_oc_int(val, min_val=1):
+        try:
+            i = int(float(val))
+            if i >= min_val:
+                return i
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    @staticmethod
+    def _parse_oc_n_components(val):
+        try:
+            f = float(val)
+            if f == int(f) and int(f) >= 1:
+                return int(f)
+            if 0.0 < f < 1.0:
+                return f
+        except (ValueError, TypeError):
+            pass
+        return None
+
+    def _collect_ocsvm_overrides(self):
+        from .contamination import get_one_class_model_grids
+        defaults = get_one_class_model_grids()['OneClassSVM']
+
+        kernels = []
+        if self.ocsvm_kernel_rbf.get():
+            kernels.append('rbf')
+        if self.ocsvm_kernel_poly.get():
+            kernels.append('poly')
+
+        gammas = []
+        if self.ocsvm_gamma_scale.get():
+            gammas.append('scale')
+        if self.ocsvm_gamma_auto.get():
+            gammas.append('auto')
+
+        nus = []
+        if self.ocsvm_nu_001.get():
+            nus.append(0.01)
+        if self.ocsvm_nu_005.get():
+            nus.append(0.05)
+        if self.ocsvm_nu_01.get():
+            nus.append(0.1)
+        custom = self.ocsvm_nu_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in nus:
+                nus.append(v)
+
+        degrees = []
+        if self.ocsvm_degree_2.get():
+            degrees.append(2)
+        custom = self.ocsvm_degree_custom.get().strip()
+        if custom:
+            v = self._parse_oc_int(custom, 1)
+            if v is not None and v not in degrees:
+                degrees.append(v)
+
+        if not kernels:
+            kernels = sorted(set(p['kernel'] for p in defaults))
+        if not gammas:
+            gammas = sorted(set(p['gamma'] for p in defaults))
+        if not nus:
+            nus = sorted(set(p['nu'] for p in defaults))
+        if not degrees:
+            degrees = [2]
+
+        return {'kernel': kernels, 'gamma': gammas, 'nu': nus, 'degree': degrees}
+
+    def _collect_if_overrides(self):
+        from .contamination import get_one_class_model_grids
+        defaults = get_one_class_model_grids()['IsolationForest']
+
+        n_est = []
+        if self.if_n_estimators_100.get():
+            n_est.append(100)
+        custom = self.if_n_estimators_custom.get().strip()
+        if custom:
+            v = self._parse_oc_int(custom, 1)
+            if v is not None and v not in n_est:
+                n_est.append(v)
+
+        contam = []
+        if self.if_contamination_001.get():
+            contam.append(0.01)
+        if self.if_contamination_005.get():
+            contam.append(0.05)
+        if self.if_contamination_01.get():
+            contam.append(0.1)
+        custom = self.if_contamination_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in contam:
+                contam.append(v)
+
+        max_feat = []
+        if self.if_max_features_05.get():
+            max_feat.append(0.5)
+        if self.if_max_features_10.get():
+            max_feat.append(1.0)
+        custom = self.if_max_features_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in max_feat:
+                max_feat.append(v)
+
+        if not n_est:
+            n_est = sorted(set(p['n_estimators'] for p in defaults))
+        if not contam:
+            contam = sorted(set(p['contamination'] for p in defaults))
+        if not max_feat:
+            max_feat = sorted(set(p['max_features'] for p in defaults))
+
+        return {'n_estimators': n_est, 'contamination': contam, 'max_features': max_feat}
+
+    def _collect_ee_overrides(self):
+        from .contamination import get_one_class_model_grids
+        defaults = get_one_class_model_grids()['EllipticEnvelope']
+
+        contam = []
+        if self.ee_contamination_001.get():
+            contam.append(0.01)
+        if self.ee_contamination_005.get():
+            contam.append(0.05)
+        if self.ee_contamination_01.get():
+            contam.append(0.1)
+        custom = self.ee_contamination_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in contam:
+                contam.append(v)
+
+        if not contam:
+            contam = sorted(set(p['contamination'] for p in defaults))
+
+        return {'contamination': contam}
+
+    def _collect_lof_overrides(self):
+        from .contamination import get_one_class_model_grids
+        defaults = get_one_class_model_grids()['LOF']
+
+        nn = []
+        if self.lof_n_neighbors_10.get():
+            nn.append(10)
+        if self.lof_n_neighbors_20.get():
+            nn.append(20)
+        if self.lof_n_neighbors_30.get():
+            nn.append(30)
+        custom = self.lof_n_neighbors_custom.get().strip()
+        if custom:
+            v = self._parse_oc_int(custom, 1)
+            if v is not None and v not in nn:
+                nn.append(v)
+
+        contam = []
+        if self.lof_contamination_005.get():
+            contam.append(0.05)
+        custom = self.lof_contamination_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in contam:
+                contam.append(v)
+
+        if not nn:
+            nn = sorted(set(p['n_neighbors'] for p in defaults))
+        if not contam:
+            contam = sorted(set(p['contamination'] for p in defaults))
+
+        return {'n_neighbors': nn, 'contamination': contam}
+
+    def _collect_simca_overrides(self):
+        from .contamination import get_one_class_model_grids
+        defaults = get_one_class_model_grids()['PCA-SIMCA']
+
+        n_comp = []
+        if self.simca_n_components_3.get():
+            n_comp.append(3)
+        if self.simca_n_components_5.get():
+            n_comp.append(5)
+        if self.simca_n_components_7.get():
+            n_comp.append(7)
+        if self.simca_n_components_095.get():
+            n_comp.append(0.95)
+        custom = self.simca_n_components_custom.get().strip()
+        if custom:
+            v = self._parse_oc_n_components(custom)
+            if v is not None and v not in n_comp:
+                n_comp.append(v)
+
+        alphas = []
+        if self.simca_alpha_001.get():
+            alphas.append(0.01)
+        if self.simca_alpha_005.get():
+            alphas.append(0.05)
+        custom = self.simca_alpha_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in alphas:
+                alphas.append(v)
+
+        if not n_comp:
+            n_comp = sorted(set(p['n_components'] for p in defaults), key=lambda x: (isinstance(x, float), x))
+        if not alphas:
+            alphas = sorted(set(p['alpha'] for p in defaults))
+
+        return {'n_components': n_comp, 'alpha': alphas}
+
+    def _collect_one_class_model_param_overrides(self):
+        overrides = {}
+        collectors = {
+            'OneClassSVM': self._collect_ocsvm_overrides,
+            'IsolationForest': self._collect_if_overrides,
+            'EllipticEnvelope': self._collect_ee_overrides,
+            'LOF': self._collect_lof_overrides,
+            'PCA-SIMCA': self._collect_simca_overrides,
+        }
+        for model_name, collector in collectors.items():
+            if not self._one_class_model_card_matches_default(model_name):
+                overrides[model_name] = collector()
+        return overrides if overrides else None
+
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
@@ -25433,12 +26019,8 @@ class SpectralPredictApp:
                         enable_smoothing=self.enable_smoothing.get(),
                         smoothing_window=self.smoothing_window.get(),
                         smoothing_polyorder=self.smoothing_polyorder.get(),
-                        oc_hyperparams={
-                            'nu': self.oc_nu.get(),
-                            'contamination': self.oc_contamination.get(),
-                            'alpha': self.oc_alpha.get(),
-                            'n_components': self.oc_n_components.get(),
-                        },
+                        oc_hyperparams=None,
+                        oc_model_param_overrides=self._collect_one_class_model_param_overrides(),
                         # Variable selection parameters
                         variable_selection_methods=selected_varsel_methods,
                         variable_counts=variable_counts if variable_counts else None,

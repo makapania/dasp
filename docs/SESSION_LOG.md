@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-19 — One-class model config parity: per-model grid overrides with curated-default preservation
+
+**Design:** The core invariant is that untouched model cards map back to the curated grids from `get_one_class_model_grids()`. The GUI compares current widget state against shipped defaults; only models whose state differs get a user-defined Cartesian product grid. This avoids silently expanding the default search space.
+
+**Backend (`search.py`):** Added `_resolve_one_class_model_grids()` private helper that centralizes grid resolution. It handles three paths: (1) no overrides → curated grids, (2) legacy `oc_hyperparams` → curated grids with flat parameter overrides, (3) per-model `oc_model_param_overrides` → Cartesian product for customized models, curated defaults for the rest. Per-model builder functions (`_build_ocsvm_custom_grid`, etc.) handle model-specific logic like pruning `degree` from non-`poly` OneClassSVM combos.
+
+**GUI (`spectral_predict_gui_optimized.py`):** Five collapsible cards in Tab 4C using the old-style `BooleanVar` + `ttk.Checkbutton` + `ttk.Entry` pattern (same as Ridge/RF cards). Widget vars added around line 2893. Cards constructed in a dedicated `oc_model_config_container` frame, shown/hidden via `_update_one_class_controls_visibility`. The `_collect_one_class_model_param_overrides()` method reads widget state, compares against defaults, and only emits overrides for customized models.
+
+**Gotcha:** The plan explicitly forbids using `_create_parameter_grid_control()` — it has a wiring bug. The old-style direct BooleanVar/Checkbutton pattern is used instead.
+
+**Backward compatibility:** The `oc_hyperparams` parameter is still accepted by `run_one_class_search()`. The GUI now passes `oc_hyperparams=None` and uses `oc_model_param_overrides` instead. Legacy callers unaffected.
+
+**Tests:** 6 new tests in `TestOneClassModelConfigParity` covering default preservation, per-model override isolation, OCSVM degree pruning, empty-row fallback, and legacy `oc_hyperparams` compatibility. All 60/60 `test_contamination_detection.py` tests pass.
+
+---
+
 ## 2026-04-17 — PyInstaller 3.12 bundle: pandas/util/__init__.py intermittently corrupted by TOC collision
 
 **Bug:** 3.12 bundle launched with `--test` crashed with `ImportError: cannot import name 'capitalize_first_letter' from 'pandas.util'`. `capitalize_first_letter` is a real function in pandas 2.3.x — so the bundled `pandas/util/__init__.py` is the wrong file.
