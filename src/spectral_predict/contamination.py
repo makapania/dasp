@@ -1143,30 +1143,36 @@ def compute_validation_metrics_for_top_one_class_models(
             # validate on a truncated feature set.
             col_indices = None
             all_vars_str = row.get('all_vars', None)
-            if all_vars_str is not None and isinstance(all_vars_str, float) and pd.isna(all_vars_str):
+            if isinstance(all_vars_str, float) and pd.isna(all_vars_str):
                 all_vars_str = None
-            if all_vars_str is not None and isinstance(all_vars_str, str) and all_vars_str.strip() and all_vars_str != 'N/A':
-                try:
-                    model_wls = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
-                    if wl_to_idx:
-                        missing = [wl for wl in model_wls if wl not in wl_to_idx]
-                        if missing:
-                            logger.warning(
-                                "[OC Validation] Row %s: %d/%d model wavelengths not found in wavelength map, skipping",
-                                idx, len(missing), len(model_wls),
-                            )
-                            continue
-                        col_indices = [wl_to_idx[wl] for wl in model_wls]
-                    else:
-                        # No wavelength mapping — nearest-index fallback
-                        all_wl_arr = np.asarray(wavelengths, dtype=float)
-                        col_indices = [int(np.argmin(np.abs(all_wl_arr - wl))) for wl in model_wls]
-                    if not col_indices:
-                        logger.warning("[OC Validation] Row %s: no valid wavelength indices resolved, skipping", idx)
+            if all_vars_str is None or not isinstance(all_vars_str, str) or not all_vars_str.strip() or all_vars_str == 'N/A':
+                logger.warning(
+                    "[OC Validation] Row %s: 'all_vars' missing or empty, skipping "
+                    "(both OC grid and Bayesian always populate it — missing means row metadata is corrupt)",
+                    idx,
+                )
+                continue
+            try:
+                model_wls = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                if wl_to_idx:
+                    missing = [wl for wl in model_wls if wl not in wl_to_idx]
+                    if missing:
+                        logger.warning(
+                            "[OC Validation] Row %s: %d/%d model wavelengths not found in wavelength map, skipping",
+                            idx, len(missing), len(model_wls),
+                        )
                         continue
-                except Exception as wl_err:
-                    logger.warning("[OC Validation] all_vars parse failed for row %s: %s, skipping", idx, wl_err)
+                    col_indices = [wl_to_idx[wl] for wl in model_wls]
+                else:
+                    # No wavelength mapping — nearest-index fallback
+                    all_wl_arr = np.asarray(wavelengths, dtype=float)
+                    col_indices = [int(np.argmin(np.abs(all_wl_arr - wl))) for wl in model_wls]
+                if not col_indices:
+                    logger.warning("[OC Validation] Row %s: no valid wavelength indices resolved, skipping", idx)
                     continue
+            except Exception as wl_err:
+                logger.warning("[OC Validation] all_vars parse failed for row %s: %s, skipping", idx, wl_err)
+                continue
 
             if col_indices is not None:
                 max_col = X_train_prep.shape[1] - 1

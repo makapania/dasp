@@ -962,6 +962,12 @@ class TestGridSearchValidationMetricsParity:
         ``search.py:5136-5174`` after the fix). Uses ``IsolationForest`` so
         the test stays focused on the preprocessing-name plumbing rather
         than estimator-specific quirks."""
+        # Integer-spaced wavelengths so rounded-string roundtrip (f"{w:.1f}")
+        # matches wl_to_idx keys exactly. Real user data is almost always
+        # integer nm (ASD) or clean decimals; np.linspace-produced floats would
+        # alias and every wavelength would miss the dict lookup.
+        wl_arr = np.arange(1100.0, 1150.0, 1.0)  # 50 clean wavelengths
+        all_vars = ','.join(f"{w:.1f}" for w in wl_arr)
         return {
             'Task': 'one_class',
             'Model': 'IsolationForest',
@@ -994,7 +1000,7 @@ class TestGridSearchValidationMetricsParity:
             'n_outliers': 15,
             'inlier_class_label': 'Clean',
             'top_vars': 'N/A',
-            'all_vars': '',
+            'all_vars': all_vars,
             'per_contaminant_sensitivity': {},
             'Rank': 1,
         }
@@ -1022,7 +1028,7 @@ class TestGridSearchValidationMetricsParity:
         X_val = np.vstack([X_val_clean, X_val_out])
         y_val = np.array(['Clean'] * 15 + ['Contam'] * 8)
 
-        wavelengths = np.linspace(1100.0, 2500.0, n_features)
+        wavelengths = np.arange(1100.0, 1100.0 + n_features, 1.0)
         return X_train, y_train, X_val, y_val, wavelengths
 
     def test_grid_search_derivative_row_populates_val_columns(
@@ -1105,4 +1111,62 @@ class TestGridSearchValidationMetricsParity:
             "PreprocessBase. The contract should be either 'PreprocessBase "
             "is required' (raise loudly) or 'normalize Preprocess as a "
             "fallback' — silent NaN is a regression."
+        )
+
+    @pytest.mark.parametrize(
+        'mutate,label',
+        [
+            (lambda r: r.update({'Params': "{'n_estimators': 50, 'random_state':"}), 'malformed_params'),
+            (lambda r: r.pop('Params'), 'missing_params'),
+            (lambda r: r.update({'Params': ''}), 'empty_params'),
+            (lambda r: r.update({'all_vars': '9999.0,9998.0,9997.0'}), 'unknown_wavelengths'),
+            (lambda r: r.update({'all_vars': ''}), 'empty_all_vars'),
+            (lambda r: r.pop('all_vars'), 'missing_all_vars'),
+        ],
+        ids=['malformed_params', 'missing_params', 'empty_params',
+             'unknown_wavelengths', 'empty_all_vars', 'missing_all_vars'],
+    )
+    def test_corrupt_metadata_row_is_skipped_not_silently_wrong(
+        self, grid_search_oc_results_row, synthetic_train_val, mutate, label, caplog
+    ):
+        """Rows with corrupt metadata (malformed/missing Params, missing or
+        unmappable wavelengths) must be skipped with a logged warning, never
+        silently validated with default params / truncated / full-spectrum
+        feature sets. Each of these silent-wrong paths was flagged MAJOR in
+        the pre-merge Codex review of commit 9e9ca11."""
+        import logging
+        from spectral_predict.contamination import (
+            compute_validation_metrics_for_top_one_class_models,
+        )
+
+        X_train, y_train, X_val, y_val, wavelengths = synthetic_train_val
+        row = dict(grid_search_oc_results_row)
+        mutate(row)
+        df = pd.DataFrame([row])
+
+        with caplog.at_level(logging.WARNING, logger='spectral_predict.contamination'):
+            result_df = compute_validation_metrics_for_top_one_class_models(
+                df_results=df,
+                X_train=X_train,
+                y_train=y_train,
+                X_val=X_val,
+                y_val=y_val,
+                inlier_label='Clean',
+                wavelengths=wavelengths,
+                top_n=10,
+            )
+
+        # Skipped row ⇒ val_* columns absent or NaN (never a believable-but-
+        # wrong number). And a warning must have been emitted so operators
+        # can see the row was dropped.
+        val_cols = [c for c in result_df.columns if c.startswith('val_')]
+        for col in val_cols:
+            assert pd.isna(result_df.loc[0, col]), (
+                f"{col} populated for corrupt-metadata case '{label}' — "
+                f"helper should have skipped this row, not validated it "
+                f"with fallback defaults"
+            )
+        assert any('OC Validation' in rec.message for rec in caplog.records), (
+            f"No [OC Validation] warning emitted for corrupt case '{label}'. "
+            f"Silent skips are the hazard this test guards against."
         )
