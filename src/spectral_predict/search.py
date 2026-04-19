@@ -4822,6 +4822,166 @@ def _run_single_config(
 # ONE-CLASS DETECTION SEARCH
 # ============================================================================
 
+def _resolve_one_class_model_grids(
+    enabled_models,
+    oc_model_param_overrides=None,
+    oc_hyperparams=None,
+):
+    from itertools import product
+    from .contamination import get_one_class_model_grids
+
+    oc_grids = get_one_class_model_grids()
+
+    if not oc_model_param_overrides:
+        if oc_hyperparams:
+            for model_name, param_list in oc_grids.items():
+                for params in param_list:
+                    if model_name == 'OneClassSVM' and 'nu' in oc_hyperparams:
+                        params['nu'] = oc_hyperparams['nu']
+                    if model_name in ('IsolationForest', 'EllipticEnvelope', 'LOF'):
+                        if 'contamination' in oc_hyperparams:
+                            params['contamination'] = oc_hyperparams['contamination']
+                    if model_name == 'PCA-SIMCA':
+                        if 'alpha' in oc_hyperparams:
+                            params['alpha'] = oc_hyperparams['alpha']
+                        if 'n_components' in oc_hyperparams:
+                            params['n_components'] = oc_hyperparams['n_components']
+        model_grids = {}
+        for model_name, param_list in oc_grids.items():
+            if model_name in enabled_models:
+                model_grids[model_name] = param_list
+        return model_grids
+
+    model_grids = {}
+    for model_name in enabled_models:
+        if model_name not in oc_grids:
+            continue
+        if model_name in oc_model_param_overrides:
+            overrides = oc_model_param_overrides[model_name]
+            if model_name == 'OneClassSVM':
+                model_grids[model_name] = _build_ocsvm_custom_grid(
+                    overrides, oc_grids['OneClassSVM'],
+                )
+            elif model_name == 'IsolationForest':
+                model_grids[model_name] = _build_if_custom_grid(
+                    overrides, oc_grids['IsolationForest'],
+                )
+            elif model_name == 'EllipticEnvelope':
+                model_grids[model_name] = _build_ee_custom_grid(
+                    overrides, oc_grids['EllipticEnvelope'],
+                )
+            elif model_name == 'LOF':
+                model_grids[model_name] = _build_lof_custom_grid(
+                    overrides, oc_grids['LOF'],
+                )
+            elif model_name == 'PCA-SIMCA':
+                model_grids[model_name] = _build_simca_custom_grid(
+                    overrides, oc_grids['PCA-SIMCA'],
+                )
+            else:
+                model_grids[model_name] = oc_grids[model_name]
+        else:
+            model_grids[model_name] = oc_grids[model_name]
+
+    return model_grids
+
+
+def _oc_extract_defaults(grid, key):
+    vals = set()
+    for p in grid:
+        if key in p:
+            vals.add(p[key])
+    return sorted(vals, key=lambda x: (isinstance(x, str), x))
+
+
+def _build_ocsvm_custom_grid(overrides, default_grid):
+    from itertools import product
+
+    kernels = overrides.get('kernel', [])
+    if not kernels:
+        kernels = _oc_extract_defaults(default_grid, 'kernel')
+    gammas = overrides.get('gamma', [])
+    if not gammas:
+        gammas = _oc_extract_defaults(default_grid, 'gamma')
+    nus = overrides.get('nu', [])
+    if not nus:
+        nus = _oc_extract_defaults(default_grid, 'nu')
+    degrees = overrides.get('degree', [])
+    if not degrees:
+        degrees = [2]
+
+    combos = []
+    for k, g, nu in product(kernels, gammas, nus):
+        if k == 'poly':
+            for d in degrees:
+                combos.append({'kernel': k, 'gamma': g, 'nu': nu, 'degree': d})
+        else:
+            combos.append({'kernel': k, 'gamma': g, 'nu': nu})
+    return combos if combos else default_grid
+
+
+def _build_if_custom_grid(overrides, default_grid):
+    from itertools import product
+
+    n_est = overrides.get('n_estimators', [])
+    if not n_est:
+        n_est = _oc_extract_defaults(default_grid, 'n_estimators')
+    contam = overrides.get('contamination', [])
+    if not contam:
+        contam = _oc_extract_defaults(default_grid, 'contamination')
+    max_feat = overrides.get('max_features', [])
+    if not max_feat:
+        max_feat = _oc_extract_defaults(default_grid, 'max_features')
+
+    combos = [
+        {'n_estimators': int(n), 'contamination': c, 'max_features': mf}
+        for n, c, mf in product(n_est, contam, max_feat)
+    ]
+    return combos if combos else default_grid
+
+
+def _build_ee_custom_grid(overrides, default_grid):
+    contam = overrides.get('contamination', [])
+    if not contam:
+        contam = _oc_extract_defaults(default_grid, 'contamination')
+    combos = [{'contamination': c} for c in contam]
+    return combos if combos else default_grid
+
+
+def _build_lof_custom_grid(overrides, default_grid):
+    from itertools import product
+
+    nn = overrides.get('n_neighbors', [])
+    if not nn:
+        nn = _oc_extract_defaults(default_grid, 'n_neighbors')
+    contam = overrides.get('contamination', [])
+    if not contam:
+        contam = _oc_extract_defaults(default_grid, 'contamination')
+
+    combos = [
+        {'n_neighbors': int(n), 'contamination': c}
+        for n, c in product(nn, contam)
+    ]
+    return combos if combos else default_grid
+
+
+def _build_simca_custom_grid(overrides, default_grid):
+    from itertools import product
+
+    n_comp = overrides.get('n_components', [])
+    if not n_comp:
+        n_comp = _oc_extract_defaults(default_grid, 'n_components')
+    alphas = overrides.get('alpha', [])
+    if not alphas:
+        alphas = _oc_extract_defaults(default_grid, 'alpha')
+
+    combos = [
+        {'n_components': nc, 'alpha': a}
+        for nc, a in product(n_comp, alphas)
+    ]
+    return combos if combos else default_grid
+
+
 def run_one_class_search(
     X, y, inlier_class_label,
     folds=5, cv_strategy='kfold', cv_n_repeats=5,
@@ -4833,6 +4993,7 @@ def run_one_class_search(
     baseline_method=None, baseline_params=None,
     enable_smoothing=False, smoothing_window=17, smoothing_polyorder=2,
     oc_hyperparams=None,
+    oc_model_param_overrides=None,
     smart_preprocess=False,
     smart_preprocess_importance='model_specific',
     smart_preprocess_n_top=10,
@@ -5085,28 +5246,12 @@ def run_one_class_search(
     # Get model grids
     if enabled_models is None:
         enabled_models = get_tier_models(tier, task_type='one_class')
-    oc_grids = get_one_class_model_grids()
 
-    # Override grid defaults with user-specified hyperparameters
-    if oc_hyperparams:
-        for model_name, param_list in oc_grids.items():
-            for params in param_list:
-                if model_name == 'OneClassSVM' and 'nu' in oc_hyperparams:
-                    params['nu'] = oc_hyperparams['nu']
-                if model_name in ('IsolationForest', 'EllipticEnvelope', 'LOF'):
-                    if 'contamination' in oc_hyperparams:
-                        params['contamination'] = oc_hyperparams['contamination']
-                if model_name == 'PCA-SIMCA':
-                    if 'alpha' in oc_hyperparams:
-                        params['alpha'] = oc_hyperparams['alpha']
-                    if 'n_components' in oc_hyperparams:
-                        params['n_components'] = oc_hyperparams['n_components']
-
-    # Filter to enabled models
-    model_grids = {}
-    for model_name, param_list in oc_grids.items():
-        if model_name in enabled_models:
-            model_grids[model_name] = param_list
+    model_grids = _resolve_one_class_model_grids(
+        enabled_models,
+        oc_model_param_overrides=oc_model_param_overrides,
+        oc_hyperparams=oc_hyperparams,
+    )
 
     # Filter and validate variable selection methods for one-class
     implemented_oc_varsel = {

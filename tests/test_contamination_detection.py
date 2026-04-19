@@ -1170,3 +1170,129 @@ class TestGridSearchValidationMetricsParity:
             f"No [OC Validation] warning emitted for corrupt case '{label}'. "
             f"Silent skips are the hazard this test guards against."
         )
+
+
+class TestOneClassModelConfigParity:
+    """Tests for default-preservation and per-model override behavior
+    in the one-class grid-search path (_resolve_one_class_model_grids)."""
+
+    def test_default_resolution_returns_curated_grids(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        all_models = list(get_one_class_model_grids().keys())
+        result = _resolve_one_class_model_grids(all_models)
+        expected = get_one_class_model_grids()
+
+        assert set(result.keys()) == set(expected.keys())
+        for model_name in expected:
+            assert result[model_name] == expected[model_name], (
+                f"{model_name}: default grid should match curated grid exactly"
+            )
+
+    def test_override_one_model_leaves_others_untouched(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        all_models = list(get_one_class_model_grids().keys())
+        overrides = {
+            'OneClassSVM': {
+                'kernel': ['rbf'],
+                'gamma': ['scale'],
+                'nu': [0.05],
+                'degree': [2],
+            },
+        }
+        result = _resolve_one_class_model_grids(all_models, oc_model_param_overrides=overrides)
+
+        assert len(result['OneClassSVM']) == 1
+        assert result['OneClassSVM'][0] == {'kernel': 'rbf', 'gamma': 'scale', 'nu': 0.05}
+
+        curated = get_one_class_model_grids()
+        for model_name in ('IsolationForest', 'EllipticEnvelope', 'LOF', 'PCA-SIMCA'):
+            assert result[model_name] == curated[model_name], (
+                f"{model_name} should still use curated default"
+            )
+
+    def test_ocsvm_override_prunes_non_poly_degree(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+
+        overrides = {
+            'OneClassSVM': {
+                'kernel': ['rbf', 'poly'],
+                'gamma': ['scale'],
+                'nu': [0.05],
+                'degree': [2],
+            },
+        }
+        result = _resolve_one_class_model_grids(
+            ['OneClassSVM'], oc_model_param_overrides=overrides,
+        )
+        grids = result['OneClassSVM']
+        rbf_combos = [g for g in grids if g['kernel'] == 'rbf']
+        poly_combos = [g for g in grids if g['kernel'] == 'poly']
+
+        assert len(rbf_combos) == 1
+        assert 'degree' not in rbf_combos[0], (
+            "rbf combos should not include degree key"
+        )
+        assert len(poly_combos) == 1
+        assert poly_combos[0]['degree'] == 2
+
+    def test_empty_row_falls_back_to_defaults(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        curated = get_one_class_model_grids()
+        default_nn = sorted(set(p['n_neighbors'] for p in curated['LOF']))
+
+        overrides = {
+            'LOF': {
+                'n_neighbors': [],
+                'contamination': [0.1],
+            },
+        }
+        result = _resolve_one_class_model_grids(
+            ['LOF'], oc_model_param_overrides=overrides,
+        )
+        grids = result['LOF']
+        nn_values = sorted(set(g['n_neighbors'] for g in grids))
+        assert nn_values == default_nn, (
+            f"Empty n_neighbors should fall back to {default_nn}, got {nn_values}"
+        )
+
+    def test_no_override_returns_curated_end_to_end(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        all_models = list(get_one_class_model_grids().keys())
+        result_none = _resolve_one_class_model_grids(all_models)
+        result_empty = _resolve_one_class_model_grids(
+            all_models, oc_model_param_overrides=None,
+        )
+        curated = get_one_class_model_grids()
+
+        assert result_none == curated
+        assert result_empty == curated
+
+    def test_legacy_oc_hyperparams_still_works(self):
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        all_models = list(get_one_class_model_grids().keys())
+        result = _resolve_one_class_model_grids(
+            all_models,
+            oc_hyperparams={'nu': 0.02, 'contamination': 0.03, 'alpha': 0.02, 'n_components': 8},
+        )
+
+        for p in result['OneClassSVM']:
+            assert p['nu'] == 0.02
+        for p in result['IsolationForest']:
+            assert p['contamination'] == 0.03
+        for p in result['EllipticEnvelope']:
+            assert p['contamination'] == 0.03
+        for p in result['LOF']:
+            assert p['contamination'] == 0.03
+        for p in result['PCA-SIMCA']:
+            assert p['alpha'] == 0.02
+            assert p['n_components'] == 8
