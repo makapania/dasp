@@ -2889,7 +2889,7 @@ class SpectralPredictApp:
         self.oc_nu = tk.DoubleVar(value=0.05)           # OneClassSVM nu parameter
         self.oc_contamination = tk.DoubleVar(value=0.05)  # IsolationForest/EllipticEnvelope/LOF
         self.oc_alpha = tk.DoubleVar(value=0.05)         # PCA-SIMCA (DD-SIMCA) alpha
-        self.oc_n_components = tk.IntVar(value=5)        # PCA-SIMCA n_components
+        self.oc_n_components = tk.IntVar(value=10)        # PCA-SIMCA n_components
 
         # Create model name to checkbox mapping
         self.model_checkboxes = {

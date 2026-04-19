@@ -1136,25 +1136,37 @@ def compute_validation_metrics_for_top_one_class_models(
                     X_val_prep = np.asarray(X_val)
                 preprocess_cache[cache_key] = (X_train_prep, X_val_prep)
 
-            # === Wavelength subset (from all_vars / selected_wavelengths) ===
+            # === Wavelength subset (from all_vars only) ===
+            # NOTE: do NOT fall back to 'selected_wavelengths' — Bayesian stores
+            # only the first 50 wavelengths there (display-only), while 'all_vars'
+            # has the full trained subset. Using selected_wavelengths would silently
+            # validate on a truncated feature set.
             col_indices = None
             all_vars_str = row.get('all_vars', None)
-            if all_vars_str is None or (isinstance(all_vars_str, float) and pd.isna(all_vars_str)):
-                all_vars_str = row.get('selected_wavelengths', None)
+            if all_vars_str is not None and isinstance(all_vars_str, float) and pd.isna(all_vars_str):
+                all_vars_str = None
             if all_vars_str is not None and isinstance(all_vars_str, str) and all_vars_str.strip() and all_vars_str != 'N/A':
                 try:
                     model_wls = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
                     if wl_to_idx:
-                        col_indices = [wl_to_idx[wl] for wl in model_wls if wl in wl_to_idx]
+                        missing = [wl for wl in model_wls if wl not in wl_to_idx]
+                        if missing:
+                            logger.warning(
+                                "[OC Validation] Row %s: %d/%d model wavelengths not found in wavelength map, skipping",
+                                idx, len(missing), len(model_wls),
+                            )
+                            continue
+                        col_indices = [wl_to_idx[wl] for wl in model_wls]
                     else:
                         # No wavelength mapping — nearest-index fallback
                         all_wl_arr = np.asarray(wavelengths, dtype=float)
                         col_indices = [int(np.argmin(np.abs(all_wl_arr - wl))) for wl in model_wls]
                     if not col_indices:
-                        col_indices = None
+                        logger.warning("[OC Validation] Row %s: no valid wavelength indices resolved, skipping", idx)
+                        continue
                 except Exception as wl_err:
-                    logger.debug("[OC Validation] all_vars parse failed for row %s: %s", idx, wl_err)
-                    col_indices = None
+                    logger.warning("[OC Validation] all_vars parse failed for row %s: %s, skipping", idx, wl_err)
+                    continue
 
             if col_indices is not None:
                 max_col = X_train_prep.shape[1] - 1
@@ -1176,16 +1188,21 @@ def compute_validation_metrics_for_top_one_class_models(
             X_inliers = X_train_final[inlier_mask]
 
             model_name = str(row.get('Model', ''))
-            params_raw = row.get('Params', '{}')
+            params_raw = row.get('Params', None)
+            if params_raw is None:
+                logger.warning("[OC Validation] Params missing for row %s, skipping", idx)
+                continue
             if isinstance(params_raw, dict):
                 params = params_raw
             elif isinstance(params_raw, str) and params_raw.strip():
                 try:
                     params = ast.literal_eval(params_raw)
                 except (ValueError, SyntaxError):
-                    params = {}
+                    logger.warning("[OC Validation] Params parse failed for row %s, skipping", idx)
+                    continue
             else:
-                params = {}
+                logger.warning("[OC Validation] Params empty for row %s, skipping", idx)
+                continue
 
             # Scale + optional PCA for scale-sensitive models, matching the
             # pattern in run_one_class_cv's calibration block.
