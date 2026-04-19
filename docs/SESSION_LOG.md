@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-19 — `self.inlier_class_label` shadowed: StringVar clobbered by tooltip Label
+
+**Bug:** Attempting to run any one-class analysis after commit `fd376b4` (2026-04-17 tooltip PR) raised `AttributeError: 'Label' object has no attribute 'get'` at `spectral_predict_gui_optimized.py:_run_analysis` when the code reached `self.inlier_class_label.get().strip()`. GUI progress tab would say "Analysis in progress" but never produce output.
+
+**Root cause:** The tooltip PR reassigned `self.inlier_class_label` from the `tk.StringVar` created in `__init__` (line 2886) to a `ttk.Label` widget, purely so `CreateToolTip(self.inlier_class_label, ...)` could attach. That one line silently clobbered the StringVar used by 18+ call sites across the file (`.get()`, `.set()`, model save/load metadata, uncertainty display, external-validation config, etc.). The bug was latent because no one ran a one-class analysis between 2026-04-17 and 2026-04-19. First triggered by testing the Tab 4C OC config feature.
+
+**Secondary consequence:** The Combobox at line 6172 was passing `textvariable=self.inlier_class_label` — but at that point `self.inlier_class_label` was a Label widget, not a StringVar. Tkinter silently accepted the Label's widget-path as a Tcl variable name, so the combobox *looked* fine in the UI, but the Python-side StringVar stayed empty. Anyone who thought inlier-class selection was working was actually hitting the auto-detect fallback ("no inlier class specified → auto-detect most frequent class") every time.
+
+**Fix (`59124ff`):** Renamed the Label to a local `inlier_class_label_widget`, attached the tooltip to the local, restored `self.inlier_class_label` as the StringVar from `__init__`. Three-line change. Landed on main as a standalone commit before the OC config feature merge so it can be cherry-picked to any in-flight branches that predate the OC work.
+
+**Lesson:** Reusing `self.X` as both a widget attribute AND a StringVar/BooleanVar is easy to miss at review time because the line that clobbers reads like a normal widget creation. Any future tooltip-retrofit work in this GUI should grep for the target attribute name in `__init__` first. There are ~150 `tk.StringVar` / `tk.BooleanVar` assignments in `__init__` (lines 2822-3120) — every one is a potential shadow target.
+
+---
+
+## 2026-04-19 — Relative imports inside `spectral_predict_gui_optimized.py` (not a package module)
+
+**Bug:** The OC config parity work (`8e1538d`, `afdeca1`) added five `from .contamination import get_one_class_model_grids` calls inside the GUI collectors (`_collect_ocsvm_overrides`, `_collect_if_overrides`, etc.). These would raise `ImportError: attempted relative import with no known parent package` at runtime whenever a user customized any Tab 4C one-class card and clicked Run.
+
+**Root cause:** `spectral_predict_gui_optimized.py` is a top-level script, not a module inside the `spectral_predict` package. Every other import in that file uses absolute `from spectral_predict.contamination import ...` (confirmed at lines 26082, 32469, 35257, 35430). GLM defaulted to the relative form without checking the surrounding file's convention.
+
+**Symptom visibility:** The bug only fires when a card is customized — default (untouched) cards never call the collector, so the curated-grid path was unaffected. 60/60 tests still passed because the test suite hits `_resolve_one_class_model_grids()` directly without going through the GUI collectors.
+
+**Fix (`3641c78`):** Replaced all 5 occurrences with the absolute form. Caught by GLM-5.1's adversarial review of its own diff — blocking issue flagged as "MERGE AFTER MINOR FIXES".
+
+---
+
 ## 2026-04-19 — One-class model config parity: per-model grid overrides with curated-default preservation
 
 **Design:** The core invariant is that untouched model cards map back to the curated grids from `get_one_class_model_grids()`. The GUI compares current widget state against shipped defaults; only models whose state differs get a user-defined Cartesian product grid. This avoids silently expanding the default search space.
@@ -676,3 +702,31 @@ Two sites in GUI stored `self.folds.get()` (spinbox value, typically 5) instead 
 - Added LOO + classification minority-class preflight guard (blocks LOO when any class has < 2 samples)
 - Removed unnecessary `.copy()` calls in early-stopping CV helper (saves memory per fold)
 - Added `training_config` to one-class grid search results (was missing, unlike regression/classification)
+
+---
+
+## 2026-04-19 — Analysis subset architecture note (OpenCode)
+
+### Architecture insight: metadata-based analysis subsets should extend `active_group`, not Explore sample sets
+The codebase already has two different sample-grouping concepts with very different roles:
+
+- `sample_sets` (`spectral_predict_gui_optimized.py:9865-10057`) are manual, click-to-assign labels used mainly for Explore coloring, peak-calculator scope, export, and exclusion helpers.
+- `active_group` (`spectral_predict_gui_optimized.py:29696-29967`) is the path that actually filters samples for main analysis (`:24913-24942`), validation-set creation (`:18977-19003`, `:19189-19218`), and Model Development/refinement (`:33863-33918`).
+
+For the requested feature "train only on grasses, exclude trees" using existing metadata, the right foundation is **not** Explore sample sets. It is the existing `active_group` mechanism, promoted into a first-class analysis-subset feature.
+
+### Current gaps in `active_group`
+- Hidden UI: only exposed from the Data Viewer toolbar, not from Analysis Configuration where users expect training-cohort controls.
+- Too limited: supports one ad hoc rule only (`has value`, equality, numeric compare, `between`, `contains`) and has no named reusable subset definitions.
+- Not persisted in training metadata: `last_training_config` / `training_config` currently record sample counts, exclusions, and validation counts, but not the subset/filter definition used to produce them.
+- Untested / undocumented: grep found no tests and no status/log docs covering this feature path.
+- Staleness risk: `active_indices` is computed once and stored as a set; if metadata values are edited later, membership is not recomputed automatically from `active_group_filter`.
+
+### Recommended direction
+Implement metadata-defined "analysis subsets" as a thin evolution of `active_group`:
+- keep `active_indices` as the runtime mask
+- replace the single-rule definition with a richer stored subset definition (name + one/more rules)
+- surface it in Analysis Configuration
+- persist the subset definition/summary in training metadata for provenance and Model Development consistency checks
+
+This is much lower risk than threading a brand-new set system through search/model code, because the analysis pipeline already filters `X`/`y` before calling backend search functions.
