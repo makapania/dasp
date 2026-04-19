@@ -23730,7 +23730,7 @@ class SpectralPredictApp:
         return None
 
     def _collect_ocsvm_overrides(self):
-        from .contamination import get_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
         defaults = get_one_class_model_grids()['OneClassSVM']
 
         kernels = []
@@ -23779,7 +23779,7 @@ class SpectralPredictApp:
         return {'kernel': kernels, 'gamma': gammas, 'nu': nus, 'degree': degrees}
 
     def _collect_if_overrides(self):
-        from .contamination import get_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
         defaults = get_one_class_model_grids()['IsolationForest']
 
         n_est = []
@@ -23825,7 +23825,7 @@ class SpectralPredictApp:
         return {'n_estimators': n_est, 'contamination': contam, 'max_features': max_feat}
 
     def _collect_ee_overrides(self):
-        from .contamination import get_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
         defaults = get_one_class_model_grids()['EllipticEnvelope']
 
         contam = []
@@ -23847,7 +23847,7 @@ class SpectralPredictApp:
         return {'contamination': contam}
 
     def _collect_lof_overrides(self):
-        from .contamination import get_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
         defaults = get_one_class_model_grids()['LOF']
 
         nn = []
@@ -23880,7 +23880,7 @@ class SpectralPredictApp:
         return {'n_neighbors': nn, 'contamination': contam}
 
     def _collect_simca_overrides(self):
-        from .contamination import get_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
         defaults = get_one_class_model_grids()['PCA-SIMCA']
 
         n_comp = []

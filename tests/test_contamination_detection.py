@@ -1275,6 +1275,45 @@ class TestOneClassModelConfigParity:
         assert result_none == curated
         assert result_empty == curated
 
+    def test_reverted_model_uses_curated_grid_when_others_customized(self):
+        """Acceptance criterion 6: a model restored to shipped-default widget
+        state uses the curated grid again, even when OTHER models remain
+        customized. The GUI collector drops default-matching models from the
+        override dict; the backend must treat that omission as 'use curated'."""
+        from spectral_predict.search import _resolve_one_class_model_grids
+        from spectral_predict.contamination import get_one_class_model_grids
+
+        all_models = list(get_one_class_model_grids().keys())
+        curated = get_one_class_model_grids()
+
+        overrides_both_custom = {
+            'OneClassSVM': {'kernel': ['rbf'], 'gamma': ['scale'], 'nu': [0.5], 'degree': [2]},
+            'IsolationForest': {'n_estimators': [500], 'contamination': [0.2], 'max_features': [0.3]},
+        }
+        both_custom = _resolve_one_class_model_grids(
+            all_models, oc_model_param_overrides=overrides_both_custom,
+        )
+        assert both_custom['OneClassSVM'] != curated['OneClassSVM']
+        assert both_custom['IsolationForest'] != curated['IsolationForest']
+
+        overrides_if_reverted = {
+            'OneClassSVM': {'kernel': ['rbf'], 'gamma': ['scale'], 'nu': [0.5], 'degree': [2]},
+        }
+        if_reverted = _resolve_one_class_model_grids(
+            all_models, oc_model_param_overrides=overrides_if_reverted,
+        )
+
+        assert if_reverted['IsolationForest'] == curated['IsolationForest'], (
+            "Reverted IsolationForest must use curated grid exactly"
+        )
+        assert if_reverted['OneClassSVM'] == both_custom['OneClassSVM'], (
+            "Still-customized OCSVM must retain its custom grid"
+        )
+        for m in ('EllipticEnvelope', 'LOF', 'PCA-SIMCA'):
+            assert if_reverted[m] == curated[m], (
+                f"Untouched {m} must remain on curated grid"
+            )
+
     def test_legacy_oc_hyperparams_still_works(self):
         from spectral_predict.search import _resolve_one_class_model_grids
         from spectral_predict.contamination import get_one_class_model_grids
