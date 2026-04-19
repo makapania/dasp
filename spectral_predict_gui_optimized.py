@@ -6122,13 +6122,13 @@ class SpectralPredictApp:
         # Inlier class selection (visible only for one-class task type)
         self.inlier_class_frame = ttk.Frame(config_frame)
         self.inlier_class_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
-        self.inlier_class_label = ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:")
-        self.inlier_class_label.pack(side=tk.LEFT, padx=(0, 5))
+        inlier_class_label_widget = ttk.Label(self.inlier_class_frame, text="Inlier (Clean) Class:")
+        inlier_class_label_widget.pack(side=tk.LEFT, padx=(0, 5))
         self.inlier_class_combo = ttk.Combobox(
             self.inlier_class_frame, textvariable=self.inlier_class_label, width=20, state='readonly'
         )
         self.inlier_class_combo.pack(side=tk.LEFT, padx=5)
-        CreateToolTip(self.inlier_class_label, text=TOOLTIP_CONTENT['one_class']['inlier_class'], delay=500)
+        CreateToolTip(inlier_class_label_widget, text=TOOLTIP_CONTENT['one_class']['inlier_class'], delay=500)
         CreateToolTip(self.inlier_class_combo, text=TOOLTIP_CONTENT['one_class']['inlier_class'], delay=500)
         ttk.Label(self.inlier_class_frame, text="(leave empty to auto-detect most frequent class)",
                  style='Caption.TLabel').pack(side=tk.LEFT, padx=5)
