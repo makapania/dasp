@@ -1573,3 +1573,189 @@ def save_user_presets(presets: list[PeakPreset]) -> None:
     _USER_PRESETS_FILE.write_text(
         json.dumps(data, indent=2), encoding="utf-8"
     )
+
+
+# ---------------------------------------------------------------------------
+# Auto Bone FTIR Index Extraction (fixed method)
+# ---------------------------------------------------------------------------
+
+BONE_FTIR_INDEX_COLUMNS: list[str] = [
+    "IRSF", "PO4_position", "PO4_intensity",
+    "CO3_position", "CO3_intensity",
+    "AmideI_position", "AmideI_intensity",
+    "Am_P", "C_P", "OrgInorg",
+]
+
+BONE_FTIR_MIN_WN: float = 400.0
+BONE_FTIR_MAX_WN: float = 1720.0
+
+
+def _bf_find_wn_idx(wn: np.ndarray, target: float) -> int:
+    return int(np.argmin(np.abs(wn - target)))
+
+
+def _bf_find_trough(spectrum: np.ndarray, wn: np.ndarray,
+                    lo: float, hi: float) -> int:
+    i_lo = _bf_find_wn_idx(wn, lo)
+    i_hi = _bf_find_wn_idx(wn, hi)
+    lo_idx, hi_idx = min(i_lo, i_hi), max(i_lo, i_hi)
+    region = spectrum[lo_idx:hi_idx + 1]
+    if len(region) == 0:
+        return lo_idx
+    return lo_idx + int(np.argmin(region))
+
+
+def _bf_local_baseline(spectrum: np.ndarray, idx1: int, idx2: int):
+    lo, hi = min(idx1, idx2), max(idx1, idx2)
+    if hi == lo:
+        return spectrum[lo:lo + 1] - spectrum[lo], lo
+    x = np.arange(hi - lo + 1, dtype=float)
+    y1, y2 = float(spectrum[lo]), float(spectrum[hi])
+    baseline = y1 + (y2 - y1) * x / (hi - lo)
+    corrected = spectrum[lo:hi + 1] - baseline
+    return corrected, lo
+
+
+def extract_bone_ftir_indices(
+    spectrum: np.ndarray,
+    wn: np.ndarray,
+) -> dict[str, float]:
+    """Extract 10 bone FTIR diagenesis indices from a single spectrum.
+
+    Fixed-method extraction following Kontopoulos et al. (2018, Box 1).
+    Each spectral region uses its own local linear baseline between
+    automatically detected troughs.  Peak positions and heights are
+    measured on the baseline-corrected segments.
+
+    Parameters
+    ----------
+    spectrum : 1-D float array
+        Absorbance values.
+    wn : 1-D float array
+        Wavenumber values in cm-1 (ascending or descending).
+
+    Returns
+    -------
+    dict with keys from :data:`BONE_FTIR_INDEX_COLUMNS`.
+    Values are ``np.nan`` when a feature could not be extracted.
+    """
+    result: dict[str, float] = {}
+
+    # IRSF
+    try:
+        t1 = _bf_find_trough(spectrum, wn, 400, 420)
+        t2 = _bf_find_trough(spectrum, wn, 630, 670)
+        corr, offset = _bf_local_baseline(spectrum, t1, t2)
+        wn_seg = wn[offset:offset + len(corr)]
+
+        lo_550 = _bf_find_wn_idx(wn_seg, 550)
+        hi_570 = _bf_find_wn_idx(wn_seg, 570)
+        lo_580 = _bf_find_wn_idx(wn_seg, 580)
+        hi_595 = _bf_find_wn_idx(wn_seg, 595)
+        lo_595b = _bf_find_wn_idx(wn_seg, 595)
+        hi_610 = _bf_find_wn_idx(wn_seg, 610)
+
+        h_560 = float(np.max(corr[min(lo_550, hi_570):max(lo_550, hi_570) + 1]))
+        h_590 = float(np.min(corr[min(lo_580, hi_595):max(lo_580, hi_595) + 1]))
+        h_600 = float(np.max(corr[min(lo_595b, hi_610):max(lo_595b, hi_610) + 1]))
+
+        result["IRSF"] = (h_560 + h_600) / h_590 if h_590 > 0 else np.nan
+    except Exception:
+        result["IRSF"] = np.nan
+
+    # Phosphate v3
+    try:
+        t1 = _bf_find_trough(spectrum, wn, 880, 900)
+        t2 = _bf_find_trough(spectrum, wn, 1150, 1180)
+        corr, offset = _bf_local_baseline(spectrum, t1, t2)
+        wn_seg = wn[offset:offset + len(corr)]
+
+        lo_950 = _bf_find_wn_idx(wn_seg, 950)
+        hi_1100 = _bf_find_wn_idx(wn_seg, 1100)
+        peak_region = corr[min(lo_950, hi_1100):max(lo_950, hi_1100) + 1]
+        peak_idx = min(lo_950, hi_1100) + int(np.argmax(peak_region))
+
+        result["PO4_position"] = float(wn_seg[peak_idx])
+        result["PO4_intensity"] = float(corr[peak_idx])
+    except Exception:
+        result["PO4_position"] = np.nan
+        result["PO4_intensity"] = np.nan
+
+    # Carbonate v3
+    try:
+        t1 = _bf_find_trough(spectrum, wn, 1270, 1310)
+        t2 = _bf_find_trough(spectrum, wn, 1570, 1610)
+        corr, offset = _bf_local_baseline(spectrum, t1, t2)
+        wn_seg = wn[offset:offset + len(corr)]
+
+        lo_1380 = _bf_find_wn_idx(wn_seg, 1380)
+        hi_1450 = _bf_find_wn_idx(wn_seg, 1450)
+        peak_region = corr[min(lo_1380, hi_1450):max(lo_1380, hi_1450) + 1]
+        peak_idx = min(lo_1380, hi_1450) + int(np.argmax(peak_region))
+
+        result["CO3_position"] = float(wn_seg[peak_idx])
+        result["CO3_intensity"] = float(corr[peak_idx])
+    except Exception:
+        result["CO3_position"] = np.nan
+        result["CO3_intensity"] = np.nan
+
+    # Amide I
+    try:
+        t1 = _bf_find_wn_idx(wn, 1590)
+        t2 = _bf_find_wn_idx(wn, 1720)
+        corr, offset = _bf_local_baseline(spectrum, t1, t2)
+        wn_seg = wn[offset:offset + len(corr)]
+
+        lo_1600 = _bf_find_wn_idx(wn_seg, 1600)
+        hi_1700 = _bf_find_wn_idx(wn_seg, 1700)
+        peak_region = corr[min(lo_1600, hi_1700):max(lo_1600, hi_1700) + 1]
+
+        if np.max(peak_region) > 0:
+            peak_idx = min(lo_1600, hi_1700) + int(np.argmax(peak_region))
+            result["AmideI_position"] = float(wn_seg[peak_idx])
+            result["AmideI_intensity"] = float(corr[peak_idx])
+        else:
+            result["AmideI_position"] = np.nan
+            result["AmideI_intensity"] = np.nan
+    except Exception:
+        result["AmideI_position"] = np.nan
+        result["AmideI_intensity"] = np.nan
+
+    # Derived ratios
+    po4 = result.get("PO4_intensity", 0) or 0
+    co3 = result.get("CO3_intensity", 0) or 0
+    am = result.get("AmideI_intensity", 0) or 0
+
+    result["Am_P"] = am / po4 if po4 > 0 else 0.0
+    result["C_P"] = co3 / po4 if po4 > 0 else 0.0
+    result["OrgInorg"] = am / (po4 + co3) if (po4 + co3) > 0 else 0.0
+
+    return result
+
+
+def extract_bone_ftir_indices_all_samples(
+    wavelengths: np.ndarray,
+    data_matrix: np.ndarray,
+    sample_names: list | np.ndarray | None = None,
+) -> pd.DataFrame:
+    """Batch extraction of bone FTIR indices for all samples.
+
+    Parameters
+    ----------
+    wavelengths : 1-D float array
+        Wavenumber axis in cm-1.
+    data_matrix : 2-D float array (n_samples, n_wavelengths)
+    sample_names : optional sample labels
+
+    Returns
+    -------
+    DataFrame with columns ``Sample`` + :data:`BONE_FTIR_INDEX_COLUMNS`.
+    One row per sample.
+    """
+    n = data_matrix.shape[0]
+    rows = [extract_bone_ftir_indices(data_matrix[i, :], wavelengths)
+            for i in range(n)]
+    df = pd.DataFrame(rows, columns=BONE_FTIR_INDEX_COLUMNS)
+    names = sample_names if sample_names is not None else list(range(n))
+    df.insert(0, "Sample", list(names))
+    return df

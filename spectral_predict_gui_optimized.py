@@ -8887,6 +8887,7 @@ class SpectralPredictApp:
         dialog._all_presets = list(BUILT_IN_PRESETS) + dialog._user_presets
         dialog._active_field = "A"  # which peak field receives next click
         dialog._peak_c_visible = False
+        dialog._auto_mode = False
 
         # --- Scrollable content ---
         outer = ttk.Frame(dialog)
@@ -8914,11 +8915,46 @@ class SpectralPredictApp:
         content = scroll_frame
         pad_x = 15
 
-        # ---- SECTION: Preset selection ----
-        preset_frame = ttk.LabelFrame(content, text="Presets", padding=8)
-        preset_frame.pack(fill='x', padx=pad_x, pady=(10, 5))
+        # ---- SECTION: Mode selector ----
+        mode_frame = ttk.LabelFrame(content, text="Mode", padding=8)
+        mode_frame.pack(fill='x', padx=pad_x, pady=(10, 5))
 
-        row0 = ttk.Frame(preset_frame)
+        dialog._calc_mode_var = tk.StringVar(value="Manual")
+        ttk.Radiobutton(
+            mode_frame, text="Manual",
+            variable=dialog._calc_mode_var, value="Manual",
+            command=lambda: self._peak_calc_mode_changed(dialog),
+        ).pack(side='left', padx=(0, 15))
+        ttk.Radiobutton(
+            mode_frame, text="Auto Bone FTIR Indices",
+            variable=dialog._calc_mode_var, value="Auto Bone FTIR",
+            command=lambda: self._peak_calc_mode_changed(dialog),
+        ).pack(side='left')
+
+        # ---- SECTION: Auto-mode info (hidden by default) ----
+        dialog._auto_info_frame = ttk.LabelFrame(
+            content, text="Auto Bone FTIR Indices", padding=8,
+        )
+        auto_desc = (
+            "Computes 10 diagenesis-relevant spectral indices automatically:\n"
+            "IRSF, PO4 position & intensity, CO3 position & intensity, "
+            "Amide I position & intensity, Am/P, C/P, OrgInorg.\n\n"
+            "Method: Kontopoulos et al. (2018, Box 1) — local linear baseline "
+            "correction between automatically detected troughs.\n\n"
+            "Uses raw absorbance spectra regardless of the current Explore subtab. "
+            "X-axis must be in cm\u207b\u00b9 and data must be in absorbance."
+        )
+        ttk.Label(
+            dialog._auto_info_frame, text=auto_desc,
+            wraplength=460, justify='left', style='Caption.TLabel',
+        ).pack(fill='x')
+        # Not packed initially — shown only in Auto mode
+
+        # ---- SECTION: Preset selection ----
+        dialog._manual_preset_frame = ttk.LabelFrame(content, text="Presets", padding=8)
+        dialog._manual_preset_frame.pack(fill='x', padx=pad_x, pady=(5, 5))
+
+        row0 = ttk.Frame(dialog._manual_preset_frame)
         row0.pack(fill='x', pady=(0, 4))
         ttk.Label(row0, text="Pack:").pack(side='left', padx=(0, 5))
 
@@ -8931,7 +8967,7 @@ class SpectralPredictApp:
         )
         pack_combo.pack(side='left', padx=(0, 10))
 
-        row1 = ttk.Frame(preset_frame)
+        row1 = ttk.Frame(dialog._manual_preset_frame)
         row1.pack(fill='x')
         ttk.Label(row1, text="Preset:").pack(side='left', padx=(0, 5))
 
@@ -9054,15 +9090,15 @@ class SpectralPredictApp:
         dialog._preset_combo.bind('<<ComboboxSelected>>', _load_preset)
 
         # Description label
-        dialog._desc_label = ttk.Label(preset_frame, text="", wraplength=450,
+        dialog._desc_label = ttk.Label(dialog._manual_preset_frame, text="", wraplength=450,
                                        style='Caption.TLabel')
         dialog._desc_label.pack(fill='x', pady=(4, 0))
 
         # ---- SECTION: Local Baseline ----
-        bl_frame = ttk.LabelFrame(content, text="Local Baseline", padding=8)
-        bl_frame.pack(fill='x', padx=pad_x, pady=5)
+        dialog._manual_bl_frame = ttk.LabelFrame(content, text="Local Baseline", padding=8)
+        dialog._manual_bl_frame.pack(fill='x', padx=pad_x, pady=5)
 
-        bl_mode_row = ttk.Frame(bl_frame)
+        bl_mode_row = ttk.Frame(dialog._manual_bl_frame)
         bl_mode_row.pack(fill='x', pady=(0, 4))
         ttk.Label(bl_mode_row, text="Mode:").pack(side='left', padx=(0, 5))
         dialog._bl_mode_var = tk.StringVar(value="Auto (from preset)")
@@ -9075,7 +9111,7 @@ class SpectralPredictApp:
         # Per-peak baseline entry rows
         dialog._bl_rows = {}  # key -> frame for show/hide
         for peak_key in ("A", "B", "C"):
-            row = ttk.Frame(bl_frame)
+            row = ttk.Frame(dialog._manual_bl_frame)
             # A and B are always packed; C starts hidden
             if peak_key != "C":
                 row.pack(fill='x', pady=1)
@@ -9121,12 +9157,12 @@ class SpectralPredictApp:
         dialog._bl_mode_combo.bind('<<ComboboxSelected>>', _bl_mode_changed)
 
         # ---- SECTION: Expression builder ----
-        expr_frame = ttk.LabelFrame(content, text="Expression Builder", padding=8)
-        expr_frame.pack(fill='x', padx=pad_x, pady=5)
+        dialog._manual_expr_frame = ttk.LabelFrame(content, text="Expression Builder", padding=8)
+        dialog._manual_expr_frame.pack(fill='x', padx=pad_x, pady=5)
 
         # Click instruction
         dialog._click_hint = ttk.Label(
-            expr_frame,
+            dialog._manual_expr_frame,
             text="Click on the plot to set peak positions. Active field is highlighted.",
             style='Caption.TLabel', foreground='#555',
         )
@@ -9134,11 +9170,11 @@ class SpectralPredictApp:
 
         # Tab warning (hidden by default)
         dialog._tab_warning = ttk.Label(
-            expr_frame, text="", foreground='#CC8800', wraplength=450,
+            dialog._manual_expr_frame, text="", foreground='#CC8800', wraplength=450,
         )
 
         # --- Peak A ---
-        peak_a_frame = ttk.Frame(expr_frame)
+        peak_a_frame = ttk.Frame(dialog._manual_expr_frame)
         peak_a_frame.pack(fill='x', pady=(0, 4))
 
         dialog._peak_a_btn = tk.Button(
@@ -9173,7 +9209,7 @@ class SpectralPredictApp:
         hw_a.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
 
         # --- Operator 1 ---
-        op1_frame = ttk.Frame(expr_frame)
+        op1_frame = ttk.Frame(dialog._manual_expr_frame)
         op1_frame.pack(fill='x', pady=2)
         dialog._op1_var = tk.StringVar(value="/")
         op_display = {"/" : "\u00f7", "*": "\u00d7", "+": "+", "-": "\u2212"}
@@ -9182,7 +9218,7 @@ class SpectralPredictApp:
                             value=op_val).pack(side='left', padx=4)
 
         # --- Peak B ---
-        peak_b_frame = ttk.Frame(expr_frame)
+        peak_b_frame = ttk.Frame(dialog._manual_expr_frame)
         peak_b_frame.pack(fill='x', pady=(0, 4))
 
         dialog._peak_b_btn = tk.Button(
@@ -9217,7 +9253,7 @@ class SpectralPredictApp:
         hw_b.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
 
         # --- Add Peak C toggle ---
-        dialog._add_c_frame = ttk.Frame(expr_frame)
+        dialog._add_c_frame = ttk.Frame(dialog._manual_expr_frame)
         dialog._add_c_frame.pack(fill='x', pady=2)
         dialog._add_c_btn = ttk.Button(
             dialog._add_c_frame, text="+ Add Peak C", style='Modern.TButton',
@@ -9226,7 +9262,7 @@ class SpectralPredictApp:
         dialog._add_c_btn.pack(side='left')
 
         # --- Peak C (initially hidden) ---
-        dialog._peak_c_frame = ttk.Frame(expr_frame)
+        dialog._peak_c_frame = ttk.Frame(dialog._manual_expr_frame)
         # Operator 2 row
         op2_row = ttk.Frame(dialog._peak_c_frame)
         op2_row.pack(fill='x', pady=2)
@@ -9270,7 +9306,7 @@ class SpectralPredictApp:
         hw_c.bind('<KeyRelease>', lambda e: self._update_peak_markers(dialog))
 
         # Grouping row (initially hidden)
-        dialog._grouping_frame = ttk.Frame(expr_frame)
+        dialog._grouping_frame = ttk.Frame(dialog._manual_expr_frame)
         ttk.Label(dialog._grouping_frame, text="Grouping:").pack(side='left', padx=(0, 5))
         dialog._grouping_var = tk.StringVar(value="left")
         ttk.Radiobutton(dialog._grouping_frame, text="(A op B) op C",
@@ -9281,6 +9317,7 @@ class SpectralPredictApp:
         # ---- SECTION: Calculate ----
         calc_frame = ttk.Frame(content)
         calc_frame.pack(fill='x', padx=pad_x, pady=5)
+        dialog._calc_section_frame = calc_frame
 
         ttk.Label(calc_frame, text="Scope:").pack(side='left', padx=(0, 5))
         scope_options = ["Active Only", "All Spectra"]
@@ -9372,11 +9409,51 @@ class SpectralPredictApp:
                 dialog._bl_rows["C"].pack_forget()
         self._update_peak_markers(dialog)
 
+    def _peak_calc_mode_changed(self, dialog):
+        """Switch between Manual and Auto Bone FTIR modes."""
+        mode = dialog._calc_mode_var.get()
+        if mode == "Auto Bone FTIR":
+            dialog._manual_preset_frame.pack_forget()
+            dialog._manual_bl_frame.pack_forget()
+            dialog._manual_expr_frame.pack_forget()
+            # Clear manual markers when entering auto mode
+            dialog._found_positions = {}
+            self._remove_peak_markers()
+            # Pack auto info before the calc section frame
+            content = dialog._calc_section_frame.master
+            dialog._auto_info_frame.pack(
+                fill='x', padx=15, pady=5,
+                in_=content,
+                before=dialog._calc_section_frame,
+            )
+        else:
+            dialog._auto_info_frame.pack_forget()
+            content = dialog._calc_section_frame.master
+            dialog._manual_preset_frame.pack(
+                fill='x', padx=15, pady=(5, 5),
+                in_=content,
+                before=dialog._calc_section_frame,
+            )
+            dialog._manual_bl_frame.pack(
+                fill='x', padx=15, pady=5,
+                in_=content,
+                before=dialog._calc_section_frame,
+            )
+            dialog._manual_expr_frame.pack(
+                fill='x', padx=15, pady=5,
+                in_=content,
+                before=dialog._calc_section_frame,
+            )
+
     def _on_peak_calc_plot_click(self, event, frame_key):
         """Handle a raw button_press_event on the explore plot for peak picking."""
         if self._peak_calc_dialog is None:
             return
         if frame_key != self._peak_calc_source_frame_key:
+            return
+        # Ignore clicks while in Auto Bone FTIR mode
+        mode = getattr(self._peak_calc_dialog, '_calc_mode_var', None)
+        if mode is not None and mode.get() == "Auto Bone FTIR":
             return
 
         # Skip if zoom/pan mode is active
@@ -9567,6 +9644,21 @@ class SpectralPredictApp:
         self._peak_calc_source_tab = None
         self._peak_calc_cid = None
 
+    def _get_peak_calc_scope_mask(self, scope: str = "Active Only") -> np.ndarray:
+        """Return the sample mask used by the Peak Calculator scope selector."""
+        if scope == "All Spectra":
+            return np.ones(len(self.X), dtype=bool)
+        if scope == "Active Only":
+            mask = ~self.X.index.isin(self.excluded_spectra)
+            if self.active_indices is not None:
+                mask &= self.X.index.isin(self.active_indices)
+            return mask
+        if self.sample_sets is not None:
+            mask = (self.sample_sets == scope).values
+            mask &= ~self.X.index.isin(self.excluded_spectra)
+            return mask
+        return np.ones(len(self.X), dtype=bool)
+
     def _get_peak_calc_data(self, source_tab: str, scope: str = "Active Only"):
         """Return (wavelengths, data_matrix, sample_names) for the given source tab.
 
@@ -9595,19 +9687,7 @@ class SpectralPredictApp:
         else:
             data = self.X.values
 
-        # Build scope mask
-        if scope == "All Spectra":
-            mask = np.ones(len(self.X), dtype=bool)
-        elif scope == "Active Only":
-            mask = ~self.X.index.isin(self.excluded_spectra)
-            if self.active_indices is not None:
-                mask &= self.X.index.isin(self.active_indices)
-        else:  # set name
-            if self.sample_sets is not None:
-                mask = (self.sample_sets == scope).values
-                mask &= ~self.X.index.isin(self.excluded_spectra)
-            else:
-                mask = np.ones(len(self.X), dtype=bool)
+        mask = self._get_peak_calc_scope_mask(scope)
 
         return wavelengths, data[mask], list(self.X.index[mask])
 
@@ -9674,6 +9754,134 @@ class SpectralPredictApp:
 
     def _peak_calc_run(self, dialog):
         """Calculate peak ratios for all samples and display results."""
+        mode = getattr(dialog, '_calc_mode_var', None)
+        if mode is not None and mode.get() == "Auto Bone FTIR":
+            self._peak_calc_run_auto(dialog)
+        else:
+            self._peak_calc_run_manual(dialog)
+
+    def _peak_calc_run_auto(self, dialog):
+        """Auto Bone FTIR index extraction."""
+        from spectral_predict.peak_calculator import (
+            extract_bone_ftir_indices_all_samples,
+            BONE_FTIR_MIN_WN, BONE_FTIR_MAX_WN,
+        )
+
+        # Clear any stale manual markers before auto calculation
+        dialog._found_positions = {}
+        dialog._peak_calc_wavelengths = None
+        dialog._peak_calc_spectrum = None
+        self._remove_peak_markers()
+
+        if self.X is None:
+            messagebox.showwarning("No Data", "Load spectral data first.")
+            return
+
+        # Validate x-axis is cm-1
+        if hasattr(self, 'current_x_unit') and self.current_x_unit.get() != "cm-1":
+            messagebox.showwarning(
+                "Wrong X-Axis Unit",
+                "Auto Bone FTIR requires x-axis in cm\u207b\u00b9.\n"
+                "Use the Data Management tab to convert the x-axis first.",
+            )
+            return
+
+        # Validate absorbance
+        if hasattr(self, 'current_data_type') and self.current_data_type.get() != "absorbance":
+            messagebox.showwarning(
+                "Wrong Data Type",
+                "Auto Bone FTIR requires absorbance data.\n"
+                "Current data type is "
+                f"{self.current_data_type.get()}. Convert in Data Management first.",
+            )
+            return
+
+        # Auto mode must use stored spectra directly, not the transform-capable
+        # "raw" explore path.
+        scope = dialog._scope_var.get()
+        wavelengths = self.X.columns.values.astype(float)
+        mask = self._get_peak_calc_scope_mask(scope)
+        data = self.X.values[mask]
+        sample_names = list(self.X.index[mask])
+
+        if len(sample_names) == 0:
+            messagebox.showwarning("No Spectra", f"No spectra match scope '{scope}'.")
+            return
+
+        # Validate wavelength coverage
+        wn_min = float(np.min(wavelengths))
+        wn_max = float(np.max(wavelengths))
+        coverage_min = min(wn_min, wn_max)
+        coverage_max = max(wn_min, wn_max)
+        if coverage_min > BONE_FTIR_MIN_WN or coverage_max < BONE_FTIR_MAX_WN:
+            messagebox.showwarning(
+                "Insufficient Wavelength Coverage",
+                f"Auto Bone FTIR requires spectra covering at least "
+                f"{BONE_FTIR_MIN_WN:.0f}\u2013{BONE_FTIR_MAX_WN:.0f} cm\u207b\u00b9.\n"
+                f"Current coverage: {coverage_min:.0f}\u2013{coverage_max:.0f} cm\u207b\u00b9.",
+            )
+            return
+
+        df = extract_bone_ftir_indices_all_samples(
+            wavelengths, data, sample_names,
+        )
+        dialog._results_df = df
+        dialog._auto_mode = True
+
+        # Build stats text
+        stats_lines = [f"Bone FTIR Indices — {len(df)} samples"]
+        index_cols = [c for c in df.columns if c != "Sample"]
+        for col in index_cols:
+            vals = df[col].dropna().values
+            if len(vals) > 0:
+                stats_lines.append(
+                    f"  {col}: mean={np.mean(vals):.4f}, "
+                    f"SD={np.std(vals, ddof=1):.4f}, "
+                    f"range=[{np.min(vals):.4f}, {np.max(vals):.4f}]"
+                )
+            else:
+                stats_lines.append(f"  {col}: all NaN")
+
+        stats_text = "\n".join(stats_lines)
+        dialog._stats_text = stats_text
+        dialog._stats_label.config(text=stats_text)
+
+        # Clear histogram area
+        for w in dialog._hist_frame.winfo_children():
+            w.destroy()
+
+        # Results table
+        if hasattr(dialog, '_table_frame') and dialog._table_frame is not None:
+            for w in dialog._table_frame.winfo_children():
+                w.destroy()
+        else:
+            dialog._table_frame = ttk.Frame(dialog._results_frame)
+            dialog._table_frame.pack(fill='both', expand=True, pady=(5, 0))
+
+        show_cols = list(df.columns)
+        tree = ttk.Treeview(dialog._table_frame, columns=show_cols, show='headings', height=8)
+        for col in show_cols:
+            tree.heading(col, text=col)
+            width = 120 if col == "Sample" else 85
+            tree.column(col, width=width, anchor='center')
+
+        for _, row in df.iterrows():
+            vals = []
+            for col in show_cols:
+                v = row[col]
+                if isinstance(v, (float, np.floating)):
+                    vals.append(f"{v:.4f}" if not np.isnan(v) else "NaN")
+                else:
+                    vals.append(str(v))
+            tree.insert('', 'end', values=vals)
+
+        vsb = ttk.Scrollbar(dialog._table_frame, orient='vertical', command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side='left', fill='both', expand=True)
+        vsb.pack(side='right', fill='y')
+
+    def _peak_calc_run_manual(self, dialog):
+        """Manual peak ratio calculation (original behavior)."""
         from spectral_predict.peak_calculator import calculate_all_samples
 
         if self.X is None:
@@ -9699,6 +9907,7 @@ class SpectralPredictApp:
             use_local_baseline=use_bl,
         )
         dialog._results_df = df
+        dialog._auto_mode = False
 
         # Store found positions and spectrum data for plot markers
         dialog._found_positions = {}
@@ -9828,12 +10037,15 @@ class SpectralPredictApp:
         if df is None:
             messagebox.showinfo("No Results", "Run calculation first.")
             return
+        auto = getattr(dialog, '_auto_mode', False)
+        default_name = "bone_ftir_indices.csv" if auto else "peak_ratios.csv"
+        default_title = "Export Bone FTIR Indices" if auto else "Export Peak Ratios"
         filepath = filedialog.asksaveasfilename(
             parent=dialog,
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-            initialfile="peak_ratios.csv",
-            title="Export Peak Ratios",
+            initialfile=default_name,
+            title=default_title,
         )
         if filepath:
             try:
@@ -9843,7 +10055,14 @@ class SpectralPredictApp:
                 messagebox.showerror("Error", f"Failed to export:\n{e}")
 
     def _peak_calc_copy_stats(self, dialog):
-        """Copy stats summary to clipboard."""
+        """Copy stats summary (or auto table) to clipboard."""
+        auto = getattr(dialog, '_auto_mode', False)
+        if auto:
+            df = getattr(dialog, '_results_df', None)
+            if df is not None:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(df.to_csv(index=False))
+                return
         text = getattr(dialog, '_stats_text', None)
         if not text:
             return

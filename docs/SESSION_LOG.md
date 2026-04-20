@@ -4,6 +4,37 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-19 — Auto Bone FTIR index extraction (main branch)
+
+**Feature:** Added fixed-method Auto Bone FTIR mode to Explore-tab Peak Calculator. Produces 10 diagenesis indices (IRSF, PO4/CO3/AmideI positions & intensities, Am_P, C_P, OrgInorg) via Kontopoulos et al. 2018 method.
+
+**Architecture decisions:**
+- NOT modeled as a normal PeakPreset. Auto mode returns 10 outputs per sample vs 1 scalar per sample for manual presets. Dedicated backend functions `extract_bone_ftir_indices()` and `extract_bone_ftir_indices_all_samples()` keep the two paths cleanly separated.
+- The fixed method's baseline regions differ from existing Bone FTIR manual presets (e.g., IRSF baseline 400-420 to 630-670 vs existing 490-510 to 690-750). A dedicated implementation was necessary rather than reusing existing helpers.
+- GUI mode toggle added at top of dialog with Manual / Auto Bone FTIR radio buttons. Manual-only sections (Presets, Local Baseline, Expression Builder) are pack_forget'd in auto mode and repacked when switching back.
+- Auto mode now reads stored spectra directly (`self.X.values` + the normal scope mask) rather than using `_get_peak_calc_data("raw", scope)`, because that helper still routes through the legacy transform-capable Explore raw path.
+- Validates x-unit (must be cm-1), data type (must be absorbance), and wavelength coverage (400-1720 cm-1) before calculation.
+- Copy in auto mode copies the full CSV table; in manual mode copies the stats text (preserving existing behavior).
+
+**Gotchas:**
+- The Amide I baseline uses fixed anchors at exactly 1590 and 1720 cm-1 (not trough search), per the external spec. When AmideI_intensity is NaN (no detectable peak above baseline), the derived ratios Am_P and OrgInorg become NaN (NaN/positive = NaN), not 0.0. This matches the reference implementation.
+- Tkinter `pack(before=...)` is needed to reinsert manual frames in the correct position when switching back from auto mode. The `content` frame (scroll_frame) must be passed as `in_=` parameter.
+
+**Bugs found and fixed in review pass:**
+- **Peak C state regression**: `_load_preset()` else-branch (no peak_c) was hiding widgets but not resetting `dialog._peak_c_visible = False`. This meant `_peak_calc_build_preset()` could still include a stale hidden Peak C in manual calculations. Fixed by adding the flag reset at `spectral_predict_gui_optimized.py:9057`.
+- **Plot clicks leak into auto mode**: `_on_peak_calc_plot_click()` had no guard for auto mode, so clicking the Explore plot while in auto mode silently mutated hidden manual A/B/C fields. Fixed by adding an early return when `_calc_mode_var == "Auto Bone FTIR"`.
+- **Stale markers on mode switch**: Switching to auto mode left manual plot markers visible. Fixed by clearing `_found_positions` and calling `_remove_peak_markers()` in both `_peak_calc_mode_changed()` (auto branch) and `_peak_calc_run_auto()`.
+- **Auto mode raw-data blocker**: Review found that `_peak_calc_run_auto()` was asking for `_get_peak_calc_data("raw", scope)`, but that helper's raw branch still calls `_apply_transformation(self.X.values)`. Fixed by adding `_get_peak_calc_scope_mask()` and having auto mode filter `self.X.values` directly so the fixed-method workflow never goes through the transform-capable Explore raw path.
+
+**Files changed:**
+- `src/spectral_predict/peak_calculator.py` — added ~130 lines: backend functions + constants
+- `spectral_predict_gui_optimized.py` — mode toggle, auto calculate, auto export/copy, bug fixes
+- `tests/test_bone_ftir_auto.py` — 24 tests (17 backend + 7 GUI-path)
+
+**Tests:** 24/24 new, 117/117 existing peak-calc/bone = 141/141 total. Reference comparison: all 10 indices match ftir_indices.py exactly.
+
+---
+
 ## 2026-04-19 — Analysis Subset V1 implementation (branch glm/analysis-subset-v1)
 
 **Feature:** Added metadata-driven Analysis Subset feature. Users can restrict analysis, validation, and refinement to a metadata-defined cohort (e.g., "only grasses"). Implemented on the existing `active_group_filter` / `active_indices` internal runtime path with user-facing rename to "Analysis Subset".
