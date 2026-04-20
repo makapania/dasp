@@ -30486,13 +30486,11 @@ For detailed documentation, see the User Guide.
             messagebox.showwarning("No Data", "Please load data first.")
             return
 
-        target_name = self.target_column.get() if self.target_column.get() else "Target"
-
         columns = []
         if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            columns = [c for c in self.combined_metadata_df.columns if c != target_name]
+            columns = list(self.combined_metadata_df.columns)
         elif self.ref is not None:
-            columns = [c for c in self.ref.columns if c != target_name]
+            columns = list(self.ref.columns)
         if not columns:
             messagebox.showwarning(
                 "No Columns", "No metadata columns available for subset filtering."
