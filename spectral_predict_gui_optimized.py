@@ -8499,6 +8499,15 @@ class SpectralPredictApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to replace data:\n{str(e)}")
 
+    def _get_explore_plot_positions(self) -> list[int]:
+        """Return positional sample indices to draw in Explore plots."""
+        if self.X is None:
+            return []
+        sample = self._current_sample_var.get()
+        if sample and sample != 'All Samples' and sample in self.X.index:
+            return [int(self.X.index.get_loc(sample))]
+        return list(range(len(self.X)))
+
     def _create_explore_plot_in_frame(self, frame, title, data, ylabel, color,
                                       color_map=None, legend_entries=None,
                                       color_label=None, source_tab=None):
@@ -8521,7 +8530,8 @@ class SpectralPredictApp:
         ax = fig.add_subplot(111)
 
         wavelengths = self.X.columns.values
-        n_samples = len(data)
+        plot_positions = self._get_explore_plot_positions()
+        n_samples = len(plot_positions)
 
         has_legend = color_map and legend_entries
 
@@ -8536,7 +8546,7 @@ class SpectralPredictApp:
         # Boost alpha slightly when coloring so groups are more visible
         if has_legend:
             alpha = min(alpha * 2.0, 0.6)
-        indices = range(n_samples)
+        indices = plot_positions
 
         # Plot spectra
         for i in indices:
@@ -10260,12 +10270,16 @@ class SpectralPredictApp:
         if self._current_sample_var.get() != 'All Samples':
             self._current_sample_var.set('All Samples')
         self._update_set_count_label()
+        if self.X is not None:
+            self._regenerate_explore_spectra_only()
 
     def _on_sample_combo_selected(self, _event=None):
         """Selecting a single sample overrides the active set selection."""
         sample = self._current_sample_var.get()
         if sample == 'All Samples':
             self._update_set_count_label()
+            if self.X is not None:
+                self._regenerate_explore_spectra_only()
             return
         if self._current_set_name.get():
             self._current_set_name.set('')
@@ -10273,6 +10287,8 @@ class SpectralPredictApp:
             self._set_assign_mode.set(False)
             self._on_assign_mode_toggled()
         self._update_set_count_label()
+        if self.X is not None:
+            self._regenerate_explore_spectra_only()
 
     def _update_set_count_label(self, *args):
         """Show 'N members' for the currently selected set."""
