@@ -2790,6 +2790,7 @@ class SpectralPredictApp:
         self.sample_set_names = []       # ordered list of set names
         self._set_assign_mode = tk.BooleanVar(value=False)
         self._current_set_name = tk.StringVar(value='')
+        self._current_sample_var = tk.StringVar(value='')
 
         # Explore tab baseline correction controls
         self._explore_polybl_degree = tk.IntVar(value=2)
@@ -6431,7 +6432,7 @@ class SpectralPredictApp:
             values=[], state='readonly', width=14
         )
         self._set_combo.pack(side='left', padx=(0, 5))
-        self._set_combo.bind('<<ComboboxSelected>>', lambda e: self._update_set_count_label())
+        self._set_combo.bind('<<ComboboxSelected>>', self._on_set_combo_selected)
 
         ttk.Button(sets_frame, text="New", command=self._on_set_new,
                    width=5).pack(side='left', padx=(0, 3))
@@ -6447,13 +6448,23 @@ class SpectralPredictApp:
 
         ttk.Separator(sets_frame, orient='vertical').pack(side='left', fill='y', padx=5)
 
-        ttk.Button(sets_frame, text="Exclude Set", command=self._on_set_exclude,
-                   width=10).pack(side='left', padx=(5, 3))
+        ttk.Button(sets_frame, text="Exclude Selected", command=self._on_set_exclude,
+                   width=14).pack(side='left', padx=(5, 3))
         ttk.Button(sets_frame, text="Keep Only", command=self._on_set_keep_only,
                    width=9).pack(side='left', padx=(0, 10))
 
         self._set_count_label = ttk.Label(sets_frame, text="", style='Caption.TLabel')
         self._set_count_label.pack(side='left', padx=(5, 0))
+
+        ttk.Separator(sets_frame, orient='vertical').pack(side='left', fill='y', padx=5)
+
+        ttk.Label(sets_frame, text="Sample:").pack(side='left', padx=(0, 3))
+        self._sample_combo = ttk.Combobox(
+            sets_frame, textvariable=self._current_sample_var,
+            values=[], state='readonly', width=20,
+        )
+        self._sample_combo.pack(side='left', padx=(0, 5))
+        self._sample_combo.bind('<<ComboboxSelected>>', self._on_sample_combo_selected)
 
         # Create notebook for sub-tabs
         self.explore_notebook = ttk.Notebook(content_frame)
@@ -6952,6 +6963,11 @@ class SpectralPredictApp:
             self.explore_color_combo['values'] = new_options
             if self.explore_color_var.get() not in new_options:
                 self.explore_color_var.set('None')
+
+        if hasattr(self, '_sample_combo') and self.X is not None:
+            self._sample_combo['values'] = list(self.X.index)
+            if self._current_sample_var.get() not in self.X.index:
+                self._current_sample_var.set('')
 
         # Clear and regenerate each plot frame (with error handling for each)
         try:
@@ -9323,6 +9339,7 @@ class SpectralPredictApp:
         scope_options = ["Active Only", "All Spectra"]
         if self.sample_set_names:
             scope_options += self.sample_set_names
+        scope_options += list(self.X.index)
         dialog._scope_var = tk.StringVar(value="Active Only")
         dialog._scope_combo = ttk.Combobox(calc_frame, textvariable=dialog._scope_var,
                                             values=scope_options, state='readonly', width=18)
@@ -9653,10 +9670,15 @@ class SpectralPredictApp:
             if self.active_indices is not None:
                 mask &= self.X.index.isin(self.active_indices)
             return mask
-        if self.sample_sets is not None:
+        # Named set?
+        if self.sample_sets is not None and scope in self.sample_sets.unique():
             mask = (self.sample_sets == scope).values
             mask &= ~self.X.index.isin(self.excluded_spectra)
             return mask
+        # Single sample name?
+        if scope in self.X.index:
+            mask = self.X.index == scope
+            return mask.values if hasattr(mask, 'values') else np.array(mask)
         return np.ones(len(self.X), dtype=bool)
 
     def _get_peak_calc_data(self, source_tab: str, scope: str = "Active Only"):
@@ -10151,8 +10173,11 @@ class SpectralPredictApp:
         self.sample_set_names = []
         self._set_assign_mode.set(False)
         self._current_set_name.set('')
+        self._current_sample_var.set('')
         if hasattr(self, '_set_combo'):
             self._set_combo['values'] = []
+        if hasattr(self, '_sample_combo'):
+            self._sample_combo['values'] = []
         if hasattr(self, '_set_count_label'):
             self._set_count_label.config(text="")
 
@@ -10230,9 +10255,32 @@ class SpectralPredictApp:
             self._set_combo['values'] = self.sample_set_names
         self._update_set_count_label()
 
+    def _on_set_combo_selected(self, _event=None):
+        """Selecting a set clears any active single-sample override."""
+        if self._current_sample_var.get():
+            self._current_sample_var.set('')
+        self._update_set_count_label()
+
+    def _on_sample_combo_selected(self, _event=None):
+        """Selecting a single sample overrides the active set selection."""
+        sample = self._current_sample_var.get()
+        if not sample:
+            self._update_set_count_label()
+            return
+        if self._current_set_name.get():
+            self._current_set_name.set('')
+        if self._set_assign_mode.get():
+            self._set_assign_mode.set(False)
+            self._on_assign_mode_toggled()
+        self._update_set_count_label()
+
     def _update_set_count_label(self, *args):
         """Show 'N members' for the currently selected set."""
         if not hasattr(self, '_set_count_label'):
+            return
+        sample = self._current_sample_var.get()
+        if sample and self.X is not None and sample in self.X.index:
+            self._set_count_label.config(text="Single sample override")
             return
         name = self._current_set_name.get()
         if not name or self.sample_sets is None:
@@ -10262,51 +10310,37 @@ class SpectralPredictApp:
             return f"Added {sample_idx} to set '{name}'"
 
     def _on_set_exclude(self):
-        """Add all members of the selected set to excluded_spectra."""
-        name = self._current_set_name.get()
-        if not name or self.sample_sets is None:
-            messagebox.showinfo("No Set", "Select a set first.")
+        """Exclude members of the selected set or the selected single sample."""
+        indices = self._get_target_indices()
+        if indices is None:
             return
 
-        members = self.sample_sets[self.sample_sets == name].index.tolist()
-        if not members:
-            messagebox.showinfo("Empty Set", f"Set '{name}' has no members.")
-            return
-
-        for idx in members:
+        for idx in indices:
             self.excluded_spectra.add(idx)
 
         self._update_exclusion_status()
         self._update_tab3_exclusion_status()
         if self.X is not None:
             self._regenerate_explore_spectra_only()
-        messagebox.showinfo("Set Excluded",
-                            f"Excluded {len(members)} members of set '{name}'.")
+        label = len(indices)
+        messagebox.showinfo("Excluded", f"Excluded {label} sample{'s' if label != 1 else ''}.")
 
     def _on_set_keep_only(self):
-        """Exclude everything NOT in the selected set."""
-        name = self._current_set_name.get()
-        if not name or self.sample_sets is None:
-            messagebox.showinfo("No Set", "Select a set first.")
+        """Exclude everything NOT in the selected set or sample."""
+        indices = self._get_target_indices()
+        if indices is None:
             return
 
-        members = set(
-            self.sample_sets[self.sample_sets == name].index.tolist())
-        if not members:
-            messagebox.showinfo("Empty Set",
-                                f"Set '{name}' has no members to keep.")
-            return
-
+        members = set(indices)
         non_members = [idx for idx in self.X.index if idx not in members]
         if not non_members:
-            messagebox.showinfo("All In Set",
-                                "All samples are already in this set.")
+            messagebox.showinfo("All Included",
+                                "All samples are already in the target.")
             return
 
         if not messagebox.askyesno(
             "Keep Only",
-            f"This will exclude {len(non_members)} samples "
-            f"not in set '{name}'.\nContinue?"
+            f"This will exclude {len(non_members)} samples.\nContinue?"
         ):
             return
 
@@ -10317,6 +10351,26 @@ class SpectralPredictApp:
         self._update_tab3_exclusion_status()
         if self.X is not None:
             self._regenerate_explore_spectra_only()
+
+    def _get_target_indices(self):
+        """Return target sample indices from the set selector or sample dropdown.
+
+        Returns None if nothing is selected (and shows a warning).
+        """
+        # Single sample takes priority
+        sample = self._current_sample_var.get()
+        if sample and sample in self.X.index:
+            return [sample]
+        # Fall back to named set
+        name = self._current_set_name.get()
+        if name and self.sample_sets is not None:
+            members = self.sample_sets[self.sample_sets == name].index.tolist()
+            if members:
+                return members
+            messagebox.showinfo("Empty Set", f"Set '{name}' has no members.")
+            return None
+        messagebox.showinfo("No Selection", "Select a sample or a set first.")
+        return None
 
     def _on_assign_mode_toggled(self):
         """Update info labels when assign mode is toggled."""
