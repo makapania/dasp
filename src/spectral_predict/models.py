@@ -378,7 +378,7 @@ def build_model(model_name, params, task_type='regression'):
     """
     if task_type == "one_class":
         # One-class model names go to build_one_class_model. Anything else
-        # is a typo/registry mismatch and must raise loudly — silently
+        # is a typo/registry mismatch and must raise loudly ΓÇö silently
         # falling back to classification produces wrong-estimator-type
         # results that are hard to diagnose downstream. If you actually
         # need a classification surrogate (e.g. for variable-selection
@@ -1776,6 +1776,8 @@ def get_feature_importances(model, model_name, X, y):
     if isinstance(model, Pipeline):
         if 'model' in model.named_steps:
             model = model.named_steps['model']
+        elif model_name == "PLS-DA" and 'pls' in model.named_steps:
+            model = model.named_steps['pls']
         else:
             model = model.steps[-1][1]
 

@@ -4,6 +4,43 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-19 — PLS-DA classification wavelength importance fix
+
+**Bug:** After running a PLS-DA classification model in Model Development, no wavelength importance figure was displayed. Regression PLS and one-class models showed it correctly. Non-PLS-DA classification (LightGBM, RandomForest, etc.) also worked.
+
+**Root cause (two interacting bugs):**
+
+1. `get_feature_importances()` (`models.py:1802-1808`): When `self.refined_model` is the full PLS-DA pipeline `[imbalance?, pls, scaler, lr]`, the Pipeline unwrapping logic checked for `'model'` in `named_steps` (not found), then took `steps[-1][1]` (LogisticRegression). It then called `compute_vip(LogisticRegression, X, y)` which failed silently because LR lacks `x_weights_`/`x_scores_`.
+
+2. PLS-DA preprocessor extraction (`gui:37086-37094`): `pipe_steps[:-2]` removed scaler+lr but kept the PLS step and any imbalance step. When `_plot_wavelength_importance()` applied this preprocessor, it collapsed data from wavelength space (hundreds of features) to PLS score space (n_components), causing dimension mismatch with wavelengths.
+
+**Fix:**
+- `models.py:1805`: Added `elif model_name == "PLS-DA" and "pls" in model.named_steps: model = model.named_steps["pls"]` before the generic fallback.
+- `gui:37087`: Replaced `pipe_steps[:-2]` with set-based filtering that excludes `{'pls', 'scaler', 'lr', 'imbalance'}` — only true spectral preprocessing steps survive.
+- `gui:33071-33080`: Removed the old wavelength-importance mismatch heuristics (trim wavelengths / fall back to index positions). The figure now only renders when `len(importances) == len(refined_wavelengths)`. A mismatch is treated as a feature-space bug, not something to guess around.
+
+**Failed approach (same session):** An intermediate attempt built `Pipeline(_preproc_steps)` from bare transformer objects (`[s for n, s in pipe_steps ...]`) instead of `(name, transformer)` tuples. sklearn accepts that constructor but `fit()` fails with `TypeError: cannot unpack non-iterable <Transformer> object`. The fix must preserve the `(name, step)` tuples.
+
+**Architecture note:** The PLS-DA pipeline structure `[pls, scaler, lr]` is unique among classification models. Other models either have `'model'` as a named step (tree models, SVM, MLP) or have a single step. Only PLS-DA uses multi-step pipelines without a `'model'` step.
+
+**Contract clarified:** Wavelength-importance figures must obey a strict one-to-one mapping: only wavelengths actually used by the fitted model may be shown, and the importance values must come directly from that same fitted model/feature space. Any count mismatch means the code mixed feature spaces.
+
+**Tests:** `tests/test_plsda_importance.py` — 5 parametrized tests covering: pipeline extraction, VIP parity with direct compute, feature-space dimensionality, bare PLSTransformer, and `'model'`-step pipeline.
+
+---
+
+## 2026-04-19 — LOO cancellation UI bug fix
+
+**Bug:** When user cancels at the LOO / high-compute-cost warning dialog in `_run_analysis()`, the code correctly avoids starting the analysis thread (all 5 `return` paths were correct), but the UI was left in a misleading "running" state. The Progress tab was already switched to, progress labels said "Analysis in progress...", the running-figure animation was spinning, and only the pause/resume/stop buttons got reset to idle. This made it look like the analysis was running despite the cancellation.
+
+**Root cause:** `_run_analysis()` sets up all the "running" UI state (tab switch at 22702, progress labels at 22706-22708, animation at 22717, buttons at 22731) *before* the cost-warning dialogs fire (22794+). The cancellation `return` paths only called `_update_search_buttons('idle')` which only touches the 3 control buttons — nothing else.
+
+**Fix:** Added `_cancel_search_ui(reason)` helper that also stops the running-figure animation, resets progress_status to "Ready", shows the cancellation reason in progress_info, and clears best_model_info / time_estimate. All 5 cancellation points in `_run_analysis()` now call this instead of bare `_update_search_buttons('idle')`.
+
+**Files changed:** `spectral_predict_gui_optimized.py` (lines ~22619-22637 new helper, 5 call sites updated).
+
+---
+
 ## 2026-04-19 — Auto Bone FTIR index extraction (main branch)
 
 **Feature:** Added fixed-method Auto Bone FTIR mode to Explore-tab Peak Calculator. Produces 10 diagenesis indices (IRSF, PO4/CO3/AmideI positions & intensities, Am_P, C_P, OrgInorg) via Kontopoulos et al. 2018 method.

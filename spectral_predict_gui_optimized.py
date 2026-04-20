@@ -22616,6 +22616,26 @@ class SpectralPredictApp:
             self.resume_btn.config(state='normal')
             self.stop_btn.config(state='normal')
 
+    def _cancel_search_ui(self, reason="Cancelled"):
+        """Reset all UI elements after a pre-search cancellation.
+
+        Undoes the visual state set up in _run_analysis before the LOO / cost
+        warning dialogs fired (tab switch, progress labels, running animation).
+        Without this the UI stays in a misleading 'running' appearance even
+        though no thread was launched.
+        """
+        self._update_search_buttons('idle')
+        if hasattr(self, 'running_figure'):
+            self.running_figure.stop_animation()
+        if hasattr(self, 'progress_status'):
+            self.progress_status.config(text="Ready")
+        if hasattr(self, 'progress_info'):
+            self.progress_info.config(text=reason)
+        if hasattr(self, 'best_model_info'):
+            self.best_model_info.config(text="(none)")
+        if hasattr(self, 'time_estimate_label'):
+            self.time_estimate_label.config(text="")
+
     def _run_analysis(self):
         """Run analysis in background thread."""
         # Validate data is loaded
@@ -22728,7 +22748,7 @@ class SpectralPredictApp:
                     f"Use '{auto_label}' as the clean/inlier class?"
                 )
                 if not confirm:
-                    self._update_search_buttons('idle')
+                    self._cancel_search_ui("Cancelled — no inlier class confirmed")
                     return
                 resolved_inlier_label = auto_label
             else:
@@ -22779,7 +22799,7 @@ class SpectralPredictApp:
                     f"{stochastic_note}\n\nContinue anyway?",
                     icon='warning',
                 ):
-                    self._update_search_buttons('idle')
+                    self._cancel_search_ui("Cancelled — compute cost too high")
                     return
             elif total_fits > 10_000:
                 if not messagebox.askyesno(
@@ -22788,7 +22808,7 @@ class SpectralPredictApp:
                     f"This may take a while."
                     f"{stochastic_note}\n\nContinue?",
                 ):
-                    self._update_search_buttons('idle')
+                    self._cancel_search_ui("Cancelled — compute cost too high")
                     return
             elif stochastic_note:
                 # Low fit count but stochastic + LOO — still warn
@@ -22799,7 +22819,7 @@ class SpectralPredictApp:
                     "nearly identical data, amplifying random seed variance.\n\n"
                     "Continue anyway?",
                 ):
-                    self._update_search_buttons('idle')
+                    self._cancel_search_ui("Cancelled — LOO with stochastic models")
                     return
 
         # --- LOO + classification: guard against single-sample minority class ---
@@ -22825,7 +22845,7 @@ class SpectralPredictApp:
                             "training fold contains all classes.\n\n"
                             "Use K-Fold instead, or add more samples."
                         )
-                        self._update_search_buttons('idle')
+                        self._cancel_search_ui("Cancelled — LOO not possible for this data")
                         return
 
         # Run in thread
@@ -33048,27 +33068,14 @@ F1 Score:  {f1:.4f}
 
             wavelengths = np.array(self.refined_wavelengths)
 
-            # Handle wavelength/feature dimension mismatch (common with derivative preprocessing)
             if len(importances) != len(wavelengths):
-                # Preprocessing (likely derivatives) changed feature count
-                # Derivatives typically trim equally from both ends
-                diff = len(wavelengths) - len(importances)
-                if diff > 0:
-                    trim_start = diff // 2
-                    trim_end = diff - trim_start
-                    if trim_end > 0:
-                        wavelengths = wavelengths[trim_start:-trim_end]
-                    else:
-                        wavelengths = wavelengths[trim_start:]
-                    print(f"Adjusted wavelengths: trimmed {diff} values to match {len(importances)} features")
-                else:
-                    # More importances than wavelengths - shouldn't happen, use indices as fallback
-                    print(f"Warning: More features ({len(importances)}) than wavelengths ({len(wavelengths)}), using indices")
-                    wavelengths = np.arange(len(importances))
-
-            # Final check - if still mismatched, cannot proceed
-            if len(importances) != len(wavelengths):
-                print(f"Cannot resolve mismatch: {len(importances)} importances vs {len(wavelengths)} wavelengths")
+                print(
+                    "Cannot plot wavelength importance: "
+                    f"model returned {len(importances)} feature importances for "
+                    f"{len(wavelengths)} plotted wavelengths. "
+                    "This indicates a feature-space mismatch between the fitted model "
+                    "and the wavelength list used for plotting."
+                )
                 return
 
             # Store data for click handling and table
@@ -37064,10 +37071,14 @@ External Validation Performance (n={n_val}):
                 else:
                     print("DEBUG: No preprocessor for raw preprocessing")
             elif model_name == "PLS-DA" and task_type == "classification":
-                # For PLS-DA: preprocessing steps are before PLS, PLS+LR are the model
-                if len(pipe_steps) > 2:  # Has preprocessing + PLS + LR
-                    final_preprocessor = Pipeline(pipe_steps[:-2])  # All steps except PLS and LR
-                    final_preprocessor.fit(X_raw)  # Fit on raw data
+                _PLS_DA_MODEL_STEPS = {'pls', 'scaler', 'lr', 'imbalance'}
+                _preproc_steps = [
+                    (n, s) for n, s in pipe_steps
+                    if n not in _PLS_DA_MODEL_STEPS
+                ]
+                if _preproc_steps:
+                    final_preprocessor = Pipeline(_preproc_steps)
+                    final_preprocessor.fit(X_raw)
                     print("DEBUG: Fitting preprocessor on subset data (PLS-DA)")
                 else:
                     final_preprocessor = None
