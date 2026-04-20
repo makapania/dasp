@@ -2790,7 +2790,7 @@ class SpectralPredictApp:
         self.sample_set_names = []       # ordered list of set names
         self._set_assign_mode = tk.BooleanVar(value=False)
         self._current_set_name = tk.StringVar(value='')
-        self._current_sample_var = tk.StringVar(value='')
+        self._current_sample_var = tk.StringVar(value='All Samples')
 
         # Explore tab baseline correction controls
         self._explore_polybl_degree = tk.IntVar(value=2)
@@ -6965,9 +6965,9 @@ class SpectralPredictApp:
                 self.explore_color_var.set('None')
 
         if hasattr(self, '_sample_combo') and self.X is not None:
-            self._sample_combo['values'] = list(self.X.index)
-            if self._current_sample_var.get() not in self.X.index:
-                self._current_sample_var.set('')
+            self._sample_combo['values'] = ['All Samples'] + list(self.X.index)
+            if self._current_sample_var.get() not in self._sample_combo['values']:
+                self._current_sample_var.set('All Samples')
 
         # Clear and regenerate each plot frame (with error handling for each)
         try:
@@ -10173,7 +10173,7 @@ class SpectralPredictApp:
         self.sample_set_names = []
         self._set_assign_mode.set(False)
         self._current_set_name.set('')
-        self._current_sample_var.set('')
+        self._current_sample_var.set('All Samples')
         if hasattr(self, '_set_combo'):
             self._set_combo['values'] = []
         if hasattr(self, '_sample_combo'):
@@ -10257,14 +10257,14 @@ class SpectralPredictApp:
 
     def _on_set_combo_selected(self, _event=None):
         """Selecting a set clears any active single-sample override."""
-        if self._current_sample_var.get():
-            self._current_sample_var.set('')
+        if self._current_sample_var.get() != 'All Samples':
+            self._current_sample_var.set('All Samples')
         self._update_set_count_label()
 
     def _on_sample_combo_selected(self, _event=None):
         """Selecting a single sample overrides the active set selection."""
         sample = self._current_sample_var.get()
-        if not sample:
+        if sample == 'All Samples':
             self._update_set_count_label()
             return
         if self._current_set_name.get():
@@ -10279,7 +10279,7 @@ class SpectralPredictApp:
         if not hasattr(self, '_set_count_label'):
             return
         sample = self._current_sample_var.get()
-        if sample and self.X is not None and sample in self.X.index:
+        if sample != 'All Samples' and self.X is not None and sample in self.X.index:
             self._set_count_label.config(text="Single sample override")
             return
         name = self._current_set_name.get()
@@ -10359,7 +10359,7 @@ class SpectralPredictApp:
         """
         # Single sample takes priority
         sample = self._current_sample_var.get()
-        if sample and sample in self.X.index:
+        if sample != 'All Samples' and sample in self.X.index:
             return [sample]
         # Fall back to named set
         name = self._current_set_name.get()

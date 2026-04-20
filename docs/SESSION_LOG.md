@@ -26,6 +26,7 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 - **Stale markers on mode switch**: Switching to auto mode left manual plot markers visible. Fixed by clearing `_found_positions` and calling `_remove_peak_markers()` in both `_peak_calc_mode_changed()` (auto branch) and `_peak_calc_run_auto()`.
 - **Auto mode raw-data blocker**: Review found that `_peak_calc_run_auto()` was asking for `_get_peak_calc_data("raw", scope)`, but that helper's raw branch still calls `_apply_transformation(self.X.values)`. Fixed by adding `_get_peak_calc_scope_mask()` and having auto mode filter `self.X.values` directly so the fixed-method workflow never goes through the transform-capable Explore raw path.
 - **Single-sample override UX**: Added sample-name scope entries to the Peak Calculator and a `Sample:` dropdown next to Explore Sets. The simplest clean behavior was to treat a selected sample as an explicit set-of-one override: selecting a sample clears the active set selection, disables assign mode, and reuses the existing Exclude / Keep Only actions against that single index. This avoids parallel set+sample state ambiguity.
+- **Reset path for override**: The Explore `Sample:` dropdown now includes an explicit `All Samples` entry as the default/reset state. Without this, once a single sample was chosen there was no clear UI path back to the non-override state.
 
 **Files changed:**
 - `src/spectral_predict/peak_calculator.py` — added ~130 lines: backend functions + constants
