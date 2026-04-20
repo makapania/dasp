@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-19 by Claude (Opus 4.7) — One-class model configuration parity MERGED TO MAIN (commits `49cc215` → `5abe75e`, 6 commits ahead of `origin/main`, not yet pushed). Five collapsible hyperparameter cards added to Tab 4C using old-style BooleanVar + Checkbutton pattern. Backend `_resolve_one_class_model_grids()` helper preserves curated defaults when cards are untouched, uses Cartesian product only for customized models. Bayesian one-class path unchanged. GLM-5.1 adversarial review caught two bugs before merge: (a) five relative imports `from .contamination import ...` that would ImportError when any card was customized (fixed in `3641c78`); (b) pre-existing main-branch bug from tooltip PR `fd376b4` (2026-04-17) where `self.inlier_class_label` was silently reassigned from StringVar to Label widget, breaking `.get()` calls in 18+ sites — cherry-picked to main as standalone hotfix `59124ff` before the feature merge. 61/61 OC tests pass (54 existing + 7 new `TestOneClassModelConfigParity` including reversion-to-default round-trip). See `docs/SESSION_LOG.md` 2026-04-19 entries for full bug traces. Prior session notes below.
+> **Last updated:** 2026-04-19 by GLM-5.1 — Analysis Subset V1 implemented on branch `glm/analysis-subset-v1` (NOT yet merged). New pure-logic module `src/spectral_predict/analysis_subset.py` with 41 tests. Analysis tab has "Analysis Subset" card above Holdout Validation. Metadata-only dialog with categorical multi-select. Subset provenance stored in `last_training_config`. Mismatch warnings in Model Development. One-class guardrail blocks when subset removes all inlier samples. C2 missing-column safe handling via `_refresh_active_group_indices`. All changes uncommitted in worktree. 41/41 analysis_subset tests + 61/61 OC regression tests pass. See `docs/SESSION_LOG.md` 2026-04-19 entry for architecture decisions and gotchas.
 
 > **Previously:** 2026-04-17 — experimental Python 3.12 PyInstaller build path complete + verified. Produces `dist/SpectralPredict-py312/SpectralPredict-py312.exe` (~1.4 GB folder) + `dist/installer/SpectralPredict_Setup_py312_0.4.0.exe` (299 MB single-file Inno Setup installer). New build guide at `docs/BUNDLED_APP_BUILD_GUIDE_PY312.md`. User-verified that LightGBM analysis runs without the historical fork-bomb crash. Threading backend in frozen mode (loky spawn broken on all windowed bundles regardless of Python version). Two pre-existing bugs surfaced + fixed: specio import name (`from specio import` never worked on .venv312 — was `specio_py310`), Analysis Config tab grid-row collisions (separator overlapping spinbox; wl checkbox overlapping info label). Post-build pandas self-repair added to build_installer_py312.py for the intermittent PyInstaller TOC corruption (pandas/util/__init__.py getting overwritten with packaging/_structures.py content). LOKY_MAX_CPU_COUNT env var now set in the GUI entry point (frozen-only) to suppress a brief cmd.exe console flash from loky's CPU-count subprocess probe. Pytest focused subset (10 test files covering all modified modules): 285/285 passed. The 3.11 production build path is UNCHANGED.
 
@@ -102,6 +102,7 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 
 ## What Works
 
+- [x] **Analysis Subset V1** (branch `glm/analysis-subset-v1`, uncommitted): Pure-logic module `src/spectral_predict/analysis_subset.py` with 41 tests. Analysis tab card, metadata-only dialog with categorical multi-select, subset provenance in training config, mismatch warnings, one-class guardrail, C2 missing-column safe handling.
 - [x] One-class model implementations in `src/spectral_predict/contamination.py`
 - [x] Bayesian optimization for one-class (`unified_bayesian.py` handles `task_type='one_class'`)
 - [x] Grid search for one-class (`run_one_class_search` in `search.py`)
@@ -189,3 +190,11 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 - **CV Strategy Phase 2: NSGA-II multi-objective search CV strategy support.** Currently falls back to K-fold with a logged warning when non-kfold strategy is selected. Needs native LOO/Repeated K-fold support.
 
 - **One-class search: Add `training_config` to result rows.** Regression/classification grid search writes `training_config` (with `cv_strategy`, `folds`, `cv_n_repeats`) but one-class search does not. This means one-class saved models don't preserve the CV strategy used during training.
+
+## Analysis Subset V1 — Known Limitations / Risk (2026-04-19)
+
+Blocking bugs (stale `active_indices` after dataset replacement or row deletion) fixed in this session. Remaining deferrals:
+
+- **Integration-level GUI tests not yet written:** reload-with-subset, row-delete-with-subset, revert-after-column-delete, and mismatch-warning text. Pure-logic coverage (41 tests in `test_analysis_subset.py`) is solid, but no automated test drives the GUI through these multi-step scenarios.
+- **Manual GUI verification checklist still pending:** end-to-end validation that the Analysis-tab card, data-viewer highlighting, provenance in training config, and one-class guardrail all behave correctly after each dataset-replacement path.
+- **`_use_for_analysis()` does not carry `combined_metadata_df`** from data sources. If a user loads data via Data Management → Use for Analysis, metadata columns may be absent, causing the subset dialog to show no columns. This is a pre-existing limitation of the data-source path, not introduced by Analysis Subset V1.

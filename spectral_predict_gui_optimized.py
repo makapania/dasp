@@ -114,6 +114,18 @@ except ImportError:
 # Import search controller for pause/resume/stop
 from spectral_predict.search_controller import SearchController
 
+# Analysis subset pure-logic helpers
+from spectral_predict.analysis_subset import (
+    compute_matches,
+    format_summary,
+    is_categorical_column,
+    build_training_subset_metadata,
+    check_one_class_inlier_guard,
+    classify_column_type,
+    get_unique_non_null_values,
+    build_filter_dict,
+)
+
 # Import interference removal methods
 try:
     from spectral_predict.interference import (
@@ -10312,11 +10324,11 @@ class SpectralPredictApp:
         # Active group controls
         ttk.Separator(control_frame, orient='vertical').pack(side='left', fill='y', padx=5)
 
-        ttk.Button(control_frame, text="Set Active Group...",
+        ttk.Button(control_frame, text="Set Analysis Subset...",
                    command=self._show_active_group_dialog,
                    style='Modern.TButton').pack(side='left', padx=(5, 2))
 
-        self.clear_group_btn = ttk.Button(control_frame, text="Clear Group",
+        self.clear_group_btn = ttk.Button(control_frame, text="Clear Subset",
                                           command=self._clear_active_group,
                                           state='disabled',
                                           style='Modern.TButton')
@@ -10760,6 +10772,51 @@ class SpectralPredictApp:
             padx=10, pady=4
         )
         row += 1
+
+        # === Analysis Subset Configuration ===
+        self._create_section_header(content_frame, "Analysis Subset", row=row, columnspan=2)
+        row += 1
+
+        subset_card_outer, subset_card = self._create_card(
+            content_frame,
+            title="Analysis Subset",
+            subtitle="Restricts analysis to a metadata-defined cohort",
+        )
+        subset_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        subset_frame = tk.Frame(subset_card, bg=self.colors['card_bg'])
+        subset_frame.pack(fill='both', expand=True)
+
+        self.analysis_subset_status_label = ttk.Label(
+            subset_frame,
+            text="All samples",
+            foreground=self.colors['accent'],
+            font=('Segoe UI', 11, 'bold'),
+        )
+        self.analysis_subset_status_label.pack(anchor='w', pady=(0, 10))
+
+        subset_btn_frame = ttk.Frame(subset_frame)
+        subset_btn_frame.pack(fill='x', pady=(0, 5))
+        ttk.Button(
+            subset_btn_frame,
+            text="Define Subset...",
+            command=self._show_active_group_dialog,
+            style='Modern.TButton',
+        ).pack(side='left', padx=(0, 5))
+        self.analysis_subset_clear_btn = ttk.Button(
+            subset_btn_frame,
+            text="Clear Subset",
+            command=self._clear_active_group,
+            state='disabled',
+            style='Modern.TButton',
+        )
+        self.analysis_subset_clear_btn.pack(side='left', padx=(0, 5))
+
+        ttk.Label(
+            subset_frame,
+            text="Affects: analysis, validation-set creation, model refinement",
+            style='Caption.TLabel',
+        ).pack(anchor='w', pady=(5, 0))
 
         # === Analysis Options ===
         self._create_section_header(content_frame, "Analysis Options", row=row, columnspan=2)
@@ -16853,6 +16910,9 @@ class SpectralPredictApp:
                 self.ref = source.ref
                 messagebox.showinfo("Success", f"Source '{source.name}' loaded for analysis")
 
+        # Refresh analysis subset cache (dataset replaced)
+        self._refresh_active_group_indices()
+
         # Update plots in Tab 1 if needed
         if hasattr(self, 'plot_canvas') and self.plot_canvas:
             self._update_spectral_plots()
@@ -16994,6 +17054,7 @@ class SpectralPredictApp:
             self.X = self.data_source_manager.merged_dataset.X
             self.y = self.data_source_manager.merged_dataset.y
             self.ref = self.data_source_manager.merged_dataset.ref
+            self._refresh_active_group_indices()
             messagebox.showinfo("Success", "Merged dataset loaded for analysis")
             # Switch to Import & Preview tab
             self.notebook.select(1)
@@ -17234,6 +17295,9 @@ class SpectralPredictApp:
             self.X = X_filtered
             self.y = y_filtered
             self.ref = ref_filtered
+
+            # Recompute active Analysis Subset against new dataset
+            self._refresh_active_group_indices()
 
             messagebox.showinfo("Filter Applied",
                 f"Filtered from {original_samples} to {len(self.X)} samples")
@@ -17955,6 +18019,9 @@ class SpectralPredictApp:
 
             # Apply wavelength filtering
             self._apply_wavelength_filter()
+
+            # Refresh analysis subset cache (dataset replaced)
+            self._refresh_active_group_indices()
 
             # Auto-detect and display task type
             if hasattr(self, 'task_type_detection_label') and self.task_type_detection_label:
@@ -21706,6 +21773,9 @@ class SpectralPredictApp:
             self.data_sources = []
             self.source_group_names = []
             self.use_custom_group_names = False
+            # Clear Analysis Subset state as well (no dataset to match against)
+            self.active_group_filter = None
+            self._refresh_active_group_indices()
             self._update_data_sources_display()
             self.tab1_status.config(text="Data cleared. Ready to load new data.")
 
@@ -25503,7 +25573,7 @@ class SpectralPredictApp:
                 y_filtered = self.y[ag_mask]
                 n_inactive = len(self.X) - len(X_filtered)
                 self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
-                    f"\n[i] Active group: {len(X_filtered)} samples ({n} filtered out)\n"))
+                    f"\n[i] Analysis Subset: {len(X_filtered)} samples ({n} filtered out)\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
             else:
                 X_filtered = self.X
@@ -25837,6 +25907,19 @@ class SpectralPredictApp:
                     self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
 
+                # One-class guardrail: block if subset removes all inlier samples
+                oc_guard_msg = check_one_class_inlier_guard(y_filtered, inlier_label)
+                if oc_guard_msg:
+                    self._log_progress(f"ERROR: {oc_guard_msg}")
+                    self.root.after(0, lambda msg=oc_guard_msg: messagebox.showerror(
+                        "No Inlier Samples", msg))
+                    self.root.after(0, lambda: self.progress_status.config(
+                        text="[X] Analysis failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
+                    return
+
                 opt_method_oc = self.optimization_method.get()
 
                 if opt_method_oc == 'unified':
@@ -26066,6 +26149,7 @@ class SpectralPredictApp:
                     'validation_count': n_validation,
                     'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
                 }
+                self.last_training_config.update(self._get_analysis_subset_training_metadata())
 
                 # Compute validation metrics for one-class if enabled.
                 # Delegates to compute_validation_metrics_for_top_one_class_models
@@ -26773,6 +26857,7 @@ class SpectralPredictApp:
                 'validation_count': n_validation,
                 'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
             }
+            self.last_training_config.update(self._get_analysis_subset_training_metadata())
             print(f"\n> Stored training configuration:")
             print(f"  Calibration samples: {self.last_training_config['n_samples_used']}")
             print(f"  Excluded samples: {self.last_training_config['excluded_count']}")
@@ -29668,7 +29753,7 @@ For detailed documentation, see the User Guide.
             status_parts = [f"Showing {n_displayed} samples × {n_total_wavelengths} wavelengths"]
             if self.active_indices is not None:
                 n_active = len(self.active_indices)
-                status_parts.append(f"{n_active} in active group (grey = inactive)")
+                status_parts.append(f"{n_active} in analysis subset (grey = inactive)")
             if n_excluded > 0 and not show_excluded:
                 status_parts.append(f"{n_excluded} excluded samples hidden")
             elif n_excluded > 0 and show_excluded:
@@ -29891,6 +29976,9 @@ For detailed documentation, see the User Guide.
             self.data_viewer_modified = True
             self.revert_data_btn.config(state='normal')
 
+            # Recompute active group membership (metadata may have changed)
+            self._refresh_active_group_indices()
+
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -29934,9 +30022,8 @@ For detailed documentation, see the User Guide.
         self.active_group_filter = state.get('active_group_filter')
         if self.active_group_filter:
             self.active_group_filter = self.active_group_filter.copy()
-        self.active_indices = state.get('active_indices')
-        if self.active_indices is not None:
-            self.active_indices = self.active_indices.copy()
+        # Recompute indices from filter rather than trusting cached set
+        self._refresh_active_group_indices()
         self._update_set_combo()
 
         # Refresh display (skip re-snapshotting)
@@ -30042,6 +30129,9 @@ For detailed documentation, see the User Guide.
             elif self.ref is not None and col_name in self.ref.columns:
                 self.ref = self.ref.drop(columns=[col_name])
 
+            # Recompute active subset BEFORE rendering (may have deleted the filter column)
+            self._refresh_active_group_indices()
+
             # Refresh display
             self._populate_data_viewer()
             self.data_viewer_status.config(text=f"> Deleted column '{col_name}'")
@@ -30126,6 +30216,9 @@ For detailed documentation, see the User Guide.
             elif self.ref is not None and col_name in self.ref.columns:
                 self.ref = self.ref.drop(columns=[col_name])
 
+            # Recompute active subset BEFORE rendering (may have deleted the filter column)
+            self._refresh_active_group_indices()
+
             self._populate_data_viewer()
             self.data_viewer_status.config(text=f"> Deleted column '{col_name}'")
 
@@ -30170,6 +30263,9 @@ For detailed documentation, see the User Guide.
 
             # Remove from excluded set
             self.excluded_spectra = self.excluded_spectra - set(indices_to_delete)
+
+            # Refresh analysis subset cache (rows removed)
+            self._refresh_active_group_indices()
 
             # Remove deleted samples from validation set if any
             if hasattr(self, 'validation_indices') and self.validation_indices:
@@ -30277,22 +30373,6 @@ For detailed documentation, see the User Guide.
 
     # ========== ACTIVE GROUP METHODS ==========
 
-    def _get_active_group_columns(self) -> list[str]:
-        """Return list of columns available for active group filtering (Target + metadata)."""
-        columns = []
-        # Target column
-        if self.y is not None:
-            target_name = self.target_column.get() if self.target_column.get() else "Target"
-            columns.append(target_name)
-        # Metadata columns from combined format
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            columns.extend(list(self.combined_metadata_df.columns))
-        # Metadata columns from separate reference file
-        elif self.ref is not None:
-            target_name = self.target_column.get() if self.target_column.get() else "Target"
-            columns.extend([c for c in self.ref.columns if c != target_name])
-        return columns
-
     def _get_column_series(self, col_name: str) -> pd.Series | None:
         """Return a pandas Series for the named column, aligned to self.X index."""
         target_name = self.target_column.get() if self.target_column.get() else "Target"
@@ -30310,78 +30390,26 @@ For detailed documentation, see the User Guide.
         series = self._get_column_series(col)
         if series is None:
             return set()
+        filter_def: dict = {"column": col, "condition": cond, "value": val, "value2": val2}
+        return compute_matches(series.to_frame(), filter_def)
 
-        if cond == "has value":
-            mask = series.notna()
-            if pd.api.types.is_string_dtype(series.dtype):
-                mask = mask & (series.astype(str).str.strip() != '')
-            return set(series.index[mask])
-
-        if cond == "contains":
-            mask = series.astype(str).str.contains(str(val), case=False, na=False)
-            return set(series.index[mask])
-
-        # Try numeric comparison
-        numeric = pd.to_numeric(series, errors='coerce')
-        try:
-            val_num = float(val) if val else None
-        except (ValueError, TypeError):
-            val_num = None
-
-        if cond in ("==", "!=") and val_num is None:
-            # String equality
-            str_series = series.astype(str)
-            if cond == "==":
-                mask = str_series == str(val)
-            else:
-                mask = str_series != str(val)
-            return set(series.index[mask])
-
-        if val_num is None:
-            return set()
-
-        if cond == "==":
-            mask = numeric == val_num
-        elif cond == "!=":
-            mask = numeric != val_num
-        elif cond == ">":
-            mask = numeric > val_num
-        elif cond == "<":
-            mask = numeric < val_num
-        elif cond == ">=":
-            mask = numeric >= val_num
-        elif cond == "<=":
-            mask = numeric <= val_num
-        elif cond == "between":
-            try:
-                val2_num = float(val2) if val2 else None
-            except (ValueError, TypeError):
-                val2_num = None
-            if val2_num is None:
-                return set()
-            lo, hi = min(val_num, val2_num), max(val_num, val2_num)
-            mask = (numeric >= lo) & (numeric <= hi)
-        else:
-            return set()
-
-        return set(series.index[mask.fillna(False)])
-
-    def _apply_active_group(self, col: str, cond: str, val: str, val2: str):
-        """Set active_indices and active_group_filter, refresh UI."""
+    def _apply_active_group(self, col: str, cond: str, val: str, val2: str,
+                            values: list | None = None):
+        """Set active_group_filter, refresh indices, update UI."""
         # Safety check: warn if validation set exists
         if self.validation_indices:
             if not messagebox.askyesno(
                 "Validation Set Warning",
-                "Setting an active group will reset the current validation set.\n\nContinue?"
+                "Setting an analysis subset will reset the current validation set.\n\nContinue?"
             ):
                 return False
             self._reset_validation_set()
 
-        self.active_indices = self._compute_active_group_matches(col, cond, val, val2)
-        self.active_group_filter = {
-            'column': col, 'condition': cond, 'value': val, 'value2': val2
-        }
-        self._update_active_group_ui()
+        filter_def: dict = {"column": col, "condition": cond, "value": val, "value2": val2}
+        if values is not None:
+            filter_def["values"] = values
+        self.active_group_filter = filter_def
+        self._refresh_active_group_indices()
         self._populate_data_viewer()
         return True
 
@@ -30389,11 +30417,10 @@ For detailed documentation, see the User Guide.
         """Clear the active group filter."""
         if self.active_group_filter is None:
             return
-        # Safety check: warn if validation set exists
         if self.validation_indices:
             if not messagebox.askyesno(
                 "Validation Set Warning",
-                "Clearing the active group will reset the current validation set.\n\nContinue?"
+                "Clearing the analysis subset will reset the current validation set.\n\nContinue?"
             ):
                 return
             self._reset_validation_set()
@@ -30408,45 +30435,73 @@ For detailed documentation, see the User Guide.
         if self.active_group_filter is not None and self.active_indices is not None:
             n_active = len(self.active_indices)
             n_total = len(self.X) if self.X is not None else 0
-            cond_str = self._format_active_group_condition(self.active_group_filter)
-            self.active_group_label.config(
-                text=f"Active Group: {n_active} of {n_total} ({cond_str})"
-            )
+            cond_str = format_summary(self.active_group_filter)
+            label_text = f"Analysis Subset: {n_active} of {n_total} ({cond_str})"
+            self.active_group_label.config(text=label_text)
             self.clear_group_btn.config(state='normal')
+            if hasattr(self, 'analysis_subset_status_label'):
+                self.analysis_subset_status_label.config(text=cond_str)
+            if hasattr(self, 'analysis_subset_clear_btn'):
+                self.analysis_subset_clear_btn.config(state='normal')
         else:
             self.active_group_label.config(text="")
             self.clear_group_btn.config(state='disabled')
+            if hasattr(self, 'analysis_subset_status_label'):
+                self.analysis_subset_status_label.config(text="All samples")
+            if hasattr(self, 'analysis_subset_clear_btn'):
+                self.analysis_subset_clear_btn.config(state='disabled')
 
-    def _format_active_group_condition(self, filter_def: dict) -> str:
-        """Return a human-readable string for the filter condition."""
-        col = filter_def['column']
-        cond = filter_def['condition']
-        val = filter_def.get('value', '')
-        val2 = filter_def.get('value2', '')
-        if cond == "has value":
-            return f"{col} has value"
-        elif cond == "between":
-            return f"{col} between {val} and {val2}"
-        elif cond == "contains":
-            return f"{col} contains '{val}'"
-        else:
-            return f"{col} {cond} {val}"
+    def _refresh_active_group_indices(self):
+        """Recompute active_indices from active_group_filter.
+
+        Handles the C2 missing-column case: if the filter references a
+        column no longer present in the current metadata, clears the
+        filter and warns instead of silently matching zero rows.
+        """
+        if not self.active_group_filter:
+            self.active_indices = None
+            self._update_active_group_ui()
+            return
+
+        col = self.active_group_filter.get("column", "")
+        series = self._get_column_series(col)
+
+        if series is None:
+            self.active_indices = None
+            self.active_group_filter = None
+            self._update_active_group_ui()
+            msg = f"Analysis Subset cleared: column '{col}' no longer present in metadata."
+            print(f"[Warning] {msg}")
+            if hasattr(self, 'data_viewer_status'):
+                self.data_viewer_status.config(text=f"> {msg}")
+            return
+
+        df = series.to_frame()
+        self.active_indices = compute_matches(df, self.active_group_filter)
+        self._update_active_group_ui()
 
     def _show_active_group_dialog(self):
-        """Show dialog for setting the active group filter."""
+        """Show type-aware dialog for setting the Analysis Subset filter."""
         if self.X is None:
             messagebox.showwarning("No Data", "Please load data first.")
             return
 
-        columns = self._get_active_group_columns()
+        target_name = self.target_column.get() if self.target_column.get() else "Target"
+
+        columns = []
+        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+            columns = [c for c in self.combined_metadata_df.columns if c != target_name]
+        elif self.ref is not None:
+            columns = [c for c in self.ref.columns if c != target_name]
         if not columns:
-            messagebox.showwarning("No Columns",
-                "No target or metadata columns available for filtering.")
+            messagebox.showwarning(
+                "No Columns", "No metadata columns available for subset filtering."
+            )
             return
 
         dialog = tk.Toplevel(self.root)
-        dialog.title("Set Active Group")
-        dialog.geometry("420x300")
+        dialog.title("Set Analysis Subset")
+        dialog.geometry("520x500")
         dialog.resizable(False, False)
         dialog.transient(self.root)
         dialog.grab_set()
@@ -30454,100 +30509,296 @@ For detailed documentation, see the User Guide.
         main_frame = ttk.Frame(dialog, padding=15)
         main_frame.pack(fill='both', expand=True)
 
-        ttk.Label(main_frame, text="Define which samples are active for analysis:",
-                  wraplength=380).pack(anchor='w', pady=(0, 10))
+        ttk.Label(
+            main_frame,
+            text="Restrict analysis to a metadata-defined cohort:",
+            wraplength=480,
+        ).pack(anchor='w', pady=(0, 10))
 
-        # Column selection
         col_frame = ttk.Frame(main_frame)
         col_frame.pack(fill='x', pady=3)
         ttk.Label(col_frame, text="Column:", width=10).pack(side='left')
         col_var = tk.StringVar(value=columns[0])
-        col_combo = ttk.Combobox(col_frame, textvariable=col_var,
-                                  values=columns, state='readonly', width=25)
+        col_combo = ttk.Combobox(
+            col_frame, textvariable=col_var, values=columns, state='readonly', width=35
+        )
         col_combo.pack(side='left', padx=(5, 0))
 
-        # Condition selection
-        cond_frame = ttk.Frame(main_frame)
-        cond_frame.pack(fill='x', pady=3)
-        ttk.Label(cond_frame, text="Condition:", width=10).pack(side='left')
-        conditions = ["has value", "==", "!=", ">", "<", ">=", "<=", "between", "contains"]
-        cond_var = tk.StringVar(value="has value")
-        cond_combo = ttk.Combobox(cond_frame, textvariable=cond_var,
-                                   values=conditions, state='readonly', width=25)
-        cond_combo.pack(side='left', padx=(5, 0))
+        condition_frame = ttk.Frame(main_frame)
+        condition_frame.pack(fill='both', expand=True, pady=(5, 0))
 
-        # Value entry
-        val_frame = ttk.Frame(main_frame)
-        val_frame.pack(fill='x', pady=3)
-        val_label = ttk.Label(val_frame, text="Value:", width=10)
-        val_label.pack(side='left')
-        val_var = tk.StringVar()
-        val_entry = ttk.Entry(val_frame, textvariable=val_var, width=27)
-        val_entry.pack(side='left', padx=(5, 0))
-
-        # Value 2 entry (for "between")
-        val2_frame = ttk.Frame(main_frame)
-        val2_frame.pack(fill='x', pady=3)
-        val2_label = ttk.Label(val2_frame, text="Value 2:", width=10)
-        val2_label.pack(side='left')
-        val2_var = tk.StringVar()
-        val2_entry = ttk.Entry(val2_frame, textvariable=val2_var, width=27)
-        val2_entry.pack(side='left', padx=(5, 0))
-
-        # Preview label
-        preview_label = ttk.Label(main_frame, text="", foreground="#1A5276")
+        preview_label = ttk.Label(main_frame, text="Select a value to preview", foreground="#1A5276")
         preview_label.pack(fill='x', pady=(10, 5))
 
-        def _update_visibility(*_args):
-            cond = cond_var.get()
-            if cond == "has value":
-                val_frame.pack_forget()
-                val2_frame.pack_forget()
-            elif cond == "between":
-                val_frame.pack(fill='x', pady=3, after=cond_frame)
-                val2_frame.pack(fill='x', pady=3, after=val_frame)
+        def _render_condition_controls(column_name: str):
+            for child in condition_frame.winfo_children():
+                child.destroy()
+            preview_label.config(text="Select a value to preview")
+
+            series = self._get_column_series(column_name)
+            if series is None:
+                return
+            col_kind = classify_column_type(series)
+
+            ctrl = {}
+
+            op_frame = ttk.Frame(condition_frame)
+            op_frame.pack(fill='x', pady=3)
+            ttk.Label(op_frame, text="Operator:", width=10).pack(side='left')
+
+            if col_kind == "numeric":
+                operators = ['==', '!=', '<', '<=', '>', '>=', 'between', 'has value']
             else:
-                val_frame.pack(fill='x', pady=3, after=cond_frame)
-                val2_frame.pack_forget()
-            preview_label.config(text="")
+                operators = ['==', '!=', 'in', 'contains', 'has value']
 
-        cond_var.trace_add('write', _update_visibility)
-        # Initial visibility
-        _update_visibility()
-
-        def _preview():
-            matches = self._compute_active_group_matches(
-                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
+            op_var = tk.StringVar(value=operators[0])
+            op_combo = ttk.Combobox(
+                op_frame, textvariable=op_var, values=operators, state='readonly', width=35
             )
+            op_combo.pack(side='left', padx=(5, 0))
+            ctrl['op_var'] = op_var
+
+            if col_kind == "numeric":
+                numeric_info = pd.to_numeric(series, errors='coerce').dropna()
+                range_text = ""
+                if len(numeric_info) > 0:
+                    range_text = f"Range: {numeric_info.min()} .. {numeric_info.max()}"
+                range_caption = ttk.Label(condition_frame, text=range_text, style='Caption.TLabel')
+                range_caption.pack(anchor='w', padx=(80, 0), pady=(0, 3))
+
+                val_frame = ttk.Frame(condition_frame)
+                ttk.Label(val_frame, text="Value:", width=10).pack(side='left')
+                val_var = tk.StringVar()
+                val_entry = ttk.Entry(val_frame, textvariable=val_var, width=35)
+                val_entry.pack(side='left', padx=(5, 0))
+                ctrl['val_var'] = val_var
+                ctrl['val_entry'] = val_entry
+
+                val2_frame = ttk.Frame(condition_frame)
+                ttk.Label(val2_frame, text="Max:", width=10).pack(side='left')
+                val2_var = tk.StringVar()
+                val2_entry = ttk.Entry(val2_frame, textvariable=val2_var, width=35)
+                val2_entry.pack(side='left', padx=(5, 0))
+                ctrl['val2_var'] = val2_var
+
+                def _update_numeric_visibility(*_args):
+                    op = op_var.get()
+                    if op == "has value":
+                        val_frame.pack_forget()
+                        val2_frame.pack_forget()
+                    elif op == "between":
+                        val_frame.pack_forget()
+                        val2_frame.pack(fill='x', pady=3, after=op_frame)
+                        for w in op_frame.master.winfo_children():
+                            pass
+                        val2_label_widget = val2_frame.winfo_children()
+                        if val2_label_widget:
+                            val2_label_widget[0].config(text="Max:")
+                        min_frame = ttk.Frame(condition_frame)
+                        found_min = False
+                        for child in condition_frame.winfo_children():
+                            if child is val2_frame:
+                                min_frame = val_frame
+                                found_min = True
+                                break
+                        val_frame.pack(fill='x', pady=3, after=op_frame)
+                        val2_frame.pack(fill='x', pady=3, after=val_frame)
+                        lbl_children = val_frame.winfo_children()
+                        if lbl_children:
+                            lbl_children[0].config(text="Min:")
+                    else:
+                        val2_frame.pack_forget()
+                        val_frame.pack(fill='x', pady=3, after=op_frame)
+                        lbl_children = val_frame.winfo_children()
+                        if lbl_children:
+                            lbl_children[0].config(text="Value:")
+                    preview_label.config(text="Select a value to preview")
+
+                op_var.trace_add('write', _update_numeric_visibility)
+                _update_numeric_visibility()
+
+                def _on_numeric_return(event):
+                    _do_preview()
+                val_entry.bind('<Return>', _on_numeric_return)
+                val2_entry.bind('<Return>', _on_numeric_return)
+
+            else:
+                cat_values = get_unique_non_null_values(series)
+
+                eq_combo_frame = ttk.Frame(condition_frame)
+                ttk.Label(eq_combo_frame, text="Value:", width=10).pack(side='left')
+                eq_var = tk.StringVar()
+                eq_combo = ttk.Combobox(
+                    eq_combo_frame, textvariable=eq_var, values=cat_values,
+                    state='normal', width=33
+                )
+                eq_combo.pack(side='left', padx=(5, 0))
+                ctrl['eq_var'] = eq_var
+
+                in_frame = ttk.Frame(condition_frame)
+                ttk.Label(in_frame, text="Values:", width=10).pack(side='left', anchor='n')
+                in_listbox = tk.Listbox(in_frame, selectmode='extended', height=8, width=33)
+                in_scrollbar = ttk.Scrollbar(in_frame, orient='vertical', command=in_listbox.yview)
+                in_listbox.configure(yscrollcommand=in_scrollbar.set)
+                in_listbox.pack(side='left', padx=(5, 0), fill='both', expand=True)
+                in_scrollbar.pack(side='right', fill='y')
+                for v in cat_values:
+                    in_listbox.insert(tk.END, str(v))
+                ctrl['in_listbox'] = in_listbox
+
+                contains_frame = ttk.Frame(condition_frame)
+                ttk.Label(contains_frame, text="Contains:", width=10).pack(side='left')
+                contains_var = tk.StringVar()
+                contains_entry = ttk.Entry(contains_frame, textvariable=contains_var, width=35)
+                contains_entry.pack(side='left', padx=(5, 0))
+                ctrl['contains_var'] = contains_var
+
+                def _update_cat_visibility(*_args):
+                    op = op_var.get()
+                    eq_combo_frame.pack_forget()
+                    in_frame.pack_forget()
+                    contains_frame.pack_forget()
+                    if op == "has value":
+                        pass
+                    elif op == "in":
+                        in_frame.pack(fill='both', expand=True, pady=3, after=op_frame)
+                    elif op == "contains":
+                        contains_frame.pack(fill='x', pady=3, after=op_frame)
+                    else:
+                        eq_combo_frame.pack(fill='x', pady=3, after=op_frame)
+                    preview_label.config(text="Select a value to preview")
+
+                op_var.trace_add('write', _update_cat_visibility)
+                _update_cat_visibility()
+
+            condition_frame._ctrl = ctrl
+            condition_frame._col_kind = col_kind
+
+        def _get_column_series_safe(col_name):
+            return self._get_column_series(col_name)
+
+        def _do_preview():
+            col = col_var.get()
+            series = _get_column_series_safe(col)
+            if series is None:
+                preview_label.config(text="Column not found")
+                return
+            ctrl = getattr(condition_frame, '_ctrl', {})
+            col_kind = getattr(condition_frame, '_col_kind', 'categorical')
+            op_var = ctrl.get('op_var')
+            if op_var is None:
+                return
+            op = op_var.get()
+
+            raw = {}
+            if col_kind == "numeric":
+                raw['value'] = ctrl.get('val_var', tk.StringVar()).get()
+                raw['value2'] = ctrl.get('val2_var', tk.StringVar()).get()
+            else:
+                if op == "in":
+                    lb = ctrl.get('in_listbox')
+                    raw['values'] = [lb.get(i) for i in lb.curselection()] if lb else []
+                elif op == "contains":
+                    raw['value'] = ctrl.get('contains_var', tk.StringVar()).get()
+                else:
+                    raw['value'] = ctrl.get('eq_var', tk.StringVar()).get()
+
+            if op == "in" and not raw.get('values'):
+                preview_label.config(text="Select at least one value to preview")
+                return
+
+            try:
+                filt = build_filter_dict(col, col_kind, op, raw)
+            except ValueError as e:
+                preview_label.config(text=str(e))
+                return
+
+            matches = compute_matches(series.to_frame(), filt)
             n_total = len(self.X) if self.X is not None else 0
             preview_label.config(text=f"Matches: {len(matches)} of {n_total} samples")
 
-        def _apply():
-            matches = self._compute_active_group_matches(
-                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
-            )
-            if len(matches) == 0:
-                messagebox.showwarning("No Matches",
-                    "No samples match this condition.", parent=dialog)
+        def _do_apply():
+            col = col_var.get()
+            series = _get_column_series_safe(col)
+            if series is None:
                 return
-            result = self._apply_active_group(
-                col_var.get(), cond_var.get(), val_var.get(), val2_var.get()
-            )
+            ctrl = getattr(condition_frame, '_ctrl', {})
+            col_kind = getattr(condition_frame, '_col_kind', 'categorical')
+            op_var = ctrl.get('op_var')
+            if op_var is None:
+                return
+            op = op_var.get()
+
+            raw = {}
+            if col_kind == "numeric":
+                raw['value'] = ctrl.get('val_var', tk.StringVar()).get()
+                raw['value2'] = ctrl.get('val2_var', tk.StringVar()).get()
+            else:
+                if op == "in":
+                    lb = ctrl.get('in_listbox')
+                    raw['values'] = [lb.get(i) for i in lb.curselection()] if lb else []
+                elif op == "contains":
+                    raw['value'] = ctrl.get('contains_var', tk.StringVar()).get()
+                else:
+                    raw['value'] = ctrl.get('eq_var', tk.StringVar()).get()
+
+            if op == "in" and not raw.get('values'):
+                messagebox.showwarning(
+                    "No Selection", "Select at least one value.", parent=dialog
+                )
+                return
+
+            try:
+                filt = build_filter_dict(col, col_kind, op, raw)
+            except ValueError as e:
+                messagebox.showwarning("Invalid Input", str(e), parent=dialog)
+                return
+
+            matches = compute_matches(series.to_frame(), filt)
+            if len(matches) == 0:
+                messagebox.showwarning(
+                    "No Matches", "No samples match this condition.", parent=dialog
+                )
+                return
+
+            if op == "in":
+                result = self._apply_active_group(
+                    col, op, val="", val2="", values=raw['values']
+                )
+            else:
+                val = raw.get('value', '')
+                val2 = raw.get('value2', '')
+                result = self._apply_active_group(col, op, val, val2)
             if result is not False:
                 dialog.destroy()
 
-        # Buttons
+        col_combo.bind('<<ComboboxSelected>>', lambda e: _render_condition_controls(col_var.get()))
+        _render_condition_controls(columns[0])
+
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill='x', pady=(10, 0))
 
-        ttk.Button(btn_frame, text="Preview", command=_preview,
+        ttk.Button(btn_frame, text="Preview", command=_do_preview,
                    style='Modern.TButton').pack(side='left', padx=(0, 5))
-        ttk.Button(btn_frame, text="Apply", command=_apply,
+        ttk.Button(btn_frame, text="Apply", command=_do_apply,
                    style='Modern.TButton').pack(side='left', padx=(0, 5))
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy,
                    style='Modern.TButton').pack(side='right')
 
+        col_combo.focus_set()
+        dialog.wait_window()
+
     # ========== END DATA VIEWER EDITING METHODS ==========
+
+    def _get_analysis_subset_training_metadata(self) -> dict:
+        """Build the four analysis_subset_* keys for last_training_config."""
+        active = self.active_group_filter is not None and self.active_indices is not None
+        n_samples = len(self.active_indices) if active else None
+        return build_training_subset_metadata(
+            active=active,
+            filter_def=self.active_group_filter,
+            n_samples=n_samples,
+        )
 
     def _validate_data_for_refinement(self):
         """Validate that required data is available for refinement."""
@@ -30637,6 +30888,26 @@ For detailed documentation, see the User Guide.
             warnings.append(
                 f"Validation set: trained with {saved_validation} validation, current has {current_validation} validation"
             )
+
+        # Check analysis subset mismatch
+        saved_subset_active = training_config.get("analysis_subset_active", False)
+        saved_subset_summary = training_config.get("analysis_subset_summary", "All samples")
+        current_subset_summary = format_summary(self.active_group_filter)
+        if saved_subset_active:
+            current_active = self.active_group_filter is not None
+            if not current_active:
+                warnings.append(
+                    f"Analysis subset: trained with {saved_subset_summary}, current state has no subset"
+                )
+            elif current_subset_summary != saved_subset_summary:
+                warnings.append(
+                    f"Analysis subset: trained with {saved_subset_summary}, current state is {current_subset_summary}"
+                )
+        else:
+            if self.active_group_filter is not None:
+                warnings.append(
+                    f"Analysis subset: trained without subset, current state is {current_subset_summary}"
+                )
 
         if warnings:
             # Show detailed warning message
@@ -31461,6 +31732,10 @@ Subset: {config.get('SubsetTag', config.get('Subset', 'N/A'))}
 Window Size: {config.get('Window', 'N/A')}
 Imbalance Handling: {config.get('Imbalance', '—')}
 """
+        # Show saved analysis subset summary if present
+        tc = config.get('training_config', {})
+        if tc.get('analysis_subset_active'):
+            info_text += f"Analysis Subset: {tc.get('analysis_subset_summary', 'N/A')}\n"
 
         # Add performance metrics
         if 'RMSE' in config and not pd.isna(config.get('RMSE')):
@@ -34450,7 +34725,7 @@ F1 Score:  {f1:.4f}
                 min_samples = 2 if cv_strategy == 'loo' else n_folds
                 if n_active < min_samples:
                     raise ValueError(
-                        f"Only {n_active} sample(s) in the active group; "
+                        f"Only {n_active} sample(s) in the analysis subset; "
                         f"{cv_strategy} CV requires at least {min_samples} samples."
                     )
                 X_source = X_source[ag_mask]
@@ -35309,6 +35584,17 @@ F1 Score:  {f1:.4f}
                 inlier_label = self.inlier_class_label.get()
                 if not inlier_label and self.selected_model_config:
                     inlier_label = self.selected_model_config.get('inlier_class_label', '') or self.selected_model_config.get('inlier_class', '')
+
+                # One-class guardrail: block if subset removes all inlier samples
+                y_series_check = pd.Series(y_array, index=X_base_df.index)
+                oc_guard_msg = check_one_class_inlier_guard(y_series_check, inlier_label)
+                if oc_guard_msg:
+                    self.root.after(0, lambda msg=oc_guard_msg: messagebox.showerror(
+                        "No Inlier Samples", msg))
+                    self.root.after(0, lambda: self._update_refined_results(
+                        f"Blocked: {oc_guard_msg}", is_error=True))
+                    return
+
                 y_str = np.array([str(v) for v in y_array])
                 y_oc = np.where(y_str == str(inlier_label), 1, -1)
 
@@ -45804,6 +46090,9 @@ External Validation Performance (n={n_val}):
                 self.combined_metadata_df = None
 
             self.ref = None  # Combined format uses combined_metadata_df
+
+            # Refresh analysis subset cache (dataset replaced)
+            self._refresh_active_group_indices()
 
             # Reset validation set (stale after data replacement)
             self.validation_X = None

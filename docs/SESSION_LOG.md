@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-19 — Analysis Subset V1 implementation (branch glm/analysis-subset-v1)
+
+**Feature:** Added metadata-driven Analysis Subset feature. Users can restrict analysis, validation, and refinement to a metadata-defined cohort (e.g., "only grasses"). Implemented on the existing `active_group_filter` / `active_indices` internal runtime path with user-facing rename to "Analysis Subset".
+
+**Architecture decisions:**
+- Pure matching/summary logic extracted into `src/spectral_predict/analysis_subset.py` (C1 requirement). GUI holds only thin glue. 41 unit tests cover matching, formatting, categorical detection, training metadata, and one-class guardrails — no Tk required.
+- `_compute_active_group_matches` and `_format_active_group_condition` now delegate to the pure module.
+- New `_refresh_active_group_indices()` helper recomputes `active_indices` from `active_group_filter` (C2: clears filter if column is missing from metadata).
+- Subset provenance (`analysis_subset_*` keys) added to `last_training_config` in both one-class and regression/classification storage sites via `_get_analysis_subset_training_metadata()` helper (C3: `n_samples=None` when inactive).
+- `_validate_training_configuration` extended with subset mismatch warnings.
+- One-class guardrail (`check_one_class_inlier_guard`) blocks analysis/refinement when zero inlier samples remain after subset filtering.
+- Dialog now metadata-only (excludes target column), with categorical multi-select via Tk Listbox for columns with <=20 unique non-null values. Supports "in" condition stored as `{"column": ..., "condition": "in", "values": [...]}`.
+- `contains` uses `regex=False` (literal substring matching).
+
+**Gotcha:** `_compute_active_group_matches` receives column name + separate args (not a filter dict), but `compute_matches` takes a DataFrame + filter dict. The GUI wrapper builds a temporary filter dict and calls `compute_matches(series.to_frame(), filter_def)`. This works because `compute_matches` matches on `df[col]`, which is the same Series regardless of whether the DataFrame has one column or many.
+
+**Gotcha (C2):** The `_revert_data_viewer` method previously cached `active_indices` in the snapshot and restored the cached set. Now it only restores `active_group_filter` and calls `_refresh_active_group_indices()` to recompute indices from the filter. This handles the case where the snapshot's metadata state differs from current state (e.g., user deleted a column, then reverted — the column is back so the filter is valid again).
+
+---
+
 ## 2026-04-19 — `self.inlier_class_label` shadowed: StringVar clobbered by tooltip Label
 
 **Bug:** Attempting to run any one-class analysis after commit `fd376b4` (2026-04-17 tooltip PR) raised `AttributeError: 'Label' object has no attribute 'get'` at `spectral_predict_gui_optimized.py:_run_analysis` when the code reached `self.inlier_class_label.get().strip()`. GUI progress tab would say "Analysis in progress" but never produce output.
