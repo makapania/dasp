@@ -16344,6 +16344,9 @@ class SpectralPredictApp:
         # Show/hide one-class controls based on task type
         self._update_one_class_controls_visibility()
 
+        # Refresh imbalance method dropdown to match the new task type
+        self._detect_and_display_imbalance()
+
         # Warn if task-type boundary changed with a non-null validation set
         prev = self._last_task_type
         if prev is not None and self.validation_y is not None and len(self.validation_y) > 0:
