@@ -1166,7 +1166,10 @@ class SpectralOptimizationProblem(Problem):
         self.label_encoder = None
         if task_type == 'classification':
             self.label_encoder = LabelEncoder()
-            self.y = self.label_encoder.fit_transform(y)
+            y_arr = np.asarray(y)
+            if y_arr.dtype == object:
+                y_arr = y_arr.astype(str)
+            self.y = self.label_encoder.fit_transform(y_arr)
 
         # Fitness cache
         self.cache_enabled = cache_enabled
@@ -1820,7 +1823,10 @@ def run_nsga2_search(
         y_for_validation = y
         if not pd.api.types.is_numeric_dtype(y.dtype):
             from sklearn.preprocessing import LabelEncoder as LE
-            y_for_validation = LE().fit_transform(y)
+            y_arr = np.asarray(y)
+            if y_arr.dtype == object:
+                y_arr = y_arr.astype(str)
+            y_for_validation = LE().fit_transform(y_arr)
         validate_classification_config(
             y=y_for_validation,
             imbalance_method=imbalance_method,
@@ -1848,7 +1854,10 @@ def run_nsga2_search(
     if task_type == 'classification':
         if not pd.api.types.is_numeric_dtype(y.dtype):
             label_encoder_for_importance = LabelEncoder()
-            y_for_importance = label_encoder_for_importance.fit_transform(y)
+            y_arr = np.asarray(y)
+            if y_arr.dtype == object:
+                y_arr = y_arr.astype(str)
+            y_for_importance = label_encoder_for_importance.fit_transform(y_arr)
 
     # Compute CARS-Tree importance for principled wavelength guidance (if use_guidance=True)
     # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
@@ -2951,7 +2960,10 @@ def _compute_classification_cv_metrics(
     try:
         # Encode labels for classification (PLS-DA requires numeric y)
         le = LabelEncoder()
-        y = le.fit_transform(y)
+        y_arr = np.asarray(y)
+        if y_arr.dtype == object:
+            y_arr = y_arr.astype(str)
+        y = le.fit_transform(y_arr)
 
         # Decode solution
         preproc_idx = int(solution[0])
@@ -3357,7 +3369,10 @@ def _compute_calibration_metrics(
         # Encode labels for classification (PLS-DA requires numeric y)
         if task_type == 'classification':
             le = LabelEncoder()
-            y = le.fit_transform(y)
+            y_arr = np.asarray(y)
+            if y_arr.dtype == object:
+                y_arr = y_arr.astype(str)
+            y = le.fit_transform(y_arr)
 
         # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])

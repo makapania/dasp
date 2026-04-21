@@ -386,6 +386,8 @@ def _evaluate_with_actual_model(
             if not pd.api.types.is_numeric_dtype(y_class.dtype):
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
+                if y_class.dtype == object:
+                    y_class = y_class.astype(str)
                 y_class = le.fit_transform(y_class)
             else:
                 y_class = y_class.astype(int)
@@ -457,6 +459,8 @@ def _evaluate_pls(X, y, cv, n_comp, task_type):
         if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
+            if y_class.dtype == object:
+                y_class = y_class.astype(str)
             y_class = le.fit_transform(y_class)
         y_pred_class = (y_pred > np.median(y_pred)).astype(int).ravel()
         return accuracy_score(y_class, y_pred_class)
@@ -472,6 +476,8 @@ def _evaluate_lightgbm(X, y, cv, task_type, random_state):
         if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
+            if y_class.dtype == object:
+                y_class = y_class.astype(str)
             y_class = le.fit_transform(y_class)
         else:
             y_class = y_class.astype(int)
@@ -501,6 +507,8 @@ def _evaluate_mlp(X, y, cv, task_type, random_state):
         if not pd.api.types.is_numeric_dtype(y_class.dtype):
             from sklearn.preprocessing import LabelEncoder
             le = LabelEncoder()
+            if y_class.dtype == object:
+                y_class = y_class.astype(str)
             y_class = le.fit_transform(y_class)
         else:
             y_class = y_class.astype(int)
@@ -531,6 +539,8 @@ def _evaluate_neuralboosted(X, y, cv, n_comp, task_type, random_state):
             if not pd.api.types.is_numeric_dtype(y_class.dtype):
                 from sklearn.preprocessing import LabelEncoder
                 le = LabelEncoder()
+                if y_class.dtype == object:
+                    y_class = y_class.astype(str)
                 y_class = le.fit_transform(y_class)
             else:
                 y_class = y_class.astype(int)

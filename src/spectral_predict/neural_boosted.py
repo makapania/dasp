@@ -603,7 +603,10 @@ class NeuralBoostedClassifier(BaseEstimator, ClassifierMixin):
 
         # Encode labels
         self.label_encoder_ = LabelEncoder()
-        y_encoded = self.label_encoder_.fit_transform(y)
+        y_arr = np.asarray(y)
+        if y_arr.dtype == object:
+            y_arr = y_arr.astype(str)
+        y_encoded = self.label_encoder_.fit_transform(y_arr)
         self.classes_ = self.label_encoder_.classes_
         self.n_classes_ = len(self.classes_)
 
