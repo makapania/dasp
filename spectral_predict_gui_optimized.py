@@ -25969,6 +25969,43 @@ class SpectralPredictApp:
                     )
                     y_filtered = y_filtered.astype(str)
 
+            # Auto-drop rows belonging to classes too rare for the configured CV.
+            # Stratified K-Fold requires min_class_samples >= n_folds, so any class
+            # with fewer samples than folds can't participate in a valid stratified
+            # split. We drop those rows entirely (more statistically defensible than
+            # reducing folds across all classes) and surface a popup listing exactly
+            # which classes were excluded so the user isn't blindsided by the model
+            # never seeing them at predict time.
+            if (task_type == 'classification'
+                    and y_filtered is not None
+                    and self.cv_strategy.get() in ('kfold', 'repeated_kfold')):
+                _n_folds = self.folds.get()
+                _classes, _counts = np.unique(np.asarray(y_filtered), return_counts=True)
+                _rare_mask = _counts < _n_folds
+                if _rare_mask.any() and len(_classes) - int(_rare_mask.sum()) >= 2:
+                    _dropped = [(str(_classes[i]), int(_counts[i]))
+                                for i in np.where(_rare_mask)[0]]
+                    _keep_mask = ~y_filtered.isin([_classes[i] for i in np.where(_rare_mask)[0]])
+                    _n_before = len(y_filtered)
+                    X_filtered = X_filtered[_keep_mask]
+                    y_filtered = y_filtered[_keep_mask]
+                    _n_after = len(y_filtered)
+                    _lines = "\n".join(
+                        f"  • '{lbl}' — {cnt} sample(s)" for lbl, cnt in _dropped
+                    )
+                    _warn = (
+                        f"The following class(es) have fewer than {_n_folds} samples "
+                        f"and cannot participate in stratified {_n_folds}-fold CV:\n\n"
+                        f"{_lines}\n\n"
+                        f"Their rows have been DROPPED from this analysis "
+                        f"({_n_before - _n_after} sample(s) total). The resulting model "
+                        f"will NOT predict these classes.\n\n"
+                        f"To include them, add more samples or reduce the fold count."
+                    )
+                    self._log_progress(f"\n[!] Rare classes dropped:\n{_lines}\n")
+                    self.root.after(0, lambda m=_warn: messagebox.showwarning(
+                        "Rare Classes Dropped from Analysis", m))
+
             # Apply wavelength restriction for analysis (if enabled)
             # These will be passed to run_search() to filter variable selection only
             analysis_wl_min_value = None
