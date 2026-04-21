@@ -226,18 +226,17 @@ def build_cv_splitter(
     """
     use_stratified = task_type == 'classification' and strategy in ('kfold', 'repeated_kfold')
     if use_stratified and y is not None:
-        import pandas as pd
-        import numpy as np
-        y_arr = np.asarray(y)
-        y_finite = y_arr[~pd.isna(y_arr)] if hasattr(pd, 'isna') else y_arr
-        if (len(y_finite) > 0
-                and pd.api.types.is_numeric_dtype(y_finite.dtype)
-                and len(np.unique(y_finite)) > 2):
+        from sklearn.utils.multiclass import type_of_target
+        try:
+            y_kind = type_of_target(y)
+        except (TypeError, ValueError):
+            y_kind = None
+        if y_kind == 'continuous':
             raise ValueError(
-                f"task_type='classification' but y has {len(np.unique(y_finite))} unique "
-                f"numeric values (continuous target). StratifiedKFold requires binary or "
-                f"multiclass labels. Either change task_type to 'regression' or use a "
-                f"categorical target column."
+                "task_type='classification' but y is continuous "
+                "(sklearn type_of_target='continuous'). StratifiedKFold requires "
+                "binary or multiclass labels. Either change task_type to "
+                "'regression' or use a categorical target column."
             )
     if strategy == 'loo':
         from sklearn.model_selection import LeaveOneOut

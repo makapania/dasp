@@ -36112,20 +36112,23 @@ F1 Score:  {f1:.4f}
             y_array = y_series.values
 
             # Defensive: validate task_type / y-array consistency before CV.
-            # If task_type is 'classification' but y is continuous (many unique
-            # numeric values), build_cv_splitter would choose StratifiedKFold
-            # and crash.  Auto-correct with a loud warning so the user knows.
+            # If task_type is 'classification' but sklearn sees y as continuous,
+            # build_cv_splitter would choose StratifiedKFold and crash.
+            # Use sklearn's own type_of_target so integer-encoded multiclass
+            # (e.g. labels {0, 1, 2}) is correctly kept as classification.
             if task_type == 'classification':
-                y_finite = y_array[~pd.isna(y_array)]
-                if (len(y_finite) > 0
-                        and pd.api.types.is_numeric_dtype(y_finite.dtype)
-                        and len(np.unique(y_finite)) > 2):
+                from sklearn.utils.multiclass import type_of_target
+                try:
+                    y_kind = type_of_target(y_array)
+                except (TypeError, ValueError):
+                    y_kind = None
+                if y_kind == 'continuous':
                     logger.warning(
-                        "task_type is 'classification' but y has %d unique "
-                        "numeric values — auto-correcting to 'regression'. "
-                        "This usually means a saved result's Task was lost or "
-                        "the radio was changed manually.",
-                        len(np.unique(y_finite)),
+                        "task_type is 'classification' but y is continuous "
+                        "(sklearn type_of_target = %r) — auto-correcting to "
+                        "'regression'. This usually means a saved result's "
+                        "Task was lost or the radio was changed manually.",
+                        y_kind,
                     )
                     task_type = 'regression'
                     self.root.after(0, lambda: self.refine_task_type.set('regression'))
