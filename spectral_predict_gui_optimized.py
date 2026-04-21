@@ -16409,6 +16409,32 @@ class SpectralPredictApp:
         for radio in self.ensemble_region_radios:
             radio.state(state)
 
+    def _update_task_type_label(self):
+        """Refresh the auto-detect task type label (shown in Import / Analysis header)."""
+        if not (hasattr(self, "task_type_detection_label") and self.task_type_detection_label):
+            return
+        if self.y is None:
+            self.task_type_detection_label.config(
+                text="No target variable (spectra only)",
+                foreground=self.colors.get("warning", "orange"),
+            )
+        elif self.task_type.get() == "auto":
+            if self.y.nunique() == 2:
+                detected_type = "classification (binary)"
+            elif not pd.api.types.is_numeric_dtype(self.y.dtype):
+                detected_type = "classification"
+            else:
+                detected_type = "regression"
+            self.task_type_detection_label.config(
+                text=f"Detected: {detected_type}",
+                foreground=self.colors.get("success", "green"),
+            )
+        else:
+            self.task_type_detection_label.config(
+                text="(manual selection)",
+                foreground=self.colors.get("info", "blue"),
+            )
+
     def _on_target_column_changed(self, event=None):
         """Handle target column change without reloading data.
 
@@ -16422,21 +16448,40 @@ class SpectralPredictApp:
         if not new_target:
             return
 
-        # Extract Y from appropriate data source
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            if new_target in self.combined_metadata_df.columns:
-                new_y = self.combined_metadata_df[new_target].copy()
-            else:
-                messagebox.showerror("Error", f"Column '{new_target}' not found in data")
-                return
-        elif self.ref is not None:
-            if new_target in self.ref.columns:
-                new_y = self.ref[new_target].copy()
-            else:
-                messagebox.showerror("Error", f"Column '{new_target}' not found in reference")
-                return
-        else:
-            return  # No reference data available
+        # Extract Y from first available data source that contains the target column
+        new_y = None
+        sources_checked = []
+        candidates = [
+            ("combined_metadata_df", getattr(self, "combined_metadata_df", None)),
+            ("self.ref", getattr(self, "ref", None)),
+        ]
+        # data_source_manager path (optional attribute chain)
+        dsm = getattr(self, "data_source_manager", None)
+        if dsm is not None:
+            merged = getattr(dsm, "merged_dataset", None)
+            if merged is not None:
+                candidates.append(("data_source_manager.merged_dataset.metadata_df",
+                                   getattr(merged, "metadata_df", None)))
+        for source_name, source_df in candidates:
+            if source_df is None:
+                sources_checked.append(f"{source_name}: None")
+                continue
+            if new_target in getattr(source_df, "columns", []):
+                new_y = source_df[new_target].copy()
+                break
+            cols = list(source_df.columns)[:10]
+            suffix = "..." if len(source_df.columns) > 10 else ""
+            sources_checked.append(f"{source_name}: {cols}{suffix}")
+        if new_y is None:
+            detail = "\n".join(f"  - {s}" for s in sources_checked)
+            messagebox.showerror(
+                "Column Not Found",
+                f"Column {new_target!r} was offered in the target dropdown but could not "
+                f"be found in any currently-loaded data source.\n\nSources checked:\n{detail}\n\n"
+                f"This usually means the data source was reloaded after the dropdown was "
+                f"populated. Try re-loading your data."
+            )
+            return
 
         # Align Y with X index (use X_original to preserve all rows)
         self.y = new_y.reindex(self.X_original.index)
@@ -16481,10 +16526,18 @@ class SpectralPredictApp:
 
         # Update task type detection and model checkboxes
         self._on_task_type_changed()
+        self._update_task_type_label()
 
         # Update target distribution plot in Explore tab if it exists
         if hasattr(self, 'explore_target_dist_frame'):
             self._generate_explore_target_distribution()
+
+        # Refresh data viewer so the new target column is highlighted and the old one is not
+        if hasattr(self, "data_viewer_sheet"):
+            try:
+                self._populate_data_viewer()
+            except Exception as e:
+                print(f"WARNING: could not refresh data viewer after target change: {e}")
 
         print(f"> Target changed to '{new_target}' ({len(self.y)} samples)")
 
@@ -18334,29 +18387,7 @@ class SpectralPredictApp:
             self._refresh_active_group_indices()
 
             # Auto-detect and display task type
-            if hasattr(self, 'task_type_detection_label') and self.task_type_detection_label:
-                if self.y is None:
-                    self.task_type_detection_label.config(
-                        text="No target variable (spectra only)",
-                        foreground=self.colors.get('warning', 'orange')
-                    )
-                elif self.task_type.get() == "auto":
-                    if self.y.nunique() == 2:
-                        detected_type = "classification (binary)"
-                    elif not pd.api.types.is_numeric_dtype(self.y.dtype):
-                        detected_type = "classification"
-                    else:
-                        detected_type = "regression"
-                    self.task_type_detection_label.config(
-                        text=f"Detected: {detected_type}",
-                        foreground=self.colors.get('success', 'green')
-                    )
-                else:
-                    # User manually selected
-                    self.task_type_detection_label.config(
-                        text=f"(manual selection)",
-                        foreground=self.colors.get('info', 'blue')
-                    )
+            self._update_task_type_label()
 
             # ALWAYS refresh model checkboxes and tier selection based on detected task type
             # This enables/disables checkboxes and selects appropriate models for the task
@@ -30114,6 +30145,18 @@ For detailed documentation, see the User Guide.
             # Set sheet data and headers
             self.data_viewer_sheet.set_sheet_data(formatted_data)
             self.data_viewer_sheet.headers(headers)
+
+            # Clear any previous header highlights before applying new one
+            try:
+                self.data_viewer_sheet.dehighlight_cells(canvas="header")
+            except Exception:
+                try:
+                    for _col_idx in range(len(headers)):
+                        self.data_viewer_sheet.highlight_cells(
+                            row=0, column=_col_idx, canvas="header", bg=None, fg=None,
+                        )
+                except Exception:
+                    pass
 
             # Highlight target column header in blue
             if display_y is not None and target_col in headers:
@@ -46535,13 +46578,9 @@ External Validation Performance (n={n_val}):
             self._populate_data_viewer()
 
             # Update task type detection
-            if hasattr(self, 'task_type_detection_label'):
-                if self.y is None:
-                    self.task_type_detection_label.config(
-                        text="No target variable (spectra only)",
-                        foreground=self.colors.get('warning', 'orange'))
-                else:
-                    self._on_task_type_changed()
+            self._update_task_type_label()
+            if self.y is not None:
+                self._on_task_type_changed()
 
             # Update Analysis tab target dropdown
             if hasattr(self, 'analysis_target_combo'):
