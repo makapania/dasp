@@ -22413,11 +22413,11 @@ class SpectralPredictApp:
                 self.imbalance_method.set(default)
             else:
                 self.imbalance_method.set('')
+            self._update_imbalance_method_description(None)
             if old:
                 self._set_imbalance_banner(
                     f"Method changed: {old} -> {self.imbalance_method.get()} (not applicable for {task_type})"
                 )
-            self._update_imbalance_method_description(None)
         else:
             self._clear_imbalance_banner()
 
