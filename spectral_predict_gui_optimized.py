@@ -10901,6 +10901,13 @@ class SpectralPredictApp:
                                               style='Caption.TLabel', wraplength=400, justify='left')
         self.imbalance_method_desc.grid(row=1, column=2, sticky=tk.W, padx=10)
 
+        # Substitution notification banner
+        self.imbalance_banner_label = ttk.Label(
+            self.imbalance_frame, text="", foreground='#ff9800',
+            font=('Segoe UI', 10, 'bold'), wraplength=600, justify='left'
+        )
+        self.imbalance_banner_label.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(5, 0), padx=(20, 0))
+
         # Parameters frame (method-specific)
         params_subframe = ttk.Frame(self.imbalance_frame)
         params_subframe.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10, padx=(20, 0))
@@ -22249,6 +22256,7 @@ class SpectralPredictApp:
                         # Auto-select recommended method
                         self.imbalance_method.set(recommendation['recommended_method'])
                         self._update_imbalance_method_description(None)
+                        self._clear_imbalance_banner()
 
                     if recommendation.get('warnings'):
                         rec_text += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in recommendation['warnings'])
@@ -22282,6 +22290,7 @@ class SpectralPredictApp:
                         # Auto-select recommended method
                         self.imbalance_method.set(recommendation['recommended_method'])
                         self._update_imbalance_method_description(None)
+                        self._clear_imbalance_banner()
 
                     if recommendation.get('warnings'):
                         rec_text += "\n\nWarnings:\n" + "\n".join(f"- {w}" for w in recommendation['warnings'])
@@ -22306,12 +22315,14 @@ class SpectralPredictApp:
         if enabled:
             self._update_imbalance_method_description(None)
         else:
+            self._clear_imbalance_banner()
             # Disable all parameter controls
             for widget_name in ['k_neighbors_spin', 'n_bins_spin', 'boost_factor_spin']:
                 self.imbalance_widgets[widget_name].config(state='disabled')
 
     def _update_imbalance_method_description(self, event):
         """Update method description and show/hide relevant parameters."""
+        self._clear_imbalance_banner()
         method = self.imbalance_method.get()
 
         # Method descriptions
