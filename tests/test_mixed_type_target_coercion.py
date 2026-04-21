@@ -142,3 +142,56 @@ class TestNaNIsDroppedNotStringified:
         assert len(y_local) == 3
         assert "nan" not in y_local.values
         assert "nan" not in set(y_local.values)
+
+
+class TestTaskTypeChangeWarning:
+    """Test 5: _on_task_type_changed warns when crossing regression <-> classification boundary."""
+
+    def test_warns_on_regression_to_classification_with_validation(self):
+        mock_app = _make_mock_app()
+        mock_app.task_type = MagicMock()
+        mock_app.task_type.get.return_value = "classification"
+        mock_app.y = pd.Series([0, 1, 0, 1])
+        mock_app.validation_y = pd.Series([0, 1, 0])
+        mock_app._last_task_type = "regression"
+        mock_app._updating_from_tier = False
+        mock_app.model_checkboxes = {}
+        mock_app.model_checkbox_widgets = {}
+
+        SpectralPredictApp._on_task_type_changed(mock_app)
+
+        log_calls = [str(c) for c in mock_app._log_progress.call_args_list]
+        assert any("Task type changed" in c and "regression" in c and "classification" in c for c in log_calls)
+        assert mock_app._last_task_type == "classification"
+
+    def test_no_warn_when_same_category(self):
+        mock_app = _make_mock_app()
+        mock_app.task_type = MagicMock()
+        mock_app.task_type.get.return_value = "classification"
+        mock_app.y = pd.Series(["A", "B", "A"])
+        mock_app.validation_y = pd.Series(["A", "B"])
+        mock_app._last_task_type = "classification"
+        mock_app._updating_from_tier = False
+        mock_app.model_checkboxes = {}
+        mock_app.model_checkbox_widgets = {}
+
+        SpectralPredictApp._on_task_type_changed(mock_app)
+
+        log_calls = [str(c) for c in mock_app._log_progress.call_args_list]
+        assert not any("Task type changed" in c for c in log_calls)
+
+    def test_no_warn_when_no_validation(self):
+        mock_app = _make_mock_app()
+        mock_app.task_type = MagicMock()
+        mock_app.task_type.get.return_value = "classification"
+        mock_app.y = pd.Series([0, 1, 0])
+        mock_app.validation_y = None
+        mock_app._last_task_type = "regression"
+        mock_app._updating_from_tier = False
+        mock_app.model_checkboxes = {}
+        mock_app.model_checkbox_widgets = {}
+
+        SpectralPredictApp._on_task_type_changed(mock_app)
+
+        log_calls = [str(c) for c in mock_app._log_progress.call_args_list]
+        assert not any("Task type changed" in c for c in log_calls)

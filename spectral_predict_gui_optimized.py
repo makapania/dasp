@@ -16306,6 +16306,19 @@ class SpectralPredictApp:
         # Show/hide one-class controls based on task type
         self._update_one_class_controls_visibility()
 
+        # Warn if task-type boundary changed with a non-null validation set
+        prev = self._last_task_type
+        if prev is not None and self.validation_y is not None and len(self.validation_y) > 0:
+            reg_types = {"regression"}
+            cls_types = {"classification", "one_class"}
+            if (prev in reg_types and actual_task in cls_types) or (prev in cls_types and actual_task in reg_types):
+                self._log_progress(
+                    f"  [Warning] Task type changed from '{prev}' to '{actual_task}' "
+                    f"with {len(self.validation_y)} validation samples still loaded. "
+                    f"Validation metrics may be incorrect for the new task type."
+                )
+        self._last_task_type = actual_task
+
     def _update_one_class_controls_visibility(self):
         """Show/hide one-class specific controls based on task type."""
         task_type = self.task_type.get()
