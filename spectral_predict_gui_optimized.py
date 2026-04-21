@@ -46151,8 +46151,8 @@ External Validation Performance (n={n_val}):
         toolbar = NavigationToolbar2Tk(canvas, self.ct_predictions_plot_frame)
         toolbar.update()
 
-    def _export_predictions(self):
-        """Export predictions to CSV file."""
+    def _export_ct_workflow_predictions(self):
+        """Export calibration transfer workflow predictions to CSV file."""
         import pandas as pd
         from tkinter import filedialog, messagebox
 
@@ -50297,7 +50297,7 @@ External Validation Performance (n={n_val}):
 
         self.ct_export_predictions_button = ttk.Button(prediction_btn_frame,
                                                        text="Export Predictions to CSV...",
-                                                       command=self._export_predictions,
+                                                       command=self._export_ct_workflow_predictions,
                                                        style='Modern.TButton', state='disabled')
         self.ct_export_predictions_button.pack(side='left')
 
