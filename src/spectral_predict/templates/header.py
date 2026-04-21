@@ -84,3 +84,27 @@ print(f"Loaded {{X.shape[0]}} samples with {{X.shape[1]}} wavelengths")
 print(f"Wavelength range: {{wavelengths.min():.1f}} - {{wavelengths.max():.1f}} nm")
 print(f"Class distribution: {{dict(zip(*np.unique(y, return_counts=True)))}}")
 '''
+
+DATA_LOADING_ONE_CLASS_TEMPLATE = '''
+# =============================================================================
+# DATA LOADING (One-Class)
+# =============================================================================
+
+data = pd.read_csv("{data_path}")  # <-- Replace with your data file path
+
+wavelength_cols = [c for c in data.columns
+                   if c.replace('.', '').replace('-', '').replace('+', '').isdigit()
+                   or (c.replace('.', '').replace('-', '').replace('+', '')[0].isdigit())]
+
+X = data[wavelength_cols].values
+wavelengths = np.array([float(c) for c in wavelength_cols])
+
+class_col = data["{target_column}"].values
+y_oc = np.where(np.array([str(v).strip() for v in class_col]) == "{inlier_class_label}", 1, -1)
+inlier_indices = np.where(y_oc == 1)[0]
+outlier_indices = np.where(y_oc == -1)[0]
+
+print(f"Loaded {{X.shape[0]}} samples with {{X.shape[1]}} wavelengths")
+print(f"Wavelength range: {{wavelengths.min():.1f}} - {{wavelengths.max():.1f}} nm")
+print(f"Inlier class: '{inlier_class_label}' -> {{len(inlier_indices)}} inliers, {{len(outlier_indices)}} outliers")
+'''

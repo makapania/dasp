@@ -4,6 +4,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — One-class model support in export system (code_generator + templates)
+
+**What:** Added `task_type='one_class'` as a third branch throughout the code export system (6 files). Previously, exporting a one-class model (IsolationForest, OCSVM, etc.) crashed with `NameError: name 'IsolationForest' is not defined`.
+
+**Files changed:**
+- `src/spectral_predict/templates/models.py` — ONE_CLASS_MODELS set, ONE_CLASS_NEEDS_SCALING set, PCASIMCA_CLASS_TEMPLATE, one-class MODEL_IMPORTS/MODEL_TEMPLATES/DEFAULT_PARAMS entries
+- `src/spectral_predict/templates/header.py` — DATA_LOADING_ONE_CLASS_TEMPLATE (y_oc + inlier/outlier indices)
+- `src/spectral_predict/templates/validation.py` — CROSS_VALIDATION_ONE_CLASS_TEMPLATE (mirrors contamination.py:run_one_class_cv exactly — inlier-only KFold, majority vote under repeated CV, mean-of-fold AUCs), METRICS_ONE_CLASS_TEMPLATE, FINAL_MODEL_ONE_CLASS_TEMPLATE, PREDICTION_ONE_CLASS_TEMPLATE, get_final_model_template(), get_prediction_template()
+- `src/spectral_predict/templates/visualization.py` — ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE, ONE_CLASS_CONFUSION_TEMPLATE, updated get_visualization_code()
+- `src/spectral_predict/code_generator.py` — one-class branches in __init__, _render_header, _get_imports_code, _generate_embedded_data_section, _render_data_loading, _render_model (_render_one_class_model), _render_cross_validation, _render_final_model, _resolve_model_ctor_class, _resolve_model_class_name, _resolve_default_param_key
+- `spectral_predict_gui_optimized.py` — one-class metrics dict + inlier_class_label in model_config
+
+**Gotchas found:**
+- PCASIMCA and LocalOutlierFactor do NOT accept `random_state` parameter. The `_render_one_class_model` method must exclude these from random_state injection alongside OneClassSVM.
+- One-class models use manual StandardScaler (not sklearn Pipeline) — scaling is handled inline in the CV/final-model templates, NOT via `_needs_standard_scaler()`.
+- The CV template uses `{x_var}` and `{model_name}` format variables that must be substituted at generation time (not replaced post-hoc like regression/classification's X_final).
+
+**Verified:** All 5 one-class models (IsolationForest, OneClassSVM, EllipticEnvelope, LOF, PCA-SIMCA) generate syntactically valid scripts that execute correctly end-to-end. 33/33 export tests pass. 61/61 contamination tests pass. No regressions in regression/classification export paths.
+
+---
+
 ## 2026-04-19 — PLS-DA classification wavelength importance fix
 
 **Bug:** After running a PLS-DA classification model in Model Development, no wavelength importance figure was displayed. Regression PLS and one-class models showed it correctly. Non-PLS-DA classification (LightGBM, RandomForest, etc.) also worked.

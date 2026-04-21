@@ -122,6 +122,46 @@ plt.savefig('confusion_matrix.png', dpi=150, bbox_inches='tight')
 plt.show()
 '''
 
+ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE = '''
+# =============================================================================
+# VISUALIZATION: Decision Score Distribution (One-Class)
+# =============================================================================
+
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.hist(y_pred_cv[all_y_true_arr == 1],
+        bins=30, alpha=0.6, label='Inlier', color='steelblue', edgecolor='k')
+ax.hist(y_pred_cv[all_y_true_arr == -1],
+        bins=30, alpha=0.6, label='Outlier', color='coral', edgecolor='k')
+ax.axvline(x=0, color='red', linestyle='--', lw=2, label='Decision boundary')
+ax.set_xlabel('Decision Score', fontsize=12)
+ax.set_ylabel('Frequency', fontsize=12)
+ax.set_title('One-Class Decision Score Distribution', fontsize=14)
+ax.legend()
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('one_class_score_distribution.png', dpi=150, bbox_inches='tight')
+plt.show()
+'''
+
+ONE_CLASS_CONFUSION_TEMPLATE = '''
+# =============================================================================
+# VISUALIZATION: Confusion Matrix (One-Class)
+# =============================================================================
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+
+fig, ax = plt.subplots(figsize=(8, 8))
+cm = confusion_matrix(all_y_true_arr, y_pred_cv, labels=[1, -1])
+disp = ConfusionMatrixDisplay(cm, display_labels=['Inlier (+1)', 'Outlier (-1)'])
+disp.plot(ax=ax, cmap='Blues')
+ax.set_title('One-Class Confusion Matrix', fontsize=14)
+
+plt.tight_layout()
+plt.savefig('one_class_confusion_matrix.png', dpi=150, bbox_inches='tight')
+plt.show()
+'''
+
 
 def get_visualization_code(task_type: str, include_spectra: bool = False,
                           include_variable_importance: bool = False) -> str:
@@ -147,6 +187,9 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
     if task_type == 'regression':
         code_parts.append(PRED_VS_ACTUAL_TEMPLATE)
         code_parts.append(RESIDUALS_TEMPLATE)
+    elif task_type == 'one_class':
+        code_parts.append(ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE)
+        code_parts.append(ONE_CLASS_CONFUSION_TEMPLATE)
     else:
         code_parts.append(CONFUSION_MATRIX_TEMPLATE)
 

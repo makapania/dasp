@@ -13,13 +13,15 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
-from .templates.header import HEADER_TEMPLATE, DATA_LOADING_TEMPLATE, DATA_LOADING_CLASSIFICATION_TEMPLATE
+from .templates.header import HEADER_TEMPLATE, DATA_LOADING_TEMPLATE, DATA_LOADING_CLASSIFICATION_TEMPLATE, DATA_LOADING_ONE_CLASS_TEMPLATE
 from .templates.preprocessing import get_preprocessing_template, SNV_TEMPLATE, SAVGOL_DERIVATIVE_TEMPLATE
 from .templates.variable_selection import get_variable_selection_template
-from .templates.models import get_model_template, get_model_imports, MODEL_IMPORTS, DEFAULT_PARAMS
+from .templates.models import get_model_template, get_model_imports, MODEL_IMPORTS, DEFAULT_PARAMS, ONE_CLASS_MODELS, ONE_CLASS_NEEDS_SCALING, PCASIMCA_CLASS_TEMPLATE
 from .templates.validation import (
     get_cross_validation_template,
     get_metrics_template,
+    get_final_model_template,
+    get_prediction_template,
     FINAL_MODEL_TEMPLATE,
     PREDICTION_TEMPLATE,
 )
@@ -115,6 +117,7 @@ class CodeGenerator:
         self.cv_strategy = model_config.get('cv_strategy', _training_config.get('cv_strategy', 'kfold'))
         self.cv_n_repeats = model_config.get('cv_n_repeats', _training_config.get('cv_n_repeats', 5))
         self.imbalance_method = model_config.get('imbalance_method', None)
+        self.inlier_class_label = model_config.get('inlier_class_label', '')
 
         # Update options with target column from config
         if self.target_name:
@@ -218,7 +221,7 @@ class CodeGenerator:
 
         # 11. Prediction template (optional)
         if self.options.include_prediction_template:
-            sections.append(PREDICTION_TEMPLATE)
+            sections.append(get_prediction_template(self.task_type))
 
         return '\n'.join(sections)
 
@@ -491,6 +494,12 @@ def _decode_embedded_data(encoded_str):
 
         sections.append(f'\nprint(f"Loaded embedded data: X shape = {{X.shape}}, y shape = {{y.shape}}")')
 
+        if self.task_type == 'one_class':
+            sections.append('\ny_oc = y')
+            sections.append('inlier_indices = np.where(y_oc == 1)[0]')
+            sections.append('outlier_indices = np.where(y_oc == -1)[0]')
+            sections.append(f'print(f"Inliers: {{len(inlier_indices)}}, Outliers: {{len(outlier_indices)}}")')
+
         return '\n'.join(sections)
 
     # =========================================================================
@@ -531,6 +540,14 @@ def _decode_embedded_data(encoded_str):
                 'from sklearn.model_selection import cross_val_predict, StratifiedKFold',
                 'from sklearn.metrics import accuracy_score, f1_score, confusion_matrix',
             ]
+        elif self.task_type == 'one_class':
+            sklearn_imports = [
+                'from sklearn.metrics import balanced_accuracy_score, recall_score, precision_score, f1_score, accuracy_score, roc_auc_score',
+            ]
+            if self.model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                imports.append('from sklearn.preprocessing import StandardScaler')
+            if self.model_name == 'EllipticEnvelope':
+                imports.append('from sklearn.decomposition import PCA')
         imports.extend(sklearn_imports)
 
         # Imbalance handling imports
@@ -615,6 +632,14 @@ def _decode_embedded_data(encoded_str):
                 'from sklearn.model_selection import cross_val_predict, StratifiedKFold',
                 'from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report',
             ])
+        elif self.task_type == 'one_class':
+            imports.extend([
+                'from sklearn.metrics import balanced_accuracy_score, recall_score, precision_score, f1_score, accuracy_score, roc_auc_score',
+            ])
+            if self.model_name in ('OneClassSVM', 'EllipticEnvelope', 'LOF'):
+                imports.append('from sklearn.preprocessing import StandardScaler')
+            if self.model_name == 'EllipticEnvelope':
+                imports.append('from sklearn.decomposition import PCA')
         else:
             imports.extend([
                 'from sklearn.model_selection import cross_val_predict, KFold',
@@ -697,7 +722,13 @@ def _decode_embedded_data(encoded_str):
 
     def _render_data_loading(self) -> str:
         """Render data loading section."""
-        if self.task_type == 'classification':
+        if self.task_type == 'one_class':
+            return DATA_LOADING_ONE_CLASS_TEMPLATE.format(
+                data_path=self.options.data_path,
+                target_column=self.options.target_column,
+                inlier_class_label=self.inlier_class_label or 'Clean',
+            )
+        elif self.task_type == 'classification':
             return DATA_LOADING_CLASSIFICATION_TEMPLATE.format(
                 data_path=self.options.data_path,
                 target_column=self.options.target_column
@@ -851,6 +882,8 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
                 lr_params.setdefault('class_weight', 'balanced')
             model_code = warning + self._render_pls_da_pipeline(pls_params, lr_params)
+        elif self.task_type == 'one_class':
+            model_code = warning + self._render_one_class_model(params)
         elif self._needs_standard_scaler():
             default_key = self._resolve_default_param_key()
             params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
@@ -980,6 +1013,16 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                 normalized = 'PLSDA'
             elif normalized == 'MLP':
                 normalized = 'MLPClassifier'
+        elif self.task_type == 'one_class':
+            oc_name_map = {
+                'IsolationForest': 'IsolationForest',
+                'OneClassSVM': 'OneClassSVM',
+                'EllipticEnvelope': 'EllipticEnvelope',
+                'LOF': 'LOF',
+                'PCASIMCA': 'PCA-SIMCA',
+            }
+            if normalized in oc_name_map:
+                normalized = oc_name_map[normalized]
 
         return normalized
 
@@ -1014,6 +1057,17 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                 return 'MLPClassifier'
             if normalized == 'PLS':
                 return 'PLSRegression'
+        elif self.task_type == 'one_class':
+            oc_ctor_map = {
+                'IsolationForest': 'IsolationForest',
+                'OneClassSVM': 'OneClassSVM',
+                'EllipticEnvelope': 'EllipticEnvelope',
+                'LOF': 'LocalOutlierFactor',
+                'PCASIMCA': 'PCASIMCA',
+            }
+            if normalized in oc_ctor_map:
+                return oc_ctor_map[normalized]
+            return normalized
         else:
             if normalized == 'RandomForest':
                 return 'RandomForestRegressor'
@@ -1061,6 +1115,16 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                 return 'MLPClassifier'
             if normalized == 'PLS':
                 return 'PLSDA'
+        elif self.task_type == 'one_class':
+            oc_default_map = {
+                'IsolationForest': 'IsolationForest',
+                'OneClassSVM': 'OneClassSVM',
+                'EllipticEnvelope': 'EllipticEnvelope',
+                'LOF': 'LOF',
+                'PCASIMCA': 'PCA-SIMCA',
+            }
+            if normalized in oc_default_map:
+                return oc_default_map[normalized]
         return normalized
 
     def _serialize_param_value(self, value: Any) -> Any:
@@ -1197,6 +1261,36 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
             "model = Pipeline([('scaler', StandardScaler()), ('model', model)])\n"
         )
 
+    def _render_one_class_model(self, params: Dict[str, Any]) -> str:
+        """Render one-class model instantiation (no Pipeline, no y in fit)."""
+        ctor_class = self._resolve_model_ctor_class()
+        default_key = self._resolve_default_param_key()
+        params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
+        params_full.update(params)
+
+        if 'random_state' not in params_full and ctor_class not in ('OneClassSVM', 'PCASIMCA', 'LocalOutlierFactor'):
+            params_full['random_state'] = 42
+        if ctor_class == 'LocalOutlierFactor':
+            params_full['novelty'] = True
+        if ctor_class == 'IsolationForest' and 'n_jobs' not in params_full:
+            params_full['n_jobs'] = 1
+        if ctor_class == 'LocalOutlierFactor' and 'n_jobs' not in params_full:
+            params_full['n_jobs'] = 1
+
+        params_full = self._serialize_param_value(params_full)
+        params_literal = repr(params_full)
+
+        code = ''
+        if ctor_class == 'PCASIMCA':
+            code = PCASIMCA_CLASS_TEMPLATE + '\n'
+
+        code += (
+            f"\n# {ctor_class} (one-class)\n"
+            f"model_params = {params_literal}\n"
+            f"model = {ctor_class}(**model_params)\n"
+        )
+        return code
+
     def _render_cross_validation(self) -> str:
         """Render cross-validation code."""
         if self.imbalance_method:
@@ -1221,10 +1315,12 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         cv_code = get_cross_validation_template(
             self.task_type, self.cv_folds,
             cv_strategy=self.cv_strategy, cv_n_repeats=self.cv_n_repeats,
+            model_name=self.model_name, x_var=x_var,
         )
 
-        # Replace X_final with appropriate variable
-        cv_code = cv_code.replace('X_final', x_var)
+        # Replace X_final with appropriate variable (one-class template uses {x_var} directly)
+        if self.task_type != 'one_class':
+            cv_code = cv_code.replace('X_final', x_var)
 
         return cv_code
 
@@ -1237,8 +1333,6 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         if self.imbalance_method:
             return self._render_final_model_with_imbalance()
 
-        # Determine which variable to use
-        # Priority: imbalance resampling > variable selection > preprocessing > raw
         resampling_methods = ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
                               'tomek_links', 'smote_tomek', 'smote_enn', 'smogn', 'smotetomek',
                               'oversample', 'undersample']
@@ -1252,15 +1346,7 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         else:
             x_var = 'X'
 
-        return f'''
-# =============================================================================
-# TRAIN FINAL MODEL
-# =============================================================================
-
-# Train the model on all data
-model.fit({x_var}, y)
-print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with {{{x_var}.shape[1]}} features")
-'''
+        return get_final_model_template(self.task_type, x_var=x_var, model_name=self.model_name)
 
     def _render_imbalance_handling(self) -> str:
         """Render imbalance handling support code."""

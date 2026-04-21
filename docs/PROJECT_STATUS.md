@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-19 by GPT-5.4 — Tightened the PLS-DA classification wavelength-importance fix. `_plot_wavelength_importance()` no longer trims wavelengths or falls back to index positions when counts disagree; it now requires an exact one-to-one match between plotted wavelengths and model-derived importances. This enforces the intended scientific contract: only wavelengths actually used by the fitted model are shown, with importances from that same fitted model/feature space. Uncommitted on main.
+> **Last updated:** 2026-04-21 by GLM-5.1 — Added one-class model support to the export system (code_generator + 4 template files + GUI). All 5 one-class models now export as standalone Python scripts and Jupyter notebooks that reproduce the CV loop from contamination.py:run_one_class_cv exactly. Previously, exporting an IsolationForest/OCSVM/etc. crashed with NameError. Uncommitted on main.
 
 > **Previously:** 2026-04-19 by GLM-5.1 — Analysis Subset V1 implemented on branch `glm/analysis-subset-v1` (NOT yet merged). New pure-logic module `src/spectral_predict/analysis_subset.py` with 41 tests. Analysis tab has "Analysis Subset" card above Holdout Validation. Metadata-only dialog with categorical multi-select. Subset provenance stored in `last_training_config`. Mismatch warnings in Model Development. One-class guardrail blocks when subset removes all inlier samples. C2 missing-column safe handling via `_refresh_active_group_indices`. All changes uncommitted in worktree. 41/41 analysis_subset tests + 61/61 OC regression tests pass. See `docs/SESSION_LOG.md` 2026-04-19 entry for architecture decisions and gotchas.
 
@@ -118,6 +118,7 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 - [x] Dancing man animation stops on completion
 - [x] Model Development: runs complete, buttons re-enable, cursor resets
 - [x] Wavelength importance: surrogate LightGBM via `compute_one_class_importances()`
+- [x] Code export: one-class models export as standalone Python scripts and Jupyter notebooks with full CV reproduction
 - [x] SHAP: permutation importance for most models, TreeExplainer for IsolationForest
 - [x] Diagnostics: decision score distribution + sample classification plots
 - [x] Residual/leverage diagnostics route to one-class-specific plots (not regression fallback)

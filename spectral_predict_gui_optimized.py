@@ -37657,13 +37657,18 @@ External Validation Performance (n={n_val}):
                     'target_name': self.refined_config.get('target_name', 'target'),
                     'task_type': self.refined_config['task_type'],
                     'params': params_from_search,
-                    'metrics': {
-                        'RMSE': self.refined_performance.get('rmse_mean'),
-                        'R2': self.refined_performance.get('r2_mean'),
-                    } if self.refined_config['task_type'] == 'regression' else {
-                        'Accuracy': self.refined_performance.get('accuracy_mean'),
-                        'F1': self.refined_performance.get('f1_mean'),
-                    },
+                    'metrics': (
+                        {'RMSE': self.refined_performance.get('rmse_mean'),
+                         'R2': self.refined_performance.get('r2_mean')}
+                        if self.refined_config['task_type'] == 'regression'
+                        else {'BalancedAcc': self.refined_performance.get('BalancedAcc'),
+                              'Sensitivity': self.refined_performance.get('Sensitivity'),
+                              'Specificity': self.refined_performance.get('Specificity'),
+                              'AUC': self.refined_performance.get('AUC')}
+                        if self.refined_config['task_type'] == 'one_class'
+                        else {'Accuracy': self.refined_performance.get('accuracy_mean'),
+                              'F1': self.refined_performance.get('f1_mean')}
+                    ),
                     'wavelengths': self.refined_wavelengths,
                     'cv_folds': self.refined_config.get('cv_folds', 5),
                     'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
@@ -37681,6 +37686,7 @@ External Validation Performance (n={n_val}):
                     'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
                     # GUI does NOT trim derivative edges; keep export aligned
                     'trim_derivative_edges': False,
+                    'inlier_class_label': self.refined_config.get('inlier_class_label', ''),
                 }
 
                 # Get data
