@@ -3989,7 +3989,8 @@ class SpectralPredictApp:
 
             if self._is_categorical_target():
                 # Categorical Y: discrete colors
-                unique_classes = np.unique(color_values)
+                color_values_clean = color_values[pd.notna(color_values)]
+                unique_classes = np.unique(color_values_clean)
                 n_classes = len(unique_classes)
                 colors = plt.cm.Set1(np.linspace(0, 1, min(n_classes, 9)))
                 if n_classes > 9:
@@ -16294,7 +16295,7 @@ class SpectralPredictApp:
                 self.oc_model_config_container.grid()
             # Populate inlier class combo with unique y values if data is loaded
             if self.y is not None:
-                unique_vals = sorted([str(v) for v in np.unique(self.y.values)])
+                unique_vals = sorted([str(v) for v in self.y.dropna().unique()])
                 self.inlier_class_combo['values'] = [''] + unique_vals
             # Swap model panels: hide standard, show one-class
             if hasattr(self, 'standard_models_frame'):
@@ -21077,7 +21078,9 @@ class SpectralPredictApp:
             counts = y_consistency['value_counts']
         else:
             # Fallback: compute from self.y
-            unique_values, counts = np.unique(self.y.values, return_counts=True)
+            vc = self.y.dropna().value_counts()
+            unique_values = vc.index.values
+            counts = vc.values
 
         # Create figure with single bar chart
         fig = Figure(figsize=(10, 6))
@@ -22736,10 +22739,15 @@ class SpectralPredictApp:
             inlier_label = self.inlier_class_label.get().strip()
             if not inlier_label:
                 # Auto-detect most frequent class but require user confirmation
-                y_vals = self.y.values
-                unique_labels, counts = np.unique(y_vals, return_counts=True)
+                y_clean = self.y.dropna()
+                if len(y_clean) == 0:
+                    messagebox.showerror("Error", "No valid (non-NaN) target values found. Cannot auto-detect inlier class.")
+                    return
+                vc = y_clean.value_counts()
+                unique_labels = vc.index.values
+                counts = vc.values
                 auto_label = unique_labels[np.argmax(counts)]
-                class_dist = dict(zip(unique_labels.tolist(), counts.tolist()))
+                class_dist = dict(zip([str(v) for v in unique_labels.tolist()], counts.tolist()))
                 confirm = messagebox.askyesno(
                     "Confirm Inlier Class",
                     f"No inlier class specified.\n\n"
@@ -29731,7 +29739,7 @@ For detailed documentation, see the User Guide.
                 import numpy as np
                 if not pd.api.types.is_numeric_dtype(self.y.dtype):
                     task_type = 'classification'
-                elif len(np.unique(self.y)) < 20:  # Heuristic for classification
+                elif len(self.y.dropna().unique()) < 20:
                     task_type = 'classification'
 
             # Get preprocessing information from results DataFrame if available
@@ -32499,7 +32507,7 @@ Performance (Classification):
             self._plot_regression_predictions()
 
     def _plot_one_class_predictions(self):
-        """Plot one-class detection results: metrics bar chart and prediction summary."""
+        """Plot one-class detection results: metrics bar chart, prediction summary, and confusion matrix."""
         if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
             return
         if not HAS_MATPLOTLIB:
@@ -32512,7 +32520,7 @@ Performance (Classification):
         plot_frame = ttk.Frame(self.refine_plot_frame)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
         # Left: Metrics grouped bar chart (calibration + CV)
         perf = self.refined_performance
@@ -32541,7 +32549,7 @@ Performance (Classification):
                 axes[0].text(bar.get_x() + bar.get_width()/2., val + 0.02,
                            f'{val:.3f}', ha='center', va='bottom', fontsize=7)
 
-        # Right: Prediction summary (inlier vs outlier counts)
+        # Middle: Prediction summary (inlier vs outlier counts)
         y_true = self.refined_y_true
         y_pred = self.refined_y_pred
         n_true_inlier = np.sum(y_true == 1)
@@ -32558,6 +32566,33 @@ Performance (Classification):
         axes[1].set_ylabel('Count')
         axes[1].set_title('Inlier/Outlier Distribution')
         axes[1].legend()
+
+        # Right: 2x2 Confusion Matrix
+        cm = confusion_matrix(y_true, y_pred, labels=[1, -1])
+        cm_display_labels = ['Inlier (+1)', 'Outlier (-1)']
+
+        im = axes[2].imshow(cm, interpolation='nearest', cmap='Blues')
+        fig.colorbar(im, ax=axes[2])
+
+        tick_marks = np.arange(len(cm_display_labels))
+        axes[2].set_xticks(tick_marks)
+        axes[2].set_xticklabels(cm_display_labels, rotation=45, ha='right', fontsize=8)
+        axes[2].set_yticks(tick_marks)
+        axes[2].set_yticklabels(cm_display_labels, fontsize=8)
+
+        thresh = cm.max() / 2.0 if cm.max() > 0 else 0.5
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                count = cm[i, j]
+                row_total = cm[i, :].sum()
+                pct = count / row_total * 100 if row_total > 0 else 0.0
+                color = "white" if count > thresh else "black"
+                axes[2].text(j, i, f"{count}\n({pct:.1f}%)",
+                             ha="center", va="center",
+                             color=color, fontsize=10)
+
+        axes[2].set_ylabel('True Label', fontsize=9, fontweight='bold')
+        axes[2].set_title('Confusion Matrix', fontsize=11, fontweight='bold')
 
         fig.tight_layout()
 

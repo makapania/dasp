@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — Fix: `np.unique()` crash on mixed str/NaN categorical targets
+
+**Bug:** Loading a combined Excel file with a categorical string target column (e.g., `Habitat` = 'Upland_Tundra'/'Valley') containing NaN values caused `TypeError: '<' not supported between instances of 'str' and 'float'`. This crashed the GUI during import when task_type was set to one_class.
+
+**Root cause:** `np.unique()` sorts its input to find unique values. When `self.y` has object dtype with both strings and float NaN, Python 3 cannot compare them with `<`. This is triggered by `drop_na_y=False` during import (intentionally keeps NaN rows for prediction).
+
+**Fix pattern:** Replace `np.unique(self.y.values)` with `self.y.dropna().unique()` or `self.y.dropna().value_counts()` — pandas `.unique()` is hash-based (no sorting), and `.dropna()` removes NaN before any comparison. Consistent with 3 existing safe sites at lines 3945, 20575, 32633 that already use `pd.notna()` filtering.
+
+**Sites fixed (6 total):**
+1. GUI line 16297 — inlier class combo population (`_update_one_class_controls_visibility`)
+2. GUI line 22740 — auto-detect inlier class in run analysis (added empty-result guard)
+3. GUI line 21080 — y distribution plot fallback in quality check tab
+4. GUI line 29734 — task type heuristic for ensemble/export
+5. GUI line 3992 — scatter plot coloring (`_apply_color_to_scatter`)
+6. `outlier_detection.py` line 419 — `check_y_data_consistency()` categorical path
+
+**Tests added:** 2 new tests in `test_outlier_detection.py::TestYDataConsistency`:
+- `test_categorical_with_nan_values` — mixed str/NaN Series
+- `test_categorical_all_nan` — all-NaN Series (float64 by pandas inference)
+
+**Gotcha:** `pd.Series([np.nan, np.nan, np.nan])` gets dtype float64 (not object), so all-NaN takes the numeric path in `check_y_data_consistency`, not categorical. The test accounts for this.
+
+**Peer review note:** DeepSeek V3.2 raised concern about empty results after `dropna()`. Fix 2 (line 22740) now has an explicit guard: `if len(y_clean) == 0: show error, return`.
+
+---
+
 ## 2026-04-21 — One-class model support in export system (code_generator + templates)
 
 **What:** Added `task_type='one_class'` as a third branch throughout the code export system (6 files). Previously, exporting a one-class model (IsolationForest, OCSVM, etc.) crashed with `NameError: name 'IsolationForest' is not defined`.

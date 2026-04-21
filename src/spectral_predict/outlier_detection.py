@@ -416,10 +416,11 @@ def check_y_data_consistency(y, lower_bound=None, upper_bound=None):
 
     if is_categorical:
         # For categorical data, return class distribution instead of outliers
-        unique_values, counts = np.unique(y_array, return_counts=True)
+        y_clean = y_array[pd.notna(y_array)]
+        unique_values, counts = np.unique(y_clean, return_counts=True)
 
         # Calculate class frequencies
-        total_samples = len(y_array)
+        total_samples = len(y_clean) if len(y_clean) > 0 else len(y_array)
         frequencies = counts / total_samples
 
         return {

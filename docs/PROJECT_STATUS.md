@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-21 by GLM-5.1 — Added one-class model support to the export system (code_generator + 4 template files + GUI). All 5 one-class models now export as standalone Python scripts and Jupyter notebooks that reproduce the CV loop from contamination.py:run_one_class_cv exactly. Previously, exporting an IsolationForest/OCSVM/etc. crashed with NameError. Uncommitted on main.
+> **Last updated:** 2026-04-21 by GLM-5.1 — Fixed `TypeError: '<' not supported between instances of 'str' and 'float'` crash when loading combined Excel files with categorical string targets containing NaN values (e.g., Arctic vegetation Habitat column). 6 fix sites across GUI + backend `outlier_detection.py`. 2 new regression tests. Uncommitted.
 
 > **Previously:** 2026-04-19 by GLM-5.1 — Analysis Subset V1 implemented on branch `glm/analysis-subset-v1` (NOT yet merged). New pure-logic module `src/spectral_predict/analysis_subset.py` with 41 tests. Analysis tab has "Analysis Subset" card above Holdout Validation. Metadata-only dialog with categorical multi-select. Subset provenance stored in `last_training_config`. Mismatch warnings in Model Development. One-class guardrail blocks when subset removes all inlier samples. C2 missing-column safe handling via `_refresh_active_group_indices`. All changes uncommitted in worktree. 41/41 analysis_subset tests + 61/61 OC regression tests pass. See `docs/SESSION_LOG.md` 2026-04-19 entry for architecture decisions and gotchas.
 
@@ -191,6 +191,12 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 - **CV Strategy Phase 2: NSGA-II multi-objective search CV strategy support.** Currently falls back to K-fold with a logged warning when non-kfold strategy is selected. Needs native LOO/Repeated K-fold support.
 
 - **One-class search: Add `training_config` to result rows.** Regression/classification grid search writes `training_config` (with `cv_strategy`, `folds`, `cv_n_repeats`) but one-class search does not. This means one-class saved models don't preserve the CV strategy used during training.
+
+- **One-class export lacks automated regression tests.** The existing 33 export tests (`tests/test_code_generator.py`, etc.) do not exercise the `task_type='one_class'` path. Manual verification confirms all 5 models compile, but a future refactor of `templates/validation.py` or `code_generator.py` could silently break one-class export. A single parameterized test generating scripts for all 5 OC models would be cheap insurance.
+
+- **Template string formatting fragility in one-class CV block.** `CROSS_VALIDATION_ONE_CLASS_TEMPLATE` uses `.format()` with `{model_name}` and `{x_var}` variables inside a large multi-line template string. This is correct today but slightly fragile: a future edit that introduces an additional brace pair (e.g. a dictionary literal `{` `}`) would cause a `KeyError` at generation time. This is pre-existing technical debt in the template system, not introduced by this commit, but worth noting if the template engine is ever refactored.
+
+- **One-class export lacks per-fold CV statistics printout (parity bug).** Regression export prints pooled metrics **and** per-fold breakdown (`print(f"\\nPer-fold RMSE: {{[f'{{x:.4f}}' for x in fold_rmse]}}")`). One-class CV template computes `fold_metrics` list but `METRICS_ONE_CLASS_TEMPLATE` prints only pooled metrics, not the per-fold details. This is a **parity mismatch** with the regression export experience. Classification also lacks per-fold printout but gives detailed confusion matrix + classification report instead, which one-class already does via its own confusion matrix plot. Still, for parity with regression's explicit per-fold reporting, one-class should print per-fold sensitivity/specificity/AUC if available.
 
 ## Analysis Subset V1 — Known Limitations / Risk (2026-04-19)
 

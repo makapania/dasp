@@ -371,6 +371,31 @@ class TestYDataConsistency:
         # Check frequencies sum to 1
         assert np.isclose(sum(results["frequencies"]), 1.0)
 
+    def test_categorical_with_nan_values(self):
+        """Verify that categorical data with NaN values does not crash.
+
+        Regression test for: np.unique() on mixed str/NaN raises
+        TypeError: '<' not supported between instances of 'str' and 'float'.
+        NaN should be silently excluded from class distribution.
+        """
+        y = pd.Series(["Upland_Tundra", "Valley", "Upland_Tundra", np.nan, "Valley", np.nan])
+
+        results = check_y_data_consistency(y)
+
+        assert results["is_categorical"] is True
+        assert results["n_outliers"] == 0
+        assert set(results["unique_values"]) == {"Upland_Tundra", "Valley"}
+        assert sum(results["value_counts"]) == 4  # 2 + 2, NaN excluded
+
+    def test_categorical_all_nan(self):
+        """Verify that all-NaN series (float64 by pandas inference) doesn't crash."""
+        y = pd.Series([np.nan, np.nan, np.nan])
+
+        results = check_y_data_consistency(y)
+
+        # pandas infers float64 for all-NaN, so numeric path is taken
+        assert results["n_outliers"] == 0
+
 
 # =============================================================================
 # Comprehensive Outlier Report Tests
