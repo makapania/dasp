@@ -2865,6 +2865,7 @@ class SpectralPredictApp:
         self.validation_indices = set()  # Sample indices in validation set
         self.validation_X = None  # Stored validation spectral data
         self.validation_y = None  # Stored validation target data
+        self._last_task_type = None  # Track previous task type for change warnings
         self.show_validation_metrics = tk.BooleanVar(value=True)  # Show val metrics in results
         self.validation_top_n = tk.IntVar(value=700)  # Number of top models for validation
 
@@ -19510,7 +19511,11 @@ class SpectralPredictApp:
 
         # Handle categorical y values by encoding them
         if not pd.api.types.is_numeric_dtype(y_values.dtype):
-            # Categorical data - encode to numeric
+            # Coerce mixed-type labels to strings before LabelEncoder
+            if y_values.dtype == object:
+                _types = {type(v).__name__ for v in y_values}
+                if len(_types) > 1:
+                    y_values = y_values.astype(str)
             le = LabelEncoder()
             y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
         else:
@@ -19606,9 +19611,13 @@ class SpectralPredictApp:
         test_size = n_samples / n_total
 
         # Determine if y is continuous or categorical
-        if y.dtype in ['object', 'category'] or len(y.unique()) < 10:
-            # Classification: use y directly for stratification
-            stratify = y
+        if y.dtype in ['object', 'category'] or y.nunique() == 2:
+            # Classification: coerce mixed-type labels, then stratify
+            stratify = y.copy()
+            if stratify.dtype == object:
+                types_present = {type(v).__name__ for v in stratify}
+                if len(types_present) > 1:
+                    stratify = stratify.astype(str)
         else:
             # Regression: bin y into quartiles for pseudo-stratification
             stratify = pd.qcut(y, q=4, labels=False, duplicates='drop')
@@ -19737,6 +19746,16 @@ class SpectralPredictApp:
             if is_classification:
                 y_val_set = self.validation_y
                 y_train_set = y_available[~y_available.index.isin(self.validation_indices)]
+
+                # Coerce mixed-type labels to strings for class comparison
+                if getattr(y_val_set, 'dtype', None) == object:
+                    _types_val = {type(v).__name__ for v in y_val_set}
+                    if len(_types_val) > 1:
+                        y_val_set = y_val_set.astype(str)
+                if getattr(y_train_set, 'dtype', None) == object:
+                    _types_train = {type(v).__name__ for v in y_train_set}
+                    if len(_types_train) > 1:
+                        y_train_set = y_train_set.astype(str)
 
                 val_classes = set(y_val_set.unique())
                 train_classes = set(y_train_set.unique())
@@ -26844,6 +26863,16 @@ class SpectralPredictApp:
                             # (run_unified_bayesian doesn't return it)
                             y_train_np = y_np_clean
                             if task_type == 'classification':
+                                # Coerce mixed-type labels to strings
+                                if getattr(y_np_clean, 'dtype', None) == object:
+                                    _types = {type(v).__name__ for v in y_np_clean}
+                                    if len(_types) > 1:
+                                        y_np_clean = y_np_clean.astype(str)
+                                if getattr(y_val_np, 'dtype', None) == object:
+                                    _types = {type(v).__name__ for v in y_val_np}
+                                    if len(_types) > 1:
+                                        y_val_np = y_val_np.astype(str)
+
                                 # Quick sanity check: validation labels should overlap training labels
                                 train_labels = np.unique(y_np_clean)
                                 val_labels = np.unique(y_val_np)
@@ -27066,6 +27095,11 @@ class SpectralPredictApp:
 
                         # Handle label encoding for classification
                         if task_type == 'classification' and label_encoder is not None:
+                            # Coerce mixed-type validation labels to strings
+                            if getattr(y_val_np, 'dtype', None) == object:
+                                _types = {type(v).__name__ for v in y_val_np}
+                                if len(_types) > 1:
+                                    y_val_np = y_val_np.astype(str)
                             try:
                                 y_val_np = label_encoder.transform(y_val_np)
                                 self._log_progress("  Encoded validation labels using training encoder")
@@ -37108,6 +37142,12 @@ Calibration Performance (n={len(y_array)}):
                         print("WARNING: No valid validation samples after dropping NaN targets")
                         raise ValueError("No valid validation samples")
 
+                    # Coerce mixed-type labels to strings before label encoding
+                    if local_label_encoder is not None and getattr(val_y, 'dtype', None) == object:
+                        _types = {type(v).__name__ for v in val_y}
+                        if len(_types) > 1:
+                            val_y = val_y.astype(str)
+
                     if local_label_encoder is not None:
                         # Check for classes not seen during training
                         unseen = set(val_y) - set(local_label_encoder.classes_)
@@ -40245,6 +40285,17 @@ External Validation Performance (n={n_val}):
                             y_true = self.validation_y.loc[self.predictions_df['Sample']].values
                             y_pred = values.values
 
+                            # Coerce mixed-type labels to strings
+                            if is_classification or (col in self.predictions_model_map and self.predictions_model_map[col].get('task_type') == 'one_class'):
+                                if getattr(y_true, 'dtype', None) == object:
+                                    _types = {type(v).__name__ for v in y_true}
+                                    if len(_types) > 1:
+                                        y_true = y_true.astype(str)
+                                if getattr(y_pred, 'dtype', None) == object:
+                                    _types = {type(v).__name__ for v in y_pred}
+                                    if len(_types) > 1:
+                                        y_pred = y_pred.astype(str)
+
                             # For one-class models, map actual labels to inlier/outlier format
                             if task_type == 'one_class' and col in self.predictions_model_map:
                                 oc_metadata = self.predictions_model_map[col]
@@ -40450,6 +40501,11 @@ External Validation Performance (n={n_val}):
             if color_vals is None:
                 ax.scatter(y_true_data, y_pred_data, alpha=0.6, edgecolors='black', linewidths=0.5, s=50, color='steelblue')
             elif is_cat:
+                # Coerce mixed-type color values to strings for np.unique
+                if getattr(color_vals, 'dtype', None) == object:
+                    _types = {type(v).__name__ for v in color_vals if pd.notna(v)}
+                    if len(_types) > 1:
+                        color_vals = color_vals.astype(str)
                 unique_vals = np.unique(color_vals[pd.notna(color_vals)])
                 n_vals = len(unique_vals)
                 colors = plt.cm.tab10(np.linspace(0, 1, 10)) if n_vals <= 10 else plt.cm.tab20(np.linspace(0, 1, 20))
@@ -40615,6 +40671,12 @@ External Validation Performance (n={n_val}):
             print(f"Error getting validation y values: {e}")
             return
 
+        # Coerce mixed-type labels to strings
+        if getattr(y_true, 'dtype', None) == object:
+            _types = {type(v).__name__ for v in y_true}
+            if len(_types) > 1:
+                y_true = y_true.astype(str)
+
         # Create figure with subplots for each model
         n_models = len(prediction_cols)
         n_cols = min(2, n_models)
@@ -40626,6 +40688,12 @@ External Validation Performance (n={n_val}):
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
 
             y_pred = self.predictions_df[col].values
+
+            # Coerce mixed-type predictions to strings
+            if getattr(y_pred, 'dtype', None) == object:
+                _types = {type(v).__name__ for v in y_pred}
+                if len(_types) > 1:
+                    y_pred = y_pred.astype(str)
 
             # For one-class models, map actual labels to inlier/outlier format
             y_true_mapped = y_true
