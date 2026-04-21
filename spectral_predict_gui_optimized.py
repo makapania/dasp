@@ -10873,39 +10873,36 @@ class SpectralPredictApp:
         self.imbalance_recommendation_label.grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=5)
 
         # === SECTION 2.6: Imbalance Handling (Optional) ===
-        ttk.Label(content_frame, text="2.6 Imbalance Handling (Optional)", style='Heading.TLabel').grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
+        self.imbalance_section_heading = ttk.Label(content_frame, text="2.6 Imbalance Handling (Optional)", style='Heading.TLabel')
+        self.imbalance_section_heading.grid(row=row, column=0, columnspan=3, sticky=tk.W, pady=(25, 15))
         row += 1
 
-        imbalance_frame = ttk.LabelFrame(content_frame, text="Imbalance Handling Settings", padding="20")
-        imbalance_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        self.imbalance_frame = ttk.LabelFrame(content_frame, text="Imbalance Handling Settings", padding="20")
+        self.imbalance_frame.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         row += 1
 
         # Enable checkbox
         self.enable_imbalance_handling = tk.BooleanVar(value=False)
-        ttk.Checkbutton(imbalance_frame, text="Enable imbalance handling",
+        ttk.Checkbutton(self.imbalance_frame, text="Enable imbalance handling",
                        variable=self.enable_imbalance_handling,
                        command=self._toggle_imbalance_controls).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=10)
 
         # Method selection
-        ttk.Label(imbalance_frame, text="Method:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(20, 10))
+        ttk.Label(self.imbalance_frame, text="Method:").grid(row=1, column=0, sticky=tk.W, pady=8, padx=(20, 10))
         self.imbalance_method = tk.StringVar(value="smote")
-        self.imbalance_method_combo = ttk.Combobox(imbalance_frame, textvariable=self.imbalance_method,
+        self.imbalance_method_combo = ttk.Combobox(self.imbalance_frame, textvariable=self.imbalance_method,
                                                    state='disabled', width=25)
-        self.imbalance_method_combo['values'] = [
-            'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-            'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight',
-            'binning', 'rare_boost', 'balanced'
-        ]
+        self.imbalance_method_combo['values'] = self._get_imbalance_methods('classification')
         self.imbalance_method_combo.grid(row=1, column=1, sticky=tk.W, pady=8)
         self.imbalance_method_combo.bind('<<ComboboxSelected>>', self._update_imbalance_method_description)
 
         # Method description
-        self.imbalance_method_desc = ttk.Label(imbalance_frame, text="SMOTE - Synthetic oversampling (standard)",
+        self.imbalance_method_desc = ttk.Label(self.imbalance_frame, text="SMOTE - Synthetic oversampling (standard)",
                                               style='Caption.TLabel', wraplength=400, justify='left')
         self.imbalance_method_desc.grid(row=1, column=2, sticky=tk.W, padx=10)
 
         # Parameters frame (method-specific)
-        params_subframe = ttk.Frame(imbalance_frame)
+        params_subframe = ttk.Frame(self.imbalance_frame)
         params_subframe.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10, padx=(20, 0))
 
         # SMOTE/ADASYN parameters
@@ -16253,6 +16250,7 @@ class SpectralPredictApp:
                     actual_task = "classification"
                 else:
                     actual_task = "regression"
+                self._refresh_imbalance_methods(actual_task)
             else:
                 # No data loaded yet - enable all models
                 for model_name, checkbox_widget in self.model_checkbox_widgets.items():
@@ -16264,10 +16262,12 @@ class SpectralPredictApp:
                 self._on_tier_changed()
                 # Update ensemble controls state (disabled for classification)
                 self._update_ensemble_controls_state()
+                self._refresh_imbalance_methods('classification')
                 return
         else:
             # User explicitly selected task type
             actual_task = task_type
+            self._refresh_imbalance_methods(actual_task)
 
         # Get supported models for this task type
         if get_supported_models is None:
@@ -16353,6 +16353,10 @@ class SpectralPredictApp:
                     getattr(self, cb_attr).state(['disabled'])
                 if hasattr(self, var_attr):
                     getattr(self, var_attr).set(False)
+            if hasattr(self, 'imbalance_frame'):
+                self.imbalance_frame.grid_remove()
+            if hasattr(self, 'imbalance_section_heading'):
+                self.imbalance_section_heading.grid_remove()
         else:
             self.inlier_class_frame.grid_remove()
             self.oc_hyperparams_frame.grid_remove()
@@ -16374,6 +16378,10 @@ class SpectralPredictApp:
             for cb_attr in ipls_family_checkboxes:
                 if hasattr(self, cb_attr):
                     getattr(self, cb_attr).state(['!disabled'])
+            if hasattr(self, 'imbalance_frame'):
+                self.imbalance_frame.grid()
+            if hasattr(self, 'imbalance_section_heading'):
+                self.imbalance_section_heading.grid()
 
     def _update_ensemble_controls_state(self):
         """Enable/disable ensemble controls based on task type.
@@ -22204,21 +22212,7 @@ class SpectralPredictApp:
                 task_type = task_type_setting
 
             # Update method dropdown based on task type
-            if task_type == 'classification':
-                classification_methods = [
-                    'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
-                    'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight'
-                ]
-                self.imbalance_method_combo['values'] = classification_methods
-                # Set default if current selection is not valid
-                if self.imbalance_method.get() not in classification_methods:
-                    self.imbalance_method.set('smote')
-            else:  # regression
-                regression_methods = ['smogn', 'oversample', 'smotetomek', 'undersample', 'binning', 'rare_boost', 'balanced']
-                self.imbalance_method_combo['values'] = regression_methods
-                # Set default if current selection is not valid
-                if self.imbalance_method.get() not in regression_methods:
-                    self.imbalance_method.set('smogn')
+            self._refresh_imbalance_methods(task_type)
 
             if task_type == 'classification':
                 # Detect class imbalance
@@ -22380,6 +22374,51 @@ class SpectralPredictApp:
                 self.imbalance_widgets['boost_factor_label'].grid(row=0, column=0, sticky=tk.W, pady=5, padx=(0, 10))
                 self.imbalance_widgets['boost_factor_spin'].config(state='normal')
                 self.imbalance_widgets['boost_factor_spin'].grid(row=0, column=1, sticky=tk.W)
+
+    def _get_imbalance_methods(self, task_type):
+        """Return valid imbalance methods for a task type."""
+        if task_type == 'classification':
+            return [
+                'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight'
+            ]
+        elif task_type == 'regression':
+            return [
+                'smogn', 'oversample', 'smotetomek', 'undersample',
+                'binning', 'rare_boost', 'balanced'
+            ]
+        else:
+            return []
+
+    def _refresh_imbalance_methods(self, task_type):
+        """Update dropdown values for task type; notify if current selection becomes invalid."""
+        methods = self._get_imbalance_methods(task_type)
+        self.imbalance_method_combo['values'] = methods
+        current = self.imbalance_method.get()
+        if current not in methods:
+            old = current
+            default = 'smote' if task_type == 'classification' else 'smogn' if task_type == 'regression' else ''
+            if default and methods:
+                self.imbalance_method.set(default)
+            else:
+                self.imbalance_method.set('')
+            if old:
+                self._set_imbalance_banner(
+                    f"Method changed: {old} -> {self.imbalance_method.get()} (not applicable for {task_type})"
+                )
+            self._update_imbalance_method_description(None)
+        else:
+            self._clear_imbalance_banner()
+
+    def _set_imbalance_banner(self, text):
+        """Show a substitution warning in the imbalance section."""
+        if hasattr(self, 'imbalance_banner_label'):
+            self.imbalance_banner_label.config(text=text)
+
+    def _clear_imbalance_banner(self):
+        """Clear the imbalance substitution warning."""
+        if hasattr(self, 'imbalance_banner_label'):
+            self.imbalance_banner_label.config(text="")
 
     def _get_imbalance_params(self):
         """Get current imbalance handling parameters for analysis."""
