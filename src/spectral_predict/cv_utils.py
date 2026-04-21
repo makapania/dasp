@@ -198,6 +198,7 @@ def build_cv_splitter(
     task_type: str,
     n_repeats: int = 5,
     random_state: int = 42,
+    y=None,
 ):
     """Build a sklearn CV splitter for the requested strategy.
 
@@ -213,18 +214,37 @@ def build_cv_splitter(
         Number of repeats. Used only when strategy == 'repeated_kfold'.
     random_state : int, default=42
         Random state for reproducibility.
+    y : array-like, optional
+        Target array. When provided and task_type is 'classification', validates
+        that y contains discrete labels (not continuous). Raises ValueError if
+        StratifiedKFold would fail on the given y.
 
     Returns
     -------
     sklearn.model_selection.BaseCrossValidator
         A splitter object usable with cross_validate, cross_val_predict, etc.
     """
+    use_stratified = task_type == 'classification' and strategy in ('kfold', 'repeated_kfold')
+    if use_stratified and y is not None:
+        import pandas as pd
+        import numpy as np
+        y_arr = np.asarray(y)
+        y_finite = y_arr[~pd.isna(y_arr)] if hasattr(pd, 'isna') else y_arr
+        if (len(y_finite) > 0
+                and pd.api.types.is_numeric_dtype(y_finite.dtype)
+                and len(np.unique(y_finite)) > 2):
+            raise ValueError(
+                f"task_type='classification' but y has {len(np.unique(y_finite))} unique "
+                f"numeric values (continuous target). StratifiedKFold requires binary or "
+                f"multiclass labels. Either change task_type to 'regression' or use a "
+                f"categorical target column."
+            )
     if strategy == 'loo':
         from sklearn.model_selection import LeaveOneOut
         return LeaveOneOut()
     if strategy == 'repeated_kfold':
         from sklearn.model_selection import RepeatedKFold, RepeatedStratifiedKFold
-        if task_type == 'classification':
+        if use_stratified:
             return RepeatedStratifiedKFold(
                 n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
             )
@@ -232,7 +252,7 @@ def build_cv_splitter(
             n_splits=n_folds, n_repeats=n_repeats, random_state=random_state
         )
     if strategy == 'kfold':
-        if task_type == 'classification':
+        if use_stratified:
             return StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
         return KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
     raise ValueError(
