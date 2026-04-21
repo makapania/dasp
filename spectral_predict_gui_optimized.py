@@ -25952,6 +25952,23 @@ class SpectralPredictApp:
                 self._log_progress(f"   Calibration samples: {n_cal}")
                 self._log_progress(f"   Validation samples (held out): {n_val}\n")
 
+            # Auto-coerce mixed-type classification target to strings.
+            # Excel columns with mixed int+str cells produce object dtype with
+            # heterogeneous Python types, which breaks sklearn LabelEncoder's
+            # internal sort. For classification / one-class tasks a mixed column
+            # obviously isn't numeric, so casting to str is the intended read.
+            if (task_type in ('classification', 'one_class')
+                    and y_filtered is not None
+                    and hasattr(y_filtered, 'dtype')
+                    and y_filtered.dtype == object):
+                types_present = {type(v).__name__ for v in y_filtered.dropna().values}
+                if len(types_present) > 1:
+                    self._log_progress(
+                        f"  [i] Target column has mixed Python types "
+                        f"({sorted(types_present)}) — coercing to strings for {task_type}."
+                    )
+                    y_filtered = y_filtered.astype(str)
+
             # Apply wavelength restriction for analysis (if enabled)
             # These will be passed to run_search() to filter variable selection only
             analysis_wl_min_value = None
@@ -35123,6 +35140,22 @@ F1 Score:  {f1:.4f}
                         f"Only {len(y_series)} samples remain after dropping NaN targets; "
                         f"{cv_strategy} CV requires at least {min_samples_nan} samples."
                     )
+
+            # Auto-coerce mixed-type classification / one-class target to strings.
+            # Excel columns with mixed int+str cells give object dtype with heterogeneous
+            # Python types, which breaks sklearn LabelEncoder's internal sort.
+            _refine_task = self.refine_task_type.get() if hasattr(self, 'refine_task_type') else ''
+            if (_refine_task in ('classification', 'one_class')
+                    and y_series is not None
+                    and hasattr(y_series, 'dtype')
+                    and y_series.dtype == object):
+                types_present = {type(v).__name__ for v in y_series.dropna().values}
+                if len(types_present) > 1:
+                    print(
+                        f"[i] Target column has mixed Python types "
+                        f"({sorted(types_present)}) — coercing to strings for {_refine_task}."
+                    )
+                    y_series = y_series.astype(str)
 
             # Add comprehensive diagnostic output for debugging R² discrepancies
             print(f"\n{'='*80}")
