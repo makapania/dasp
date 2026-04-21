@@ -4,6 +4,57 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — Mixed-type target coercion (Validation-Wide fix for 3 sibling bugs)
+
+**Bug cluster:** When classification target column is object-dtype with heterogeneous Python types (e.g. `[1, 2, "3", "4", NaN]` from mixed Excel cells), three independent call sites crashed with `TypeError: '<' not supported between instances of 'str' and 'int/float'`:
+
+1. Bayesian validation metrics — `gui:26849` `np.unique(y_val_np)` during post-Bayesian metrics computation.
+2. Stratified validation-set creation — `gui:19609` `StratifiedShuffleSplit` inside `train_test_split(stratify=...)`.
+3. SPXY validation-set creation — `LabelEncoder.fit_transform` on raw categorical y.
+
+**Root cause:** Commit `2a1c77c` coerced the **training** target `y_filtered` at `_run_analysis_thread`:25986-26001, but `self.validation_y` and the `_create_validation_set` path had no coercion. Each downstream consumer that sorts or encodes the target re-discovers the crash.
+
+User confirmed manually resetting validation doesn't fix bug #1 — so bug is reproduced **within a single classification run**, not carried over from a prior regression run.
+
+**Why the narrow fix isn't enough (Codex review):** Narrow (only Bayesian site) leaves bugs #2 and #3 broken. Centralized (mutate `self.y` / `self.validation_y` at assignment time) has a blocking NaN regression — `astype(str)` converts `np.nan` to `"nan"`, which silently breaks `self.y.isna()` at `gui:16487` plus downstream NaN filters at `search.py:419/3070/3701` and `gui:26836/27060/37101`.
+
+**Fix (Validation-Wide):** Coerce on **local copies** strictly **after** NaN filter at every site that sorts/encodes validation labels. Never mutate `self.y` or `self.validation_y`.
+
+Sites patched:
+- `_validation_stratified` (`gui:19609`) — replaced stale `len(y.unique()) < 10` heuristic with `y.nunique() == 2` (commit `41371e0` had missed this site), plus coercion on stratify vector.
+- `_validation_spxy` (`gui:19510`) — coerce before `LabelEncoder.fit_transform`.
+- `_create_validation_set` class distribution (`gui:19760`) — coerce before `y_val_set.unique()` / `y_train_set.unique()`.
+- Bayesian validation (`gui:26876`) — coerce after NaN filter at 26836, before `np.unique`.
+- NSGA-II validation (`gui:27108`) — coerce before `label_encoder.transform`.
+- Refine validation (`gui:37155`) — coerce after NaN filter at 37101.
+- `compute_validation_metrics_for_top_models` (`search.py:446`) — coerce after NaN filter for classification/one_class.
+- Prediction display paths (`gui:40298, 40514, 40684, 40702`) — coerce before `np.unique` / confusion matrix / scatter plot.
+- `_on_task_type_changed` (`gui:16306`) — warn in progress log when regression ↔ classification boundary is crossed with a validation set loaded. Does NOT auto-clear (holdout indices still valid; Codex recommendation).
+
+**Tests:** `tests/test_mixed_type_target_coercion.py` — 7 tests:
+- Stratified split with `pd.Series([1, "1", 2, "2", 1, "2"], dtype=object)` — no TypeError
+- SPXY split with same mixed-type Series — no TypeError
+- `compute_validation_metrics_for_top_models` with mixed `y_val` — returns DataFrame with `val_Accuracy`
+- NaN drop before coercion — asserts `"nan"` string never appears in post-processing
+- Task-type change warning fires on regression → classification with validation loaded
+- Task-type change does NOT warn on same-category transition
+- Task-type change does NOT warn when no validation set
+
+151/151 tests pass (7 new + 144 regression across contamination/cv_strategy/refine_task_type_preservation).
+
+**Known follow-ups (deferred):**
+- `search.py:975` and `search.py:3232` — `LabelEncoder.fit_transform(y_np)` in training-path (not validation). Would crash for direct library callers with mixed-type targets. Out of scope for this fix.
+- NaN preservation is explicit only at sites with pre-existing NaN filters (Bayesian, NSGA-II, Refine). At `_validation_spxy`, `_validation_stratified`, `_create_validation_set` class distribution, and prediction display paths, NaN could theoretically reach the coercion and become `"nan"`. In practice these sites are fed from `_create_validation_set` which drops NaN upstream, or would have failed pre-fix on NaN anyway (LabelEncoder rejects NaN). Risk is cosmetic (spurious `"nan"` class in stratification/encoding), not a silent correctness bug.
+
+**Plans:**
+- Kimi's diagnosis: `docs/plans/2026-04-21-mixed-type-target-kimi-plan.md`
+- Codex review: `docs/plans/2026-04-21-codex-review.md`
+- Final consolidated plan: `docs/plans/2026-04-21-mixed-type-target-FINAL.md`
+
+Merged from `glm/mixed-type-target-validation-wide` via `--no-ff`.
+
+---
+
 ## 2026-04-21 — PLS regression hotfix: refine tab silently runs PLS-DA
 
 **Bug:** Loading a PLS regression result row into Model Development (Tab 7 "Refine") and clicking Run executes PLS-DA (classification) instead of PLS regression. The downstream cascade `_on_refine_task_type_changed` (line ~16493) replaces PLS with PLS-DA when the task type flips to classification.
