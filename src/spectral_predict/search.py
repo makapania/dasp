@@ -20,6 +20,37 @@ def _frozen_needs_threading_fallback() -> bool:
     return is_frozen
 import numpy as np
 import pandas as pd
+
+
+def _normalize_mixed_type_labels(labels):
+    """Normalize mixed-type class labels so numeric-equivalent values collapse.
+
+    Accepts pd.Series, np.ndarray, or list; returns the same container type.
+    NaN is preserved; never stringified.
+    """
+
+    def _norm(v):
+        if pd.isna(v):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+        try:
+            f = float(v)
+            if f.is_integer():
+                return str(int(f))
+            return str(f)
+        except (ValueError, TypeError):
+            return str(v)
+
+    if isinstance(labels, pd.Series):
+        return labels.apply(_norm)
+    if isinstance(labels, np.ndarray):
+        return np.array([_norm(v) for v in labels], dtype=object)
+    if isinstance(labels, list):
+        return [_norm(v) for v in labels]
+    return type(labels)(_norm(v) for v in labels)
+
+
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
@@ -451,11 +482,11 @@ def compute_validation_metrics_for_top_models(
         if getattr(y_train, 'dtype', None) == object:
             _types = {type(v).__name__ for v in y_train}
             if len(_types) > 1:
-                y_train = y_train.astype(str)
+                y_train = _normalize_mixed_type_labels(y_train)
         if getattr(y_val, 'dtype', None) == object:
             _types = {type(v).__name__ for v in y_val}
             if len(_types) > 1:
-                y_val = y_val.astype(str)
+                y_val = _normalize_mixed_type_labels(y_val)
 
     # For classification, check class distribution in validation set and warn if problematic
     if task_type == 'classification':

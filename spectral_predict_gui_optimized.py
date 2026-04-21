@@ -49,6 +49,37 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+
+
+def _normalize_mixed_type_labels(labels):
+    """Normalize mixed-type class labels so numeric-equivalent values collapse.
+
+    Accepts pd.Series, np.ndarray, or list; returns the same container type.
+    NaN is preserved; never stringified.
+    """
+
+    def _norm(v):
+        if pd.isna(v):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+        try:
+            f = float(v)
+            if f.is_integer():
+                return str(int(f))
+            return str(f)
+        except (ValueError, TypeError):
+            return str(v)
+
+    if isinstance(labels, pd.Series):
+        return labels.apply(_norm)
+    if isinstance(labels, np.ndarray):
+        return np.array([_norm(v) for v in labels], dtype=object)
+    if isinstance(labels, list):
+        return [_norm(v) for v in labels]
+    return type(labels)(_norm(v) for v in labels)
+
+
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 
@@ -19543,7 +19574,7 @@ class SpectralPredictApp:
             if y_values.dtype == object:
                 _types = {type(v).__name__ for v in y_values}
                 if len(_types) > 1:
-                    y_values = y_values.astype(str)
+                    y_values = _normalize_mixed_type_labels(y_values)
             le = LabelEncoder()
             y_array = le.fit_transform(y_values).reshape(-1, 1).astype(float)
         else:
@@ -19645,7 +19676,7 @@ class SpectralPredictApp:
             if stratify.dtype == object:
                 types_present = {type(v).__name__ for v in stratify}
                 if len(types_present) > 1:
-                    stratify = stratify.astype(str)
+                    stratify = _normalize_mixed_type_labels(stratify)
         else:
             # Regression: bin y into quartiles for pseudo-stratification
             stratify = pd.qcut(y, q=4, labels=False, duplicates='drop')
@@ -19779,11 +19810,11 @@ class SpectralPredictApp:
                 if getattr(y_val_set, 'dtype', None) == object:
                     _types_val = {type(v).__name__ for v in y_val_set}
                     if len(_types_val) > 1:
-                        y_val_set = y_val_set.astype(str)
+                        y_val_set = _normalize_mixed_type_labels(y_val_set)
                 if getattr(y_train_set, 'dtype', None) == object:
                     _types_train = {type(v).__name__ for v in y_train_set}
                     if len(_types_train) > 1:
-                        y_train_set = y_train_set.astype(str)
+                        y_train_set = _normalize_mixed_type_labels(y_train_set)
 
                 val_classes = set(y_val_set.unique())
                 train_classes = set(y_train_set.unique())
@@ -26076,11 +26107,19 @@ class SpectralPredictApp:
                     and y_filtered.dtype == object):
                 types_present = {type(v).__name__ for v in y_filtered.dropna().values}
                 if len(types_present) > 1:
-                    self._log_progress(
-                        f"  [i] Target column has mixed Python types "
-                        f"({sorted(types_present)}) — coercing to strings for {task_type}."
-                    )
-                    y_filtered = y_filtered.astype(str)
+                    from collections import Counter
+                    _by_type = Counter(type(v).__name__ for v in y_filtered.dropna())
+                    self._log_progress(f"  [i] Target column has mixed Python types: {dict(_by_type)}")
+
+                    _before = set(y_filtered.dropna().astype(str).unique())
+                    y_filtered = _normalize_mixed_type_labels(y_filtered)
+                    _after = set(y_filtered.dropna().unique())
+                    if _after != _before:
+                        _collapsed = sorted(_before - _after)
+                        self._log_progress(
+                            f"  [i] Normalized numeric-equivalent labels into canonical strings. "
+                            f"Collapsed labels: {_collapsed}"
+                        )
 
             # Auto-drop rows belonging to classes too rare for the configured CV.
             # Stratified K-Fold requires min_class_samples >= n_folds, so any class
@@ -26930,11 +26969,11 @@ class SpectralPredictApp:
                                 if getattr(y_np_clean, 'dtype', None) == object:
                                     _types = {type(v).__name__ for v in y_np_clean}
                                     if len(_types) > 1:
-                                        y_np_clean = y_np_clean.astype(str)
+                                        y_np_clean = _normalize_mixed_type_labels(y_np_clean)
                                 if getattr(y_val_np, 'dtype', None) == object:
                                     _types = {type(v).__name__ for v in y_val_np}
                                     if len(_types) > 1:
-                                        y_val_np = y_val_np.astype(str)
+                                        y_val_np = _normalize_mixed_type_labels(y_val_np)
 
                                 # Quick sanity check: validation labels should overlap training labels
                                 train_labels = np.unique(y_np_clean)
@@ -27162,7 +27201,7 @@ class SpectralPredictApp:
                             if getattr(y_val_np, 'dtype', None) == object:
                                 _types = {type(v).__name__ for v in y_val_np}
                                 if len(_types) > 1:
-                                    y_val_np = y_val_np.astype(str)
+                                    y_val_np = _normalize_mixed_type_labels(y_val_np)
                             try:
                                 y_val_np = label_encoder.transform(y_val_np)
                                 self._log_progress("  Encoded validation labels using training encoder")
@@ -35332,7 +35371,7 @@ F1 Score:  {f1:.4f}
                         f"[i] Target column has mixed Python types "
                         f"({sorted(types_present)}) — coercing to strings for {_refine_task}."
                     )
-                    y_series = y_series.astype(str)
+                    y_series = _normalize_mixed_type_labels(y_series)
 
             # Add comprehensive diagnostic output for debugging R² discrepancies
             print(f"\n{'='*80}")
@@ -37209,7 +37248,7 @@ Calibration Performance (n={len(y_array)}):
                     if local_label_encoder is not None and getattr(val_y, 'dtype', None) == object:
                         _types = {type(v).__name__ for v in val_y}
                         if len(_types) > 1:
-                            val_y = val_y.astype(str)
+                            val_y = _normalize_mixed_type_labels(val_y)
 
                     if local_label_encoder is not None:
                         # Check for classes not seen during training
@@ -40353,11 +40392,11 @@ External Validation Performance (n={n_val}):
                                 if getattr(y_true, 'dtype', None) == object:
                                     _types = {type(v).__name__ for v in y_true}
                                     if len(_types) > 1:
-                                        y_true = y_true.astype(str)
+                                        y_true = _normalize_mixed_type_labels(y_true)
                                 if getattr(y_pred, 'dtype', None) == object:
                                     _types = {type(v).__name__ for v in y_pred}
                                     if len(_types) > 1:
-                                        y_pred = y_pred.astype(str)
+                                        y_pred = _normalize_mixed_type_labels(y_pred)
 
                             # For one-class models, map actual labels to inlier/outlier format
                             if task_type == 'one_class' and col in self.predictions_model_map:
@@ -40568,7 +40607,7 @@ External Validation Performance (n={n_val}):
                 if getattr(color_vals, 'dtype', None) == object:
                     _types = {type(v).__name__ for v in color_vals if pd.notna(v)}
                     if len(_types) > 1:
-                        color_vals = color_vals.astype(str)
+                        color_vals = _normalize_mixed_type_labels(color_vals)
                 unique_vals = np.unique(color_vals[pd.notna(color_vals)])
                 n_vals = len(unique_vals)
                 colors = plt.cm.tab10(np.linspace(0, 1, 10)) if n_vals <= 10 else plt.cm.tab20(np.linspace(0, 1, 20))
@@ -40738,7 +40777,7 @@ External Validation Performance (n={n_val}):
         if getattr(y_true, 'dtype', None) == object:
             _types = {type(v).__name__ for v in y_true}
             if len(_types) > 1:
-                y_true = y_true.astype(str)
+                y_true = _normalize_mixed_type_labels(y_true)
 
         # Create figure with subplots for each model
         n_models = len(prediction_cols)
@@ -40756,7 +40795,7 @@ External Validation Performance (n={n_val}):
             if getattr(y_pred, 'dtype', None) == object:
                 _types = {type(v).__name__ for v in y_pred}
                 if len(_types) > 1:
-                    y_pred = y_pred.astype(str)
+                    y_pred = _normalize_mixed_type_labels(y_pred)
 
             # For one-class models, map actual labels to inlier/outlier format
             y_true_mapped = y_true
