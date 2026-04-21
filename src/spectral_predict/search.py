@@ -446,6 +446,17 @@ def compute_validation_metrics_for_top_models(
 
     print(f"\n[Validation] Computing validation metrics for top {n_to_process} models...")
 
+    # Coerce mixed-type labels to strings for classification / one-class
+    if task_type in ('classification', 'one_class'):
+        if getattr(y_train, 'dtype', None) == object:
+            _types = {type(v).__name__ for v in y_train}
+            if len(_types) > 1:
+                y_train = y_train.astype(str)
+        if getattr(y_val, 'dtype', None) == object:
+            _types = {type(v).__name__ for v in y_val}
+            if len(_types) > 1:
+                y_val = y_val.astype(str)
+
     # For classification, check class distribution in validation set and warn if problematic
     if task_type == 'classification':
         val_class_counts = pd.Series(y_val).value_counts()
