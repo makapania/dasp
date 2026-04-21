@@ -4,6 +4,53 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — Phantom rare-class drop + Refine 91-vs-94 mismatch (label normalization)
+
+**Bug:** User had a 94-row classification target column where every cell visually showed `250`. Analysis tab's rare-class auto-drop (from commit `51c50cc`) flagged 3 of them as a different class with count < n_folds and dropped those rows — model trained on 91 samples. Then loading that model into Model Development showed a training-mismatch warning: "trained with 91, current has 94", because `_run_refined_model_thread` doesn't replicate the auto-drop.
+
+**Root cause:** Earlier-today's mixed-type coercion (commit `382b7e6`) uses `astype(str)`, which preserves type-distinct representations of the same number. If 3 cells were stored as `str("250")` (Text-formatted Excel cell, or apostrophe prefix, or trailing whitespace — all invisible in Excel) while others are `int(250)`, `.astype(str)` produces `"250"` for both forms visually but `np.unique` still sees them as distinct classes. The 3 minority-form rows then get auto-dropped as a phantom rare class.
+
+`_run_refined_model_thread` at `gui:35271-35285` also `astype(str)`-coerces but lacks the auto-drop (per `51c50cc`'s own scope note), so Refine sees all 94 rows. `_validate_training_configuration` compares saved 91 vs current 94 → mismatch warning.
+
+**Fix:** Replace `astype(str)` with a new `_normalize_mixed_type_labels()` helper at all 12 mixed-type coercion sites added by `382b7e6`. The helper collapses numerically-equivalent values to canonical strings:
+- `250` (int), `250.0` (float), `"250"` (str), `"250 "` (whitespace), `"2.5e2"` (scientific) → all `"250"`
+- `250.5` (non-integer float), `"grass"` → unchanged
+- `np.nan` → preserved (NOT `"nan"` string)
+- Python 3's `str.strip()` handles non-breaking space `\xa0` and other unicode whitespace
+
+Implementation pattern:
+```python
+def _norm(v):
+    if pd.isna(v): return v
+    if isinstance(v, str): v = v.strip()
+    try:
+        f = float(v)
+        return str(int(f)) if f.is_integer() else str(f)
+    except (ValueError, TypeError):
+        return str(v)
+```
+
+Accepts `pd.Series`, `np.ndarray`, or `list`; returns same container type. Module-level helper in `spectral_predict_gui_optimized.py`; duplicated in `src/spectral_predict/search.py` to avoid circular import (acceptable — 8 lines).
+
+**Enhanced diagnostic log** at the primary Analysis-tab site: prints per-type row counts AND the specific "collapsed labels" list so next time this comes up the user sees e.g. `Target column has mixed Python types: {'int': 91, 'str': 3}` and `Collapsed labels: ['250']` (the str form that got merged with the int form).
+
+**Both reported bugs resolve with this single change** — once all `250`-forms normalize to one class, the auto-drop never fires, and the Refine mismatch never triggers. No need to replicate the auto-drop in Refine (that was Option B, rejected because it would lose 3 real specimens for a spurious reason).
+
+**Tests:** 9 unit tests for the helper (int/float/str collapse, scientific notation, whitespace, numpy-array input, genuine-strings-unchanged, bool collapse with int, empty string, NaN preservation) + 1 integration test (phantom class not dropped from 94-row synthetic dataset). 17/17 total pass.
+
+**Known edge cases not covered by this helper** (documented for future iteration if needed):
+- Apostrophe-prefixed Excel cells (`'250` → `"'250"` — stays distinct). Would need explicit `if s.startswith("'"): s = s[1:]`.
+- Fullwidth Unicode digits (`２５０`). Would need `unicodedata.normalize('NFKC', s)`.
+- Zero-width / Em-space / other non-standard Unicode whitespace. Python's default `.strip()` catches most but not all.
+
+If this fix doesn't resolve the user's specific case, enhance the helper with NFKC + apostrophe stripping. Most likely cause based on the user's report ("exactly 250 no decimals, all look identical") is plain Text-formatted Excel cells (int vs str) or trailing ASCII whitespace — both handled.
+
+**Plan:** `docs/plans/2026-04-21-phantom-class-normalize-FINAL.md`.
+
+Cherry-picked from `glm/label-normalize` worktree as `b754354` + `9d55c8d` (dropped two transient opencode-draft snapshot commits).
+
+---
+
 ## 2026-04-21 — Mixed-type target coercion (Validation-Wide fix for 3 sibling bugs)
 
 **Bug cluster:** When classification target column is object-dtype with heterogeneous Python types (e.g. `[1, 2, "3", "4", NaN]` from mixed Excel cells), three independent call sites crashed with `TypeError: '<' not supported between instances of 'str' and 'int/float'`:
