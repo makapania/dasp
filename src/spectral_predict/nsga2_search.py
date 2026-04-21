@@ -1814,8 +1814,12 @@ def run_nsga2_search(
     if task_type == 'regression' and imbalance_method in UNSUPPORTED_REGRESSION_METHODS:
         original_method = imbalance_method
         imbalance_method = 'smogn'  # SMOTE-style synthetic oversampling for regression
-        if verbose >= 1:
-            print(f"  Note: '{original_method}' requires Grid Search. Using 'smogn' instead for NSGA-II.")
+        warn_msg = f"'{original_method}' requires Grid Search. Using 'smogn' instead for NSGA-II."
+        logger.warning(warn_msg)
+        if progress_callback:
+            progress_callback({'message': f"[Warning] {warn_msg}"})
+        elif verbose >= 1:
+            print(f"  Note: {warn_msg}")
 
     # Validate imbalance configuration for classification
     if task_type == 'classification' and imbalance_method is not None:

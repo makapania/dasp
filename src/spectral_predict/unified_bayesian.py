@@ -32,6 +32,9 @@ Example:
 from __future__ import annotations
 
 import logging
+
+logger = logging.getLogger(__name__)
+
 import ast
 import numpy as np
 import pandas as pd
@@ -1712,8 +1715,12 @@ def run_unified_bayesian(
     if task_type == 'regression' and imbalance_method in UNSUPPORTED_REGRESSION_METHODS:
         original_method = imbalance_method
         imbalance_method = 'smogn'  # SMOTE-style synthetic oversampling for regression
-        if verbose:
-            print(f"Note: '{original_method}' requires Grid Search. Using 'smogn' instead for Bayesian optimization.")
+        warn_msg = f"'{original_method}' requires Grid Search. Using 'smogn' instead for Bayesian optimization."
+        logger.warning(warn_msg)
+        if progress_callback:
+            progress_callback({'message': f"[Warning] {warn_msg}"})
+        elif verbose:
+            print(f"Note: {warn_msg}")
 
     # Validate imbalance configuration for classification
     if task_type == 'classification' and imbalance_method is not None:
