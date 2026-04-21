@@ -4,6 +4,24 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — PLS regression hotfix: refine tab silently runs PLS-DA
+
+**Bug:** Loading a PLS regression result row into Model Development (Tab 7 "Refine") and clicking Run executes PLS-DA (classification) instead of PLS regression. The downstream cascade `_on_refine_task_type_changed` (line ~16493) replaces PLS with PLS-DA when the task type flips to classification.
+
+**Root cause:** `_load_model_for_refinement` (introduced by commit `057d9f6` on 2026-04-11) only honored `config.get('Task')` when it equaled `'one_class'`. For saved `'regression'` or `'classification'` results, it silently discarded the saved task and re-ran an `nunique() < 10` auto-detect heuristic on `self.y`. Temperature data with discrete step values (e.g. 100/200/300/400/500/600/700/800°C = 8 unique) tripped the heuristic, flipping the task to classification, which triggered the PLS → PLS-DA cascade.
+
+**Secondary bug (same session):** The same `nunique() < 10` heuristic at 8 other auto-detect sites misclassified numeric y targets with few unique values (≤9) as classification. This caused the Analysis tab auto-detect to show "classification" for clearly numeric temperature data.
+
+**Fix A (required hotfix):** `_load_model_for_refinement` now trusts the saved Task for all three values (`regression`, `classification`, `one_class`). Only falls back to auto-detect when Task is missing/empty. Extracted a pure helper `_detect_refine_task_type(config, y)` at module level for testability; `_load_model_for_refinement` calls it instead of inline logic.
+
+**Fix B1 (recommended, applied at all 9 sites):** Dropped `or self.y.nunique() < 10` from the auto-detect heuristic. Only `nunique() == 2` (binary) and `not is_numeric_dtype(...)` (categorical/text) remain as classification triggers. Sites: lines ~16174, ~16230, ~16354, ~18325, ~19626, ~22113, ~22834, ~24325, plus the refine fallback (in the helper). Integer-coded multi-class labels (e.g. {0,1,2,3}) no longer auto-detect as classification — users must explicitly pick classification or store labels as strings.
+
+**Tests:** `tests/test_refine_task_type_preservation.py` — 12 tests in `TestDetectRefineTaskType` covering: saved regression/classification/one_class with inlier labels, no-task fallback, binary detection, non-numeric detection, empty task, and the exact Burned-temperature scenario. 376/376 broader suite pass.
+
+**Caveat:** Line ~19626 (`y_available` validation-path heuristic) was not in the original plan's 8-site list but was fixed for consistency — it uses the same flawed heuristic.
+
+---
+
 ## 2026-04-21 — Fix: `np.unique()` crash on mixed str/NaN categorical targets
 
 **Bug:** Loading a combined Excel file with a categorical string target column (e.g., `Habitat` = 'Upland_Tundra'/'Valley') containing NaN values caused `TypeError: '<' not supported between instances of 'str' and 'float'`. This crashed the GUI during import when task_type was set to one_class.

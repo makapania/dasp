@@ -2397,6 +2397,26 @@ def _is_wrapped_model(model):
     return type(model).__name__ in WRAPPED_TYPES
 
 
+def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, str | None]:
+    resolved_task = config.get("Task", "")
+    inlier_label = None
+
+    if resolved_task == "one_class":
+        inlier_label = config.get("inlier_class_label", "") or config.get("inlier_class", "")
+        inlier_label = str(inlier_label) if inlier_label else None
+    elif resolved_task in ("regression", "classification"):
+        pass
+    elif y is not None:
+        if y.nunique() == 2 or not pd.api.types.is_numeric_dtype(y.dtype):
+            resolved_task = "classification"
+        else:
+            resolved_task = "regression"
+    else:
+        resolved_task = "regression"
+
+    return resolved_task, inlier_label
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -16172,7 +16192,7 @@ class SpectralPredictApp:
         if task_type == "auto":
             # If auto and data is loaded, try to detect
             if hasattr(self, 'y') and self.y is not None:
-                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
+                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
                     actual_task = "classification"
                 else:
                     actual_task = "regression"
@@ -16228,7 +16248,7 @@ class SpectralPredictApp:
             # Auto-detect from loaded data
             if self.y is not None:
                 # Use same logic as in analysis to detect task type
-                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
+                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
                     actual_task = "classification"
                 else:
                     actual_task = "regression"
@@ -16352,7 +16372,7 @@ class SpectralPredictApp:
         # Determine actual task type (handle "auto" mode)
         if task_type == "auto" and self.y is not None:
             # Auto-detection logic: classification if <10 unique values or non-numeric
-            if self.y.nunique() < 10 or not pd.api.types.is_numeric_dtype(self.y.dtype):
+            if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
                 actual_task = "classification"
             else:
                 actual_task = "regression"
@@ -18323,7 +18343,7 @@ class SpectralPredictApp:
                 elif self.task_type.get() == "auto":
                     if self.y.nunique() == 2:
                         detected_type = "classification (binary)"
-                    elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
+                    elif not pd.api.types.is_numeric_dtype(self.y.dtype):
                         detected_type = "classification"
                     else:
                         detected_type = "regression"
@@ -19624,7 +19644,7 @@ class SpectralPredictApp:
             # Determine if classification task for validation warnings
             task_type_setting = self.task_type.get()
             if task_type_setting == "auto":
-                is_classification = y_available.nunique() < 10 or not pd.api.types.is_numeric_dtype(y_available.dtype)
+                is_classification = y_available.nunique() == 2 or not pd.api.types.is_numeric_dtype(y_available.dtype)
             else:
                 is_classification = task_type_setting in ("classification", "one_class")
 
@@ -22113,7 +22133,7 @@ class SpectralPredictApp:
                 # Auto-detect task type (same logic as analysis)
                 if self.y.nunique() == 2:
                     task_type = "classification"
-                elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
+                elif not pd.api.types.is_numeric_dtype(self.y.dtype):
                     task_type = "classification"
                 else:
                     task_type = "regression"
@@ -22839,7 +22859,7 @@ class SpectralPredictApp:
                 task_setting = self.task_type.get()
                 resolved_is_classification = task_setting == 'classification' or (
                     task_setting == 'auto'
-                    and (self.y.nunique() < 10 or not pd.api.types.is_numeric_dtype(self.y.dtype))
+                    and (self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype))
                 )
                 if resolved_is_classification:
                     class_counts = self.y.value_counts()
@@ -24330,7 +24350,7 @@ class SpectralPredictApp:
                 # Auto-detect task type
                 if self.y.nunique() == 2:
                     task_type = "classification"
-                elif not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
+                elif not pd.api.types.is_numeric_dtype(self.y.dtype):
                     task_type = "classification"
                 else:
                     task_type = "regression"
@@ -32243,27 +32263,10 @@ Performance (Classification):
                 # Window from Bayesian (e.g., 31) not in radio buttons - use custom field
                 self.refine_window_custom.set(str(window))
 
-        # Set task type FIRST (auto-detect from data or config)
-        # This must happen before model validation so we validate against the correct task type
-        config_task = config.get('Task', '')
-        if config_task == 'one_class':
-            detected_task_type = 'one_class'
-            self.refine_task_type.set('one_class')
-            # Restore inlier class label from saved config
-            inlier_label_saved = config.get('inlier_class_label', '') or config.get('inlier_class', '')
-            if inlier_label_saved:
-                self.inlier_class_label.set(str(inlier_label_saved))
-        elif self.y is not None:
-            if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype) or self.y.nunique() < 10:
-                detected_task_type = 'classification'
-                self.refine_task_type.set('classification')
-            else:
-                detected_task_type = 'regression'
-                self.refine_task_type.set('regression')
-        else:
-            # Fallback to regression if no y data available
-            detected_task_type = 'regression'
-            self.refine_task_type.set('regression')
+        detected_task_type, inlier_label_saved = _detect_refine_task_type(config, self.y)
+        self.refine_task_type.set(detected_task_type)
+        if detected_task_type == "one_class" and inlier_label_saved:
+            self.inlier_class_label.set(inlier_label_saved)
 
         # Set model type with validation (now using correct task type)
         model_name = config.get('Model', 'PLS')

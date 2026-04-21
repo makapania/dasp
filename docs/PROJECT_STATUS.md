@@ -1,6 +1,6 @@
 # Project Status
 
-> **Last updated:** 2026-04-21 by GLM-5.1 — Fixed `TypeError: '<' not supported between instances of 'str' and 'float'` crash when loading combined Excel files with categorical string targets containing NaN values (e.g., Arctic vegetation Habitat column). 6 fix sites across GUI + backend `outlier_detection.py`. 2 new regression tests. Uncommitted.
+> **Last updated:** 2026-04-21 — Three commits landed today: `7407140` (one-class export support), `de6b618` (2x2 confusion matrix + NaN-safety fixes for categorical targets), plus the PLS-regression hotfix in this commit (refine tab honors saved Task for regression/classification; `nunique() < 10` classification heuristic removed at 9 sites). First two pushed to `origin/main`, this one pending push.
 
 > **Previously:** 2026-04-19 by GLM-5.1 — Analysis Subset V1 implemented on branch `glm/analysis-subset-v1` (NOT yet merged). New pure-logic module `src/spectral_predict/analysis_subset.py` with 41 tests. Analysis tab has "Analysis Subset" card above Holdout Validation. Metadata-only dialog with categorical multi-select. Subset provenance stored in `last_training_config`. Mismatch warnings in Model Development. One-class guardrail blocks when subset removes all inlier samples. C2 missing-column safe handling via `_refresh_active_group_indices`. All changes uncommitted in worktree. 41/41 analysis_subset tests + 61/61 OC regression tests pass. See `docs/SESSION_LOG.md` 2026-04-19 entry for architecture decisions and gotchas.
 
@@ -59,6 +59,15 @@ Earlier audit said `RepeatedStratifiedKFold` doesn't appear in the codebase. **R
 ---
 
 ## Recently resolved
+
+### PLS regression hotfix: refine tab PLS-DA instead of PLS — FIXED 2026-04-21
+
+Two bugs latent since commit `057d9f6` (2026-04-11), triggered by Burned-temperature data with ≤9 unique values:
+
+1. **Fix A:** `_load_model_for_refinement` now trusts the saved Task type for regression/classification (was only trusting one_class). Extracted pure helper `_detect_refine_task_type(config, y)` for testability. Prevents the PLS → PLS-DA cascade when loading regression results into Model Development.
+2. **Fix B1:** Removed `nunique() < 10` heuristic from auto-detect at all 9 sites. Only `nunique() == 2` and non-numeric dtype remain as classification triggers.
+
+Tests: `tests/test_refine_task_type_preservation.py` (12 tests). 376/376 broader suite pass.
 
 ### OC validation helper silent-wrong-result paths + PCA-SIMCA default — FIXED 2026-04-18 (9e9ca11 + follow-up)
 
