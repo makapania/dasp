@@ -2428,6 +2428,32 @@ def _is_wrapped_model(model):
     return type(model).__name__ in WRAPPED_TYPES
 
 
+def _infer_task_type_from_y(y) -> "str | None":
+    """Best-effort auto-detect of task type from a target array/Series.
+
+    Returns 'classification', 'regression', or None if indeterminate.
+    Uses sklearn.utils.multiclass.type_of_target as the authoritative
+    signal so integer-encoded multiclass (e.g. labels {0,1,2}) is
+    correctly recognized as classification, while float continuous
+    targets stay as regression.
+    """
+    if y is None:
+        return None
+    try:
+        from sklearn.utils.multiclass import type_of_target
+        y_clean = y.dropna() if hasattr(y, 'dropna') else y
+        if len(y_clean) == 0:
+            return None
+        kind = type_of_target(y_clean)
+    except (TypeError, ValueError):
+        return None
+    if kind in ('binary', 'multiclass', 'multilabel-indicator', 'multiclass-multioutput'):
+        return 'classification'
+    if kind == 'continuous':
+        return 'regression'
+    return None
+
+
 def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, str | None]:
     resolved_task = config.get("Task", "")
     inlier_label = None
@@ -2437,13 +2463,9 @@ def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, 
         inlier_label = str(inlier_label) if inlier_label else None
     elif resolved_task in ("regression", "classification"):
         pass
-    elif y is not None:
-        if y.nunique() == 2 or not pd.api.types.is_numeric_dtype(y.dtype):
-            resolved_task = "classification"
-        else:
-            resolved_task = "regression"
     else:
-        resolved_task = "regression"
+        inferred = _infer_task_type_from_y(y)
+        resolved_task = inferred if inferred in ("regression", "classification") else "regression"
 
     return resolved_task, inlier_label
 
@@ -16228,10 +16250,7 @@ class SpectralPredictApp:
         if task_type == "auto":
             # If auto and data is loaded, try to detect
             if hasattr(self, 'y') and self.y is not None:
-                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    actual_task = "classification"
-                else:
-                    actual_task = "regression"
+                actual_task = _infer_task_type_from_y(self.y) or "regression"
             else:
                 # Default to regression if no data loaded
                 actual_task = "regression"
@@ -16283,11 +16302,7 @@ class SpectralPredictApp:
         if task_type == "auto":
             # Auto-detect from loaded data
             if self.y is not None:
-                # Use same logic as in analysis to detect task type
-                if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    actual_task = "classification"
-                else:
-                    actual_task = "regression"
+                actual_task = _infer_task_type_from_y(self.y) or "regression"
                 self._refresh_imbalance_methods(actual_task)
             else:
                 # No data loaded yet - enable all models
@@ -16434,11 +16449,7 @@ class SpectralPredictApp:
 
         # Determine actual task type (handle "auto" mode)
         if task_type == "auto" and self.y is not None:
-            # Auto-detection logic: classification if <10 unique values or non-numeric
-            if self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype):
-                actual_task = "classification"
-            else:
-                actual_task = "regression"
+            actual_task = _infer_task_type_from_y(self.y) or "regression"
         elif task_type == "auto":
             # No data loaded yet - assume regression (default enabled state)
             actual_task = "regression"
@@ -16594,18 +16605,17 @@ class SpectralPredictApp:
         # type_of_target so integer-encoded multiclass (e.g. {0,1,2}) is
         # correctly recognized as classification without falsely flagging
         # integer-stepped regression targets.
-        try:
-            from sklearn.utils.multiclass import type_of_target
-            y_kind = type_of_target(self.y.dropna()) if self.y is not None else None
-        except (TypeError, ValueError):
-            y_kind = None
-        if y_kind in ('binary', 'multiclass', 'multilabel-indicator'):
-            detected_task = 'classification'
-        elif y_kind == 'continuous':
-            detected_task = 'regression'
-        else:
-            detected_task = None
-        if detected_task is not None and self.task_type.get() != detected_task:
+        # Exception: if the user explicitly chose "one_class", leave it alone.
+        # A categorical column can validly be used for either classification
+        # (normal multi-class) or one-class (treat one label as inliers) — only
+        # the user knows which, so we don't auto-override their one_class pick.
+        detected_task = _infer_task_type_from_y(self.y)
+        current_radio = self.task_type.get()
+        if (
+            detected_task is not None
+            and current_radio != detected_task
+            and current_radio != 'one_class'
+        ):
             # trace on task_type will fire _on_task_type_changed, so we don't
             # need to call it again explicitly after this.
             self.task_type.set(detected_task)
@@ -19768,7 +19778,7 @@ class SpectralPredictApp:
             # Determine if classification task for validation warnings
             task_type_setting = self.task_type.get()
             if task_type_setting == "auto":
-                is_classification = y_available.nunique() == 2 or not pd.api.types.is_numeric_dtype(y_available.dtype)
+                is_classification = _infer_task_type_from_y(y_available) == 'classification'
             else:
                 is_classification = task_type_setting in ("classification", "one_class")
 
@@ -22483,6 +22493,12 @@ class SpectralPredictApp:
 
     def _set_imbalance_banner(self, text):
         """Show a substitution warning in the imbalance section."""
+        # Suppress the banner when imbalance handling isn't enabled — the
+        # method migration still happens silently (so the dropdown is in a
+        # valid state if the user toggles imbalance on later), but the
+        # warning is only user-relevant when they've opted in.
+        if not self.enable_imbalance_handling.get():
+            return
         if hasattr(self, 'imbalance_banner_label'):
             self.imbalance_banner_label.config(text=text)
 
@@ -23032,7 +23048,7 @@ class SpectralPredictApp:
                 task_setting = self.task_type.get()
                 resolved_is_classification = task_setting == 'classification' or (
                     task_setting == 'auto'
-                    and (self.y.nunique() == 2 or not pd.api.types.is_numeric_dtype(self.y.dtype))
+                    and _infer_task_type_from_y(self.y) == 'classification'
                 )
                 if resolved_is_classification:
                     class_counts = self.y.value_counts()
