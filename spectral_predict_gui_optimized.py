@@ -22452,8 +22452,12 @@ class SpectralPredictApp:
                 self._set_imbalance_banner(
                     f"Method changed: {old} -> {self.imbalance_method.get()} (not applicable for {task_type})"
                 )
-        else:
-            self._clear_imbalance_banner()
+        # Do NOT auto-clear the banner here: _detect_and_display_imbalance() and
+        # _on_task_type_changed() both trigger refreshes on the same task-switch,
+        # and an auto-clear would wipe the "Method changed" warning that the
+        # first refresh just set. The banner is cleared by user-driven events:
+        # manual method pick (<<ComboboxSelected>> -> _update_imbalance_method_description)
+        # or disabling imbalance handling (_on_imbalance_enabled_changed).
 
     def _set_imbalance_banner(self, text):
         """Show a substitution warning in the imbalance section."""
