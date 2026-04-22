@@ -265,10 +265,33 @@ def compute_pls_complexity_curve(X, y, max_components, cv, task='regression', ba
         - optimal_idx: index of optimal complexity (min CV error)
     """
     from sklearn.cross_decomposition import PLSRegression
-    from sklearn.model_selection import cross_val_predict
+    from sklearn.model_selection import cross_val_predict, KFold
     from sklearn.metrics import mean_squared_error, accuracy_score
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
+
+    def _pool_fold_predictions(estimator, X_arr, y_arr, splitter):
+        """Manual per-fold aggregation for splitters that aren't partitions.
+
+        `sklearn.cross_val_predict` rejects RepeatedKFold/RepeatedStratifiedKFold
+        with "cross_val_predict only works for partitions" because each sample
+        appears in multiple test folds across repeats. For the complexity
+        curve we care about a single pooled prediction per sample; we
+        average across the repeats when a sample is tested more than once.
+        """
+        n = len(y_arr)
+        pred_sum = np.zeros(n, dtype=float)
+        pred_count = np.zeros(n, dtype=int)
+        for train_idx, test_idx in splitter.split(X_arr, y_arr):
+            m = clone(estimator)
+            m.fit(X_arr[train_idx], y_arr[train_idx])
+            pred_sum[test_idx] += m.predict(X_arr[test_idx]).ravel()
+            pred_count[test_idx] += 1
+        if np.any(pred_count == 0):
+            # Fallback to a plain 5-fold so every sample gets a prediction.
+            kf = KFold(n_splits=min(5, max(2, n - 1)), shuffle=True, random_state=42)
+            return cross_val_predict(estimator, X_arr, y_arr, cv=kf).ravel()
+        return pred_sum / pred_count
 
     X = np.asarray(X)
     y = np.asarray(y).ravel()
@@ -305,8 +328,19 @@ def compute_pls_complexity_curve(X, y, max_components, cv, task='regression', ba
             train_rmse = np.sqrt(mean_squared_error(y, y_train_pred))
             train_scores.append(train_rmse)
 
-            # CV score
-            y_cv_pred = cross_val_predict(pls, X, y, cv=cv)
+            # CV score — cross_val_predict requires a partition CV (each
+            # sample tested once). Under RepeatedKFold / RepeatedStratifiedKFold
+            # each sample is tested multiple times across repeats, so sklearn
+            # raises ValueError("cross_val_predict only works for partitions").
+            # Fall back to manual per-fold aggregation that averages the
+            # repeats for the pooled prediction used here.
+            try:
+                y_cv_pred = cross_val_predict(pls, X, y, cv=cv)
+            except ValueError as cv_err:
+                if 'only works for partitions' in str(cv_err):
+                    y_cv_pred = _pool_fold_predictions(pls, X, y, cv)
+                else:
+                    raise
             cv_rmse = np.sqrt(mean_squared_error(y, y_cv_pred))
             cv_scores.append(cv_rmse)
 

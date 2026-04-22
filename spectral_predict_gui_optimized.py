@@ -34936,6 +34936,14 @@ F1 Score:  {f1:.4f}
             print(f"Error computing validation curve for {model_type}: {e}")
             import traceback
             traceback.print_exc()
+            # Surface the failure in the Results text so users aren't left
+            # wondering why the Model Complexity plot is empty.
+            try:
+                msg = (f"Note: Model Complexity curve could not be computed "
+                       f"for {model_type} ({type(e).__name__}: {e}).")
+                self._log_progress(msg)
+            except Exception:
+                pass
             return None
 
     def _plot_complexity_curve(self):
