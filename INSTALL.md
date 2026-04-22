@@ -1,6 +1,8 @@
-# Spectral Predict — Install Guide
+# Spectral Predict — Install Guide (developer source path)
 
-This guide is for installing the **GUI version of Spectral Predict** from the source repository. If you received a bundled `.exe` or `.app`, you don't need this — just run the bundled file.
+> **End users:** stop here. Install the bundled `.exe` (`SpectralPredict_Setup_py312_<version>.exe`) from your distribution channel and skip this entire document. As of `0.5.0b1` (beta), the bundled installer is the only supported user-facing distribution.
+>
+> The instructions below are for **developers and contributors** who want to run the GUI from a source checkout (e.g., to make code changes, debug, or test pre-release branches).
 
 ---
 
@@ -13,7 +15,7 @@ This guide is for installing the **GUI version of Spectral Predict** from the so
 | **~3 GB free disk** | For the venv + scientific Python stack (numpy, scikit-learn, xgboost, lightgbm, catboost, etc.). |
 | **Internet** | Required during install to download packages from PyPI. |
 
-> **Why Python 3.12?** Earlier versions (3.10, 3.11) will mostly work, but the maintained venv pins are tested on 3.12 and several scientific packages have better wheels there. The previously-bundled `.exe` used 3.11 because of PyInstaller compatibility — that constraint does not apply to the source install.
+> **Why Python 3.12?** The shipped bundle uses 3.12 + PyInstaller 6.x as of `0.5.0b1`, and the maintained venv pins are tested against the same. Earlier versions (3.10, 3.11) will mostly work for development but are no longer the reference target.
 
 ---
 

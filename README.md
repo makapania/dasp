@@ -6,7 +6,15 @@ Stop manually testing preprocessing pipelines. Get a ranked list of candidate mo
 
 ---
 
-## 🚀 Quick Start (2 minutes)
+> ### 📦 End users — install the bundled `.exe`
+>
+> Spectral Predict ships as a standalone Windows installer (`SpectralPredict_Setup_py312_<version>.exe`). Get it from the distribution channel your group uses; double-click to install, then launch from the Start Menu. No Python, no git, no command line required.
+>
+> **The instructions below are for developers and contributors who want to run from source.** Source installs are no longer the supported user path as of `0.5.0b1` (beta).
+
+---
+
+## 🚀 Quick Start — developers (2 minutes)
 
 ### 1. Install
 

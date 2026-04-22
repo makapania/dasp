@@ -1,6 +1,6 @@
 # Spectral Predict — Bundled App Build Guide (Python 3.12)
 
-Build a standalone Spectral Predict bundle + Windows installer using Python 3.12 + PyInstaller 6.x. This is the **experimental / current** build path. The Python 3.11 path (`docs/BUNDLED_APP_BUILD_GUIDE.md`) remains available as the conservative fallback — see "When to use which" at the bottom.
+Build a standalone Spectral Predict bundle + Windows installer using Python 3.12 + PyInstaller 6.x. This is the **shipped** build path as of `0.5.0b1`. The Python 3.11 path was retired on 2026-04-21; its files are preserved at `archive/build_3_11/` (see that folder's README) for historical / reproducibility purposes only.
 
 ---
 
@@ -19,7 +19,7 @@ This single command handles everything:
 
 **Output:**
 - `dist/SpectralPredict-py312/SpectralPredict-py312.exe` — standalone bundle (~1.4 GB folder)
-- `dist/installer/SpectralPredict_Setup_py312_0.4.0.exe` — single-file installer (~299 MB, LZMA2-compressed)
+- `dist/installer/SpectralPredict_Setup_py312_0.5.0b1.exe` — single-file installer (~299 MB, LZMA2-compressed)
 
 ---
 
@@ -53,7 +53,7 @@ Download from <https://jrsoftware.org/isdl.php>. The build script auto-detects `
 4. **Pandas self-repair** — Byte-compares `_internal/pandas/util/__init__.py` against the venv version and restores when mismatched. PyInstaller 6.18 occasionally overwrites this file with `packaging/_structures.py` content (intermittent, ~1 in 3 rebuilds). See Troubleshooting.
 5. **Inno Setup** — If `ISCC.exe` is found, runs `installer/spectral_predict_py312.iss` to produce the installer .exe.
 
-The 3.12 spec is independent from the 3.11 spec — they share no files and produce distinct output names. You can build either one without affecting the other.
+(The 3.11 spec previously coexisted in parallel; it is now in `archive/build_3_11/` and no longer built.)
 
 ---
 
@@ -67,13 +67,13 @@ The 3.12 spec is independent from the 3.11 spec — they share no files and prod
 | `asp_logo_final.png` | Source icon (auto-converted) |
 | `asp_logo.ico` | Generated Windows icon |
 
-The 3.11 build path uses parallel files: `spectral_predict.spec`, `build_installer.py`, `installer/spectral_predict.iss`, `docs/BUNDLED_APP_BUILD_GUIDE.md`. Do not cross-edit.
+The 3.11 build path was archived on 2026-04-21 to `archive/build_3_11/` (specs, build script, .iss, and old build guide). Restore via `git mv archive/build_3_11/<file> <original-path>` if you ever need to reproduce an old release.
 
 ---
 
 ## Multiprocessing Behavior in the Bundle
 
-**The 3.12 bundle uses joblib's `threading` backend, not `loky`.** Same as the 3.11 bundle. The reason:
+**The bundle uses joblib's `threading` backend, not `loky`.** The reason:
 
 - `loky`'s `spawn` method re-executes the frozen .exe to start child processes
 - The child runs `multiprocessing.freeze_support()` in PyInstaller's runtime hook (`pyi_rth_multiprocessing.py:43`)
@@ -141,22 +141,6 @@ dist\SpectralPredict-py312\SpectralPredict-py312.exe
 
 ---
 
-## When to Use Which (3.11 vs 3.12)
-
-| Concern | 3.11 build | 3.12 build |
-|---------|-----------|-----------|
-| Maturity | Battle-tested, shipped to users | Newer, fewer real-world miles |
-| Python version | 3.11 (older) | 3.12 (current) |
-| Bundle size | ~1.0 GB | ~1.4 GB |
-| Catboost/XGBoost DLLs | Required workarounds historically | Clean |
-| Pandas TOC corruption | Doesn't hit | Auto-repaired by build script |
-| Multiprocessing | Threading fallback | Threading fallback (same) |
-| Installer | `SpectralPredict_Setup_0.4.0.exe` | `SpectralPredict_Setup_py312_0.4.0.exe` (same AppId — installs replace each other) |
-
-**Recommendation:** Use the 3.12 build for new shares unless you have a specific reason to prefer 3.11. Keep the 3.11 build path in-repo as a fallback until the 3.12 build has been deployed to real users for a couple of weeks without issues — then it can be retired.
-
----
-
 ## Maintenance
 
 ### Adding a new dependency
@@ -174,4 +158,4 @@ If renaming `spectral_predict_gui_optimized.py`, update both:
 
 ---
 
-*Version: 0.4.0 | Last updated: 2026-04-17*
+*Version: 0.5.0b1 | Last updated: 2026-04-21*

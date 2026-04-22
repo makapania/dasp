@@ -24,7 +24,7 @@ from pathlib import Path
 
 
 # Configuration
-VERSION = "0.4.0"
+VERSION = "0.5.0b1"
 APP_NAME = "SpectralPredict"
 PROJECT_ROOT = Path(__file__).parent
 DIST_DIR = PROJECT_ROOT / "dist"

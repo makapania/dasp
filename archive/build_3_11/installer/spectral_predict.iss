@@ -3,7 +3,7 @@
 ; Built with Nuitka standalone output
 
 #define MyAppName "Spectral Predict"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.5.0b1"
 #define MyAppPublisher "Spectral Predict"
 #define MyAppURL "https://github.com/spectral-predict"
 #define MyAppExeName "SpectralPredict.exe"

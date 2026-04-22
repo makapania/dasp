@@ -10,37 +10,44 @@
 
 ---
 
-## Repo-distribution install path (added 2026-04-17)
+## Distribution path — bundle-only as of 0.5.0b1 (updated 2026-04-21)
 
-Goal: enable a small group to clone the repo and run the GUI without dealing with venv setup themselves. Bundled-app limitations (PyInstaller forces Python 3.11, multiprocessing falls back to threading-only) led to deciding to share the source for now.
+**Decision:** the PyInstaller 3.12 bundle is now the only supported distribution path. Nobody is expected to clone and `pip install -e .`; the source-install scaffolding (`install.bat` / `install.sh` / `INSTALL.md`) stays in-repo as a developer convenience but is no longer marketed to end users. Beta version `0.5.0b1` ships exclusively as the bundled installer.
 
-**What's in place:**
-- `install.bat` (Windows) / `install.sh` (mac/linux): detects Python 3.12, creates `.venv312`, runs `pip install -e . --upgrade`. Idempotent.
-- `INSTALL.md`: GUI-focused walkthrough with troubleshooting for the three real failure modes (Python missing, proxy/firewall, missing C++ build tools).
-- `pyproject.toml` deps audited via AST scan vs declared deps. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1` (the old "Python 3.11 bug" comment was stale; jcamp 1.2.x imports cleanly on 3.12). Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11` (sklearn floor traces to PR #5 evidence).
-- `run_gui.sh`: fixed stale `spectral_predict_gui.py` filename (was `spectral_predict_gui_optimized.py`).
+**Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (see `src/spectral_predict/search.py:_frozen_needs_threading_fallback` — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
+
+**Still in-repo from the source-install era (kept, not deleted):**
+- `install.bat` / `install.sh`: detects Python 3.12, creates `.venv312`, runs `pip install -e . --upgrade`. Idempotent. Useful for developer setup.
+- `INSTALL.md`: GUI-focused walkthrough — now developer-facing, not user-facing.
+- `pyproject.toml` deps audited via AST scan. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1`. Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11`.
 
 **Intentionally NOT declared as required:**
-- **`torch`** — `src/spectral_predict/learned_preprocessing.py` exists and imports torch, but is **not wired into the GUI**. The dead import block at `gui:165-170` was removed 2026-04-17. The module itself is preserved because there may be a future place for learned-preprocessing models. **If/when learned_preprocessing is wired into the GUI**, decide: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch — install with `pip install torch`" message in the GUI when the user tries to use it.
-- **`agilent-ir-formats`** — no Python 3.12 wheel exists on PyPI. Stays in optional `[agilent]` extra. .seq file loading will raise a clear ImportError from `agilent_reader.py:62` until the upstream package ships a 3.12 wheel.
+- **`torch`** — `src/spectral_predict/learned_preprocessing.py` imports torch but is **not wired into the GUI**. Dead import block at `gui:165-170` removed 2026-04-17. If/when learned_preprocessing is wired into the GUI: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch" message in the GUI.
+- **`agilent-ir-formats`** — no Python 3.12 wheel on PyPI. Stays in optional `[agilent]` extra. .seq file loading raises a clear ImportError from `agilent_reader.py:62` until upstream ships a 3.12 wheel.
 
-**Next:** Test the 3.12 bundle GUI with actual analysis (user-verified). The threading fallback means no multiprocessing parallelism in the bundle, but no crash either.
+**Open follow-up if bundle parallelism becomes a real bottleneck:** fix the PyInstaller spawned-child runtime hook (the argv-parse crash in `multiprocessing.freeze_support()`) so loky can be used in the bundle. Tractable but non-trivial — would need a custom runtime hook + verification across the supported Windows targets.
 
 ---
 
-## 3.11 build retirement — pending real-world soak (2026-04-17)
+## 3.11 build retirement — DONE 2026-04-21
 
-The 3.12 PyInstaller bundle is now functional and superior on every dimension that matters (newer wheels, cleaner dep set, working installer, fork-bomb fix). The 3.11 bundle is now redundant *technically*. **Recommendation: keep the 3.11 build path in-repo for ~2 weeks of real-user soak before retiring.** The 3.12 path has only been verified by the maintainer on one machine; new edge cases may surface when the limited-share group exercises it. Once the 3.12 bundle has run cleanly for a few weeks across the audience:
+The 3.11 build path was archived to `archive/build_3_11/` on 2026-04-21 as part of the `0.5.0b1` beta cut. The 3.12 PyInstaller bundle is now the only build path. Files moved (with git history preserved via `git mv`):
 
-1. Delete `spectral_predict.spec`, `spectral_predict_mac.spec`, `build_installer.py`, `installer/spectral_predict.iss`, `docs/BUNDLED_APP_BUILD_GUIDE.md`, `RUN_SPECTRAL_PREDICT.bat`, `run_v3.bat`
-2. Rename `spectral_predict_py312.spec` → `spectral_predict.spec`, `build_installer_py312.py` → `build_installer.py`, etc. (drop the `_py312` suffix everywhere)
-3. Adjust the spec/build script for the rename (the `APP_NAME` constant, the .iss `OutputBaseFilename` — current values keep `-py312`/`_py312` suffixes to coexist with the 3.11 path)
-4. Update `docs/BUNDLED_APP_BUILD_GUIDE_PY312.md` → `docs/BUNDLED_APP_BUILD_GUIDE.md`
-5. Delete `.venv311/` (or leave for occasional 3.11 reproduction if needed)
+- `spectral_predict.spec` → `archive/build_3_11/spectral_predict.spec`
+- `spectral_predict_mac.spec` → `archive/build_3_11/spectral_predict_mac.spec`
+- `build_installer.py` → `archive/build_3_11/build_installer.py`
+- `installer/spectral_predict.iss` → `archive/build_3_11/installer/spectral_predict.iss`
+- `docs/BUNDLED_APP_BUILD_GUIDE.md` → `archive/build_3_11/BUNDLED_APP_BUILD_GUIDE.md`
+- `run_gui.bat` → `archive/build_3_11/run_gui.bat` (was `.venv311`-based)
+- `run_v3.bat` → `archive/build_3_11/run_v3.bat` (deprecated Dear PyGui V3 prototype)
 
-**Risk of retiring now (today):** if the 3.12 bundle has an undiscovered issue specific to a user's machine (different antivirus interaction, missing C++ runtime, etc.), there's no fallback. The 3.11 path is well-traveled.
+**Kept in repo root** (current `.venv312` dev launchers, NOT 3.11-specific): `RUN_SPECTRAL_PREDICT.bat`, `run_gui.sh`.
 
-**Cost of keeping the 3.11 path another 2 weeks:** essentially zero — the two paths are independent files, no maintenance overhead, no risk of cross-contamination.
+**Still TODO** (deferred — cosmetic, not blocking):
+- Rename `spectral_predict_py312.spec` → `spectral_predict.spec`, `build_installer_py312.py` → `build_installer.py`, `installer/spectral_predict_py312.iss` → `installer/spectral_predict.iss`, `docs/BUNDLED_APP_BUILD_GUIDE_PY312.md` → `docs/BUNDLED_APP_BUILD_GUIDE.md`. Drop the `_py312` / `-py312` suffixes everywhere they appear (APP_NAME constants, .iss `OutputBaseFilename`, etc.). Save for after `0.5.0b1` ships so installer filenames stay stable through the beta.
+- Delete `.venv311/` (or leave for occasional 3.11 reproduction if needed).
+
+**Restore one file from archive:** `git mv archive/build_3_11/<file> <original-path>`.
 
 ---
 

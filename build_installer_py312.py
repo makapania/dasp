@@ -1,16 +1,26 @@
 #!/usr/bin/env python
 """
-PyInstaller build script for Spectral Predict — Python 3.12 build (experimental).
+PyInstaller build script for Spectral Predict — Python 3.12 build.
 
-PARALLEL to build_installer.py (the production 3.11 build). This script never
+PARALLEL to build_installer.py (the legacy 3.11 build). This script never
 modifies the 3.11 build path; it only produces the 3.12 bundle in:
     dist/SpectralPredict-py312/SpectralPredict-py312.exe
 
-Goals vs 3.11 build:
+Wins over the 3.11 build:
   - Python 3.12 + PyInstaller 6.x (newer wheels, fewer workarounds)
-  - Recover real multiprocessing (loky backend, gated on Python version in
-    src/spectral_predict/search.py:_frozen_needs_threading_fallback)
   - Pick up newly-required deps (Pillow, shap, jcamp, pybaselines, vendor formats)
+  - Cleaner dependency closure, fewer hidden-import patches
+
+NOT a win — the 3.12 bundle did NOT recover real multiprocessing:
+  src/spectral_predict/search.py:_frozen_needs_threading_fallback() returns
+  True for ANY frozen build regardless of Python version. The fork-bomb /
+  argv-parse crash in PyInstaller's spawned-child runtime hook is not Python-
+  3.11-specific, so the loky→threading fallback still applies in the 3.12
+  bundle. Practical impact: numpy/sklearn/lightgbm/xgboost training still gets
+  thread-parallel speedup (those C extensions release the GIL), but pure-
+  Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) fall back to
+  single-core. Recovering true multiprocessing in the bundle would require
+  fixing the runtime hook itself, not bumping Python.
 
 Prerequisites:
     .venv312\\Scripts\\pip install pyinstaller
@@ -18,8 +28,8 @@ Prerequisites:
 Usage:
     python build_installer_py312.py
 
-If this build is verified working, we can promote it to the production path
-in a follow-up PR. Until then, the 3.11 build remains the shipped one.
+This is now the shipped path. The 3.11 build remains in-repo only as a
+fallback during the beta soak (see docs/PROJECT_STATUS.md for retirement plan).
 """
 
 from __future__ import annotations
@@ -32,7 +42,7 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0b1"
 APP_NAME = "SpectralPredict-py312"
 PROJECT_ROOT = Path(__file__).parent
 DIST_DIR = PROJECT_ROOT / "dist"

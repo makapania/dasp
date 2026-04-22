@@ -40,6 +40,25 @@ if getattr(sys, 'frozen', False):
     # multiprocessing.cpu_count() can call out to subprocess on some platforms.
     _cpu_count = os.cpu_count() or 4
     os.environ.setdefault('LOKY_MAX_CPU_COUNT', str(_cpu_count))
+
+# Suppress console-window flashes from any subprocess spawned by dependencies.
+# PyInstaller's console=False hides the parent's console, but child processes
+# spawned via subprocess.Popen without explicit creationflags get a fresh
+# cmd.exe window that renders briefly before the child exits. Common culprits
+# we cannot individually patch: platform.processor() shelling to reg.exe on
+# first call, joblib temp-folder init, various sklearn/scipy probes.
+# Monkey-patching subprocess.Popen.__init__ catches all of them uniformly.
+# CREATE_NO_WINDOW only affects console visibility — it does not change I/O
+# wiring, exit codes, or any functional behavior. Caller-provided
+# creationflags are honored (setdefault semantics).
+if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+    import subprocess as _subprocess
+    _orig_popen_init = _subprocess.Popen.__init__
+    def _silent_popen_init(self, *args, **kwargs):
+        if 'creationflags' not in kwargs:
+            kwargs['creationflags'] = _subprocess.CREATE_NO_WINDOW
+        _orig_popen_init(self, *args, **kwargs)
+    _subprocess.Popen.__init__ = _silent_popen_init
 import ast
 import re
 from pathlib import Path
@@ -2519,7 +2538,7 @@ class SpectralPredictApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ASP - Advanced Spectral Prediction")
+        self.root.title("ASP - Advanced Spectral Prediction  —  BETA 0.5.0b1")
 
         # Set minimum window size for usability
         self.root.minsize(1200, 700)
@@ -4601,7 +4620,20 @@ class SpectralPredictApp:
                 text="Advanced Spectral Prediction",
                 font=('Segoe UI', 16, 'bold'),
                 fg=self.colors['text'],
-                bg=self.colors['bg']).pack(anchor='w')
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 2))
+
+        # Subtle amber BETA marker + muted version (same row, baseline-aligned)
+        tk.Label(text_frame,
+                text="BETA",
+                font=('Segoe UI', 9, 'bold'),
+                fg='#D97706',  # amber-600 — attractive but unobtrusive
+                bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
+
+        tk.Label(text_frame,
+                text="v0.5.0b1",
+                font=('Segoe UI', 9),
+                fg=self.colors['text_light'],
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
 
         # Right side: Theme switcher with beautiful buttons
         theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
@@ -23097,8 +23129,13 @@ class SpectralPredictApp:
                         self._cancel_search_ui("Cancelled — LOO not possible for this data")
                         return
 
-        # Run in thread
-        self.analysis_thread = threading.Thread(target=self._run_analysis_thread, args=(selected_models, tier, resolved_inlier_label))
+        # Run in thread (daemon=True so the process can exit cleanly if the
+        # user closes the main window while analysis is in flight)
+        self.analysis_thread = threading.Thread(
+            target=self._run_analysis_thread,
+            args=(selected_models, tier, resolved_inlier_label),
+            daemon=True,
+        )
         self.analysis_thread.start()
 
     def _reconstruct_models_from_results(self, top_models_df, X_train, y_train, task_type):
@@ -35089,8 +35126,8 @@ F1 Score:  {f1:.4f}
         self.learning_curve_btn.config(state='disabled')
         self.learning_curve_status.config(text="Computing learning curve...")
 
-        # Run in background thread
-        thread = threading.Thread(target=self._run_learning_curve_thread)
+        # Run in background thread (daemon=True for clean process exit)
+        thread = threading.Thread(target=self._run_learning_curve_thread, daemon=True)
         thread.start()
 
     def _run_learning_curve_thread(self):
@@ -35229,8 +35266,8 @@ F1 Score:  {f1:.4f}
         self.refine_status.config(text="Running refined model...")
         self.root.config(cursor="wait")
 
-        # Run in thread
-        thread = threading.Thread(target=self._run_refined_model_thread)
+        # Run in thread (daemon=True for clean process exit)
+        thread = threading.Thread(target=self._run_refined_model_thread, daemon=True)
         thread.start()
 
     def _run_refined_model_thread(self):
@@ -56879,22 +56916,34 @@ def main():
 
     root = tk.Tk()
 
-    # Set window icon (taskbar and title bar)
+    # Set window icon (taskbar and title bar). Belt-and-suspenders:
+    #   1. iconbitmap(default=...) sets the .ico for *every* future Toplevel and
+    #      is what Windows reads for the taskbar group (combined with the
+    #      AppUserModelID set above).
+    #   2. iconphoto(True, <PNG>) is the cross-platform path. On Windows it
+    #      sets a higher-resolution image used in the title bar / Alt-Tab; on
+    #      macOS it's the *only* path that works (iconbitmap is a no-op there).
+    # The previous version imported `from src.spectral_predict...` which
+    # silently failed in both dev (editable install) and bundle (no `src`
+    # package on sys.path), so the icon never loaded.
     try:
-        from src.spectral_predict.resource_paths import get_resource_path
-        if sys.platform == 'darwin':
-            # macOS: use iconphoto with the PNG (iconbitmap doesn't work on Mac)
-            png_path = get_resource_path('asp_logo_final.png')
-            if png_path.exists():
-                from PIL import Image, ImageTk
-                icon_img = ImageTk.PhotoImage(Image.open(png_path))
-                root.iconphoto(True, icon_img)
-        else:
-            icon_path = get_resource_path('asp_logo.ico')
-            if icon_path.exists():
-                root.iconbitmap(default=str(icon_path))
+        from spectral_predict.resource_paths import get_resource_path
+
+        ico_path = get_resource_path('asp_logo.ico')
+        png_path = get_resource_path('asp_logo_final.png')
+
+        if sys.platform != 'darwin' and ico_path.exists():
+            root.iconbitmap(default=str(ico_path))
+
+        if png_path.exists():
+            from PIL import Image, ImageTk
+            icon_img = ImageTk.PhotoImage(Image.open(png_path))
+            root._app_icon_ref = icon_img  # prevent GC
+            root.iconphoto(True, icon_img)
     except Exception as e:
-        print(f"Warning: Could not set window icon: {e}")
+        import traceback
+        sys.stderr.write(f"[icon] Could not set window icon: {e}\n")
+        traceback.print_exc(file=sys.stderr)
 
     app = SpectralPredictApp(root)
 
@@ -56917,9 +56966,37 @@ def main():
     help_menu.add_command(label="User Guide (Online)", command=app._open_user_guide_online)
     help_menu.add_command(label="User Guide (Offline)", command=app._open_user_guide_offline)
     help_menu.add_separator()
-    help_menu.add_command(label="Exit", command=root.quit)
+    help_menu.add_command(label="Exit", command=lambda: _clean_shutdown(root))
+
+    # Wire the window's [X] button to the same clean-shutdown path. Without
+    # this, non-daemon threads from completed analyses (or stray matplotlib
+    # figure destructors, joblib worker teardowns, etc.) can keep the Python
+    # interpreter alive after the Tk root is destroyed — the user sees "no
+    # window" but `SpectralPredict-py312.exe` lingers in Task Manager. Calling
+    # os._exit(0) after root.destroy() is the belt-and-suspenders guarantee.
+    root.protocol("WM_DELETE_WINDOW", lambda: _clean_shutdown(root))
 
     root.mainloop()
+
+    # Defensive: if mainloop returned without WM_DELETE_WINDOW firing (e.g. a
+    # call to root.quit() from somewhere we don't control), still force exit.
+    _clean_shutdown(root)
+
+
+def _clean_shutdown(root):
+    """Tear down the GUI and force-terminate the process.
+
+    root.destroy() breaks the mainloop; os._exit(0) guarantees no non-daemon
+    threads or lingering subprocess handles keep the .exe alive in Task Manager
+    after the window is gone. We skip normal sys.exit() (which runs atexit
+    handlers and waits for non-daemon threads) because by the time the user
+    closed the window they've explicitly asked for the app to go away.
+    """
+    try:
+        root.destroy()
+    except Exception:
+        pass
+    os._exit(0)
 
 
 def run_import_tests():
