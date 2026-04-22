@@ -17835,6 +17835,8 @@ class SpectralPredictApp:
                     export_df.insert(0, 'Set', self.sample_sets)
                 if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
                     for col in self.combined_metadata_df.columns:
+                        if col == target_col:
+                            continue
                         export_df.insert(0, col, self.combined_metadata_df[col])
                 elif self.ref is not None:
                     for col in self.ref.columns:
@@ -17875,6 +17877,8 @@ class SpectralPredictApp:
                     # Add metadata columns (from combined file or reference file)
                     if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
                         for col in self.combined_metadata_df.columns:
+                            if col == target_col:
+                                continue
                             export_df.insert(0, col, self.combined_metadata_df[col])
                     elif self.ref is not None:
                         for col in self.ref.columns:
@@ -30280,7 +30284,7 @@ For detailed documentation, see the User Guide.
                     display_metadata = self.combined_metadata_df.copy()
                 else:
                     display_metadata = self.combined_metadata_df[mask].copy()
-                metadata_cols = list(self.combined_metadata_df.columns)
+                metadata_cols = [c for c in self.combined_metadata_df.columns if c != target_col]
             # For separate spectral + reference files, metadata is in self.ref
             elif self.ref is not None and len(self.ref.columns) > 0:
                 # Filter metadata to match displayed samples
@@ -30484,6 +30488,8 @@ For detailed documentation, see the User Guide.
             insert_position = 0
             if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None and len(self.combined_metadata_df.columns) > 0:
                 for col in self.combined_metadata_df.columns:
+                    if col == target_col:
+                        continue
                     export_df.insert(insert_position, col, self.combined_metadata_df[col])
                     insert_position += 1
             elif self.ref is not None and len(self.ref.columns) > 0:
@@ -30624,7 +30630,14 @@ For detailed documentation, see the User Guide.
             if new_metadata:
                 metadata_df = pd.DataFrame(new_metadata, index=new_indices)
                 if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
+                    # Re-attach target column — `_get_available_target_columns` reads
+                    # `combined_metadata_df.columns` to populate the target dropdown.
+                    # The sheet-rebuild loop above excludes target-named headers from
+                    # `metadata_indices`, so without this re-attachment the target would
+                    # disappear from the dropdown after the first edit.
                     self.combined_metadata_df = metadata_df
+                    if target_idx is not None and self.y is not None and target_col_name:
+                        self.combined_metadata_df[target_col_name] = self.y
                 else:
                     self.ref = metadata_df
 
