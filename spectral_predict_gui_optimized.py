@@ -16587,8 +16587,30 @@ class SpectralPredictApp:
             except Exception as e:
                 print(f"WARNING: Could not update validation_y after target change: {e}")
 
-        # Update task type detection and model checkboxes
-        self._on_task_type_changed()
+        # Target variable is the authoritative signal for task type. Override
+        # any sticky Task Type radio choice from the Import tab so that
+        # changing the target to a categorical variable actually switches the
+        # GUI to classification models (and vice versa). Uses sklearn's
+        # type_of_target so integer-encoded multiclass (e.g. {0,1,2}) is
+        # correctly recognized as classification without falsely flagging
+        # integer-stepped regression targets.
+        try:
+            from sklearn.utils.multiclass import type_of_target
+            y_kind = type_of_target(self.y.dropna()) if self.y is not None else None
+        except (TypeError, ValueError):
+            y_kind = None
+        if y_kind in ('binary', 'multiclass', 'multilabel-indicator'):
+            detected_task = 'classification'
+        elif y_kind == 'continuous':
+            detected_task = 'regression'
+        else:
+            detected_task = None
+        if detected_task is not None and self.task_type.get() != detected_task:
+            # trace on task_type will fire _on_task_type_changed, so we don't
+            # need to call it again explicitly after this.
+            self.task_type.set(detected_task)
+        else:
+            self._on_task_type_changed()
         self._update_task_type_label()
 
         # Update target distribution plot in Explore tab if it exists
