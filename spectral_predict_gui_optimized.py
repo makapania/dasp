@@ -35711,8 +35711,50 @@ F1 Score:  {f1:.4f}
             # Get user-selected task type
             task_type = self.refine_task_type.get()
 
+            # Preflight: reconcile task_type against the saved result config and
+            # the actual y-kind BEFORE model creation. The radio can drift from
+            # the saved result (user-editable), and a stale 'classification'
+            # value would otherwise build a classification estimator for a
+            # regression row, silently producing wrong results even after the
+            # CV guard corrects the splitter type.
+            saved_task = None
+            if self.selected_model_config is not None:
+                saved_task = self.selected_model_config.get('Task')
+            if saved_task in ('regression', 'classification', 'one_class') and saved_task != task_type:
+                logger.warning(
+                    "refine_task_type radio is %r but saved result Task is %r — "
+                    "using saved Task (radio likely drifted between load and run).",
+                    task_type, saved_task,
+                )
+                task_type = saved_task
+                self.root.after(0, lambda v=saved_task: self.refine_task_type.set(v))
+            if task_type == 'classification' and self.y is not None:
+                from sklearn.utils.multiclass import type_of_target
+                try:
+                    y_kind = type_of_target(self.y)
+                except (TypeError, ValueError):
+                    y_kind = None
+                if y_kind == 'continuous':
+                    logger.warning(
+                        "task_type is 'classification' but y is continuous "
+                        "(sklearn type_of_target = %r) — auto-correcting to "
+                        "'regression' before model creation.",
+                        y_kind,
+                    )
+                    task_type = 'regression'
+                    self.root.after(0, lambda: self.refine_task_type.set('regression'))
+
             # Get user-selected model
             model_name = self.refine_model_type.get()
+
+            # Remap classification-only models if task_type was corrected to regression
+            if task_type == 'regression' and model_name == 'PLS-DA':
+                logger.warning(
+                    "Model 'PLS-DA' is classification-only but task_type is 'regression' — "
+                    "remapping to 'PLS'."
+                )
+                model_name = 'PLS'
+                self.root.after(0, lambda: self.refine_model_type.set('PLS'))
 
             # Extract hyperparameters from loaded model config (if available)
             # This ensures we reproduce the exact same model that was selected from results
@@ -36110,28 +36152,9 @@ F1 Score:  {f1:.4f}
 
             # Prepare cross-validation
             y_array = y_series.values
-
-            # Defensive: validate task_type / y-array consistency before CV.
-            # If task_type is 'classification' but sklearn sees y as continuous,
-            # build_cv_splitter would choose StratifiedKFold and crash.
-            # Use sklearn's own type_of_target so integer-encoded multiclass
-            # (e.g. labels {0, 1, 2}) is correctly kept as classification.
-            if task_type == 'classification':
-                from sklearn.utils.multiclass import type_of_target
-                try:
-                    y_kind = type_of_target(y_array)
-                except (TypeError, ValueError):
-                    y_kind = None
-                if y_kind == 'continuous':
-                    logger.warning(
-                        "task_type is 'classification' but y is continuous "
-                        "(sklearn type_of_target = %r) — auto-correcting to "
-                        "'regression'. This usually means a saved result's "
-                        "Task was lost or the radio was changed manually.",
-                        y_kind,
-                    )
-                    task_type = 'regression'
-                    self.root.after(0, lambda: self.refine_task_type.set('regression'))
+            # (task_type / y-kind consistency was validated pre-model-creation
+            #  via the preflight block near line 35714; build_cv_splitter also
+            #  validates when y is passed in, as a final safety net.)
 
             # === ONE-CLASS EARLY-EXIT PATH ===
             if task_type == 'one_class':
