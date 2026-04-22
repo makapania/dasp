@@ -23015,7 +23015,10 @@ class SpectralPredictApp:
                     "nearly identical data, amplifying random seed variance."
                 )
 
-            if total_fits > 50_000:
+            # Thresholds calibrated for fast fits on small spectral datasets
+            # (PLS/Ridge on ~50 samples). Raised from 10k/50k because those
+            # tripped warnings for <1-minute Bayesian LOO runs.
+            if total_fits > 500_000:
                 if not messagebox.askyesno(
                     "Very High Compute Cost",
                     f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
@@ -23025,7 +23028,7 @@ class SpectralPredictApp:
                 ):
                     self._cancel_search_ui("Cancelled — compute cost too high")
                     return
-            elif total_fits > 10_000:
+            elif total_fits > 100_000:
                 if not messagebox.askyesno(
                     "High Compute Cost",
                     f"Estimated ~{total_fits:,} model fits with {cv_strategy} CV.\n\n"
