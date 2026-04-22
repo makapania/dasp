@@ -30357,17 +30357,27 @@ For detailed documentation, see the User Guide.
             self.data_viewer_sheet.set_sheet_data(formatted_data)
             self.data_viewer_sheet.headers(headers)
 
-            # Clear any previous header highlights before applying new one
-            try:
-                self.data_viewer_sheet.dehighlight_cells(canvas="header")
-            except Exception:
+            # Clear the previous target-column header highlight. The prior
+            # approach used dehighlight_cells(canvas="header") without row/column
+            # args, which silently no-ops on some tksheet versions, so the old
+            # highlight persisted and both the previous and new target headers
+            # stayed blue after changing the target column. Track the last
+            # highlighted column index explicitly and dehighlight it by index.
+            last_idx = getattr(self, "_last_target_header_highlight_idx", None)
+            if last_idx is not None and last_idx < len(headers):
                 try:
-                    for _col_idx in range(len(headers)):
-                        self.data_viewer_sheet.highlight_cells(
-                            row=0, column=_col_idx, canvas="header", bg=None, fg=None,
-                        )
+                    self.data_viewer_sheet.dehighlight_cells(
+                        row=0, column=last_idx, canvas="header",
+                    )
                 except Exception:
-                    pass
+                    try:
+                        self.data_viewer_sheet.highlight_cells(
+                            row=0, column=last_idx, canvas="header",
+                            bg=None, fg=None,
+                        )
+                    except Exception:
+                        pass
+            self._last_target_header_highlight_idx = None
 
             # Highlight target column header in blue
             if display_y is not None and target_col in headers:
@@ -30376,6 +30386,7 @@ For detailed documentation, see the User Guide.
                     row=0, column=target_col_idx, canvas="header",
                     bg="#D4E6F1", fg="#1A5276",
                 )
+                self._last_target_header_highlight_idx = target_col_idx
 
             # Reset all row backgrounds to default (clear any previous highlighting)
             # Use None instead of "" - empty string causes tksheet color parsing errors on selection
