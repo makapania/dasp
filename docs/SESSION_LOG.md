@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 — Imbalance-handling + Task-type + Cost-estimate session (long)
+
+### Discovery: Prediction-tab "Export to CSV" said "please run prediction first" even after prediction ran
+**Root cause:** Duplicate method name `_export_predictions` — one at `spectral_predict_gui_optimized.py:40771` (Prediction tab, checks `self.predictions_df`), the second at `:45984` (Calibration Transfer workflow, checks `self.ct_pred_y_pred`). Python class resolution uses the LAST definition, so the second method silently shadowed the first. The Prediction tab's button was calling the CT method, which checks a variable the normal prediction path never sets. **Lesson:** When adding methods to long class files, grep for the method name to check for shadowing — this codebase is too big to spot visually. Fix: `8d05dc0` renamed the CT one to `_export_ct_workflow_predictions`.
+
+### Discovery: Substitution banner set, then immediately wiped
+**Root cause:** Initial banner-ordering bug (fixed by `ac43289`): `_refresh_imbalance_methods` called `_set_imbalance_banner` then `_update_imbalance_method_description`, which internally calls `_clear_imbalance_banner`. Then a DIFFERENT ordering bug (fixed by `8b2cd74`): `_detect_and_display_imbalance` internally calls `_refresh_imbalance_methods` a second time — once `_on_task_type_changed` set the banner for a substitution, the second refresh found the method valid (already substituted) and hit the else-branch `_clear_imbalance_banner`. Both bugs: banner silently wiped in same call stack. **Lesson:** When two code paths both refresh the same UI element, the second call can inadvertently wipe state the first just set. The fix is not to have the else-branch auto-clear; let banner persist until user-driven acknowledgment (manual method pick or disable toggle).
+
+### Discovery: StratifiedKFold on continuous y in refinement (Codex's diagnosis)
+**Symptom:** User ran Bayesian regression, loaded result into Model Development, clicked Run → `ValueError: Supported target types are: ('binary', 'multiclass'). Got 'continuous' instead.` Traceback showed `_run_refined_model_thread` line 36790: `_final = pipe.steps[-1][1]`.
+
+**Codex's diagnosis (`docs/plans/2026-04-21-refine-task-type-root-cause.md`):** The crash traceback line number matched the PRE-`aa73edd` file exactly. In current HEAD, that same statement has moved to `:36816`. So the user's crash came from a **stale Python process running old code** — their GUI was launched before the CV-guard commits landed. No code path in current HEAD could plausibly reset `refine_task_type` to `'classification'` for a regression result. **Lesson:** When investigating reported traceback line numbers, cross-check against the current source — a moved line is strong evidence the user's environment is stale. Always suggest a GUI restart as first diagnostic step.
+
+**Secondary finding:** The CV guard (now at `~36119`) ran AFTER model creation. If a stale `task_type='classification'` slipped through, the estimator was built as a classifier before the guard corrected for CV. Fix `b9d2b39` moved the preflight BEFORE model creation AND also prefers `selected_model_config['Task']` over the radio value (radio can drift between load and run).
+
+### Discovery: Integer-encoded multiclass targets lost classification detection
+**Root cause:** Commit `41371e0` (earlier today) dropped the `or self.y.nunique() < 10` clause from auto-detect at 9 sites to fix a Burned-temperature regression dataset that was being mis-classified. Side effect: integer-encoded classification targets (e.g. `collagencat` with values `{1, 2, 3}`) are no longer auto-detected — they're numeric with `nunique > 2`, so everything falls through to regression. User reported "select categorical variable → stays regression." **Lesson:** Fixing an over-eager heuristic at all sites is tempting but risks under-eager detection. The better tool is `sklearn.utils.multiclass.type_of_target` — distinguishes `'multiclass'` (integer or integer-valued float, discrete) from `'continuous'` (floats spanning a range). Fix `0ef91e5` added `_infer_task_type_from_y` helper using `type_of_target` and replaced 6 sites. Note: temperature data with 8 unique integer values still gets flagged as `'multiclass'` by sklearn, so `41371e0`'s Fix A (refinement honors saved `Task`) is what actually protects that workflow, not the initial auto-detect.
+
+### Discovery: Import-tab Task Type radio silently overrides variable-driven intent
+**Symptom:** User had radio pinned to "Regression" on the Import tab, then picked a categorical target at Configuration → Basic Settings. Models stayed as regression because `_on_task_type_changed` reads the radio and respects the explicit "Regression" choice. **Lesson:** Target variable selection is a fundamental-intent signal — the user is saying "I want to predict THIS" — and should override any sticky radio state from a previous task. One-class is the exception: a categorical column could be either classification or one-class (user must pick). Fix `10d97a6` in `_on_target_column_changed` runs `type_of_target` on the new y and sets `self.task_type` explicitly, except when current radio is `one_class`.
+
+### Discovery: Bayesian cost estimator inflated 10× by phantom preprocessing dimension
+**Symptom:** User saw "Very High Compute Cost" warning for a Bayesian LOO run that finished in 15 seconds. **Root cause:** `estimate_total_cv_fits` was called with `n_preprocessing=10` unconditionally. Grid search DOES have 10 preprocessing configs as an outer loop dimension. Bayesian samples preprocessing as a hyperparameter INSIDE each trial, so effective `n_preprocessing=1`. The 10× inflator pushed 43×100×1×1 = 4,300 fits up to 43,000, crossing the "High Compute Cost" (>10k) and nearly the "Very High" (>50k) thresholds. Fix `0f4a1e6`. **Also:** the 10k/50k fit thresholds were calibrated for slow fits on large datasets. On small spectral data (~50 samples, PLS/Ridge), each fit is milliseconds — 20-40k fits finishes in under a minute. Bumped to 100k/500k in `0da5bd4`.
+
+---
+
 ## 2026-04-21 — Phantom rare-class drop + Refine 91-vs-94 mismatch (label normalization)
 
 **Bug:** User had a 94-row classification target column where every cell visually showed `250`. Analysis tab's rare-class auto-drop (from commit `51c50cc`) flagged 3 of them as a different class with count < n_folds and dropped those rows — model trained on 91 samples. Then loading that model into Model Development showed a training-mismatch warning: "trained with 91, current has 94", because `_run_refined_model_thread` doesn't replicate the auto-drop.
@@ -984,3 +1010,11 @@ Implement metadata-defined "analysis subsets" as a thin evolution of `active_gro
 - persist the subset definition/summary in training metadata for provenance and Model Development consistency checks
 
 This is much lower risk than threading a brand-new set system through search/model code, because the analysis pipeline already filters `X`/`y` before calling backend search functions.
+
+---
+
+## 2026-04-21 — Refine task-type crash investigation (Codex)
+
+Investigated the `%Collagen` regression + Bayesian imbalance `binning` smoke-test crash in Model Development. No current `HEAD` (`8f14511`) path was found that resets `refine_task_type` from a regression Bayesian result to classification between row load and Run. The pasted traceback line (`spectral_predict_gui_optimized.py:36790` showing `_final = pipe.steps[-1][1]`) matches the parent of `aa73edd`, before the continuous-target guard was added; in current `HEAD` that statement is at `:36816`, with the `type_of_target(y_array) == 'continuous'` guard before `build_cv_splitter(...)`.
+
+Conclusion recorded in `docs/plans/2026-04-21-refine-task-type-root-cause.md`: strongly suspect stale/pre-guard runtime or stale GUI process, not a newly found Tk trace/event-ordering mutation. Remaining hardening recommendation: move task/y consistency preflight earlier, before model construction, and reassert saved `selected_model_config['Task']` at Run time so stale radio drift cannot create a classification estimator for a regression result.
