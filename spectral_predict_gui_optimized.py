@@ -22978,14 +22978,21 @@ class SpectralPredictApp:
 
             n_samples = len(self.X) if self.X is not None else 0
             n_models = len(selected_models)
-            # Rough preprocessing count: grid search tests ~10-20 configs; use 10 as default
-            n_preprocessing = 10
             n_trials = 1
             if self.optimization_method.get() == 'unified':
+                # Bayesian samples preprocessing as a hyperparameter inside
+                # each trial — it is NOT an outer dimension. Using 10 here
+                # overestimated fits by ~10x and falsely triggered the "Very
+                # High Compute Cost" dialog on quick LOO runs.
+                n_preprocessing = 1
                 try:
                     n_trials = self.n_unified_trials.get()
                 except Exception:
                     n_trials = 300
+            else:
+                # Grid search does test ~10-20 preprocessing configs as an
+                # outer loop dimension.
+                n_preprocessing = 10
 
             total_fits = estimate_total_cv_fits(
                 cv_strategy,
