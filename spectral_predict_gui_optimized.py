@@ -36813,7 +36813,11 @@ F1 Score:  {f1:.4f}
             print(f"y shape: {y_array.shape}")
             print(f"First 5 y values: {y_array[:5].tolist()}")
             print(f"Last 5 y values: {y_array[-5:].tolist()}")
-            print(f"y range: [{y_array.min():.2f}, {y_array.max():.2f}]")
+            if np.issubdtype(y_array.dtype, np.number):
+                print(f"y range: [{y_array.min():.2f}, {y_array.max():.2f}]")
+            else:
+                unique_classes = np.unique(y_array)
+                print(f"y classes ({len(unique_classes)}): {unique_classes.tolist()}")
             print(f"{'='*80}\n")
 
             # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
