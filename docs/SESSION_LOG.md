@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 (evening follow-up) — Task-type helper reverted + CV tooltip overhaul
+
+### Discovery: `type_of_target`-based helper is too aggressive on integer-valued numeric targets
+**Symptom:** User loaded a CSV with target `group.cov.heath` (3 integer-valued numeric values). Analysis tab auto-checked PLS-DA. On Run, crashed with `ValueError: No valid models found. Available: ['PLS', 'Ridge', 'ElasticNet', 'RandomForest', 'LightGBM'], Requested: ['PLS-DA']` from `run_search` at `src/spectral_predict/search.py:1192`.
+
+**Root cause (two-part):**
+1. Earlier-today commit `0ef91e5` switched `_infer_task_type_from_y` from the Fix-B1 heuristic (`nunique()==2` OR non-numeric → classification, else regression) to `sklearn.utils.multiclass.type_of_target`. The theory: float-typed numeric columns would be called `'continuous'` and only true int-typed multiclass would be `'multiclass'`. **Not true:** `type_of_target` uses `_is_integral_float` on float arrays, so any integer-valued float array — burn temperatures `{150.0, 250.0, ..., 850.0}`, proportion columns `{0.0, 1.0, 2.0}` — is called `'multiclass'`. This pushed the `41371e0`/Fix-B1 intent (numeric-with-few-values defaults to regression) back into the broken state it was meant to fix.
+2. `0ef91e5` centralized 6 sites through the helper but missed three: `_run_analysis_thread` (the crash site), `_update_task_type_label` (display label), and the imbalance detection thread at `~22278`. These still used the Fix-B1 heuristic inline. So the GUI model-picker path (helper → classification → PLS-DA checked) and the run path (inline heuristic → regression) disagreed, producing the "No valid models found" crash.
+
+**Evidence:** `tests/test_refine_task_type_preservation.py` already had 2 failing tests against HEAD (`test_no_task_fallback_regression_few_unique_numeric`, `test_empty_task_falls_through`) that encoded Fix-B1's intent — they were written against commit `41371e0` and broke silently at `0ef91e5`/`10d97a6`. Codex review (`019db36b`) recommended reverting the helper rather than keeping the minimal 3-site consistency fix.
+
+**Fix:**
+- Revert `_infer_task_type_from_y` to Fix-B1 semantics: `nunique()==2` OR non-numeric dtype → `'classification'`, else `'regression'`. Doc comment updated to explain the reversion.
+- Route the 3 stale sites through the now-restored helper for consistency.
+- Result: integer-valued numeric targets default to regression; user overrides to classification via the radio button. Matches user's stated preference. True string/categorical columns still auto-detect classification.
+- Defense-in-depth: `build_cv_splitter(..., y=y)` and the Model Development `type_of_target` preflight (`aa73edd`) still catch any remaining `classification + continuous y` via user error or stale config.
+
+**Lesson:** `type_of_target`'s `'multiclass'` kind is too inclusive for regression-vs-classification disambiguation on numeric chemometric data — it triggers on any integer-valued array regardless of dtype, which is the common regression-target shape in spectroscopy (concentrations rounded to integers, discrete temperatures, burn degrees). The heuristic must be more conservative: treat numeric as regression unless it's binary or explicitly non-numeric. Let the user's radio button cover the integer-multiclass case.
+
+### Tooltip: CV strategy guidance overhaul
+**Problem:** Same tooltip text ("K-Fold standard / Repeated lower variance / LOO best for n<30") duplicated inline at three call sites. Lacked citations. Inline hint (`n>100 K-Fold | 30<n<100 Repeated | n<30 LOO`) capped Repeated K-Fold usefulness at 100, which is too low for an app whose core use-case is *ranking* many models — repeated CV stabilizes ranks up to ~200 samples.
+
+**Fix:** Added `TOOLTIP_CONTENT['cross_validation']['strategy_detail']` as a single shared tooltip string. Replaced all 3 inline duplicates with the shared key (Analysis-tab label + combobox, Model Development combobox). Inline hint updated to `n<30 LOO | 30–200 Repeated | n>200 K-Fold (hover for details)`. Detailed tooltip cites Kohavi (1995) for 10-fold default, Krstajic et al. (2014) for repeated-K-Fold benefit on model selection, Hastie et al. for LOOCV high-variance mechanism (training sets overlap by n−2), and notes the chemometrics-specific caution that LOOCV RMSEP reads optimistically on NIR spectra due to collinearity/overlap. Cross-checked against Wikipedia CV article, scikit-learn user guide, Raschka's evaluation survey (arXiv 1811.12808), and Ezenarro et al. 2025 NIR systematic review. The user's originally-pasted table (specific n-bands like 30–80, 80–200) is preserved as the sample-size guide section, labeled explicitly as a heuristic.
+
+---
+
 ## 2026-04-21 — Imbalance-handling + Task-type + Cost-estimate session (long)
 
 ### Discovery: Prediction-tab "Export to CSV" said "please run prediction first" even after prediction ran

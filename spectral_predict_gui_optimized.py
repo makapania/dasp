@@ -1282,11 +1282,40 @@ TOOLTIP_CONTENT = {
 
     # ===== CROSS-VALIDATION =====
     'cross_validation': {
+        'strategy_detail': (
+            "Cross-validation strategy for model evaluation.\n\n"
+            "K-Fold (k=5 or 10): Split data into k parts; each part held out once.\n"
+            "  The default. Kohavi (1995) found 10-fold stratified CV is the best\n"
+            "  general-purpose choice for model selection.\n\n"
+            "Repeated K-Fold: Re-run K-Fold with different random splits and average.\n"
+            "  Reduces variance of the estimate (not bias). Most useful when ranking\n"
+            "  many models against each other — this app ranks preprocessing × model\n"
+            "  combinations, so repeats stabilize the ranking. Typical: 3-5 repeats\n"
+            "  for exploration, 10+ for publication. Reference: Krstajic et al. (2014).\n\n"
+            "Leave-One-Out (LOO): Hold out 1 sample at a time. Trains n models.\n"
+            "  Approximately unbiased, but the error estimate has HIGH VARIANCE because\n"
+            "  the n training sets overlap by n-2 samples (Kohavi 1995; Hastie et al.).\n"
+            "  On NIR spectra LOO RMSEP tends to read optimistically — pair with an\n"
+            "  external validation set when possible. Expensive: n model fits per CV\n"
+            "  run. Unreliable for stochastic models (RandomForest, LightGBM, XGBoost,\n"
+            "  CatBoost, MLP) since their predictions jitter on retraining.\n\n"
+            "Rough sample-size guidance (heuristic, not a hard rule):\n"
+            "  n < 30     → LOO, or 5-fold with 5-10 repeats\n"
+            "  30 - 80    → 5- or 10-fold, 3-5 repeats\n"
+            "  80 - 200   → 5- or 10-fold, 3-10 repeats for stable rankings\n"
+            "  200 - 500  → 5- or 10-fold; add repeats only if the RMSEcv ranking\n"
+            "                is unstable between runs\n"
+            "  n > 500    → single 5- or 10-fold is typically sufficient"
+        ),
         'cv_folds': (
-            "Number of cross-validation folds (K). Used with K-Fold and Repeated K-Fold strategies.\n\n"
-            "Data is split into K parts; each part is held out once for testing while the others "
-            "train the model. More folds = less bias but more variance and computation.\n"
-            "Recommendations: 5 folds for 50-100 samples, 10 folds for 100+ samples.\n\n"
+            "Number of cross-validation folds (k). Used with K-Fold and Repeated K-Fold.\n\n"
+            "Data is split into k parts; each part is held out once for testing while the\n"
+            "others train the model. Smaller k = faster and slightly more biased (each\n"
+            "fold trains on less data); larger k = slower and lower bias.\n\n"
+            "Recommendations:\n"
+            "  - k = 5 for 30-100 samples (faster, acceptable bias)\n"
+            "  - k = 10 for 100+ samples — Kohavi (1995) found 10-fold stratified is\n"
+            "    the general-purpose default even when more compute is available.\n\n"
             "For Leave-One-Out CV, folds are determined automatically (one per sample)."
         ),
         'stratified': (
@@ -2432,26 +2461,41 @@ def _infer_task_type_from_y(y) -> "str | None":
     """Best-effort auto-detect of task type from a target array/Series.
 
     Returns 'classification', 'regression', or None if indeterminate.
-    Uses sklearn.utils.multiclass.type_of_target as the authoritative
-    signal so integer-encoded multiclass (e.g. labels {0,1,2}) is
-    correctly recognized as classification, while float continuous
-    targets stay as regression.
+
+    Policy (Fix-B1 semantics, restored 2026-04-21 after sklearn
+    type_of_target caused integer-stepped regression targets like burn
+    temperatures {150, 250, ..., 850} and 3-value proportion columns to
+    auto-flip to classification):
+
+    - ``nunique() == 2`` (binary) → classification
+    - non-numeric dtype (object / category / string) → classification
+    - otherwise numeric with 3+ unique values → regression
+
+    Integer-coded multiclass targets (e.g. labels {0, 1, 2}) therefore
+    auto-detect as regression; the user must pick classification via the
+    radio button. This matches user preference and avoids falsely
+    flagging numeric regression targets as classification. The
+    ``build_cv_splitter(..., y=y)`` guard and the Model Development
+    preflight still re-check ``type_of_target`` at CV-build time, so an
+    explicit classification + truly-continuous y combination is caught.
     """
     if y is None:
         return None
     try:
-        from sklearn.utils.multiclass import type_of_target
         y_clean = y.dropna() if hasattr(y, 'dropna') else y
         if len(y_clean) == 0:
             return None
-        kind = type_of_target(y_clean)
+        dtype = getattr(y_clean, 'dtype', None)
+        if dtype is None:
+            return None
+        n_unique = y_clean.nunique() if hasattr(y_clean, 'nunique') else len(np.unique(y_clean))
     except (TypeError, ValueError):
         return None
-    if kind in ('binary', 'multiclass', 'multilabel-indicator', 'multiclass-multioutput'):
+    if n_unique == 2:
         return 'classification'
-    if kind == 'continuous':
-        return 'regression'
-    return None
+    if not pd.api.types.is_numeric_dtype(dtype):
+        return 'classification'
+    return 'regression'
 
 
 def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, str | None]:
@@ -11208,28 +11252,14 @@ class SpectralPredictApp:
         # --- CV Strategy ---
         cv_strategy_label = ttk.Label(options_frame, text="CV Strategy:")
         cv_strategy_label.grid(row=1, column=0, sticky=tk.W, pady=8, padx=(0, 10))
-        CreateToolTip(cv_strategy_label, text=(
-            "Cross-validation strategy for model evaluation.\n\n"
-            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
-            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
-            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
-            "LOO is computationally expensive on large datasets and unreliable for stochastic "
-            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
-        ), delay=500)
+        CreateToolTip(cv_strategy_label, text=TOOLTIP_CONTENT['cross_validation']['strategy_detail'], delay=500)
 
         self.cv_strategy_combo = ttk.Combobox(
             options_frame, textvariable=self.cv_strategy, width=18,
             values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
         )
         self.cv_strategy_combo.grid(row=1, column=1, sticky=tk.W)
-        CreateToolTip(self.cv_strategy_combo, text=(
-            "Cross-validation strategy for model evaluation.\n\n"
-            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
-            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
-            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
-            "LOO is computationally expensive on large datasets and unreliable for stochastic "
-            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
-        ), delay=500)
+        CreateToolTip(self.cv_strategy_combo, text=TOOLTIP_CONTENT['cross_validation']['strategy_detail'], delay=500)
 
         # CV Folds spinbox (hidden under LOO)
         cv_folds_label = ttk.Label(options_frame, text="Folds:")
@@ -11246,10 +11276,10 @@ class SpectralPredictApp:
         self.cv_repeats_spinbox.grid(row=1, column=5, sticky=tk.W)
         CreateToolTip(self.cv_repeats_spinbox, text=TOOLTIP_CONTENT['cross_validation']['repeats'], delay=500)
 
-        # CV strategy inline hint
+        # CV strategy inline hint (hover the dropdown for details and citations)
         self.cv_hint_label = ttk.Label(
             options_frame,
-            text="n > 100: K-Fold | 30 < n < 100: Repeated K-Fold | n < 30: LOO",
+            text="n<30: LOO or repeated 5-fold  |  30–200: Repeated K-Fold  |  n>200: K-Fold (hover for details)",
             style='Caption.TLabel', foreground=self.colors['text_light']
         )
         self.cv_hint_label.grid(row=2, column=0, columnspan=6, sticky=tk.W, pady=(0, 5))
@@ -15110,14 +15140,7 @@ class SpectralPredictApp:
             values=['kfold', 'repeated_kfold', 'loo'], state='readonly'
         )
         self.refine_strategy_combo.pack(side='left', padx=(0, 8))
-        CreateToolTip(self.refine_strategy_combo, text=(
-            "Cross-validation strategy for model evaluation.\n\n"
-            "K-Fold: Split data into K parts, train on K-1, test on 1. Standard approach.\n"
-            "Repeated K-Fold: Repeat K-Fold multiple times with different splits. Lower variance.\n"
-            "Leave-One-Out (LOO): Hold out 1 sample at a time. Best for n < 30.\n\n"
-            "LOO is computationally expensive on large datasets and unreliable for stochastic "
-            "models (RandomForest, LightGBM, XGBoost, CatBoost, MLP)."
-        ), delay=500)
+        CreateToolTip(self.refine_strategy_combo, text=TOOLTIP_CONTENT['cross_validation']['strategy_detail'], delay=500)
 
         self.refine_folds_label = ttk.Label(cv_frame, text="Folds:")
         self.refine_folds_label.pack(side='left', padx=(0, 3))
@@ -16493,10 +16516,11 @@ class SpectralPredictApp:
                 foreground=self.colors.get("warning", "orange"),
             )
         elif self.task_type.get() == "auto":
-            if self.y.nunique() == 2:
+            inferred = _infer_task_type_from_y(self.y)
+            if inferred == "classification" and self.y.nunique() == 2:
                 detected_type = "classification (binary)"
-            elif not pd.api.types.is_numeric_dtype(self.y.dtype):
-                detected_type = "classification"
+            elif inferred in ("classification", "regression"):
+                detected_type = inferred
             else:
                 detected_type = "regression"
             self.task_type_detection_label.config(
@@ -22274,13 +22298,7 @@ class SpectralPredictApp:
 
             # Auto-detect task type if set to "auto"
             if task_type_setting == "auto":
-                # Auto-detect task type (same logic as analysis)
-                if self.y.nunique() == 2:
-                    task_type = "classification"
-                elif not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = "classification"
-                else:
-                    task_type = "regression"
+                task_type = _infer_task_type_from_y(self.y) or "regression"
             else:
                 task_type = task_type_setting
 
@@ -24546,13 +24564,15 @@ class SpectralPredictApp:
             task_type_setting = self.task_type.get()
 
             if task_type_setting == "auto":
-                # Auto-detect task type
-                if self.y.nunique() == 2:
-                    task_type = "classification"
-                elif not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = "classification"
-                else:
-                    task_type = "regression"
+                # Delegate to the centralized helper so this path agrees with
+                # _on_tier_changed / _on_task_type_changed / _update_task_type_label.
+                # Prior to 2026-04-21 this site had its own copy of the
+                # nunique()==2 + is_numeric heuristic; the GUI model-selection
+                # path used the centralized helper, and the two could disagree
+                # (e.g. 3 integer-valued numeric values — GUI checked PLS-DA
+                # while this path resolved "regression", causing
+                # run_search to raise "No valid models found").
+                task_type = _infer_task_type_from_y(self.y) or "regression"
                 self._log_progress(f"Task type: {task_type} (auto-detected)")
             else:
                 # User explicitly selected task type
