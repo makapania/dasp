@@ -4,6 +4,45 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-21 (late evening) — Data viewer duplicate-target fix + RepeatedKFold complexity curve
+
+### Discovery: Data Management viewer rendered the target column twice under combined-CSV load
+
+**Symptom:** With a combined-format CSV (metadata + spectra in one file), the Data Management viewer showed the target column in two places: once in the metadata section and once at the dedicated target position. Switching the target dropdown made both instances update to the new column name (still two copies). CSV/Excel exports also produced duplicate columns (or `ValueError: cannot insert, already exists` if pandas enforced uniqueness). Worst: `_apply_data_viewer_edits` silently removed the target from `combined_metadata_df` after any cell edit (because both target-named headers matched the target branch in its header scan and neither was captured as metadata), which broke the target-switch dropdown until the user reloaded the file.
+
+**Root cause:** Low-level readers (`read_combined_csv`/`read_combined_excel` in `src/spectral_predict/io.py`) correctly strip the target from `metadata_df`. But the GUI loader intentionally re-adds it at `spectral_predict_gui_optimized.py:17985-17990` so `_get_available_target_columns` can list it in the target-switch dropdown. Four render/export paths then iterated `self.combined_metadata_df.columns` AND appended `[target_col]` separately — producing the duplicate. The separate-ref branch had the correct `if col == target_col: continue` guard but combined did not.
+
+**Investigation approach:** Dispatched Codex and Kimi K2.6 in parallel (via opencode Go's Moonshot integration, NOT OpenRouter) for independent deep investigations. Both agreed on the fix shape. Codex's report was slightly more complete — caught two older export helpers Kimi missed (`_export_to_csv` / `_export_to_excel` at ~17830, ~17870) and recommended an explicit target-preservation guard in `_apply_data_viewer_edits` rather than relying on the "accidental heal" behavior.
+
+**Fix (4 view/export projections + 1 state guard):**
+1. `_populate_data_viewer` combined branch (~30287): `metadata_cols = [c for c in self.combined_metadata_df.columns if c != target_col]` — mirrors the separate-ref branch at ~30295.
+2. `_export_data_viewer_to_csv` combined branch (~30491): `if col == target_col: continue`.
+3. `_export_to_csv` combined branch (~17838): same skip.
+4. `_export_to_excel` combined branch (~17880): same skip.
+5. `_apply_data_viewer_edits` (~30629-30640): after rebuilding `combined_metadata_df` from metadata-indexed headers, re-attach `self.y` under `target_col_name` so target-switching still works. Guarded by `target_idx is not None and self.y is not None and target_col_name`.
+
+**Workflow (worth repeating):** worktree → detailed plan in `docs/plans/2026-04-21-duplicate-target-col-fix.md` → GLM-5.1 (z.ai direct subscription) implemented via opencode `build` agent → Codex + Claude both verified PASS independently → user manual verification of Valley CSV → `--no-ff` merge via `cb0aa8b`.
+
+**Lesson:** When `self.combined_metadata_df` is re-inflated with data that logically belongs somewhere else (like `self.y` stored separately), every consumer of `combined_metadata_df.columns` becomes a potential duplicate-render site. Search for all `combined_metadata_df.columns` uses when you add any such re-injection. Better yet: don't re-inject; use a dedicated "target_name" attribute for the dropdown instead of repurposing the metadata frame. That's a wider refactor and out of scope for this fix.
+
+### Discovery: `cross_val_predict only works for partitions` on RepeatedKFold
+
+**Symptom:** User ran Bayesian refinement with RepeatedKFold and the Model Complexity Analysis plot was empty. Console showed:
+
+```
+Error computing validation curve for PLS: cross_val_predict only works for partitions
+```
+
+The exception was caught but swallowed — no user-facing message.
+
+**Root cause:** `sklearn.model_selection.cross_val_predict` requires a partition CV (each sample tested exactly once). Under RepeatedKFold / RepeatedStratifiedKFold each sample is tested multiple times (once per repeat), so sklearn refuses. LOO and plain KFold are partitions and work fine. The offending call is `compute_pls_complexity_curve` at `src/spectral_predict/diagnostics.py:309`. Other validation-curve functions in the same module use `cv.split()` manually and are unaffected.
+
+**Fix:** `compute_pls_complexity_curve` now catches the specific ValueError and falls back to a manual per-fold aggregation that averages the repeat predictions per sample. Verified on n=40/p=30 synthetic data with KFold(5), RepeatedKFold(5,3), LOO — all three now produce non-NaN curves. Also surfaced the failure in the Results text via `_log_progress` so users see a note instead of staring at an empty plot. `9bd8751`.
+
+**Lesson:** Any `cross_val_predict` call path must handle non-partition splitters explicitly. Grep for `cross_val_predict` across the codebase when adding a new CV strategy — if the result isn't a single pooled prediction, `validation_curve` or `cross_validate` (per-fold) is the correct alternative.
+
+---
+
 ## 2026-04-21 (evening follow-up) — Task-type helper reverted + CV tooltip overhaul
 
 ### Discovery: `type_of_target`-based helper is too aggressive on integer-valued numeric targets
