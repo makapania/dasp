@@ -93,12 +93,14 @@ def select_by_vip(X, y, n_variables, n_components=None):
 '''
 
 SPA_TEMPLATE = '''
-def spa_selection(X, y, n_variables, random_state=42):
+def spa_selection(X, y, n_variables, cv_folds=5):
     """
-    Successive Projections Algorithm (SPA) for variable selection.
+    Successive Projections Algorithm (SPA) for variable selection (canonical Araujo 2001).
 
-    Selects variables with minimum collinearity by iteratively choosing
-    variables that have maximum projection orthogonal to already-selected variables.
+    SPA reduces collinearity by iteratively selecting variables that have minimum
+    projection (correlation) onto the already-selected variable set. The canonical
+    algorithm enumerates EVERY variable as a candidate first variable and keeps
+    the chain with the best CV criterion. SPA is fully deterministic.
 
     Parameters
     ----------
@@ -108,8 +110,8 @@ def spa_selection(X, y, n_variables, random_state=42):
         Target values
     n_variables : int
         Number of variables to select
-    random_state : int
-        Random seed for reproducibility
+    cv_folds : int, default=5
+        Number of CV folds used to score each candidate chain
 
     Returns
     -------
@@ -122,45 +124,70 @@ def spa_selection(X, y, n_variables, random_state=42):
     variable selection in spectroscopic multicomponent analysis.
     Chemometrics and Intelligent Laboratory Systems, 57(2), 65-73.
     """
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.model_selection import cross_val_score
+
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y).ravel()
     n_samples, n_features = X.shape
 
     n_variables = min(n_variables, n_features)
 
-    # Normalize X for correlation computation
+    # Match in-app SPA: reduce cv_folds when n_samples is below the request.
+    # Without this, small-sample exports fail CV scoring on every seed and the
+    # exported script's selection diverges from the saved model.
+    if n_samples < cv_folds:
+        cv_folds = max(2, n_samples // 2)
+
+    # Normalize X for correlation/projection computation
     X_mean = np.mean(X, axis=0)
     X_std = np.std(X, axis=0) + 1e-10
     X_norm = (X - X_mean) / X_std
 
-    # Normalize y
-    y_mean = np.mean(y)
-    y_std = np.std(y) + 1e-10
-    y_norm = (y - y_mean) / y_std
+    best_score = -np.inf
+    best_selection = None
 
-    # Initial correlations with y
-    initial_corrs = np.abs(X_norm.T @ y_norm) / n_samples
+    # Canonical Araujo 2001: every variable is a candidate seed
+    for first_var in range(n_features):
+        selected = [first_var]
+        available = set(range(n_features)) - {first_var}
 
-    # Start with variable most correlated with y
-    selected = [int(np.argmax(initial_corrs))]
-    available = set(range(n_features)) - set(selected)
+        for _ in range(1, n_variables):
+            # Vectorized projection: matmul over compact available indices.
+            # ~2-3 orders of magnitude faster than a Python loop for J >> 100,
+            # which matters for FTIR datasets (J = 1000-3000) when users run
+            # the exported script.
+            avail_idx = np.array(sorted(available))
+            X_selected = X_norm[:, selected]
+            X_avail = X_norm[:, avail_idx]
+            corr_matrix = (X_avail.T @ X_selected) / n_samples
+            proj_values = np.sum(corr_matrix ** 2, axis=1)
+            min_idx = int(avail_idx[np.argmin(proj_values)])
 
-    # Iteratively select remaining variables
-    for _ in range(1, n_variables):
-        projections = np.zeros(n_features)
-        X_selected = X_norm[:, selected]
+            selected.append(min_idx)
+            available.remove(min_idx)
 
-        for j in available:
-            # Correlation with already selected variables
-            corrs = X_norm[:, j] @ X_selected / n_samples
-            projections[j] = np.sum(corrs ** 2)
+        # Evaluate this chain with PLS+CV
+        try:
+            n_components = min(n_variables, n_samples - 1, 10)
+            pls = PLSRegression(n_components=n_components, scale=False)
+            cv_scores = cross_val_score(
+                pls, X[:, selected], y, cv=cv_folds, scoring="r2", n_jobs=1
+            )
+            mean_score = float(np.mean(cv_scores))
+        except Exception:
+            continue
 
-        # Select variable with minimum projection (least correlated with selected)
-        min_idx = min(available, key=lambda j: projections[j])
-        selected.append(min_idx)
-        available.remove(min_idx)
+        if np.isfinite(mean_score) and mean_score > best_score:
+            best_score = mean_score
+            best_selection = list(selected)
 
-    return np.array(selected)
+    if best_selection is None:
+        # Match in-app SPA: when every seed's CV failed, return all variables
+        # (uniform importance) rather than a single-variable argmax chain.
+        return np.arange(n_features)
+
+    return np.array(best_selection)
 '''
 
 UVE_TEMPLATE = '''

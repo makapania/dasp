@@ -211,7 +211,6 @@ Select one or more sophisticated wavelength selection techniques:
 |-----------|---------|-------------|
 | UVE Cutoff | 1.0 | Threshold multiplier (0.7-1.5) |
 | UVE Components | Auto | Number of PLS components |
-| SPA Random Starts | 10 | Number of initialization points |
 | iPLS Intervals | 20 | Number of spectral intervals |
 | Fwd iPLS Max Combine | 5 | Maximum intervals to combine |
 | GA Population | 64 | Genetic algorithm population size |

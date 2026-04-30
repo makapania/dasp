@@ -4,6 +4,85 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-30 (later) — T-06 SPA canonical Araújo 2001 enumeration
+
+Picked up DASP validation-gate ticket triage on a different machine (the
+2026-04-30 morning bugfix run was completed on the prior machine). Selected
+T-06 (SPA `n_random_starts` non-functionality) as the smaller-win-to-verify-
+gate-still-works candidate per `docs/CONTINUATION_PROMPT_2026-04-30.md`.
+
+**Investigation phase** (parallel general-purpose agent, findings at
+`docs/bugfix_validation/T06_findings.md`):
+- Confirmed roadmap framing on code-reading: every iteration of `for start_idx
+  in range(n_random_starts)` produces byte-identical output. The function's
+  own docstring at line 322-324 already conceded: "currently SPA is
+  deterministic, but this parameter is included for API consistency and
+  future enhancements." Empirical confirmation: `n_random_starts ∈ {1, 5,
+  10}` and `random_state ∈ {42, 123}` produce identical importances.
+- **Key gate-finding that flipped the fix path:** the roadmap proposed
+  `rng.choice()` for random first-variable selection (Option A). Field
+  alignment check killed this. Canonical Araújo 2001 SPA is **deterministic
+  enumeration over every variable as candidate seed**, not random restarts.
+  `auswahl` (modern Python reference) explicitly enumerates every variable
+  with no `n_random_starts` and no `random_state`. Galvão 2012 SPA-GUI
+  (Araújo's own group) follows the same pattern. No verified chemometrics
+  implementation exposes random restarts for SPA. Option A would have been
+  a textbook sklearn-instinct-on-chemometrics-domain failure — the recurring
+  master-rule violation.
+- **GUI reachability confirmed:** unlike T-26's backend-only-knob trap, T-06
+  has a real Spinbox (`gui:12085`, range 1-50, default 10) plumbed through 6+
+  `search.py` call sites. The fix surface IS reachable to bundled-app users.
+
+**Disposition:** Option B — canonical Araújo 2001 enumeration. Replaced
+`for start_idx in range(n_random_starts)` with `for first_var in
+range(n_vars)` in production + the export `SPA_TEMPLATE`. Dropped
+`n_random_starts` and `random_state` from `spa_selection` signature plus
+the three hybrid signatures (`uve_spa_selection`, `uve_cars_spa_selection`,
+`fipls_spa_selection`). Removed the GUI Spinbox + IntVar + 2 plumbing call
+sites. Removed 6 `search.py` call-site usages + signature parameter on
+`run_search` and `run_one_class_search`. Removed 2 hardcoded
+`spa_n_random_starts = 10` blocks in `bayesian_utils.py`.
+
+**Cross-family review caught real bugs the verdict-author missed:**
+- Codex (US-trained) found a missed call-site at
+  `tests/gui/test_comprehensive.py:387` still passing `random_state=42` →
+  fixed. Plus a template ↔ in-app divergence on small-sample CV-fold
+  reduction and failure-fallback semantics → fixed (template now mirrors
+  production's small-sample fold adjustment + uniform fallback).
+- Kimi K2.6 (Moonshot, Chinese-trained, via opencode-go subscription) found
+  a dead `y_norm` computation in production (leftover from the argmax-
+  correlation seed path) → removed. Plus a Python-loop projection in the
+  template (~2-3 orders of magnitude slower than production's vectorized
+  matmul on FTIR-scale J=2000) → vectorized.
+- Both reviewers independently flagged the original soft
+  `test_spa_explores_multiple_seeds` test as too weak — it would have
+  passed under the pre-T-06 implementation. Replaced with a deterministic
+  pinned-data fixture (`np.random.default_rng(0)`, 30×15 noise) where
+  canonical SPA picks chain `[0, 5, 6, 7, 10]` from seed 6 while argmax-
+  only would pick `[3, 5, 8, 10, 11]` from seed 11. Added Kimi's suggested
+  call-count invariant test as additive coverage (`test_spa_evaluates_all_j_seeds`).
+
+**Performance flag for follow-up:** canonical enumeration is O(J seeds) ×
+O(N×J inner forward chain) × O(folds × PLS CV). For typical bone-FTIR
+(J=200-1500 wavelengths after preprocessing), this is **100×–1500× the
+prior single-chain-repeated-10-times work.** Pre-fix typical SPA runtime
+~1-5 sec; post-fix ~30-750 sec on the high end. Canonical-correct but
+visible. Deferred follow-up: parallelize the seed loop with joblib, or
+vectorize across seeds. Tracked in T06 verdict note section 8.
+
+**Lesson reinforced (master-rule, again):** The roadmap's `rng.choice()`
+fix would have been a textbook sklearn-instinct slippage —
+chemometrics-aligned reviewers would catch it; sklearn-trained reviewers
+would not. The gate methodology's step 3 (field alignment via
+documentation lookup, not generic intuition) caught it. Future agents
+encountering "SPA random starts is broken" tickets MUST do the field-
+alignment lookup first.
+
+**Commits / merge:** `fix/T06-spa-canonical-seeds` ff-merged into main.
+Validation note: `docs/bugfix_validation/T06_spa_canonical_seeds.md`.
+
+---
+
 ## 2026-04-30 — Bugfix branch validation gate session (closes the previous-day's run)
 
 Each of the 5 implemented bugfix branches went through a strict validation gate

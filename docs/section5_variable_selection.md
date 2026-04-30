@@ -322,12 +322,12 @@ SPA is a forward selection method that minimizes multicollinearity by iterativel
       j_next = argmax(norm_j) for j not in S
    e. Add to selected set: S = S ∪ {j_next}
 
-3. QUALITY EVALUATION (with random starts)
-   For each start s = 1 to n_random_starts:
-   a. Run selection from different initial variable
+3. QUALITY EVALUATION (canonical seed enumeration, Araújo 2001)
+   For each candidate first variable k = 1 to J (every variable in turn):
+   a. Run forward selection chain from variable k
    b. Build PLS model on selected variables
    c. Compute CV R² score
-   d. Track best selection across starts
+   d. Track best chain across all J seeds
 
 4. IMPORTANCE SCORING
    a. Variables selected earlier get higher scores
@@ -355,9 +355,11 @@ $$\text{corr}(\mathbf{x}_j, \mathbf{y}) = \frac{\mathbf{x}_j^T \mathbf{y}}{||\ma
 | Parameter | Default | Description | Effect |
 |-----------|---------|-------------|--------|
 | `n_features` | required | Number of features to select | Directly controls output size |
-| `n_random_starts` | 10 | Number of random initializations | More starts = more robust but slower |
 | `cv_folds` | 5 | CV folds for quality evaluation | More folds = more stable scores |
-| `random_state` | 42 | Random seed | Ensures reproducibility |
+
+SPA is fully deterministic: every variable is enumerated as a candidate first
+variable per Araújo 2001, and the chain with the best CV criterion is returned.
+There is no random initialization and no `random_state` parameter.
 
 ### 3.4 When to Use
 
@@ -426,9 +428,8 @@ The UVE-SPA hybrid combines the noise filtering capability of UVE with the colli
 | `cutoff_multiplier` | 1.0 | UVE threshold multiplier |
 | `uve_n_components` | auto | PLS components for UVE |
 | `uve_cv_folds` | 5 | CV folds for UVE |
-| `spa_n_random_starts` | 10 | Random starts for SPA |
 | `spa_cv_folds` | 5 | CV folds for SPA evaluation |
-| `random_state` | 42 | Random seed |
+| `random_state` | 42 | Random seed (UVE only; SPA is deterministic) |
 
 ### 4.3 When to Use
 

@@ -232,7 +232,7 @@ class TestVariableSelection:
         """SPA smoke test: verify output shape and non-negative scores."""
         X, y, _ = synthetic_data
 
-        scores = spa_selection(X, y, n_features=20, n_random_starts=10)
+        scores = spa_selection(X, y, n_features=20)
 
         # Check return types
         assert isinstance(scores, np.ndarray), "Scores should be numpy array"
@@ -261,7 +261,7 @@ class TestVariableSelection:
         X, y, _ = synthetic_data
 
         # SPA should select diverse variables
-        scores = spa_selection(X, y, n_features=20, n_random_starts=10)
+        scores = spa_selection(X, y, n_features=20)
 
         # Derive selected indices from scores (non-zero scores)
         selected_indices = np.where(scores > 0)[0]
@@ -294,6 +294,112 @@ class TestVariableSelection:
         assert max_gap > 5, \
             f"SPA should select variables across spectrum, largest gap = {max_gap}"
 
+    def test_spa_deterministic(self, synthetic_data):
+        """T-06: canonical Araujo 2001 SPA is fully deterministic across repeat calls."""
+        X, y, _ = synthetic_data
+
+        scores_a = spa_selection(X, y, n_features=20)
+        scores_b = spa_selection(X, y, n_features=20)
+
+        np.testing.assert_array_equal(scores_a, scores_b)
+
+    def test_spa_explores_multiple_seeds(self):
+        """T-06: canonical SPA picks a winning seed != argmax-correlation seed.
+
+        Pre-T-06 dasp seeded only at argmax(|corr(X[:, j], y)|) and repeated
+        that single chain N times — so the selection was always the
+        argmax-only chain. Canonical Araújo 2001 enumerates over every
+        variable as candidate first variable and keeps the chain with the
+        best CV criterion.
+
+        This test pins a deterministic dataset (numpy default_rng(0), 30×15
+        random) where canonical SPA picks chain [0, 5, 6, 7, 10] starting
+        from seed 6, while the argmax seed is 11 leading to chain
+        [3, 5, 8, 10, 11]. A regression to the pre-T-06 single-chain
+        behavior would return the argmax chain and fail both assertions.
+        """
+        rng = np.random.default_rng(0)
+        n_samples = 30
+        n_vars = 15
+        y = rng.normal(0, 1, n_samples)
+        X = rng.normal(0, 1, (n_samples, n_vars))
+
+        # Compute the argmax-correlation seed and the chain pre-T-06 would have produced.
+        X_norm = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-10)
+        y_norm = (y - y.mean()) / (y.std() + 1e-10)
+        initial_corrs = np.abs(X_norm.T @ y_norm) / n_samples
+        argmax_seed = int(np.argmax(initial_corrs))
+
+        n_select = 5
+        argmax_chain = [argmax_seed]
+        available = set(range(n_vars)) - {argmax_seed}
+        for _ in range(n_select - 1):
+            X_sel = X_norm[:, argmax_chain]
+            proj = {
+                j: float(np.sum((X_norm[:, j] @ X_sel / n_samples) ** 2))
+                for j in available
+            }
+            min_j = min(available, key=lambda j: proj[j])
+            argmax_chain.append(min_j)
+            available.remove(min_j)
+
+        scores = spa_selection(X, y, n_features=n_select, cv_folds=5)
+        canonical_chain = sorted(np.where(scores > 0)[0].tolist())
+
+        # Pinned expectations from the verified empirical run on rng(0) data.
+        assert sorted(argmax_chain) == [3, 5, 8, 10, 11], (
+            f"argmax-only reference chain drifted: {sorted(argmax_chain)}"
+        )
+        assert canonical_chain == [0, 5, 6, 7, 10], (
+            f"canonical chain drifted: {canonical_chain}"
+        )
+        assert canonical_chain != sorted(argmax_chain), (
+            "Canonical SPA produced the same chain as argmax-only — "
+            "T-06 fix should explore other seeds."
+        )
+
+    def test_spa_evaluates_all_j_seeds(self, synthetic_data):
+        """T-06: canonical SPA must evaluate exactly J candidate seeds.
+
+        Pinned via call-count on cross_val_score. A regression that narrowed
+        the seed loop (e.g., back to range(n_random_starts) or
+        range(min(n_vars, 10))) would fail this assertion immediately.
+        Complementary to test_spa_explores_multiple_seeds, which pins the
+        actual selection on a deterministic dataset.
+        """
+        from unittest.mock import patch
+
+        X, y, _ = synthetic_data
+        n_vars = X.shape[1]
+        call_count = {"n": 0}
+
+        def counting_cv(*args, **kwargs):
+            call_count["n"] += 1
+            return np.array([0.5])
+
+        with patch(
+            "spectral_predict.variable_selection.cross_val_score",
+            side_effect=counting_cv,
+        ):
+            spa_selection(X, y, n_features=20)
+
+        assert call_count["n"] == n_vars, (
+            f"Canonical SPA should evaluate exactly {n_vars} seeds, "
+            f"got {call_count['n']}"
+        )
+
+    def test_spa_rejects_legacy_n_random_starts(self, synthetic_data):
+        """T-06: the n_random_starts kwarg was removed (canon has no such concept)."""
+        X, y, _ = synthetic_data
+        with pytest.raises(TypeError):
+            spa_selection(X, y, n_features=20, n_random_starts=5)
+
+    def test_spa_rejects_legacy_random_state(self, synthetic_data):
+        """T-06: the random_state kwarg was removed (SPA is fully deterministic)."""
+        X, y, _ = synthetic_data
+        with pytest.raises(TypeError):
+            spa_selection(X, y, n_features=20, random_state=42)
+
     # =========================================================================
     # UVE-SPA Tests
     # =========================================================================
@@ -308,7 +414,6 @@ class TestVariableSelection:
             cutoff_multiplier=1.0,
             uve_n_components=5,
             uve_cv_folds=5,
-            spa_n_random_starts=10,
             spa_cv_folds=5
         )
 
@@ -345,7 +450,6 @@ class TestVariableSelection:
             cutoff_multiplier=1.0,
             uve_n_components=5,
             uve_cv_folds=5,
-            spa_n_random_starts=10,
             spa_cv_folds=5
         )
 
@@ -406,7 +510,7 @@ class TestVariableSelection:
 
         # Test SPA
         scores_spa = spa_selection(
-            X, y, n_features=10, n_random_starts=5
+            X, y, n_features=10
         )
         selected_spa = np.where(scores_spa > 0)[0]
         assert len(selected_spa) > 0, "SPA should return selected indices even with small dataset"
@@ -418,7 +522,6 @@ class TestVariableSelection:
             cutoff_multiplier=1.0,
             uve_n_components=3,
             uve_cv_folds=adjusted_folds,
-            spa_n_random_starts=5,
             spa_cv_folds=5
         )
         selected_hybrid = np.where(scores_hybrid > 0)[0]
@@ -446,7 +549,7 @@ class TestVariableSelection:
 
         # Test SPA with n_features close to total features
         scores_spa = spa_selection(
-            X, y, n_features=min(10, n_features - 1), n_random_starts=5
+            X, y, n_features=min(10, n_features - 1)
         )
         selected_spa = np.where(scores_spa > 0)[0]
         assert len(selected_spa) > 0, "SPA should handle few features"
@@ -459,7 +562,6 @@ class TestVariableSelection:
             cutoff_multiplier=1.0,
             uve_n_components=3,
             uve_cv_folds=5,
-            spa_n_random_starts=5,
             spa_cv_folds=5
         )
         assert scores_hybrid.shape[0] == n_features, "UVE-SPA scores should match n_features"
@@ -490,7 +592,6 @@ class TestVariableSelection:
             cutoff_multiplier=1.0,
             uve_n_components=n_features + 10,
             uve_cv_folds=5,
-            spa_n_random_starts=5,
             spa_cv_folds=5
         )
         assert scores_hybrid.shape[0] == n_features, "UVE-SPA should handle n_components > n_features"
@@ -506,10 +607,10 @@ class TestVariableSelection:
         methods = [
             ("iPLS", lambda: ipls_selection(X, y, n_intervals=20, n_components=5, cv_folds=5)),
             ("UVE", lambda: uve_selection(X, y, cutoff_multiplier=1.0, n_components=5, cv_folds=5)),
-            ("SPA", lambda: spa_selection(X, y, n_features=20, n_random_starts=10)),
+            ("SPA", lambda: spa_selection(X, y, n_features=20)),
             ("UVE-SPA", lambda: uve_spa_selection(
                 X, y, n_features=20, cutoff_multiplier=1.0, uve_n_components=5, uve_cv_folds=5,
-                spa_n_random_starts=10, spa_cv_folds=5
+                spa_cv_folds=5
             ))
         ]
 

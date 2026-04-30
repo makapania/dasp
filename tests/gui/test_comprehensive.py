@@ -384,7 +384,7 @@ class TestVariableSelectionViaGUI:
 
         # Run SPA
         n_vars = 50
-        importances = spa_selection(X, y, n_features=n_vars, cv_folds=5, random_state=42)
+        importances = spa_selection(X, y, n_features=n_vars, cv_folds=5)
 
         top_indices = np.argsort(importances)[-n_vars:]
         X_selected = X[:, top_indices]

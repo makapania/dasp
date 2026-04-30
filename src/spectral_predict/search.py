@@ -884,7 +884,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                progress_callback=None,
                variable_selection_methods=None, apply_uve_prefilter=False,
                uve_cutoff_multiplier=1.0, uve_n_components=None,
-               spa_n_random_starts=10, ipls_n_intervals=20,
+               ipls_n_intervals=20,
                ipls_max_combine=5, ipls_subset_limit="Top 10",
                sipls_n_combinations=500,
                mwpls_window_sizes=None, mwpls_step_size=None,
@@ -970,8 +970,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         Placeholder parameter for UVE cutoff scaling.
     uve_n_components : int or None, default=None
         Placeholder for specifying component count for UVE.
-    spa_n_random_starts : int, default=10
-        Placeholder for SPA random restarts.
     ipls_n_intervals : int, default=20
         Placeholder for interval count in iPLS selection.
     tier : str, default='standard'
@@ -1090,8 +1088,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     if not selected_methods:
         selected_methods = ['importance']
         print("Info: No implemented methods selected. Defaulting to 'importance'.")
-    if spa_n_random_starts != 10:
-        print("Info: SPA random starts parameter is noted but not yet applied in the Python backend.")
     if ipls_n_intervals != 20:
         print("Info: iPLS interval parameter is noted but not yet applied in the Python backend.")
 
@@ -2497,9 +2493,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     importances = spa_selection(
                                         X_transformed_varsel, y_np,
                                         n_features=n_to_select,
-                                        n_random_starts=spa_n_random_starts,
                                         cv_folds=folds,
-                                        random_state=random_state
                                     )
 
                                 elif varsel_method == 'uve':
@@ -2525,7 +2519,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         uve_n_components=uve_n_components,
                                         uve_cv_folds=folds,
-                                        spa_n_random_starts=spa_n_random_starts,
                                         spa_cv_folds=folds,
                                         random_state=random_state
                                     )
@@ -2612,7 +2605,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         cars_cv_folds=folds,
                                         monte_carlo_samples=80,
                                         spa_n_features=None,
-                                        spa_n_random_starts=spa_n_random_starts,
                                         spa_cv_folds=folds,
                                         random_state=random_state,
                                         task_type=task_type
@@ -2628,7 +2620,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         max_combine=5,
                                         ipls_cv_folds=folds,
                                         spa_n_features=None,
-                                        spa_n_random_starts=spa_n_random_starts,
                                         spa_cv_folds=folds,
                                         random_state=random_state
                                     )
@@ -5067,7 +5058,6 @@ def run_one_class_search(
     apply_uve_prefilter=False,
     uve_cutoff_multiplier=1.0,
     uve_n_components=None,
-    spa_n_random_starts=10,
     ga_population_size=64,
     ga_generations=100,
     ga_n_runs=5,
@@ -5133,8 +5123,6 @@ def run_one_class_search(
         UVE cutoff multiplier for uninformative variable elimination.
     uve_n_components : int, optional
         Number of PLS components for UVE.
-    spa_n_random_starts : int, default=10
-        Number of random starts for SPA.
     ga_population_size : int, default=64
         Population size for GA variable selection.
     ga_generations : int, default=100
@@ -5736,9 +5724,7 @@ def run_one_class_search(
                             importances = spa_selection(
                                 X_preprocessed, y_oc,
                                 n_features=n_to_select,
-                                n_random_starts=spa_n_random_starts,
                                 cv_folds=folds,
-                                random_state=random_state,
                             )
 
                         elif varsel_method == 'uve':
@@ -5764,7 +5750,6 @@ def run_one_class_search(
                                 cutoff_multiplier=uve_cutoff_multiplier,
                                 uve_n_components=uve_n_components,
                                 uve_cv_folds=folds,
-                                spa_n_random_starts=spa_n_random_starts,
                                 spa_cv_folds=folds,
                                 random_state=random_state,
                             )
@@ -5824,7 +5809,6 @@ def run_one_class_search(
                                 cars_cv_folds=folds,
                                 monte_carlo_samples=80,
                                 spa_n_features=None,
-                                spa_n_random_starts=spa_n_random_starts,
                                 spa_cv_folds=folds,
                                 random_state=random_state,
                                 task_type='classification',

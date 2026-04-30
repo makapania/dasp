@@ -290,7 +290,7 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     return real_reliability, threshold, selected_mask
 
 
-def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state=42):
+def spa_selection(X, y, n_features, cv_folds=5):
     """
     Successive Projections Algorithm (SPA) - selects minimally correlated variables.
 
@@ -298,14 +298,20 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
     projection (correlation) onto the already-selected variable set. This creates
     a set of maximally uncorrelated features.
 
-    Algorithm:
-    1. For each random start:
-       a. Select initial variable (max correlation with y, or random)
+    Algorithm (canonical Araújo 2001):
+    1. For every variable k=1..J as candidate first variable:
+       a. Initialize chain with k as the seed
        b. Iteratively select variable with MINIMUM projection onto selected set
        c. Projection = sum of squared correlations with already-selected variables
        d. Evaluate selection quality using PLS R² via CV
-    2. Return best selection across all starts
+    2. Return the chain with the best CV criterion across all J seeds
     3. Convert to importance scores (earlier selected = higher score)
+
+    Note on determinism: SPA is fully deterministic. There is no random
+    initialization in the canonical algorithm; the seed is enumerated, not
+    randomized. dasp prior to T-06 had an `n_random_starts` parameter that
+    looped a single argmax-correlation chain N times producing identical
+    output — that knob has been removed.
 
     Parameters
     ----------
@@ -315,13 +321,8 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
         Target values
     n_features : int
         Number of features to select
-    n_random_starts : int, default=10
-        Number of random initializations
     cv_folds : int, default=5
         Number of CV folds for quality evaluation
-    random_state : int, default=42
-        Random seed for reproducibility (currently SPA is deterministic, but
-        this parameter is included for API consistency and future enhancements)
 
     Returns
     -------
@@ -376,35 +377,28 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
         cv_folds = max(2, n_samples // 2)
         print(f"Warning: Insufficient samples. Reducing cv_folds to {cv_folds}")
 
-    # Step 1: Normalize X for correlation computation (zero mean, unit variance)
-    # This makes dot products equivalent to correlations
+    # Step 1: Normalize X for projection computation (zero mean, unit variance).
+    # This makes dot products equivalent to correlations.
     X_mean = np.mean(X, axis=0)
-    X_std = np.std(X, axis=0) + 1e-10  # Add small value to avoid division by zero
+    X_std = np.std(X, axis=0) + 1e-10  # Avoid division by zero on flat columns
     X_norm = (X - X_mean) / X_std
 
-    # Normalize y for correlation computation
-    y_mean = np.mean(y)
-    y_std = np.std(y) + 1e-10
-    y_norm = (y - y_mean) / y_std
+    # Note: y is no longer normalized — Araújo 2001 SPA enumerates every variable
+    # as a candidate first variable and selects the chain with the best CV
+    # criterion. The pre-T-06 implementation seeded only at
+    # argmax(|corr(X[:, j], y)|) (which required y normalization); canon does not.
 
-    # Compute initial correlations with y (for initialization)
-    # corr(X[:, j], y) = (X_norm[:, j] @ y_norm) / n_samples
-    initial_corrs = np.abs(X_norm.T @ y_norm) / n_samples
-
-    # Track best selection across random starts
+    # Track best selection across all candidate seeds
     best_score = -np.inf
     best_selection = None
 
-    print(f"Running SPA with {n_random_starts} random starts...")
+    print(f"Running canonical SPA over {n_vars} candidate seeds...")
 
-    # Step 2: Run multiple random starts
-    for start_idx in range(n_random_starts):
-        # Initialize: select variable with max correlation with y
+    # Step 2: Enumerate every variable as a candidate first variable (Araújo 2001).
+    for first_var in range(n_vars):
         selected_indices = []
         available_indices = set(range(n_vars))
 
-        # First variable: highest correlation with y
-        first_var = np.argmax(initial_corrs)
         selected_indices.append(first_var)
         available_indices.remove(first_var)
 
@@ -454,19 +448,15 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
             )
             mean_score = np.mean(cv_scores)
 
-            # Track best selection (skip if score is NaN or -inf)
+            # Track best selection; print only on improvement to keep J-seed
+            # enumeration logs readable (J can be 1500+ on FTIR data).
             if not np.isnan(mean_score) and not np.isinf(mean_score):
                 if mean_score > best_score:
                     best_score = mean_score
                     best_selection = selected_indices.copy()
-                    print(f"  Start {start_idx+1}/{n_random_starts}: R² = {mean_score:.4f} (new best)")
-                else:
-                    print(f"  Start {start_idx+1}/{n_random_starts}: R² = {mean_score:.4f}")
-            else:
-                print(f"  Start {start_idx+1}/{n_random_starts}: R² = {mean_score:.4f} (invalid)")
+                    print(f"  Seed {first_var}: R² = {mean_score:.4f} (new best)")
 
-        except Exception as e:
-            print(f"  Start {start_idx+1}/{n_random_starts}: Failed - {str(e)}")
+        except Exception:
             continue
 
     # Step 4: Convert best selection to importance scores
@@ -477,7 +467,7 @@ def spa_selection(X, y, n_features, n_random_starts=10, cv_folds=5, random_state
             # Assign scores: first selected gets n_features, last gets 1
             importances[var_idx] = n_features - rank
     else:
-        print("Warning: All random starts failed. Returning uniform importances.")
+        print("Warning: All SPA seeds failed. Returning uniform importances.")
         importances = np.ones(n_vars)
 
     print(f"\nBest selection achieved R² = {best_score:.4f}")
@@ -676,7 +666,7 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
 
 def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
                       uve_n_components=None, uve_cv_folds=5,
-                      spa_n_random_starts=10, spa_cv_folds=5, random_state=42):
+                      spa_cv_folds=5, random_state=42):
     """
     UVE-SPA Hybrid - combines noise filtering (UVE) with collinearity reduction (SPA).
 
@@ -704,8 +694,6 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
         Number of PLS components for UVE
     uve_cv_folds : int, default=5
         Number of CV folds for UVE
-    spa_n_random_starts : int, default=10
-        Number of random starts for SPA
     spa_cv_folds : int, default=5
         Number of CV folds for SPA evaluation
     random_state : int, default=42
@@ -784,9 +772,7 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
     spa_importances_reduced = spa_selection(
         X_uve_selected, y,
         n_features=spa_n_features,
-        n_random_starts=spa_n_random_starts,
         cv_folds=spa_cv_folds,
-        random_state=random_state
     )
 
     # Step 3: Combine UVE and SPA results
@@ -919,7 +905,7 @@ def uve_cars_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_c
 def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_cv_folds=5,
                            n_iterations=50, pls_components=5, cars_cv_folds=5,
                            monte_carlo_samples=80, spa_n_features=None,
-                           spa_n_random_starts=10, spa_cv_folds=5,
+                           spa_cv_folds=5,
                            random_state=42, task_type='regression'):
     """
     UVE-CARS-SPA 3-stage hybrid: noise filtering → adaptive selection → collinearity reduction.
@@ -946,8 +932,6 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
         CARS Monte Carlo samples
     spa_n_features : int or None
         Target features for SPA (None = use all CARS survivors)
-    spa_n_random_starts : int, default=10
-        SPA random starts
     spa_cv_folds : int, default=5
         CV folds for SPA
     random_state : int, default=42
@@ -1022,9 +1006,7 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
     spa_importances_reduced = spa_selection(
         X_cars_selected, y,
         n_features=spa_n,
-        n_random_starts=spa_n_random_starts,
         cv_folds=spa_cv_folds,
-        random_state=random_state
     )
 
     # Map back through both stages to full indices
@@ -1043,7 +1025,7 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
 
 def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
                         ipls_cv_folds=5, spa_n_features=None,
-                        spa_n_random_starts=10, spa_cv_folds=5,
+                        spa_cv_folds=5,
                         random_state=42):
     """
     Forward iPLS → SPA hybrid: region selection followed by collinearity reduction.
@@ -1067,8 +1049,6 @@ def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
         CV folds for iPLS
     spa_n_features : int or None
         Target features for SPA (None = use all iPLS-selected)
-    spa_n_random_starts : int, default=10
-        SPA random starts
     spa_cv_folds : int, default=5
         CV folds for SPA
     random_state : int, default=42
@@ -1120,9 +1100,7 @@ def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
     spa_importances_reduced = spa_selection(
         X_ipls_selected, y,
         n_features=spa_n,
-        n_random_starts=spa_n_random_starts,
         cv_folds=spa_cv_folds,
-        random_state=random_state
     )
 
     # Map SPA scores back to full indices

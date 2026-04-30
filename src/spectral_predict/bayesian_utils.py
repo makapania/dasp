@@ -440,14 +440,10 @@ def create_objective_function(
                                 # SPA: Successive Projections Algorithm
                                 n_to_select = min(max(valid_variable_counts), n_features_available)
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = RANDOM_STATE
-                                spa_n_random_starts = 10  # Use default
                                 importances = spa_selection(
                                     X, y,
                                     n_features=n_to_select,
-                                    n_random_starts=spa_n_random_starts,
                                     cv_folds=folds,
-                                    random_state=random_state
                                 )
                                 _varsel_cache[varsel_method] = importances.copy()
                             elif varsel_method == 'uve':
@@ -471,14 +467,12 @@ def create_objective_function(
                                 random_state = RANDOM_STATE
                                 uve_cutoff_multiplier = 1.0  # Use default
                                 uve_n_components = 5  # Use default
-                                spa_n_random_starts = 10  # Use default
                                 importances = uve_spa_selection(
                                     X, y,
                                     n_features=n_to_select,
                                     cutoff_multiplier=uve_cutoff_multiplier,
                                     uve_n_components=uve_n_components,
                                     uve_cv_folds=folds,
-                                    spa_n_random_starts=spa_n_random_starts,
                                     spa_cv_folds=folds,
                                     random_state=random_state
                                 )

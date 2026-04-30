@@ -79,6 +79,7 @@ DROP. Each correction came from a question I should have asked myself first:
 | T-04 one-class UVE prefilter | [T04_one_class_uve.md](T04_one_class_uve.md) ([investigation](T04_findings.md)) | MERGED 2026-04-30 — GUI grey-out matching iPLS pattern; 75 tests pass. T-04b/c deferred (broader y_oc audit + LOVE-style native one-class varsel) |
 | T-21 SG wavelength uniformity guard | [T21_findings.md](T21_findings.md) | RESOLVED 2026-04-30 by hiding the "Convert to other unit" button (the only path that creates the non-uniform-grid bug surface). Radio-button relabel path was already safe. Function + widget preserved in code (un-comment one `.pack()` line) for a future resample-on-convert fix. ~20-60% derivative error magnitude verified empirically. |
 | T-32 sample_weight length mismatch | (analyzed inline in this session) | DEFERRED to T-19 — current code path is unreachable; bug would fire only after T-19 makes class_weight + resampler combinations possible |
+| T-06 SPA canonical Araújo 2001 enumeration | [T06_spa_canonical_seeds.md](T06_spa_canonical_seeds.md) ([investigation](T06_findings.md)) | MERGED 2026-04-30 — replaced non-functional `n_random_starts` knob with canonical Araújo 2001 deterministic enumeration over all J seeds. Cross-reviewed by Codex + Kimi K2.6. 5 new T-06 tests pass; full sweep 226+ tests green. |
 
 ## Codex review archive
 

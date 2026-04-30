@@ -3722,7 +3722,6 @@ class SpectralPredictApp:
         self.apply_uve_prefilter = tk.BooleanVar(value=False)  # Apply UVE before main selection
         self.uve_cutoff_multiplier = tk.DoubleVar(value=1.0)  # UVE threshold (0.7-1.5)
         self.uve_n_components = tk.StringVar(value="")  # PLS components for UVE (empty = auto)
-        self.spa_n_random_starts = tk.IntVar(value=10)  # Random starts for SPA
         self.ipls_n_intervals = tk.IntVar(value=20)  # Number of intervals for iPLS
         self.ipls_max_combine = tk.IntVar(value=5)  # Max intervals to combine in forward iPLS
         self.ipls_subset_limit = tk.StringVar(value="Top 10")  # Dropdown: Top 5, Top 10, Top 20, All
@@ -12081,48 +12080,44 @@ class SpectralPredictApp:
         ttk.Entry(params_frame, textvariable=self.uve_n_components, width=8).grid(row=1, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(leave empty for auto)", style='Caption.TLabel').grid(row=1, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="SPA Random Starts:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=1, to=50, textvariable=self.spa_n_random_starts, width=8).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 10)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="iPLS Intervals:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=5, to=50, textvariable=self.ipls_n_intervals, width=8).grid(row=2, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 20)", style='Caption.TLabel').grid(row=2, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="iPLS Intervals:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=5, to=50, textvariable=self.ipls_n_intervals, width=8).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 20)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="Fwd iPLS Max Combine:").grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=10, textvariable=self.ipls_max_combine, width=8).grid(row=3, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5)", style='Caption.TLabel').grid(row=3, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="Fwd iPLS Max Combine:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=1, to=10, textvariable=self.ipls_max_combine, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 5)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="siPLS Combinations:").grid(row=4, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=50, to=5000, textvariable=self.sipls_n_combinations, width=8).grid(row=4, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 500)", style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="siPLS Combinations:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=50, to=5000, textvariable=self.sipls_n_combinations, width=8).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 500)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="MWPLS Window Sizes:").grid(row=5, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Entry(params_frame, textvariable=self.mwpls_window_sizes_str, width=14).grid(row=5, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(comma-separated, e.g. 10, 20, 40)", style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="MWPLS Window Sizes:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Entry(params_frame, textvariable=self.mwpls_window_sizes_str, width=14).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(comma-separated, e.g. 10, 20, 40)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="MWPLS Step Size:").grid(row=6, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Entry(params_frame, textvariable=self.mwpls_step_size, width=8).grid(row=6, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(empty = window/4)", style='Caption.TLabel').grid(row=6, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="MWPLS Step Size:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Entry(params_frame, textvariable=self.mwpls_step_size, width=8).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(empty = window/4)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
-
-        ttk.Label(params_frame, text="Subsets to Test:").grid(row=8, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Label(params_frame, text="Subsets to Test:").grid(row=7, column=0, sticky=tk.W, padx=(0, 5), pady=5)
         ttk.Combobox(params_frame, textvariable=self.ipls_subset_limit,
                      values=["Top 5", "Top 10", "Top 20", "All"],
-                     state='readonly', width=10).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(limit subsets tested)", style='Caption.TLabel').grid(row=8, column=2, sticky=tk.W, padx=10)
+                     state='readonly', width=10).grid(row=7, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(limit subsets tested)", style='Caption.TLabel').grid(row=7, column=2, sticky=tk.W, padx=10)
 
         # GA parameters
-        ttk.Label(params_frame, text="GA Population:").grid(row=9, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=9, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=9, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Population:").grid(row=8, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=16, to=256, textvariable=self.ga_population_size, width=8).grid(row=8, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 64)", style='Caption.TLabel').grid(row=8, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Generations:").grid(row=10, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=10, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Generations:").grid(row=9, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=10, to=500, textvariable=self.ga_generations, width=8).grid(row=9, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 100)", style='Caption.TLabel').grid(row=9, column=2, sticky=tk.W, padx=10)
 
-        ttk.Label(params_frame, text="GA Runs:").grid(row=11, column=0, sticky=tk.W, padx=(0, 5), pady=5)
-        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=11, column=1, sticky=tk.W, padx=5, pady=5)
-        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=11, column=2, sticky=tk.W, padx=10)
+        ttk.Label(params_frame, text="GA Runs:").grid(row=10, column=0, sticky=tk.W, padx=(0, 5), pady=5)
+        ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
+        ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=10, column=2, sticky=tk.W, padx=10)
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -26796,7 +26791,6 @@ class SpectralPredictApp:
                         apply_uve_prefilter=self.apply_uve_prefilter.get(),
                         uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
                         uve_n_components=uve_n_comp,
-                        spa_n_random_starts=self.spa_n_random_starts.get(),
                         ga_population_size=self.ga_population_size.get(),
                         ga_generations=self.ga_generations.get(),
                         ga_n_runs=self.ga_n_runs.get(),
@@ -27489,7 +27483,6 @@ class SpectralPredictApp:
                 apply_uve_prefilter=self.apply_uve_prefilter.get(),
                 uve_cutoff_multiplier=self.uve_cutoff_multiplier.get(),
                 uve_n_components=uve_n_comp,
-                spa_n_random_starts=self.spa_n_random_starts.get(),
                 ipls_n_intervals=self.ipls_n_intervals.get(),
                 ipls_max_combine=self.ipls_max_combine.get(),
                 ipls_subset_limit=self.ipls_subset_limit.get(),
