@@ -6458,11 +6458,21 @@ class SpectralPredictApp:
                        state='disabled')
         self.cm1_radio.pack(side=tk.LEFT, padx=5)
 
+        # Convert-to-other-unit button hidden 2026-04-30 (T-21):
+        # Numerically converting column values via 1e7/x produces a non-uniformly-
+        # spaced grid, which silently miscomputes Savitzky-Golay derivatives
+        # (~20-60% relative error in peak regions per empirical NIR-style
+        # measurement). The radio buttons above remain (relabel-only — no value
+        # modification) to handle the common case of a mis-detected unit on
+        # import. The button widget + handler (_convert_x_unit_and_replot) are
+        # preserved in code; un-comment the .pack() below if/when a resample-on-
+        # convert fix lands (interpolate to uniform grid in target unit) per
+        # T-21 disposition discussion (2026-04-30).
         self.convert_x_unit_button = ttk.Button(x_unit_subframe, text="Convert to cm⁻¹",
                                                 command=self._convert_x_unit_and_replot,
                                                 style='Modern.TButton',
                                                 state='disabled')
-        self.convert_x_unit_button.pack(side=tk.LEFT, padx=10)
+        # self.convert_x_unit_button.pack(side=tk.LEFT, padx=10)  # hidden — see comment above
         cfg_row += 1
 
         # Spectrum Selection

@@ -77,7 +77,7 @@ DROP. Each correction came from a question I should have asked myself first:
 |-------------------------------------------------|------------------------------------------|----------------|
 | T-05a duplicate VIP formulas (templates + nsga2) | [T05a_vip_duplicates.md](T05a_vip_duplicates.md) | MERGED 2026-04-30 — applied same canonical Wold 2001 fix to both sites; 162 regression tests pass |
 | T-04 one-class UVE prefilter | [T04_one_class_uve.md](T04_one_class_uve.md) ([investigation](T04_findings.md)) | MERGED 2026-04-30 — GUI grey-out matching iPLS pattern; 75 tests pass. T-04b/c deferred (broader y_oc audit + LOVE-style native one-class varsel) |
-| T-21 SG wavelength uniformity guard | [T21_findings.md](T21_findings.md) | PENDING USER DECISION — radio-button relabel path is safe (verified: no value conversion); only the explicit "Convert" button creates the bug surface, which is rarely used in practice. DROP / DEFER / APPROVE_MINIMAL options pending user call |
+| T-21 SG wavelength uniformity guard | [T21_findings.md](T21_findings.md) | RESOLVED 2026-04-30 by hiding the "Convert to other unit" button (the only path that creates the non-uniform-grid bug surface). Radio-button relabel path was already safe. Function + widget preserved in code (un-comment one `.pack()` line) for a future resample-on-convert fix. ~20-60% derivative error magnitude verified empirically. |
 | T-32 sample_weight length mismatch | (analyzed inline in this session) | DEFERRED to T-19 — current code path is unreachable; bug would fire only after T-19 makes class_weight + resampler combinations possible |
 
 ## Codex review archive
