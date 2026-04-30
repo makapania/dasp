@@ -4,6 +4,30 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-29 (T-01 audit) — per-fold variable selection leakage
+
+Full audit at `docs/T01_VARSEL_LEAKAGE_AUDIT.md`. Non-obvious findings:
+
+### NSGA-II CARS guidance is NOT per-fold varsel
+`nsga2_search.py:1872` calls `cars_selection(X, y, ...)` but this is OUTSIDE `_evaluate()`. The result biases the initial population's wavelength sampling probability only — the per-individual CV at `_evaluate():1310` uses the chromosome's own wavelength mask with `cross_val_score`. So NSGA-II's CARS is not per-fold varsel leakage in the traditional sense; it's population-initialization bias. Low priority.
+
+### Unified Bayesian has only 3-4 varsel methods, not the full set
+`unified_bayesian.py:827` defines `available_methods = ['importance', 'cars', 'region']` with optional `uve`. No `spa`, `ga`, `ipls`, `uve_spa`, etc. The old Bayesian path (`bayesian_utils.py`) has more methods (`spa`, `uve`, `uve_spa`, `ipls`, `cars`, `vcpa-iriv`) but they're all cached per `(preprocess, method)` across trials, compounding leakage.
+
+### Refinement path is N/A — it reuses saved wavelengths
+`_run_refined_model_thread()` in the GUI (line 35273) parses wavelengths from the saved result row's `all_vars` field or from `_original_wavelength_order`. It does NOT re-run any varsel algorithm. So the refinement path inherits whatever leakage the search path had, but doesn't introduce new leakage.
+
+### `bayesian_utils.py` hardcodes `random_state=42` inside varsel
+Lines 442, 455, 469, 488, 502, 520 all use `random_state = 42` instead of threading through the user's random_state. Grid search correctly threads the seed. This is a reproducibility bug, not leakage.
+
+### Region selection (`create_region_subsets`) is y-using
+`regions.py:170` calls `compute_region_correlations(X, y, wavelengths)` which uses `pearsonr` per-region with y. Region selection is used in both Bayesian paths but not in grid search. Marked LEAKY in the audit.
+
+### One-class grid varsel methods are a subset of regression
+`implemented_oc_varsel` at `search.py:5299-5302` lists 11 methods. Notably absent: `ipls`, `ipls_forward`, `ipls_backward`, `mc_sipls`, `mwpls`, `fipls_spa`, `fipls_cars`. These interval-based methods are PLS-specific and not applicable to one-class models.
+
+---
+
 ## 2026-04-29 (post-Codex T-19 review) — imbalance design corrections
 
 Codex did a focused mechanical-verification pass on T-19 and the original loss-reweighting design doc. Three substantive findings worth preserving for future sessions:
