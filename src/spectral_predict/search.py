@@ -3313,10 +3313,14 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
     # Determine binary classification status
     is_binary_classification = (task_type == "classification" and len(np.unique(y_np)) == 2)
 
-    # Adjust max_n_components based on data constraints (same logic as run_search)
-    # For small wavelength subsets, PLS n_components must be capped
-    # Use TRAINING fold size (not test fold) since PLS is fit on training data
-    min_train_samples = n_samples * (folds - 1) // folds
+    # Adjust max_n_components based on data constraints (same logic as run_search).
+    # T-10: cv_strategy-aware. See compute_min_train_fold_size for semantics.
+    from .cv_utils import compute_min_train_fold_size
+    min_train_samples = compute_min_train_fold_size(
+        cv_strategy=cv_strategy,
+        n_samples=n_samples,
+        n_folds=folds,
+    )
 
     if task_type == "regression":
         # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)

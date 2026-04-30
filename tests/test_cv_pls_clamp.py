@@ -258,3 +258,44 @@ def _extract_n_components_seen(df) -> set[int]:
                 return seen
 
     return seen
+
+
+class TestRunBayesianSearchPLSGridClamping:
+    """Black-box: run_bayesian_search must clamp the PLS LV upper bound.
+
+    Bayesian search uses an Optuna IntDistribution for n_components but
+    the upper bound flows through the same min_train_samples clamp.
+    We confirm by inspecting the LVs column.
+    """
+
+    @pytest.fixture
+    def tiny_regression_data(self):
+        import numpy as np
+        import pandas as pd
+        rng = np.random.default_rng(42)
+        X = rng.standard_normal((10, 50))
+        y = X[:, 0] + 0.5 * X[:, 1] - 0.3 * X[:, 2] + 0.05 * rng.standard_normal(10)
+        return pd.DataFrame(X), pd.Series(y)
+
+    def test_n10_loo_bayesian_caps_at_9(self, tiny_regression_data):
+        from spectral_predict.search import run_bayesian_search
+        X, y = tiny_regression_data
+        df, _ = run_bayesian_search(
+            X, y,
+            task_type='regression',
+            folds=5,
+            cv_strategy='loo',
+            n_trials=8,
+            max_n_components=20,
+            models_to_test=['PLS'],
+            preprocessing_methods={'raw': True, 'snv': False, 'sg1': False, 'sg2': False, 'sg3': False, 'sg4': False, 'deriv_snv': False},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+            variable_selection_methods=['none'],
+        )
+        n_components_seen = _extract_n_components_seen(df)
+        assert n_components_seen, f"No PLS rows produced; df cols={list(df.columns)}"
+        assert max(n_components_seen) <= 9, (
+            f"Bayesian PLS for N=10 LOO produced n_components={max(n_components_seen)}, "
+            f"expected max 9 (n-1). Clamp is broken in run_bayesian_search."
+        )
