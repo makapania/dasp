@@ -109,6 +109,19 @@ Two additional copies of the buggy formula exist at:
 - `src/spectral_predict/templates/variable_selection.py:54`
 - `src/spectral_predict/nsga2_search.py:627`
 These are out of scope for T-05 and deferred to a follow-up ticket. They continue to produce mis-weighted VIP scores.
+---
+
+## 2026-04-30 (T-24 Lin's CCC) — non-obvious findings
+
+**Exported validation template required deeper refactor than plan described.** `get_final_model_template()` in `templates/validation.py` previously returned a static `FINAL_MODEL_TEMPLATE` constant (no f-string substitution available). To inject the inline `_lins_ccc()` helper AND the `x_var` substitution it needed, the function had to be rewritten as an f-string-returning helper. Commit `e01f477` carries this refactor — it's NOT a behavior change, just turns a constant into a parameterized return.
+
+**Templates can't import internal scoring.** Source modules can `from spectral_predict.scoring import lins_ccc`, but exported user scripts (which the templates produce) ship as standalone `.py` files. So the template inlines a local copy of `_lins_ccc()` at the top of the generated script.
+
+**ddof=0 vs ddof=1 — only one closed-form test discriminates.** The plan's `y_pred = 2*y_true → CCC = 0.8` test does NOT distinguish ddof=0 from ddof=1 because the variance/covariance scale cancels. Added `test_ccc_finite_sample_ddof_zero_exact` per Codex suggestion: `y=[0,1,2], pred=[1,2,3]` gives `CCC = 4/7` under ddof=0 (different value under ddof=1). This is the protective test against silently switching estimator types.
+
+**`opencode draft snapshot` empty commits** (`7d8e27d`, `8ccbe30`, `cb7d3f9`) auto-created by the dispatcher wrapper after killed opencode sessions. They contain no diffs. Drop or squash on merge.
+
+**zai-coding-plan provider hung twice during T-24 Tasks 8-9** (each session ran 30+ min producing zero stdout / zero file changes / zero git activity, then required `kill -9`). Tasks 1-7 all completed via opencode normally on the same provider. opencode-go provider was used successfully for varsel-leakage Phase 1 around the same time, so when this happens again, fail over to opencode-go rather than retry zai-coding-plan.
 
 ---
 
