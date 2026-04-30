@@ -66,7 +66,7 @@ from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
 )
-from spectral_predict.scoring import compute_specificity
+from spectral_predict.scoring import compute_specificity, lins_ccc
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -1274,6 +1274,7 @@ def create_unified_objective(
                 y_range = float(np.ptp(y))
                 rpd = y_std / rmse if rmse > 0 else 0.0
                 rer = y_range / rmse if rmse > 0 else 0.0
+                ccc_cv = lins_ccc(y, y_pred_cv)
 
                 # Compute regional RMSE (per-quartile performance) for coloring in Results tab
                 # This enables the same quartile-based highlighting as Grid search
@@ -1433,10 +1434,13 @@ def create_unified_objective(
             if task_type == 'regression':
                 cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
                 cal_r2 = r2_score(y, y_pred_cal)
+                cal_ccc = lins_ccc(y, y_pred_cal)
                 trial.set_user_attr('RMSE', cal_rmse)      # Calibration
                 trial.set_user_attr('R2', cal_r2)          # Calibration
+                trial.set_user_attr('CCC', cal_ccc)        # Calibration
                 trial.set_user_attr('RMSEcv', rmse)        # CV (was RMSE)
                 trial.set_user_attr('R2cv', r2)            # CV (was R2)
+                trial.set_user_attr('CCCcv', ccc_cv)       # CV
                 # NIR-specific metrics (computed from aggregated CV predictions)
                 trial.set_user_attr('MAEcv', mae_cv)
                 trial.set_user_attr('RPD', rpd)
@@ -2049,8 +2053,10 @@ def convert_study_to_dataframe(
         if task_type == 'regression':
             row['RMSE'] = trial.user_attrs.get('RMSE', np.nan)       # Calibration
             row['R2'] = trial.user_attrs.get('R2', np.nan)           # Calibration
+            row['CCC'] = trial.user_attrs.get('CCC', np.nan)         # Calibration
             row['RMSEcv'] = trial.user_attrs.get('RMSEcv', trial.value)  # CV
             row['R2cv'] = trial.user_attrs.get('R2cv', np.nan)       # CV
+            row['CCCcv'] = trial.user_attrs.get('CCCcv', np.nan)     # CV
             # NIR-specific metrics
             row['MAEcv'] = trial.user_attrs.get('MAEcv', np.nan)
             row['RPD'] = trial.user_attrs.get('RPD', np.nan)
