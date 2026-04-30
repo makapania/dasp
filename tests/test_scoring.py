@@ -449,5 +449,113 @@ class TestOneClassComplexity:
         assert abs(score_with_params - score_with_lvs) < 1.0
 
 
+class TestLinsCCC:
+    """Tests for Lin's Concordance Correlation Coefficient.
+
+    Reference: Lin, L. I. (1989). "A concordance correlation coefficient
+    to evaluate reproducibility." Biometrics, 45(1), 255-268.
+    """
+
+    def test_perfect_prediction_returns_one(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.linspace(0.0, 10.0, 50)
+        y_pred = y_true.copy()
+        assert abs(lins_ccc(y_true, y_pred) - 1.0) < 1e-12
+
+    def test_perfect_anticorrelation_returns_minus_one(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.linspace(-5.0, 5.0, 50)
+        y_pred = -y_true
+        assert abs(lins_ccc(y_true, y_pred) - (-1.0)) < 1e-12
+
+    def test_bias_only_below_one_even_when_pearson_is_one(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.linspace(0.0, 10.0, 50)
+        y_pred = y_true + 5.0
+        ccc = lins_ccc(y_true, y_pred)
+        pearson = np.corrcoef(y_true, y_pred)[0, 1]
+        assert abs(pearson - 1.0) < 1e-12, "sanity: Pearson should be 1 for pure bias"
+        assert ccc < 1.0
+        assert ccc > 0.0
+
+    def test_scale_only_below_one_even_when_pearson_is_one(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.linspace(-5.0, 5.0, 50)
+        y_pred = 2.0 * y_true
+        ccc = lins_ccc(y_true, y_pred)
+        pearson = np.corrcoef(y_true, y_pred)[0, 1]
+        assert abs(pearson - 1.0) < 1e-12
+        assert ccc < 1.0
+        assert abs(ccc - 0.8) < 1e-12
+
+    def test_known_closed_form_scale_only(self):
+        from spectral_predict.scoring import lins_ccc
+        rng = np.random.default_rng(0)
+        y_true = rng.standard_normal(1000)
+        y_true -= y_true.mean()
+        y_pred = 2.0 * y_true
+        assert abs(lins_ccc(y_true, y_pred) - 0.8) < 1e-2
+
+    def test_ccc_finite_sample_ddof_zero_exact(self):
+        from spectral_predict.scoring import lins_ccc
+        y = np.array([0.0, 1.0, 2.0])
+        pred = np.array([1.0, 2.0, 3.0])
+        result = lins_ccc(y, pred)
+        assert abs(result - 4 / 7) < 1e-10
+
+    def test_range_within_bounds_random_inputs(self):
+        from spectral_predict.scoring import lins_ccc
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            y_true = rng.standard_normal(100)
+            y_pred = rng.standard_normal(100)
+            ccc = lins_ccc(y_true, y_pred)
+            assert -1.0 <= ccc <= 1.0
+
+    def test_symmetry_in_arguments(self):
+        from spectral_predict.scoring import lins_ccc
+        rng = np.random.default_rng(1)
+        a = rng.standard_normal(50)
+        b = rng.standard_normal(50)
+        assert abs(lins_ccc(a, b) - lins_ccc(b, a)) < 1e-12
+
+    def test_nan_in_inputs_returns_nan(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.array([1.0, 2.0, np.nan, 4.0])
+        y_pred = np.array([1.0, 2.0, 3.0, 4.0])
+        assert np.isnan(lins_ccc(y_true, y_pred))
+
+    def test_length_mismatch_raises(self):
+        from spectral_predict.scoring import lins_ccc
+        with pytest.raises(ValueError):
+            lins_ccc(np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0]))
+
+    def test_constant_predictions_returns_zero(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.linspace(0.0, 10.0, 20)
+        y_pred = np.full(20, 5.0)
+        result = lins_ccc(y_true, y_pred)
+        assert result == 0.0
+
+    def test_constant_truth_returns_zero(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.full(20, 7.0)
+        y_pred = np.linspace(0.0, 10.0, 20)
+        assert lins_ccc(y_true, y_pred) == 0.0
+
+    def test_both_constant_and_equal_returns_one(self):
+        from spectral_predict.scoring import lins_ccc
+        y_true = np.full(20, 7.0)
+        y_pred = np.full(20, 7.0)
+        assert lins_ccc(y_true, y_pred) == 1.0
+
+    def test_accepts_lists_and_pandas_series(self):
+        from spectral_predict.scoring import lins_ccc
+        import pandas as pd
+        y_list = [1.0, 2.0, 3.0, 4.0, 5.0]
+        y_series = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+        assert abs(lins_ccc(y_list, y_series) - 1.0) < 1e-12
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
