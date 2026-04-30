@@ -182,13 +182,33 @@ def estimate_pds(
     X_satellite : np.ndarray
         Satellite spectra on common grid, shape (n_samples, p).
     window : int
-        Window size (odd integer) for local regression around each wavelength.
+        Window size (odd integer >= 1) for local regression around each
+        wavelength. This implementation uses a full centered width of
+        2k+1 (channels i-k to i+k), so it must be odd. Even values
+        raise ValueError.
 
     Returns
     -------
     np.ndarray
         PDS coefficient array B of shape (p, window).
+
+    Raises
+    ------
+    ValueError
+        If `window` is not a positive odd integer.
     """
+    if not isinstance(window, (int, np.integer)) or window < 1:
+        raise ValueError(
+            f"window must be a positive integer (got {window!r}). "
+            "PDS uses a centered local-regression window of width 2k+1."
+        )
+    if window % 2 == 0:
+        raise ValueError(
+            f"window must be odd (got {window}). This implementation uses a "
+            "centered, odd-width local window of size 2k+1 — see "
+            "Wang, Veltkamp, & Kowalski (1991), 'Multivariate Instrument "
+            "Standardization,' Anal. Chem. 63(23), 2750-2756."
+        )
     n_samples, p = X_satellite.shape
     half_window = window // 2
 
@@ -225,34 +245,66 @@ def estimate_pds(
 def apply_pds(
     X_satellite_new: np.ndarray,
     B: np.ndarray,
-    window: int = 11,
+    window: int | None = None,
 ) -> np.ndarray:
     """
     Apply previously estimated PDS coefficients B to new satellite spectra.
+
+    Parameters
+    ----------
+    X_satellite_new : np.ndarray
+        New satellite spectra, shape (n_samples, p).
+    B : np.ndarray
+        PDS coefficient matrix from estimate_pds, shape (p, w) where w
+        is the odd window width 2k+1.
+    window : int or None
+        Deprecated. If provided and disagrees with B.shape[1], a
+        FutureWarning is issued and B.shape[1] is used instead.
 
     Returns
     -------
     np.ndarray
         Transformed spectra in primary instrument domain.
+
+    Raises
+    ------
+    ValueError
+        If B has even second dimension or B.shape[0] != X_satellite_new.shape[1].
     """
+    import warnings
+
     n_samples, p = X_satellite_new.shape
-    half_window = window // 2
+    expected_window = int(B.shape[1])
+    if expected_window % 2 == 0:
+        raise ValueError(
+            f"B has even width {expected_window}; PDS B must be odd-width "
+            f"2k+1. Re-fit estimator on data using current calibration_transfer.py."
+        )
+    if B.shape[0] != p:
+        raise ValueError(
+            f"B.shape[0]={B.shape[0]} != X.shape[1]={p}; "
+            f"B was fitted on a different feature count."
+        )
+    if window is not None and window != expected_window:
+        warnings.warn(
+            f"apply_pds: caller passed window={window}, but B has width "
+            f"{expected_window}. Ignoring caller arg; using B-derived width.",
+            FutureWarning,
+            stacklevel=2,
+        )
+    half_window = expected_window // 2
 
     X_transformed = np.zeros_like(X_satellite_new)
 
     for i in range(p):
-        # Determine window boundaries
         start = max(0, i - half_window)
         end = min(p, i + half_window + 1)
 
-        # Extract window from satellite spectra
         X_window = X_satellite_new[:, start:end]
 
-        # Get coefficients for this wavelength
         offset = start - (i - half_window)
         b = B[i, offset:offset + X_window.shape[1]]
 
-        # Apply transformation
         X_transformed[:, i] = X_window @ b
 
     return X_transformed
