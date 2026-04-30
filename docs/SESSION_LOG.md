@@ -841,4 +841,41 @@ Branch's inline comment documents the motivation: pooled RMSE matches Unscramble
 
 ---
 
+## 2026-04-29 — T-10 PLS components clamp implemented
+
+**Problem:** `min_train_samples = n_samples * (folds - 1) // folds` at `search.py:1109` and `:3312`
+was a K-fold-only formula applied unconditionally even when `cv_strategy` was `'loo'` or
+`'repeated_kfold'`. Under LOO with N=10, it returned 8 instead of 9. This shrank the LOO PLS
+grid by 1 component on small datasets. Any future caller who forgot to clamp would crash inside CV.
+
+**Solution:** New helper `cv_utils.compute_min_train_fold_size(cv_strategy, n_samples, n_folds)`
+returns the smallest training-fold size for each CV strategy:
+- kfold: `n_samples * (k-1) // k` (exact for sklearn KFold with no shuffle)
+- repeated_kfold: same as kfold (each repeat uses same fold sizes)
+- loo / repeated_loo: `n_samples - 1`
+- group_kfold / leave_one_group_out: raises `NotImplementedError` (deferred to T-15)
+
+Both `run_search` and `run_bayesian_search` call this helper to clamp `max_n_components` before
+passing it to `get_model_grids`. The helper raises `ValueError` when `n_folds > n_samples` for
+kfold/repeated_kfold strategies.
+
+**Codex review:** APPROVE_WITH_CHANGES. All 5 suggestions applied:
+1. `n_folds > n_samples` ValueError in helper + 2 extra tests covering the guard.
+2. Docstring math wording tightened — "exact" not "conservative" since the formula
+   `n*(k-1)//k` equals `n - ceil(n/k)` for sklearn KFold.
+3. Task 5 was docstring/comment only in models.py — no assert added. An assert would have
+   broken existing tests that call `get_model_grids` without clamping.
+4. `_extract_n_components_seen` helper uses the LVs column as canonical source, with
+   `ast.literal_eval` fallback (not `json.loads`) because Params is `str(dict)` Python repr
+   with single quotes, not JSON.
+5. NSGA-II deferred ticket reframed as AUDIT (T-10b), not assumed-bug.
+   `_get_constrained_pls_components` clamps by n_samples but some evaluation paths already
+   use min_train_samples from cv_folds; need full audit of decode/result-row/reporting
+   consistency before declaring same bug present.
+
+**DEFERRED:** NSGA-II audit ticket (T-10b). Full audit of `_get_constrained_pls_components`
+and all evaluation paths needed before asserting identical bug.
+
+---
+
 > **Older entries archived to [`SESSION_LOG_ARCHIVE.md`](SESSION_LOG_ARCHIVE.md)** as of 2026-04-29 — entries before 2026-04-15 moved out to keep this log lean. Grep the archive when you need historical context.
