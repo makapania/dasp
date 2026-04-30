@@ -11952,8 +11952,9 @@ class SpectralPredictApp:
         ttk.Label(varsel_frame, text="Collinearity-aware selection",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE (Uninformative Variable Elimination)",
-                       variable=self.varsel_uve).grid(row=3, column=0, sticky=tk.W, pady=2)
+        self._cb_uve = ttk.Checkbutton(varsel_frame, text="UVE (Uninformative Variable Elimination)",
+                       variable=self.varsel_uve)
+        self._cb_uve.grid(row=3, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Filters noisy variables",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, padx=15)
 
@@ -12014,23 +12015,27 @@ class SpectralPredictApp:
         # Hybrid methods separator
         ttk.Label(varsel_frame, text="Hybrid Methods (multi-stage pipelines):", style='Subheading.TLabel').grid(row=13, column=0, columnspan=2, sticky=tk.W, pady=(10, 4))
 
-        ttk.Checkbutton(varsel_frame, text="UVE-SPA",
-                       variable=self.varsel_uve_spa).grid(row=14, column=0, sticky=tk.W, pady=2)
+        self._cb_uve_spa = ttk.Checkbutton(varsel_frame, text="UVE-SPA",
+                       variable=self.varsel_uve_spa)
+        self._cb_uve_spa.grid(row=14, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Noise filtering + collinearity reduction",
                  style='Caption.TLabel').grid(row=14, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS",
-                       variable=self.varsel_uve_cars).grid(row=15, column=0, sticky=tk.W, pady=2)
+        self._cb_uve_cars = ttk.Checkbutton(varsel_frame, text="UVE-CARS",
+                       variable=self.varsel_uve_cars)
+        self._cb_uve_cars.grid(row=15, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Noise filtering + adaptive selection",
                  style='Caption.TLabel').grid(row=15, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS-Tree",
-                       variable=self.varsel_uve_cars_tree).grid(row=16, column=0, sticky=tk.W, pady=2)
+        self._cb_uve_cars_tree = ttk.Checkbutton(varsel_frame, text="UVE-CARS-Tree",
+                       variable=self.varsel_uve_cars_tree)
+        self._cb_uve_cars_tree.grid(row=16, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Noise filtering + tree-based selection",
                  style='Caption.TLabel').grid(row=16, column=1, sticky=tk.W, padx=15)
 
-        ttk.Checkbutton(varsel_frame, text="UVE-CARS-SPA",
-                       variable=self.varsel_uve_cars_spa).grid(row=17, column=0, sticky=tk.W, pady=2)
+        self._cb_uve_cars_spa = ttk.Checkbutton(varsel_frame, text="UVE-CARS-SPA",
+                       variable=self.varsel_uve_cars_spa)
+        self._cb_uve_cars_spa.grid(row=17, column=0, sticky=tk.W, pady=2)
         ttk.Label(varsel_frame, text="Noise filter + adaptive + collinearity reduction",
                  style='Caption.TLabel').grid(row=17, column=1, sticky=tk.W, padx=15)
 
@@ -12047,8 +12052,9 @@ class SpectralPredictApp:
                  style='Caption.TLabel').grid(row=19, column=1, sticky=tk.W, padx=15)
 
         # UVE Prefilter option
-        ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
-                       variable=self.apply_uve_prefilter).grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
+        self._cb_apply_uve_prefilter = ttk.Checkbutton(varsel_frame, text="Apply UVE Pre-filter (removes noisy variables first)",
+                       variable=self.apply_uve_prefilter)
+        self._cb_apply_uve_prefilter.grid(row=20, column=0, columnspan=2, sticky=tk.W, pady=(15, 5))
 
         # Method parameters
         ttk.Label(varsel_frame, text="Method Parameters:", style='Subheading.TLabel').grid(row=21, column=0, columnspan=2, sticky=tk.W, pady=(15, 8))
@@ -12231,8 +12237,9 @@ class SpectralPredictApp:
         ttk.Checkbutton(self.bayes_options_frame, text="Test pairwise combinations",
                         variable=self.bayes_region_test_pairwise).grid(row=3, column=2, sticky=tk.W, pady=(5, 0))
         # Row 4: UVE
-        ttk.Checkbutton(self.bayes_options_frame, text="UVE Variable Selection",
-                        variable=self.bayes_enable_uve).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        self._cb_bayes_enable_uve = ttk.Checkbutton(self.bayes_options_frame, text="UVE Variable Selection",
+                        variable=self.bayes_enable_uve)
+        self._cb_bayes_enable_uve.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Label(self.bayes_options_frame, text="(fast ~50-100ms/trial, adds uninformative variable elimination)",
                   style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, pady=(5, 0))
 
@@ -16449,19 +16456,25 @@ class SpectralPredictApp:
                 self.standard_models_frame.pack_forget()
             if hasattr(self, 'oc_models_frame'):
                 self.oc_models_frame.pack(fill='both', expand=True)
-            # Show variable selection card but disable iPLS-family methods
-            # (they require PLS internals not available for one-class)
+            # Show variable selection card but disable methods that don't fit one-class:
+            # - iPLS family (require PLS internals not available for one-class)
+            # - UVE family (T-04: y-driven discrimination, wrong target for one-class
+            #   per Pomerantsev et al. 2025 LOVE / Forina modeling-power vs discrimination-power)
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
-            ipls_family_checkboxes = [
+            disabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
                 '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+                '_cb_uve', '_cb_uve_spa', '_cb_uve_cars', '_cb_uve_cars_tree',
+                '_cb_uve_cars_spa', '_cb_apply_uve_prefilter', '_cb_bayes_enable_uve',
             ]
-            ipls_family_vars = [
+            disabled_vars = [
                 'varsel_ipls', 'varsel_ipls_forward', 'varsel_ipls_backward',
                 'varsel_mc_sipls', 'varsel_mwpls', 'varsel_fipls_spa', 'varsel_fipls_cars',
+                'varsel_uve', 'varsel_uve_spa', 'varsel_uve_cars', 'varsel_uve_cars_tree',
+                'varsel_uve_cars_spa', 'apply_uve_prefilter', 'bayes_enable_uve',
             ]
-            for cb_attr, var_attr in zip(ipls_family_checkboxes, ipls_family_vars):
+            for cb_attr, var_attr in zip(disabled_checkboxes, disabled_vars):
                 if hasattr(self, cb_attr):
                     getattr(self, cb_attr).state(['disabled'])
                 if hasattr(self, var_attr):
@@ -16483,12 +16496,14 @@ class SpectralPredictApp:
             # Re-enable variable selection methods
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
-            # Re-enable iPLS-family checkboxes
-            ipls_family_checkboxes = [
+            # Re-enable iPLS-family + UVE-family checkboxes (disabled in one-class mode only)
+            re_enabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
                 '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
+                '_cb_uve', '_cb_uve_spa', '_cb_uve_cars', '_cb_uve_cars_tree',
+                '_cb_uve_cars_spa', '_cb_apply_uve_prefilter', '_cb_bayes_enable_uve',
             ]
-            for cb_attr in ipls_family_checkboxes:
+            for cb_attr in re_enabled_checkboxes:
                 if hasattr(self, cb_attr):
                     getattr(self, cb_attr).state(['!disabled'])
             if hasattr(self, 'imbalance_frame'):
