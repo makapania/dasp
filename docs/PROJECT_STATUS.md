@@ -136,6 +136,9 @@ Test coverage: `tests/test_cv_pls_clamp.py` — 16 unit tests on the helper +
 Replaced `np.var(y)` per-component weight with canonical `q_a**2 * sum(T_a**2)` (Wold 2001, Mehmood et al. 2012 Eq. 1) in `src/spectral_predict/models.py:compute_vip`. Old formula collapsed all components to the same Y-weighting scalar, skewing VIP rankings whenever components had similar X-score energy but different Y-loading. Added `ssy_total <= 0` guard for degenerate fits. 7 new tests in `tests/test_vip_formula.py`. All 33 preprocessing_discovery tests + 5 PLS-DA importance tests pass unchanged.
 
 **Deferred to T-05a:** Two additional copies of the buggy formula at `templates/variable_selection.py:54` and `nsga2_search.py:627` still need the same correction. See plan at `docs/plans/2026-04-29-T05-vip-formula-fix.md`.
+### T-07: PDS even-window arithmetic — FIXED 2026-04-30
+
+`estimate_pds` crashed on even window sizes due to B-allocation overflow (slice has window+1 columns for even window but B has window columns). Fix: reject even windows with clear ValueError. `apply_pds` signature changed to `window: int | None = None`, deriving geometry from `B.shape[1]` with FutureWarning on mismatch. 10 new tests in `tests/test_pds_window_arithmetic.py`. Commits: `d3d1606` (tests), `f438083` (fix).
 
 ### PLS regression hotfix: refine tab PLS-DA instead of PLS — FIXED 2026-04-21
 

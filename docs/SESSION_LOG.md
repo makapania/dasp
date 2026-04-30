@@ -896,6 +896,44 @@ kfold/repeated_kfold strategies.
 
 **DEFERRED:** NSGA-II audit ticket (T-10b). Full audit of `_get_constrained_pls_components`
 and all evaluation paths needed before asserting identical bug.
+---
+
+## 2026-04-30 — T-07 PDS even-window arithmetic
+
+**Symptom:** `estimate_pds(window=10)` raised
+`ValueError: could not broadcast input array from shape (11,) into shape (10,)`
+at the first interior wavelength.
+
+**Root cause:** B allocated as `(p, window)` but the X-slice spans
+`2*(window//2)+1` columns. For odd window, slice = window. For even
+window, slice = window+1. The assignment `B[i, 0:window+1] = b` overflows.
+This implementation uses a centered, odd-width local window of size 2k+1
+(channels i-k to i+k), so it must be odd.
+
+**Fix:** Reject even windows with ValueError citing Wang, Veltkamp, &
+Kowalski (1991), Anal. Chem. 63(23), 2750-2756. Also harden apply_pds:
+- Signature changed from `window: int = 11` to `window: int | None = None`
+- Geometry derived from B.shape[1], not caller's window arg
+- FutureWarning (not DeprecationWarning) on mismatching window —
+  user-visible, not silenced in non-__main__
+- ValueError on even-width B and B.shape[0]/X.shape[1] mismatch
+
+**Why reject vs coerce:** Coercing silently would create contract drift
+between requested `window` and returned `B.shape[1]`. The canonical
+centered-local-regression definition (2k+1) is confirmed in Wang et al.
+(1991), the RNIR package, and the specProc R package.
+
+**Codex review modifications applied:**
+1. Literature claim tightened to "this implementation's window is the
+   full centered width 2k+1, so it must be odd"
+2. apply_pds signature default changed to None (plan had 11)
+3. FutureWarning instead of DeprecationWarning
+4. Two extra tests: even-width B rejection and shape compatibility
+5. Test count: 10 (plan said 7-8)
+
+**Commits:** `d3d1606` (RED tests), `f438083` (fix). See
+`docs/plans/2026-04-29-T07-pds-even-window-fix.md` and
+`tests/test_pds_window_arithmetic.py`.
 
 ---
 
