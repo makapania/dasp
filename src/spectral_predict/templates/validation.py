@@ -561,8 +561,7 @@ def get_final_model_template(task_type: str, x_var: str = 'X_final', model_name:
     if task_type == 'one_class':
         return FINAL_MODEL_ONE_CLASS_TEMPLATE.format(x_var=x_var, model_name=model_name)
     if task_type == 'regression':
-        return FINAL_MODEL_TEMPLATE
-    return f'''
+        return f'''
 # =============================================================================
 # TRAIN FINAL MODEL
 # =============================================================================
@@ -580,6 +579,15 @@ print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with {{{x_var}.sh
 print(f"  Calibration RMSE: {{cal_rmse:.4f}}")
 print(f"  Calibration R²:   {{cal_r2:.4f}}")
 print(f"  Calibration CCC:  {{cal_ccc:.4f}}")
+'''
+    return f'''
+# =============================================================================
+# TRAIN FINAL MODEL
+# =============================================================================
+
+# Train the model on all data
+model.fit({x_var}, y)
+print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with {{{x_var}.shape[1]}} features")
 '''
 
 
