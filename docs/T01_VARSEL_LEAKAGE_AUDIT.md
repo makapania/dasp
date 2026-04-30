@@ -9,11 +9,13 @@
 | Verdict | Count |
 |---------|-------|
 | CLEAN    | 0    |
-| LEAKY    | 60   |
+| LEAKY    | 49   |
 | UNKNOWN  | 0    |
-| N/A      | 35   |
+| N/A      | 88   |
 
-**Every y-using variable selection method in every search path is LEAKY.** No method x path combination refits varsel inside CV folds. The pattern is universal: varsel runs once on the full preprocessed calibration matrix with full y, produces a frozen `top_indices` array, and `_run_single_config()` / `run_one_class_cv()` / `cross_val_score()` receives the pre-subsetted data with no per-fold varsel re-run.
+(Counts derived from the Method × Path matrix below — 23 method rows × 6 search paths, minus 1 cell where UVE Prefilter applies to only 5 paths. The earlier-published count of 60/35 over-counted some method × path combinations and is corrected here.)
+
+**Every y-using variable selection method in every search path it actually runs in is LEAKY.** No method x path combination refits varsel inside CV folds. The pattern is universal: varsel runs once on the full preprocessed calibration matrix with full y, produces a frozen `top_indices` array, and `_run_single_config()` / `run_one_class_cv()` / `cross_val_score()` receives the pre-subsetted data with no per-fold varsel re-run.
 
 The Refinement/Model Development path is N/A for all methods because it reuses the saved wavelength list from the search result — it does not re-run any varsel algorithm.
 
