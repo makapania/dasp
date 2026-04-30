@@ -580,7 +580,11 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
     n_features : int
         Number of input features
     max_n_components : int, default=10
-        Maximum number of PLS components to test
+        Maximum number of PLS components to test.  CALLER MUST CLAMP this by
+        the smallest training-fold size (use ``cv_utils.compute_min_train_fold_size``).
+        ``models.py`` does NOT independently clamp by ``n_samples`` — that is the
+        caller's responsibility, because the CV strategy lives at the call site.
+        See ``run_search`` / ``run_bayesian_search`` for the canonical pattern.
     max_iter : int, default=500
         Maximum iterations for MLP
     n_estimators_list : list of int, optional
@@ -837,8 +841,12 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
 
     grids = {}
 
-    # PLS components grid - test ALL integer values from 1 to max allowed
-    # Max is limited by both n_features and max_n_components (which is adjusted for CV fold size)
+    # PLS components grid - test ALL integer values from 1 to max allowed.
+    # T-10: max_n_components MUST be pre-clamped by min_train_fold_size by the
+    # caller (search.py uses cv_utils.compute_min_train_fold_size). models.py
+    # only clamps by n_features here as a final guard against feature-only
+    # caps; we deliberately do NOT silently re-clamp by n_samples because
+    # we don't have CV strategy at this scope.
     pls_max = min(n_features, max_n_components)
     pls_components = list(range(1, pls_max + 1)) if pls_max >= 1 else [1]
 

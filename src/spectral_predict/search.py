@@ -1108,12 +1108,15 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_train_fold)
     # For CLASSIFICATION: PLS-DA uses PLS as dimensionality reduction before LR classifier,
     #                     so we can be less strict (LR can handle more components than samples)
-    from .cv_utils import compute_min_train_fold_size
-    min_train_samples = compute_min_train_fold_size(
-        cv_strategy=cv_strategy,
-        n_samples=n_samples,
-        n_folds=folds,
-    )
+    if n_samples >= 2:
+        from .cv_utils import compute_min_train_fold_size
+        min_train_samples = compute_min_train_fold_size(
+            cv_strategy=cv_strategy,
+            n_samples=n_samples,
+            n_folds=folds,
+        )
+    else:
+        min_train_samples = 0
 
     if task_type == "regression":
         # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
@@ -3315,12 +3318,15 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
 
     # Adjust max_n_components based on data constraints (same logic as run_search).
     # T-10: cv_strategy-aware. See compute_min_train_fold_size for semantics.
-    from .cv_utils import compute_min_train_fold_size
-    min_train_samples = compute_min_train_fold_size(
-        cv_strategy=cv_strategy,
-        n_samples=n_samples,
-        n_folds=folds,
-    )
+    if n_samples >= 2:
+        from .cv_utils import compute_min_train_fold_size
+        min_train_samples = compute_min_train_fold_size(
+            cv_strategy=cv_strategy,
+            n_samples=n_samples,
+            n_folds=folds,
+        )
+    else:
+        min_train_samples = 0
 
     if task_type == "regression":
         # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
