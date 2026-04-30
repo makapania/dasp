@@ -4,6 +4,115 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-30 — Bugfix branch validation gate session (closes the previous-day's run)
+
+Each of the 5 implemented bugfix branches went through a strict validation gate
+(literature check + commercial-software comparison + reachability verification +
+regression test sweep). Plus the two re-evaluation flags + T-32 + T-04 + T-21 were
+investigated using the same gate. The gate caught two categories of overzealous flag
+that would have wasted implementation effort:
+
+**False-alarm patterns the gate caught:**
+- **T-26 SNV near-zero std** — main behavior already matches PLS_Toolbox default at
+  offset=0 (both produce unit-normalized round-off on degenerate spectra). The user
+  has run thousands of analyses without hitting it. Verdict: DROP. Tests would have
+  passed; field-alignment check showed dasp wasn't actually misaligned.
+- **`search.py:2855 top_n_vars=30`** flagged as "count shown disagrees with count
+  used." Turned out to be display economy: `all_vars` column already preserves the
+  full wavelength list for replication; `top_vars` is a separate display-only
+  truncated list. Not a correctness bug; the model uses the right number of features.
+  Verdict: DROP.
+- **T-32 sample_weight length mismatch at search.py:3883** — defensive code for
+  resampler+sample_weight combinations that's currently unreachable because
+  `_needs_resampling_pipeline` returns False when imbalance_method='class_weight'.
+  Codex correctly identified the future-bug under T-19's planned scope. Verdict:
+  DEFER to T-19.
+- **`bayesian_utils.py random_state=42`** flagged as "ignores user setting." Turned
+  out: no user setting exists (random_state isn't exposed anywhere in the codebase).
+  Real issue is just code-style (use the shared `RANDOM_STATE` constant from
+  `constants.py` instead of literal 42). Refactored as `50d5d05`.
+
+**Real bugs the gate confirmed and fixed:**
+- **T-10 PLS components clamp** — main's `n_samples * (folds-1) // folds` formula is
+  K-fold-correct but over-clamps for LOO + spinbox-default-folds (gives n*4//5
+  instead of n-1). Real bug, small impact for typical bone-FTIR n_components <= 15.
+  Merged at `fbeb50c`.
+- **T-05 VIP formula** — main's `compute_vip` used `var(y) * (T'T)` instead of
+  canonical Wold 2001 `q_a^2 * (T'T)`. On NIR/FTIR-realistic data with structured
+  X-noise (interferents, scattering), main picks wrong wavelengths in top-N. Field
+  consensus is universal — every commercial + open-source chemometrics package uses
+  canonical. dasp internally inconsistent (contaminant_analysis already canonical).
+  Merged at `2c068cd`. Plus T-05a duplicate fixes at `1eb6c06` for
+  `templates/variable_selection.py:54` + `nsga2_search.py:627`.
+- **T-07 PDS even-window** — main's `estimate_pds(window=even)` crashes with cryptic
+  numpy traceback. Universal field consensus on odd-only windows (Wang 1991 +
+  Bouveresse 1996 + Feudale 2002 + RNIR + specProc + PLS_Toolbox). Plus apply_pds
+  hardening: derive geometry from B.shape[1] not caller arg. Merged at `1b91d93`.
+- **T-24 Lin's CCC metric addition** — formula bit-correct vs Lin 1989. Field
+  alignment soft-flagged (CCC standard for method-comparison since 1989, but
+  chemometrics-specific tools rarely report it by default). User explicit override:
+  "EVEN IF ccc IS NOT SUPER common in my domain... it is clearly relevant and a
+  small addition so i would say go ahead." GUI plumbing fixed pre-merge per user
+  requirement (CCC/CCCcv added to higher_is_better_cols + tooltip dict). Merged at
+  `0087cad`.
+- **T-04 one-class UVE prefilter** — UVE-on-y_oc returns wavelengths that
+  discriminate outliers from inliers, not wavelengths defining the inlier class
+  structure. Pomerantsev, Kucheryavskiy & Rodionova (2025) "Variable selection for
+  one class classifiers. Introduction of LOVE" opens with exactly this critique.
+  Empirical bone-FTIR demo: main's UVE prefilter selected 5/5 consolidant peak
+  wavelengths, 0/20 phosphate or carbonate (the actual bone chemistry). Verdict:
+  GUI grey-out for one-class mode matching the existing iPLS pattern. Merged at
+  `6beb5e8`. T-04b/c follow-ups deferred (broader y_oc-as-target audit + LOVE-style
+  native one-class varsel).
+- **T-21 SG wavelength uniformity guard** — Savitzky-Golay 1964 assumes uniform
+  spacing. dasp's "Convert to other unit" button (`_convert_x_unit_and_replot`)
+  numerically inverts column values via 1e7/x, producing a non-uniform grid; SG
+  on that data is silently miscomputed (verified empirically: median 22% / max 60%
+  relative error in peak regions on a representative NIR spectrum). User-verified
+  reachability finding: the radio button (`_on_x_unit_override`) is RELABEL-ONLY
+  (no value modification — verified at gui:19007-19029); only the Convert button
+  creates the bug surface. Disposition: hide the Convert button (don't .pack() it),
+  preserve the function in code for a future resample-on-convert fix. Resolved at
+  `a5eef70`. The original T-21 implementation plan
+  (`docs/plans/2026-04-29-T21-sg-wavelength-uniformity-guard.md`) had factual
+  errors flagged by the gate (fabricated OpenSpecy `is_evenly_spaced()`, unverified
+  PLS_Toolbox `gridcheck` tolerance, scope gap with 30+ direct SavgolDerivative
+  callsites bypassing the planned guard) — annotated with a banner pointing to the
+  findings doc.
+
+**Lessons learned (now documented in `docs/bugfix_validation/README.md`):**
+1. **Verify reachability before drafting verdicts.** T-26, T-32, and the two
+   re-evaluation flags all turned out to be reachable-only-in-theory. The gate's
+   recurring test: "is the buggy code path actually hit by the GUI's bundled-app
+   user?"
+2. **Verify commercial-software behavior with documentation lookup, not generic
+   intuition.** T-26's first-pass verdict appealed to "universal numerical-computing
+   practice" (sklearn-instinct). Actual PLS_Toolbox / SIMCA documentation showed the
+   field uses a different pattern (continuous additive `offset` parameter, default 0).
+3. **Bundled-app distribution matters.** A "fix" reachable only from a Python REPL
+   is dead code for non-technical users. T-26's hardcoded threshold and T-04's
+   programmatic-only mitigation would have failed this test.
+4. **A real finding can warrant zero action.** T-26's "current behavior already
+   matches PLS_Toolbox default" justified a DROP rather than a code change. T-21's
+   "rarely used button creates the bug surface" justified hiding the button rather
+   than fixing every SG callsite.
+5. **Match-the-field cuts both ways.** When the field has converged on a pattern
+   (T-05 VIP canonical formula, T-07 PDS odd-only windows), matching it is high
+   confidence. When the field is actively developing replacements (T-04 one-class
+   variable selection, the 2024-2025 LOVE / MPS-SIMCA literature), being the outlier
+   is a strong signal something's wrong.
+
+**Outstanding decisions still pending from the broader roadmap re-evaluation:**
+1. T-31 multi-class SIMCA — confirm "none of the above" output is useful for
+   bone-FTIR/diagenesis science.
+2. T-01 reframe scope — confirm external-test-set workflow over per-fold varsel.
+3. T-22 reframe — confirm bootstrap stability diagnostic investment.
+4. T-04 follow-ups — T-04b broader y_oc-as-target audit (compute_one_class_importances
+   has the same fundamental issue), T-04c proper one-class-native varsel
+   (Forina modeling power / LOVE / OGA).
+
+---
+
 ## 2026-04-30 — Full roadmap re-evaluation under chemometrics master rule
 
 **Re-evaluation complete.** All 35 items (32 tickets + T-05a, T-10b, T-31 PENDING + P3 drop list) re-evaluated against chemometrics literature + bone-FTIR application domain.
