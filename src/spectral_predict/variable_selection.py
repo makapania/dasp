@@ -5,7 +5,10 @@ This module implements various variable selection algorithms to identify
 the most informative spectral variables for prediction.
 """
 
+import os
+
 import numpy as np
+from joblib import Parallel, delayed
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
@@ -15,6 +18,19 @@ def _get_cv_n_jobs():
     """Get n_jobs for CV, respecting frozen app constraints."""
     from spectral_predict.search import _frozen_needs_threading_fallback
     return 1 if _frozen_needs_threading_fallback() else -1
+
+
+def _spa_seed_n_jobs():
+    """Worker count for the SPA seed loop.
+
+    Threading backend is used (numpy/sklearn release the GIL on the heavy
+    matmul + PLS CV work, and threading is PyInstaller-bundle-safe — loky
+    has known argv-parse issues in the frozen runtime per
+    `search._frozen_needs_threading_fallback`). Returns the cpu count
+    capped at 8 to avoid pathological oversubscription on 32-core dev boxes
+    (each thread fights for the same numpy BLAS pool).
+    """
+    return min(os.cpu_count() or 1, 8)
 
 
 def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, random_state=42):
@@ -290,6 +306,44 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     return real_reliability, threshold, selected_mask
 
 
+def _evaluate_spa_seed(first_var, X, X_norm, y, n_samples, n_vars, n_features, cv_folds):
+    """Run one canonical SPA chain seeded at `first_var` and return (selection, CV R²).
+
+    Pure function — reads only the passed-in arrays (which are not mutated).
+    Designed to run concurrently across all J candidate seeds in
+    `spa_selection`. Returns (None, -inf) if the chain's CV scoring fails.
+    """
+    selected = [first_var]
+    available = set(range(n_vars))
+    available.remove(first_var)
+
+    for _ in range(1, n_features):
+        X_selected_norm = X_norm[:, selected]
+        if X_selected_norm.ndim == 1:
+            X_selected_norm = X_selected_norm.reshape(-1, 1)
+        avail_idx = np.array(sorted(available))
+        X_avail_norm = X_norm[:, avail_idx]
+        corr_matrix = (X_avail_norm.T @ X_selected_norm) / n_samples
+        proj_values = np.sum(corr_matrix ** 2, axis=1)
+        min_proj_var = int(avail_idx[np.argmin(proj_values)])
+        selected.append(min_proj_var)
+        available.remove(min_proj_var)
+
+    try:
+        n_components = min(n_features, n_samples - 1, 10)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        cv_scores = cross_val_score(
+            pls, X[:, selected], y,
+            cv=cv_folds, scoring="r2", n_jobs=1,
+        )
+        mean_score = float(np.mean(cv_scores))
+        if np.isfinite(mean_score):
+            return selected, mean_score
+    except Exception:
+        pass
+    return None, -np.inf
+
+
 def spa_selection(X, y, n_features, cv_folds=5):
     """
     Successive Projections Algorithm (SPA) - selects minimally correlated variables.
@@ -388,76 +442,29 @@ def spa_selection(X, y, n_features, cv_folds=5):
     # criterion. The pre-T-06 implementation seeded only at
     # argmax(|corr(X[:, j], y)|) (which required y normalization); canon does not.
 
-    # Track best selection across all candidate seeds
+    print(
+        f"Running canonical SPA over {n_vars} candidate seeds "
+        f"(threading n_jobs={_spa_seed_n_jobs()})..."
+    )
+
+    # Step 2: Evaluate every variable as a candidate first variable (Araújo 2001).
+    # Each seed's chain is independent — read-only access to X, X_norm, y.
+    # Parallelize via joblib with threading backend (GIL-free for numpy/sklearn
+    # work, PyInstaller-bundle-safe; loky has frozen-runtime argv-parse issues).
+    results = Parallel(n_jobs=_spa_seed_n_jobs(), backend="threading")(
+        delayed(_evaluate_spa_seed)(
+            first_var, X, X_norm, y, n_samples, n_vars, n_features, cv_folds
+        )
+        for first_var in range(n_vars)
+    )
+
+    # Sequentially pick the best chain across all seeds.
     best_score = -np.inf
     best_selection = None
-
-    print(f"Running canonical SPA over {n_vars} candidate seeds...")
-
-    # Step 2: Enumerate every variable as a candidate first variable (Araújo 2001).
-    for first_var in range(n_vars):
-        selected_indices = []
-        available_indices = set(range(n_vars))
-
-        selected_indices.append(first_var)
-        available_indices.remove(first_var)
-
-        # Iteratively select remaining variables (n_features - 1 more)
-        for step in range(1, n_features):
-            # Compute projections for all available variables at once
-            # Projection = sum of squared correlations with already-selected variables
-            # Extract selected columns as a 2D array
-            X_selected_norm = X_norm[:, selected_indices]
-            if X_selected_norm.ndim == 1:
-                X_selected_norm = X_selected_norm.reshape(-1, 1)
-
-            # Vectorized: compute projections for all available variables at once
-            # avail_idx is an array of available column indices
-            avail_idx = np.array(sorted(available_indices))
-            # X_avail_norm has shape (n_samples, len(avail_idx))
-            X_avail_norm = X_norm[:, avail_idx]
-            # Matrix multiply: correlations between every available var and every selected var
-            # Result shape: (len(avail_idx), len(selected_indices))
-            corr_matrix = (X_avail_norm.T @ X_selected_norm) / n_samples
-            # Projection for each available var = sum of squared correlations with selected set
-            proj_values = np.sum(corr_matrix ** 2, axis=1)
-
-            # Select variable with MINIMUM projection (least correlated with selected set)
-            # np.argmin over the compact array, then map back to original variable index
-            min_proj_var = avail_idx[np.argmin(proj_values)]
-
-            selected_indices.append(min_proj_var)
-            available_indices.remove(min_proj_var)
-
-        # Step 3: Evaluate this selection using PLS with cross-validation
-        try:
-            # Extract selected features from original (non-normalized) data
-            X_selected = X[:, selected_indices]
-
-            # Fit PLS and compute CV R²
-            # Use n_components = min(n_features, n_samples-1) to avoid overfitting
-            n_components = min(n_features, n_samples - 1, 10)
-            pls = PLSRegression(n_components=n_components, scale=False)
-
-            # Cross-validation score (R²)
-            cv_scores = cross_val_score(
-                pls, X_selected, y,
-                cv=cv_folds,
-                scoring='r2',
-                n_jobs=1
-            )
-            mean_score = np.mean(cv_scores)
-
-            # Track best selection; print only on improvement to keep J-seed
-            # enumeration logs readable (J can be 1500+ on FTIR data).
-            if not np.isnan(mean_score) and not np.isinf(mean_score):
-                if mean_score > best_score:
-                    best_score = mean_score
-                    best_selection = selected_indices.copy()
-                    print(f"  Seed {first_var}: R² = {mean_score:.4f} (new best)")
-
-        except Exception:
-            continue
+    for selected, score in results:
+        if selected is not None and score > best_score:
+            best_score = score
+            best_selection = selected
 
     # Step 4: Convert best selection to importance scores
     # Earlier selected = higher importance

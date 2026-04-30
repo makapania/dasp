@@ -124,6 +124,8 @@ def spa_selection(X, y, n_variables, cv_folds=5):
     variable selection in spectroscopic multicomponent analysis.
     Chemometrics and Intelligent Laboratory Systems, 57(2), 65-73.
     """
+    import os
+    from joblib import Parallel, delayed
     from sklearn.cross_decomposition import PLSRegression
     from sklearn.model_selection import cross_val_score
 
@@ -144,30 +146,23 @@ def spa_selection(X, y, n_variables, cv_folds=5):
     X_std = np.std(X, axis=0) + 1e-10
     X_norm = (X - X_mean) / X_std
 
-    best_score = -np.inf
-    best_selection = None
-
-    # Canonical Araujo 2001: every variable is a candidate seed
-    for first_var in range(n_features):
+    def _evaluate_seed(first_var):
+        """Run one canonical SPA chain seeded at first_var; return (selection, R²)."""
         selected = [first_var]
         available = set(range(n_features)) - {first_var}
 
         for _ in range(1, n_variables):
-            # Vectorized projection: matmul over compact available indices.
-            # ~2-3 orders of magnitude faster than a Python loop for J >> 100,
-            # which matters for FTIR datasets (J = 1000-3000) when users run
-            # the exported script.
+            # Vectorized matmul projection (~2-3 orders of magnitude faster
+            # than a Python loop for FTIR-scale J = 1000-3000).
             avail_idx = np.array(sorted(available))
             X_selected = X_norm[:, selected]
             X_avail = X_norm[:, avail_idx]
             corr_matrix = (X_avail.T @ X_selected) / n_samples
             proj_values = np.sum(corr_matrix ** 2, axis=1)
             min_idx = int(avail_idx[np.argmin(proj_values)])
-
             selected.append(min_idx)
             available.remove(min_idx)
 
-        # Evaluate this chain with PLS+CV
         try:
             n_components = min(n_variables, n_samples - 1, 10)
             pls = PLSRegression(n_components=n_components, scale=False)
@@ -175,12 +170,26 @@ def spa_selection(X, y, n_variables, cv_folds=5):
                 pls, X[:, selected], y, cv=cv_folds, scoring="r2", n_jobs=1
             )
             mean_score = float(np.mean(cv_scores))
+            if np.isfinite(mean_score):
+                return selected, mean_score
         except Exception:
-            continue
+            pass
+        return None, float("-inf")
 
-        if np.isfinite(mean_score) and mean_score > best_score:
-            best_score = mean_score
-            best_selection = list(selected)
+    # Canonical Araujo 2001: enumerate every variable as candidate seed.
+    # Parallelize via joblib threading backend (numpy/sklearn release the
+    # GIL on heavy work; threading is safe in PyInstaller-bundled apps).
+    n_jobs = min(os.cpu_count() or 1, 8)
+    results = Parallel(n_jobs=n_jobs, backend="threading")(
+        delayed(_evaluate_seed)(fv) for fv in range(n_features)
+    )
+
+    best_score = float("-inf")
+    best_selection = None
+    for selected, score in results:
+        if selected is not None and score > best_score:
+            best_score = score
+            best_selection = selected
 
     if best_selection is None:
         # Match in-app SPA: when every seed's CV failed, return all variables

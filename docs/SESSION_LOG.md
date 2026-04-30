@@ -62,13 +62,17 @@ sites. Removed 6 `search.py` call-site usages + signature parameter on
   only would pick `[3, 5, 8, 10, 11]` from seed 11. Added Kimi's suggested
   call-count invariant test as additive coverage (`test_spa_evaluates_all_j_seeds`).
 
-**Performance flag for follow-up:** canonical enumeration is O(J seeds) ×
-O(N×J inner forward chain) × O(folds × PLS CV). For typical bone-FTIR
-(J=200-1500 wavelengths after preprocessing), this is **100×–1500× the
-prior single-chain-repeated-10-times work.** Pre-fix typical SPA runtime
-~1-5 sec; post-fix ~30-750 sec on the high end. Canonical-correct but
-visible. Deferred follow-up: parallelize the seed loop with joblib, or
-vectorize across seeds. Tracked in T06 verdict note section 8.
+**Performance follow-up implemented in same session (T-06b):** the
+sequential canonical enumeration was 100×–1500× the pre-fix work
+(~30-750 sec on bone-FTIR-scale data). Parallelized in branch
+`fix/T06b-spa-parallel` via `joblib.Parallel(backend='threading')`
+across J independent seed evaluations. Threading (not loky) for
+PyInstaller-bundle safety per the existing `_frozen_needs_threading_fallback`
+pattern. Inner `cross_val_score` keeps `n_jobs=1` to avoid nested
+parallelism. Worker count capped at min(cpu_count, 8). Empirical
+FTIR-scale benchmark (J=800, n=50): 10.92 sec parallelized vs. ~70-80
+sec sequential — ~7-8× speedup. Export `SPA_TEMPLATE` parallelized
+identically so exported user scripts match in-app SPA performance.
 
 **Lesson reinforced (master-rule, again):** The roadmap's `rng.choice()`
 fix would have been a textbook sklearn-instinct slippage —

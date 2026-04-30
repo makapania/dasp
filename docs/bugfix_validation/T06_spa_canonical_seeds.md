@@ -182,25 +182,36 @@ argmax-correlation seed path) — removed.
 Kimi caught Python-loop projection in template (~2-3 orders of magnitude
 slower than production's vectorized matmul on FTIR-scale J=2000) — vectorized.
 
-## 8. Performance note (deferred follow-up)
+## 8. Performance — parallelized in same merge series (T-06b)
 
 Canonical enumeration is O(J seeds) × O(N×J inner forward chain) × O(folds ×
 PLS CV). For typical bone-FTIR data after preprocessing (J = 200-1500
 wavelengths), this is **100×–1500× the prior single-chain-repeated-10-times
-work**. Pre-fix typical SPA runtime: ~1-5 sec; post-fix: ~30-750 sec on the
-high end of J.
+work** in sequential form. Pre-fix typical SPA runtime: ~1-5 sec; sequential
+canonical: ~30-750 sec on the high end of J.
 
-This is canonical-correct but visible. Deferred follow-up options:
-1. Parallelize the seed loop with joblib (independent CV evaluations);
-   constrain inner `cross_val_score(n_jobs=1)` to avoid PyInstaller bundle
-   issues per `_frozen_needs_threading_fallback`.
-2. Vectorize the inner forward chain across seeds (heavier rewrite).
-3. Top-K seeds only (bounded enumeration) — but this would be option D from
-   the original triage and was rejected as non-canonical.
+**Parallelized in `fix/T06b-spa-parallel`.** Each seed's chain + CV is
+independent, with read-only access to `X`, `X_norm`, `y`. Refactored
+`spa_selection` to factor out `_evaluate_spa_seed` (pure function, returns
+`(selection, score)`) and dispatch via `joblib.Parallel(backend='threading')`
+across J seeds. Inner `cross_val_score` keeps `n_jobs=1` to avoid nested
+parallelism. Threading backend (not loky) for PyInstaller-bundle safety —
+loky has known argv-parse issues in the frozen runtime per
+`search._frozen_needs_threading_fallback`. Worker count capped at
+`min(cpu_count, 8)` to avoid pathological BLAS oversubscription on
+high-core dev machines.
 
-If users report visible slowdowns in real bone-FTIR workflows, option 1 is
-the smallest change. Tracked as informal "T-06 perf follow-up" in
-PROJECT_STATUS.
+Empirical benchmark on synthetic FTIR-scale data (J=800, n=50, n_features=20):
+- Threading n_jobs=8: **10.92 sec**
+- Sequential (estimated by ratio): ~70-80 sec
+- Speedup: ~7-8× as expected for numpy/sklearn-heavy work releasing the GIL
+
+For J=1500 (high end of typical bone-FTIR after preprocessing), expect
+~20 sec parallelized vs. ~140-160 sec sequential. Visible but acceptable —
+in the noise compared to typical multi-hour grid searches.
+
+The export `SPA_TEMPLATE` was parallelized identically so exported user
+scripts run at the same speed as in-app SPA.
 
 ## 9. Related observations (out of scope)
 

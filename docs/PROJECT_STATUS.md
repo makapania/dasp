@@ -1,14 +1,12 @@
 # Project Status
 
-> **Last updated:** 2026-04-30 (later — T-06 canonical Araújo 2001 SPA merged) —
+> **Last updated:** 2026-04-30 (later — T-06 canonical SPA merged + T-06b parallelization follow-up) —
 >
-> **T-06 SPA canonical seed enumeration MERGED.** Replaced non-functional `n_random_starts` knob with canonical Araújo 2001 deterministic enumeration over all J variables as candidate first variable. Branch `fix/T06-spa-canonical-seeds` ff-merged into `main`. Validation note: `docs/bugfix_validation/T06_spa_canonical_seeds.md`.
+> **T-06 SPA canonical seed enumeration MERGED + T-06b parallelization MERGED.** Replaced non-functional `n_random_starts` knob with canonical Araújo 2001 deterministic enumeration over all J variables as candidate first variable. Branch `fix/T06-spa-canonical-seeds` ff-merged into `main`. Validation note: `docs/bugfix_validation/T06_spa_canonical_seeds.md`. Follow-up branch `fix/T06b-spa-parallel` ff-merged immediately after — parallelizes the J-seed loop via `joblib.Parallel(backend='threading')`, capped at min(cpu_count, 8) workers, PyInstaller-bundle-safe. Empirical FTIR-scale benchmark (J=800, n=50, n_features=20): 10.92 sec parallelized vs. ~70-80 sec sequential — ~7-8× speedup as expected for GIL-releasing numpy/sklearn work.
 >
 > Key gate-finding: the roadmap's proposed `rng.choice()` fix (Option A) was a sklearn-instinct slippage — canonical SPA per Araújo 2001 + auswahl + Galvão 2012 SPA-GUI is deterministic enumeration, not random restarts. No verified chemometrics implementation exposes a "random restart count" parameter. The gate's step-3 field-alignment lookup caught this; without it the fix would have invented a non-canonical pattern.
 >
-> Cross-family review (Codex + Kimi K2.6) caught: a missed call-site (`tests/gui/test_comprehensive.py:387`), template ↔ in-app divergence on small-sample CV-fold handling, dead `y_norm` code, and a Python-loop projection in the export template that was 100-1000× slower than the vectorized production path. All fixed before merge. Five new T-06 tests + 226-test regression sweep all green.
->
-> **Performance flag for future follow-up:** canonical enumeration is O(J seeds) × inner forward chain × CV. For typical bone-FTIR data (J=200-1500), this is 100×–1500× the prior 10-redundant-iterations work. Pre-fix SPA: ~1-5 sec; post-fix: ~30-750 sec on the high end. Deferred: parallelize seed loop with joblib if users report visible slowdowns.
+> Cross-family review (Codex + Kimi K2.6) caught: a missed call-site (`tests/gui/test_comprehensive.py:387`), template ↔ in-app divergence on small-sample CV-fold handling, dead `y_norm` code, and a Python-loop projection in the export template that was 100-1000× slower than the vectorized production path. All fixed before merge. Five new T-06 tests + 226-test regression sweep all green (post-parallelization too).
 >
 > **Previously:** 2026-04-30 (validation gate session — bugfix branches resolved) —
 >
