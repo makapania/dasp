@@ -1,8 +1,81 @@
 # Model-Native Loss Reweighting for Class Imbalance
 
-**Status:** Proposal — not yet implemented
-**Date:** 2026-04-29
+**Status:** Proposal — superseded in scope by REVISIONS section below (post-Codex review)
+**Date:** 2026-04-29 (original); revised same day after Codex code-verification review
 **Origin:** Session analyzing the FTIR Bone PLS paper revealed dasp does not expose model-native imbalance handling for the boosting models (XGBoost / LightGBM / CatBoost), nor for SVC's gamma-C combination, nor for elastic-net logistic regression (which itself isn't a model card yet — see `2026-04-29-enlr-and-lda-on-pls-models.md` if/when that doc is written).
+
+> **READ THIS FIRST:** the REVISIONS section directly below supersedes specific claims in the original body. When the REVISIONS section conflicts with the body, REVISIONS wins. Implementation reference is `docs/RECONCILED_ROADMAP_2026-04-29.md` T-19.
+
+---
+
+## REVISIONS — 2026-04-29 (post-Codex code-verification review)
+
+After this design doc was first written, Codex performed a code-verification review against the actual `src/spectral_predict/` codebase. Six points in the original body are superseded.
+
+### R1. PLS-DA inner LR scope is broader than originally documented
+
+The original body's "Implementation surface" section claims PLS-DA inner LR sites are `search.py:380`, `:4261`, and `bayesian_utils.py:400`, all stuck at `class_weight=None`. **The actual codebase has ~10 PLS-DA inner LR construction sites.** Codex's audit:
+
+| Site | Status |
+|------|--------|
+| `search.py:4257-4261` | ✅ already honors `imbalance_method='class_weight'` |
+| `unified_bayesian.py:1219-1222` | ✅ already honors |
+| `nsga2_search.py:1417-1426` | ✅ already honors |
+| `nsga2_search.py:3077-3080` | ✅ already honors |
+| `code_generator.py:880-884, 1248` | ✅ injects `class_weight='balanced'` in exported code |
+| `search.py:380` | ❌ silent default — fix |
+| `bayesian_utils.py:400` | ❌ silent default — fix |
+| `nsga2_search.py:822` | ❌ silent default — fix |
+| `nsga2_search.py:3453` | ❌ silent default — fix |
+| `ga_preprocessing.py:428` | ❌ silent default — fix |
+
+So **5 sites** need wiring (auxiliary paths like rebuild-from-row and importance-fit utilities), not 2.
+
+### R2. The original "sample_weight via fit_params" approach is broken when a resampler is in the Pipeline
+
+The original Auto-mode implementation note #4 prescribes: "Auto mode for multiclass should fall back to `sample_weight=compute_sample_weight('balanced', y_train)` regardless of which boosting model is used. This works for all three boosting libraries via their `fit(..., sample_weight=...)` interface."
+
+**This is mechanically correct ONLY if no resampler is in the Pipeline.** Codex verified that imblearn's `Pipeline._fit()` does NOT rewrite or recompute `fit_params` after a resampler step (`imblearn/pipeline.py:435-455`; helper returns only `X_res, y_res, sampler` at `pipeline.py:1330-1334`). If you precompute `sample_weight` from pre-resampling y and pass it via `fit_params`, the resampler will change y length and the `sample_weight` array will mismatch.
+
+**The right approach is a custom estimator wrapper** (originally dismissed in implementation note #1 as "more complex"; now the recommended path). The wrapper intercepts `fit(X, y)` inside the Pipeline and computes `sample_weight = compute_sample_weight('balanced', y)` from the y the wrapper RECEIVES (post-resampling). The wrapper then calls `inner.fit(X, y, sample_weight=sample_weight)`. This bypasses imblearn's fit_params problem and is automatically resampling-aware.
+
+**Where each library lands:**
+
+| Library | Mechanism | Resampling-aware? |
+|---------|-----------|-------------------|
+| sklearn LR / RF / SVC | `class_weight='balanced'` | ✅ lazy at fit |
+| LightGBM | `class_weight='balanced'` | ✅ lazy at fit (verified `lightgbm/sklearn.py:969-976`) |
+| CatBoost | `auto_class_weights='Balanced'` / `'SqrtBalanced'` | ✅ computed on train pool (verified `catboost/core.py:5020-5023`) |
+| XGBoost binary | `scale_pos_weight` | ❌ frozen at __init__ — wrapper needed under resampling |
+| XGBoost multiclass / MLP | `sample_weight` at fit | ⚠ wrapper needed (cannot route through imblearn fit_params) |
+
+### R3. MLP sample_weight requires sklearn ≥1.7 — and bundle compatibility is the gating question
+
+The original body says "sklearn MLP doesn't accept `class_weight`; reweighting requires routing per-sample weights through `Pipeline.fit(..., classifier__sample_weight=w)`." The first half is correct (no `class_weight` kwarg). The second half is **doubly wrong**: (a) `MLPClassifier.fit()` only accepts `sample_weight` as of sklearn 1.7 (`sklearn/neural_network/_multilayer_perceptron.py:842-845`), and (b) routing through imblearn's `fit_params` is broken anyway (see R2).
+
+The current `pyproject.toml:29` floor is `>=1.5.0`. **Decision required before bumping the floor:** test whether sklearn ≥1.7 builds cleanly in the PyInstaller bundle (`spectral_predict_py312.spec`). If incompatible, **skip MLP from the imbalance dropdown** rather than block T-19 on a sklearn version bump — MLP is among this user's least-used models, so omitting balanced loss reweighting for MLP specifically is an acceptable tradeoff. The user's local venv is sklearn 1.8, so the design works locally regardless.
+
+When MLP is included, it uses the same custom wrapper approach as XGBoost multiclass — wrapper intercepts fit(), computes sample_weight from received y, calls `inner.fit(X, y, sample_weight=sw)`.
+
+### R4. Active bug found while verifying T-19 (separate ticket T-32 in the roadmap)
+
+`search.py:3883` in the existing resampling path computes `sample_weight_train` from `y_train` (pre-resampling) but passes it to `final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)` against `y_train` (rather than `y_train_for_model`, the resampled y). When a resampler runs, this is a length-mismatch bug TODAY — not a hypothetical risk. Tracked as **T-32** in the roadmap.
+
+### R5. Stacking ensemble does not route sample_weight to base models
+
+`StackingEnsemble.fit()` (`ensemble.py:796-825`) calls `fold_model.fit(X_train_proc, y_train)` without `sample_weight`. Any auto-mode sample-weight in the outer pipeline will NOT propagate into stacking-internal models. **Document as a known limitation.** Users wanting balanced loss reweighting in stacked models should pick `class_weight`-style modes for base models that support them (sklearn / LightGBM / CatBoost native kwargs work; XGBoost binary scale_pos_weight is frozen as discussed in R2).
+
+### R6. Effort estimate revised
+
+Original: "1-2 days." Revised: **5-7 days** after counting:
+- 5 PLS-DA sites needing wiring
+- Custom wrapper design + tests
+- sklearn floor bump compatibility check (or MLP skip)
+- Tests for resampling × balanced paths
+- Code export updates (boosting kwargs + wrapper-based sample_weight path)
+- GUI dropdown + tooltip + per-fold logging
+
+The original body of this doc is preserved below for context but should not be implemented as written. Read sections 1-6 of REVISIONS as authoritative.
 
 ---
 

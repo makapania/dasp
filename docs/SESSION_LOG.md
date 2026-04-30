@@ -4,6 +4,71 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-29 (post-Codex T-19 review) — imbalance design corrections
+
+Codex did a focused mechanical-verification pass on T-19 and the original loss-reweighting design doc. Three substantive findings worth preserving for future sessions:
+
+### imblearn Pipeline does NOT propagate fit_params through resampling
+
+Originally the loss-reweighting design proposed "for multiclass boosting and MLP, route `sample_weight=compute_sample_weight('balanced', y_train)` via `Pipeline.fit(..., classifier__sample_weight=w)`." Codex verified this is broken as designed:
+- imblearn's `Pipeline._fit()` updates only X and y in `_fit_resample_one()` (`imblearn/pipeline.py:435-437`, helper `pipeline.py:1330-1334`).
+- `fit_params` are passed through unchanged to the final estimator.
+- If `sample_weight` was computed from pre-resampling y and the resampler changes y size, the sample_weight array length mismatches the resampled y at fit time.
+
+**The correct design** is a custom thin estimator wrapper that intercepts `fit(X, y)` *inside* the Pipeline and computes `sample_weight = compute_sample_weight('balanced', y)` from the y RECEIVED (post-resampling). Wrapper then calls `inner.fit(X, y, sample_weight=sample_weight)`. This bypasses the imblearn fit_params problem and is automatically resampling-aware.
+
+For sklearn (`LogisticRegression`, `RandomForestClassifier`, `SVC`), LightGBM, and CatBoost, the native `class_weight='balanced'` / `auto_class_weights='Balanced'` kwargs are already lazy at fit and don't need a wrapper. Only XGBoost (binary `scale_pos_weight` is constructor-frozen; multiclass needs sample_weight) and MLP need the wrapper.
+
+### Active length-mismatch bug at search.py:3883 (now T-32)
+
+While verifying T-19, Codex found: `search.py:3869-3873` computes `sample_weight_train` from pre-resampling `y_train`, then `:3883` passes it to `final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)` against `y_train` rather than `y_train_for_model` (the resampled y). When a resampler is active, lengths mismatch — this is a live bug today, not a hypothetical risk.
+
+### PLS-DA inner LR is ~10 sites, not 3
+
+Codex audit found ~10 PLS-DA inner LR construction sites in `src/`. Five are missing `class_weight` handling and need fixing:
+- `search.py:380` (rebuild-from-row)
+- `bayesian_utils.py:400` (importance/full-fit utility)
+- `nsga2_search.py:822` (`_build_model()` PLS-DA branch)
+- `nsga2_search.py:3453` (calibration metrics conversion)
+- `ga_preprocessing.py:428` (GA preprocessing fitness)
+
+Five are already correct: `search.py:4261`, `unified_bayesian.py:1220`, `nsga2_search.py:1424`, `nsga2_search.py:3078`, `code_generator.py:880-884` (exported code).
+
+The originally-cited 3-site claim (search.py:380, :4261, bayesian_utils.py:400) was incomplete. The auxiliary sites (rebuild-from-row, importance utility) aren't the main CV but they still produce results the user sees, so silent inconsistency is still wrong.
+
+### MLP sample_weight needs sklearn ≥1.7 — bundle compatibility unknown
+
+`MLPClassifier.fit()` accepts `sample_weight` only as of sklearn 1.7 (`sklearn/neural_network/_multilayer_perceptron.py:842-845`). Current `pyproject.toml:29` floor is `>=1.5.0`. Bumping to `>=1.7.0` could break the PyInstaller bundle — needs testing before committing. If incompatible, skip MLP from the imbalance dropdown rather than block T-19; MLP is among the least-used models in the user's workflow.
+
+---
+
+## 2026-04-29 (latest) — Reconciled roadmap from three independent reviews
+
+### Scope
+User asked for a critical analysis of `docs/analysis_vs_ftir_bone_pls/GAP_ANALYSIS.md` + six docs in `docs/analysis_vs_unscrambler/`, with pushback on items that are wrong / not useful / don't belong. Then asked for codex independent review, then DeepSeek V4 Pro fresh-eyes review (briefed with prior conclusions + chemometrics-domain rule). Final deliverable: `docs/RECONCILED_ROADMAP_2026-04-29.md`.
+
+### Key findings worth preserving (so future sessions don't re-derive)
+
+**1. The "audit nobody did" meta-finding (DeepSeek).** All seven analysis docs say variants of "audit per-fold variable selection for leakage" but none ever performed the audit. T-01 in the roadmap IS that audit. CARS / UVE / VIP / SPA / iPLS may fit on full calibration data and pass a frozen variable list into CV — would produce optimistic CV estimates. DeepSeek points to `search.py:5400-5460` as a likely leakage site, but the audit needs to actually trace each varsel × each search path before fixes can be designed.
+
+**2. Three false alarms that should not be re-flagged:**
+- LESSER_FINDINGS 1.1 "binary specificity bug" — false alarm. `scoring.py:344-348` is correct under standard sklearn convention (positive class at index 1: TN=cm[0,0], FP=cm[0,1]). The reviewer flipped row/column indexing.
+- FTIR Gap Analysis #10 "PLS-DA inner LR stuck at class_weight=None" — wrong. `search.py:4257-4261` and `unified_bayesian.py:1220-1222` apply balanced class weights when `imbalance_method='class_weight'`. Loss-reweighting design doc at `docs/plans/2026-04-29-model-native-loss-reweighting.md` needs scope reduction: only XGB/LightGBM/CatBoost need new wiring.
+- VALIDATION_SUPPLEMENT "509 except blocks" stat — unreproducible / scope-inflated when re-counted. CODE_QUALITY also self-contradicts (asserts "no path traversal risk" while flagging Zip Slip in same doc).
+
+**3. HMAC signing of `.dasp` is technically insufficient.** If the HMAC key ships inside the bundled app, an attacker can extract it and sign malicious models. Better fix is safe `zipfile.extractall()` (validate entry names against `..` and absolute paths) + UX warning at load time. See T-25.
+
+**4. Chemometrics community convention ≠ ML convention.** Per-spectrum operations (SNV, SG derivatives, baseline correction) are NOT leakage even when computed on full data before CV. They use only within-spectrum statistics. Cross-sample operations (PCA fit on full data, variable selection using y, hyperparameter tuning on full data) ARE real leakage. Naive ML reviewers/agents will misclassify the first as bugs. Saved to auto-memory at `feedback_chemometrics_conventions.md`.
+
+**5. PLS-2 framing correction (Codex).** sklearn's `PLSRegression` is multi-output capable. The gap is the workflow assuming 1D y everywhere (`np.ravel()` at `search.py:695`, results DataFrame schema, plot generation, code export). Real ticket is "multi-Y workflow," not "PLS-2 model card." User confirmed multi-Y prediction is highly useful → T-17 elevated to P1, 2-3 weeks effort.
+
+**6. Multi-class SIMCA is a research-design question, not a coding question.** dasp's "PCA-SIMCA" is one-class anomaly detection (DD-SIMCA). True multi-class SIMCA is class-modeling — each test specimen tested against each class's PCA model independently, can output "none of the above" or "multiple of the above." Different statistical model from PLS-DA / RF / XGB which are discriminant classifiers. Tracked as T-31 PENDING in the roadmap — needs user decision on whether unknowns / continuum samples are real for their bone-FTIR work.
+
+### Three-reviewer methodology worked
+Claude / Codex / DeepSeek V4 Pro are deliberately family-orthogonal (Anthropic / OpenAI / Chinese-trained). Each independently caught issues the others missed; Codex caught the PLS-DA inner LR claim, DeepSeek caught the meta-finding plus three under-prioritized leakage issues. When all three converged, confidence is high. When they disagreed, the strongest argument won (e.g., DeepSeek's elevation of ensemble OOF leakage over my mid-priority ranking — DeepSeek's reasoning that academic publication CV scores must be honest is correct).
+
+---
+
 ## 2026-04-29 (evening) — Validation supplement to Unscrambler analysis
 
 ### Scope
@@ -38,6 +103,42 @@ Three different versions in same product: `0.5.0b1` (backend), `v0.4.0` (report.
 
 ### Bottom line
 The original 8-agent analysis was directionally excellent but understated severity. Revised commercial readiness score: **3/10** (down from 4/10). See VALIDATION_SUPPLEMENT.md for full details.
+
+---
+
+## 2026-04-29 (late evening) — Lesser findings audit (3 agents)
+
+### Scope
+User asked: "that document only includes the severe findings? what about lesser ones that are still worth dealing with?" Dispatched 3 parallel agents: (1) code hygiene + performance + robustness, (2) UX/QA polish, (3) silent correctness bugs.
+
+### Output
+- **`docs/analysis_vs_unscrambler/LESSER_FINDINGS.md`** — comprehensive catalog of ~200+ non-blocker issues across 5 categories.
+
+### Key discoveries
+
+**11 silent correctness bugs** (most dangerous — wrong results users trust):
+1. Binary specificity formula computes recall of negative class instead of TNR (`scoring.py:346`). **HIGH.**
+2. VIP uses `np.var(y)` instead of per-component explained variance (`models.py:1738`).
+3. SPA deterministic despite `n_random_starts` — `random_state` unused (`variable_selection.py:407`).
+4. Ensemble OOF predictions use preprocessor fitted on full dataset — data leakage inflates R² ~0.01-0.03.
+5. Preprocessing discovery computes importances on full data before CV — optimistically biased.
+6. PDS window arithmetic fails for even window sizes — buffer overflow (`calibration_transfer.py:193-221`).
+7. PLS grid can exceed CV fold training samples — no `n_samples` clamp (`models.py:842-843`).
+8. One-class UVE prefilter trained on binary labels including outliers — contradicts one-class philosophy.
+9. CARS tree-mode weight update biases toward unselected variables — oscillation instead of convergence.
+10. SNV exact equality guard misses near-zero std — numerical artifacts.
+11. Scoring metrics silently return 0.0 on failure — bare except blocks.
+
+**~150+ UX polish issues** including: 209 "specimen" vs "sample" inconsistencies, 9 "check console" messages in windowed app, 161 generic `showerror("Error",...)`, 184 "Please..." messages, zero progress bars on Analysis tab, 15+ uncentered dialogs, 3 arrow styles for Run buttons, inconsistent CSV exports, no keyboard shortcuts, no help system, emoji breaking screen readers.
+
+**36 code hygiene issues**: commented-out Instrument Lab code blocks, 20+ public APIs without docstrings, missing `__all__` in 7 modules, dozens of `open()` without encoding, `models.py` imports `logging` but never uses it.
+
+**8 performance issues**: triple `.copy()` in `search.py`, `iterrows()` in `ensemble.py` and `io.py`, per-sample `interp1d` in calibration transfer, per-sample baseline loops.
+
+**14 robustness/edge cases**: `pd.read_csv` without encoding detection, division by zero in VIP for constant y, SNV silent skip of constant spectra, `min_wavelengths=100` rejecting valid datasets, unvalidated `simpledialog` inputs.
+
+### Bottom line
+Top 12 blockers prevent commercial release. These ~200+ lesser findings determine whether early adopters say "promising" or "amateur." The 4-week roadmap in LESSER_FINDINGS.md (~40 hours) would eliminate silent wrong-result bugs, prevent international data crashes, and remove the "student project" impression.
 
 ---
 
