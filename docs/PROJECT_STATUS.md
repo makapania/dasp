@@ -114,6 +114,20 @@ Earlier audit said `RepeatedStratifiedKFold` doesn't appear in the codebase. **R
 
 ## Recently resolved
 
+### T-10: PLS component grid CV-strategy-aware clamp — FIXED 2026-04-30
+
+`search.py:1109` and `search.py:3312` previously used `n_samples * (folds - 1) // folds`
+to bound the PLS `n_components` grid. Correct for K-fold/RepeatedKFold, under-counts
+for LOO (true train-fold size is `n - 1`, not `4n/5`). Added
+`cv_utils.compute_min_train_fold_size(cv_strategy, n_samples, n_folds)` and routed
+both grid clamps through it. LOO grids now reach the proper `n - 1` ceiling.
+Also validates `n_folds > n_samples` geometry (Codex suggestion #1). Group splitters
+(`group_kfold`, `leave_one_group_out`) deliberately raise `NotImplementedError`;
+T-15 will plumb group-aware sizing.
+
+Test coverage: `tests/test_cv_pls_clamp.py` — 16 unit tests on the helper +
+4 grid integration tests on N=10 / N=80 synthetic data + 1 Bayesian integration test.
+
 ### PLS regression hotfix: refine tab PLS-DA instead of PLS — FIXED 2026-04-21
 
 Two bugs latent since commit `057d9f6` (2026-04-11), triggered by Burned-temperature data with ≤9 unique values:

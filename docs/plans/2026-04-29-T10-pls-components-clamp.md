@@ -848,7 +848,7 @@ Expected: all pass. The `tests/test_cv_pls_clamp.py` block adds 19 new tests (14
 
 - **Group splitters (`group_kfold`, `leave_one_group_out`).** Helper raises `NotImplementedError`. T-15 will add a separate path that uses the smallest-group size as the bound.
 - **Per-fold silent clamping inside the model.** Hides the user's intent. If a per-fold fit ever sees `n_components > train_fold_size`, sklearn should raise; the search aggregator should surface that, not swallow it. Out of scope for T-10 — touch `_run_single_config`'s exception swallowing in a separate ticket.
-- **NSGA-II / GA-PLS clamping.** `nsga2_search.py:751` (`_get_constrained_pls_components`) already does its own per-trial clamp by both `n_features` and `n_samples`. Verify it consumes `n_samples` rather than `n_samples_train_fold` and file a follow-up if so — but do NOT change in this PR. T-10 scope is the two grid-construction sites called out in the roadmap.
+- **NSGA-II / GA-PLS clamping.** `nsga2_search.py:751` (`_get_constrained_pls_components`) already does its own per-trial clamp by both `n_features` and `n_samples`. Some NSGA-II evaluation paths already compute `min_train_samples` from cv_folds. The deferred ticket should be an **AUDIT** of NSGA-II decode/result-row/reporting consistency (not an assumed identical bug) — verify whether `_get_constrained_pls_components` already receives the correct train-fold size or only `n_samples`, and whether the per-trial decode, the result-row writeback, and the reporting step are all consistent. Do NOT change in this PR. T-10 scope is the two grid-construction sites called out in the roadmap.
 - **One-class search.** Does not use PLS. No change needed.
 - **Bayesian Optuna IntDistribution.** The upper bound for `n_components` is fed via `max_n_components`, which now flows through the same clamp. No change to the Optuna search space construction itself.
 
@@ -858,7 +858,7 @@ Expected: all pass. The `tests/test_cv_pls_clamp.py` block adds 19 new tests (14
 
 1. Should the helper also accept `'stratified_kfold'` and `'repeated_stratified_kfold'` as aliases? `cv_utils.build_cv_splitter` resolves stratification internally and the user-facing strategy strings are only `'kfold'`, `'repeated_kfold'`, `'loo'`, but a code-export script or a unit test might pass the explicit stratified name. Current plan: accept only the three user-facing strings, raise on others. Alternative: alias `'stratified_kfold' → 'kfold'` and `'repeated_stratified_kfold' → 'repeated_kfold'`.
 2. The `test_n80_kfold_uses_full_grid_default_max` test imports `run_search` which triggers the full preprocessing+CV pipeline. That makes the test ~10-30 s per case. Acceptable for a `tests/` slow-tier test, or should it be marked `@pytest.mark.slow`?
-3. NSGA-II's `_get_constrained_pls_components(model_param, n_features, n_samples)` at `nsga2_search.py:751` clamps by `n_samples` (not `n_samples_train_fold`). That is over-permissive by exactly one component on LOO and by `~n/k` on K-fold. Worth fixing in the same PR or filing as a separate follow-up?
+3. NSGA-II's `_get_constrained_pls_components(model_param, n_features, n_samples)` at `nsga2_search.py:751` clamps by `n_samples` (not `n_samples_train_fold`). Some NSGA-II evaluation paths already compute `min_train_samples` from cv_folds. The deferred ticket should be an AUDIT of decode/result-row/reporting consistency rather than an assumed identical bug. Filed as a follow-up, not in T-10 scope.
 
 ---
 

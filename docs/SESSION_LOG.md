@@ -56,6 +56,38 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 - 1 worktree paused (`fix/varsel-leakage` Phase 1 done, Phases 2-7 paused) — disposition pending re-evaluation agent.
 - Roadmap doc + audit doc + project-status doc all annotated with reconsideration banners pointing to the master rule.
 - New re-evaluation agent prompt at `docs/plans/2026-04-30-roadmap-reevaluation-prompt.md` ready to dispatch.
+---
+
+## 2026-04-30 — T-10 PLS component clamp
+
+**What broke today:** roadmap T-10 surfaced that `min_train_samples = n_samples * (folds - 1) // folds`
+at `search.py:1109` and `:3312` was K-fold-only. Under LOO the formula under-counts
+the train-fold size by 1 (`4n/5` vs `n-1`). Conservative, so not a silent failure
+producer in itself, but it shrinks the LOO PLS grid by 1 component on small datasets,
+and any future caller who forgot to clamp would crash inside CV.
+
+**Design call:** clamp at the call site (where `cv_strategy` is in scope) rather than
+inside `models.py`. `models.py` does NOT silently re-clamp by `n_samples` because that
+would mask a caller bug — the contract is documented via docstring only (no assert per
+Codex suggestion #3).
+
+**Files touched:**
+- `src/spectral_predict/cv_utils.py` (new helper `compute_min_train_fold_size`)
+- `src/spectral_predict/search.py` (two call sites: 1109, 3312)
+- `src/spectral_predict/models.py` (docstring + comment only)
+- `tests/test_cv_pls_clamp.py` (new, 21 tests)
+- `docs/plans/2026-04-29-T10-pls-components-clamp.md` (NSGA-II deferred wording)
+
+**Codex review suggestions applied:**
+1. `n_folds > n_samples` validation in helper (2 extra tests).
+2. Docstring says "exact" not "conservative" — the formula `n*(k-1)//k` equals `n - ceil(n/k)`.
+3. No assert in models.py — docstring-only defense-in-depth.
+4. `_extract_n_components_seen` uses LVs column as canonical, falls back to `ast.literal_eval` (not `json.loads`) because Params is Python repr with single quotes.
+5. NSGA-II deferred ticket is an AUDIT, not an assumed identical bug.
+
+**Group-splitter handling:** `group_kfold` and `leave_one_group_out` raise `NotImplementedError` from the helper. T-15 will route these through a separate group-aware sizing path.
+
+**Empty-DataFrame edge case:** `compute_min_train_fold_size` rejects `n_samples < 2`. Both call sites guard with `if n_samples >= 2` before calling the helper, preserving the existing graceful-empty-return behavior in `run_search`.
 
 ---
 
