@@ -1445,6 +1445,8 @@ TOOLTIP_CONTENT = {
         'RPD': 'RPD (Ratio of Performance to Deviation)\n\nSD(reference) / RMSE. Higher is better.\n<1.5: poor, 1.5-2: rough screening, 2-2.5: good, >2.5: excellent',
         'RER': 'RER (Range Error Ratio)\n\nRange(reference) / RMSE. Higher is better.\nIndicates prediction precision relative to data range.',
         'Bias': 'Bias (Systematic Error)\n\nMean(predicted - actual). Should be close to 0.\nPositive = over-predicting, Negative = under-predicting',
+        'CCC': 'CCC (Lin\'s Concordance Correlation Coefficient)\n\nMeasures agreement between predicted and observed along the 1:1 line.\nUnlike R², CCC penalizes both correlation departures AND bias/scale shifts.\nRange: -1 to 1 (higher is better, 1 = perfect agreement).\nLin (1989), Biometrics 45:255-268.',
+        'CCCcv': 'CCCcv (Lin\'s CCC, Cross-Validation)\n\nCCC computed on pooled cross-validation predictions.\nMore reliable than calibration CCC for assessing real-world agreement.',
         'LVs': 'LVs (Latent Variables)\n\nNumber of PLS components used.\nMore LVs = more complex model (risk of overfitting).',
         'Accuracy': 'Accuracy (Classification Accuracy)\n\nProportion of correct predictions.\nRange: 0-1 (higher is better)',
         'Accuracycv': 'Accuracycv (Accuracy Cross-Validation)\n\nAccuracy on held-out folds.',
@@ -27964,6 +27966,7 @@ For detailed documentation, see the User Guide.
         higher_is_better_cols = {
             'R2', 'R2cv', 'R²', 'Accuracy', 'Accuracycv',
             'ROC_AUC', 'F1', 'F1cv', 'ROC_AUCcv', 'RPD', 'RER',
+            'CCC', 'CCCcv',
         }
 
         if shift_held and self.results_sort_keys:
