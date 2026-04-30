@@ -30,7 +30,7 @@ answers:
 |---------------------------------|------------------------------------------|----------------|
 | `fix/T05-vip-formula-fix`       | _pending_                                | _pending_      |
 | `fix/T07-pds-even-window`       | _pending_                                | _pending_      |
-| `fix/T10-pls-components-clamp`  | _pending_                                | _pending_      |
+| `fix/T10-pls-components-clamp`  | [T10_pls_components_clamp.md](T10_pls_components_clamp.md) | APPROVED — real bug (LOO over-clamp), small impact, clean fix, complete coverage |
 | `fix/T24-lins-ccc`              | _pending_                                | _pending_      |
 | `fix/T26-snv-near-zero-std`     | [T26_snv_near_zero_std.md](T26_snv_near_zero_std.md) | DROP / WONT_FIX — current dasp behavior matches PLS_Toolbox default; bundled-app distribution makes a backend-only knob useless |
 
