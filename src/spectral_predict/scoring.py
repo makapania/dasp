@@ -470,7 +470,7 @@ def create_results_dataframe(task_type):
 
     if task_type == "regression":
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
-        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER"]
+        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER", "CCC", "CCCcv"]
     elif task_type == "one_class":
         # One-class detection screening metrics
         metric_cols = [
