@@ -1718,43 +1718,71 @@ def compute_vip(pls_model, X, y):
     """
     Compute Variable Importance in Projection (VIP) scores for a fitted PLS model.
 
+    Uses the canonical formula from Wold et al. (2001), as restated in
+    Mehmood et al. (2012, Eq. 1):
+
+        SSY_a   = q_a**2 * (T_a.T @ T_a)
+        VIP_j   = sqrt( p * sum_a [ SSY_a * (W_{j,a} / ||W_a||)**2 ] / SSY_total )
+
+    where ``W = x_weights_``, ``T = x_scores_``, ``q = y_loadings_[0, :]``
+    (univariate Y; sklearn's ``y_loadings_`` has shape
+    ``(n_targets, n_components)``, so row 0 is the per-component vector),
+    and ``p = n_features``. For multi-output Y, replace ``q_a**2`` with
+    ``np.sum(y_loadings_**2, axis=0)[a]``. The invariant
+    ``mean(VIP**2) == 1`` follows from this definition.
+
     Parameters
     ----------
     pls_model : PLSRegression or PLSTransformer
-        Fitted PLS model
+        Fitted PLS model exposing ``x_weights_``, ``x_scores_``,
+        ``y_loadings_``.
     X : array-like
-        Training data
+        Training data. Currently unused (kept for API compatibility); VIP
+        is fully determined by the fitted model's weights/scores/loadings.
     y : array-like
-        Target values
+        Target values. Currently unused (kept for API compatibility); the
+        per-component Y variance enters via ``y_loadings_``, not ``y``.
 
     Returns
     -------
-    vip_scores : ndarray
-        VIP score for each variable
+    vip_scores : ndarray of shape (n_features,)
+        VIP score for each variable.
+
+    References
+    ----------
+    Wold, S., Sjostrom, M., Eriksson, L. (2001). PLS-regression: a basic
+    tool of chemometrics. *Chemometrics and Intelligent Laboratory
+    Systems*, 58(2), 109-130.
+
+    Mehmood, T., Liland, K. H., Snipen, L., Saebo, S. (2012). A review of
+    variable selection methods in Partial Least Squares Regression.
+    *Chemometrics and Intelligent Laboratory Systems*, 118, 62-69.
     """
-    # Handle PLSTransformer wrapper
     if isinstance(pls_model, PLSTransformer):
         pls_model = pls_model.pls_
 
-    # Get PLS components
-    W = pls_model.x_weights_  # (n_features, n_components)
-    T = pls_model.x_scores_  # (n_samples, n_components)
+    W = np.asarray(pls_model.x_weights_)
+    T = np.asarray(pls_model.x_scores_)
+    Q = np.asarray(pls_model.y_loadings_)
 
-    # Get explained variance by each component
-    # SSY: sum of squares of y explained by each component
-    y = np.asarray(y).reshape(-1, 1)
-    ssy_comp = np.sum(T**2, axis=0) * np.var(y, axis=0)
+    if Q.ndim == 1:
+        q = Q
+    else:
+        q = Q[0, :]
 
-    # Total SSY
-    ssy_total = np.sum(ssy_comp)
-
-    # VIP calculation (vectorized for performance)
     n_features = W.shape[0]
-    n_components = W.shape[1]
 
-    # Vectorized version: same math, but uses broadcasting instead of loop
-    weight = np.sum((W ** 2) * ssy_comp, axis=1)  # Sum over components for each feature
-    vip_scores = np.sqrt(n_features * weight / ssy_total)
+    ssy_comp = (q ** 2) * np.sum(T ** 2, axis=0)
+    ssy_total = float(np.sum(ssy_comp))
+
+    if ssy_total <= 0.0:
+        return np.zeros(n_features, dtype=float)
+
+    col_norm_sq = np.sum(W ** 2, axis=0)
+    col_norm_sq = np.where(col_norm_sq > 0.0, col_norm_sq, 1.0)
+    w_norm_sq = (W ** 2) / col_norm_sq
+
+    vip_scores = np.sqrt(n_features * (w_norm_sq @ ssy_comp) / ssy_total)
 
     return vip_scores
 
