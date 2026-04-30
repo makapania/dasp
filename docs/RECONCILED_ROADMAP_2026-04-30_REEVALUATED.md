@@ -20,6 +20,31 @@
 
 ---
 
+## Validation gate outcomes (2026-04-30 session)
+
+A strict validation gate was applied to every implemented bugfix branch + the four
+re-evaluation flags + T-21 + T-04. The gate verifies (1) reachability in the GUI
+bundled-app, (2) commercial-software / open-source field alignment via documentation
+lookup, (3) regression test sweep. Gate methodology + lessons learned are at
+`docs/bugfix_validation/README.md`.
+
+| Ticket | Gate verdict | Commit / disposition | Validation note |
+|---|---|---|---|
+| T-04 (one-class UVE) | MERGED — GUI grey-out matching iPLS pattern | `6beb5e8` | [T04_one_class_uve.md](bugfix_validation/T04_one_class_uve.md) ([investigation](bugfix_validation/T04_findings.md)) |
+| T-05 (VIP central) | MERGED | `2c068cd` | [T05_vip_formula.md](bugfix_validation/T05_vip_formula.md) |
+| T-05a (VIP duplicates) | MERGED | `1eb6c06` | [T05a_vip_duplicates.md](bugfix_validation/T05a_vip_duplicates.md) |
+| T-07 (PDS even-window) | MERGED | `1b91d93` | [T07_pds_even_window.md](bugfix_validation/T07_pds_even_window.md) |
+| T-10 (PLS clamp LOO) | MERGED | `fbeb50c` | [T10_pls_components_clamp.md](bugfix_validation/T10_pls_components_clamp.md) |
+| T-21 (SG uniformity) | RESOLVED — convert button hidden (eliminates bug surface; function preserved for future resample-on-convert fix) | `a5eef70` | [T21_findings.md](bugfix_validation/T21_findings.md) |
+| T-24 (Lin's CCC) | MERGED — addition with user override on field-alignment soft-flag; GUI plumbing fixed pre-merge | `0087cad` | [T24_lins_ccc.md](bugfix_validation/T24_lins_ccc.md) |
+| T-26 (SNV near-zero std) | DROP / WONT_FIX — current dasp behavior matches PLS_Toolbox default at offset=0; bundled-app distribution makes a backend-only knob useless | n/a | [T26_snv_near_zero_std.md](bugfix_validation/T26_snv_near_zero_std.md) |
+| T-32 (sample_weight mismatch) | DEFERRED to T-19 — current code path is unreachable; bug fires only after T-19's planned scope makes class_weight + resampler combinations possible | n/a | (analyzed inline in 2026-04-30 SESSION_LOG) |
+| `bayesian_utils` random_state hardcoding (re-evaluation flag) | MERGED — refactored to use shared `RANDOM_STATE` constant | `50d5d05` | (analyzed inline in 2026-04-30 SESSION_LOG) |
+| `search.py:2855` top_n_vars hardcoding (re-evaluation flag) | DROPPED — display economy, not a bug. `all_vars` column already preserves the full wavelength list for replication; `top_vars` is a separate display-only truncated list | n/a | (analyzed inline in 2026-04-30 SESSION_LOG) |
+| Worktree cleanup | DONE — 5 stale worktrees removed; branch refs preserved | n/a | (covered in T-05a commit message) |
+
+---
+
 ## P0 — Science integrity
 
 ### T-01: Per-fold variable selection leakage audit
