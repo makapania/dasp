@@ -57,6 +57,28 @@ CROSS_VALIDATION_REGRESSION_TEMPLATE = '''
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.base import clone
 
+def _lins_ccc(y_true, y_pred):
+    """Lin's Concordance Correlation Coefficient (Lin 1989, Biometrics 45(1)).
+
+    Display convention: zero-variance inputs return 0.0 (unequal) or 1.0
+    (equal).  Lin (1989) defines CCC as undefined when variance is zero.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        return float('nan')
+    mean_t = y_true.mean()
+    mean_p = y_pred.mean()
+    var_t = y_true.var()
+    var_p = y_pred.var()
+    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
+    denom = var_t + var_p + (mean_t - mean_p) ** 2
+    if denom == 0.0:
+        return 1.0
+    if var_t == 0.0 or var_p == 0.0:
+        return 0.0
+    return float(2.0 * cov / denom)
+
 # Set up cross-validation
 cv = {cv_constructor}
 
@@ -100,6 +122,7 @@ rmse = float(np.sqrt(mean_squared_error(all_y_true_arr, all_y_pred_arr)))
 r2 = float(r2_score(all_y_true_arr, all_y_pred_arr))
 mae = float(mean_absolute_error(all_y_true_arr, all_y_pred_arr))
 rpd = np.std(y) / rmse
+ccc = _lins_ccc(all_y_true_arr, all_y_pred_arr)
 
 # Also keep y_pred_cv for compatibility with visualization
 y_pred_cv = all_y_pred_arr
@@ -169,6 +192,7 @@ print(f"  RMSE: {{rmse:.4f}} (pooled across folds — matches Model Development)
 print(f"  R²:   {{r2:.4f}} (pooled across folds)")
 print(f"  MAE:  {{mae:.4f}} (pooled across folds)")
 print(f"  RPD:  {{rpd:.2f}}")
+print(f"  CCC:  {{ccc:.4f}} (Lin's Concordance Correlation Coefficient)")
 
 # Per-fold details (for reference only — not used in headline numbers)
 print(f"\\nPer-fold RMSE: {{[f'{{x:.4f}}' for x in fold_rmse]}}")
@@ -200,7 +224,17 @@ FINAL_MODEL_TEMPLATE = '''
 
 # Train the model on all data
 model.fit(X_final, y)
+
+# Calibration metrics (training data)
+y_pred_cal = model.predict(X_final).ravel()
+cal_rmse = np.sqrt(np.mean((y - y_pred_cal) ** 2))
+cal_r2 = 1 - np.sum((y - y_pred_cal) ** 2) / np.sum((y - y.mean()) ** 2)
+cal_ccc = _lins_ccc(y, y_pred_cal)
+
 print(f"\\nFinal model trained on {{X_final.shape[0]}} samples with {{X_final.shape[1]}} features")
+print(f"  Calibration RMSE: {{cal_rmse:.4f}}")
+print(f"  Calibration R²:   {{cal_r2:.4f}}")
+print(f"  Calibration CCC:  {{cal_ccc:.4f}}")
 '''
 
 PREDICTION_TEMPLATE = '''
@@ -526,6 +560,8 @@ def get_metrics_template(task_type: str, cv_folds: int) -> str:
 def get_final_model_template(task_type: str, x_var: str = 'X_final', model_name: str = '') -> str:
     if task_type == 'one_class':
         return FINAL_MODEL_ONE_CLASS_TEMPLATE.format(x_var=x_var, model_name=model_name)
+    if task_type == 'regression':
+        return FINAL_MODEL_TEMPLATE
     return f'''
 # =============================================================================
 # TRAIN FINAL MODEL
@@ -533,7 +569,17 @@ def get_final_model_template(task_type: str, x_var: str = 'X_final', model_name:
 
 # Train the model on all data
 model.fit({x_var}, y)
+
+# Calibration metrics (training data)
+y_pred_cal = model.predict({x_var}).ravel()
+cal_rmse = np.sqrt(np.mean((y - y_pred_cal) ** 2))
+cal_r2 = 1 - np.sum((y - y_pred_cal) ** 2) / np.sum((y - y.mean()) ** 2)
+cal_ccc = _lins_ccc(y, y_pred_cal)
+
 print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with {{{x_var}.shape[1]}} features")
+print(f"  Calibration RMSE: {{cal_rmse:.4f}}")
+print(f"  Calibration R²:   {{cal_r2:.4f}}")
+print(f"  Calibration CCC:  {{cal_ccc:.4f}}")
 '''
 
 
