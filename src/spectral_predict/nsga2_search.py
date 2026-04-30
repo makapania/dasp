@@ -57,7 +57,7 @@ from pymoo.termination import get_termination
 from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
 from .variable_selection import cars_selection
-from .scoring import compute_specificity
+from .scoring import compute_specificity, lins_ccc
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -2799,7 +2799,7 @@ def _compute_nir_metrics(
         Dictionary with NIR metrics: {'MAEcv', 'Bias', 'RPD', 'RER'}
         Values are np.nan if computation failed.
     """
-    default_metrics = {'MAEcv': np.nan, 'Bias': np.nan, 'RPD': np.nan, 'RER': np.nan}
+    default_metrics = {'MAEcv': np.nan, 'Bias': np.nan, 'RPD': np.nan, 'RER': np.nan, 'CCCcv': np.nan}
 
     if task_type != 'regression':
         return default_metrics
@@ -2904,7 +2904,8 @@ def _compute_nir_metrics(
             'MAEcv': float(mae_cv),
             'Bias': bias_cv,
             'RPD': rpd,
-            'RER': rer
+            'RER': rer,
+            'CCCcv': float(lins_ccc(y, y_pred_cv.ravel())),
         }
 
     except Exception:
@@ -3477,6 +3478,7 @@ def _compute_calibration_metrics(
         if task_type == 'regression':
             metrics['RMSE'] = np.sqrt(mean_squared_error(y, y_pred))
             metrics['R2'] = r2_score(y, y_pred)
+            metrics['CCC'] = lins_ccc(y, y_pred.ravel())
         else:
             metrics['Accuracy'] = accuracy_score(y, y_pred)
 
@@ -3650,9 +3652,11 @@ def convert_nsga2_to_v1_format(
                 )
                 row['RMSE'] = cal_metrics.get('RMSE', np.nan)
                 row['R2'] = cal_metrics.get('R2', np.nan)
+                row['CCC'] = cal_metrics.get('CCC', np.nan)
             else:
                 row['RMSE'] = np.nan
                 row['R2'] = np.nan
+                row['CCC'] = np.nan
 
             # Compute CV metrics (cross-validation) with imbalance handling
             if X is not None and y is not None:
@@ -3683,6 +3687,7 @@ def convert_nsga2_to_v1_format(
                 row['Bias'] = nir_metrics['Bias']
                 row['RPD'] = nir_metrics['RPD']
                 row['RER'] = nir_metrics['RER']
+                row['CCCcv'] = nir_metrics['CCCcv']
             else:
                 row['RMSEcv'] = objectives[0]  # Fallback to optimization RMSE
                 row['R2cv'] = None
@@ -3690,6 +3695,7 @@ def convert_nsga2_to_v1_format(
                 row['Bias'] = np.nan
                 row['RPD'] = np.nan
                 row['RER'] = np.nan
+                row['CCCcv'] = np.nan
 
             row['CompositeScore'] = row['RMSEcv']  # Use CV RMSE as composite
         else:
