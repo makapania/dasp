@@ -29,7 +29,7 @@ answers:
 | Branch                          | Validation note                          | Verdict        |
 |---------------------------------|------------------------------------------|----------------|
 | `fix/T05-vip-formula-fix`       | [T05_vip_formula.md](T05_vip_formula.md) ([investigation](T05_findings.md)) | MERGED 2026-04-30 — fast-forward into main at `2c068cd` after rebase + 290 tests pass |
-| `fix/T07-pds-even-window`       | [T07_pds_even_window.md](T07_pds_even_window.md) ([investigation](T07_findings.md)) | APPROVED — real but smaller-class bug (cryptic crash → clear error), universal field consensus on odd-only |
+| `fix/T07-pds-even-window`       | [T07_pds_even_window.md](T07_pds_even_window.md) ([investigation](T07_findings.md)) | MERGED 2026-04-30 — fast-forward into main at `1b91d93` after rebase + 327 tests pass |
 | `fix/T10-pls-components-clamp`  | [T10_pls_components_clamp.md](T10_pls_components_clamp.md) | MERGED 2026-04-30 — fast-forward into main at `fbeb50c` after rebase + 290+ tests pass |
 | `fix/T24-lins-ccc`              | _pending_                                | _pending_      |
 | `fix/T26-snv-near-zero-std`     | [T26_snv_near_zero_std.md](T26_snv_near_zero_std.md) | DROP / WONT_FIX — current dasp behavior matches PLS_Toolbox default; bundled-app distribution makes a backend-only knob useless |
