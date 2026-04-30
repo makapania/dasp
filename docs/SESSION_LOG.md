@@ -4,6 +4,37 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-30 — Full roadmap re-evaluation under chemometrics master rule
+
+**Re-evaluation complete.** All 35 items (32 tickets + T-05a, T-10b, T-31 PENDING + P3 drop list) re-evaluated against chemometrics literature + bone-FTIR application domain.
+
+**Results:** 27 KEEP, 2 REFRAME, 2 DROP, 2 DEFER, 2 NEEDS_USER_DECISION.
+
+**Key findings that contradicted prior agent framing:**
+- **T-02 (ensemble OOF preprocessor) is a FALSE ALARM.** `PreprocessorConfig` at `preprocessing_wrapper.py:15-100` only applies per-spectrum operations (SNV, SG derivatives, wavelength subsetting). No cross-sample statistics. Same false-alarm pattern as T-01 — prior agents assumed the preprocessor learns cross-sample statistics. It doesn't.
+- **T-03 (preprocessing-discovery full-data) is a FALSE ALARM.** The ticket misread the code. Importances do NOT feed into the ranking score at `preprocessing_discovery.py:570-662`; `_quick_evaluate()` uses honest 5-fold `cross_val_score()`. The importance computation is a separate side output. Furthermore, preprocessing choice ranking by CV performance is standard chemometrics practice (The Unscrambler's "Preprocessing Advisor" does exactly this).
+- **T-04 (one-class UVE prefilter) is REAL** — distinct from leakage question. UVE with inlier/outlier y selects wavelengths that distinguish outliers from inliers, the opposite of what one-class screening needs. Centner et al. 1996 UVE uses y for PLS coefficient reliability; for one-class, the relevant y is "stable within inliers," not "distinguishes inliers from outliers."
+- **T-21 (SG uniformity guard) is chemometrics-correct.** Savitzky & Golay 1964 assumes uniform sampling. PLS_Toolbox's `gridcheck` and OpenSpecy's `is_evenly_spaced()` are commercial/academic precedent. The warn-and-proceed design is appropriate.
+- **T-22 should be reframed** as bootstrap stability diagnostic — the right answer to "is this wavelength real chemistry?"
+
+**Worktree disposition:** `varsel_transformer.py` is MERGE_AS_OPTIONAL_TOOL (useful for T-22 stability diagnostic, expert mode, paper reproduction). Plan doc + Codex reviews are DROP. Audit doc is CHERRY_PICK (rename, fix labels).
+
+**New potential tickets found:**
+1. `bayesian_utils.py:261` hardcodes `random_state=42` in varsel calls (lines 442, 455, 469, 488, 502, 520) — ignores user's setting. Correctness issue independent of leakage framing.
+2. `search.py:2855` hardcodes `top_n_vars=30` regardless of actual `n_top` — reporting mismatch.
+
+**Deliverables:**
+- `docs/RECONCILED_ROADMAP_2026-04-30_REEVALUATED.md` — full per-ticket verdicts
+- `docs/varsel_leakage_worktree_disposition_2026-04-30.md` — worktree artifact disposition
+- `docs/PROJECT_STATUS.md` — updated with re-evaluation summary
+
+**User decisions needed before further work:**
+1. T-31 (multi-class SIMCA): confirm "none of the above" output is useful for bone-FTIR/diagenesis science
+2. T-01 reframe scope: confirm external-test-set approach over per-fold varsel
+3. T-22 reframe: confirm bootstrap stability diagnostic investment
+
+---
+
 ## 2026-04-30 — T-01 audit framing reconsidered after literature validation
 
 **The recurring failure mode named.** Multiple sessions of agents working on dasp have flagged "data leakage" findings that turned out to be standard chemometrics workflow. Tonight this happened again at scale: the T-01 audit labeled 49 method × path combinations as LEAKY, a 2900-line implementation plan was written, 4 Codex review cycles were burned, Phase 1 of the refactor (`VarselTransformer` infrastructure) was implemented — all before the user pointed out that varsel-on-full-calibration is the published methodology in Li 2009 (CARS), Centner 1996 (UVE), Araujo 2001 (SPA), Norgaard 2000 (iPLS), Wold 2001 (PLS/VIP).
