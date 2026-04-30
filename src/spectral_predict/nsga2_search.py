@@ -619,20 +619,24 @@ def _compute_wavelength_importance(
             pls = PLSRegression(n_components=n_comp, scale=False)
             pls.fit(X_proc, y)
 
-            # Compute VIP scores
-            W = pls.x_weights_  # (n_features, n_components)
-            T = pls.x_scores_   # (n_samples, n_components)
+            # Compute VIP scores per Wold (2001) canonical formula:
+            # SSY_a = q_a^2 * (T_a' T_a) where q_a is the y-loading for component a
+            W = np.asarray(pls.x_weights_)   # (n_features, n_components)
+            T = np.asarray(pls.x_scores_)    # (n_samples, n_components)
+            Q = np.asarray(pls.y_loadings_)  # sklearn shape: (n_targets, n_components)
+            q = Q if Q.ndim == 1 else Q[0, :]
 
-            y_arr = np.asarray(y).reshape(-1, 1)
-            ssy_comp = np.sum(T**2, axis=0) * np.var(y_arr, axis=0)
-            ssy_total = np.sum(ssy_comp)
+            ssy_comp = (q ** 2) * np.sum(T ** 2, axis=0)
+            ssy_total = float(np.sum(ssy_comp))
 
-            if ssy_total < 1e-10:
-                importance = np.ones(n_wavelengths)
+            if ssy_total <= 0.0:
+                importance = np.zeros(n_wavelengths, dtype=float)
             else:
                 n_features = W.shape[0]
-                weight = np.sum((W ** 2) * ssy_comp, axis=1)
-                importance = np.sqrt(n_features * weight / ssy_total)
+                col_norm_sq = np.sum(W ** 2, axis=0)
+                col_norm_sq = np.where(col_norm_sq > 0.0, col_norm_sq, 1.0)
+                w_norm_sq = (W ** 2) / col_norm_sq
+                importance = np.sqrt(n_features * (w_norm_sq @ ssy_comp) / ssy_total)
 
     except Exception:
         # Fallback to uniform importance if computation fails

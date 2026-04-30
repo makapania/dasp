@@ -71,6 +71,12 @@ DROP. Each correction came from a question I should have asked myself first:
    we shouldn't fix it" if leading programs accept the same behavior at their defaults
    and no real-world dataset has ever triggered it.
 
+## Follow-up tickets
+
+| Branch / Site                                   | Validation note                          | Status         |
+|-------------------------------------------------|------------------------------------------|----------------|
+| T-05a duplicate VIP formulas (templates + nsga2) | [T05a_vip_duplicates.md](T05a_vip_duplicates.md) | MERGED 2026-04-30 — applied same canonical Wold 2001 fix to both sites; 162 regression tests pass |
+
 ## Codex review archive
 
 `codex_reviews/` holds the original per-ticket Codex reviews captured during implementation. These

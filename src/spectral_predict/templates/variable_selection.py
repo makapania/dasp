@@ -46,21 +46,24 @@ def compute_vip(X, y, n_components=None):
     pls = PLSRegression(n_components=n_components)
     pls.fit(X, y)
 
-    W = pls.x_weights_  # (n_features, n_components)
-    T = pls.x_scores_   # (n_samples, n_components)
+    W = np.asarray(pls.x_weights_)   # (n_features, n_components)
+    T = np.asarray(pls.x_scores_)    # (n_samples, n_components)
+    Q = np.asarray(pls.y_loadings_)  # sklearn shape: (n_targets, n_components)
+    q = Q if Q.ndim == 1 else Q[0, :]  # univariate Y: row 0
 
-    # Explained variance per component
-    y_reshaped = y.reshape(-1, 1)
-    ssy_comp = np.sum(T**2, axis=0) * np.var(y_reshaped, axis=0)
-    ssy_total = np.sum(ssy_comp)
+    # Per-component explained Y sum-of-squares: SSY_a = q_a^2 * (T_a' T_a)
+    ssy_comp = (q ** 2) * np.sum(T ** 2, axis=0)
+    ssy_total = float(np.sum(ssy_comp))
 
-    if ssy_total < 1e-10:
-        return np.ones(n_features)
+    if ssy_total <= 0.0:
+        return np.zeros(n_features, dtype=float)
 
-    # VIP calculation
-    weight = np.sum((W ** 2) * ssy_comp, axis=1)
-    vip_scores = np.sqrt(n_features * weight / ssy_total)
+    # ||W_a||^2 normalization (no-op for sklearn unit-norm weights, defensive)
+    col_norm_sq = np.sum(W ** 2, axis=0)
+    col_norm_sq = np.where(col_norm_sq > 0.0, col_norm_sq, 1.0)
+    w_norm_sq = (W ** 2) / col_norm_sq
 
+    vip_scores = np.sqrt(n_features * (w_norm_sq @ ssy_comp) / ssy_total)
     return vip_scores
 
 
