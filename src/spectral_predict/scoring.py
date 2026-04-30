@@ -366,6 +366,79 @@ def compute_specificity(y_true, y_pred, average='macro'):
         return specificities
 
 
+def lins_ccc(y_true, y_pred) -> float:
+    """Compute Lin's Concordance Correlation Coefficient.
+
+    CCC measures agreement between paired observations along the 1:1 line.
+    Unlike Pearson r (which is invariant to scale and bias) or R2 (which
+    can be inflated under bias), CCC penalizes BOTH correlation departures
+    AND systematic shift / scale-change of the predictions away from the
+    identity line. Range: [-1, 1].
+
+    Formula (Lin 1989):
+        CCC = 2 * rho * sigma_x * sigma_y / (sigma_x^2 + sigma_y^2 + (mu_x - mu_y)^2)
+
+    where rho is the Pearson correlation between x = y_true and y = y_pred.
+
+    When one or both inputs have zero variance, this implementation returns
+    0.0 (constant-vs-varying) or 1.0 (both constant equal). This is a
+    DISPLAY CONVENTION for ranking; Lin (1989) defines CCC as undefined
+    when variance is zero.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Observed reference values.
+    y_pred : array-like
+        Predicted values, same length as y_true.
+
+    Returns
+    -------
+    ccc : float
+        Concordance correlation coefficient in [-1, 1].
+        Returns 0.0 when either input has zero variance and the two
+        arrays are not identical (degenerate-but-defined convention).
+        Returns 1.0 when both inputs are equal constants.
+        Returns NaN if either input contains NaN.
+
+    Raises
+    ------
+    ValueError
+        If y_true and y_pred have different lengths.
+
+    References
+    ----------
+    Lin, L. I. (1989). A concordance correlation coefficient to evaluate
+    reproducibility. Biometrics, 45(1), 255-268.
+    """
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+
+    if y_true.shape != y_pred.shape:
+        raise ValueError(
+            f"y_true and y_pred must have the same shape, got "
+            f"{y_true.shape} and {y_pred.shape}"
+        )
+
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        return float("nan")
+
+    mean_true = y_true.mean()
+    mean_pred = y_pred.mean()
+    var_true = y_true.var()
+    var_pred = y_pred.var()
+    cov = np.mean((y_true - mean_true) * (y_pred - mean_pred))
+
+    denominator = var_true + var_pred + (mean_true - mean_pred) ** 2
+
+    if denominator == 0.0:
+        return 1.0
+    if var_true == 0.0 or var_pred == 0.0:
+        return 0.0
+
+    return float(2.0 * cov / denominator)
+
+
 def create_results_dataframe(task_type):
     """
     Create an empty results dataframe with correct columns.
