@@ -150,6 +150,86 @@ def validate_cv_strategy_for_task(
             )
 
 
+def compute_min_train_fold_size(
+    cv_strategy: str,
+    n_samples: int,
+    n_folds: int,
+) -> int:
+    """Exact lower bound on the smallest training-fold size.
+
+    PLS regression requires n_components <= min(n_features, n_samples_train_fold).
+    The grid for ``n_components`` must be clamped using a value that is no greater
+    than the smallest training-fold size any CV split will produce, otherwise
+    sklearn raises silently inside the fold or returns NaN metrics that are
+    swallowed by the search aggregator.
+
+    Strategy semantics
+    ------------------
+    - ``'kfold'``:  train fold size = ``n_samples - ceil(n_samples / n_folds)``.
+      The formula ``n_samples * (n_folds - 1) // n_folds`` used here equals
+      ``n_samples - ceil(n_samples / n_folds)`` for all positive integers and
+      is therefore exact (not merely conservative) for sklearn ``KFold``.
+    - ``'repeated_kfold'``: identical to kfold.  ``RepeatedKFold`` reuses
+      ``KFold`` partitions across repeats; per-fold geometry is the same.
+      ``n_repeats`` does NOT affect train-fold size.
+    - ``'loo'``: train fold size = ``n_samples - 1``.
+
+    Group splitters (``GroupKFold``, ``LeaveOneGroupOut``) are NOT covered
+    here and will raise ``NotImplementedError``; T-15 will plumb group-aware
+    sizing through a separate path.
+
+    Parameters
+    ----------
+    cv_strategy : str
+        One of ``'kfold'``, ``'repeated_kfold'``, ``'loo'``.
+    n_samples : int
+        Total samples in the calibration set.
+    n_folds : int
+        Number of folds.  Ignored when ``cv_strategy == 'loo'``.
+
+    Returns
+    -------
+    int
+        Exact lower bound on the smallest training-fold size, >= 1.
+
+    Raises
+    ------
+    ValueError
+        If ``n_samples < 2`` or ``n_folds < 2`` (kfold/repeated_kfold)
+        or ``n_folds > n_samples`` (kfold/repeated_kfold — invalid geometry
+        that would produce empty training folds).
+    NotImplementedError
+        If ``cv_strategy`` is ``'group_kfold'`` or ``'leave_one_group_out'``
+        (T-15 scope).
+    """
+    if n_samples < 2:
+        raise ValueError(
+            f"PLS clamp requires n_samples >= 2 (got {n_samples})."
+        )
+    if cv_strategy == 'loo':
+        return n_samples - 1
+    if cv_strategy in ('kfold', 'repeated_kfold'):
+        if n_folds < 2:
+            raise ValueError(
+                f"K-fold CV requires n_folds >= 2 (got {n_folds})."
+            )
+        if n_folds > n_samples:
+            raise ValueError(
+                f"Cannot have more folds ({n_folds}) than samples "
+                f"({n_samples}); reduce folds or use LOO."
+            )
+        return max(1, n_samples * (n_folds - 1) // n_folds)
+    if cv_strategy in ('group_kfold', 'leave_one_group_out'):
+        raise NotImplementedError(
+            f"compute_min_train_fold_size: {cv_strategy!r} not supported yet "
+            "(T-15 will add group-aware sizing)."
+        )
+    raise ValueError(
+        f"Unknown cv_strategy: {cv_strategy!r}. "
+        "Expected 'kfold', 'repeated_kfold', or 'loo'."
+    )
+
+
 def estimate_total_cv_fits(
     strategy: str,
     n_folds: int,
