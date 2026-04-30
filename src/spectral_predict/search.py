@@ -1101,12 +1101,19 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         n_classes = len(np.unique(y_np))
         is_binary_classification = n_classes == 2
 
-    # Adjust max_n_components based on CV training fold size
-    # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_in_training_fold)
+    # Adjust max_n_components based on CV training fold size.
+    # T-10: cv_strategy-aware. K-fold/RepeatedKFold use the exact
+    # floor `n_samples * (folds - 1) // folds`. LOO has train-fold size n-1.
+    # Group splitters are not yet supported (T-15 follow-up).
+    # For REGRESSION: PLS requires n_components <= min(n_features, n_samples_train_fold)
     # For CLASSIFICATION: PLS-DA uses PLS as dimensionality reduction before LR classifier,
     #                     so we can be less strict (LR can handle more components than samples)
-    # Use TRAINING fold size (not test fold) since PLS is fit on training data
-    min_train_samples = n_samples * (folds - 1) // folds
+    from .cv_utils import compute_min_train_fold_size
+    min_train_samples = compute_min_train_fold_size(
+        cv_strategy=cv_strategy,
+        n_samples=n_samples,
+        n_folds=folds,
+    )
 
     if task_type == "regression":
         # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
