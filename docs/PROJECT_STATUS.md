@@ -1,14 +1,35 @@
 # Project Status
 
-> **Last updated:** 2026-04-30 (full roadmap re-evaluation under chemometrics master rule) —
+> **Last updated:** 2026-04-30 (validation gate session — bugfix branches resolved) —
+>
+> **Bugfix branch validation gate complete.** Five branches that came out of the T-01 roadmap each went through a strict validation gate (literature check + commercial-software comparison + reachability verification + regression test sweep). Final dispositions:
+>
+> | Branch / Ticket | Disposition | Commit |
+> |---|---|---|
+> | T-26 SNV near-zero std | DROP / WONT_FIX (current dasp behavior matches PLS_Toolbox default at offset=0; bundled-app distribution makes a backend-only knob useless) | n/a |
+> | T-10 PLS components clamp (LOO) | MERGED | `fbeb50c` |
+> | T-05 VIP central formula | MERGED | `2c068cd` |
+> | T-07 PDS even-window | MERGED | `1b91d93` |
+> | T-24 Lin's CCC metric addition | MERGED | `0087cad` |
+> | T-05a duplicate VIP formulas (templates + nsga2) | MERGED | `1eb6c06` |
+> | T-04 one-class UVE prefilter | MERGED (GUI grey-out matching iPLS pattern) | `6beb5e8` |
+> | T-21 SG uniformity guard | PENDING USER DECISION (DROP / DEFER / APPROVE_MINIMAL — radio-button path is safe; only the rarely-used Convert button creates the bug surface) | n/a |
+> | T-32 sample_weight length mismatch | DEFERRED to T-19 (current path is unreachable; bug fires only after T-19's planned scope) | n/a |
+> | `bayesian_utils.py random_state=42` hardcoding | MERGED (refactored to use the shared `RANDOM_STATE` constant) | `50d5d05` |
+> | `search.py:2855 top_n_vars=30` hardcoding | DROPPED (display economy, not a bug — `all_vars` already preserves the full wavelength list for replication) | n/a |
+> | Worktree cleanup (5 stale worktrees) | DONE — branch refs preserved locally | n/a |
+>
+> Per-branch validation notes at `docs/bugfix_validation/`. The gate itself caught two false alarms (T-26 + the two re-evaluation flags) where the underlying claim was real-but-unreachable or really a code-style issue. The recurring pattern: verify reachability + match-the-field BEFORE drafting verdicts. See `docs/bugfix_validation/README.md` "Lessons" section.
+>
+> **One pending user decision:** T-21 disposition. Investigation findings at `docs/bugfix_validation/T21_findings.md` flagged that the plan as written has citation errors (OpenSpecy `is_evenly_spaced()` is fabricated; PLS_Toolbox `gridcheck` is unverified) and a scope gap (~half of SG paths bypass the proposed guard). The user's typical workflow uses the radio-button relabel (which is safe — verified `_on_x_unit_override` does NOT call `convert_x_axis`); only the explicit "Convert" button creates the non-uniform-grid bug surface, and that button is rarely used in routine analysis.
+>
+> **Three pending user decisions still from the re-evaluation:** (1) T-31 multi-class SIMCA — confirm "none of the above" output is useful. (2) T-01 reframe scope — confirm external-test-set approach over per-fold varsel. (3) T-22 reframe — confirm bootstrap stability diagnostic investment.
+
+> **Previously:** 2026-04-30 (full roadmap re-evaluation under chemometrics master rule) —
 >
 > **Roadmap re-evaluation complete.** All 32 tickets + deferred items re-evaluated against chemometrics literature + bone-FTIR application domain. Full results at `docs/RECONCILED_ROADMAP_2026-04-30_REEVALUATED.md`. Summary: **27 KEEP, 2 REFRAME (T-01, T-22), 2 DROP (T-02, T-03), 2 DEFER (T-05a, T-10b), 2 NEEDS_USER_DECISION (T-31).** Key findings: T-02 (ensemble OOF preprocessor) and T-03 (preprocessing-discovery full-data) are false alarms — same pattern as T-01 (sklearn-pipeline-purity misapplied to per-spectrum chemometrics operations). T-04 (one-class UVE prefilter on outlier-contaminated labels) is a REAL issue distinct from the leakage question. T-21 (SG uniformity guard) is chemometrics-correct (Savitzky & Golay 1964 assumes uniform sampling; PLS_Toolbox's `gridcheck` is precedent). T-22 reframed as bootstrap stability diagnostic. Top 5 next actions: T-15 (LOGO), T-16 (bootstrap CIs), T-11 (Optuna SQLite), T-01 reframe (external-test-set workflow), T-19 (loss reweighting).
 >
 > **Worktree disposition:** `fix/varsel-leakage` branch artifacts evaluated. `varsel_transformer.py` → MERGE_AS_OPTIONAL_TOOL (useful for T-22 stability diagnostic, expert mode, paper reproduction). `test_varsel_transformer.py` → MERGE. Audit doc → CHERRY_PICK (rename to VARSEL_ARCHITECTURE_AUDIT.md, fix labels). Plan doc + Codex reviews → DROP. See `docs/varsel_leakage_worktree_disposition_2026-04-30.md`.
->
-> **Potential new tickets found during re-evaluation:** (1) `bayesian_utils.py:261` hardcodes `random_state=42` in varsel calls, ignores user setting. (2) `search.py:2855` hardcodes `top_n_vars=30` regardless of actual `n_top`.
->
-> **User decisions needed:** (1) T-31 multi-class SIMCA — confirm "none of the above" output is useful. (2) T-01 reframe scope — confirm external-test-set approach over per-fold varsel. (3) T-22 reframe — confirm bootstrap stability diagnostic investment.
 
 > **Last updated:** 2026-04-30 (T-01 framing reconsidered + 5 small tickets implemented) —
 >
