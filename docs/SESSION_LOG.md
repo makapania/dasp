@@ -88,6 +88,27 @@ Codex suggestion #3).
 **Group-splitter handling:** `group_kfold` and `leave_one_group_out` raise `NotImplementedError` from the helper. T-15 will route these through a separate group-aware sizing path.
 
 **Empty-DataFrame edge case:** `compute_min_train_fold_size` rejects `n_samples < 2`. Both call sites guard with `if n_samples >= 2` before calling the helper, preserving the existing graceful-empty-return behavior in `run_search`.
+---
+
+## 2026-04-30 — T-05 VIP formula fix
+
+### T-05: VIP formula corrected to canonical Wold (2001)
+Replaced `np.var(y)` per-component weight with canonical
+`q_a**2 * sum(T_a**2)` (Wold 2001, Mehmood et al. 2012 Eq. 1) in
+`src/spectral_predict/models.py:compute_vip`. Old formula collapsed all
+components to the same Y-weighting scalar, skewing VIP rankings whenever
+components had similar X-score energy but different Y-loading. New tests
+in `tests/test_vip_formula.py` lock the formula in. Existing PLS-DA
+importance tests pass unchanged. See `docs/plans/2026-04-29-T05-vip-formula-fix.md`.
+
+### Pre-fix code had no ssy_total guard
+The old `compute_vip()` at `models.py:1738` used `np.var(y, axis=0)` as a scalar weight for all components. It also had no guard for `ssy_total <= 0`, meaning degenerate fits (e.g. zero y_loadings_) would produce NaN from division by zero rather than a clean all-zeros return. The fix adds both the canonical formula and the degenerate-fit guard.
+
+### Deferred: T-05a (duplicate VIP formulas)
+Two additional copies of the buggy formula exist at:
+- `src/spectral_predict/templates/variable_selection.py:54`
+- `src/spectral_predict/nsga2_search.py:627`
+These are out of scope for T-05 and deferred to a follow-up ticket. They continue to produce mis-weighted VIP scores.
 
 ---
 
