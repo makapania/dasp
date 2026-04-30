@@ -1,5 +1,17 @@
 # T-21: Savitzky-Golay Wavelength Uniformity Guard Implementation Plan
 
+> **⚠️ PLAN UNDER REVIEW (2026-04-30) — see [`docs/bugfix_validation/T21_findings.md`](../bugfix_validation/T21_findings.md) before implementing.**
+>
+> An investigation under the chemometrics master rule flagged three issues with this plan as written:
+>
+> 1. **Citation error.** `OpenSpecy.is_evenly_spaced()` does not exist. OpenSpecy actually proactively auto-resamples non-uniform spectra via `conform_spec()` rather than warn. The plan's tolerance defense leans on this fabricated citation.
+> 2. **Citation unverified.** PLS_Toolbox `gridcheck` at 1e-2 tolerance could not be verified in any public Eigenvector documentation. The 1% CV threshold appears to be dasp inventing a precedent rather than citing one.
+> 3. **Scope gap.** The plan claims `wavelengths` is already plumbed at `search.py:612`, but verification shows it isn't. Plus 30+ direct `SavgolDerivative()` instantiations across the GUI / ensemble / GA / interactive paths bypass the guard entirely. As-planned, the guard fires on roughly half the SG paths.
+>
+> Additional reachability finding (2026-04-30 user verification): the GUI's x-unit RADIO BUTTON is relabel-only and does NOT create non-uniform data (verified: `_on_x_unit_override` in `spectral_predict_gui_optimized.py:19007-19029` does not call `convert_x_axis`). Only the explicit "Convert" button (`_convert_x_unit_and_replot:19031+`) introduces non-uniformity, and that button is rarely used in routine analysis. The bug surface is much narrower than this plan assumes.
+>
+> **Pending verdict:** DROP / DEFER / APPROVE_MINIMAL (guard at the convert-button site only, not at every SG path). See `T21_findings.md` for the full analysis. Do not implement this plan as-written without first reading the findings + getting an updated disposition decision.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans.
 
 **Goal:** Guard against silent SG-derivative artefacts when wavelength spacing is non-uniform.

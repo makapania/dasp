@@ -63,7 +63,7 @@ dasp/
 - **Models**: PLS, Ridge, Lasso, ElasticNet, RandomForest, LightGBM, XGBoost, CatBoost, SVM, MLP
 - **One-Class Models**: OneClassSVM, IsolationForest, LOF, EllipticEnvelope, PCA-SIMCA (contamination detection / membership screening)
 - **Preprocessing**: SNV, Savitzky-Golay derivatives (1st, 2nd), baseline correction
-- **Variable Selection**: UVE, SPA, iPLS, CARS, GA-PLS (note: only 'importance' works for one-class)
+- **Variable Selection**: UVE, SPA, iPLS, CARS, GA-PLS (one-class mode disables iPLS family + UVE family per T-04 — UVE-on-y_oc is a discrimination method, not a one-class method per Pomerantsev et al. 2025 LOVE)
 - **Calibration Transfer**: Direct Standardization (DS), Piecewise DS (PDS)
 - **File Formats**: CSV, Excel, ASD, OPUS, SPC, JCAMP-DX, PerkinElmer
 
