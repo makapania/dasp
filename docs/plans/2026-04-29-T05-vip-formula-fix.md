@@ -28,7 +28,9 @@ This multiplies the sum of squared X-scores for each component by a single scala
 
 The correct definition (Wold, 2001; Mehmood et al., 2012) is:
 
-> Let `T` be the X-scores `(n_samples, A)`, `q` be the y-loadings `(A,)` (or `y_loadings_[:, 0]` for univariate Y in scikit-learn's `PLSRegression`), and `W` be the X-weights `(p, A)`.
+> Let `T` be the X-scores `(n_samples, A)`, `q` be the y-loadings `(A,)` (or `y_loadings_[0, :]` for univariate Y in scikit-learn's `PLSRegression`), and `W` be the X-weights `(p, A)`.
+
+> **sklearn shape note:** for univariate Y, `pls.y_loadings_` has shape `(1, n_components)` — i.e. `(n_targets, n_components)` — so the per-component vector is **row 0**: `y_loadings_[0, :]`. Selecting the first column instead (`[:, 0]` style indexing) would extract the *first component's* loadings across all targets (a scalar for univariate Y), which is **not** what we want. For multi-output Y in the future, the canonical generalization replaces `q_a**2` with `np.sum(y_loadings_**2, axis=0)[a]` (sum of squared loadings across Y columns).
 >
 > The Y variance explained by component `a` is:
 >
@@ -49,10 +51,14 @@ Notes:
 
 VIP is exposed in the GUI's wavelength-importance ranking (`get_feature_importances` -> `compute_vip` for `model_name in ("PLS","PLS-DA")`) and feeds the `importance` variable-selection method. A skewed VIP shifts which wavelengths get selected, which propagates through the entire model search. Roadmap effort estimate: **30 min**.
 
+### Test-fixture validation (independent)
+
+Codex independently ran the synthetic two-factor fixture defined in Task 1 and confirmed `max_abs_diff = 1.3869` between the old (buggy) and new (canonical) VIP outputs across the 20 variables. That is well above the `1e-3` discrimination threshold the test asserts on, so the regression test reliably distinguishes the two formulas.
+
 ### References
 
-- Wold, S., Sjöström, M., Eriksson, L. (2001). "PLS-regression: a basic tool of chemometrics." *Chemometrics and Intelligent Laboratory Systems*, **58**(2), 109–130. https://doi.org/10.1016/S0169-7439(01)00155-1
-- Mehmood, T., Liland, K. H., Snipen, L., Sæbø, S. (2012). "A review of variable selection methods in Partial Least Squares Regression." *Chemometrics and Intelligent Laboratory Systems*, **118**, 62–69. https://doi.org/10.1016/j.chemolab.2012.07.010 — see Eq. (1) for the VIP formula stated above.
+- Wold, S., Sjostrom, M., Eriksson, L. (2001). "PLS-regression: a basic tool of chemometrics." *Chemometrics and Intelligent Laboratory Systems*, **58**(2), 109-130. https://doi.org/10.1016/S0169-7439(01)00155-1
+- Mehmood, T., Liland, K. H., Snipen, L., Saebo, S. (2012). "A review of variable selection methods in Partial Least Squares Regression." *Chemometrics and Intelligent Laboratory Systems*, **118**, 62-69. https://doi.org/10.1016/j.chemolab.2012.07.010 — see Eq. (1) for the VIP formula stated above.
 
 ---
 
@@ -63,7 +69,24 @@ VIP is exposed in the GUI's wavelength-importance ranking (`get_feature_importan
 | `tests/test_vip_formula.py` | **NEW** — parametrized regression test exercising old vs new formula |
 | `src/spectral_predict/models.py` | Modify `compute_vip()` body only (lines ~1709-1751); function signature and docstring unchanged except a small docstring update citing Wold (2001) |
 
-No other files require changes. `get_feature_importances` calls `compute_vip` with the same signature; the fix is internal.
+`get_feature_importances` calls `compute_vip` with the same signature; the fix is internal there. **However,** the same buggy VIP formula is duplicated in two other locations (see "Out of scope (deferred to T-05a)" below) which this plan does **not** touch. Those sites continue to produce mis-weighted VIP scores until T-05a lands.
+
+### Out of scope (deferred to T-05a)
+
+Codex's review surfaced two additional copies of the same buggy formula (`np.sum(T**2, axis=0) * np.var(y, axis=0)`) that are **not** in scope for T-05:
+
+| File | Line | Consumer | Impact while unfixed |
+|---|---|---|---|
+| `src/spectral_predict/templates/variable_selection.py` | 54 | Exported standalone-script template for the `importance` variable-selection method | Any user who exports a script and runs it outside the GUI gets wrong VIP rankings |
+| `src/spectral_predict/nsga2_search.py` | 627 | NSGA-II PLS importance computation inside the multi-objective genetic search | NSGA-II's PLS importance signal is mis-weighted, biasing wavelength selection during multi-objective search |
+
+**Why deferred, not extended:** the original 30-min budget assumed a single-site fix plus a regression test. Extending to two more sites is mechanically simple (same one-line edit), but each site has its own degenerate-fit fallback (`np.ones(n_features)` vs `np.zeros`) and would expand the test surface meaningfully (need fixtures for `templates/` exported-script behavior and for `nsga2_search`'s PLS branch). Cleaner to land T-05 first, then sweep both call sites in **T-05a** with a shared helper or copy-paste of the corrected block, plus tests covering each call site.
+
+**T-05a follow-up:**
+- Apply the same `q_a**2 * sum(T_a**2)` correction at `templates/variable_selection.py:54` and `nsga2_search.py:627`.
+- Decide whether to extract a shared `_compute_vip_from_pls(pls)` helper (preferred — single source of truth) or duplicate the corrected block.
+- Add per-site regression tests (or extend `tests/test_vip_formula.py` to cover all three call sites via parametrization).
+- File a roadmap ticket entry referencing this plan as the predecessor.
 
 ---
 
@@ -120,11 +143,18 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
 
   This test:
     1. Builds a small synthetic PLS regression problem where the OLD and NEW
-       formulas disagree by > 1e-3 on at least one variable (proves the test
-       is sensitive to the bug).
-    2. Compares compute_vip() output to an independent reference
-       implementation of the canonical formula.
-    3. Verifies the canonical invariant: sum(VIP**2) / p ~= 1.
+       formulas disagree by > 1e-3 on at least one variable (proves the
+       fixture is sensitive to the formula difference). Codex independently
+       confirmed max_abs_diff ~= 1.39 on this fixture.
+    2. [DISCRIMINATING] Compares compute_vip() output to an independent
+       reference implementation of the canonical formula.
+    3. [DISCRIMINATING] Asserts compute_vip() does NOT match the old buggy
+       formula (catches the unfixed state).
+    4. [SANITY] Verifies the canonical invariant: sum(VIP**2) / p ~= 1.
+       NOTE: this invariant holds for BOTH the old and new formulas because
+       sklearn's x_weights_ columns are unit-norm, so it cannot distinguish
+       the bug from the fix. It is a guard against future regressions that
+       break weight normalization, not a bug discriminator.
   """
 
   from __future__ import annotations
@@ -255,20 +285,69 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
           assert vip.shape == (pls.x_weights_.shape[0],)
           assert np.all(vip >= 0)
           assert np.all(np.isfinite(vip))
+
+
+  class TestVIPEdgeCases:
+      """Edge-case coverage requested by Codex review."""
+
+      def test_compute_vip_n_components_1(self):
+          """Single-component PLS: old and new formulas collapse to the same
+          ranking (only one component, no per-component disagreement
+          possible). Test that output is finite and shape-correct."""
+          rng = np.random.default_rng(1)
+          X = rng.standard_normal((40, 12))
+          y = X[:, 0] + 0.1 * rng.standard_normal(40)
+          pls = PLSRegression(n_components=1, scale=False)
+          pls.fit(X, y)
+
+          vip = compute_vip(pls, X, y)
+          assert vip.shape == (12,)
+          assert np.all(np.isfinite(vip))
+          assert np.all(vip >= 0)
+          # With A=1, mean(VIP**2) == 1 still holds.
+          assert float(np.sum(vip ** 2) / 12) == pytest.approx(1.0, rel=1e-6, abs=1e-8)
+
+      def test_compute_vip_zero_y_loadings_returns_zeros(self):
+          """When y_loadings_ is all zeros, the new formula's SSY_total is 0.
+          Contract: compute_vip() returns an all-zeros array of shape
+          (n_features,), matching the existing degenerate-fit guard
+          (`if ssy_total <= 0.0: return np.zeros(n_features)`).
+
+          We construct this by fitting on real data, then monkey-patching
+          y_loadings_ to zero to force the degenerate path without faking
+          a whole PLS object.
+          """
+          rng = np.random.default_rng(2)
+          X = rng.standard_normal((30, 8))
+          y = rng.standard_normal(30)
+          pls = PLSRegression(n_components=2, scale=False)
+          pls.fit(X, y)
+          # Force degenerate y_loadings_
+          pls.y_loadings_ = np.zeros_like(pls.y_loadings_)
+
+          vip = compute_vip(pls, X, y)
+          assert vip.shape == (8,)
+          assert np.all(vip == 0.0)
   ```
+
+  > **Design choice for zero-`y_loadings_` behavior:** the canonical formula divides by `SSY_total`, which becomes zero when `y_loadings_` is all zeros. The three options are (a) raise `ValueError`, (b) return all-zeros, (c) return uniform output. **We pick (b) all-zeros** to match the existing pattern in `compute_vip` (which already short-circuits on `ssy_total <= 0`) and to avoid breaking call sites that don't expect exceptions from a numerical helper. This is documented in the implementation guard at Step 2.1 (`if ssy_total <= 0.0: return np.zeros(n_features, dtype=float)`).
 
 - [ ] **Step 1.2:** Run the test against the **current (buggy)** implementation. Confirm the failures we expect.
   ```bash
   pytest tests/test_vip_formula.py -v
   ```
   Expected outcome:
-  - `test_old_and_new_formulas_disagree_on_this_problem` — **PASS** (old vs new differ; this is a fixture sanity check, independent of `compute_vip`).
-  - `test_compute_vip_matches_canonical_reference` — **FAIL** with an `AssertionError: Not equal to tolerance ...` message because `compute_vip` returns the buggy result.
-  - `test_compute_vip_does_not_match_old_buggy_formula` — **FAIL** with `compute_vip() still matches the old (buggy) formula — fix not applied.`.
-  - `test_canonical_invariant_average_squared_vip_is_one` — **FAIL** (the buggy formula does not satisfy this invariant).
-  - `test_output_shape_and_nonnegativity` — **PASS** (shape and non-negativity are unaffected by the bug).
-  
-  Net: **3 failed, 2 passed**. If you see anything else (e.g. import error), fix that first before continuing.
+  - `test_old_and_new_formulas_disagree_on_this_problem` — **PASS** [DISCRIMINATING] — fixture sanity check, independent of `compute_vip`. Codex independently ran the fixture and confirmed `max_abs_diff = 1.3869` between old and new formulas — well above the `1e-3` threshold, so the test really does discriminate.
+  - `test_compute_vip_matches_canonical_reference` — **FAIL** [DISCRIMINATING] — the principal regression test. Fails with `AssertionError: Not equal to tolerance ...` because `compute_vip` returns the buggy result.
+  - `test_compute_vip_does_not_match_old_buggy_formula` — **FAIL** [DISCRIMINATING] — fails with `compute_vip() still matches the old (buggy) formula — fix not applied.`.
+  - `test_canonical_invariant_average_squared_vip_is_one` — **PASS** [SANITY] — see note below; this invariant is satisfied by *both* formulas, so it cannot distinguish the bug. It guards against future regressions that break the textbook identity.
+  - `test_output_shape_and_nonnegativity` — **PASS** [SANITY] — shape and non-negativity are unaffected by the bug.
+
+  Net (`TestVIPCanonicalFormula` only): **2 failed, 3 passed**. The two `TestVIPEdgeCases` tests are independent of the bug — both should PASS pre-fix and post-fix, since neither single-component PLS nor zero-`y_loadings_` distinguishes the formulas (the new formula's `ssy_total <= 0` guard does not yet exist pre-fix; pre-fix the zero-`y_loadings_` test will FAIL because the old formula uses `np.var(y) > 0` and returns a nonzero VIP). Pre-fix expected count across both classes: **3 failed, 4 passed** (`test_compute_vip_zero_y_loadings_returns_zeros` joins the failing set because the old formula does not zero-out on degenerate `y_loadings_`).
+
+  > **Why isn't the invariant a discriminator?** The average-squared-VIP identity `sum(VIP**2) / p == 1` holds for **both** the old and new formulas because sklearn's `x_weights_` columns are unit-norm: under that condition, the algebra of `sum_j VIP_j**2` simplifies to `p * (sum_a SSY_a) / SSY_total = p`, regardless of how `SSY_a` is defined per component. The only assumption it tests is that `||W_a|| == 1`. So this test is a **sanity guard** (catches future weight-normalization regressions), not a **bug discriminator** (does not separate the canonical from the buggy formula). The discriminating tests are the two reference-comparison assertions above.
+
+  If you see anything else (e.g. import error, or different pass/fail counts), fix that first before continuing.
 
 - [ ] **Step 1.3:** Commit the failing test.
   ```bash
@@ -347,8 +426,11 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
           SSY_a   = q_a**2 * (T_a.T @ T_a)
           VIP_j   = sqrt( p * sum_a [ SSY_a * (W_{j,a} / ||W_a||)**2 ] / SSY_total )
 
-      where ``W = x_weights_``, ``T = x_scores_``, ``q = y_loadings_[:, 0]``
-      (univariate Y), and ``p = n_features``. The invariant
+      where ``W = x_weights_``, ``T = x_scores_``, ``q = y_loadings_[0, :]``
+      (univariate Y; sklearn's ``y_loadings_`` has shape
+      ``(n_targets, n_components)``, so row 0 is the per-component vector),
+      and ``p = n_features``. For multi-output Y, replace ``q_a**2`` with
+      ``np.sum(y_loadings_**2, axis=0)[a]``. The invariant
       ``mean(VIP**2) == 1`` follows from this definition.
 
       Parameters
@@ -370,11 +452,11 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
 
       References
       ----------
-      Wold, S., Sjöström, M., Eriksson, L. (2001). PLS-regression: a basic
+      Wold, S., Sjostrom, M., Eriksson, L. (2001). PLS-regression: a basic
       tool of chemometrics. *Chemometrics and Intelligent Laboratory
       Systems*, 58(2), 109-130.
 
-      Mehmood, T., Liland, K. H., Snipen, L., Sæbø, S. (2012). A review of
+      Mehmood, T., Liland, K. H., Snipen, L., Saebo, S. (2012). A review of
       variable selection methods in Partial Least Squares Regression.
       *Chemometrics and Intelligent Laboratory Systems*, 118, 62-69.
       """
@@ -422,16 +504,20 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
   ```
   Expected: `ok`. Any `ImportError`/`SyntaxError` means the edit landed wrong — re-read the function and fix.
 
-- [ ] **Step 2.3:** Run the new VIP test file. All five tests should pass.
+- [ ] **Step 2.3:** Run the new VIP test file. All seven tests should pass.
   ```bash
   pytest tests/test_vip_formula.py -v
   ```
-  Expected: **5 passed**. Specifically:
+  Expected: **7 passed**. Specifically, in `TestVIPCanonicalFormula`:
   - `test_old_and_new_formulas_disagree_on_this_problem` — PASS
   - `test_compute_vip_matches_canonical_reference` — PASS
   - `test_compute_vip_does_not_match_old_buggy_formula` — PASS
   - `test_canonical_invariant_average_squared_vip_is_one` — PASS
   - `test_output_shape_and_nonnegativity` — PASS
+
+  And in `TestVIPEdgeCases`:
+  - `test_compute_vip_n_components_1` — PASS
+  - `test_compute_vip_zero_y_loadings_returns_zeros` — PASS
 
 - [ ] **Step 2.4:** Run the existing PLS-DA importance tests to confirm no collateral damage. Those tests assert that `get_feature_importances` for a PLS-DA pipeline matches `compute_vip` on the underlying PLS step — both sides change together, so they should still pass.
   ```bash
@@ -480,7 +566,13 @@ No other files require changes. `get_feature_importances` calls `compute_vip` wi
   ```bash
   pytest tests/test_plsda_importance.py tests/test_vip_formula.py -v
   ```
-  Expected: **10 passed** (5 + 5).
+  Expected: **12 passed** (5 PLS-DA + 7 VIP).
+
+- [ ] **Step 3.2b:** Run `tests/test_preprocessing_discovery.py` because `compute_importance(..., method="vip")` calls `compute_vip` indirectly through that module. Any test that asserts on VIP-derived importance values or rankings could regress.
+  ```bash
+  pytest tests/test_preprocessing_discovery.py -v
+  ```
+  Expected: all currently-passing tests still pass. If a test pinned magnitude values from the old formula, update those to the canonical values (do not revert the implementation) and document the update in the Step 3.3 commit.
 
 - [ ] **Step 3.3:** If Step 3.1 surfaced any test that needed updating, commit those updates separately:
   ```bash
