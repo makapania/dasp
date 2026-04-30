@@ -1,11 +1,42 @@
 # T-26 validation: SNV near-zero std tolerance threshold
 
 **Branch:** `fix/T26-snv-near-zero-std` (HEAD `1fd9d2c`)
-**Status:** REJECT_AS_IS — the underlying concern is real but the fix design does not match
-how leading commercial chemometrics software handles this case
+**Status:** DROP / WONT_FIX
 **Author:** Opus 4.7, 2026-04-30
-**Verdict:** REJECT for merge in current form. Recommend rescope to match PLS_Toolbox /
-SIMCA design pattern.
+**Verdict:** Do not merge. Do not rescope. Close the ticket without code change. dasp's
+current behavior already matches PLS_Toolbox's default behavior, the user has run
+thousands of analyses without ever hitting the corner case, and dasp ships as a bundled
+GUI app — adding a parameter only reachable from the Python REPL would deliver zero value
+to the actual user base, while adding a GUI knob would clutter the UI for a knob nobody
+has ever needed (and that even PLS_Toolbox users rarely touch).
+
+---
+
+## Final disposition
+
+This validation went through three verdicts before settling:
+
+1. **APPROVED** (initial draft) — based on "universal numerical-computing practice" of
+   flooring near-zero divisors. **Wrong.** Generic ML/scipy instinct, not chemometrics.
+2. **REJECT_AS_IS** (after user pushback) — verified that PLS_Toolbox / SIMCA use a
+   continuous additive `offset` parameter, not a hardcoded threshold. T-26's design
+   pattern doesn't appear in any leading program. Recommended rescope to match PLS_Toolbox.
+3. **DROP / WONT_FIX** (after user pointed out distribution model) — dasp ships as a
+   bundled Inno Setup desktop app to non-technical users. There is no Python REPL.
+   "Power users can set `SNV(offset=1e-4)` programmatically" describes nobody in the
+   actual user base. The only meaningful change would be a GUI knob (Option 2 in the
+   rescope analysis), which costs 1–2 hours of plumbing for a parameter that's never
+   been needed.
+
+The chemometrics master rule was satisfied without code change: dasp main's behavior at
+near-zero std (divide by tiny std → unit-normalized noise) is identical to PLS_Toolbox's
+behavior at default `offset = 0`. Both rely on the user to know if their data has flat
+spectra and to act accordingly. Both produce questionable output if the user doesn't.
+Both default to "trust the user."
+
+The branch ref `fix/T26-snv-near-zero-std` is preserved locally for history (commits
+`1fd9d2c`, `81fdc26`, `58b9342`) but should not be merged. The worktree
+`.worktrees/T26-snv-near-zero-std` can be removed at the user's discretion.
 
 ---
 

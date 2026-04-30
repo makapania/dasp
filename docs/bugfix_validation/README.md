@@ -32,21 +32,44 @@ answers:
 | `fix/T07-pds-even-window`       | _pending_                                | _pending_      |
 | `fix/T10-pls-components-clamp`  | _pending_                                | _pending_      |
 | `fix/T24-lins-ccc`              | _pending_                                | _pending_      |
-| `fix/T26-snv-near-zero-std`     | [T26_snv_near_zero_std.md](T26_snv_near_zero_std.md) | REJECT_AS_IS — design does not match PLS_Toolbox `offset` parameter convention |
+| `fix/T26-snv-near-zero-std`     | [T26_snv_near_zero_std.md](T26_snv_near_zero_std.md) | DROP / WONT_FIX — current dasp behavior matches PLS_Toolbox default; bundled-app distribution makes a backend-only knob useless |
 
-## Lesson from T-26
+## Lessons from T-26
 
-The first-pass T-26 validation note approved the fix by appealing to "universal numerical-
-computing practice" (scipy/numpy/sklearn-style flooring of near-zero divisors). The user
-pushed back: "make sure that is not the way leading programs do it though." Web research
-into Eigenvector PLS_Toolbox / SIMCA / R chemometrics packages then established that
-leading programs use a **continuous user-controlled `offset` parameter**, not a hardcoded
-threshold. T-26 invented its own design pattern that does not match the field.
+The T-26 validation went through three verdicts before settling: APPROVED → REJECT_AS_IS →
+DROP. Each correction came from a question I should have asked myself first:
 
-**Validation rule:** verify leading-program behavior — actual documentation lookup, not
-plausible-sounding inference — *before* drafting the verdict. Section 4 of the note
-template ("Commercial-software sanity check") must cite specific documentation pages, not
-generic claims.
+1. **APPROVED → REJECT_AS_IS.** Initial verdict appealed to "universal numerical-computing
+   practice" (scipy/numpy/sklearn pattern of flooring near-zero divisors). Wrong frame —
+   generic ML/scientific-computing instinct, not chemometrics. After the user pushed back,
+   actual documentation lookup showed PLS_Toolbox / SIMCA use a continuous user-controlled
+   `offset` parameter, not a hardcoded threshold. dasp would have been inventing its own
+   pattern.
+
+2. **REJECT_AS_IS → DROP.** Second verdict recommended rescoping to match PLS_Toolbox's
+   `offset` parameter. The user pointed out that dasp ships as a bundled Inno Setup
+   desktop app — there is no Python REPL, and "power users can set the parameter
+   programmatically" describes nobody in the user base. Adding a backend-only parameter
+   would deliver zero value; adding a GUI knob is 1–2 hours of plumbing for a corner
+   case the user has never hit in thousands of analyses.
+
+**Validation rules learned:**
+
+1. **Verify leading-program behavior with actual documentation lookup before drafting the
+   verdict.** Section 4 of the note template ("Commercial-software sanity check") must
+   cite specific documentation pages, not generic claims like "universal numerical
+   practice."
+2. **Distribution model matters.** dasp is a bundled GUI app for non-technical users in
+   bone FTIR / paleoanthropology / archaeology / isotope work. A "fix" that's only
+   reachable from the Python API is not a fix — it's dead code. Validate that the proposed
+   change actually delivers value to the GUI user base before recommending merge.
+3. **Match-the-field cuts both ways.** The chemometrics master rule says don't invent
+   patterns the field doesn't use. It also implies: if the field's *default* behavior is
+   already what dasp does, the field-alignment gap may already be zero.
+4. **A real finding can warrant zero action.** The original T-26 ticket described a real
+   numerical behavior. The validation gate is allowed to conclude "yes this happens, no
+   we shouldn't fix it" if leading programs accept the same behavior at their defaults
+   and no real-world dataset has ever triggered it.
 
 ## Codex review archive
 
