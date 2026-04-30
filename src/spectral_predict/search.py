@@ -67,7 +67,7 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
-from .scoring import create_results_dataframe, add_result, compute_specificity
+from .scoring import create_results_dataframe, add_result, compute_specificity, lins_ccc
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
     spa_selection, uve_selection, uve_spa_selection,
@@ -4376,6 +4376,7 @@ def _run_single_config(
         mae_cv = mean_absolute_error(all_y_test, all_y_pred)
         # Bias: Mean prediction error (positive = systematic overprediction)
         bias_cv = float(np.mean(all_y_pred - all_y_test))
+        ccc_cv = lins_ccc(all_y_test, all_y_pred)
         # RPD: Ratio of Performance to Deviation (std(y) / RMSEcv)
         # Industry standard for NIR model fitness assessment
         # RPD < 1.5: Poor, 1.5-2: Screening only, 2-3: Acceptable, > 3: Good
@@ -4497,6 +4498,7 @@ def _run_single_config(
     # Also compute calibration metrics on training data
     cal_rmse = None
     cal_r2 = None
+    cal_ccc = None
     cal_acc = None
     cal_auc = None
     cal_f1 = None
@@ -4534,6 +4536,7 @@ def _run_single_config(
         if task_type == "regression":
             cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
             cal_r2 = r2_score(y, y_pred_cal)
+            cal_ccc = lins_ccc(y, y_pred_cal)
         else:
             # Classification metrics
             cal_acc = accuracy_score(y, y_pred_cal)
@@ -4755,9 +4758,11 @@ def _run_single_config(
         # Calibration metrics (training data)
         result["RMSE"] = cal_rmse if cal_rmse is not None else np.nan
         result["R2"] = cal_r2 if cal_r2 is not None else np.nan
-        # Cross-validation metrics (test fold averages)
+        result["CCC"] = cal_ccc if cal_ccc is not None else np.nan
+        # Cross-validation metrics (pooled across folds)
         result["RMSEcv"] = mean_rmse
         result["R2cv"] = mean_r2
+        result["CCCcv"] = ccc_cv
         # NIR-specific metrics (computed from aggregated CV predictions)
         result["MAEcv"] = mae_cv
         result["RPD"] = rpd
