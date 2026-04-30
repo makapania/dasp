@@ -24,6 +24,7 @@ from optuna.pruners import MedianPruner, SuccessiveHalvingPruner, PercentilePrun
 import numpy as np
 from typing import Dict, Any, Optional, Callable
 import logging
+from .constants import RANDOM_STATE
 from .regions import create_region_subsets
 
 
@@ -439,7 +440,7 @@ def create_objective_function(
                                 # SPA: Successive Projections Algorithm
                                 n_to_select = min(max(valid_variable_counts), n_features_available)
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 spa_n_random_starts = 10  # Use default
                                 importances = spa_selection(
                                     X, y,
@@ -452,7 +453,7 @@ def create_objective_function(
                             elif varsel_method == 'uve':
                                 # UVE: Uninformative Variable Elimination
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 uve_cutoff_multiplier = 1.0  # Use default
                                 uve_n_components = 5  # Use default
                                 importances = uve_selection(
@@ -467,7 +468,7 @@ def create_objective_function(
                                 # UVE-SPA: Hybrid method
                                 n_to_select = min(max(valid_variable_counts), n_features_available)
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 uve_cutoff_multiplier = 1.0  # Use default
                                 uve_n_components = 5  # Use default
                                 spa_n_random_starts = 10  # Use default
@@ -485,7 +486,7 @@ def create_objective_function(
                             elif varsel_method == 'ipls':
                                 # iPLS: Interval PLS
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 ipls_n_intervals = 20  # Use default
                                 uve_n_components = 5  # Use default
                                 importances = ipls_selection(
@@ -500,7 +501,7 @@ def create_objective_function(
                                 # CARS: Competitive Adaptive Reweighted Sampling
                                 # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 uve_n_components = 5  # Use default
                                 model_type_for_cars = model_name if varsel_method == 'cars-aware' else None
                                 if model_type_for_cars:
@@ -518,7 +519,7 @@ def create_objective_function(
                             elif varsel_method == 'vcpa-iriv':
                                 # VCPA-IRIV: Variable Combination Population Analysis
                                 folds = filtered_kwargs.get('folds', 5)
-                                random_state = 42  # Use fixed random state
+                                random_state = RANDOM_STATE
                                 uve_n_components = 5  # Use default
                                 print(f"    -> Running VCPA-IRIV (n_outer=10, n_inner=50)")
                                 result = vcpa_iriv(
