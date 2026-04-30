@@ -1,10 +1,32 @@
 # Reconciled Roadmap — 2026-04-29
 
+> ## ⚠ ROADMAP NEEDS RE-EVALUATION 2026-04-30 — READ BEFORE TOUCHING ANY TICKET
+>
+> Several tickets in this roadmap (T-01, T-02, T-03 — and possibly others) were written under a framing that imported sklearn-pipeline-purity convention into a chemometrics codebase where it does not apply. The user (a paleoanthropologist with deep chemometrics expertise) and two independent literature-validation passes (Codex + GLM 5.1) confirmed that several "leakage" findings are actually descriptions of the standard chemometrics workflow.
+>
+> **Master rule (now memory-pinned):** every methodology decision in dasp must be validated against chemometrics literature + the applied domain (bone FTIR / isotopes / paleoanthropology), NOT against sklearn / generic ML / genomics ML conventions. When literatures conflict, chemometrics wins.
+>
+> **Specific reconsiderations as of 2026-04-30:**
+> - **T-01 (per-fold varsel leakage audit)** — reconsidered. The audit's body is a technically-correct description of where varsel runs, but the "LEAKY" labels misframe the standard chemometrics workflow. dasp's varsel-on-full-calibration matches Li 2009 (CARS), Centner 1996 (UVE), Araujo 2001 (SPA), Norgaard 2000 (iPLS), Wold 2001 (PLS/VIP) exactly. Furthermore, per-fold varsel actively defeats the scientific purpose of these methods — stable wavelength selection across resamples is *evidence the chemistry is real*; per-fold instability destroys interpretability. See `docs/T01_VARSEL_LEAKAGE_AUDIT.md` banner + `docs/analysis_vs_chemometrics_lit/`.
+> - **T-02 (ensemble OOF preprocessor leakage)** — possibly the same false alarm as T-01. Needs re-evaluation under master rule before any work.
+> - **T-03 (preprocessing-discovery full-data leakage)** — possibly the same false alarm. Needs re-evaluation.
+> - **T-04 (one-class UVE prefilter on outlier-contaminated labels)** — distinct issue (the *labels* may be wrong, separate from the where-CV-runs question). Likely real but needs verification against one-class chemometrics literature (PCA-SIMCA, OneClassSVM in spectroscopy).
+> - **T-21 (SG wavelength uniformity guard)** — plan exists but not implemented. Needs literature check before implementation: do canonical chemometrics SG implementations check uniform spacing, or is the user assumed to provide it?
+> - **T-22 (multi-source consensus wavenumber selection)** — closer to "the right diagnostic for finding real chemistry" than the per-fold-varsel framing implied. Should be reframed under the new lens.
+>
+> **Status of varsel-leakage refactor work in flight:** Phase 1 of the `fix/varsel-leakage` plan was implemented (additive `VarselTransformer` infrastructure, branch `fix/varsel-leakage`, HEAD `ac4aae1`). It should NOT be merged. Phases 2–7 paused indefinitely.
+>
+> **5 implemented branches that came out of T-05 / T-07 / T-10 / T-24 / T-26 are unaffected** — they are real bugs verified independently. Ready to merge.
+>
+> **Action required before resuming any roadmap work:** dispatch a fresh re-evaluation agent. The full re-evaluation prompt is at `docs/plans/2026-04-30-roadmap-reevaluation-prompt.md`. Output expected at `docs/RECONCILED_ROADMAP_2026-04-30_REEVALUATED.md`.
+>
+> ---
+
 > **Source material:** `docs/analysis_vs_ftir_bone_pls/GAP_ANALYSIS.md` + six docs in `docs/analysis_vs_unscrambler/`.
 >
-> **Reviewers:** Claude (project read + code spot-checks), Codex (independent), DeepSeek V4 Pro (fresh eyes, briefed on chemometrics conventions and prior conclusions).
+> **Reviewers:** Claude (project read + code spot-checks), Codex (independent), DeepSeek V4 Pro (fresh eyes, briefed on chemometrics conventions and prior conclusions). Note 2026-04-30: the original chemometrics-convention briefing was incomplete — it covered per-spectrum preprocessing but not variable selection, leading to several false-alarm leakage findings. Subsequent literature validation has expanded the convention rule.
 >
-> **Source rule:** Per-spectrum preprocessing (SNV, SG derivatives, baseline) is NOT data leakage by chemometrics convention — see `~/.claude/projects/.../memory/feedback_chemometrics_conventions.md`.
+> **Source rule (expanded 2026-04-30):** Per-spectrum preprocessing (SNV, SG derivatives, baseline) is NOT data leakage by chemometrics convention. **NEITHER is variable selection (CARS / UVE / SPA / iPLS / VIP) on full calibration data — that is the standard published workflow.** When chemometrics convention conflicts with sklearn/generic-ML purity, chemometrics wins. See `feedback_validate_against_chemometrics_and_application_lit.md` (master rule) + the three feedback memos it links.
 
 This document deduplicates ~240 raw findings from seven analysis docs down to a small set of real tickets, plus a plain-language report explaining the choices.
 

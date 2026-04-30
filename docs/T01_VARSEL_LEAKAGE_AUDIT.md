@@ -1,8 +1,36 @@
 # T-01: Per-Fold Variable Selection Leakage Audit
 
-> Date: 2026-04-29
-> Scope: Determine whether each variable selection method x search path refits varsel inside CV folds (CLEAN) or computes once on full calibration data with a frozen list passed into CV (LEAKY).
+> ## ⚠ FRAMING RECONSIDERED 2026-04-30 — READ THIS FIRST
+>
+> Two independent literature-validation passes (Codex CLI + GLM 5.1, both citing Li 2009 / Centner 1996 / Araujo 2001 / Norgaard 2000 / Wold 2001 plus chemometrics-specific bias references including Filzmoser 2009, Westad & Marini 2015, Shi 2019) concluded that **dasp's "varsel-on-full-calibration + CV" pattern is the standard chemometrics workflow**, not a bug. CARS, UVE, SPA, iPLS, VIP all run once on full calibration in their canonical implementations. Per-fold refitting was never the published methodology.
+>
+> **Furthermore, the user (a paleoanthropologist with deep chemometrics expertise) flagged a deeper problem with the audit's recommended fix:** the *purpose* of variable selection in this domain is identifying wavelengths that correspond to real chemistry — actual absorption bands, vibrational modes, functional groups. Stable selected wavelengths across resamples is *evidence the chemistry is real*. Per-fold varsel that picks different wavelengths per fold destroys interpretability ("you can't say 1650 cm⁻¹ is the diagnostic amide I band if fold 2 picked 1620 and fold 3 picked 1700"). The audit's proposed refactor would actively damage the science it's meant to support.
+>
+> **Status of this audit:** the file:line evidence and method × path matrix below are **technically correct as a description of the code** — the code does run varsel on full calibration before CV. What was wrong was calling that "LEAKY" with the implication that a fix is needed. The right framing is:
+>
+> - dasp uses CV as the *headline performance metric* without exposing an external-test-set workflow.
+> - Reporting "R²cv" on data that varsel saw is technically biased upward — but this is well-understood in chemometrics and is solved by external test sets / RMSEP, not by per-fold varsel.
+> - dasp's gap is GUI workflow for external test sets + reporting language ("R²cv on selection set — for unbiased performance, evaluate RMSEP on independent samples") — NOT pipeline architecture.
+>
+> **Status of follow-up work:**
+> - Phase 1 of `fix/varsel-leakage` (the additive `VarselTransformer` infrastructure) was implemented but **should NOT be merged**. The code is harmless but represents a worldview that conflicts with the chemometrics convention.
+> - Phases 2–7 of the original plan (the call-site refactors) were paused and should NOT be resumed.
+> - T-02 (ensemble OOF preprocessor), T-03 (preprocessing-discovery full-data), T-04 (one-class UVE prefilter on outlier-contaminated labels) need re-evaluation under the same literature lens. T-04 in particular may be a real issue (the *labels* used for selection may be problematic, distinct from the selection-on-full-calibration question).
+> - The 5 implemented branches that came out of T-01's roadmap (T-05 VIP, T-07 PDS, T-10 PLS clamp, T-24 CCC, T-26 SNV) are unaffected — they are real bugs verified independently.
+>
+> **Master rule from this episode:** dasp methodology decisions must be validated against chemometrics literature + the applied domain (bone FTIR, isotopes, paleoanthropology), not against sklearn / generic ML / genomics ML conventions. See `feedback_validate_against_chemometrics_and_application_lit.md` in the user's auto-memory.
+>
+> **Validation analyses (read these for full reasoning):**
+> - `docs/analysis_vs_chemometrics_lit/leakage_validation_GLM_2026-04-30.md` (282 lines, 12 references)
+> - `docs/analysis_vs_chemometrics_lit/leakage_validation_codex_2026-04-30.txt`
+>
+> ---
+
+> Date: 2026-04-29 (audit body); reconsidered 2026-04-30 (banner above)
+> Scope: Determine whether each variable selection method x search path refits varsel inside CV folds or computes once on full calibration data with a frozen list passed into CV.
 > Domain rule: Per-spectrum preprocessing (SNV/SG/baseline) is NOT leakage by chemometrics convention. This audit is specifically about y-using variable selection.
+>
+> **Note (2026-04-30):** the original "CLEAN/LEAKY" labels below should be read as "per-fold-refit / once-on-full" — the LEAKY label was a misframing. See banner above.
 
 ## Summary
 

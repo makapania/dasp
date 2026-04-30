@@ -4,6 +4,30 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-30 — T-01 audit framing reconsidered after literature validation
+
+**The recurring failure mode named.** Multiple sessions of agents working on dasp have flagged "data leakage" findings that turned out to be standard chemometrics workflow. Tonight this happened again at scale: the T-01 audit labeled 49 method × path combinations as LEAKY, a 2900-line implementation plan was written, 4 Codex review cycles were burned, Phase 1 of the refactor (`VarselTransformer` infrastructure) was implemented — all before the user pointed out that varsel-on-full-calibration is the published methodology in Li 2009 (CARS), Centner 1996 (UVE), Araujo 2001 (SPA), Norgaard 2000 (iPLS), Wold 2001 (PLS/VIP).
+
+**Two independent literature-validation passes** (Codex CLI reading the Li 2009 PDF + web search; GLM 5.1 reading same + 7 chemometrics-specific bias references including Filzmoser 2009, Westad & Marini 2015, Shi 2019) converged: the bias is real, but dasp's pattern matches canonical chemometrics. The published papers escape the bias by reporting RMSEP on a separate held-out test set, NOT by per-fold varsel.
+
+**The user's deeper point:** the *purpose* of CARS/UVE/SPA in this domain is identifying wavelengths that correspond to real chemistry. Stable selection across resamples is *evidence the chemistry is real*. Per-fold varsel that picks different wavelengths per fold destroys interpretability — "you can't say 1650 cm⁻¹ is the diagnostic amide I band if fold 2 picked 1620 and fold 3 picked 1700." The audit's proposed fix would actively damage the science it's meant to support.
+
+**Master rule now memory-pinned at `feedback_validate_against_chemometrics_and_application_lit.md`:** every methodology decision in dasp must be validated against chemometrics literature + the applied domain (bone FTIR / isotopes / paleoanthropology), NOT against sklearn / generic ML / genomics ML conventions. When literatures conflict, chemometrics wins.
+
+**Provider failures observed during the night** (worth logging since they may recur):
+- `zai-coding-plan/glm-5.1` wedged twice in retry loops (16 min for varsel Phase 1 attempt 1, 30+ min for T-24 Tasks 8-9). `opencode-go/glm-5.1` worked first attempt for the same workloads. **Default to opencode-go for GLM going forward.**
+- Codex CLI wedged once (T-21 plan review, killed after 1 hour with 39-byte output).
+- Watchdog: when a long-running tool produces zero output for >2 min, kill and report — don't sit on the connection.
+
+**State of the world after tonight:**
+- 5 small ticket branches landed cleanly (`fix/T05-*`, `fix/T07-*`, `fix/T10-*`, `fix/T24-*`, `fix/T26-*`) — these are real bugs verified independently of the audit framing. Ready to merge.
+- 1 ticket plan committed but not implemented (`fix/T21-sg-uniformity` plan only, codex review wedged) — needs literature check before implementation.
+- 1 worktree paused (`fix/varsel-leakage` Phase 1 done, Phases 2-7 paused) — disposition pending re-evaluation agent.
+- Roadmap doc + audit doc + project-status doc all annotated with reconsideration banners pointing to the master rule.
+- New re-evaluation agent prompt at `docs/plans/2026-04-30-roadmap-reevaluation-prompt.md` ready to dispatch.
+
+---
+
 ## 2026-04-29 (T-01 audit) — per-fold variable selection leakage
 
 Full audit at `docs/T01_VARSEL_LEAKAGE_AUDIT.md`. Non-obvious findings:
