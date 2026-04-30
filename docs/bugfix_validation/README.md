@@ -26,13 +26,27 @@ answers:
 
 ## Status
 
-| Branch                          | Validation note          | Verdict          |
-|---------------------------------|--------------------------|------------------|
-| `fix/T05-vip-formula-fix`       | _pending_                | _pending_        |
-| `fix/T07-pds-even-window`       | _pending_                | _pending_        |
-| `fix/T10-pls-components-clamp`  | _pending_                | _pending_        |
-| `fix/T24-lins-ccc`              | _pending_                | _pending_        |
-| `fix/T26-snv-near-zero-std`     | _pending_                | _pending_        |
+| Branch                          | Validation note                          | Verdict        |
+|---------------------------------|------------------------------------------|----------------|
+| `fix/T05-vip-formula-fix`       | _pending_                                | _pending_      |
+| `fix/T07-pds-even-window`       | _pending_                                | _pending_      |
+| `fix/T10-pls-components-clamp`  | _pending_                                | _pending_      |
+| `fix/T24-lins-ccc`              | _pending_                                | _pending_      |
+| `fix/T26-snv-near-zero-std`     | [T26_snv_near_zero_std.md](T26_snv_near_zero_std.md) | REJECT_AS_IS — design does not match PLS_Toolbox `offset` parameter convention |
+
+## Lesson from T-26
+
+The first-pass T-26 validation note approved the fix by appealing to "universal numerical-
+computing practice" (scipy/numpy/sklearn-style flooring of near-zero divisors). The user
+pushed back: "make sure that is not the way leading programs do it though." Web research
+into Eigenvector PLS_Toolbox / SIMCA / R chemometrics packages then established that
+leading programs use a **continuous user-controlled `offset` parameter**, not a hardcoded
+threshold. T-26 invented its own design pattern that does not match the field.
+
+**Validation rule:** verify leading-program behavior — actual documentation lookup, not
+plausible-sounding inference — *before* drafting the verdict. Section 4 of the note
+template ("Commercial-software sanity check") must cite specific documentation pages, not
+generic claims.
 
 ## Codex review archive
 
