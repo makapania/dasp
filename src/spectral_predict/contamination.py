@@ -1115,10 +1115,49 @@ def compute_validation_metrics_for_top_one_class_models(
             else:
                 autoscale = bool(autoscale_raw)
 
+            # T-36 fix (post-merge review): mirror search.py's display-name fallback
+            # so legacy .dasp files without an explicit Autoscale/baseline column
+            # still rebuild the right pipeline from the suffixed pipeline name
+            # (e.g. "als+sg0+snv+autoscale"). Explicit columns always win.
+            if '+' in str(preprocess_name):
+                parts = str(preprocess_name).split('+')
+                core_parts = []
+                for part in parts:
+                    if part in ('als', 'polynomial', 'rubber_band', 'airpls', 'advanced'):
+                        if baseline_method is None:
+                            baseline_method = part
+                    elif part == 'sg0':
+                        smoothing = True
+                    elif part == 'autoscale':
+                        if not autoscale:
+                            autoscale = True
+                    else:
+                        core_parts.append(part)
+                preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
+
+            # T-36 fix (post-merge review): persist baseline_params from the row so
+            # non-default ALS/polynomial settings survive the validation roundtrip
+            # rather than silently snapping back to defaults during rebuild.
+            baseline_params_raw = row.get('baseline_params', None)
+            baseline_params = None
+            if baseline_params_raw is not None:
+                if isinstance(baseline_params_raw, dict):
+                    baseline_params = baseline_params_raw
+                elif isinstance(baseline_params_raw, str) and baseline_params_raw.strip():
+                    try:
+                        import ast as _ast
+                        parsed = _ast.literal_eval(baseline_params_raw)
+                        if isinstance(parsed, dict):
+                            baseline_params = parsed
+                    except (ValueError, SyntaxError):
+                        baseline_params = None
+
             cache_key = (
                 preprocess_name, deriv, window, poly,
                 baseline_method, smoothing, smoothing_window, smoothing_polyorder,
                 autoscale,  # T-36: must vary key — autoscale changes preprocessing output
+                # baseline_params is intentionally excluded — keyed by method only since
+                # callers don't currently parameterize per-config; safe today.
             )
 
             # === Preprocess FULL spectrum (matching search.py pattern) ===
@@ -1132,7 +1171,7 @@ def compute_validation_metrics_for_top_one_class_models(
                     polyorder=poly if poly > 0 else None,
                     task_type='one_class',
                     baseline_method=baseline_method,
-                    baseline_params=None,
+                    baseline_params=baseline_params,  # T-36 fix: was hardcoded None
                     smoothing=smoothing,
                     smoothing_window=smoothing_window,
                     smoothing_polyorder=smoothing_polyorder,

@@ -757,9 +757,6 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
         preproc = self.preprocessing.lower()
 
-        if preproc == 'raw':
-            return '\n# No preprocessing - using raw spectra\nX_processed = X.copy()\n'
-
         # Get window size from config (default 17, matching GUI default)
         window = self.config.get('window_size', 17)
 
@@ -773,7 +770,12 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         # Track if we're using derivatives (edge trimming is optional)
         uses_derivative = preproc in ['sg1', 'sg2', 'sg3', 'snv_sg1', 'snv_sg2', 'snv_deriv', 'deriv_snv']
 
-        if preproc == 'snv':
+        if preproc == 'raw':
+            # T-36 fix (post-merge review): cannot early-return here, otherwise
+            # the autoscale block below is skipped for raw+autoscale exports.
+            code_lines.append("# No preprocessing - using raw spectra")
+            code_lines.append("X_processed = X.copy()")
+        elif preproc == 'snv':
             code_lines.append("X_processed = apply_snv(X)")
         elif preproc == 'sg1':
             code_lines.append(f"X_processed = apply_savgol_derivative(X, derivative=1, window_length={window})")
@@ -802,7 +804,9 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
         # T-36: autoscale (UV scaling) — applied AFTER SNV/derivatives so the
         # exported pipeline reproduces the trained model exactly.
-        if bool(self.config.get('autoscale', False)):
+        # Use the robust parser so round-tripped CSV/JSON values like the string
+        # "False" are not silently coerced to True by Python's bool() builtin.
+        if self._autoscale_enabled():
             code_lines.append("\n# Autoscale (UV scaling): mean-center + unit variance per wavelength column")
             code_lines.append("from sklearn.preprocessing import StandardScaler as _AutoscaleStandardScaler")
             code_lines.append("X_processed = _AutoscaleStandardScaler().fit_transform(X_processed)")
@@ -891,7 +895,7 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             model_code = warning + self._render_pls_da_pipeline(pls_params, lr_params)
         elif self.task_type == 'one_class':
             model_code = warning + self._render_one_class_model(params)
-        elif self._needs_standard_scaler():
+        elif self._needs_standard_scaler() and not self._autoscale_enabled():
             default_key = self._resolve_default_param_key()
             params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
@@ -1163,6 +1167,21 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             'Ridge', 'Lasso', 'ElasticNet'
         }
         return normalized in scale_models and not self._needs_pls_da_pipeline()
+
+    def _autoscale_enabled(self) -> bool:
+        """Robust parse of self.config['autoscale'] — handles bool, int, NaN, and the
+        string forms ('True'/'False'/'1'/'0') that round-tripped CSVs may contain.
+        Plain bool() is wrong on the string path: bool('False') is True."""
+        raw = self.config.get('autoscale', False)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ('true', '1', 'yes')
+        try:
+            import math
+            if isinstance(raw, float) and math.isnan(raw):
+                return False
+        except Exception:
+            pass
+        return bool(raw)
 
     def _split_pls_da_params(self, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Split params into PLS and LogisticRegression sets for PLS-DA."""

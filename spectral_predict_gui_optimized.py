@@ -38264,7 +38264,22 @@ External Validation Performance (n={n_val}):
                 # roundtrip is already safe via the pickled preprocessor.pkl, but
                 # emitting the flag in metadata lets downstream tools and metadata
                 # readers know the trained pipeline used UV scaling.
-                'autoscale': bool(self.use_autoscale.get()),
+                # T-36 fix (post-merge review): prefer the trained config over the
+                # live checkbox. If the user toggles the checkbox after refinement,
+                # the model itself is unchanged, but the live checkbox no longer
+                # describes the trained pipeline. Fall back to the checkbox only
+                # when neither config records the flag.
+                'autoscale': bool(
+                    (self.refined_config or {}).get(
+                        'autoscale',
+                        (self.selected_model_config or {}).get(
+                            'autoscale',
+                            (self.selected_model_config or {}).get(
+                                'Autoscale', self.use_autoscale.get()
+                            ),
+                        ),
+                    )
+                ),
                 # Y-transform
                 'y_transform': self.refine_y_transform.get() if hasattr(self, 'refine_y_transform') else 'None',
             }
@@ -38580,7 +38595,20 @@ External Validation Performance (n={n_val}):
                     # T-36: autoscale flag — exported scripts must apply UV scaling after
                     # SNV/derivatives if it was active during training, else they will not
                     # reproduce the saved model.
-                    'autoscale': bool(self.use_autoscale.get()),
+                    # T-36 fix (post-merge review): prefer the trained config over the
+                    # live checkbox so an exported script always describes the actual
+                    # trained pipeline even if the user toggled the checkbox afterwards.
+                    'autoscale': bool(
+                        (self.refined_config or {}).get(
+                            'autoscale',
+                            (self.selected_model_config or {}).get(
+                                'autoscale',
+                                (self.selected_model_config or {}).get(
+                                    'Autoscale', self.use_autoscale.get()
+                                ),
+                            ),
+                        )
+                    ),
                     # Variable selection indices (GA or wavelength subset)
                     'variable_indices': variable_indices,
                     'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
