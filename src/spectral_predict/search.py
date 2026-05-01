@@ -529,13 +529,22 @@ def compute_validation_metrics_for_top_models(
             smoothing_polyorder = int(row.get('smoothing_polyorder', 2)) if not (isinstance(row.get('smoothing_polyorder'), float) and pd.isna(row.get('smoothing_polyorder'))) else 2
             # T-36: autoscale flag must be read so the validation rebuild matches the
             # search pipeline. Old .dasp files without the column default to False.
+            # Parse robustly: handles bool, numpy.bool_, NaN-float, int 0/1, and the
+            # quoted-string forms ("True"/"False"/"1"/"0") that hand-edited CSVs may
+            # contain. Note: bool("False") == True in Python, so a naive bool() cast
+            # is wrong on the string path.
             autoscale_raw = row.get('Autoscale', False)
             if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
                 autoscale = False
+            elif isinstance(autoscale_raw, str):
+                autoscale = autoscale_raw.strip().lower() in ('true', '1', 'yes')
             else:
                 autoscale = bool(autoscale_raw)
 
-            # Fallback: parse display name for old results without explicit columns
+            # Fallback: parse display name for old results without explicit columns.
+            # Sets autoscale=True ONLY when the explicit column read above produced False
+            # (so an explicit column always wins over a name suffix). The smoothing flag
+            # follows the same pattern (sg0 prefix only sets it when not already True).
             if '+' in str(preprocess_name):
                 parts = str(preprocess_name).split('+')
                 core_parts = []
@@ -546,8 +555,8 @@ def compute_validation_metrics_for_top_models(
                     elif part == 'sg0':
                         smoothing = True
                     elif part == 'autoscale':
-                        # T-36: autoscale fallback parse — only override if Autoscale column was missing/false
-                        autoscale = True
+                        if not autoscale:
+                            autoscale = True
                     else:
                         core_parts.append(part)
                 preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
