@@ -61,10 +61,16 @@ PREPROCESSING_CASES = [
     ({'name': 'snv', 'deriv': 0, 'window': 0, 'polyorder': 0}, 'snv'),
     ({'name': 'snv_deriv1', 'deriv': 1, 'window': 11, 'polyorder': 2}, 'snv_deriv1'),
     ({'name': 'snv_deriv2', 'deriv': 2, 'window': 11, 'polyorder': 3}, 'snv_deriv2'),
+    ({'name': 'snv_deriv3', 'deriv': 3, 'window': 11, 'polyorder': 4}, 'snv_deriv3'),
+    ({'name': 'snv_deriv4', 'deriv': 4, 'window': 11, 'polyorder': 5}, 'snv_deriv4'),
     ({'name': 'deriv1_snv', 'deriv': 1, 'window': 11, 'polyorder': 2}, 'deriv1_snv'),
     ({'name': 'deriv2_snv', 'deriv': 2, 'window': 11, 'polyorder': 3}, 'deriv2_snv'),
+    ({'name': 'deriv3_snv', 'deriv': 3, 'window': 11, 'polyorder': 4}, 'deriv3_snv'),
+    ({'name': 'deriv4_snv', 'deriv': 4, 'window': 11, 'polyorder': 5}, 'deriv4_snv'),
     ({'name': 'deriv1', 'deriv': 1, 'window': 11, 'polyorder': 2}, 'deriv1'),
     ({'name': 'deriv2', 'deriv': 2, 'window': 11, 'polyorder': 3}, 'deriv2'),
+    ({'name': 'deriv3', 'deriv': 3, 'window': 11, 'polyorder': 4}, 'deriv3'),
+    ({'name': 'deriv4', 'deriv': 4, 'window': 11, 'polyorder': 5}, 'deriv4'),
 ]
 
 
@@ -115,6 +121,38 @@ def test_autoscale_changes_output(synthetic_X, config, label):
         f"apply_autoscale=True produced identical output to False for '{label}' — "
         f"autoscale step was unreachable (BUG #1 not fixed)"
     )
+
+
+def test_display_name_includes_autoscale_suffix():
+    """T-36 Phase 5 follow-up: _build_display_preprocess_name must append
+    '+autoscale' when apply_autoscale=True so Bayesian-path display names
+    match the grid-path '+autoscale' suffix.
+    """
+    from spectral_predict.unified_bayesian import _build_display_preprocess_name
+
+    # Plain core name + autoscale only
+    assert _build_display_preprocess_name('snv', apply_autoscale=True) == 'snv+autoscale'
+    # baseline + autoscale (suffix comes after baseline prefix)
+    out = _build_display_preprocess_name(
+        'snv', apply_baseline=True, baseline_method='als', apply_autoscale=True
+    )
+    assert out == 'als+snv+autoscale', f"got {out}"
+    # smoothing + autoscale (sg0 prefix preserved, autoscale suffix at end)
+    out = _build_display_preprocess_name(
+        'snv', apply_smoothing=True, apply_autoscale=True
+    )
+    assert out == 'sg0+snv+autoscale', f"got {out}"
+    # baseline + smoothing + autoscale
+    out = _build_display_preprocess_name(
+        'snv',
+        apply_baseline=True,
+        baseline_method='als',
+        apply_smoothing=True,
+        apply_autoscale=True,
+    )
+    assert out == 'als+sg0+snv+autoscale', f"got {out}"
+    # autoscale=False omits the suffix
+    assert _build_display_preprocess_name('snv', apply_autoscale=False) == 'snv'
 
 
 def test_cache_key_includes_apply_autoscale():
