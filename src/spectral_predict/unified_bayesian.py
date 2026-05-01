@@ -2162,6 +2162,12 @@ def convert_study_to_dataframe(
             'Poly': trial.user_attrs.get('poly', 0),
             'Autoscale': trial.user_attrs.get('apply_autoscale', False),  # T-36
             'baseline_method': baseline_method if trial.user_attrs.get('apply_baseline', False) else None,
+            # T-36 fix (post-merge review v2): persist baseline_params alongside
+            # baseline_method so the validation rebuild path can read both.
+            # Without this, non-default ALS / polynomial settings used by the
+            # Bayesian search silently snap back to defaults when validation
+            # rebuilds the pipeline.
+            'baseline_params': baseline_params if trial.user_attrs.get('apply_baseline', False) else None,
             'smoothing': trial.user_attrs.get('apply_smoothing', False),
             'smoothing_window': smoothing_window,
             'smoothing_polyorder': smoothing_polyorder,

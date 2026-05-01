@@ -1865,6 +1865,26 @@ class SidebarNavigation:
                 section['content'].config(bg=sidebar_bg)
 
 
+# ===== HELPER: ROBUST AUTOSCALE FLAG PARSE =====
+# Pulled out of the metadata save / code-export sites so we share the same
+# string-aware parsing the code generator uses (`bool("False")` is True in
+# Python, so any path that just wraps the resolved value in `bool(...)` is
+# wrong on the round-tripped CSV/JSON string path).
+
+def _parse_autoscale_flag(raw, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in ('true', '1', 'yes')
+    try:
+        import math as _math
+        if isinstance(raw, float) and _math.isnan(raw):
+            return default
+    except Exception:
+        pass
+    return bool(raw)
+
+
 # ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
 
 def _get_imbalance_suffix(imbalance_method: str | None) -> str:
@@ -38269,7 +38289,10 @@ External Validation Performance (n={n_val}):
                 # the model itself is unchanged, but the live checkbox no longer
                 # describes the trained pipeline. Fall back to the checkbox only
                 # when neither config records the flag.
-                'autoscale': bool(
+                # T-36 fix (post-merge review v2): parse via the shared
+                # string-aware helper so a round-tripped string "False" doesn't
+                # silently coerce to True via Python's bool() builtin.
+                'autoscale': _parse_autoscale_flag(
                     (self.refined_config or {}).get(
                         'autoscale',
                         (self.selected_model_config or {}).get(
@@ -38598,7 +38621,9 @@ External Validation Performance (n={n_val}):
                     # T-36 fix (post-merge review): prefer the trained config over the
                     # live checkbox so an exported script always describes the actual
                     # trained pipeline even if the user toggled the checkbox afterwards.
-                    'autoscale': bool(
+                    # T-36 fix (post-merge review v2): parse via the shared
+                    # string-aware helper to avoid the bool("False") == True trap.
+                    'autoscale': _parse_autoscale_flag(
                         (self.refined_config or {}).get(
                             'autoscale',
                             (self.selected_model_config or {}).get(
