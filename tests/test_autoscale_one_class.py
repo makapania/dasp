@@ -85,12 +85,17 @@ class TestOneClassAutoscale:
         assert all('+autoscale' in n for n in names), (
             f"Autoscaled rows should have '+autoscale' suffix, got {names}"
         )
-        # PreprocessBase stays clean (used by build_preprocessing_pipeline)
-        if 'PreprocessBase' in autoscaled.columns:
-            bases = autoscaled['PreprocessBase'].unique().tolist()
-            assert all('+autoscale' not in str(b) for b in bases), (
-                f"PreprocessBase must NOT carry '+autoscale', got {bases}"
-            )
+        # PreprocessBase stays clean (used by build_preprocessing_pipeline).
+        # Hard assertion — silent skip would mask a regression that removes
+        # PreprocessBase entirely (DeepSeek Phase 4 review).
+        assert 'PreprocessBase' in autoscaled.columns, (
+            "Varsel one-class result rows must carry PreprocessBase "
+            "(see search.py:6020 — required for validation rebuild)"
+        )
+        bases = autoscaled['PreprocessBase'].unique().tolist()
+        assert all('+autoscale' not in str(b) for b in bases), (
+            f"PreprocessBase must NOT carry '+autoscale', got {bases}"
+        )
 
 
 if __name__ == "__main__":
