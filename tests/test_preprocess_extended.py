@@ -538,10 +538,17 @@ class TestAutoscaleStep:
         names = [name for name, _ in steps]
         assert "autoscale" not in names
 
-    def test_autoscale_after_snv_deriv(self):
+    @pytest.mark.parametrize(
+        "preprocess_name,deriv_kwargs",
+        [
+            ("snv_deriv", {"deriv": 1, "window": 11, "polyorder": 2}),
+            ("deriv_snv", {"deriv": 1, "window": 11, "polyorder": 2}),
+            ("deriv", {"deriv": 1, "window": 11, "polyorder": 2}),
+        ],
+    )
+    def test_autoscale_after_snv_deriv(self, preprocess_name, deriv_kwargs):
         """Autoscale step must come AFTER SNV/derivatives so varsel sees scaled features."""
-        steps = build_preprocessing_pipeline("snv_deriv", deriv=1, window=11, polyorder=2,
-                                             autoscale=True)
+        steps = build_preprocessing_pipeline(preprocess_name, autoscale=True, **deriv_kwargs)
         names = [name for name, _ in steps]
         assert "autoscale" in names
         idx_autoscale = names.index("autoscale")
@@ -562,10 +569,17 @@ class TestAutoscaleStep:
         )
         names = [name for name, _ in steps]
         assert "autoscale" in names
-        # imbalance step is appended last; verify autoscale precedes whichever imbalance step name appears
         idx_autoscale = names.index("autoscale")
-        # Anything appended after autoscale should be the imbalance handler
-        assert idx_autoscale < len(names) - 1, "Expected at least one step after autoscale (imbalance)"
+        # Find the imbalance handler step (appended after autoscale by the imbalance block).
+        # All preprocessing-stage steps are in this set; anything else after autoscale must
+        # be the imbalance handler.
+        prep_step_names = {"baseline", "smooth", "snv", "savgol", "autoscale",
+                           "wl_exclude", "msc", "osc"}
+        post_autoscale = [n for n in names[idx_autoscale + 1:]]
+        assert post_autoscale, "Expected an imbalance step after autoscale"
+        assert all(n not in prep_step_names for n in post_autoscale), (
+            f"Steps after autoscale must be imbalance only, got {post_autoscale}"
+        )
 
     def test_autoscale_zero_mean_unit_var_per_column(self):
         """Pipeline output with autoscale=True must have ~zero column means and ~unit column std."""
@@ -598,7 +612,7 @@ class TestAutoscaleStep:
         # Baseline transformer is registered under the name "baseline".
         assert "baseline" in names, f"baseline missing from {names}"
         idx_autoscale = names.index("autoscale")
-        for earlier in ("baseline", "smooth", "snv"):
+        for earlier in ("baseline", "smooth", "snv", "savgol"):
             if earlier in names:
                 assert names.index(earlier) < idx_autoscale
 
