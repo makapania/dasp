@@ -24826,6 +24826,16 @@ class SpectralPredictApp:
                         if hasattr(self, "n_trials_var") else None,
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
+                except ImportError as run_err:
+                    # The new run_state / run_logging modules failed to import.
+                    # Surface this clearly — the in-memory Optuna fallback still
+                    # works, but the user should know SQLite persistence + disk
+                    # logging are unavailable for this session.
+                    self._log_progress(
+                        f"[RUN] Run-state modules unavailable (ImportError): {run_err}. "
+                        "Falling back to in-memory Optuna; resume-on-restart "
+                        "and disk log file will not be available."
+                    )
                 except Exception as run_err:
                     # Logging-only failure path; in-memory Optuna fallback still works.
                     self._log_progress(f"[RUN] Run-state init failed: {run_err}")
@@ -27894,8 +27904,19 @@ class SpectralPredictApp:
             try:
                 from spectral_predict.run_state import mark_complete as _mark_complete
                 _mark_complete()
-            except Exception:
-                pass
+            except Exception as _mc_err:
+                # Don't re-raise — the analysis itself completed successfully
+                # and the user shouldn't see a "completion failed" error. But
+                # surface the failure to the progress log: a stale sidecar
+                # would otherwise produce an unexplained "resume previous run?"
+                # dialog on next launch.
+                try:
+                    self._log_progress(
+                        f"[RUN] mark_complete failed; sidecar will persist "
+                        f"and next launch may prompt to resume: {_mc_err}"
+                    )
+                except Exception:
+                    pass  # progress log itself broken — nothing else we can do
 
             # Analysis complete - status updated
 
@@ -57228,9 +57249,13 @@ def main():
 
     # T-11 D: after the GUI is fully built but before the user can interact,
     # check for an incomplete run from a previous session and offer to
-    # resume. Run via after(0) so the dialog appears on top of the rendered
-    # window rather than blocking the construction phase.
-    root.after(0, app._check_for_incomplete_run)
+    # resume. Use after(100) instead of after(0) — a tiny delay gives the
+    # window manager time to finish rendering the main window before the
+    # modal dialog pops. With after(0), on macOS Tk Aqua and on slow
+    # Windows machines the dialog could appear behind the main window, or
+    # the main window wouldn't render until the dialog was dismissed.
+    # 100ms is below human perception, so users see no lag.
+    root.after(100, app._check_for_incomplete_run)
 
     root.mainloop()
 

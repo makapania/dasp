@@ -133,10 +133,12 @@ class _TeeStream:
                     self._buffer_bytes = len(tail)
 
         # Emit outside the lock to minimize contention; logger is itself
-        # thread-safe so concurrent emits are fine.
+        # thread-safe so concurrent emits are fine. Preserve whitespace-only
+        # and empty lines: the log file is meant to mirror stdout faithfully
+        # for crash post-mortem, so backend-formatted blank-line separators
+        # in tables / progress sections must survive.
         for line in emit_lines:
-            if line.strip():
-                self._logger.log(self._level, line)
+            self._logger.log(self._level, line)
         return len(text)
 
     def flush(self) -> None:
@@ -147,7 +149,13 @@ class _TeeStream:
                 self._buffer = []
                 self._buffer_bytes = 0
                 # Same \n-only split as write() — already \r-stripped.
-                emit_lines = [ln for ln in joined.split("\n") if ln.strip()]
+                # Preserve whitespace-only and empty lines for log fidelity
+                # (mirrors the same change in write() above).
+                emit_lines = joined.split("\n")
+                # Drop only the trailing "" produced when joined ends in "\n"
+                # — that artifact is a split-side-effect, not a real line.
+                if emit_lines and emit_lines[-1] == "" and joined.endswith("\n"):
+                    emit_lines = emit_lines[:-1]
         for line in emit_lines:
             self._logger.log(self._level, line)
         try:
