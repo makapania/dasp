@@ -1,6 +1,24 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (early hours — T-11 MERGED via PR #6 after seven reviewer passes) —
+> **Last updated:** 2026-05-01 (overnight T-36 implementation — Codex-final READY_TO_MERGE_WITH_NITS_CLOSED, awaiting user PR open) —
+>
+> **T-36 autoscale (UV scaling) preprocessing toggle — IMPLEMENTED, READY FOR PR.**
+> Branch `feature/T36-autoscale-toggle` at `2351c3c` (13 commits past `da51f60`).
+> Multi-pass review trail (echoing T-11's 7-pass pattern):
+> Phase 2 DeepSeek V4 Pro Max → Phase 3 → Phase 4 → Phase 5 → Phase 6 (all READY_TO_PROCEED) → Codex round-1 final review (3 BLOCKERS — Model Dev parser, 3 refinement rebuild paths, code export — all closed in `98fb80f`) → Codex round-2 (READY_TO_MERGE_WITH_NITS — both nits closed in `2351c3c`).
+>
+> Key wins:
+> - **Three pre-existing bugs fixed** (uncovered during plan review, would have shipped silently if autoscale were added naively): `apply_preprocessing` early-return killing autoscale for every preprocessing name, Bayesian cache key omitting autoscale, contamination cache key omitting autoscale.
+> - **Bundled one-class metadata-write fix** — `run_one_class_search` result rows now emit `baseline_method`, `smoothing`, `smoothing_window`, `smoothing_polyorder` so contamination.py validation rebuild reads real values rather than silent defaults.
+> - **Codex caught three downstream silent-mismatch paths DeepSeek missed** — Model Development tab parser dropped `+autoscale`, three refinement rebuild paths didn't pass autoscale, code export emitted no StandardScaler. All three closed.
+>
+> Test coverage: **62 new T-36 tests + 203 in the targeted regression sweep — all green.** 10 pre-existing I/O test failures (jcamp/spc/opus/perkinelmer) and 2 environmental flakes (subprocess `python` vs `.venv312`) are unrelated.
+>
+> Audit trail: `docs/bugfix_validation/T36_autoscale_toggle.md`.
+>
+> Branch is ready for `gh pr create`. NOT pushed yet (per cross-machine doc rule); user should review + push from the originating machine.
+>
+> **Previously:** 2026-05-01 (early hours — T-11 MERGED via PR #6 after seven reviewer passes) —
 >
 > **T-11 MERGED to main via PR #6** at `50057af` (rebase merge, linear history).
 > Three independent reviewer families converged on READY_TO_MERGE:
@@ -28,8 +46,8 @@
 >
 > | Ticket | Title | Status | Plan |
 > |---|---|---|---|
-> | **T-36** | Autoscale (UV scaling) preprocessing toggle | PLAN_FILED — branch reserved, ready for overnight handoff | `docs/plans/2026-05-01-T36-autoscale-toggle.md` |
-> | **T-37** | TPE quick preprocessing discovery (replaces basic + GA + exhaustive) | ROUGH_PLAN — blocked on T-36 | `docs/plans/2026-05-01-T37-tpe-quick-preprocessing-discovery.md` |
+> | **T-36** | Autoscale (UV scaling) preprocessing toggle | IMPLEMENTED on `feature/T36-autoscale-toggle` (tip `2351c3c`); 13 commits, full review trail, awaiting PR | `docs/plans/2026-05-01-T36-autoscale-toggle.md` + `docs/bugfix_validation/T36_autoscale_toggle.md` |
+> | **T-37** | TPE quick preprocessing discovery (replaces basic + GA + exhaustive) | ROUGH_PLAN — UNBLOCKED by T-36 implementation | `docs/plans/2026-05-01-T37-tpe-quick-preprocessing-discovery.md` |
 > | **T-38** | Dead preprocessing module cleanup | ROUGH_PLAN — three modules deletable now (zero callers); `ga_preprocessing.py` retires after T-37 | `docs/plans/2026-05-01-T38-dead-preprocessing-cleanup.md` |
 >
 > **T-36 plan caught three pre-existing implementation bugs in a draft autoscale plan (DeepSeek V4 Pro draft, audited):**
