@@ -128,7 +128,7 @@ except ImportError:
     HAS_MATPLOTLIB = False
 
 # Frozen application detection (Nuitka and PyInstaller support)
-_NUITKA_FROZEN = "__compiled__" in dir()
+_NUITKA_FROZEN = "__compiled__" in globals()
 _PYINSTALLER_FROZEN = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 _FROZEN = _NUITKA_FROZEN or _PYINSTALLER_FROZEN
 
@@ -21824,8 +21824,12 @@ class SpectralPredictApp:
             self.screening_status.config(text="Training Random Forest (may take a moment)...")
             self.root.update()
 
-            # Detect if running as bundled app (PyInstaller) - use serial execution to avoid spawn issues
-            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+            # Detect if running as bundled app (PyInstaller or Nuitka) — use
+            # serial execution to avoid spawn issues. Use globals() not dir():
+            # `dir()` inside a method returns local names, never sees the
+            # module-level `__compiled__` Nuitka injects. Same fix applied at
+            # search.py:19 (DeepSeek Finding 1) and module-level on line 131.
+            is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in globals()
             n_jobs = 1 if is_frozen else -1
 
             # Quick RF fit (limited trees for speed)
