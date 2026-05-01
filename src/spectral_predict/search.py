@@ -16,7 +16,7 @@ def _frozen_needs_threading_fallback() -> bool:
     1)"), and the parent retries spawning → fork-bomb of GUI windows.
     Falling back to the threading backend avoids the broken spawn entirely.
     """
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in dir()
+    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in globals()
     return is_frozen
 import numpy as np
 import pandas as pd
