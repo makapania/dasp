@@ -1,6 +1,26 @@
 # Project Status
 
-> **Last updated:** 2026-04-30 (evening — T-08 dropped, T-11 shipped, T-15 dropped, T-16 reframed, T-19 user-framed) —
+> **Last updated:** 2026-05-01 (early hours — T-11 MERGED via PR #6 after seven reviewer passes) —
+>
+> **T-11 MERGED to main via PR #6** at `50057af` (rebase merge, linear history).
+> Three independent reviewer families converged on READY_TO_MERGE:
+> Codex (initial, 4 HIGH + 3 MEDIUM all fixed pre-merge) → Kimi K2.6 (initial,
+> 2 MAJOR + 4 MINOR all fixed pre-merge) → DeepSeek V4 Pro pass 1 (24h, 2 HIGH +
+> 3 MEDIUM + 9 LOW/INFO all closed) → DeepSeek V4 Pro pass 2 (recheck, 2 NEW HIGH
+> closed) → 5 specialist agents post-recheck (code-reviewer, pr-test-analyzer,
+> silent-failure-hunter, comment-analyzer, type-design-analyzer; 13 findings,
+> 12 closed + 1 deferred) → Codex meta-review (1 NEW critical closed, 1 NEW
+> deferred as architectural cost) → DeepSeek V4 Pro pass 3 (high-effort, 0
+> blockers + 1 cosmetic). Final: **47/47 T-11 tests passing**, NEW BUG #2
+> (per-model Bayesian failure → mark_complete still runs) deferred for a
+> follow-up ticket since the fix requires per-model sidecars (architectural
+> change). Full audit trail at `docs/reviews/deepseek_v4pro_24h_review_2026-04-30.md`.
+>
+> **T-33 Gaussian Process Regression** — rough plan filed at
+> `docs/plans/2026-04-30-T33-gaussian-process-regression.md`. Not yet
+> implemented; awaits prioritization.
+>
+> **Previously:** 2026-04-30 (evening — T-08 dropped, T-11 staged, T-15 dropped, T-16 reframed, T-19 user-framed) —
 >
 > **Session close-out:**
 >
@@ -8,7 +28,8 @@
 > |---|---|---|
 > | T-06 SPA canonical Araújo 2001 enumeration | MERGED + T-06b parallelization | `af44ad4` + `85063b8` |
 > | T-08 CARS tree-mode bug | DROPPED — false alarm; algorithm converges; CARS-Tree confirmed dasp-invented | n/a |
-> | T-11 Pause/resume + disk logging + Optuna SQLite | APPROVED for merge — Codex (4 HIGH + 3 MEDIUM) + Kimi K2.6 (2 MAJOR + 4 MINOR) all fixed; 260 tests pass | `fix/T11-pause-resume-hardening` (committed locally, NOT pushed) |
+> | T-11 Pause/resume + disk logging + Optuna SQLite | **MERGED 2026-05-01 via PR #6** at `50057af` (rebase, 13 commits) — 7-pass review trail | PR #6 |
+> | T-33 Gaussian Process Regression | ROUGH_PLAN filed; awaits prioritization | `docs/plans/2026-04-30-T33-gaussian-process-regression.md` |
 > | T-12 disk-mirrored logging | CLOSED via T-11 Unit A | (subsumed) |
 > | T-15 LeaveOneGroupOut / GroupKFold | DROPPED — user decision; LOGO is footgun in user's data regime (5-100 N per site, 20× ratio); chemometrics literature recommends external test sets, not LOGO | n/a |
 > | T-16 model-comparison machinery | REFRAMED — strategic split surfaced. Chemometrics canon (jackknife + Y-permutation = competitor parity) vs ML canon (paired t-test/Wilcoxon = "comparing between models"). Awaiting user decision on Shape A vs B vs hybrid | (investigation only) |
