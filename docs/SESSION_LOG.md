@@ -4,6 +4,68 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-01 (overnight) — T-36 autoscale toggle implemented end-to-end; Codex caught 3 downstream silent-mismatch paths DeepSeek missed
+
+**Tip:** `2351c3c` on `feature/T36-autoscale-toggle` (13 commits past `da51f60`). Branch ready for PR.
+
+### What shipped
+
+A user-selectable autoscale (UV scaling) preprocessing toggle that:
+- **Grid path** (`run_search`, `run_one_class_search`) — doubles `preprocess_configs` so every selected combo runs both with and without autoscale; `+autoscale` suffix on display name; `Autoscale` boolean column on result rows.
+- **Bayesian path** (`run_unified_bayesian`) — `apply_autoscale` becomes a per-trial Optuna categorical when `enable_autoscale=True` is set. TPE learns whether autoscale helps for the dataset.
+- **Validation rebuild** (`compute_validation_metrics_for_top_models` + one-class twin) — reads `Autoscale` column from result rows, threads it into `build_preprocessing_pipeline`. Cache keys updated.
+- **Per-model `StandardScaler` skip** for `SCALE_SENSITIVE_MODELS` when autoscale is on, in both grid and Bayesian paths. PLS-DA's internal scaler (operating on PLS scores) preserved.
+- **GUI** — checkbox in Preprocessing tab + tooltip; flag threaded to all four search call sites.
+- **Model Dev tab + code export** — refinement and exported scripts now reproduce the autoscaled pipeline (Codex catch — see below).
+
+### Three pre-existing bugs fixed (uncovered during plan review)
+
+1. **`unified_bayesian.py:apply_preprocessing` early-return.** Function returned early in every named-prep branch, so a naive autoscale step at the end would have been UNREACHABLE for every preprocessing name. Fix: assign-then-return restructure with single trailing autoscale block.
+2. **Bayesian preprocessing cache key omitted `apply_autoscale`.** Two trials with same prep but different autoscale would collide on the cache, second trial silently receiving the first's `X_prep`. Fix: 7th element added to cache_key tuple.
+3. **`contamination.py` validation cache key omitted autoscale.** Same class as #2 for one-class. Fix: 9th element added.
+
+### Bundled adjacent fix
+
+`run_one_class_search` result rows previously omitted `baseline_method`, `smoothing`, `smoothing_window`, `smoothing_polyorder`. Validation rebuild used silent defaults. Fixed in the same commits as the autoscale row writes — same code surface, near-zero risk.
+
+### Codex caught three downstream silent-mismatch paths DeepSeek missed
+
+DeepSeek's per-phase reviews focused on the diff itself + immediate test surface. **Codex's final cross-family review (commit 8e5137c) found three silent-mismatch paths in downstream consumers** — all HIGH/MEDIUM, all real, all closed in `98fb80f` and `2351c3c`:
+
+1. **HIGH** — Model Development tab `Preprocess` parser at `spectral_predict_gui_optimized.py:33045` assumed the LAST `+` segment is the core preprocessing name. For `snv+autoscale` the parser set `core='autoscale'` and fell through to `'raw'`, silently building a wrong refined pipeline. Fix: strip trailing `+autoscale` first, prefer explicit `Autoscale` column over suffix parsing, set `self.use_autoscale` for downstream.
+2. **HIGH** — Three Model Dev refinement `build_preprocessing_pipeline()` calls (one-class refinement, Path A full-spectrum-derivative, Path B raw/SNV) didn't pass `autoscale=...`. Selecting an autoscale=True search row and refining produced a non-autoscaled pipeline. Fix: every refinement call now passes the flag.
+3. **MEDIUM** — Code export had no autoscale contract. `model_config` didn't carry the flag, and `code_generator._render_preprocessing_application` emitted no StandardScaler step. Exported Python scripts couldn't reproduce autoscaled training pipelines. Fix: GUI passes `autoscale` into `model_config`, renderer emits `from sklearn.preprocessing import StandardScaler` + fit_transform after the spectral block.
+
+### Lesson for future T-36-shaped tickets
+
+When a new flag is added to a search loop, audit ALL downstream consumers — Model Development tab refinement, code export, model save/load metadata — for parallel changes. DeepSeek's diff-scoped review correctly verified the search-loop changes; only Codex's broader cross-family pass spotted that the same flag wasn't being threaded into the four refinement call sites and the code generator. Pattern: **new flags travel through (a) search loop, (b) result row, (c) validation rebuild, (d) Model Dev refinement rebuild, (e) saved-model metadata, (f) exported-script rendering**. T-36's plan covered (a)-(c); Codex caught the gap on (d)-(f).
+
+### Review-pass discipline
+
+| Phase | DeepSeek verdict | Findings |
+|---|---|---|
+| 2 (preprocess.py) | READY_TO_PROCEED | 3 LOW (test ordering tightened) |
+| 3 (search.py grid) | READY_TO_PROCEED | 1 MEDIUM (string-bool parse) + 2 LOW |
+| 4 (one-class + contamination) | READY_TO_PROCEED | 1 MEDIUM (silent-skip assertion hardened) |
+| 5 (Bayesian + 3 bugs) | READY_TO_PROCEED | 1 MEDIUM (display-name suffix) + 1 LOW (deriv3/4 test coverage) |
+| 6 (GUI) | READY_TO_PROCEED | 0 findings |
+| 7 — Codex round-1 | BLOCKERS_FOUND | 2 HIGH + 1 MEDIUM (all closed in `98fb80f`) |
+| 7 — Codex round-2 | READY_TO_MERGE_WITH_NITS | 1 MEDIUM + 1 LOW (closed in `2351c3c`) |
+
+Total: 13 commits (12 review + fix iterations + 1 final nits commit). Mirrors T-11's seven-pass pattern at smaller scale.
+
+### Test coverage
+
+- 62 new T-36 tests across 4 new files: `test_preprocess_extended.py::TestAutoscaleStep` (9), `test_autoscale_grid_doubling.py` (5), `test_autoscale_one_class.py` (4), `test_autoscale_bayesian.py` (44).
+- 203 in the targeted regression sweep (autoscale + preprocess + Bayesian + cv_pls_clamp + contamination + export) — all green.
+- 10 pre-existing I/O test failures (jcamp/spc/opus/perkinelmer reader modules) are unrelated; verified by stash-and-rerun against `da51f60`.
+
+### Next session
+
+T-36 is ready for `gh pr create`. T-37 (TPE quick preprocessing discovery) is unblocked.
+
+---
+
 ## 2026-05-01 (early hours) — T-11 MERGED via PR #6 after seven reviewer passes; 4 deferral tickets filed
 
 T-11 went from APPROVED-but-not-pushed to MERGED via the project's first
