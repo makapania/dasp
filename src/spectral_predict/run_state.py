@@ -36,7 +36,6 @@ import dataclasses
 import hashlib
 import json
 import os
-import sys
 import tempfile
 import threading
 import uuid
@@ -49,6 +48,13 @@ from spectral_predict.resource_paths import get_user_optuna_dir
 _lock = threading.Lock()
 _active_storage_url: str | None = None
 _active_run_id: str | None = None
+# Cached metadata from the original `start_run` call. Codex+type-design-analyzer
+# meta-review Cluster C: prior `start_run` idempotent-return path synthesized a
+# fresh RunMetadata with the *new caller's* args while reusing the original
+# run_id/storage_url, producing inconsistent state vs. what the sidecar held on
+# disk. Caching the original metadata fixes the contract: subsequent calls
+# return the SAME object the first call returned.
+_active_metadata: "RunMetadata | None" = None
 _is_resuming: bool = False
 _SIDECAR_NAME = "active_run.json"
 
@@ -112,6 +118,26 @@ class RunMetadata:
         return cls(**data)
 
 
+@dataclasses.dataclass
+class DiscardResult:
+    """Outcome of `discard_incomplete_run`.
+
+    Codex meta-review Cluster A3: the prior `discard_incomplete_run` always
+    returned `True` even when both `unlink()` calls failed. The GUI surfaced
+    "Discarding stale sidecar + SQLite" while neither file was actually
+    removed, leading to silently-orphaned SQLite files (storage-only failure)
+    or repeated resume prompts (sidecar-failure). Callers now get per-file
+    success and a list of human-readable error strings to surface.
+    """
+    sidecar_deleted: bool
+    storage_deleted: bool
+    errors: list[str]
+
+    @property
+    def fully_succeeded(self) -> bool:
+        return self.sidecar_deleted and self.storage_deleted and not self.errors
+
+
 def _sidecar_path() -> Path:
     return get_user_optuna_dir() / _SIDECAR_NAME
 
@@ -164,20 +190,15 @@ def start_run(
     metadata so all `create_study` callers within one Run Analysis click
     share one SQLite file.
     """
-    global _active_storage_url, _active_run_id, _is_resuming
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
-        if _active_storage_url is not None and _active_run_id is not None:
-            existing_path = get_user_optuna_dir() / f"{_active_run_id}.sqlite3"
-            return RunMetadata(
-                run_id=_active_run_id,
-                storage_path=str(existing_path),
-                storage_url=_active_storage_url,
-                label=label,
-                dataset_fingerprint=dataset_fingerprint,
-                model_names=model_names or [],
-                n_trials_per_model=n_trials_per_model,
-                started_iso=datetime.now().isoformat(),
-            )
+        # Cluster C fix: idempotent path returns the cached original metadata,
+        # NOT a synthesized one. This ensures callers see the same fingerprint,
+        # label, model_names, and started_iso the FIRST `start_run` recorded —
+        # what's actually on disk in the sidecar — rather than whatever args
+        # the second caller happened to pass.
+        if _active_metadata is not None:
+            return _active_metadata
 
         run_id = uuid.uuid4().hex[:12]
         storage_path = get_user_optuna_dir() / f"{run_id}.sqlite3"
@@ -203,6 +224,7 @@ def start_run(
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
         _active_run_id = run_id
+        _active_metadata = meta
         _is_resuming = False
         return meta
 
@@ -210,20 +232,55 @@ def start_run(
 def mark_complete() -> None:
     """Mark the active run as cleanly finished. Removes the sidecar.
 
+    Codex meta-review NEW BUG #1: prior implementation deleted the sidecar
+    UNCONDITIONALLY. The GUI calls `mark_complete()` after every successful
+    analysis (Bayesian / grid / NSGA), so a user with a paused Bayesian run
+    who clicks "Decide later" and then completes a fresh grid search would
+    have their prior resume sidecar silently destroyed. Fix: only unlink
+    the sidecar if its `run_id` matches `_active_run_id` — i.e. only delete
+    OUR sidecar.
+
+    Codex meta-review A1: prior implementation also cleared `_active_run_id`
+    even when the unlink failed (Windows file lock, AV, permission). This
+    diverged in-memory state from disk and silenced the failure. Fix: on
+    OSError, leave in-memory state alone and re-raise so the caller's
+    handler can surface the failure.
+
     Leaves the SQLite file in place so the user can inspect Optuna study
-    contents post-hoc if they want; cleanup of old SQLite files is a
-    separate concern (out of T-11 D scope).
+    contents post-hoc. Old SQLite files accumulate in
+    `<user_data_dir>/dasp/optuna/`; manual cleanup or a future scheduled
+    cleanup is the user's responsibility (out of T-11 D scope).
     """
-    global _active_storage_url, _active_run_id, _is_resuming
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
         sidecar = _sidecar_path()
-        if sidecar.exists():
+        sidecar_belongs_to_active_run = False
+        if sidecar.exists() and _active_run_id is not None:
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                sidecar_belongs_to_active_run = (
+                    data.get("run_id") == _active_run_id
+                )
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                # Unreadable sidecar — conservatively don't unlink in case
+                # it belongs to a different run or another instance owns it.
+                sidecar_belongs_to_active_run = False
+
+        if sidecar_belongs_to_active_run:
             try:
                 sidecar.unlink()
             except OSError:
-                pass
+                # Cleanup failed; preserve in-memory state so the user can
+                # retry and so the next launch can still find the sidecar.
+                # Re-raise — the GUI handler at the call site already wraps
+                # mark_complete() in try/except and surfaces the failure.
+                raise
+
+        # Sidecar either didn't exist, didn't belong to us, or was deleted.
+        # Either way, our run is done — clear in-memory state.
         _active_storage_url = None
         _active_run_id = None
+        _active_metadata = None
         _is_resuming = False
 
 
@@ -293,14 +350,17 @@ def verify_resume_fingerprint(current_fingerprint: str) -> tuple[bool, str | Non
 def clear_resume_state() -> None:
     """Drop the resume flag without deleting the sidecar / SQLite.
 
-    Used after a fingerprint mismatch when the user wants to fall back to
-    a fresh run but keep the previous sidecar around for inspection. The
-    sidecar persists; future launches will re-offer it.
+    Fallback path used when the GUI cannot determine the rejected run_id
+    (e.g. import-time / partial-init failure); in normal operation,
+    fingerprint mismatches go through `discard_incomplete_run` instead
+    (Kimi MAJOR #3b). The sidecar persists; future launches will re-offer
+    it for inspection.
     """
-    global _active_storage_url, _active_run_id, _is_resuming
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
         _active_storage_url = None
         _active_run_id = None
+        _active_metadata = None
         _is_resuming = False
 
 
@@ -310,20 +370,39 @@ def find_incomplete_run() -> RunMetadata | None:
     Returns the metadata if one exists, else None. Does NOT modify state —
     the GUI calls this on startup to decide whether to show the resume
     dialog. The actual resume happens via `resume_run(run_id)`.
+
+    Codex meta-review A2: prior implementation caught only
+    `(JSONDecodeError, TypeError, KeyError)` and silently DELETED corrupt
+    sidecars. Two issues fixed here:
+      1. `OSError` / `PermissionError` / `UnicodeDecodeError` from
+         `read_text()` now bubble up — a locked or unreadable sidecar is
+         a caller-visible decision (start fresh? abort? retry?), not
+         something the library should silently swallow.
+      2. Unreadable-but-existing sidecars are quarantined (renamed to
+         `.corrupt`) rather than deleted — a downgrade from a future
+         schema looks identical to a corruption, and we want recovery
+         to remain possible.
     """
     sidecar = _sidecar_path()
-    if not sidecar.exists():
-        return None
     try:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
         return RunMetadata.from_dict(data)
-    except (json.JSONDecodeError, TypeError, KeyError):
-        # Corrupt sidecar — discard it.
-        try:
-            sidecar.unlink()
-        except OSError:
-            pass
+    except FileNotFoundError:
         return None
+    except (json.JSONDecodeError, TypeError, KeyError, UnicodeDecodeError):
+        try:
+            sidecar.rename(sidecar.with_suffix(".corrupt"))
+        except OSError:
+            # Quarantine failed — fall back to deletion as last resort
+            # so we don't keep prompting on a sidecar we can't parse.
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
+        return None
+    # OSError (permission, locked file, dead network share) intentionally
+    # escapes — the GUI startup wraps this in its own handler and surfaces
+    # a warning to the user.
 
 
 def resume_run(run_id: str) -> RunMetadata | None:
@@ -332,50 +411,108 @@ def resume_run(run_id: str) -> RunMetadata | None:
     The next `optuna.create_study` call in the search will pass `storage=`
     pointing at the existing SQLite, plus `load_if_exists=True`, so the
     same study_name will pick up where it left off. Returns the metadata
-    on success, or None if the sidecar's run_id doesn't match.
+    on success, or None if the sidecar's run_id doesn't match or the
+    on-disk SQLite is missing or untrusted.
+
+    Code-reviewer + Codex meta-review: the sidecar's `storage_path` is
+    untrusted JSON content. Validate it resolves under the project's
+    user-optuna directory before trusting it as the Optuna URL — a tampered
+    sidecar (e.g. via Dropbox/OneDrive sync conflict) could otherwise
+    point Optuna at an arbitrary path on disk.
     """
-    global _active_storage_url, _active_run_id, _is_resuming
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
 
     meta = find_incomplete_run()
     if meta is None or meta.run_id != run_id:
         return None
-    storage_path = Path(meta.storage_path)
+
+    optuna_dir = get_user_optuna_dir().resolve()
+    try:
+        storage_path = Path(meta.storage_path).resolve()
+    except OSError:
+        return None
+    if not storage_path.is_relative_to(optuna_dir):
+        # Tampered sidecar — refuse to use the path or the URL derived
+        # from it. Don't auto-discard; let the GUI surface the situation.
+        return None
     if not storage_path.exists():
-        # SQLite file went missing — nothing to resume from.
+        # SQLite file went missing — nothing to resume from. Discard the
+        # orphaned sidecar so we don't keep prompting next launch.
         discard_incomplete_run(run_id)
         return None
 
     with _lock:
         _active_storage_url = meta.storage_url
         _active_run_id = meta.run_id
+        _active_metadata = meta
         _is_resuming = True
     return meta
 
 
-def discard_incomplete_run(run_id: str) -> bool:
-    """Delete the sidecar + SQLite for an incomplete run. Returns True on success."""
+def discard_incomplete_run(run_id: str) -> DiscardResult:
+    """Delete the sidecar + SQLite for an incomplete run.
+
+    Returns a `DiscardResult` describing per-file success and any errors.
+    Codex meta-review A3: prior implementation swallowed `OSError` on both
+    unlink calls and returned bare `True` even when nothing was removed —
+    the GUI's "Discarding stale sidecar + SQLite" message lied about
+    success when the files were locked. Callers can now surface the
+    actual outcome.
+
+    Code-reviewer: also path-validates `storage_path` against the project's
+    user-optuna directory before unlinking, refusing to follow a tampered
+    sidecar that points outside.
+    """
     meta = find_incomplete_run()
     if meta is None or meta.run_id != run_id:
-        return False
+        return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=[])
+
     sidecar = _sidecar_path()
-    storage_path = Path(meta.storage_path)
+    optuna_dir = get_user_optuna_dir().resolve()
+    errors: list[str] = []
+
+    sidecar_deleted = False
     try:
         if sidecar.exists():
             sidecar.unlink()
-    except OSError:
-        pass
+            sidecar_deleted = True
+    except OSError as e:
+        errors.append(f"sidecar unlink failed: {e}")
+
+    storage_deleted = False
     try:
-        if storage_path.exists():
-            storage_path.unlink()
-    except OSError:
-        pass
-    return True
+        storage_path = Path(meta.storage_path).resolve()
+    except OSError as e:
+        errors.append(f"storage_path resolve failed: {e}")
+        return DiscardResult(
+            sidecar_deleted=sidecar_deleted,
+            storage_deleted=False,
+            errors=errors,
+        )
+    if not storage_path.is_relative_to(optuna_dir):
+        errors.append(
+            f"storage_path outside optuna dir, refusing to unlink: {storage_path}"
+        )
+    else:
+        try:
+            if storage_path.exists():
+                storage_path.unlink()
+                storage_deleted = True
+        except OSError as e:
+            errors.append(f"storage unlink failed: {e}")
+
+    return DiscardResult(
+        sidecar_deleted=sidecar_deleted,
+        storage_deleted=storage_deleted,
+        errors=errors,
+    )
 
 
 def _reset_for_tests() -> None:
     """Test-only reset of module-level state. Do not call from production code."""
-    global _active_storage_url, _active_run_id, _is_resuming
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
         _active_storage_url = None
         _active_run_id = None
+        _active_metadata = None
         _is_resuming = False
