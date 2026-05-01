@@ -527,16 +527,27 @@ def compute_validation_metrics_for_top_models(
                 smoothing = smoothing > 0
             smoothing_window = int(row.get('smoothing_window', 17)) if not (isinstance(row.get('smoothing_window'), float) and pd.isna(row.get('smoothing_window'))) else 17
             smoothing_polyorder = int(row.get('smoothing_polyorder', 2)) if not (isinstance(row.get('smoothing_polyorder'), float) and pd.isna(row.get('smoothing_polyorder'))) else 2
+            # T-36: autoscale flag must be read so the validation rebuild matches the
+            # search pipeline. Old .dasp files without the column default to False.
+            autoscale_raw = row.get('Autoscale', False)
+            if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
+                autoscale = False
+            else:
+                autoscale = bool(autoscale_raw)
 
             # Fallback: parse display name for old results without explicit columns
-            if baseline_method is None and '+' in str(preprocess_name):
+            if '+' in str(preprocess_name):
                 parts = str(preprocess_name).split('+')
                 core_parts = []
                 for part in parts:
                     if part in ('als', 'polynomial', 'rubber_band', 'airpls', 'advanced'):
-                        baseline_method = part
+                        if baseline_method is None:
+                            baseline_method = part
                     elif part == 'sg0':
                         smoothing = True
+                    elif part == 'autoscale':
+                        # T-36: autoscale fallback parse — only override if Autoscale column was missing/false
+                        autoscale = True
                     else:
                         core_parts.append(part)
                 preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
@@ -597,7 +608,8 @@ def compute_validation_metrics_for_top_models(
                 cache_key = ('ga', tuple(ga_genes))
             else:
                 cache_key = (preprocess_name, deriv, window, poly, baseline_method,
-                             smoothing, smoothing_window, smoothing_polyorder)
+                             smoothing, smoothing_window, smoothing_polyorder,
+                             autoscale)  # T-36: must vary key to avoid cache collision
 
             # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
             if cache_key in preprocess_cache:
@@ -618,6 +630,7 @@ def compute_validation_metrics_for_top_models(
                         smoothing=smoothing,
                         smoothing_window=smoothing_window,
                         smoothing_polyorder=smoothing_polyorder,
+                        autoscale=autoscale,
                     )
 
                     if prep_steps:
@@ -912,6 +925,8 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                smoothing=False,
                smoothing_window=17,
                smoothing_polyorder=2,
+               # Autoscale (UV scaling) toggle — doubles preprocess_configs (T-36)
+               autoscale=False,
                # Search control (pause/resume/stop)
                controller=None,
                # Validation metrics parameters
@@ -1848,6 +1863,21 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             configs_with_smooth.append(cfg_sm)
         preprocess_configs = configs_without_smooth + configs_with_smooth
 
+    # --- Autoscale (UV scaling) toggle: when enabled, test both WITH and WITHOUT autoscale ---
+    if autoscale and preprocess_configs:
+        configs_without_autoscale = []
+        configs_with_autoscale = []
+        for cfg in preprocess_configs:
+            cfg_no = dict(cfg)
+            cfg_no["autoscale"] = False
+            configs_without_autoscale.append(cfg_no)
+            cfg_sc = dict(cfg)
+            cfg_sc["autoscale"] = True
+            cfg_sc["base_name"] = cfg.get("base_name", cfg["name"])
+            cfg_sc["name"] = cfg["name"] + "+autoscale"
+            configs_with_autoscale.append(cfg_sc)
+        preprocess_configs = configs_without_autoscale + configs_with_autoscale
+
     # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
     cv_splitter = build_cv_splitter(
         strategy=cv_strategy,
@@ -1911,7 +1941,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         does not include model_name. For model-category-dependent methods
         (cars-aware, cars-tree, uve_cars_tree, ga), it includes the category.
         """
-        # Canonical preprocessing hash: only fields that affect output
+        # Canonical preprocessing hash: only fields that affect output.
+        # Note: 'smoothing' need not be a separate field — the smoothing-doubling
+        # block already encodes it in the 'name' (sg0+ prefix), so name discriminates.
+        # 'autoscale' is encoded in 'name' too, but is added here defensively (and
+        # because Bayesian-path Optuna trials toggle autoscale without renaming).
         prep_parts = (
             preprocess_cfg.get('name', ''),
             preprocess_cfg.get('base_name', ''),
@@ -1919,6 +1953,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             preprocess_cfg.get('window', 0),
             preprocess_cfg.get('polyorder', 0),
             str(preprocess_cfg.get('baseline_method', '')),
+            preprocess_cfg.get('autoscale', False),  # T-36
         )
 
         # Methods that depend on model category (tree vs linear)
@@ -1975,7 +2010,8 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 baseline_params=preprocess_cfg.get("baseline_params"),
                 smoothing=preprocess_cfg.get("smoothing", False),
                 smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
+                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+                autoscale=preprocess_cfg.get("autoscale", False),
             )
 
             # Step 2: Apply preprocessing to full spectrum
@@ -3539,6 +3575,9 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             else:
                 # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
                 # Use base_name if available (for GA configs), otherwise use name
+                # NOTE (T-36): run_bayesian_search is test-only — no GUI caller — so
+                # autoscale is not threaded through here. The user-facing Bayesian path
+                # is run_unified_bayesian (unified_bayesian.py), which Tasks 11-14 wire.
                 preprocess_name = preprocess_cfg.get("base_name", preprocess_cfg["name"])
                 prep_pipe_steps = build_preprocessing_pipeline(
                     preprocess_name,
@@ -4202,7 +4241,8 @@ def _run_single_config(
             baseline_params=preprocess_cfg.get("baseline_params"),
             smoothing=preprocess_cfg.get("smoothing", False),
             smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+            autoscale=preprocess_cfg.get("autoscale", False),
         )
 
     # Handle class_weight for imbalanced classification
@@ -4268,9 +4308,12 @@ def _run_single_config(
 
         pipe_steps.append(("lr", LogisticRegression(**lr_kwargs)))
     # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler before model
-    # These use gradient descent or kernel methods that are sensitive to feature scale
+    # These use gradient descent or kernel methods that are sensitive to feature scale.
+    # T-36: When autoscale is active, the preprocessing pipeline already inserts a
+    # StandardScaler on the spectral block, so the per-model scaler is redundant.
     elif model_name in SCALE_SENSITIVE_MODELS:
-        pipe_steps.append(("scaler", StandardScaler()))
+        if not preprocess_cfg.get("autoscale", False):
+            pipe_steps.append(("scaler", StandardScaler()))
         pipe_steps.append(("model", clone(model)))
     else:
         pipe_steps.append(("model", clone(model)))
@@ -4691,6 +4734,7 @@ def _run_single_config(
         "Deriv": preprocess_cfg["deriv"],
         "Window": preprocess_cfg["window"],
         "Poly": preprocess_cfg["polyorder"],
+        "Autoscale": preprocess_cfg.get("autoscale", False),  # T-36: UV scaling toggle
         "LVs": lvs,
         "n_vars": n_vars,
         "full_vars": full_vars,
