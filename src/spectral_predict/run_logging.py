@@ -40,6 +40,14 @@ _active_log_path: Path | None = None
 _original_stdout = None
 _original_stderr = None
 
+# Guards the idempotency check + setup block in setup_run_logger so two
+# concurrent callers can't both pass the None-check and double-attach the
+# RotatingFileHandler / TeeStream. The current single-caller pattern in
+# the GUI thread is safe, but the docstring promises multi-caller use
+# ("background workers and the GUI see the same log"), so the contract
+# needs the lock to hold under future call-sites.
+_setup_lock = threading.RLock()
+
 # Codex MEDIUM #10: cap log file growth. A 12-hour verbose run can produce
 # multi-GB logs without rotation. RotatingFileHandler caps each file at
 # this size and keeps a small backup chain.
@@ -173,47 +181,48 @@ def setup_run_logger(
     """
     global _active_log_path, _original_stdout, _original_stderr
 
-    logger = logging.getLogger(_LOGGER_NAME)
-    if _active_log_path is not None:
-        return logger, _active_log_path
+    with _setup_lock:
+        logger = logging.getLogger(_LOGGER_NAME)
+        if _active_log_path is not None:
+            return logger, _active_log_path
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    suffix = f"_{label}" if label else ""
-    log_path = get_user_log_dir() / f"run_{timestamp}{suffix}.log"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{label}" if label else ""
+        log_path = get_user_log_dir() / f"run_{timestamp}{suffix}.log"
 
-    logger.setLevel(logging.INFO)
-    logger.propagate = False  # Don't double-emit to root
+        logger.setLevel(logging.INFO)
+        logger.propagate = False  # Don't double-emit to root
 
-    # Codex MEDIUM #10: rotate to cap total disk usage on long verbose runs.
-    fh = logging.handlers.RotatingFileHandler(
-        log_path,
-        maxBytes=_LOG_MAX_BYTES,
-        backupCount=_LOG_BACKUP_COUNT,
-        encoding="utf-8",
-        delay=False,
-    )
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(
-        logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+        # Codex MEDIUM #10: rotate to cap total disk usage on long verbose runs.
+        fh = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=_LOG_MAX_BYTES,
+            backupCount=_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+            delay=False,
         )
-    )
-    logger.addHandler(fh)
+        fh.setLevel(logging.INFO)
+        fh.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)s [%(levelname)s] %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        logger.addHandler(fh)
 
-    logger.info("=== DASP run log ===")
-    logger.info("Path: %s", log_path)
-    logger.info("Python: %s", sys.version.split()[0])
-    logger.info("Platform: %s", sys.platform)
+        logger.info("=== DASP run log ===")
+        logger.info("Path: %s", log_path)
+        logger.info("Python: %s", sys.version.split()[0])
+        logger.info("Platform: %s", sys.platform)
 
-    if capture_stdout and _original_stdout is None:
-        _original_stdout = sys.stdout
-        _original_stderr = sys.stderr
-        sys.stdout = _TeeStream(_original_stdout, logger, logging.INFO)
-        sys.stderr = _TeeStream(_original_stderr, logger, logging.WARNING)
+        if capture_stdout and _original_stdout is None:
+            _original_stdout = sys.stdout
+            _original_stderr = sys.stderr
+            sys.stdout = _TeeStream(_original_stdout, logger, logging.INFO)
+            sys.stderr = _TeeStream(_original_stderr, logger, logging.WARNING)
 
-    _active_log_path = log_path
-    return logger, log_path
+        _active_log_path = log_path
+        return logger, log_path
 
 
 def get_active_log_path() -> Path | None:
