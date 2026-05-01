@@ -20,6 +20,29 @@
 > `docs/plans/2026-04-30-T33-gaussian-process-regression.md`. Not yet
 > implemented; awaits prioritization.
 >
+> **T-36 / T-37 / T-38 preprocessing-discovery roadmap filed (2026-05-01)** —
+> three tickets surfaced from a conversation about adding autoscale (UV
+> scaling) as a preprocessing option, which led to a deeper audit of the
+> preprocessing-discovery surface (basic, GA, exhaustive, learned, ensemble
+> modules). Branch `feature/T36-autoscale-toggle` reserved.
+>
+> | Ticket | Title | Status | Plan |
+> |---|---|---|---|
+> | **T-36** | Autoscale (UV scaling) preprocessing toggle | PLAN_FILED — branch reserved, ready for overnight handoff | `docs/plans/2026-05-01-T36-autoscale-toggle.md` |
+> | **T-37** | TPE quick preprocessing discovery (replaces basic + GA + exhaustive) | ROUGH_PLAN — blocked on T-36 | `docs/plans/2026-05-01-T37-tpe-quick-preprocessing-discovery.md` |
+> | **T-38** | Dead preprocessing module cleanup | ROUGH_PLAN — three modules deletable now (zero callers); `ga_preprocessing.py` retires after T-37 | `docs/plans/2026-05-01-T38-dead-preprocessing-cleanup.md` |
+>
+> **T-36 plan caught three pre-existing implementation bugs in a draft autoscale plan (DeepSeek V4 Pro draft, audited):**
+> 1. `unified_bayesian.py:apply_preprocessing()` returns early in every named-preprocessing branch — naive autoscale step at end of function would be unreachable. Fix: restructure to assign-not-return.
+> 2. `unified_bayesian.py:857-864` preprocessing cache key omits `apply_autoscale` — would cause two trials with same prep but different autoscale to collide on cache. Fix: add to tuple.
+> 3. `contamination.py:1109-1112` validation cache key omits `autoscale` — same class of bug. Fix: add to tuple.
+>
+> **T-36 also bundles a pre-existing one-class metadata gap:** `run_one_class_search` result rows omit `baseline_method`, `smoothing`, `smoothing_window`, `smoothing_polyorder` columns; validation rebuild reads them and falls back to defaults silently. Same code surface as the autoscale row writes — low-cost to fix together.
+>
+> **T-37 background:** Independent audits (Explore agent + DeepSeek V4 Pro via opencode-call) confirmed `ga_preprocessing.py`'s GA mode evaluates ~6× the entire 238-point search space, providing zero benefit over exhaustive on a discrete categorical space with no neighborhood structure. Basic and GA paths cover the same operation space with different search strategies; merge into one TPE-based path covering a richer 5-D space (preproc × window × autoscale × baseline × smoothing) at 75-100 trials.
+>
+> **T-38 deletes:** `learned_preprocessing.py` (775 LOC, zero callers), `ensemble_preprocessing.py` (701 LOC, dead `HAS_ENSEMBLE_PREPROCESSING` flag only), `preprocessing_wrapper.py` (220 LOC, only imported by ensemble_preprocessing). Retires `ga_preprocessing.py` after T-37 absorbs its useful insights (`DERIVATIVE_WINDOW_RANGES`, multi-seed robustness logic).
+>
 > **Previously:** 2026-04-30 (evening — T-08 dropped, T-11 staged, T-15 dropped, T-16 reframed, T-19 user-framed) —
 >
 > **Session close-out:**
