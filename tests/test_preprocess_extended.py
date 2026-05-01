@@ -518,6 +518,91 @@ class TestPipelineWithBaseline:
         assert X_transformed.shape == X.shape, "Shape should be preserved"
 
 
+@pytest.mark.numerical
+class TestAutoscaleStep:
+    """T-36: Autoscale (UV scaling) toggle in build_preprocessing_pipeline."""
+
+    def test_autoscale_step_present_when_enabled(self):
+        steps = build_preprocessing_pipeline("snv", autoscale=True)
+        names = [name for name, _ in steps]
+        assert "autoscale" in names, "Expected 'autoscale' step when autoscale=True"
+
+    def test_autoscale_step_absent_by_default(self):
+        steps = build_preprocessing_pipeline("snv")
+        names = [name for name, _ in steps]
+        assert "autoscale" not in names, "Autoscale step should be absent when flag omitted"
+
+    def test_autoscale_step_absent_when_disabled(self):
+        steps = build_preprocessing_pipeline("snv_deriv", deriv=1, window=11, polyorder=2,
+                                             autoscale=False)
+        names = [name for name, _ in steps]
+        assert "autoscale" not in names
+
+    def test_autoscale_after_snv_deriv(self):
+        """Autoscale step must come AFTER SNV/derivatives so varsel sees scaled features."""
+        steps = build_preprocessing_pipeline("snv_deriv", deriv=1, window=11, polyorder=2,
+                                             autoscale=True)
+        names = [name for name, _ in steps]
+        assert "autoscale" in names
+        idx_autoscale = names.index("autoscale")
+        # Both savgol (deriv) and snv must precede autoscale
+        for prep_step in ("snv", "savgol"):
+            if prep_step in names:
+                assert names.index(prep_step) < idx_autoscale, (
+                    f"{prep_step} must come before autoscale, got {names}"
+                )
+
+    def test_autoscale_before_imbalance(self):
+        """Autoscale must come BEFORE imbalance handling so SMOTE neighbors are computed in scaled space."""
+        steps = build_preprocessing_pipeline(
+            "snv",
+            imbalance_method="smote",
+            task_type="classification",
+            autoscale=True,
+        )
+        names = [name for name, _ in steps]
+        assert "autoscale" in names
+        # imbalance step is appended last; verify autoscale precedes whichever imbalance step name appears
+        idx_autoscale = names.index("autoscale")
+        # Anything appended after autoscale should be the imbalance handler
+        assert idx_autoscale < len(names) - 1, "Expected at least one step after autoscale (imbalance)"
+
+    def test_autoscale_zero_mean_unit_var_per_column(self):
+        """Pipeline output with autoscale=True must have ~zero column means and ~unit column std."""
+        rng = np.random.default_rng(0)
+        # Use 'raw' so the only transformation we exercise is autoscale itself.
+        X = rng.normal(loc=5.0, scale=2.0, size=(40, 25))
+        steps = build_preprocessing_pipeline("raw", autoscale=True)
+        pipe = Pipeline(steps)
+        X_out = pipe.fit_transform(X)
+        # StandardScaler default uses ddof=0 (biased variance) — match that here.
+        assert np.allclose(X_out.mean(axis=0), 0.0, atol=1e-10)
+        assert np.allclose(X_out.std(axis=0), 1.0, atol=1e-10)
+
+    def test_autoscale_step_order_full_chain(self):
+        """Order: baseline -> smoothing -> SNV/deriv -> autoscale."""
+        steps = build_preprocessing_pipeline(
+            "snv_deriv",
+            deriv=1,
+            window=11,
+            polyorder=2,
+            baseline_method="polynomial",
+            baseline_params={"degree": 2},
+            smoothing=True,
+            smoothing_window=11,
+            smoothing_polyorder=2,
+            autoscale=True,
+        )
+        names = [name for name, _ in steps]
+        # Required ordering: baseline -> smoothing -> SNV/savgol -> autoscale.
+        # Baseline transformer is registered under the name "baseline".
+        assert "baseline" in names, f"baseline missing from {names}"
+        idx_autoscale = names.index("autoscale")
+        for earlier in ("baseline", "smooth", "snv"):
+            if earlier in names:
+                assert names.index(earlier) < idx_autoscale
+
+
 if __name__ == "__main__":
     # Allow running tests directly
     pytest.main([__file__, "-v", "--tb=short"])
