@@ -280,7 +280,8 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                                  imbalance_method=None, imbalance_params=None, task_type=None,
                                  interference=None, wavelengths=None, random_state=42,
                                  baseline_method=None, baseline_params=None,
-                                 smoothing=False, smoothing_window=17, smoothing_polyorder=2):
+                                 smoothing=False, smoothing_window=17, smoothing_polyorder=2,
+                                 autoscale=False):
     """
     Build a preprocessing pipeline from a configuration.
 
@@ -314,6 +315,10 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         Window size for smoothing
     smoothing_polyorder : int, default=2
         Polynomial order for smoothing
+    autoscale : bool, default=False
+        If True, append a StandardScaler step (mean-center + unit variance per
+        wavelength column) AFTER SNV/derivatives and BEFORE imbalance handling.
+        UV scaling — equivalent to SIMCA's default scaling for PLS.
 
     Returns
     -------
@@ -322,7 +327,7 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 
     Notes
     -----
-    Processing order: Baseline → Smoothing → SNV/Derivatives → Imbalance handling
+    Processing order: Interference → Baseline → Smoothing → SNV/Derivatives → Autoscale → Imbalance handling
     Imbalance handling is applied AFTER spectral preprocessing (SNV/derivatives)
     but BEFORE the model. This ensures resampling operates on preprocessed spectra.
     """
@@ -546,6 +551,13 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 
     else:
         raise ValueError(f"Unknown preprocess: {preprocess_name}")
+
+    # Autoscale (UV scaling): mean-center + unit variance per wavelength.
+    # Applied AFTER SNV/derivatives so variable selection sees normalized features,
+    # and BEFORE imbalance handling so SMOTE/etc. operate in the scaled space.
+    if autoscale:
+        from sklearn.preprocessing import StandardScaler
+        steps.append(("autoscale", StandardScaler()))
 
     # Step 2: Imbalance handling (optional, added only if user enables it)
     if imbalance_method is not None:
