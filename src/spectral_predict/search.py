@@ -5114,6 +5114,8 @@ def run_one_class_search(
     ga_population_size=64,
     ga_generations=100,
     ga_n_runs=5,
+    # T-36: autoscale (UV scaling) toggle — doubles preprocess_configs
+    autoscale=False,
 ):
     """Run one-class model search.
 
@@ -5348,6 +5350,23 @@ def run_one_class_search(
                     'smoothing_polyorder': smoothing_polyorder,
                 })
 
+    # --- Autoscale (UV scaling) toggle: when enabled, test both WITH and WITHOUT autoscale ---
+    # T-36: mirrors run_search's grid-doubling block. One-class configs use 'method'
+    # as the clean pipeline name (search.py:5326) rather than 'base_name'; we leave
+    # 'method' alone and only suffix the display 'name'.
+    if autoscale and preprocess_configs:
+        configs_without_autoscale = []
+        configs_with_autoscale = []
+        for cfg in preprocess_configs:
+            cfg_no = dict(cfg)
+            cfg_no["autoscale"] = False
+            configs_without_autoscale.append(cfg_no)
+            cfg_sc = dict(cfg)
+            cfg_sc["autoscale"] = True
+            cfg_sc["name"] = cfg["name"] + "+autoscale"
+            configs_with_autoscale.append(cfg_sc)
+        preprocess_configs = configs_without_autoscale + configs_with_autoscale
+
     # Get model grids
     if enabled_models is None:
         enabled_models = get_tier_models(tier, task_type='one_class')
@@ -5446,6 +5465,7 @@ def run_one_class_search(
             smoothing=preprocess_cfg.get("smoothing", False),
             smoothing_window=preprocess_cfg.get("smoothing_window", 17),
             smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+            autoscale=preprocess_cfg.get("autoscale", False),  # T-36
         )
 
         # Apply preprocessing (fit on inlier data, transform all)
@@ -5545,6 +5565,14 @@ def run_one_class_search(
                     "Deriv": preprocess_cfg["deriv"],
                     "Window": preprocess_cfg["window"],
                     "Poly": preprocess_cfg["polyorder"],
+                    "Autoscale": preprocess_cfg.get("autoscale", False),  # T-36
+                    # T-36 bundled fix: write baseline/smoothing metadata so the
+                    # one-class validation rebuild path (contamination.py:~1100) reads
+                    # actual values rather than silently falling back to defaults.
+                    "baseline_method": preprocess_cfg.get("baseline_method"),
+                    "smoothing": preprocess_cfg.get("smoothing", False),
+                    "smoothing_window": preprocess_cfg.get("smoothing_window", 17),
+                    "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
                     "LVs": params.get("n_components") if model_name == "PCA-SIMCA" else None,
                     "n_vars": n_vars,
                     "full_vars": len(wavelengths_current),
@@ -5662,6 +5690,7 @@ def run_one_class_search(
                     smoothing=preprocess_cfg.get("smoothing", False),
                     smoothing_window=preprocess_cfg.get("smoothing_window", 17),
                     smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+                    autoscale=preprocess_cfg.get("autoscale", False),  # T-36
                 )
 
                 if pipe_steps:
@@ -6079,6 +6108,13 @@ def run_one_class_search(
                                 "Deriv": preprocess_cfg["deriv"],
                                 "Window": preprocess_cfg["window"],
                                 "Poly": preprocess_cfg["polyorder"],
+                                "Autoscale": preprocess_cfg.get("autoscale", False),  # T-36
+                                # T-36 bundled fix: write baseline/smoothing metadata
+                                # so the validation rebuild path reads real values.
+                                "baseline_method": preprocess_cfg.get("baseline_method"),
+                                "smoothing": preprocess_cfg.get("smoothing", False),
+                                "smoothing_window": preprocess_cfg.get("smoothing_window", 17),
+                                "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
                                 "LVs": (
                                     params.get("n_components")
                                     if model_name == "PCA-SIMCA" else None
