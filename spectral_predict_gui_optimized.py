@@ -3129,6 +3129,11 @@ class SpectralPredictApp:
         self.use_sg3 = tk.BooleanVar(value=False)  # 3rd derivative (not default)
         self.use_sg4 = tk.BooleanVar(value=False)  # 4th derivative (not default)
         self.use_deriv_snv = tk.BooleanVar(value=True)  # deriv_snv (derivative then SNV)
+        # T-36: Autoscale (UV scaling) toggle. When True, every preprocessing combo is
+        # tested both with and without autoscale (grid-path doubling); in the Bayesian
+        # path, Optuna picks apply_autoscale per trial. Default OFF — preserves prior
+        # behavior for users who don't explicitly enable it.
+        self.use_autoscale = tk.BooleanVar(value=False)
 
         # Interference removal methods (Phase 3: Basic integration)
         self.enable_wavelength_exclusion = tk.BooleanVar(value=False)
@@ -11585,6 +11590,37 @@ class SpectralPredictApp:
         self.deriv_snv_checkbox.grid(row=6, column=0, sticky=tk.W, pady=5)
         ttk.Label(preprocess_frame, text="Derivative then SNV (less common)", style='Caption.TLabel').grid(row=6, column=1, sticky=tk.W, padx=15)
         CreateToolTip(self.deriv_snv_checkbox, text=TOOLTIP_CONTENT['preprocessing']['deriv_snv'], delay=500)
+
+        # T-36: Autoscale (UV scaling) toggle. When enabled, every selected preprocessing
+        # combination is tested both with and without autoscale; the Bayesian path lets
+        # Optuna pick autoscale per trial.
+        self.autoscale_checkbox = ttk.Checkbutton(
+            preprocess_frame,
+            text="Autoscale (UV scaling: mean-center + unit variance per wavelength)",
+            variable=self.use_autoscale,
+        )
+        self.autoscale_checkbox.grid(row=7, column=0, sticky=tk.W, pady=5)
+        ttk.Label(
+            preprocess_frame,
+            text="SIMCA default for PLS — useful when wavelength variances differ after SNV/derivatives",
+            style='Caption.TLabel',
+        ).grid(row=7, column=1, sticky=tk.W, padx=15)
+        CreateToolTip(
+            self.autoscale_checkbox,
+            text=(
+                "Autoscale (UV scaling): each wavelength column is mean-centered and "
+                "scaled to unit variance after SNV/derivatives.\n\n"
+                "When enabled, every preprocessing combination is tested twice — with "
+                "and without autoscale — so the grid doubles. In Bayesian search, "
+                "Optuna treats it as another categorical hyperparameter.\n\n"
+                "Field-aligned: SIMCA defaults to UV scaling for PLS. PLS_Toolbox and "
+                "Unscrambler offer it as an option. Most useful when wavelength "
+                "variances differ substantially after SNV/derivatives — e.g., regions "
+                "with strong informative bands are otherwise dominated by high-noise "
+                "regions during variable selection."
+            ),
+            delay=500,
+        )
 
         # Derivative window size settings
         window_size_label = ttk.Label(preprocess_frame, text="Derivative Window Sizes:", style='Subheading.TLabel')
@@ -26964,6 +27000,7 @@ class SpectralPredictApp:
                                 smoothing=sm_enabled_oc,
                                 smoothing_window=sm_win_oc,
                                 smoothing_polyorder=sm_poly_oc,
+                                enable_autoscale=self.use_autoscale.get(),  # T-36
                                 inlier_class_label=inlier_label,
                                 enable_uve=self.bayes_enable_uve.get(),
                             )
@@ -27068,6 +27105,8 @@ class SpectralPredictApp:
                         smart_preprocess=self.enable_smart_preprocessing.get(),
                         smart_preprocess_importance=self.smart_preprocess_importance.get(),
                         smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
+                        # T-36: autoscale toggle (UV scaling)
+                        autoscale=self.use_autoscale.get(),
                     )
 
                 label_encoder = None
@@ -27303,6 +27342,7 @@ class SpectralPredictApp:
                             smoothing=sm_enabled,
                             smoothing_window=sm_win,
                             smoothing_polyorder=sm_poly,
+                            enable_autoscale=self.use_autoscale.get(),  # T-36
                             enable_uve=enable_uve,
                         )
 
@@ -27672,6 +27712,8 @@ class SpectralPredictApp:
                 smoothing=self.enable_smoothing.get(),
                 smoothing_window=self.smoothing_window.get(),
                 smoothing_polyorder=self.smoothing_polyorder.get(),
+                # T-36: Autoscale (UV scaling) toggle — doubles preprocess_configs
+                autoscale=self.use_autoscale.get(),
                 # interference_settings=interference_settings,  # DISABLED: Code stashed (broke R² reproducibility)
                 window_sizes=window_sizes,
                 n_estimators_list=n_estimators_list,
