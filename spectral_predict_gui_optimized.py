@@ -33045,7 +33045,12 @@ Performance (Classification):
         baseline_prefix = None
         smoothing_detected = False
         autoscale_detected = False
-        if '+' in preprocess:
+        # Edge case: bare "autoscale" with no core name (rare — hand-edited row) →
+        # treat as raw + autoscale.
+        if preprocess == 'autoscale':
+            autoscale_detected = True
+            preprocess = 'raw'
+        elif '+' in preprocess:
             parts = preprocess.split('+')
             # Strip trailing '+autoscale' first so it can't be mistaken for the core name.
             if parts[-1] == 'autoscale':
@@ -38255,6 +38260,11 @@ External Validation Performance (n={n_val}):
                 # Imbalance handling
                 'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                 'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                # T-36: persist autoscale flag in saved-model metadata. Prediction
+                # roundtrip is already safe via the pickled preprocessor.pkl, but
+                # emitting the flag in metadata lets downstream tools and metadata
+                # readers know the trained pipeline used UV scaling.
+                'autoscale': bool(self.use_autoscale.get()),
                 # Y-transform
                 'y_transform': self.refine_y_transform.get() if hasattr(self, 'refine_y_transform') else 'None',
             }
