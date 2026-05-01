@@ -619,6 +619,25 @@ def compute_validation_metrics_for_top_models(
                 window = int(window) if window and not pd.isna(window) and window > 0 else None
                 poly = int(poly) if poly and not pd.isna(poly) and poly > 0 else None
 
+            # T-36 fix (post-merge review v2): persist baseline_params from the
+            # row so non-default ALS/polynomial settings survive the regression /
+            # classification validation roundtrip rather than silently snapping
+            # back to defaults — same shape as the one-class fix in
+            # contamination.py:~1141.
+            baseline_params_raw = row.get('baseline_params', None)
+            baseline_params = None
+            if baseline_params_raw is not None:
+                if isinstance(baseline_params_raw, dict):
+                    baseline_params = baseline_params_raw
+                elif isinstance(baseline_params_raw, str) and baseline_params_raw.strip():
+                    try:
+                        import ast as _ast_local
+                        parsed = _ast_local.literal_eval(baseline_params_raw)
+                        if isinstance(parsed, dict):
+                            baseline_params = parsed
+                    except (ValueError, SyntaxError):
+                        baseline_params = None
+
             # Create cache key
             if use_ga_transform:
                 # GA preprocessing: cache by genes hash
@@ -644,6 +663,7 @@ def compute_validation_metrics_for_top_models(
                         window=window,
                         polyorder=poly,
                         baseline_method=baseline_method,
+                        baseline_params=baseline_params,  # T-36 fix v2
                         smoothing=smoothing,
                         smoothing_window=smoothing_window,
                         smoothing_polyorder=smoothing_polyorder,
@@ -4755,6 +4775,17 @@ def _run_single_config(
         "Window": preprocess_cfg["window"],
         "Poly": preprocess_cfg["polyorder"],
         "Autoscale": preprocess_cfg.get("autoscale", False),  # T-36: UV scaling toggle
+        # T-36 fix (post-merge review v2): persist baseline / smoothing metadata
+        # so the validation rebuild path (compute_validation_metrics_for_top_models)
+        # can reconstruct the same pipeline that search ran. Previously only the
+        # one-class path emitted these — regression/classification rows would
+        # silently snap back to defaults during validation rebuild whenever the
+        # user picked non-default ALS / smoothing settings.
+        "baseline_method": preprocess_cfg.get("baseline_method"),
+        "baseline_params": preprocess_cfg.get("baseline_params"),
+        "smoothing": preprocess_cfg.get("smoothing", False),
+        "smoothing_window": preprocess_cfg.get("smoothing_window", 17),
+        "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
         "LVs": lvs,
         "n_vars": n_vars,
         "full_vars": full_vars,

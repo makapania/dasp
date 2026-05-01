@@ -1078,7 +1078,6 @@ def compute_validation_metrics_for_top_one_class_models(
                 preprocess_name = row.get('Preprocess', 'raw')
             if preprocess_name is None or (isinstance(preprocess_name, float) and pd.isna(preprocess_name)):
                 preprocess_name = 'raw'
-            preprocess_name = _normalize_preprocess_for_pipeline(str(preprocess_name))
 
             def _maybe_int(v, default=0):
                 try:
@@ -1115,10 +1114,13 @@ def compute_validation_metrics_for_top_one_class_models(
             else:
                 autoscale = bool(autoscale_raw)
 
-            # T-36 fix (post-merge review): mirror search.py's display-name fallback
-            # so legacy .dasp files without an explicit Autoscale/baseline column
-            # still rebuild the right pipeline from the suffixed pipeline name
-            # (e.g. "als+sg0+snv+autoscale"). Explicit columns always win.
+            # T-36 fix (post-merge review v2): mirror search.py's display-name
+            # fallback so legacy .dasp files without an explicit Autoscale /
+            # baseline column still rebuild the right pipeline from the suffixed
+            # pipeline name (e.g. "als+sg0+snv+autoscale"). Must run BEFORE
+            # _normalize_preprocess_for_pipeline below — that helper collapses
+            # any '+'-containing name to 'raw' and would erase the suffixes
+            # before this parser ever saw them. Explicit columns still win.
             if '+' in str(preprocess_name):
                 parts = str(preprocess_name).split('+')
                 core_parts = []
@@ -1134,6 +1136,8 @@ def compute_validation_metrics_for_top_one_class_models(
                     else:
                         core_parts.append(part)
                 preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
+
+            preprocess_name = _normalize_preprocess_for_pipeline(str(preprocess_name))
 
             # T-36 fix (post-merge review): persist baseline_params from the row so
             # non-default ALS/polynomial settings survive the validation roundtrip
