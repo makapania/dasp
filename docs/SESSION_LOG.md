@@ -4,6 +4,98 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-01 (early hours) — T-11 MERGED via PR #6 after seven reviewer passes; 4 deferral tickets filed
+
+T-11 went from APPROVED-but-not-pushed to MERGED via the project's first
+GitHub PR (#6) instead of the prior fast-forward-from-local pattern.
+Decision driver: T-11 is the largest single feature on this codebase
+(~7000 LOC, new modules) with non-trivial threading + persistence + GUI
+state surfaces. A PR URL is the cheap audit-trail artifact for future
+bisects.
+
+**Seven independent reviewer passes converged on READY_TO_MERGE:**
+
+1. Codex initial (4 HIGH + 3 MEDIUM, all fixed pre-PR)
+2. Kimi K2.6 initial (2 MAJOR + 4 MINOR, all fixed pre-PR)
+3. DeepSeek V4 Pro pass-1 (24h sweep, 2 HIGH + 3 MEDIUM + 9 LOW/INFO,
+   all closed in `446465c` / `9107a68` / `53b3078`)
+4. DeepSeek V4 Pro pass-2 (recheck, found 2 NEW HIGH — same
+   `__compiled__ in dir()` pattern in 2 GUI sites the pass-1 grep
+   missed because it was scoped to `src/spectral_predict/`. Closed
+   in `e62c15d`)
+5. Five specialist agents in parallel (code-reviewer, pr-test-analyzer,
+   silent-failure-hunter, comment-analyzer, type-design-analyzer).
+   13 findings: Cluster A (3 interlocking sidecar-lifecycle bugs in
+   `run_state.py`), Cluster B (3 logger-failure-isolation bugs in
+   `run_logging.py`), Cluster C (start_run Frankenstein metadata),
+   Cluster D (5 test-coverage gaps for headline contracts), plus 8
+   "Important" + 4 "Suggestion" items. 12 closed in commits
+   `37a71ea` / `5db0b40` / `4dc7ec3` / `6fd8dab` / `29fe489`. 1
+   deferred → T-34.
+6. Codex meta-review of the synthesis. Found NEW BUG #1 (mark_complete
+   deletes unrelated sidecars — GUI calls it after every successful
+   analysis, so a paused Bayesian sidecar was destroyed by a fresh
+   grid run; closed in the run_state.py rewrite) AND deferred NEW
+   BUG #2 (per-model Bayesian failure swallowing → mark_complete
+   still runs, can erase resume state for partially-completed
+   multi-model runs; filed as T-34).
+7. DeepSeek V4 Pro pass-3 with `--variant high` (high-effort
+   reasoning). Verdict: READY_TO_MERGE. 0 blockers, 1 cosmetic
+   observation explicitly accepted ("not worth fixing").
+
+**Final T-11 test count:** 47 (34 original + 13 added in `29fe489`
+covering the cluster-A/B/C contracts and the rotation regression).
+
+**Lessons that recur:**
+
+- "Diff-only" review misses pre-existing copies of patterns. The
+  `__compiled__ in dir()` Nuitka bug existed in 4 sites; pass-1 grep
+  scoped to `src/` and pass-2 broadened to the GUI monolith caught
+  the remaining 2. Lesson: when a finding surfaces a *class* of bug
+  not an isolated incident, ask the next pass to grep repo-wide for
+  the entire pattern.
+- Multi-agent convergence as a defect-confidence signal. The
+  `start_run` Frankenstein-metadata bug was flagged independently
+  by type-design-analyzer ("dataclass returns inconsistent state")
+  and code-reviewer ("API silently lies about which copy is
+  authoritative"). Two agents arriving at the same defect through
+  orthogonal lenses = near-zero false-positive probability.
+- The chemometrics master rule scaling. Five new agents + Codex,
+  zero false-positives flagging SNV/varsel/CARS-Tree as bugs. Rule
+  was embedded in every prompt with concrete examples. Without it,
+  ~30% of output would have been sklearn-instinct noise.
+- "High-effort" reasoning mode for the gate-pass review. Pass-3
+  used opencode `--variant high` (provider-specific reasoning
+  effort), 12 minutes wall time, extensive `Thinking:` traces showing
+  actual code-tracing work. Worth the budget for the final pre-merge
+  pass.
+
+**Four new tickets filed for deferrals:**
+
+- **T-34** per-model Bayesian failure handling (NEW BUG #2). Requires
+  per-model sidecars — architectural change. `docs/plans/2026-04-30-T34-per-model-bayesian-failure-handling.md`
+- **T-35** T-11 type-design follow-ups. `RunMetadata` `frozen=True,
+  slots=True` + `__post_init__`, `_TeeStream` extract `_LineBuffer`
+  helper, `_TeeStream` add missing file-protocol attrs.
+  `docs/plans/2026-04-30-T35-t11-type-design-followups.md`
+- **T-36** `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
+  format differs across numpy versions; spurious "data has changed"
+  rejections on resume after numpy upgrade.
+  `docs/plans/2026-04-30-T36-fingerprint-numpy-stability.md`
+- **T-37** Stop-vs-Complete + concurrent-instance footgun. Stop button
+  silently kills resume option; two app instances can race on resume
+  dialog. `docs/plans/2026-04-30-T37-stop-vs-complete.md`
+
+T-33 GP regression rough plan was filed earlier in this session via
+user request. Still ROUGH_PLAN, awaits prioritization.
+
+**Merge details:** PR #6 rebase-merged at `50057af` (this commit's
+parent in `git log main`). 13 commits + 1 PROJECT_STATUS update.
+Original branch SHAs (`4084352`, etc.) became new SHAs after rebase
+replay; GitHub keeps both for history queries.
+
+---
+
 ## 2026-04-30 (evening) — T-08 dropped, T-11 shipped, T-15 dropped, T-16 reframed, T-19 user-framed
 
 Continuation session after the morning's T-06 + T-06b merges. User asked

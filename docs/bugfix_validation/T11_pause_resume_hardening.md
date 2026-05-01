@@ -1,9 +1,12 @@
-# T-11 Pause/resume hardening + Optuna SQLite + disk logging — APPROVED
+# T-11 Pause/resume hardening + Optuna SQLite + disk logging — MERGED
 
-**Branch:** `fix/T11-pause-resume-hardening`
-**Status:** APPROVED (post-Codex + Kimi cross-family review)
-**Date:** 2026-04-30
+**Branch:** `fix/T11-pause-resume-hardening` (deleted post-merge)
+**Status:** MERGED 2026-05-01 via PR #6 (rebase merge, linear history)
+**Merge tip:** `50057af` (post-merge `main` HEAD prior to PROJECT_STATUS update)
+**PR:** https://github.com/makapania/dasp/pull/6
+**Date:** 2026-04-30 (initial APPROVED) → 2026-05-01 (MERGED after pass-3 verdict)
 **Investigation:** [T11_findings.md](T11_findings.md)
+**Full review trail:** [docs/reviews/deepseek_v4pro_24h_review_2026-04-30.md](../reviews/deepseek_v4pro_24h_review_2026-04-30.md)
 
 ## 1. Scope shipped
 
@@ -121,3 +124,126 @@ Re-open T-11 (or open T-11b) only if:
 ## 7. Known false-alarm patterns NOT triggered
 
 T-11 is the first ticket since T-26 to actually NEED most of its claimed fixes — no false alarm here. The original PROJECT_STATUS Follow-Ups note from 2026-04-23 was directionally correct on all 4 items + the bonus disk-logging gap, with one minor framing correction (gap #3's "errored worker → resume on dead thread" path is mostly closed by the existing `except Exception` handler; the realistic case is "worker hung but alive," same one-liner fix either way).
+
+## 8. Post-APPROVED review trail (added 2026-05-01)
+
+After Codex + Kimi cross-family review (sections 2a–2e above), four
+additional review passes ran before merge. Each surfaced new findings the
+prior reviewers had missed because of charter scope, search-window scope,
+or the inherent limit of "diff-only" review.
+
+### Pass 1 — DeepSeek V4 Pro 24h sweep (commits ahead of `main` over the prior day)
+
+Found 0 BLOCKER + 2 HIGH + 3 MEDIUM + 4 LOW + 5 INFO:
+
+- HIGH-1: `search.py:19` `'__compiled__' in dir()` was a missed copy of the
+  Nuitka detection pattern (3 sites in `resource_paths.py` were fixed by
+  T-11 itself; this 4th copy lived outside the diff and was missed).
+  Closed in `446465c`.
+- HIGH-2: `setup_run_logger` idempotency check + setup block had no
+  `_setup_lock`, contradicting the docstring's "background workers and
+  the GUI see the same log" multi-caller promise. Closed in `9107a68`.
+- MEDIUM #3: `except Exception` in boot-path masked `ImportError` from
+  `_start_run_state`; bare `except: pass` around `mark_complete()` hid
+  failures. Closed in `53b3078`.
+- MEDIUM #4: `_TeeStream.write/flush` stripped whitespace-only lines via
+  `if line.strip()`. Lost log fidelity vs the actual stdout stream.
+  Closed in `53b3078`.
+- MEDIUM #5: `root.after(0, _check_for_incomplete_run)` could fire before
+  the main window finished rendering on macOS Tk-Aqua / slow Windows
+  machines, causing the modal to appear behind. Closed in `53b3078`.
+
+### Pass 2 — DeepSeek V4 Pro recheck
+
+Confirmed pass-1 findings closed. Surfaced 2 NEW HIGH (the same
+`__compiled__ in dir()` pattern in two more sites — `gui:131` module-level
+and `gui:21828` inside `_compute_rf_screening`). The prior pass had
+scoped grep to `src/spectral_predict/`; the recheck broadened to the GUI
+monolith. Both closed in `e62c15d`.
+
+### Pass 3 — 5 specialist agents in parallel
+
+After pass 2, ran code-reviewer / pr-test-analyzer / silent-failure-hunter
+/ comment-analyzer / type-design-analyzer in parallel against the diff
+through `e62c15d`. 13 findings:
+
+- Cluster A (3 interlocking bugs in `run_state.py`): `mark_complete()`
+  swallowed OSError on unlink and cleared in-memory state on failure;
+  `find_incomplete_run()` missed `OSError`/`UnicodeDecodeError` and
+  silently deleted corrupt sidecars; `discard_incomplete_run()` lied
+  about success even when both unlinks failed.
+- Cluster B (3 bugs in `run_logging.py`): `_TeeStream._logger.log()`
+  unprotected → worker thread crash on handler failure;
+  `RotatingFileHandler.handleError` feedback loop via the tee;
+  `_BUFFER_BYTE_THRESHOLD` flush dead for stated purpose (no-newline
+  buffer at threshold re-buffered verbatim).
+- Cluster C: `start_run()` idempotent-return path returned a Frankenstein
+  `RunMetadata` mixing the original on-disk `run_id`/`storage_url` with
+  the second caller's `label`/`fingerprint`/`model_names`/`started_iso`.
+  Found independently by type-design-analyzer + code-reviewer.
+- Cluster D: 5 test-coverage gaps for headline T-11 contracts (concurrent
+  `setup_run_logger`, concurrent `_TeeStream.write`, rotation, blank-line
+  preservation, locked-file discard).
+- Plus 8 "Important" + 4 "Suggestion" items spanning study-hash
+  completeness, GUI integration of new contracts, defensive path
+  validation, comment/docstring lag, and type-design suggestions.
+
+All Critical + High closed across commits `37a71ea` / `5db0b40` /
+`4dc7ec3` / `6fd8dab`. Test coverage closed via `29fe489` (13 new tests
+covering each contract).
+
+### Pass 4 — Codex meta-review (synthesis check)
+
+Asked Codex to evaluate the 5-agent synthesis. Verdict: NEEDS_ADJUSTMENT
+because the synthesis was directionally right but missed one big
+integration bug (NEW BUG #1: `mark_complete()` deleted unrelated
+sidecars unconditionally — GUI calls it after every successful analysis,
+so a paused Bayesian sidecar was destroyed by a fresh grid run) and
+flagged one architectural-cost deferral (NEW BUG #2: per-model Bayesian
+failure swallowing → `mark_complete()` still runs, can erase resume
+state for partially-completed multi-model runs). NEW BUG #1 closed by
+the `mark_complete()` rewrite; NEW BUG #2 deferred (filed as T-34, see
+`docs/plans/2026-04-30-T34-per-model-bayesian-failure-handling.md`).
+
+Codex also corrected several failure-mode framings: "discard prompt
+reappears every launch" was partially wrong (sidecar-failure → loud,
+SQLite-failure → silent orphan); concurrent-logger tests are
+regression-hardening, not merge-blocking.
+
+### Pass 5 — DeepSeek V4 Pro pass-3 (high-effort, opencode `--variant high`)
+
+Final gate-pass before merge. Verdict: **READY_TO_MERGE**.
+
+- All 12 fix claims verified against diff hunks.
+- NEW BUG #2 correctly classified as DEFERRED (architectural cost).
+- 47/47 T-11 tests passing.
+- 1 cosmetic observation (duplicate `_original` write on logger fallback)
+  — DeepSeek explicitly noted "not worth fixing — the fallback's job is
+  crash-prevention, not output-fidelity."
+- 1 bundle-mode edge case (no error signal on rollover failure when
+  `_original_stderr is None` because `console=False` PyInstaller bundle
+  redirects fd 2 to /dev/null) — explicitly accepted as "the best
+  achievable behavior in a no-console Windows bundle."
+
+**Reviewer count for the final state**: 7 independent passes (Codex
+initial + Kimi K2.6 initial + DeepSeek pass 1 + DeepSeek pass 2 + 5
+specialists in parallel + Codex meta-review + DeepSeek pass 3 high-effort).
+
+## 9. Deferrals filed as new tickets
+
+After T-11 merge:
+
+- **T-34** — per-model Bayesian failure handling (NEW BUG #2 deferral
+  from this PR). `docs/plans/2026-04-30-T34-per-model-bayesian-failure-handling.md`.
+- **T-35** — type-design follow-ups: `RunMetadata` `frozen=True, slots=True`
+  + `__post_init__` validation, `_TeeStream` extract `_LineBuffer` helper,
+  `_TeeStream` add missing file-protocol attrs (`closed`, `encoding`,
+  `writable()`, `readable()`). `docs/plans/2026-04-30-T35-t11-type-design-followups.md`.
+- **T-36** — `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
+  format differs across numpy versions; spurious "data has changed"
+  rejections on resume after numpy upgrade.
+  `docs/plans/2026-04-30-T36-fingerprint-numpy-stability.md`.
+- **T-37** — Stop-vs-Complete distinction + concurrent-instance footgun.
+  Clicking Stop mid-run silently kills resume option (success-path
+  `mark_complete` runs); two app instances can race on the resume dialog.
+  `docs/plans/2026-04-30-T37-stop-vs-complete.md`.
