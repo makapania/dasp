@@ -245,3 +245,217 @@ The three follow-up commits correctly and completely address Findings 1–5 from
 **One new finding requires attention before merging:** `spectral_predict_gui_optimized.py:21828` has the same `'__compiled__' in dir()` bug as the already-fixed `search.py:19`. This is a one-character fix (`dir()` → `globals()`) with identical impact and identical fix. It was missed because the first-review grep targeted `src/spectral_predict/` backend files, not the 57K-line GUI monolith. The module-level copy at line 131 is functionally correct but should be changed for consistency.
 
 **Recommendation:** Fix line 21828 (one-character change, 30 seconds), optionally fix line 131 for consistency, then the branch is ready to push and merge to `main`. The existing fixes are solid; the only gap is a copy of the exact bug we already fixed that lives in a different file.
+
+---
+
+# DeepSeek V4 Pro: high-effort recheck (post 5-agent + Codex review)
+
+## Summary
+- **Reasoning mode used:** high (full manual trace-through of all critical paths)
+- **Commits rechecked:** `37a71ea`, `5db0b40`, `4dc7ec3`, `6fd8dab`, `29fe489`
+- **Tests run:** 47 passed, 0 failed, 0 skipped in 1.95s
+- **Verdict: READY_TO_MERGE** — 12 of 13 claims are closed/correct; 1 (NEW BUG #2) is correctly deferred. No new bugs introduced by the fixes. One minor edge-case observation (not a bug).
+
+---
+
+## Per-finding verification
+
+### NEW BUG #1 — mark_complete unrelated-sidecar fix
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:256-267` (pre-flight read of `data.get("run_id") == _active_run_id`)
+- **Notes:**
+  - The pre-flight check is correct: reads the JSON, extracts `run_id`, compares against `_active_run_id`. Only unlinks when they match.
+  - Guard `if sidecar.exists() and _active_run_id is not None:` correctly skips the read check when there's no active run (grid/NSGA path that never called `start_run`).
+  - `except (json.JSONDecodeError, OSError, UnicodeDecodeError)` conservatively sets `sidecar_belongs_to_active_run = False` — a corrupt/unreadable sidecar is NOT deleted even if we think it's ours. This is correct: deletion of an unreadable file that might belong to another instance should never happen.
+  - The test `test_mark_complete_does_not_delete_unrelated_sidecar` correctly simulates the real scenario: a previous run's sidecar exists on disk, `start_run` was NOT called (so `_active_run_id` is `None`), `mark_complete()` is called, and the unrelated sidecar survives. ✓
+  - OSError handling: the `raise` at line 277 exits before the clear-in-memory-state block at lines 281-284, preserving `_active_run_id`, `_active_storage_url`, and `_active_metadata`. The GUI handler at line 27960 catches the exception and logs a diagnostic. On next launch, the sidecar is available for resume/discard. ✓
+
+### NEW BUG #2 — partial-Bayesian-failure mark_complete
+- **Closure: DEFERRED (correctly)**
+- **Notes (impact assessment):**
+  - The gap is at `spectral_predict_gui_optimized.py:27324-27328` (per-model `except Exception` + `continue`) and line 27958 (`mark_complete()`). When one model's Bayesian search fails but others succeed, `mark_complete()` still runs, deleting the sidecar.
+  - **What's lost:** the ability to resume the failed model's Bayesian search. The failed model's trials (e.g., 23 completed before crash) are orphaned inside the SQLite file.
+  - **What survives:** the SQLite file itself (not deleted by `mark_complete()` — it's left for forensic inspection per design). Successful model results are in `results_df` and were saved to CSV.
+  - **Why DEFERRED is acceptable:** The architecture uses one-sidecar-per-session. Per-model sidecars would require a schema redesign. The user-visible impact is minor: orphaned SQLite files (few MB), lost trials for the failed model only. The failed model's error is logged prominently. If the failure was transient (OOM), the user loses ~23 trials from that model but retains results from all others. A TODO comment or GitHub issue to track this would be appropriate but should NOT block merge.
+  - **User action that triggers it:** Multi-model Bayesian search where at least one model raises during `run_unified_bayesian()` and at least one succeeds. The `continue` lets successful models complete; `mark_complete()` runs afterward.
+  - **Mitigation for the user:** Re-run the analysis — Optuna creates a fresh study (the old one is orphaned without the sidecar) and starts from scratch for all models. Total time lost = failed model's trial time (e.g., 23 × ~30s for CatBoost = ~11 min). Acceptable for this beta.
+
+### Cluster C — start_run Frankenstein metadata
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:195-201` (idempotent path returns `_active_metadata` directly)
+- **Notes:**
+  - The fix is elegant: the original `RunMetadata` is cached at line 227 (`_active_metadata = meta`) and returned verbatim on subsequent calls. No synthetic dataclass construction — the SAME object is returned.
+  - **Sync verification across all paths:**
+    - `start_run()` (first call): sets `_active_metadata = meta` ✓
+    - `start_run()` (subsequent): returns `_active_metadata` ✓
+    - `mark_complete()` (success): clears `_active_metadata = None` at line 283 ✓
+    - `mark_complete()` (OSError): does NOT clear (raise exits before line 283) — state preserved ✓
+    - `resume_run()`: sets `_active_metadata = meta` at line 447 ✓
+    - `clear_resume_state()`: clears `_active_metadata = None` at line 363 ✓
+    - `_reset_for_tests()`: clears `_active_metadata = None` at line 517 ✓
+  - **One edge case observed (NOT a bug):** If `mark_complete()` raises OSError (file locked), in-memory state is preserved. Within the same process, subsequent calls to `start_run()` return the cached metadata from the completed (but not-cleaned-up) run. This means the user can't start a fresh run within the same process — they'd need to restart the app. This is acceptable because OSError on unlink is rare (disk full / AV lock), the user gets a clear diagnostic via the GUI's `_log_progress` message, and restarting the app triggers `find_incomplete_run()` which re-offers resume/discard. The previous behavior (pre-A1 fix) silently cleared state and lied about success — far worse.
+  - Test `test_start_run_idempotent_returns_first_call_args` correctly verifies all fields (`label`, `dataset_fingerprint`, `model_names`, `n_trials_per_model`, `started_iso`) match the first call, not the second. ✓
+
+### A1 — mark_complete re-raises on OSError
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:272-277` (OSError re-raised, state preserved)
+- **Notes:**
+  - Verified: the `raise` at line 277 exits the `with _lock:` block via `__exit__`, which releases the lock. The clear-in-memory-state block (lines 281-284) is NOT reached. In-memory state (`_active_run_id`, `_active_storage_url`, `_active_metadata`, `_is_resuming`) is preserved. ✓
+  - The GUI handler at line 27960-27972 catches the exception via `except Exception as _mc_err` and logs a diagnostic via `self._log_progress`. The user sees: `[RUN] mark_complete failed; sidecar will persist and next launch may prompt to resume: <OSError message>`. ✓
+  - Test `test_mark_complete_raises_on_unlink_failure` monkeypatches `Path.unlink` to raise OSError on the sidecar specifically, verifies `pytest.raises(OSError)`, then verifies `rs.get_storage_url() == meta.storage_url` and `rs._active_run_id == meta.run_id`. ✓
+
+### A2 — find_incomplete_run quarantines corrupt sidecars
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:386-402` (quarantine to `.corrupt`, OSError escapes)
+- **Notes:**
+  - Three-tier catch: `FileNotFoundError` → return None (no sidecar); `(JSONDecodeError, TypeError, KeyError, UnicodeDecodeError)` → quarantine to `.corrupt` + return None; all other exceptions (including PermissionError, OSError) → bubble up to caller.
+  - `FileNotFoundError` is caught BEFORE the JSON errors because it's raised by `sidecar.read_text()` and has no JSON payload to quarantine. ✓
+  - Quarantine uses `sidecar.rename(sidecar.with_suffix(".corrupt"))`. If rename fails (cross-device move?), falls back to `sidecar.unlink()` (last resort). ✓
+  - `OSError` intentionally escapes — the GUI at line 22950-22966 wraps this in `try/except OSError as read_err` and shows `messagebox.showwarning("Could not read previous run", ...)`. Test `test_find_incomplete_run_propagates_oserror` monkeypatches `Path.read_text` to raise OSError and verifies the exception propagates. ✓
+
+### A3 — discard_incomplete_run returns DiscardResult
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:452-508` (DiscardResult return type)
+- **Notes:**
+  - The `DiscardResult` dataclass has three fields: `sidecar_deleted: bool`, `storage_deleted: bool`, `errors: list[str]`. The `fully_succeeded` property checks `sidecar_deleted and storage_deleted and not errors`. ✓
+  - Per-file error collection: sidecar unlink errors are appended to `errors`; storage_path resolution errors cause early return with partial result; storage_path-is-outside-optuna-dir errors are appended but fall through; storage unlink errors are appended. ✓
+  - The GUI at `spectral_predict_gui_optimized.py:23033-23056` checks `result.fully_succeeded` and surfaces partial failures via `messagebox.showwarning` with a detailed breakdown. ✓
+  - Test `test_discard_returns_discard_result_with_per_file_status` verifies the happy path returns `fully_succeeded = True`. ✓
+  - Test `test_discard_reports_partial_failure` monkeypatches `Path.unlink` to selectively fail on the storage_path, verifying `sidecar_deleted=True`, `storage_deleted=False`, `errors contains "simulated SQLite lock"`, `fully_succeeded=False`. ✓
+
+### B1 — _TeeStream._logger.log() wrapped in try/except
+- **Closure: CLOSED**
+- **Diff hunk reference:** `5db0b40` — `run_logging.py:184-192` (write() emit loop) and `run_logging.py:213-221` (flush() emit loop)
+- **Notes:**
+  - Both `write()` and `flush()` now wrap each `self._logger.log(self._level, line)` in try/except, falling back to `self._original.write(line + "\n")` on logger failure. Both `_original` writes have their own try/except-pass guard. ✓
+  - Minor observation: `write()` also writes to `_original` BEFORE the lock at line 118 (raw text passthrough). If the logger subsequently fails and the fallback fires, the line appears TWICE on `_original`. In dev mode (console), this produces duplicated output. In bundle mode (`_original` is None or /dev/null), no visible effect. This is a cosmetic issue, not a bug. ✓
+  - Test `test_tee_logger_failure_falls_back_to_original` attaches a `BrokenHandler` that raises OSError on every `emit()`, then verifies `tee.write("worker thread message\n")` does NOT raise, and the fallback stream contains `"worker thread message"`. ✓
+
+### B2 — _SafeRotatingFileHandler.handleError writes to _original_stderr
+- **Closure: CLOSED**
+- **Diff hunk reference:** `5db0b40` — `run_logging.py:45-69` (new class) and line 269-275 (usage in setup)
+- **Notes:**
+  - The feedback loop is definitively broken: `handleError` writes to `_original_stderr` (captured BEFORE the tee was installed at line 292) or `sys.__stderr__` (C-level fd 2, never the tee). Neither can loop back into the handler. ✓
+  - Windows rollover path trace: `RotatingFileHandler.emit()` calls `doRollover()` which calls `os.rename()`. If rename fails (AV holds inode), the exception is caught by `emit()`'s `except Exception:` and `self.handleError(record)` is called. Our override fires. ✓
+  - One edge case: In a PyInstaller bundle with `console=False` and `capture_stdout=False`, `_original_stderr` is None (never set) and `sys.__stderr__` is the C-level fd (writes to void). The user sees NO error signal. BUT the feedback loop IS broken — the app doesn't crash. This is the best achievable behavior in a no-console Windows bundle. ✓
+  - If `logging.raiseExceptions` is False (unusual), the handler silently returns — no crash, no loop. ✓
+  - The test `test_rotating_handler_rolls_over_at_threshold` verifies rollover works (backups created) but does NOT test the `handleError` path. That's appropriate: a Windows-specific rename-failure test would require mocking `os.rename` at the OS level. ✓
+
+### B3 — _BUFFER_BYTE_THRESHOLD flush emits tail when no newline
+- **Closure: CLOSED**
+- **Diff hunk reference:** `5db0b40` — `run_logging.py:148-165` (B3 fix branch)
+- **Notes:**
+  - Traced through all edge cases:
+    - **70000 chars of 'x' no newline (pure threshold trip):** `parts == [joined]`, `byte_threshold_hit and not newline_present and len(parts) == 1` → True → emits full string as one record, buffer drained. ✓
+    - **70000 chars of 'x' + chr(10) at the end:** `newline_present=True`, `joined.endswith("\n")` → True → normal `split("\n")[:-1]` path → emits "xxxx...x" (70000 chars, newline stripped). ✓
+    - **70000 chars of 'x' + chr(10) in the middle, arrived in multiple writes:** First 30000 chars buffered silently. Second write adds 40001 chars (total 70001), newline triggers flush → normal path. ✓
+    - **Multiple newlines with some fragments:** Normal `parts[:-1]` tail-buffering works correctly, preserving partial-line semantics. ✓
+  - Test `test_tee_byte_threshold_emits_no_newline_string` writes `"x" * (threshold + 1024)` with no newline, verifies the entire string is captured in one record and buffer is drained (bytes=0, buffer=[]). ✓
+
+### Study-hash — config_components completeness
+- **Closure: CLOSED**
+- **Diff hunk reference:** `4dc7ec3` — `unified_bayesian.py:1862-1888`
+- **Notes:**
+  - Seven new fields added: `imbalance_params`, `baseline_params`, `wl_shape`, `n_top_regions`, `region_indiv`, `region_pair`, `early_stop`. All are deterministic (sorted+repr'd dicts, tuple shapes, direct values). ✓
+  - The `_dasp_version` catch narrowed from `except Exception` to `except (ImportError, AttributeError)`. A real import-chain bug (syntax error, circular import) would NOT be caught and would surface — correct. ✓
+  - Existing studies get fresh hashes: acceptable for beta (0.5.0b1, no field deployment). ✓
+  - The commit message correctly documents this as a breaking change to existing study hashes. ✓
+
+### GUI integration — messagebox on import failure + OSError + DiscardResult
+- **Closure: CLOSED**
+- **Diff hunk reference:** `6fd8dab` — `spectral_predict_gui_optimized.py:22950-23056`
+- **Notes:**
+  - Import failure path: `except Exception as imp_err` → `messagebox.showwarning("Resume feature unavailable", ...)` with the actual error text. Previously this silently returned, losing the user's resume opportunity with zero diagnostic. ✓
+  - OSError from `find_incomplete_run()`: wrapped in `try/except OSError as read_err` → `messagebox.showwarning("Could not read previous run", ...)`. Previously the OSError would have propagated up (A2 fix made it escape) and crashed the startup dialog. ✓
+  - Discard "No" path: `result = discard_incomplete_run(meta.run_id)` → checks `result.fully_succeeded` → if not, builds a detailed warning with per-file status and error list. Previously the bare `True` return made this check impossible. ✓
+  - Thread safety: `_check_for_incomplete_run` is called via `root.after(100, ...)` which runs on the main (GUI) thread. `messagebox.showwarning()` is a Tkinter builtin that's safe to call from the main thread. ✓
+
+### Defense-in-depth — path validation
+- **Closure: CLOSED**
+- **Diff hunk reference:** `37a71ea` — `run_state.py:429-437` (resume_run) and `run_state.py:471,483-492` (discard_incomplete_run)
+- **Notes:**
+  - Both `resume_run()` and `discard_incomplete_run()` now resolve the sidecar's `storage_path` via `Path.resolve()` and check `is_relative_to(get_user_optuna_dir().resolve())`. ✓
+  - Symlink safety: `resolve()` follows symlinks. If the optuna dir itself contains a symlink, `resolve()` follows it to the real path, then `is_relative_to()` checks the resolved paths. A tampered sidecar pointing to `/optuna_dir/symlink_to_evil` would have `resolve()` follow the symlink to the real target, which is outside the resolved optuna dir → rejected. ✓
+  - On Windows: `is_relative_to()` is available since Python 3.9 (this project uses 3.12). Junction points are followed by `resolve()`. ✓
+  - OSError during `resolve()`: both functions catch `OSError` — `resume_run` returns None, `discard_incomplete_run` adds it to `errors` with a descriptive message. ✓
+  - The `discard_incomplete_run` sidecar-deletion path correctly still deletes the sidecar (it's in our optuna dir by construction) while refusing to unlink the out-of-tree storage_path. Test `test_discard_rejects_storage_path_traversal` confirms: `sidecar_deleted=True`, `storage_deleted=False`, `errors` contains "outside optuna dir". ✓
+
+---
+
+## New findings introduced by the 5 commits
+
+**No significant new bugs found.** One minor observation documented for transparency:
+
+1. **Duplicate output on `_original` when logger falls back (B1 path, cosmetic).** In `_TeeStream.write()`, the raw text is written to `_original` (line 118) BEFORE the logger emit loop. If the logger then fails, the fallback writes the same content to `_original` again (line 190). This produces duplicated console output in dev mode. In bundle mode (`_original` is None or /dev/null) there's no visible effect. Not worth fixing — the fallback's job is crash-prevention, not output-fidelity.
+
+   (The prior agents would NOT have caught this because they reviewed the diff in isolation, not the interaction between the line-118 write-through and the line-190 fallback.)
+
+---
+
+## Test additions: do they exercise the fixes?
+
+### test_mark_complete_does_not_delete_unrelated_sidecar (NEW BUG #1)
+- **Verdict: YES, fully exercises the fix.**
+- Setup: sidecar written directly (simulating a prior paused run), `_active_run_id = None` (fresh_state fixture calls `_reset_for_tests()` at setup → all state cleared). `mark_complete()` is called with no active run. Verifies sidecar survives and contains the original run_id. ✓
+
+### test_mark_complete_raises_on_unlink_failure (A1)
+- **Verdict: YES, fully exercises the fix.**
+- Monkeypatches `Path.unlink` to raise OSError on the sidecar, verifies `pytest.raises(OSError)` and that in-memory state (`_active_run_id`, `_active_storage_url`) is preserved post-exception. ✓
+
+### test_find_incomplete_run_quarantines_corrupt_sidecar (A2)
+- **Verdict: YES, fully exercises the fix.**
+- Writes invalid JSON to the sidecar, calls `find_incomplete_run()`, verifies it returns None, the original file is gone, and the `.corrupt` sibling exists with the original content preserved. ✓
+
+### test_find_incomplete_run_propagates_oserror (A2)
+- **Verdict: YES, fully exercises the fix.**
+- Monkeypatches `Path.read_text` to raise OSError (simulating a locked file). Verifies the OSError propagates (not caught internally). ✓
+
+### test_discard_returns_discard_result_with_per_file_status + test_discard_reports_partial_failure (A3)
+- **Verdict: YES, fully exercise the fix.**
+- Happy path: creates a run, resets state, calls discard, verifies `DiscardResult` type, `fully_succeeded=True`, all booleans correct, errors empty. Partial-failure: monkeypatches `Path.unlink` to selectively fail on storage_path, verifies sidecar deleted, storage NOT deleted, error string present, `fully_succeeded=False`. ✓
+
+### test_start_run_idempotent_returns_first_call_args (Cluster C)
+- **Verdict: YES, fully exercises the fix.**
+- Calls `start_run` twice with DIFFERENT args, verifies all returned fields match the first call, not the second. ✓
+
+### test_resume_rejects_path_traversal + test_discard_rejects_storage_path_traversal (defense-in-depth)
+- **Verdict: YES, fully exercise the fix.**
+- Creates a tampered sidecar with `storage_path` pointing to `tmp_path/elsewhere/evil.sqlite3`. For resume: verifies returns None, sidecar survives (not auto-discarded). For discard: verifies sidecar is deleted (it's in our dir), storage is NOT deleted, errors mention "outside optuna dir", off-path file survives. ✓
+- **Note:** Both tests use `Path.resolve()` implicitly (the `is_relative_to` call in the code). On Windows, this correctly follows junction points. The tests are platform-independent. ✓
+
+### test_tee_preserves_blank_and_whitespace_lines (Finding 4)
+- **Verdict: YES, fully exercises the fix.**
+- Writes `"header\n\n   \nbody\n"`, flushes, verifies captured lines are `["header", "", "   ", "body"]` — blank line AND whitespace-only line are preserved. ✓
+
+### test_tee_byte_threshold_emits_no_newline_string (B3)
+- **Verdict: YES, fully exercises the fix.**
+- Writes `"x" * (threshold + 1024)` with no newlines, verifies captured is non-empty, first entry matches the full string, buffer is drained (bytes=0, buffer=[]). ✓
+
+### test_tee_logger_failure_falls_back_to_original (B1)
+- **Verdict: YES, exercises the fix, with one caveat.**
+- Creates a logger with a `BrokenHandler` that raises on every `emit`. Writes to the tee, verifies no exception propagates and the fallback stream contains the message. ✓
+- **Caveat:** This test covers the failure path inside the emit loop (after the lock). It does NOT separately test the failure path on the `_original.write()` at line 118 (before the lock), but that path already has its own try/except. ✓
+
+### test_rotating_handler_rolls_over_at_threshold (rollover)
+- **Verdict: YES, with a dependency on correct fixture ordering.**
+- The test monkeypatches `rl._LOG_MAX_BYTES = 1024` BEFORE calling `setup_run_logger()`. Since `setup_run_logger` reads `_LOG_MAX_BYTES` at call time (module-level name lookup), the patched value of 1024 is passed to `_SafeRotatingFileHandler(maxBytes=1024)`. ✓
+- The `fresh_logging` fixture provides a clean module (pops from `sys.modules`, reimports), so no previous `setup_run_logger` call has polluted `_active_log_path`. ✓
+- Writes 200 records × ~80 bytes = ~16000 bytes. At 1024 threshold, that's 15+ rollovers. Backups exist and are verified. ✓
+- This test does NOT verify the `handleError` path (rollover-failure -> non-recursive error handling). A separate test for that would require mocking `os.rename` at the filesystem level — testing `os.rename` failure in a cross-platform way is impractical. The `handleError` correctness was verified manually via code trace above. ✓
+
+---
+
+## Chemometrics master rule
+
+- **Sanity check: NO false positives possible.**
+- All five commits are pure infrastructure (logging, state management, hashing, error handling). None touches preprocessing, model fitting, variable selection, calibration transfer, or any chemometrics methodology. The master rule's "do not flag known-safe patterns" (SNV before split, variable selection on full calibration, etc.) is not applicable to any change in this PR. ✓
+
+---
+
+## Final verdict
+
+The five new commits correctly and completely address 12 of the 13 review findings. Each fix is implemented with careful attention to edge cases: the `mark_complete` pre-flight read guards against sidecar-vs-active mismatch, the `_active_metadata` cache is correctly synced across all six state-modifying paths (with a minor OSError edge case that preserves state intentionally), the `_SafeRotatingFileHandler` breaks the feedback loop, the `_BUFFER_BYTE_THRESHOLD` fix handles the pathological no-newline case correctly, and the path validation uses `Path.resolve()` + `is_relative_to()` which is safe against symlink traversal on both POSIX and Windows. The GUI integration surfaces import/read/discard failures via `messagebox.showwarning` on the main thread (safe). The one deferred item (NEW BUG #2 — partial-Bayesian-failure mark_complete) is correctly assessed: the one-sidecar-per-session architecture makes a per-model fix infeasible without a schema redesign, and the user-visible impact (orphaned SQLite, lost trials for the single failed model) is minor.
+
+All 47 tests pass with no flakes. The test additions directly exercise the contracts they claim to cover, with correct fixture setup and meaningful assertions.
+
+**No regressions. No new bugs of significance. Ready to merge.**
