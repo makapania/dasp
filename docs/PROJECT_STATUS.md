@@ -1,6 +1,10 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (overnight T-36 implementation — Codex-final READY_TO_MERGE_WITH_NITS_CLOSED, awaiting user PR open) —
+> **Last updated:** 2026-05-01 (post-T-36 ship — T-41 Bayesian SQLite auto-calculator plan filed in response to user-reported 5-28× Bayesian slowdown) —
+>
+> **T-41 Bayesian SQLite auto-calculator plan filed at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md`.** User reported Bayesian 5× slower than pre-T-11; investigation traced to T-11's per-trial Optuna SQLite writes. Benchmarks (`tests/_bench_bayesian_per_model.py`) show overhead is ~200ms/trial constant — fast models pay 8-10×, heavy models 1.36-1.89×. Plan: per-model auto-calculator (first 5 trials in-memory + decide based on mean fit time + migrate via `optuna.copy_study` if heavy), 3-way GUI override (Auto/Always-on/Always-off), WAL mode bundled in. ~180 LOC + tests. Branch `fix/T41-bayesian-sqlite-auto-calculator` reserved (off post-T-36 main).
+>
+> **Previously:** 2026-05-01 (overnight T-36 implementation — Codex-final READY_TO_MERGE_WITH_NITS_CLOSED, awaiting user PR open) —
 >
 > **T-36 autoscale (UV scaling) preprocessing toggle — IMPLEMENTED, READY FOR PR.**
 > Branch `feature/T36-autoscale-toggle` at `2351c3c` (13 commits past `da51f60`).
