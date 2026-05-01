@@ -1,4 +1,9 @@
-# T-37: Stop button vs natural completion + concurrent-instance footgun
+# T-40: Stop button vs natural completion + concurrent-instance footgun
+
+> **Note 2026-05-01:** Originally drafted as T-40 during the T-11 PR
+> review wrap-up; renumbered to T-40 to avoid collision with the
+> in-flight T-40 (TPE quick preprocessing discovery) reservation
+> drafted in parallel by another session. Content unchanged.
 
 **Status:** PLANNED — deferred from T-11 PR #6 review.
 **Filed:** 2026-04-30.
@@ -160,9 +165,9 @@ Stop-vs-Complete distinction is a one-line check.
 
 ## Coordination with T-34
 
-T-34 (per-model Bayesian failure) and T-37 (Stop-vs-Complete) both
-touch the sidecar lifecycle. Suggested order: land T-37 first (Stop
+T-34 (per-model Bayesian failure) and T-40 (Stop-vs-Complete) both
+touch the sidecar lifecycle. Suggested order: land T-40 first (Stop
 button distinction is a small, well-scoped change), then T-34's
 larger per-model state machinery can build on the now-three-state
 lifecycle (running / stopped / complete). Implementing T-34 first
-would require a third pass when T-37 lands.
+would require a third pass when T-40 lands.

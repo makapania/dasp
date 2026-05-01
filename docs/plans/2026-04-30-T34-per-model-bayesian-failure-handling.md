@@ -87,8 +87,8 @@ not a schema rewrite.
    that "completed but I want to discard" or "completed but I want to
    keep partial trials for resume"? Currently Stop runs the success
    path including `mark_complete()`. Codex's "Stop vs Complete distinction"
-   suggestion (filed as T-37) is closely related — may want to land
-   T-37 first to disambiguate the lifecycle states before implementing
+   suggestion (filed as T-40) is closely related — may want to land
+   T-40 first to disambiguate the lifecycle states before implementing
    T-34.
 2. **`_active_metadata` cache invalidation**: T-11's `_active_metadata`
    cache exists for the idempotent-return contract. If `mark_model_*`
@@ -117,7 +117,7 @@ not a schema rewrite.
 - Existing single-model Bayesian regression behavior unchanged
   (single model = `mark_complete` runs as before since
   `models_completed == model_names`).
-- Stop-button behavior preserved or improved per T-37.
+- Stop-button behavior preserved or improved per T-40.
 
 ## Estimated effort
 
@@ -128,4 +128,4 @@ not a schema rewrite.
 - T-11 PR #6 review trail (2026-04-30 → 2026-05-01)
 - Codex meta-review (`docs/reviews/deepseek_v4pro_24h_review_2026-04-30.md`,
   the meta-review section)
-- T-37 (Stop-vs-Complete) — companion ticket, possibly land first
+- T-40 (Stop-vs-Complete) — companion ticket, possibly land first

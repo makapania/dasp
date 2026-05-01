@@ -1,4 +1,9 @@
-# T-36: `fingerprint_dataset` numpy 2.x repr stability
+# T-39: `fingerprint_dataset` numpy 2.x repr stability
+
+> **Note 2026-05-01:** Originally drafted as T-36 during the T-11 PR
+> review wrap-up; renumbered to T-39 to avoid collision with the
+> in-flight T-36 (autoscale toggle) reservation drafted in parallel
+> by another session. Content unchanged.
 
 **Status:** PLANNED — deferred from T-11 PR #6 review.
 **Filed:** 2026-04-30.

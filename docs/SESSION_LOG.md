@@ -78,13 +78,17 @@ covering the cluster-A/B/C contracts and the rotation regression).
   slots=True` + `__post_init__`, `_TeeStream` extract `_LineBuffer`
   helper, `_TeeStream` add missing file-protocol attrs.
   `docs/plans/2026-04-30-T35-t11-type-design-followups.md`
-- **T-36** `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
+- **T-39** `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
   format differs across numpy versions; spurious "data has changed"
   rejections on resume after numpy upgrade.
-  `docs/plans/2026-04-30-T36-fingerprint-numpy-stability.md`
-- **T-37** Stop-vs-Complete + concurrent-instance footgun. Stop button
+  `docs/plans/2026-04-30-T39-fingerprint-numpy-stability.md` (originally
+  drafted as T-36; renumbered to avoid collision with parallel session's
+  T-36 autoscale-toggle reservation)
+- **T-40** Stop-vs-Complete + concurrent-instance footgun. Stop button
   silently kills resume option; two app instances can race on resume
-  dialog. `docs/plans/2026-04-30-T37-stop-vs-complete.md`
+  dialog. `docs/plans/2026-04-30-T40-stop-vs-complete.md` (originally
+  drafted as T-37; renumbered to avoid collision with parallel session's
+  T-37 TPE-quick-preprocessing-discovery reservation)
 
 T-33 GP regression rough plan was filed earlier in this session via
 user request. Still ROUGH_PLAN, awaits prioritization.

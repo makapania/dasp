@@ -239,11 +239,15 @@ After T-11 merge:
   + `__post_init__` validation, `_TeeStream` extract `_LineBuffer` helper,
   `_TeeStream` add missing file-protocol attrs (`closed`, `encoding`,
   `writable()`, `readable()`). `docs/plans/2026-04-30-T35-t11-type-design-followups.md`.
-- **T-36** — `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
+- **T-39** — `fingerprint_dataset` numpy 2.x repr stability. `str(X.flat[idx])`
   format differs across numpy versions; spurious "data has changed"
   rejections on resume after numpy upgrade.
-  `docs/plans/2026-04-30-T36-fingerprint-numpy-stability.md`.
-- **T-37** — Stop-vs-Complete distinction + concurrent-instance footgun.
+  `docs/plans/2026-04-30-T39-fingerprint-numpy-stability.md`. (Originally
+  drafted as T-36; renumbered to avoid collision with another session's
+  in-flight T-36 autoscale-toggle work.)
+- **T-40** — Stop-vs-Complete distinction + concurrent-instance footgun.
   Clicking Stop mid-run silently kills resume option (success-path
   `mark_complete` runs); two app instances can race on the resume dialog.
-  `docs/plans/2026-04-30-T37-stop-vs-complete.md`.
+  `docs/plans/2026-04-30-T40-stop-vs-complete.md`. (Originally drafted
+  as T-37; renumbered to avoid collision with another session's in-flight
+  T-37 TPE-quick-preprocessing-discovery work.)
