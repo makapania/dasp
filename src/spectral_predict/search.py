@@ -302,7 +302,7 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     return False
 
 
-def _rebuild_model_from_row(row: pd.Series, task_type: str):
+def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool = False):
     """Rebuild sklearn model from results row metadata.
 
     This function recreates the exact model configuration used during search,
@@ -314,6 +314,11 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str):
         A row from the results DataFrame containing model configuration
     task_type : str
         'regression' or 'classification'
+    autoscale : bool, default False
+        T-36 fix (post-merge review): when True, the preprocessing pipeline
+        already includes a StandardScaler, so the per-model scaler that this
+        function would otherwise wrap around scale-sensitive estimators is
+        skipped to avoid double-scaling on the validation rebuild path.
 
     Returns
     -------
@@ -381,9 +386,12 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str):
         ])
         return pls_lr_pipeline
 
-    # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
-    # These use gradient descent or kernel methods that are sensitive to feature scale
-    if model_name in SCALE_SENSITIVE_MODELS:
+    # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler.
+    # T-36 fix (post-merge review): when autoscale was active during search, the
+    # preprocessing pipeline already StandardScaler'd the inputs — adding another
+    # scaler here would double-scale and produce different validation scores than
+    # search produced. Skip the per-model scaler in that case.
+    if model_name in SCALE_SENSITIVE_MODELS and not autoscale:
         from sklearn.pipeline import Pipeline
         scaled_pipeline = Pipeline([
             ('scaler', StandardScaler()),
@@ -702,7 +710,10 @@ def compute_validation_metrics_for_top_models(
                 X_val_final = X_val_preprocessed
 
             # === STEP 4: Rebuild model and fit ===
-            model = _rebuild_model_from_row(row, task_type)
+            # T-36 fix (post-merge review): pass the parsed autoscale flag so
+            # _rebuild_model_from_row can skip its per-model StandardScaler when
+            # the preprocessing pipeline already scaled the inputs.
+            model = _rebuild_model_from_row(row, task_type, autoscale=autoscale)
 
             # Safety check: Skip if n_components > n_features (can happen with variable selection)
             if hasattr(model, 'n_components') and model.n_components > X_train_final.shape[1]:
@@ -5570,6 +5581,9 @@ def run_one_class_search(
                     # one-class validation rebuild path (contamination.py:~1100) reads
                     # actual values rather than silently falling back to defaults.
                     "baseline_method": preprocess_cfg.get("baseline_method"),
+                    # T-36 fix (post-merge review): persist baseline_params so
+                    # non-default ALS/polynomial settings survive the rebuild.
+                    "baseline_params": preprocess_cfg.get("baseline_params"),
                     "smoothing": preprocess_cfg.get("smoothing", False),
                     "smoothing_window": preprocess_cfg.get("smoothing_window", 17),
                     "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
@@ -6112,6 +6126,8 @@ def run_one_class_search(
                                 # T-36 bundled fix: write baseline/smoothing metadata
                                 # so the validation rebuild path reads real values.
                                 "baseline_method": preprocess_cfg.get("baseline_method"),
+                                # T-36 fix (post-merge review): persist baseline_params.
+                                "baseline_params": preprocess_cfg.get("baseline_params"),
                                 "smoothing": preprocess_cfg.get("smoothing", False),
                                 "smoothing_window": preprocess_cfg.get("smoothing_window", 17),
                                 "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
