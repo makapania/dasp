@@ -934,5 +934,50 @@ def test_variable_selection_r_export():
     assert 'snv' in script
 
 
+def test_autoscale_emitted_in_python_export():
+    """T-36: when autoscale is True in model_config, the exported script must
+    apply StandardScaler after SNV/derivatives so the saved pipeline reproduces
+    exactly. Codex Phase 7 review caught that this was missing."""
+    config = {
+        'model_name': 'PLS',
+        'preprocessing': 'snv',
+        'task_type': 'regression',
+        'params': {'n_components': 5},
+        'cv_folds': 3,
+        'autoscale': True,
+    }
+    options = ExportOptions(include_data=False)
+    generator = CodeGenerator(config, options)
+    script = generator.generate_script()
+
+    # Autoscale block must appear in the generated preprocessing section.
+    assert 'StandardScaler' in script, (
+        "Autoscale=True model_config must emit a StandardScaler import"
+    )
+    assert 'autoscale' in script.lower() or 'UV scaling' in script, (
+        "Generated script should comment that autoscale is being applied"
+    )
+
+
+def test_autoscale_omitted_when_false():
+    """When autoscale is False (or absent), exported scripts must NOT apply
+    StandardScaler — would silently change the pipeline."""
+    config = {
+        'model_name': 'PLS',
+        'preprocessing': 'snv',
+        'task_type': 'regression',
+        'params': {'n_components': 5},
+        'cv_folds': 3,
+        'autoscale': False,
+    }
+    options = ExportOptions(include_data=False)
+    generator = CodeGenerator(config, options)
+    script = generator.generate_script()
+    # Search for the autoscale-block sentinel (the comment prefix is unique).
+    assert 'Autoscale (UV scaling)' not in script, (
+        "Autoscale=False should not emit the autoscale block"
+    )
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])

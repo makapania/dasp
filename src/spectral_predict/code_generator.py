@@ -800,6 +800,13 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             _, application_code = get_preprocessing_template(preproc)
             code_lines.append(application_code)
 
+        # T-36: autoscale (UV scaling) — applied AFTER SNV/derivatives so the
+        # exported pipeline reproduces the trained model exactly.
+        if bool(self.config.get('autoscale', False)):
+            code_lines.append("\n# Autoscale (UV scaling): mean-center + unit variance per wavelength column")
+            code_lines.append("from sklearn.preprocessing import StandardScaler as _AutoscaleStandardScaler")
+            code_lines.append("X_processed = _AutoscaleStandardScaler().fit_transform(X_processed)")
+
         # Optional edge trimming for derivatives (disabled by default for GUI parity)
         trim_edges = bool(self.config.get('trim_derivative_edges', False))
         if uses_derivative and trim_edges:
