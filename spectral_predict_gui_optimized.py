@@ -33039,18 +33039,42 @@ Performance (Classification):
         preprocess = config.get('Preprocess', 'raw')
         deriv = config.get('Deriv', None)
 
-        # Strip baseline/smoothing prefixes (e.g., "als+sg0+snv" → baseline="als", smoothing=True, core="snv")
+        # Strip baseline/smoothing/autoscale affixes (e.g., "als+sg0+snv+autoscale"
+        # → baseline="als", smoothing=True, autoscale=True, core="snv").
+        # T-36: '+autoscale' is a SUFFIX (last position); baseline/sg0 are PREFIXES.
         baseline_prefix = None
         smoothing_detected = False
+        autoscale_detected = False
         if '+' in preprocess:
             parts = preprocess.split('+')
-            core = parts[-1]  # Last part is always the core preprocessing
-            for part in parts[:-1]:
-                if part == 'sg0':
-                    smoothing_detected = True
-                else:
-                    baseline_prefix = part
-            preprocess = core
+            # Strip trailing '+autoscale' first so it can't be mistaken for the core name.
+            if parts[-1] == 'autoscale':
+                autoscale_detected = True
+                parts = parts[:-1]
+            if parts:
+                core = parts[-1]  # Last remaining part is the core preprocessing
+                for part in parts[:-1]:
+                    if part == 'sg0':
+                        smoothing_detected = True
+                    else:
+                        baseline_prefix = part
+                preprocess = core
+            else:
+                preprocess = 'raw'
+
+        # T-36: prefer the explicit Autoscale column over the parsed display-name suffix.
+        # This matches the validation-rebuild parser in search.py:529-540.
+        autoscale_raw = config.get('Autoscale', autoscale_detected)
+        try:
+            import pandas as _pd
+            if isinstance(autoscale_raw, float) and _pd.isna(autoscale_raw):
+                autoscale_loaded = False
+            elif isinstance(autoscale_raw, str):
+                autoscale_loaded = autoscale_raw.strip().lower() in ('true', '1', 'yes')
+            else:
+                autoscale_loaded = bool(autoscale_raw)
+        except Exception:
+            autoscale_loaded = bool(autoscale_detected)
 
         # Convert from search.py naming to GUI naming
         if preprocess == 'deriv' and deriv == 1:
@@ -33127,6 +33151,12 @@ Performance (Classification):
             print(f"> Smoothing loaded from results")
         else:
             self.enable_smoothing.set(False)
+
+        # T-36: load autoscale flag from result row so the Refine tab and any
+        # subsequent rebuild use the same preprocessing the search winner used.
+        self.use_autoscale.set(autoscale_loaded)
+        if autoscale_loaded:
+            print("> Autoscale (UV scaling) loaded from results")
 
         # Detect and load GA preprocessing if present
         if 'ga_genes' in config and config['ga_genes']:
@@ -36689,7 +36719,8 @@ F1 Score:  {f1:.4f}
                     baseline_params=baseline_params_oc,
                     smoothing=smoothing_enabled_oc,
                     smoothing_window=smoothing_window_oc,
-                    smoothing_polyorder=smoothing_poly_oc
+                    smoothing_polyorder=smoothing_poly_oc,
+                    autoscale=self.use_autoscale.get(),  # T-36
                 )
 
                 X_full = X_base_df.values
@@ -37111,7 +37142,8 @@ F1 Score:  {f1:.4f}
                     baseline_params=baseline_params,
                     smoothing=smoothing_enabled,
                     smoothing_window=smoothing_window_size,
-                    smoothing_polyorder=smoothing_poly
+                    smoothing_polyorder=smoothing_poly,
+                    autoscale=self.use_autoscale.get(),  # T-36
                 )
                 # 2. Preprocess FULL spectrum (all wavelengths)
                 X_full = X_base_df.values
@@ -37247,7 +37279,8 @@ F1 Score:  {f1:.4f}
                     task_type=task_type,
                     interference=None,          # Match search.py (interference disabled)
                     wavelengths=wavelengths_for_pipeline,
-                    random_state=42
+                    random_state=42,
+                    autoscale=self.use_autoscale.get(),  # T-36
                 )
 
                 # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
@@ -38534,6 +38567,10 @@ External Validation Performance (n={n_val}):
                     # Imbalance handling (for reproducibility)
                     'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                     'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                    # T-36: autoscale flag — exported scripts must apply UV scaling after
+                    # SNV/derivatives if it was active during training, else they will not
+                    # reproduce the saved model.
+                    'autoscale': bool(self.use_autoscale.get()),
                     # Variable selection indices (GA or wavelength subset)
                     'variable_indices': variable_indices,
                     'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
