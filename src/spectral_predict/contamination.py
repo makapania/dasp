@@ -1105,10 +1105,20 @@ def compute_validation_metrics_for_top_one_class_models(
                 smoothing = bool(smoothing_raw)
             smoothing_window = _maybe_int(row.get('smoothing_window'), 17)
             smoothing_polyorder = _maybe_int(row.get('smoothing_polyorder'), 2)
+            # T-36: parse autoscale flag with the same robust handling as search.py
+            # (handles bool, numpy.bool_, int 0/1, NaN-float, and string "true"/"false").
+            autoscale_raw = row.get('Autoscale', False)
+            if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
+                autoscale = False
+            elif isinstance(autoscale_raw, str):
+                autoscale = autoscale_raw.strip().lower() in ('true', '1', 'yes')
+            else:
+                autoscale = bool(autoscale_raw)
 
             cache_key = (
                 preprocess_name, deriv, window, poly,
                 baseline_method, smoothing, smoothing_window, smoothing_polyorder,
+                autoscale,  # T-36: must vary key — autoscale changes preprocessing output
             )
 
             # === Preprocess FULL spectrum (matching search.py pattern) ===
@@ -1126,6 +1136,7 @@ def compute_validation_metrics_for_top_one_class_models(
                     smoothing=smoothing,
                     smoothing_window=smoothing_window,
                     smoothing_polyorder=smoothing_polyorder,
+                    autoscale=autoscale,  # T-36
                 )
                 if prep_steps:
                     pipe = Pipeline(list(prep_steps))
