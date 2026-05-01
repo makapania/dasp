@@ -195,8 +195,9 @@ def _build_display_preprocess_name(
     apply_baseline: bool = False,
     baseline_method: str | None = None,
     apply_smoothing: bool = False,
+    apply_autoscale: bool = False,
 ) -> str:
-    """Build display name with baseline/smoothing prefixes matching Grid Search conventions."""
+    """Build display name with baseline/smoothing/autoscale affixes matching Grid Search conventions."""
     name = _normalize_preprocess_name(core_name)
     if apply_baseline and baseline_method:
         name = f"{baseline_method}+{name}"
@@ -206,6 +207,10 @@ def _build_display_preprocess_name(
             name = f"{parts[0]}+sg0+{parts[1]}"
         else:
             name = f"sg0+{name}"
+    # T-36: trailing '+autoscale' suffix matches the grid-path doubling block
+    # (search.py:1880) so users can filter by Preprocess display name across paths.
+    if apply_autoscale:
+        name = f"{name}+autoscale"
     return name
 
 
@@ -1972,6 +1977,7 @@ def run_unified_bayesian(
                         apply_baseline=best.user_attrs.get('apply_baseline', False),
                         baseline_method=baseline_method,
                         apply_smoothing=best.user_attrs.get('apply_smoothing', False),
+                        apply_autoscale=best.user_attrs.get('apply_autoscale', False),  # T-36
                     ),
                     'n_vars': best.user_attrs.get('n_vars', 'N/A'),
                 }
@@ -2148,6 +2154,7 @@ def convert_study_to_dataframe(
                 apply_baseline=trial.user_attrs.get('apply_baseline', False),
                 baseline_method=baseline_method,
                 apply_smoothing=trial.user_attrs.get('apply_smoothing', False),
+                apply_autoscale=trial.user_attrs.get('apply_autoscale', False),  # T-36
             ),
             'PreprocessBase': _normalize_preprocess_name(trial.user_attrs.get('preprocessing', 'unknown')),
             'Deriv': trial.user_attrs.get('deriv', 0),
