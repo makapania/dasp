@@ -22883,7 +22883,7 @@ class SpectralPredictApp:
         self._poll_actually_paused(elapsed_ms=0)
 
     def _poll_actually_paused(self, elapsed_ms=0):
-        """Recursive 500ms-interval poll until the worker acknowledges pause.
+        """Tk-after-driven 500ms-interval poll until the worker acknowledges pause.
 
         If the controller has been resumed (e.g., the user clicked Resume
         before the worker even noticed), bail out without transitioning.
@@ -22950,10 +22950,36 @@ class SpectralPredictApp:
                 resume_run,
                 discard_incomplete_run,
             )
-        except Exception:
+        except Exception as imp_err:
+            # Codex meta-review: silent return here loses the user's resume
+            # opportunity entirely if the new modules fail to import. Surface
+            # a warning so they at least know the feature is unavailable.
+            try:
+                messagebox.showwarning(
+                    "Resume feature unavailable",
+                    f"Could not load run-state module — resume-on-restart will not "
+                    f"be available this session.\n\nDetails: {imp_err}",
+                )
+            except Exception:
+                pass
             return
 
-        meta = find_incomplete_run()
+        try:
+            meta = find_incomplete_run()
+        except OSError as read_err:
+            # Codex meta-review A2: locked sidecar / dead network share.
+            # Don't silently skip — the user has an unfinished run on disk
+            # but we can't read it. Tell them so they can investigate.
+            try:
+                messagebox.showwarning(
+                    "Could not read previous run",
+                    f"A previous-run record exists on disk but could not "
+                    f"be read:\n\n{read_err}\n\nResume is unavailable for "
+                    f"this session.",
+                )
+            except Exception:
+                pass
+            return
         if meta is None:
             return
 
@@ -23007,7 +23033,30 @@ class SpectralPredictApp:
                 except Exception:
                     pass
         else:
-            discard_incomplete_run(meta.run_id)
+            # Codex meta-review A3: discard returns a DiscardResult now.
+            # Surface partial-failure (sidecar locked, SQLite locked) so the
+            # user knows whether to retry or investigate, instead of seeing
+            # the same prompt reappear next launch with no diagnostic.
+            result = discard_incomplete_run(meta.run_id)
+            if not result.fully_succeeded:
+                try:
+                    detail_lines = [
+                        f"Sidecar deleted: {result.sidecar_deleted}",
+                        f"SQLite store deleted: {result.storage_deleted}",
+                    ]
+                    if result.errors:
+                        detail_lines.append("")
+                        detail_lines.append("Errors:")
+                        detail_lines.extend(f"  • {e}" for e in result.errors)
+                    messagebox.showwarning(
+                        "Discard partially failed",
+                        "Could not fully discard the previous run. The "
+                        "resume prompt may reappear next launch, or the "
+                        "SQLite file may remain on disk.\n\n"
+                        + "\n".join(detail_lines),
+                    )
+                except Exception:
+                    pass
 
     def _update_search_buttons(self, state):
         """Update button states based on search state.
