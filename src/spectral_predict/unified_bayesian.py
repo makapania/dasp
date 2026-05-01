@@ -1847,18 +1847,44 @@ def run_unified_bayesian(
     # known limitation in T-11 verdict §8.
     try:
         from spectral_predict import __version__ as _dasp_version
-    except Exception:
+    except (ImportError, AttributeError):
+        # Codex meta-review: narrowed from `except Exception:` so a real bug
+        # in the import chain (circular import, syntax error in __init__) is
+        # surfaced rather than silently degrading the fingerprint to
+        # "unknown" — that would mix incompatible-version trials into one
+        # study via load_if_exists=True.
         _dasp_version = "unknown"
+
+    # Codex meta-review: include caller-visible config that affects the
+    # search space or the objective. Two prior reviewers (synthesis +
+    # Codex) flagged that omitting these means changing them silently
+    # reuses an incompatible study via load_if_exists=True.
+    _wavelength_shape = (
+        tuple(wavelengths.shape) if hasattr(wavelengths, "shape") else None
+    )
+    _imbalance_params_str = (
+        repr(sorted((imbalance_params or {}).items())) if imbalance_params else "none"
+    )
+    _baseline_params_str = (
+        repr(sorted((baseline_params or {}).items())) if baseline_params else "none"
+    )
     config_components = (
         f"version={_dasp_version}|"
         f"task={task_type}|"
         f"cv={cv_strategy}_{cv_folds}_{cv_n_repeats}|"
         f"seed={random_state}|"
         f"imbalance={imbalance_method or 'none'}|"
+        f"imbalance_params={_imbalance_params_str}|"
         f"baseline={baseline_method or 'none'}|"
+        f"baseline_params={_baseline_params_str}|"
         f"smoothing={smoothing}_{smoothing_window}_{smoothing_polyorder}|"
         f"uve={enable_uve}|"
-        f"inlier={inlier_class_label}"
+        f"inlier={inlier_class_label}|"
+        f"wl_shape={_wavelength_shape}|"
+        f"n_top_regions={n_top_regions}|"
+        f"region_indiv={region_test_all_individual}|"
+        f"region_pair={region_test_pairwise}|"
+        f"early_stop={early_stopping_rounds}"
     )
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
     study_name = f"unified_bayesian_{model_name}_{config_hash}"
