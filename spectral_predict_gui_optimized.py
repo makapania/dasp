@@ -22862,18 +22862,64 @@ class SpectralPredictApp:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _pause_search(self):
-        """Pause the running search."""
-        if self.search_controller:
-            self.search_controller.pause()
-            self._log_progress("[PAUSED] Search paused by user")
+        """Request pause; transition to 'pausing' UI until the worker acks (T-11 B).
+
+        The worker only sees the pause request when it next hits
+        `check_and_wait()` — for a Bayesian CatBoost trial that can be 30+
+        minutes after the click. Don't lie to the user about the state.
+        """
+        if not self.search_controller:
+            return
+        self.search_controller.pause()
+        self._log_progress("[PAUSE REQUESTED] Waiting for current trial to finish…")
+        self._update_search_buttons('pausing')
+        # Poll the controller for actual-paused acknowledgment. When the
+        # worker reaches check_and_wait() and blocks, the controller sets
+        # `is_actually_paused` and we transition the UI to 'paused'.
+        self._poll_actually_paused(elapsed_ms=0)
+
+    def _poll_actually_paused(self, elapsed_ms=0):
+        """Recursive 500ms-interval poll until the worker acknowledges pause.
+
+        If the controller has been resumed (e.g., the user clicked Resume
+        before the worker even noticed), bail out without transitioning.
+        Same for ended controllers.
+        """
+        if not self.search_controller:
+            return
+        if self.search_controller.is_ended:
+            return
+        if not self.search_controller.is_paused:
+            # User resumed before worker acked — stay in 'running' state.
+            return
+        if self.search_controller.is_actually_paused:
+            self._log_progress("[PAUSED] Search paused — worker acknowledged.")
             self._update_search_buttons('paused')
+            return
+        # After 30 seconds of no acknowledgment, surface the wait so the
+        # user knows the trial is just slow, not stuck.
+        if elapsed_ms == 30_000:
+            self._log_progress(
+                "[PAUSE PENDING] Trial still running. Pause takes effect "
+                "between trials; current trial may be 20+ minutes."
+            )
+        self.root.after(500, lambda: self._poll_actually_paused(elapsed_ms + 500))
 
     def _resume_search(self):
-        """Resume a paused search."""
-        if self.search_controller:
-            self.search_controller.resume()
-            self._log_progress("[RESUMED] Search resumed")
-            self._update_search_buttons('running')
+        """Resume a paused search; refuse if the worker has died (T-11 B)."""
+        if not self.search_controller:
+            return
+        thread = getattr(self, "analysis_thread", None)
+        if thread is None or not thread.is_alive():
+            self._log_progress(
+                "[X] Worker thread is no longer alive — cannot resume. "
+                "Start a new search."
+            )
+            self._update_search_buttons('idle')
+            return
+        self.search_controller.resume()
+        self._log_progress("[RESUMED] Search resumed")
+        self._update_search_buttons('running')
 
     def _stop_search(self):
         """Stop the running search."""
@@ -22882,11 +22928,88 @@ class SpectralPredictApp:
             self._log_progress("[STOPPED] Search stopped by user")
             self._update_search_buttons('idle')
 
+    def _check_for_incomplete_run(self):
+        """T-11 D: on app startup, check for an unfinished previous run.
+
+        If the previous session crashed or was force-quit during a Bayesian
+        search, the sidecar at <user_data_dir>/dasp/optuna/active_run.json
+        survives. Offer the user a Resume / Discard / Decide-later dialog.
+        Resume sets the active storage URL so the user's next Run Analysis
+        click will reuse the existing SQLite — Optuna skips already-completed
+        trials and continues from the cutoff. The user is responsible for
+        re-loading the same data + settings; we surface a banner reminding
+        them.
+        """
+        try:
+            from spectral_predict.run_state import (
+                find_incomplete_run,
+                resume_run,
+                discard_incomplete_run,
+            )
+        except Exception:
+            return
+
+        meta = find_incomplete_run()
+        if meta is None:
+            return
+
+        try:
+            started_str = datetime.fromisoformat(meta.started_iso).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except Exception:
+            started_str = meta.started_iso
+
+        models_str = ", ".join(meta.model_names) if meta.model_names else "(unknown)"
+        n_trials_str = (
+            str(meta.n_trials_per_model)
+            if meta.n_trials_per_model is not None
+            else "?"
+        )
+
+        message = (
+            f"Found an unfinished Bayesian run from {started_str}.\n\n"
+            f"Run id: {meta.run_id}\n"
+            f"Models: {models_str}\n"
+            f"Trials per model (target): {n_trials_str}\n\n"
+            "Resume?\n\n"
+            "  • Yes — keep the SQLite store. Re-load the same data and\n"
+            "    click Run Analysis to continue from where it left off.\n"
+            "  • No — delete the unfinished run and start fresh next time."
+        )
+
+        try:
+            answer = messagebox.askyesnocancel(
+                "Resume previous run?", message, icon="question"
+            )
+        except Exception:
+            return
+
+        if answer is None:
+            # Cancel — leave sidecar in place; ask again next launch.
+            return
+        if answer:
+            resumed = resume_run(meta.run_id)
+            if resumed is not None:
+                # Surface a status banner so the user knows to re-load data.
+                try:
+                    if hasattr(self, "progress_status"):
+                        self.progress_status.config(
+                            text=(
+                                "Resuming previous run — load the same data + "
+                                "settings and click Run Analysis."
+                            )
+                        )
+                except Exception:
+                    pass
+        else:
+            discard_incomplete_run(meta.run_id)
+
     def _update_search_buttons(self, state):
         """Update button states based on search state.
 
         Args:
-            state: 'idle', 'running', or 'paused'
+            state: 'idle', 'running', 'pausing', or 'paused'
         """
         if self.pause_btn is None:
             return  # Buttons not yet created
@@ -22897,6 +23020,12 @@ class SpectralPredictApp:
             self.stop_btn.config(state='disabled')
         elif state == 'running':
             self.pause_btn.config(state='normal')
+            self.resume_btn.config(state='disabled')
+            self.stop_btn.config(state='normal')
+        elif state == 'pausing':
+            # Pause requested but worker hasn't acknowledged yet (T-11 B).
+            # Both Pause and Resume disabled — only Stop is honest.
+            self.pause_btn.config(state='disabled')
             self.resume_btn.config(state='disabled')
             self.stop_btn.config(state='normal')
         elif state == 'paused':
@@ -24622,6 +24751,84 @@ class SpectralPredictApp:
         try:
             from spectral_predict.search import run_search
             from spectral_predict.report import write_markdown_report
+            from spectral_predict.run_logging import setup_run_logger
+            from spectral_predict.run_state import (
+                start_run as _start_run_state,
+                fingerprint_dataset,
+            )
+
+            # T-11 A: spin up disk-mirrored logging at search start. Idempotent
+            # across threads (worker + GUI share one file). The path lands in
+            # the user's local app-data dir so post-mortem inspection survives
+            # process death — the Tkinter widget caps at 2000 lines and dies
+            # with the process; this file does neither.
+            try:
+                _, run_log_path = setup_run_logger(label=tier)
+                self._log_progress(f"[LOG] Run log: {run_log_path}")
+            except Exception as log_err:
+                # Never block the run if logging setup fails. The fall-through
+                # widget log is still active.
+                self._log_progress(f"[LOG] Disk log unavailable: {log_err}")
+
+            # T-11 D: register run state ONLY for Bayesian (unified) searches.
+            # Codex MEDIUM (additional): grid + NSGA-II don't use Optuna
+            # storage; if they crashed and left a sidecar, the next launch's
+            # "Resume?" dialog would be misleading because there are no
+            # Optuna studies to actually resume from.
+            is_bayesian_run = (
+                hasattr(self, "optimization_method")
+                and self.optimization_method.get() == "unified"
+            )
+            if is_bayesian_run:
+                try:
+                    from spectral_predict.run_state import (
+                        is_resuming as _is_resuming,
+                        verify_resume_fingerprint,
+                        clear_resume_state,
+                    )
+
+                    fingerprint = fingerprint_dataset(self.X, self.y)
+
+                    # Codex HIGH #7: if the user clicked "Resume" at app
+                    # startup, enforce that the currently-loaded data
+                    # matches the run they're resuming. Resuming on
+                    # different data would silently pick up Optuna trials
+                    # with stale objective values.
+                    if _is_resuming():
+                        matches, stored_fp = verify_resume_fingerprint(fingerprint)
+                        if not matches:
+                            # Kimi MAJOR #3b: capture run_id BEFORE state is
+                            # cleared, then discard the sidecar + SQLite (NOT
+                            # just clear the in-memory flag). If we only
+                            # cleared in-memory state, the sidecar would
+                            # persist and the user would be re-prompted to
+                            # resume the same rejected run on every launch.
+                            from spectral_predict import run_state as _rs
+                            rejected_id = _rs._active_run_id
+                            self._log_progress(
+                                "[RUN] Resume rejected — current data does "
+                                f"not match the resumed run "
+                                f"(current={fingerprint[:8]}..., "
+                                f"stored={(stored_fp or '?')[:8]}...). "
+                                "Discarding stale sidecar + SQLite; "
+                                "starting a fresh run."
+                            )
+                            if rejected_id:
+                                _rs.discard_incomplete_run(rejected_id)
+                            else:
+                                _rs.clear_resume_state()
+
+                    meta = _start_run_state(
+                        label=tier,
+                        dataset_fingerprint=fingerprint,
+                        model_names=list(selected_models) if selected_models else [],
+                        n_trials_per_model=int(self.n_trials_var.get())
+                        if hasattr(self, "n_trials_var") else None,
+                    )
+                    self._log_progress(f"[RUN] Run id: {meta.run_id}")
+                except Exception as run_err:
+                    # Logging-only failure path; in-memory Optuna fallback still works.
+                    self._log_progress(f"[RUN] Run-state init failed: {run_err}")
 
             # Determine task type
             task_type_setting = self.task_type.get()
@@ -27679,6 +27886,17 @@ class SpectralPredictApp:
             # Disable search control buttons
             self.root.after(0, lambda: self._update_search_buttons('idle'))
 
+            # T-11 D: clean completion → drop the sidecar so the next launch
+            # doesn't offer a stale "resume?" dialog. Errors fall through to
+            # the except block below, which deliberately does NOT mark
+            # complete — leaving the sidecar lets the user resume from where
+            # they left off.
+            try:
+                from spectral_predict.run_state import mark_complete as _mark_complete
+                _mark_complete()
+            except Exception:
+                pass
+
             # Analysis complete - status updated
 
         except Exception as e:
@@ -27788,7 +28006,18 @@ class SpectralPredictApp:
             self.root.after(0, lambda text=model_text: self.best_model_info.config(text=text))
 
     def _log_progress(self, message):
-        """Log message to progress text area."""
+        """Log message to progress text area AND mirror to disk (T-11 A).
+
+        Disk mirror is best-effort: if `setup_run_logger` hasn't run yet
+        (early startup before any search begins), `log_event` no-ops.
+        """
+        from spectral_predict.run_logging import log_event
+        try:
+            log_event(message)
+        except Exception:
+            # Never let logging break the GUI flow. Silent on purpose —
+            # the file logger is a debugging aid, not a critical path.
+            pass
         self.root.after(0, lambda: self._append_progress(message))
 
     def _append_progress(self, message):
@@ -56996,6 +57225,12 @@ def main():
     # window" but `SpectralPredict-py312.exe` lingers in Task Manager. Calling
     # os._exit(0) after root.destroy() is the belt-and-suspenders guarantee.
     root.protocol("WM_DELETE_WINDOW", lambda: _clean_shutdown(root))
+
+    # T-11 D: after the GUI is fully built but before the user can interact,
+    # check for an incomplete run from a previous session and offer to
+    # resume. Run via after(0) so the dialog appears on top of the rendered
+    # window rather than blocking the construction phase.
+    root.after(0, app._check_for_incomplete_run)
 
     root.mainloop()
 
