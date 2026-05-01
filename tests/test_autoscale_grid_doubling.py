@@ -105,6 +105,54 @@ class TestAutoscaleGridDoubling:
             f"PreprocessBase should NOT carry '+autoscale' (used by build_preprocessing_pipeline), got {bases}"
         )
 
+    def test_autoscale_with_smoothing_doubling(self, synthetic_regression_data):
+        """Smoothing + autoscale doubling stack: each preprocessing variant should
+        appear in 4 forms (smoothing × autoscale = 2 × 2). PreprocessBase must
+        remain clean (no sg0/autoscale prefix or suffix) so the validation rebuild
+        path can reconstruct the pipeline.
+        """
+        X, y = synthetic_regression_data
+        results = run_search(
+            X,
+            y,
+            task_type="regression",
+            models_to_test=["PLS"],
+            preprocessing_methods={"raw": True, "snv": True},
+            window_sizes=[],
+            folds=3,
+            cv_strategy="kfold",
+            max_n_components=3,
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+            smoothing=True,
+            smoothing_window=11,
+            smoothing_polyorder=2,
+            autoscale=True,
+            progress_callback=None,
+        )[0]
+        # 2 base preps × 2 smoothing × 2 autoscale = 8 unique preprocessing display names.
+        n_unique_preps = results['Preprocess'].nunique()
+        assert n_unique_preps == 8, (
+            f"smoothing × autoscale doubling should yield 8 preprocessing variants, "
+            f"got {n_unique_preps}: {sorted(results['Preprocess'].unique().tolist())}"
+        )
+
+        autoscaled = results[results['Autoscale'] == True]  # noqa: E712
+        # All autoscaled rows should have a clean PreprocessBase that
+        # build_preprocessing_pipeline can consume — no '+autoscale', no 'sg0+', no '+sg0+'.
+        for base in autoscaled['PreprocessBase'].unique():
+            base_s = str(base)
+            assert '+autoscale' not in base_s and 'sg0' not in base_s, (
+                f"PreprocessBase '{base_s}' contains a display-only suffix"
+            )
+
+        # And both smoothing prefix and autoscale suffix should appear together
+        # on at least one config (the sg0+snv+autoscale form).
+        names = set(autoscaled['Preprocess'].unique().tolist())
+        assert any('sg0' in n and '+autoscale' in n for n in names), (
+            f"Expected at least one sg0+...+autoscale variant, got {sorted(names)}"
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
