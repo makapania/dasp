@@ -3,8 +3,9 @@ Per-run disk-mirrored logging for the GUI.
 
 Without this, a multi-hour search that crashes leaves no post-mortem trail —
 the Tkinter progress widget is capped at 2000 lines and dies with the
-process. This module sets up a `logging.FileHandler` writing to
-`<user_data_dir>/dasp/logs/run_<timestamp>.log` so any GUI progress event,
+process. This module sets up a `logging.handlers.RotatingFileHandler` writing to
+`<user_data_dir>/dasp/logs/run_<timestamp>.log` (rotated at 50 MB, 3
+backups kept) so any GUI progress event,
 backend logger call, or routed `print()` survives the run.
 
 The setup also installs a tee-style stdout/stderr proxy so backend `print()`
@@ -39,6 +40,33 @@ _LOGGER_NAME = "dasp.run"
 _active_log_path: Path | None = None
 _original_stdout = None
 _original_stderr = None
+
+
+class _SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler with a non-recursive error path.
+
+    Codex meta-review B2: the default `handleError` writes to `sys.stderr`,
+    but `setup_run_logger` REPLACES `sys.stderr` with a `_TeeStream` that
+    forwards to this very handler. A rollover failure (Windows file lock
+    on `.log` -> `.log.1` rename, AV holding the inode) would then trigger
+    handleError -> sys.stderr.write -> tee -> handler.emit -> rollover
+    fails again -> feedback loop bloating the buffer. Override to write
+    error notices to the *original* stderr captured at setup time, which
+    is never the tee.
+    """
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        if logging.raiseExceptions:
+            target = _original_stderr if _original_stderr is not None else sys.__stderr__
+            try:
+                import traceback
+                target.write("--- _SafeRotatingFileHandler error ---\n")
+                traceback.print_exc(file=target)
+                target.write(f"Logged from file {record.filename}, line {record.lineno}\n")
+                target.write("--- end handler error ---\n")
+                target.flush()
+            except Exception:
+                pass  # last resort — there's nowhere safe left to log to
 
 # Guards the idempotency check + setup block in setup_run_logger so two
 # concurrent callers can't both pass the None-check and double-attach the
@@ -107,11 +135,9 @@ class _TeeStream:
         with self._lock:
             self._buffer.append(text_for_buffer)
             self._buffer_bytes += len(text_for_buffer)
-            should_flush = (
-                "\n" in text_for_buffer
-                or self._buffer_bytes >= _BUFFER_BYTE_THRESHOLD
-            )
-            if should_flush:
+            newline_present = "\n" in text_for_buffer
+            byte_threshold_hit = self._buffer_bytes >= _BUFFER_BYTE_THRESHOLD
+            if newline_present or byte_threshold_hit:
                 joined = "".join(self._buffer)
                 self._buffer = []
                 self._buffer_bytes = 0
@@ -122,10 +148,21 @@ class _TeeStream:
                 else:
                     parts = joined.split("\n")
                     if parts:
-                        # Last fragment has no trailing newline yet — keep
-                        # it buffered so we don't fragment a partial line.
-                        emit_lines = parts[:-1]
-                        tail = parts[-1]
+                        # Last fragment has no trailing newline yet.
+                        # Normally we keep it buffered so a partial line
+                        # isn't fragmented in the log. BUT if the byte
+                        # threshold tripped without ANY newline in the
+                        # whole buffer (parts == [joined]), keeping the
+                        # tail would just re-buffer everything — defeating
+                        # the threshold's stated purpose of capping memory
+                        # on long no-newline strings (Codex meta-review B3).
+                        # Emit the whole tail as one record in that case.
+                        if byte_threshold_hit and not newline_present and len(parts) == 1:
+                            emit_lines = parts
+                            tail = ""
+                        else:
+                            emit_lines = parts[:-1]
+                            tail = parts[-1]
                     else:
                         tail = ""
                 if tail:
@@ -137,8 +174,22 @@ class _TeeStream:
         # and empty lines: the log file is meant to mirror stdout faithfully
         # for crash post-mortem, so backend-formatted blank-line separators
         # in tables / progress sections must survive.
+        #
+        # Codex meta-review B1: each `_logger.log` call is wrapped because
+        # `sys.stdout` has been replaced with this object — if the logger's
+        # file handler is broken (disk full, rollover lock), an unprotected
+        # raise would propagate out of any `print()` call site in a worker
+        # thread and crash it. On logger failure we fall back to the
+        # original stream so the message is at least visible there.
         for line in emit_lines:
-            self._logger.log(self._level, line)
+            try:
+                self._logger.log(self._level, line)
+            except Exception:
+                try:
+                    if self._original is not None:
+                        self._original.write(line + "\n")
+                except Exception:
+                    pass  # both paths broken — last resort, drop the line
         return len(text)
 
     def flush(self) -> None:
@@ -156,8 +207,18 @@ class _TeeStream:
                 # — that artifact is a split-side-effect, not a real line.
                 if emit_lines and emit_lines[-1] == "" and joined.endswith("\n"):
                     emit_lines = emit_lines[:-1]
+        # Codex meta-review B1: same protection as in write(). If the file
+        # handler is broken, fall back to the original stream rather than
+        # crashing the caller (sys.stdout is this object).
         for line in emit_lines:
-            self._logger.log(self._level, line)
+            try:
+                self._logger.log(self._level, line)
+            except Exception:
+                try:
+                    if self._original is not None:
+                        self._original.write(line + "\n")
+                except Exception:
+                    pass
         try:
             if self._original is not None:
                 self._original.flush()
@@ -182,7 +243,8 @@ def setup_run_logger(
     """Configure the per-run logger. Returns (logger, log_path).
 
     The first call in a process creates the log file, attaches a
-    FileHandler, and (if `capture_stdout=True`) installs a tee-style proxy
+    _SafeRotatingFileHandler (50 MB per file, 3 backups), and (if
+    `capture_stdout=True`) installs a tee-style proxy
     over `sys.stdout` and `sys.stderr` so backend `print()` calls land in
     the file. Subsequent calls return the same logger + path so background
     workers and the GUI share one file.
@@ -202,7 +264,9 @@ def setup_run_logger(
         logger.propagate = False  # Don't double-emit to root
 
         # Codex MEDIUM #10: rotate to cap total disk usage on long verbose runs.
-        fh = logging.handlers.RotatingFileHandler(
+        # Codex meta-review B2: use _SafeRotatingFileHandler so rollover
+        # errors don't recurse through the tee back into this handler.
+        fh = _SafeRotatingFileHandler(
             log_path,
             maxBytes=_LOG_MAX_BYTES,
             backupCount=_LOG_BACKUP_COUNT,
