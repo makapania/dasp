@@ -214,6 +214,7 @@ def suggest_preprocessing(
     n_features: int,
     baseline_method: str | None = None,
     smoothing: bool = False,
+    enable_autoscale: bool = False,
 ) -> Dict[str, Any]:
     """Suggest preprocessing configuration.
 
@@ -227,6 +228,9 @@ def suggest_preprocessing(
         If not None, Optuna will suggest whether to apply this baseline method.
     smoothing : bool
         If True, Optuna will suggest whether to apply Savitzky-Golay smoothing.
+    enable_autoscale : bool
+        If True, Optuna will suggest whether to apply autoscale (UV scaling) per trial.
+        T-36: lets TPE learn whether autoscale helps for this dataset.
 
     Returns
     -------
@@ -238,6 +242,7 @@ def suggest_preprocessing(
         - 'polyorder': Polynomial order
         - 'apply_baseline': Whether to apply baseline correction (bool)
         - 'apply_smoothing': Whether to apply smoothing (bool)
+        - 'apply_autoscale': Whether to apply autoscale (bool, T-36)
     """
     preprocessing = trial.suggest_categorical('preprocessing', PREPROCESSING_OPTIONS)
 
@@ -259,6 +264,12 @@ def suggest_preprocessing(
         config['apply_smoothing'] = trial.suggest_categorical('apply_smoothing', [True, False])
     else:
         config['apply_smoothing'] = False
+
+    # Autoscale (UV scaling) toggle — T-36
+    if enable_autoscale:
+        config['apply_autoscale'] = trial.suggest_categorical('apply_autoscale', [True, False])
+    else:
+        config['apply_autoscale'] = False
 
     if 'deriv' in preprocessing:
         # Extract derivative order
@@ -335,18 +346,17 @@ def apply_preprocessing(
     if config.get('apply_smoothing'):
         X = SavgolSmooth(window_length=smoothing_window, polyorder=smoothing_polyorder).fit_transform(X)
 
-    # Step 3: Core preprocessing (SNV / derivatives)
+    # Step 3: Core preprocessing (SNV / derivatives).
+    # T-36 BUG #1 fix: previously each branch returned early, leaving any
+    # trailing autoscale step unreachable. Now each branch ASSIGNS to X,
+    # then a single trailing autoscale step + return runs at the end.
     name = config['name']
 
     if name == 'raw':
-        return X.copy()
-
-    if name == 'snv':
-        snv = SNV()
-        return snv.fit_transform(X)
-
-    # Handle derivatives
-    if 'deriv' in name:
+        X = X.copy()
+    elif name == 'snv':
+        X = SNV().fit_transform(X)
+    elif 'deriv' in name:
         deriv_order = config['deriv']
         window = config['window']
         polyorder = config['polyorder']
@@ -361,19 +371,24 @@ def apply_preprocessing(
 
         if name.startswith('snv_deriv'):
             # SNV then derivative
-            snv = SNV()
-            X_snv = snv.fit_transform(X)
-            return savgol.fit_transform(X_snv)
+            X = savgol.fit_transform(SNV().fit_transform(X))
         elif name.startswith('deriv') and '_snv' in name:
             # Derivative then SNV
-            X_deriv = savgol.fit_transform(X)
-            snv = SNV()
-            return snv.fit_transform(X_deriv)
+            X = SNV().fit_transform(savgol.fit_transform(X))
         else:
             # Just derivative
-            return savgol.fit_transform(X)
+            X = savgol.fit_transform(X)
+    else:
+        # Unknown / unhandled name — preserve historic fallback (a defensive copy).
+        X = X.copy()
 
-    return X.copy()
+    # Step 4 (T-36): Autoscale (UV scaling) — applied AFTER core preprocessing,
+    # so variable selection and the model see scaled features.
+    if config.get('apply_autoscale'):
+        from sklearn.preprocessing import StandardScaler
+        X = StandardScaler().fit_transform(X)
+
+    return X
 
 
 def suggest_model_params(
@@ -737,6 +752,7 @@ def create_unified_objective(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    enable_autoscale: bool = False,  # T-36
     enable_uve: bool = False,
     inlier_class_label=None,
     y_original: np.ndarray | None = None,
@@ -851,9 +867,13 @@ def create_unified_objective(
                 trial, n_features,
                 baseline_method=baseline_method,
                 smoothing=smoothing,
+                enable_autoscale=enable_autoscale,
             )
 
-            # Create cache key from preprocessing config
+            # Create cache key from preprocessing config.
+            # T-36 BUG #2 fix: include apply_autoscale so two trials that differ
+            # only in autoscale don't collide on the cache (the second would
+            # silently receive the first's X_prep).
             cache_key = (
                 preprocess_config.get('name', 'raw'),
                 preprocess_config.get('deriv', 0),
@@ -861,6 +881,7 @@ def create_unified_objective(
                 preprocess_config.get('polyorder', 0),
                 preprocess_config.get('apply_baseline', False),
                 preprocess_config.get('apply_smoothing', False),
+                preprocess_config.get('apply_autoscale', False),
             )
 
             # 2. Apply preprocessing (cached per config — deterministic for same input)
@@ -1050,6 +1071,8 @@ def create_unified_objective(
                 trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
                 trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
                 trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
+                # T-36: persist autoscale flag so convert_study_to_dataframe can emit it
+                trial.set_user_attr('apply_autoscale', preprocess_config.get('apply_autoscale', False))
                 trial.set_user_attr('model_params', str(oc_params))
                 trial.set_user_attr('n_vars', X_for_cv.shape[1])
                 trial.set_user_attr('full_vars_masked', X_prep.shape[1])
@@ -1222,8 +1245,11 @@ def create_unified_objective(
                     lr.set_params(class_weight='balanced')
                 pipe_steps.append(('lr', lr))
             elif model_name in SCALE_SENSITIVE_MODELS:
-                # Scale-sensitive models: StandardScaler + Model
-                pipe_steps.append(('scaler', StandardScaler()))
+                # Scale-sensitive models: StandardScaler + Model.
+                # T-36: skip the per-model scaler when autoscale is already
+                # applied at the preprocessing stage — avoids redundant scaling.
+                if not preprocess_config.get('apply_autoscale', False):
+                    pipe_steps.append(('scaler', StandardScaler()))
                 pipe_steps.append(('model', model))
             else:
                 # Other models don't need scaling
@@ -1414,6 +1440,8 @@ def create_unified_objective(
             trial.set_user_attr('poly', preprocess_config.get('polyorder', 0))
             trial.set_user_attr('apply_baseline', preprocess_config.get('apply_baseline', False))
             trial.set_user_attr('apply_smoothing', preprocess_config.get('apply_smoothing', False))
+            # T-36: persist autoscale flag for convert_study_to_dataframe emission
+            trial.set_user_attr('apply_autoscale', preprocess_config.get('apply_autoscale', False))
             trial.set_user_attr('subset_type', subset_type)
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
@@ -1597,6 +1625,7 @@ def run_unified_bayesian(
     smoothing: bool = False,
     smoothing_window: int = 17,
     smoothing_polyorder: int = 2,
+    enable_autoscale: bool = False,  # T-36
     enable_uve: bool = False,
     inlier_class_label=None,
 ) -> Tuple[pd.DataFrame, optuna.Study]:
@@ -1801,6 +1830,7 @@ def run_unified_bayesian(
         smoothing=smoothing,
         smoothing_window=smoothing_window,
         smoothing_polyorder=smoothing_polyorder,
+        enable_autoscale=enable_autoscale,  # T-36
         enable_uve=enable_uve,
         inlier_class_label=inlier_class_label,
         y_original=y,
@@ -2123,6 +2153,7 @@ def convert_study_to_dataframe(
             'Deriv': trial.user_attrs.get('deriv', 0),
             'Window': trial.user_attrs.get('window', 0),
             'Poly': trial.user_attrs.get('poly', 0),
+            'Autoscale': trial.user_attrs.get('apply_autoscale', False),  # T-36
             'baseline_method': baseline_method if trial.user_attrs.get('apply_baseline', False) else None,
             'smoothing': trial.user_attrs.get('apply_smoothing', False),
             'smoothing_window': smoothing_window,
