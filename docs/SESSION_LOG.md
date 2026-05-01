@@ -4,6 +4,132 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-04-30 (evening) — T-08 dropped, T-11 shipped, T-15 dropped, T-16 reframed, T-19 user-framed
+
+Continuation session after the morning's T-06 + T-06b merges. User asked
+for parallel reality-checks on T-15, T-19, T-11, T-08, then T-16
+(reframed). Verdicts:
+
+**T-08 CARS tree-mode bug — DROPPED.** Third gate-caught false alarm of
+the same shape (after T-26 SNV, search.py:2855 top_n_vars hardcoding):
+prior agent cited line numbers in the wrong control-flow branch
+(1519-1522 are PLS-mode; tree-mode is at 1499-1507). Empirical
+reproducer disproved all three claims (oscillation, bias, persistent
+tiny weights). CARS-Tree converges with std 0.0007-0.0038 over last 10
+iterations. **User confirmed: CARS-Tree is dasp's invention** for tree
+models that lack PLS coefficients (canonical CARS depends on those);
+saved to project memory so future agents don't search Li 2009 for a
+nonexistent canonical "tree-mode CARS."
+
+**T-11 Pause/resume + Optuna SQLite + disk logging — SHIPPED LOCALLY**
+(committed, not pushed per user request). Three sub-units:
+- A: `RotatingFileHandler` writing to `<user_data_dir>/dasp/logs/` +
+  thread-safe tee proxy over stdout/stderr capturing backend prints that
+  hit /dev/null in the bundle. Closes T-12 simultaneously.
+- B: `_actually_paused` event in `SearchController` set inside
+  `check_and_wait`'s `try/finally`. New 'pausing' UI state. Resume checks
+  `analysis_thread.is_alive()`.
+- D: per-run UUID + SQLite storage URL + sidecar JSON tracking active
+  runs. Atomic sidecar writes via `tempfile + fsync + os.replace`.
+  Resume-on-startup dialog. Run-state ONLY for Bayesian (`optimization_method == "unified"`).
+
+**Cross-family review caught real bugs that would have shipped:**
+- Codex HIGH #3: `study.optimize(n_trials=N)` runs N MORE trials, not
+  until total reaches N. Crashed 80/100 study would have resumed with
+  100 fresh trials = 180 total. Fixed via terminal-state-filtered remaining-trial clamp.
+- Codex HIGH #5: `write_text()` could leave partial JSON on crash. Fixed
+  via atomic-write-replace.
+- Codex HIGH #7: dataset fingerprint stored but unused — user could
+  resume on different data and Optuna would silently pick up trials with
+  stale objective values. Fixed via GUI-side `verify_resume_fingerprint`
+  check before `start_run`.
+- Codex HIGH (additional): study_name was just `unified_bayesian_{model_name}` —
+  `load_if_exists=True` would silently mix trials across runs with
+  different task_type / CV / seed / etc. Fixed via config-fingerprint hash
+  in study_name.
+- Codex MEDIUMs: `_TeeStream` thread-unsafe, no log rotation, run-state
+  firing for grid/NSGA-II (misleading resume prompts). All fixed.
+- Kimi MAJOR #2: `verify_resume_fingerprint` didn't check run_id —
+  second app instance could overwrite sidecar between resume and check.
+  Fixed: assert `data["run_id"] == _active_run_id`.
+- Kimi MAJOR #3b: GUI used `clear_resume_state` on fingerprint mismatch
+  → sidecar persisted → re-prompted forever. Fixed: GUI calls
+  `discard_incomplete_run` instead.
+- Kimi MINOR #4: `_TeeStream.splitlines()` splits on `\r` AND `\n`;
+  tqdm `\r<bar>\r<bar>\n` would emit one log line per bar update. Fixed
+  via `replace("\r", "")` before split.
+- Kimi MINOR #5: pre-existing Nuitka detection bug. `"__compiled__" in
+  dir()` checks function-local namespace, not module globals. Fixed at
+  3 sites in `resource_paths.py`.
+- Kimi MINOR #6: `n_trials` in `study_name` orphans old studies on
+  target change. Removed; rely on trial-count clamp.
+- Kimi MINOR #7: SQLite default short busy-timeout → "database is locked"
+  on Windows under contention. Fixed: `?check_same_thread=False&timeout=30`.
+
+Documented as known limitations: cross-process sidecar locking
+(deferred — would need filelock dep, GUI is single-instance in practice);
+search-space hyperparameter bounds NOT in config_hash (theoretical for
+now since custom ranges from Tab 4C don't currently flow into Bayesian);
+GUI thread-integration test (Tk threading tests are flaky).
+
+Test sweep: 260/260 pass.
+
+**T-15 LeaveOneGroupOut — DROPPED** by user decision after gate
+investigation validated their pre-investigation skepticism. The user's
+own paper data (5-100 N per site, 20× ratio) makes LOGO a footgun
+without uncertainty quantification. Chemometrics literature (Westad &
+Marini 2015, Workman 2018) recommends external test sets, NOT LOGO. No
+single canonical citation mandates LOGO over external sets. Competitor
+parity mixed (only PLS_Toolbox exposes group-aware CV). The user's paper
+§2.6 was the only load-bearing reason; since that paper isn't actively
+shipping, dropped.
+
+**T-16 model-comparison machinery — REFRAMED.** User asked "what do
+competitors do" and "compare between models." Investigation surfaced a
+strategic split: chemometrics tools (Unscrambler/SIMCA/PLS_Toolbox/OPUS)
+ship single-model validation only — Y-permutation (PLS_Toolbox) +
+coefficient jackknife (Unscrambler). They DO NOT ship two-model paired
+comparison. ML frameworks (caret/mlr3/tidymodels) ship the actual
+between-model machinery (paired t-test, Wilcoxon, Friedman+Nemenyi).
+Four candidate shapes catalogued; Shape A (jackknife + Y-permutation)
+gets PLS_Toolbox parity + Unscrambler-adjacent parity for ~3-5 days +
+closes T-13 simultaneously. Shape B requires per-fold metric storage
+schema upgrade (hidden infra cost ~2-3 days on top). User decision
+pending: A vs B vs hybrid.
+
+**T-19 model-native imbalance handling — REFRAMED.** User clarified the
+framing: "expose model-native abilities OR auto-detect," not the
+roadmap's "FTIR Bone PLS paper reproducibility." Investigation
+confirmed: math is already statistically equivalent today (existing
+imbalance dropdown's `class_weight` selection routes through
+`compute_sample_weight('balanced')` for boosting models). Gap is
+audit-trail labels (result CSVs say "sample_weight" not
+"scale_pos_weight") + 5 unwired PLS-DA inner-LR sites + T-32 closure.
+Smaller scope confirmed: ~2-3 days vs. design doc's 5-7 days. Yesterday's
+design doc + Codex review captured the detail; do not re-investigate
+from scratch. User affirmed via course-correction: "make sure the
+imbalance thing is not another ticket, as we dealt with this in real
+detail yesterday."
+
+**Memory rules saved this session:**
+- `feedback_glm_routing.md` — never dispatch GLM 5.1 via opencode-go
+  (bills user's z.ai subscription; flat-rate opencode-go plan covers
+  Kimi/DeepSeek/MiniMax/Qwen/MiMo only).
+- `project_cars_tree_origin.md` — CARS-Tree is dasp invention; canonical
+  CARS doesn't run on tree models that lack PLS coefficients.
+- `project_t19_user_framing.md` — T-19 is one ticket, not a fork.
+  User's lens: expose existing abilities + auto-detect.
+- `project_t15_dropped_t16_reframed.md` — T-15 closed, T-16 standalone
+  competitive-machinery survey.
+
+**Lessons reinforced this session:**
+1. **Reality check (gate step 1) keeps catching framings that don't survive direct line-number inspection.** T-08 was the third in this pattern (after T-26 SNV and search.py:2855). Future ticket framings citing "buggy" code at specific line numbers should be expected to have this kind of error.
+2. **Cross-family review (Codex US + Kimi K2.6 Moonshot) catches different blind spots.** This session: Codex caught Optuna-specific gotchas (trial-count overrun, study-name collisions). Kimi caught Python/threading gotchas (`splitlines` on `\r`, `dir()` vs `globals()` for Nuitka, run_id race, SQLite Windows locking).
+3. **The "competitors don't ship X" finding cuts two ways.** For T-11: it means dasp is the outlier among AutoML-adjacent tools (auto-sklearn / H2O / FLAML all do checkpoint-with-resume), so ship parity. For T-15: it means dasp dropping LOGO matches OPUS/SIMCA/Unscrambler (only PLS_Toolbox exposes it), so dropping isn't an outlier choice. Not all "field doesn't do X" findings are alike.
+4. **Domain pushback ("group composition is variable in practice") was empirically validated.** The user's instinct caught a real chemometrics issue (LOGO footgun on uneven group sizes) before any work was done. The gate's job was to test the instinct against actual data + literature; both confirmed it.
+
+---
+
 ## 2026-04-30 (later) — T-06 SPA canonical Araújo 2001 enumeration
 
 Picked up DASP validation-gate ticket triage on a different machine (the

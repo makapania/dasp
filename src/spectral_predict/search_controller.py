@@ -25,10 +25,18 @@ class SearchController:
     def __init__(self):
         self._pause_event = threading.Event()
         self._end_event = threading.Event()
+        # T-11 B: separate event so the GUI can tell whether the worker has
+        # *actually* reached check_and_wait() and is blocked. Set when the
+        # worker is currently inside `_pause_event.wait()`; cleared otherwise.
+        self._actually_paused = threading.Event()
         self._pause_event.set()  # Start in running state (not paused)
 
     def pause(self):
-        """Pause the search. Search will block at next checkpoint."""
+        """Request a pause. The worker blocks at the next checkpoint.
+
+        Pause is asynchronous — the GUI should poll `is_actually_paused` to
+        know when the worker is genuinely blocked (per T-11 B).
+        """
         self._pause_event.clear()
 
     def resume(self):
@@ -48,24 +56,44 @@ class SearchController:
         """Reset controller to initial state for a new search."""
         self._pause_event.set()
         self._end_event.clear()
+        self._actually_paused.clear()
 
     def check_and_wait(self) -> bool:
         """Check for end signal and wait if paused.
 
         Call this at natural checkpoints in the search loop.
 
+        Sets `_actually_paused` while blocked so the GUI can transition
+        from "Pausing — please wait" to "Paused" only when the worker has
+        genuinely stopped (T-11 B).
+
         Returns:
             True to continue searching, False to end immediately.
         """
         if self._end_event.is_set():
             return False
-        self._pause_event.wait()  # Blocks if paused
+        if not self._pause_event.is_set():
+            # About to block — tell the GUI "we're really paused now."
+            self._actually_paused.set()
+            try:
+                self._pause_event.wait()
+            finally:
+                self._actually_paused.clear()
         return not self._end_event.is_set()
 
     @property
     def is_paused(self) -> bool:
-        """Check if currently paused."""
+        """True if a pause has been requested (regardless of worker state)."""
         return not self._pause_event.is_set()
+
+    @property
+    def is_actually_paused(self) -> bool:
+        """True only when the worker is currently blocked at a checkpoint.
+
+        The GUI uses this to distinguish "pause requested but trial still
+        running" from "worker has acknowledged the pause." T-11 B.
+        """
+        return self._actually_paused.is_set()
 
     @property
     def is_ended(self) -> bool:

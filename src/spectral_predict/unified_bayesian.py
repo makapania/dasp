@@ -1816,12 +1816,63 @@ def run_unified_bayesian(
         warn_independent_sampling=False  # Suppress dynamic space warning
     )
 
-    # Create study
-    study = optuna.create_study(
-        direction='minimize',
-        sampler=sampler,
-        study_name=f"unified_bayesian_{model_name}"
+    # Create study. T-11 D: when a run-state storage URL is active, persist
+    # to SQLite so a crash/force-quit leaves the trials recoverable.
+    # `load_if_exists=True` means re-running the same model picks up where
+    # it left off; Optuna skips already-completed trials and continues from
+    # the cutoff trial.
+    #
+    # Codex HIGH (study name): the study_name must be config-sensitive so
+    # that changing task_type / CV / random_state / imbalance / preprocessing
+    # creates a NEW study instead of silently mixing incompatible trials
+    # via load_if_exists=True. Without this fingerprint, a user could
+    # change task_type='classification' and inherit RMSEcv-minimizing trials
+    # from a prior regression run — the trial values would be wrong but
+    # Optuna would happily resume.
+    import hashlib as _hashlib
+    from spectral_predict.run_state import get_storage_url
+
+    # Kimi MINOR #6: omit n_trials from the identity hash. If included,
+    # changing the trial target (100 → 200) creates a new study and orphans
+    # the old one in SQLite. With n_trials excluded, the existing study is
+    # reused and the trial-count clamp at the optimize() call computes
+    # remaining = max(0, target - already_finished) — the user gets the
+    # extra 100 trials added to the existing study rather than a fresh
+    # 200-trial study competing with the orphan.
+    #
+    # Kimi MAJOR #1 partial: include dasp __version__ as a defensive proxy
+    # for "code path may have changed." A user upgrading dasp gets a fresh
+    # study even if the surface params look identical. Real model-specific
+    # search-space changes still need careful attention; documented as a
+    # known limitation in T-11 verdict §8.
+    try:
+        from spectral_predict import __version__ as _dasp_version
+    except Exception:
+        _dasp_version = "unknown"
+    config_components = (
+        f"version={_dasp_version}|"
+        f"task={task_type}|"
+        f"cv={cv_strategy}_{cv_folds}_{cv_n_repeats}|"
+        f"seed={random_state}|"
+        f"imbalance={imbalance_method or 'none'}|"
+        f"baseline={baseline_method or 'none'}|"
+        f"smoothing={smoothing}_{smoothing_window}_{smoothing_polyorder}|"
+        f"uve={enable_uve}|"
+        f"inlier={inlier_class_label}"
     )
+    config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
+    study_name = f"unified_bayesian_{model_name}_{config_hash}"
+
+    storage_url = get_storage_url()
+    create_kwargs = {
+        "direction": "minimize",
+        "sampler": sampler,
+        "study_name": study_name,
+    }
+    if storage_url is not None:
+        create_kwargs["storage"] = storage_url
+        create_kwargs["load_if_exists"] = True
+    study = optuna.create_study(**create_kwargs)
 
     # Progress callback wrapper
     def progress_wrapper(study: optuna.Study, trial: optuna.trial.FrozenTrial):
@@ -1889,13 +1940,40 @@ def run_unified_bayesian(
                 else:
                     print(f"  Trial {trial.number + 1}/{n_trials}: Acccv={-trial.value:.4f}")
 
-    # Run optimization
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        callbacks=[progress_wrapper],
-        show_progress_bar=verbose and not progress_callback
-    )
+    # T-11 D / Codex HIGH #3: when resuming a previously-loaded study,
+    # study.optimize(n_trials=N) runs N MORE trials, not "until total reaches
+    # N." Without this clamp, a crashed 80/100 study resumes with 100 fresh
+    # trials (180 total) — silently doubling the user's wait. Compute the
+    # remaining count from study.trials filtered to terminal states (Optuna
+    # may include RUNNING / FAIL trials in the list, which shouldn't count
+    # toward "completed").
+    try:
+        from optuna.trial import TrialState
+        terminal_states = (TrialState.COMPLETE, TrialState.PRUNED)
+        already_finished = sum(
+            1 for t in study.trials if t.state in terminal_states
+        )
+    except Exception:
+        # Defensive fallback — if Optuna's API surface changes, bias toward
+        # running too few rather than too many trials so the user can re-run.
+        already_finished = len(study.trials)
+
+    remaining_trials = max(0, n_trials - already_finished)
+    if already_finished > 0:
+        print(
+            f"  Resume detected: {already_finished} trials already complete; "
+            f"requesting {remaining_trials} more (target: {n_trials})."
+        )
+
+    if remaining_trials > 0:
+        study.optimize(
+            objective,
+            n_trials=remaining_trials,
+            callbacks=[progress_wrapper],
+            show_progress_bar=verbose and not progress_callback
+        )
+    else:
+        print(f"  All {n_trials} trials already complete; skipping optimization.")
 
     # Convert results to DataFrame
     results_df = convert_study_to_dataframe(

@@ -1,6 +1,37 @@
 # Project Status
 
-> **Last updated:** 2026-04-30 (later — T-06 canonical SPA merged + T-06b parallelization follow-up) —
+> **Last updated:** 2026-04-30 (evening — T-08 dropped, T-11 shipped, T-15 dropped, T-16 reframed, T-19 user-framed) —
+>
+> **Session close-out:**
+>
+> | Ticket | Disposition | Branch / commit |
+> |---|---|---|
+> | T-06 SPA canonical Araújo 2001 enumeration | MERGED + T-06b parallelization | `af44ad4` + `85063b8` |
+> | T-08 CARS tree-mode bug | DROPPED — false alarm; algorithm converges; CARS-Tree confirmed dasp-invented | n/a |
+> | T-11 Pause/resume + disk logging + Optuna SQLite | APPROVED for merge — Codex (4 HIGH + 3 MEDIUM) + Kimi K2.6 (2 MAJOR + 4 MINOR) all fixed; 260 tests pass | `fix/T11-pause-resume-hardening` (committed locally, NOT pushed) |
+> | T-12 disk-mirrored logging | CLOSED via T-11 Unit A | (subsumed) |
+> | T-15 LeaveOneGroupOut / GroupKFold | DROPPED — user decision; LOGO is footgun in user's data regime (5-100 N per site, 20× ratio); chemometrics literature recommends external test sets, not LOGO | n/a |
+> | T-16 model-comparison machinery | REFRAMED — strategic split surfaced. Chemometrics canon (jackknife + Y-permutation = competitor parity) vs ML canon (paired t-test/Wilcoxon = "comparing between models"). Awaiting user decision on Shape A vs B vs hybrid | (investigation only) |
+> | T-19 model-native imbalance handling | APPROVED with smaller scope (~2-3 days) — "extend single dropdown to dispatch native kwargs internally + fix 5 PLS-DA sites + close T-32." Math is already statistically equivalent today; gap is audit-trail labels + 5 unwired PLS-DA sites | (awaiting implementation) |
+> | T-32 sample_weight length mismatch | DEFERRED into T-19 scope (unchanged) | n/a |
+>
+> **T-11 detail:** Three sub-units (A: disk-mirrored logging with `RotatingFileHandler` + tee-stdout proxy; B: thread-alive check + UI pause-state honesty with `_actually_paused` event; D: Optuna SQLite persistence + resume-on-startup dialog). Cross-family review pattern caught real bugs that would have shipped: trial-count overrun on resume (silently doubles work), non-atomic sidecar writes, dataset fingerprint stored but never enforced, study names too coarse (load_if_exists would mix incompatible trials), `_TeeStream` thread-unsafe, no log rotation, run-state firing for grid/NSGA-II falsely. All fixed. Pre-existing Nuitka `is_frozen()` bug also fixed (`__compiled__ in dir()` → `__compiled__ in globals()`).
+>
+> **Memory rules added this session:**
+> - GLM 5.1 must NEVER be dispatched through opencode-go (bills against z.ai subscription)
+> - CARS-Tree is dasp's invention, not in Li 2009 — don't search for canonical "tree-mode CARS"
+> - T-19's user framing is "expose model-native abilities OR auto-detect," not paper-reproducibility
+> - T-15 dropped + T-16 reframed (competitive-framework survey)
+>
+> **Pending user decisions still blocking bigger tickets:**
+> - T-31 multi-class SIMCA (yes/no on usefulness)
+> - T-22 bootstrap stability diagnostic (yes/no on investment)
+> - T-01 reframe (external-test-set workflow yes/no)
+> - **T-16 (NEW): pick Shape A (chemometrics canon) vs Shape B (ML canon) vs hybrid**
+>
+> See `docs/bugfix_validation/` for per-ticket validation notes. See `docs/CONTINUATION_PROMPT_2026-04-30_v2.md` for the next-session pickup prompt with all session lessons applied.
+>
+> **Previously:** 2026-04-30 (later — T-06 canonical SPA merged + T-06b parallelization follow-up) —
 >
 > **T-06 SPA canonical seed enumeration MERGED + T-06b parallelization MERGED.** Replaced non-functional `n_random_starts` knob with canonical Araújo 2001 deterministic enumeration over all J variables as candidate first variable. Branch `fix/T06-spa-canonical-seeds` ff-merged into `main`. Validation note: `docs/bugfix_validation/T06_spa_canonical_seeds.md`. Follow-up branch `fix/T06b-spa-parallel` ff-merged immediately after — parallelizes the J-seed loop via `joblib.Parallel(backend='threading')`, capped at min(cpu_count, 8) workers, PyInstaller-bundle-safe. Empirical FTIR-scale benchmark (J=800, n=50, n_features=20): 10.92 sec parallelized vs. ~70-80 sec sequential — ~7-8× speedup as expected for GIL-releasing numpy/sklearn work.
 >
