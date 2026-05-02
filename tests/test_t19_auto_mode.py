@@ -290,3 +290,25 @@ def test_auto_mode_severe_imbalance_applies_balanced_kwarg(
         f"{model_name} under Auto + severe imbalance should have "
         f"{balanced_kwarg}={expected_value!r}; got {kwargs.get(balanced_kwarg)!r}"
     )
+
+
+def test_auto_mode_mlp_severe_imbalance_emits_both_resolution_and_warning():
+    """Codex LOW (post-Q2 review): the MLP-specific 'model will train
+    unweighted' note is emitted from code_generator.py inside the auto
+    resolution block, but no end-to-end test exercises Auto+MLP+severe.
+    A future indentation/refactor break would slip through. Pin both the
+    standard 'applying class_weight' resolution message AND the MLP-specific
+    follow-up warning so MLP users see why no balancing is happening."""
+    X, y = _imbalanced_data()
+    g = _execute_auto("MLP", X, y, params={"hidden_layer_sizes": (10,), "max_iter": 50})
+    assert "applying class_weight" in g["_stdout"], (
+        "Auto resolution itself should fire on imbalanced data regardless of model"
+    )
+    assert "MLP does not support class_weight" in g["_stdout"], (
+        "MLP-specific warning should appear when Auto resolves to class_weight "
+        "but the model can't accept it"
+    )
+    assert "train unweighted" in g["_stdout"]
+    # And confirm the model itself has no class_weight set (mirrors runtime fallback).
+    kwargs = _model_kwargs(g["model"])
+    assert kwargs.get("class_weight", None) is None
