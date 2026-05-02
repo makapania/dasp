@@ -23152,16 +23152,40 @@ class SpectralPredictApp:
             else "?"
         )
 
-        message = (
-            f"Found an unfinished Bayesian run from {started_str}.\n\n"
-            f"Run id: {meta.run_id}\n"
-            f"Models: {models_str}\n"
-            f"Trials per model (target): {n_trials_str}\n\n"
-            "Resume?\n\n"
-            "  • Yes — keep the SQLite store. Re-load the same data and\n"
-            "    click Run Analysis to continue from where it left off.\n"
-            "  • No — delete the unfinished run and start fresh next time."
-        )
+        # T-43: include captured GUI-settings summary in the resume prompt
+        # so the user sees exactly what auto-restore will set before they
+        # accept. Older sidecars lack gui_settings — fall back to the
+        # original "load the same data + settings" wording.
+        try:
+            from spectral_predict.run_gui_settings import summarize_gui_settings
+            settings_summary = summarize_gui_settings(meta.gui_settings)
+        except Exception:
+            settings_summary = ""
+
+        if settings_summary:
+            message = (
+                f"Found an unfinished Bayesian run from {started_str}.\n\n"
+                f"Run id: {meta.run_id}\n"
+                f"Models: {models_str}\n"
+                f"Trials per model (target): {n_trials_str}\n\n"
+                f"Captured settings:\n{settings_summary}\n\n"
+                "Resume?\n\n"
+                "  • Yes — restore the captured settings and keep the SQLite\n"
+                "    store. Re-load the same data and click Run Analysis to\n"
+                "    continue from where it left off.\n"
+                "  • No — delete the unfinished run and start fresh next time."
+            )
+        else:
+            message = (
+                f"Found an unfinished Bayesian run from {started_str}.\n\n"
+                f"Run id: {meta.run_id}\n"
+                f"Models: {models_str}\n"
+                f"Trials per model (target): {n_trials_str}\n\n"
+                "Resume?\n\n"
+                "  • Yes — keep the SQLite store. Re-load the same data and\n"
+                "    click Run Analysis to continue from where it left off.\n"
+                "  • No — delete the unfinished run and start fresh next time."
+            )
 
         try:
             answer = messagebox.askyesnocancel(
@@ -23176,6 +23200,37 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
+                # T-43: auto-restore the captured GUI settings before forcing
+                # the persistence override. Order matters — if we did the
+                # override first, restoring would clobber it back to whatever
+                # the previous run was using (likely 'auto'), and the resumed
+                # SQLite URL would be ignored.
+                restore_summary = ""
+                if resumed.gui_settings:
+                    try:
+                        from spectral_predict.run_gui_settings import (
+                            restore_gui_settings,
+                        )
+                        report = restore_gui_settings(self, resumed.gui_settings)
+                        restore_summary = (
+                            f" Restored {report.total_restored} settings."
+                        )
+                        if report.errors:
+                            self._log_progress(
+                                f"[RUN] T-43: {len(report.errors)} setting(s) "
+                                f"failed to restore: {'; '.join(report.errors[:3])}"
+                            )
+                        if report.skipped_unknown:
+                            self._log_progress(
+                                f"[RUN] T-43: {len(report.skipped_unknown)} "
+                                "setting(s) from sidecar are not in the "
+                                "current build — ignored."
+                            )
+                    except Exception as restore_err:
+                        self._log_progress(
+                            f"[RUN] T-43: GUI-settings restore failed: {restore_err}"
+                        )
+
                 # Force 'always' on resume — under 'auto' or 'never', the loaded
                 # SQLite URL would be ignored and the user would get a fresh run
                 # despite the banner. silent-failure HIGH#4: if the set fails,
@@ -23197,9 +23252,9 @@ class SpectralPredictApp:
 
                 if _override_ok:
                     banner_text = (
-                        "Resuming previous run — load the same data + settings "
-                        "and click Run Analysis. (Persistence auto-set to "
-                        "Always-on for this session.)"
+                        "Resuming previous run — load the same data and click "
+                        "Run Analysis. (Persistence auto-set to Always-on for "
+                        f"this session.{restore_summary})"
                     )
                 else:
                     banner_text = (
@@ -24998,6 +25053,7 @@ class SpectralPredictApp:
                 start_run as _start_run_state,
                 fingerprint_dataset,
             )
+            from spectral_predict.run_gui_settings import capture_gui_settings
 
             # T-11 A: spin up disk-mirrored logging at search start. Idempotent
             # across threads (worker + GUI share one file). The path lands in
@@ -25071,6 +25127,7 @@ class SpectralPredictApp:
                             if hasattr(self, "bayesian_persistence_mode")
                             else "never"
                         ),
+                        gui_settings=capture_gui_settings(self),  # T-43
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:

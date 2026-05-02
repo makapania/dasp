@@ -43,7 +43,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from spectral_predict.resource_paths import get_user_optuna_dir
 
@@ -131,6 +131,11 @@ class RunMetadata:
     n_trials_per_model: int | None
     started_iso: str
     bayesian_persistence_mode: PersistenceMode = "never"  # T-41
+    # T-43: snapshot of GUI settings at start_run time. None when no settings
+    # were captured (older sidecars, headless callers). Stored as a flat
+    # dict[str, JSON-serializable] so future GUI additions auto-flow through
+    # without schema migration; restore tolerates missing/unknown keys.
+    gui_settings: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -151,7 +156,13 @@ class RunMetadata:
             )
             mode = "never"
         data["bayesian_persistence_mode"] = mode
-        return cls(**data)
+
+        # T-43: ignore unknown fields so a future schema addition can land
+        # without breaking older Python builds that lack the field. Without
+        # this, `cls(**data)` would TypeError on the unknown kwarg.
+        known = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
 
 @dataclasses.dataclass
@@ -272,6 +283,7 @@ def start_run(
     model_names: list[str] | None = None,
     n_trials_per_model: int | None = None,
     bayesian_persistence_mode: PersistenceMode = "never",
+    gui_settings: dict[str, Any] | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -323,6 +335,7 @@ def start_run(
             n_trials_per_model=n_trials_per_model,
             started_iso=datetime.now().isoformat(),
             bayesian_persistence_mode=bayesian_persistence_mode,
+            gui_settings=dict(gui_settings) if gui_settings else None,
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
