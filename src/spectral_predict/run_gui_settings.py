@@ -188,6 +188,21 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "cv_n_repeats",
     "max_n_components",
     "max_iter",
+    # --- external validation set ---
+    # The validation partition is decided BEFORE the search runs, not
+    # post-hoc. Trials in the resumed SQLite were trained on a specific
+    # calibration split; re-creating a different validation set on resume
+    # (different algorithm, different %) could place trial-trained samples
+    # into the "new" validation, causing silent leakage. Capturing the
+    # configuration is sufficient for deterministic algorithms (SPXY,
+    # Kennard-Stone, Stratified). For non-deterministic ("Random") and
+    # Manual algorithms the partition indices themselves must persist —
+    # tracked separately as T-49.
+    "validation_enabled",
+    "validation_percentage",
+    "validation_algorithm",
+    "show_validation_metrics",
+    "validation_top_n",
     # --- imbalance handling ---
     "enable_imbalance_handling",
     "imbalance_method",

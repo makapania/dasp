@@ -445,6 +445,26 @@ def test_restore_then_override_persistence_mode_order(fresh_state):
     assert gui.bayesian_persistence_mode.get() == "always"
 
 
+def test_external_validation_controls_in_whitelist(fresh_state):
+    """The external validation partition (SPXY / KS / Stratified / Random /
+    Manual) is decided BEFORE the search, not post-hoc. Trials in the
+    resumed SQLite were trained on a specific cal split; if the user
+    re-creates a different validation set on resume (different algorithm,
+    different %), samples used by the resumed trials' calibration could
+    end up in the "new" validation set — silent leakage. Capturing the
+    five validation Tk vars is sufficient for deterministic algorithms;
+    non-deterministic ones need T-49 (indices persistence)."""
+    _, _, rgs, _ = fresh_state
+    required = {
+        "validation_enabled",
+        "validation_percentage",
+        "validation_algorithm",
+        "show_validation_metrics",
+        "validation_top_n",
+    }
+    assert required.issubset(set(rgs.CAPTURABLE_SETTINGS))
+
+
 def test_bayesian_specific_controls_in_whitelist(fresh_state):
     """The Bayesian search path reads bayes_* Tk vars (bayes_enable_baseline,
     bayes_baseline_method, bayes_enable_smoothing, bayes_region_test_*,

@@ -28,6 +28,7 @@
 > - **T-46** (`docs/plans/2026-05-02-T46-wal-pragma-return-not-surfaced.md`): `_apply_wal_pragmas` return value discarded at both call sites despite "caller should surface that" docstring. OneDrive/Dropbox-synced data dirs silently fall back to DELETE journal mode.
 > - **T-47** (`docs/plans/2026-05-02-T47-flip-bayesian-persistence-default-to-auto.md`): one-liner default flip from `'never'` to `'auto'`. Justified by the T-42 baseline benchmark numbers (XGBoost 1.01×, LightGBM 0.93× — well below 1.15× target). Gated on this PR merging first.
 > - **T-48** (`docs/plans/2026-05-02-T48-real-tk-integration-tests-for-resume.md`): real-Tk integration tests for the resume flow. Pins Tcl set/get-verify behavior + order-dependent restore-then-override contract on the actual method instead of `_FakeGUI` shims. Belt-and-braces; current shim coverage is sound at the unit level.
+> - **T-49** (`docs/plans/2026-05-02-T49-persist-validation-indices-on-resume.md`): persist external validation set indices for resume. The 5 validation Tk vars are now captured (this PR), which is sufficient for deterministic algorithms (SPXY / KS / Stratified). For Random and Manual algorithms the actual indices must persist or resume can silently leak — old trials trained on samples that land in the new "validation" partition. Filed as separate ticket because it requires extending `RunMetadata` schema + dataset_fingerprint-gated re-slicing.
 >
 > **Audit trail:**
 > - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
