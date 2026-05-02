@@ -25263,6 +25263,15 @@ class SpectralPredictApp:
                         model_names=list(selected_models) if selected_models else [],
                         n_trials_per_model=int(self.n_trials_var.get())
                         if hasattr(self, "n_trials_var") else None,
+                        # T-41 + T-47: the literal 'never' below is a
+                        # safety-net fallback for a corrupted GUI state
+                        # (Tk var missing entirely), NOT the user-facing
+                        # default for unspecified input. Do NOT "fix" it
+                        # to 'auto' alongside the run_state.py field-default
+                        # flip — that would silently start writing SQLite
+                        # files when the GUI state is malformed. The
+                        # field default for unspecified input lives in
+                        # run_state.RunMetadata + start_run() (both 'auto').
                         bayesian_persistence_mode=(  # T-41
                             self.bayesian_persistence_mode.get()
                             if hasattr(self, "bayesian_persistence_mode")
