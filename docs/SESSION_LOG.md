@@ -4,6 +4,20 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-46 review by DeepSeek) — recent merges can reclassify edge cases as common cases
+
+T-46 plan was filed when `bayesian_persistence_mode='never'` was the default — the auto-migration code path was a rare edge case. Plan said: site 1 (always-on) gets `progress_callback`; site 2 (auto-migration) gets only `logger.warning` because no callback in scope and the failure mode was rare.
+
+T-47 merged earlier the same session and flipped the default to `'auto'`. **Auto-migration is now the most-traveled WAL-touching path.** The plan's "logger.warning is fine, T-45 will surface it" reasoning no longer held: under the new default, the user-visible benefit of T-46 ("OneDrive/Dropbox no longer silently halve throughput") only fires in `'always'` mode — most users on the new `'auto'` default still got silent halving until T-45 ships.
+
+DeepSeek V4 Pro Max caught this in cross-family review by integrating the T-47 context into the T-46 evaluation. The plan author missed it because T-47 didn't exist when the plan was written. Codex caught the test gap at site 2 but didn't connect it to the default-flip context — convergence on the gap, divergence on the why.
+
+**Lesson:** when a recent merge changes the default behavior of an adjacent surface, audit older filed plans against the new default before implementing. A plan's "rare edge case" assumption can flip overnight. Cross-family review with same-session context is the gate that catches this — neither the plan author nor a per-ticket reviewer in isolation would notice.
+
+**Fix applied:** threaded `progress_callback` through `_migrate_study_to_sqlite` as optional kwarg. Distinct event tag `t41_decision: "wal_rejected_at_migration"` (vs site 1's `"wal_rejected"`) so consumers can identify which lifecycle phase rejected from the structured key alone. 264 + 1 skipped after the fix.
+
+---
+
 ## 2026-05-02 (T-47 follow-up) — DeepSeek caught the missing absent-key fallback test
 
 DeepSeek V4 Pro Max review of the T-47 default-flip identified a MEDIUM gap: the test suite had no regression covering from_dict with the bayesian_persistence_mode key absent entirely. Every existing from_dict test explicitly included the key (sometimes with garbage, sometimes with a real value), so a future refactor accidentally flipping data.get("bayesian_persistence_mode", "never") to data.get(..., "auto") would have landed silently.

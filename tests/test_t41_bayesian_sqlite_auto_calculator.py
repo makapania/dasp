@@ -983,6 +983,80 @@ class TestWALPragmaReturnValue:
         assert "WAL" in wal_events[0]["message"]
         rs._reset_for_tests()
 
+    def test_wal_rejection_surfaces_at_auto_migration_site(
+        self, tmp_path, monkeypatch
+    ):
+        """T-46 follow-up after DeepSeek MEDIUM: under the post-T-47 default
+        ('auto'), the auto-migration path through `_migrate_study_to_sqlite`
+        is the COMMON WAL-touching path — not an edge case. WAL rejection
+        there must surface to progress_callback, not just logger.warning
+        (which is invisible in the bundled GUI per T-45).
+
+        Distinct event tag (`wal_rejected_at_migration`) so consumers can
+        tell which lifecycle phase rejected from the structured key alone."""
+        import optuna as _optuna
+        from spectral_predict import unified_bayesian as ub
+        from spectral_predict.unified_bayesian import _migrate_study_to_sqlite
+
+        src_study = _optuna.create_study(direction="minimize", study_name="src")
+        src_study.optimize(lambda t: t.suggest_float("x", 0, 1) ** 2, n_trials=2)
+
+        target_db = tmp_path / "auto_migrate_target.sqlite3"
+        url = f"sqlite:///{target_db.as_posix()}"
+
+        events: list[dict] = []
+        monkeypatch.setattr(ub, "_apply_wal_pragmas", lambda _url: False)
+
+        _migrate_study_to_sqlite(
+            src_study, url, "target", random_state=0,
+            progress_callback=events.append,
+        )
+
+        wal_events = [
+            e for e in events
+            if e.get("t41_decision") == "wal_rejected_at_migration"
+        ]
+        assert wal_events, (
+            "WAL rejection during auto-migration must surface via "
+            "progress_callback under the post-T-47 'auto' default — "
+            "logger.warning alone is invisible in the bundled GUI"
+        )
+        assert "auto-migration" in wal_events[0]["message"].lower()
+
+    def test_migrate_without_callback_still_logs_on_wal_rejection(
+        self, tmp_path, monkeypatch
+    ):
+        """Headless callers (no progress_callback) must still get the
+        logger.warning surface — the callback is opt-in, the log is
+        unconditional. Pin both behaviors so a future refactor that
+        consolidates them silently can't drop the log."""
+        import optuna as _optuna
+        import logging
+        from spectral_predict import unified_bayesian as ub
+        from spectral_predict.unified_bayesian import _migrate_study_to_sqlite
+
+        src_study = _optuna.create_study(direction="minimize", study_name="src2")
+        src_study.optimize(lambda t: t.suggest_float("x", 0, 1) ** 2, n_trials=2)
+
+        target_db = tmp_path / "headless_target.sqlite3"
+        url = f"sqlite:///{target_db.as_posix()}"
+
+        monkeypatch.setattr(ub, "_apply_wal_pragmas", lambda _url: False)
+
+        with patch.object(ub.logger, "warning") as mock_warn:
+            _migrate_study_to_sqlite(
+                src_study, url, "target2", random_state=0,
+                progress_callback=None,
+            )
+            warn_calls = [
+                str(c) for c in mock_warn.call_args_list
+                if "T-46" in str(c) or "WAL" in str(c)
+            ]
+            assert warn_calls, (
+                "logger.warning must fire on WAL rejection regardless of "
+                "callback presence — it's the headless-caller surface"
+            )
+
 
 class TestMigrationOrphanCleanup:
     """HIGH-2 fix: when migration partway-fails, the orphan SQLite file is
