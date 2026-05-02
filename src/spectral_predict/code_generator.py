@@ -914,7 +914,18 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             params_full.update(params)
 
             if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
-                params_full.setdefault('class_weight', 'balanced')
+                # Library-aware balanced-loss dispatch. Pre-T-19 the catch-all path injected
+                # class_weight='balanced' for every model: LightGBM/RandomForest accept it,
+                # XGBoost silently ignores it (no balancing applied), CatBoost crashes on
+                # instantiation with TypeError. Map each library to its canonical kwarg
+                # instead. XGBoost has no constructor knob — sample_weight is threaded into
+                # the fit() call via _xgb_class_weight_needs_sample_weight().
+                if model_class.startswith('CatBoost'):
+                    params_full.setdefault('auto_class_weights', 'Balanced')
+                elif model_class.startswith('XGBoost') or model_class.startswith('XGB'):
+                    pass
+                else:
+                    params_full.setdefault('class_weight', 'balanced')
 
             # Avoid injecting random_state into estimators that don't accept it (e.g., PLSRegression)
             ctor_class = self._resolve_model_ctor_class()
@@ -1167,6 +1178,17 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             'Ridge', 'Lasso', 'ElasticNet'
         }
         return normalized in scale_models and not self._needs_pls_da_pipeline()
+
+    def _xgb_class_weight_needs_sample_weight(self) -> bool:
+        """XGBoost classification under imbalance_method='class_weight' threads
+        sample_weight at fit() time because XGBoost has no class_weight constructor
+        kwarg. Mirrors the runtime path in search.py."""
+        if self.task_type != 'classification':
+            return False
+        if not self.imbalance_method or self.imbalance_method.lower() != 'class_weight':
+            return False
+        model_class = self._resolve_model_class_name()
+        return model_class.startswith('XGBoost') or model_class.startswith('XGB')
 
     def _autoscale_enabled(self) -> bool:
         """Robust parse of self.config['autoscale'] — handles bool, int, NaN, and the
@@ -1534,6 +1556,18 @@ def _regression_resample(X_vals, y_vals, method_name, params):
             self.task_type, self.cv_strategy, self.cv_folds, self.cv_n_repeats
         )
 
+        xgb_sample_weight = self._xgb_class_weight_needs_sample_weight()
+        sample_weight_import = (
+            'from sklearn.utils.class_weight import compute_sample_weight\n'
+            if xgb_sample_weight else ''
+        )
+        sample_weight_block = (
+            "    fit_kwargs = {}\n"
+            "    if IMBALANCE_METHOD == 'class_weight':\n"
+            "        fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_fold)\n"
+            if xgb_sample_weight else "    fit_kwargs = {}\n"
+        )
+
         if self.task_type == 'classification':
             return f'''
 # =============================================================================
@@ -1544,7 +1578,7 @@ def _regression_resample(X_vals, y_vals, method_name, params):
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
 from sklearn.base import clone
 from collections import Counter
-
+{sample_weight_import}
 cv = {cv_constructor}
 
 unique_classes = np.unique(y)
@@ -1571,7 +1605,7 @@ for train_idx, test_idx in cv.split({x_var}, y):
             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
 
     fold_model = clone(model)
-    fold_model.fit(X_train_fold, y_train_fold)
+{sample_weight_block}    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
     y_pred_fold = fold_model.predict(X_test)
 
     for local_i, sample_idx in enumerate(test_idx):
@@ -1686,11 +1720,22 @@ y_pred_cv = all_y_pred_arr
             x_var = 'X'
 
         if self.task_type == 'classification':
+            xgb_sample_weight = self._xgb_class_weight_needs_sample_weight()
+            sample_weight_import = (
+                'from sklearn.utils.class_weight import compute_sample_weight\n'
+                if xgb_sample_weight else ''
+            )
+            sample_weight_block = (
+                "fit_kwargs = {}\n"
+                "if IMBALANCE_METHOD == 'class_weight':\n"
+                "    fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_full)\n"
+                if xgb_sample_weight else "fit_kwargs = {}\n"
+            )
             return f'''
 # =============================================================================
 # TRAIN FINAL MODEL (with imbalance handling)
 # =============================================================================
-
+{sample_weight_import}
 X_train_full, y_train_full = {x_var}, y
 if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
                         'tomek_links', 'smote_tomek', 'smote_enn']:
@@ -1698,7 +1743,7 @@ if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersamp
     if resampler is not None:
         X_train_full, y_train_full = resampler.fit_resample(X_train_full, y_train_full)
 
-model.fit(X_train_full, y_train_full)
+{sample_weight_block}model.fit(X_train_full, y_train_full, **fit_kwargs)
 print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
 '''
 
