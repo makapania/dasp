@@ -327,6 +327,119 @@ def test_summarize_handles_empty_settings(fresh_state):
     assert rgs.summarize_gui_settings({}) == ""
 
 
+def test_from_dict_coerces_malformed_gui_settings_to_none(fresh_state):
+    """A corrupted sidecar storing gui_settings as a string crashed the
+    downstream `.items()` call before this guard was added (DeepSeek HIGH #2)."""
+    rs, _, _, _ = fresh_state
+    bad = {
+        "run_id": "abc",
+        "storage_path": "/tmp/x.sqlite3",
+        "storage_url": "",
+        "label": None,
+        "dataset_fingerprint": None,
+        "model_names": [],
+        "n_trials_per_model": None,
+        "started_iso": "2026-05-02T00:00:00",
+        "bayesian_persistence_mode": "never",
+        "gui_settings": "not-a-dict-somehow",
+    }
+    meta = rs.RunMetadata.from_dict(bad)
+    assert meta.gui_settings is None
+
+
+def test_restore_detects_silent_tk_int_var_corruption(fresh_state):
+    """Tk IntVar.set("abc") doesn't raise but poisons the variable. The
+    set/get verify (DeepSeek MEDIUM #3) must catch it as an error."""
+    _, _, rgs, _ = fresh_state
+
+    class _PoisonableIntVar:
+        """Mimics tk.IntVar's set-succeeds, get-raises pattern."""
+        def __init__(self):
+            self._value = 0
+
+        def set(self, value):
+            self._value = value  # store anything; no raise
+
+        def get(self):
+            if not isinstance(self._value, int):
+                raise RuntimeError("expected integer")
+            return self._value
+
+    gui = _FakeGUI(use_snv=False)
+    gui.smoothing_window = _PoisonableIntVar()
+    report = rgs.restore_gui_settings(
+        gui, {"use_snv": True, "smoothing_window": "abc"}
+    )
+
+    assert "use_snv" in report.restored
+    assert "smoothing_window" not in report.restored
+    assert any("smoothing_window" in e for e in report.errors)
+
+
+def test_restore_detects_value_mismatch_after_set(fresh_state):
+    """Some Tk var subclasses round/truncate the set value. The get-back
+    verify catches that drift instead of falsely reporting "restored"."""
+    _, _, rgs, _ = fresh_state
+
+    class _RoundingDoubleVar:
+        def __init__(self):
+            self._value = 0.0
+
+        def set(self, value):
+            # Simulate floor-to-int round-trip drift.
+            self._value = int(float(value))
+
+        def get(self):
+            return self._value
+
+    gui = _FakeGUI(use_snv=False)
+    gui.uve_cutoff_multiplier = _RoundingDoubleVar()
+    report = rgs.restore_gui_settings(
+        gui, {"uve_cutoff_multiplier": 1.25, "use_snv": True}
+    )
+
+    assert "use_snv" in report.restored
+    assert any("uve_cutoff_multiplier" in e for e in report.errors)
+
+
+def test_capture_skips_var_with_raising_get(fresh_state):
+    """A real Tk var can raise on .get() if the Tcl interpreter is in a bad
+    state (e.g., destroyed widget). Snapshot must omit the key, not crash."""
+    _, _, rgs, _ = fresh_state
+
+    class _BrokenGetVar:
+        def get(self):
+            raise RuntimeError("Tcl interpreter is gone")
+
+        def set(self, value):
+            pass
+
+    gui = _FakeGUI(use_snv=True)
+    gui.smoothing_window = _BrokenGetVar()
+    captured = rgs.capture_gui_settings(gui)
+
+    assert captured["use_snv"] is True
+    assert "smoothing_window" not in captured
+
+
+def test_restore_then_override_persistence_mode_order(fresh_state):
+    """Document the order-dependent contract used by `_check_for_incomplete_run`:
+    restore first (which would set bayesian_persistence_mode back to 'auto'),
+    then force 'always'. If a future refactor inverts the order the resume
+    would silently ignore the SQLite URL."""
+    _, _, rgs, _ = fresh_state
+    gui = _FakeGUI(bayesian_persistence_mode="auto", use_snv=True)
+    settings = {"bayesian_persistence_mode": "auto", "use_snv": False}
+
+    rgs.restore_gui_settings(gui, settings)
+    assert gui.bayesian_persistence_mode.get() == "auto"
+
+    # GUI's `_check_for_incomplete_run` then overrides to 'always' — this
+    # final write must happen AFTER restore, not before.
+    gui.bayesian_persistence_mode.set("always")
+    assert gui.bayesian_persistence_mode.get() == "always"
+
+
 def test_summarize_includes_key_facts(fresh_state, populated_gui):
     _, _, rgs, _ = fresh_state
     captured = rgs.capture_gui_settings(populated_gui)

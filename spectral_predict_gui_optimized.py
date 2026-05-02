@@ -23212,13 +23212,22 @@ class SpectralPredictApp:
                             restore_gui_settings,
                         )
                         report = restore_gui_settings(self, resumed.gui_settings)
-                        restore_summary = (
-                            f" Restored {report.total_restored} settings."
-                        )
+                        # Surface restore errors in the banner itself, not just
+                        # the scrollable log — a "Restored N settings" message
+                        # with hidden errors is a silent-failure trap (DeepSeek
+                        # T-43 review HIGH #1).
                         if report.errors:
+                            restore_summary = (
+                                f" Restored {report.total_restored} settings "
+                                f"({len(report.errors)} errors — see log)."
+                            )
                             self._log_progress(
                                 f"[RUN] T-43: {len(report.errors)} setting(s) "
                                 f"failed to restore: {'; '.join(report.errors[:3])}"
+                            )
+                        else:
+                            restore_summary = (
+                                f" Restored {report.total_restored} settings."
                             )
                         if report.skipped_unknown:
                             self._log_progress(
@@ -23227,6 +23236,7 @@ class SpectralPredictApp:
                                 "current build — ignored."
                             )
                     except Exception as restore_err:
+                        restore_summary = " Settings restore FAILED — see log."
                         self._log_progress(
                             f"[RUN] T-43: GUI-settings restore failed: {restore_err}"
                         )

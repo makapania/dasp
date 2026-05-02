@@ -162,6 +162,21 @@ class RunMetadata:
         # this, `cls(**data)` would TypeError on the unknown kwarg.
         known = {f.name for f in dataclasses.fields(cls)}
         filtered = {k: v for k, v in data.items() if k in known}
+
+        # T-43 type guard: a corrupted sidecar storing
+        # `gui_settings: "malformed"` (string instead of dict) would pass
+        # the field filter and crash later in restore_gui_settings when
+        # `.items()` is called on a string. Coerce to None with a warning
+        # so the resume flow degrades to "no auto-restore" rather than
+        # surfacing a generic outer-handler exception.
+        gs = filtered.get("gui_settings")
+        if gs is not None and not isinstance(gs, dict):
+            logger.warning(
+                "T-43: sidecar gui_settings has unexpected type %s; "
+                "coercing to None (auto-restore disabled for this resume)",
+                type(gs).__name__,
+            )
+            filtered["gui_settings"] = None
         return cls(**filtered)
 
 

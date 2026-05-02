@@ -254,9 +254,26 @@ def restore_gui_settings(
             continue
         try:
             var.set(value)
-            report.restored.append(name)
         except Exception as exc:
             report.errors.append(f"{name}: {exc}")
+            continue
+
+        # Tcl quirk: tk.IntVar.set("not-a-number") does NOT raise — Tcl stores
+        # the string verbatim and the TclError surfaces on the next .get().
+        # Read back and compare so a poisoned value is reported as an error
+        # instead of being silently counted as restored.
+        try:
+            actual = var.get()
+        except Exception as exc:
+            report.errors.append(f"{name}: set succeeded but get raised: {exc}")
+            continue
+        if actual != value:
+            report.errors.append(
+                f"{name}: set succeeded but value mismatch "
+                f"(expected {value!r}, got {actual!r})"
+            )
+            continue
+        report.restored.append(name)
     return report
 
 
