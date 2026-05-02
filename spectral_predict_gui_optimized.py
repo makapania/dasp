@@ -25126,19 +25126,24 @@ class SpectralPredictApp:
             return  # caller's fingerprint check should have caught this
 
         try:
-            missing = [i for i in pending if i not in self.X.index]
-            if missing:
+            missing_labels = [
+                i for i in pending
+                if i not in self.X.index or i not in self.y.index
+            ]
+            if missing_labels:
                 self._log_progress(
-                    f"[RUN] {len(missing)} captured validation indices not "
-                    f"present in current data; skipping validation restore. "
+                    f"[RUN] {len(missing_labels)} captured validation indices "
+                    f"not present in current data; skipping validation restore. "
                     "Re-create the validation set manually before resuming."
                 )
                 self._pending_validation_indices = None
                 return
 
+            new_validation_X = self.X.loc[pending]
+            new_validation_y = self.y.loc[pending]
             self.validation_indices = set(pending)
-            self.validation_X = self.X.loc[pending]
-            self.validation_y = self.y.loc[pending]
+            self.validation_X = new_validation_X
+            self.validation_y = new_validation_y
             if hasattr(self, "validation_status_label"):
                 try:
                     self.validation_status_label.config(

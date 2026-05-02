@@ -786,6 +786,38 @@ def test_apply_pending_validation_indices_skip_on_missing_label():
     assert any("not present" in m for m in app._logs)
 
 
+def test_apply_pending_validation_indices_skip_on_label_only_in_X():
+    """Defense-in-depth against partial mutation: if X and y indices
+    disagree on a captured label, skip cleanly rather than half-mutate
+    state (which would silently disable validation metrics downstream
+    when validation_y ends up None or stale)."""
+    import pandas as pd
+
+    class _FakeApp:
+        def __init__(self):
+            self.X = pd.DataFrame({"f1": range(5)},
+                                   index=[f"s{i}" for i in range(5)])
+            self.y = pd.Series(range(4), index=[f"s{i}" for i in range(4)])
+            self.validation_X = None
+            self.validation_y = None
+            self.validation_indices = set()
+            self._pending_validation_indices = ["s2", "s4"]
+            self._logs = []
+
+        def _log_progress(self, msg):
+            self._logs.append(msg)
+
+    from spectral_predict_gui_optimized import SpectralPredictApp
+    app = _FakeApp()
+    SpectralPredictApp._apply_pending_validation_indices(app)
+
+    assert app.validation_X is None
+    assert app.validation_y is None
+    assert app.validation_indices == set()
+    assert app._pending_validation_indices is None
+    assert any("not present" in m for m in app._logs)
+
+
 def test_gui_settings_survive_through_full_sidecar_round_trip(fresh_state, populated_gui):
     """End-to-end: capture settings, persist via start_run, simulate process
     death (reset module state), find_incomplete_run reads the sidecar, the
