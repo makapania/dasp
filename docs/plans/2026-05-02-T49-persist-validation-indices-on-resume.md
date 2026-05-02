@@ -1,9 +1,9 @@
 # T-49: Persist external validation set indices for resume
 
-**Status:** PLANNED — moderate fix, ~50 LOC.
+**Status:** IMPLEMENTED — folded into the consolidated `fix/bayesian-resume-and-cleanup` PR. ~150 LOC + tests.
 **Filed:** 2026-05-02.
-**Source:** User question during T-43 review wrap-up: "for the pause function, when it restarts does it also maintain the external validation set?"
-**Priority:** MEDIUM — silent-leakage risk on resume when the validation algorithm is non-deterministic.
+**Source:** User question during T-43 review wrap-up: "for the pause function, when it restarts does it also maintain the external validation set?" — followed by user judgment that the gap is a correctness blocker, not a deferred follow-up.
+**Priority:** MEDIUM (originally), elevated to BLOCKER for the consolidated PR.
 
 ## Problem
 
@@ -82,6 +82,28 @@ This is more than a one-line whitelist addition and would expand the scope of th
 - Storing the full `validation_X` / `validation_y` content in the sidecar — too large; indices + the loaded DataFrame is the right contract.
 - Auto-persisting indices on every `_create_validation_set` click independent of resume. Could be useful but separate UX concern.
 
-## Dependencies
+## Implementation summary
 
-- Merge of `fix/bayesian-resume-and-cleanup` (T-42 + T-43 + T-38 consolidated PR) first.
+Landed in the consolidated PR:
+
+- `RunMetadata.validation_indices: list[Any] | None` (Any because DataFrame index labels can be int or str). `from_dict` type-guards against malformed shapes.
+- `_coerce_validation_indices(raw)` helper in `run_state.py`: sorts int-only labels, preserves insertion order for str / mixed, drops non-scalar entries silently.
+- `start_run` accepts and persists `validation_indices`; empty list normalizes to None.
+- GUI `_run_analysis_thread` passes `list(self.validation_indices)` if set.
+- `_check_for_incomplete_run` stashes `resumed.validation_indices` on `self._pending_validation_indices` and clears it on fingerprint mismatch (so a stale capture can't be applied to wrong data).
+- New GUI helper `_apply_pending_validation_indices()` re-slices `self.X` / `self.y` after the fingerprint check passes, populating `validation_X` / `validation_y` / `validation_indices`. Three guard cases: respects user's manual re-creation (don't clobber), skips on missing label (defense in depth), no-op when no pending indices.
+
+## Test coverage
+
+Added to `tests/test_t43_resume_auto_restore.py` (8 new tests):
+
+- `test_validation_indices_round_trip_int` — int labels sort deterministically.
+- `test_validation_indices_round_trip_string_labels` — str labels preserve insertion order.
+- `test_validation_indices_legacy_sidecar_loads_with_none` — pre-T-49 sidecars deserialize cleanly.
+- `test_validation_indices_malformed_coerces_to_none` — string-instead-of-list, list-with-nested-list both degrade safely.
+- `test_validation_indices_empty_list_treated_as_none` — empty list normalizes.
+- `test_apply_pending_validation_indices_slices_by_label` — happy path: pending labels resolve through `.loc`.
+- `test_apply_pending_validation_indices_skip_when_user_already_set` — user's manual choice preserved.
+- `test_apply_pending_validation_indices_skip_on_missing_label` — defense in depth.
+
+Wider sweep: 257/257 + 1 skipped across the consolidated suite.

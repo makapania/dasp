@@ -4,6 +4,25 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-49 user-caught) — validation partition is decided AT START not AT END
+
+User asked during the consolidated PR wrap-up: "for the pause function, when it restarts does it also maintain the external validation set? or does that not really matter since only calculated at the end?"
+
+**The framing is the trap.** Validation metrics (RMSEP / R²pred / val_Accuracy) ARE only computed at the end of the search — but the validation *partition* is decided BEFORE the search runs (when the user clicks "Create Validation Set"). The Bayesian trials train on the calibration partition only. If on resume the user creates a different validation set:
+
+- **Deterministic algorithms (SPXY / Kennard-Stone / Stratified):** same data + same algorithm + same % gives the same partition. The captured Tk vars (now in `CAPTURABLE_SETTINGS`) are sufficient — IF the user remembers to click "Create Validation Set" again.
+- **Random algorithm:** re-clicking gives a DIFFERENT random draw. Some samples that the resumed Bayesian trials trained on can land in the new "validation" set → silent leakage on RMSEP.
+- **Manual algorithm:** there's no algorithmic way to reproduce the partition; the indices must persist or the resumed run is broken.
+- **Even for deterministic algorithms:** if the user forgets to click the button, `validation_X` is None and the post-search validation step silently skips. Banner says "settings restored" but key state is missing.
+
+User's judgment: this is a correctness blocker, not a deferred follow-up. Folded into the consolidated PR.
+
+**Architecture:** added `RunMetadata.validation_indices: list[Any] | None` (Any because DataFrame index labels can be int or str). Sidecar persists labels as-is; `from_dict` type-guards against malformed shapes. GUI's `_check_for_incomplete_run` stashes captured indices on `self._pending_validation_indices`; new `_apply_pending_validation_indices` helper re-slices `self.X` / `self.y` after the fingerprint check passes in `_run_analysis_thread`. The helper has three guard cases: respect user's manual re-creation, skip-on-missing-label as defense in depth, no-op when no pending indices.
+
+**Lesson logged:** the question "does it matter only at the end?" is the same shape as "does the per-trial cv_strategy attr matter?" — both look like post-hoc state but are actually preconditions of the search. When auditing a resume flow, list every piece of state the search consumes BEFORE the first trial, not just what it produces. Validation partition belongs in that list; T-43 missed it.
+
+---
+
 ## 2026-05-02 (T-38 dead preprocessing cleanup) — plan correction held; test name was misleading
 
 Plan correction from earlier (T-37 review by CodeRabbit) held: `preprocessing_wrapper.py` is alive and stays (imported by `ensemble.py:18`); only `learned_preprocessing.py` (775 LOC) and `ensemble_preprocessing.py` (701 LOC) deleted, plus the dead `HAS_ENSEMBLE_PREPROCESSING` import block at `gui:236-241`.

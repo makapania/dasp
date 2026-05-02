@@ -602,6 +602,190 @@ def test_summarize_includes_key_facts(fresh_state, populated_gui):
     assert "baseline=airpls" in summary
 
 
+def test_validation_indices_round_trip_int(fresh_state):
+    """Int-typed DataFrame indices (default range index) round-trip
+    through start_run -> sidecar JSON -> from_dict, sorted."""
+    rs, rp, _, _ = fresh_state
+    rs.start_run(
+        label="x",
+        model_names=["pls"],
+        validation_indices=[42, 7, 100, 3],
+    )
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    written = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert written["validation_indices"] == [3, 7, 42, 100]
+
+    rs._reset_for_tests()
+    revived = rs.find_incomplete_run()
+    assert revived is not None
+    assert revived.validation_indices == [3, 7, 42, 100]
+
+
+def test_validation_indices_round_trip_string_labels(fresh_state):
+    """String DataFrame labels (sample IDs) preserve insertion order."""
+    rs, rp, _, _ = fresh_state
+    rs.start_run(
+        label="x",
+        model_names=["pls"],
+        validation_indices=["sample_05", "sample_01", "sample_12"],
+    )
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    written = json.loads(sidecar.read_text(encoding="utf-8"))
+    # Insertion order preserved (no sort because str labels).
+    assert written["validation_indices"] == [
+        "sample_05", "sample_01", "sample_12",
+    ]
+
+
+def test_validation_indices_legacy_sidecar_loads_with_none(fresh_state):
+    """Older sidecars without the field deserialize cleanly."""
+    rs, _, _, _ = fresh_state
+    legacy = {
+        "run_id": "abc",
+        "storage_path": "/tmp/x.sqlite3",
+        "storage_url": "",
+        "label": None,
+        "dataset_fingerprint": None,
+        "model_names": [],
+        "n_trials_per_model": None,
+        "started_iso": "2026-04-01T12:00:00",
+        "bayesian_persistence_mode": "never",
+        # no validation_indices key
+    }
+    meta = rs.RunMetadata.from_dict(legacy)
+    assert meta.validation_indices is None
+
+
+def test_validation_indices_malformed_coerces_to_none(fresh_state):
+    """Corrupted sidecar storing validation_indices as garbage shouldn't
+    crash the resume path — coerce to None, log a warning, continue."""
+    rs, _, _, _ = fresh_state
+    bad = {
+        "run_id": "abc",
+        "storage_path": "/tmp/x.sqlite3",
+        "storage_url": "",
+        "label": None,
+        "dataset_fingerprint": None,
+        "model_names": [],
+        "n_trials_per_model": None,
+        "started_iso": "2026-04-01T12:00:00",
+        "bayesian_persistence_mode": "never",
+        "validation_indices": "not-a-list",
+    }
+    meta = rs.RunMetadata.from_dict(bad)
+    assert meta.validation_indices is None
+
+    bad2 = dict(bad)
+    bad2["validation_indices"] = [1, 2, [3, 4]]  # nested list element
+    meta2 = rs.RunMetadata.from_dict(bad2)
+    assert meta2.validation_indices is None
+
+
+def test_validation_indices_empty_list_treated_as_none(fresh_state):
+    """An empty list is equivalent to "no validation captured." start_run
+    should normalize to None so the sidecar doesn't carry empty arrays."""
+    rs, _, _, _ = fresh_state
+    meta = rs.start_run(
+        label="x", model_names=["pls"], validation_indices=[],
+    )
+    assert meta.validation_indices is None
+
+
+def test_apply_pending_validation_indices_slices_by_label():
+    """The GUI helper resolves pending indices against the current
+    DataFrame and populates validation_X / validation_y."""
+    import pandas as pd
+
+    # Stand-in for the GUI: just enough surface area for the helper.
+    class _FakeApp:
+        def __init__(self):
+            self.X = pd.DataFrame(
+                {"f1": range(10), "f2": range(10, 20)},
+                index=[f"s{i}" for i in range(10)],
+            )
+            self.y = pd.Series(range(10), index=[f"s{i}" for i in range(10)])
+            self.validation_X = None
+            self.validation_y = None
+            self.validation_indices = set()
+            self._pending_validation_indices = ["s2", "s5", "s8"]
+            self._logs = []
+
+        def _log_progress(self, msg):
+            self._logs.append(msg)
+
+    # Bind the real method into the fake.
+    from spectral_predict_gui_optimized import (
+        SpectralPredictApp,
+    )
+    app = _FakeApp()
+    SpectralPredictApp._apply_pending_validation_indices(app)
+
+    assert app.validation_indices == {"s2", "s5", "s8"}
+    assert list(app.validation_X.index) == ["s2", "s5", "s8"]
+    assert list(app.validation_y.index) == ["s2", "s5", "s8"]
+    assert app._pending_validation_indices is None  # cleared
+
+
+def test_apply_pending_validation_indices_skip_when_user_already_set():
+    """If the user clicked Create Validation Set manually before Run
+    Analysis, respect that — don't clobber with the resumed indices."""
+    import pandas as pd
+
+    class _FakeApp:
+        def __init__(self):
+            self.X = pd.DataFrame({"f1": range(10)},
+                                   index=[f"s{i}" for i in range(10)])
+            self.y = pd.Series(range(10), index=[f"s{i}" for i in range(10)])
+            # User manually created a different validation set.
+            self.validation_X = pd.DataFrame({"f1": [3, 4]}, index=["s3", "s4"])
+            self.validation_y = pd.Series([3, 4], index=["s3", "s4"])
+            self.validation_indices = {"s3", "s4"}
+            self._pending_validation_indices = ["s2", "s5", "s8"]
+            self._logs = []
+
+        def _log_progress(self, msg):
+            self._logs.append(msg)
+
+    from spectral_predict_gui_optimized import SpectralPredictApp
+    app = _FakeApp()
+    SpectralPredictApp._apply_pending_validation_indices(app)
+
+    # User's choice preserved.
+    assert app.validation_indices == {"s3", "s4"}
+    assert list(app.validation_X.index) == ["s3", "s4"]
+    assert app._pending_validation_indices is None  # cleared
+    assert any("ignoring" in m for m in app._logs)
+
+
+def test_apply_pending_validation_indices_skip_on_missing_label():
+    """If a captured label isn't in the current data's index, skip safely
+    — shouldn't happen post-fingerprint-check, but defense in depth."""
+    import pandas as pd
+
+    class _FakeApp:
+        def __init__(self):
+            self.X = pd.DataFrame({"f1": range(5)},
+                                   index=[f"s{i}" for i in range(5)])
+            self.y = pd.Series(range(5), index=[f"s{i}" for i in range(5)])
+            self.validation_X = None
+            self.validation_y = None
+            self.validation_indices = set()
+            self._pending_validation_indices = ["s2", "s99"]  # s99 missing
+            self._logs = []
+
+        def _log_progress(self, msg):
+            self._logs.append(msg)
+
+    from spectral_predict_gui_optimized import SpectralPredictApp
+    app = _FakeApp()
+    SpectralPredictApp._apply_pending_validation_indices(app)
+
+    assert app.validation_X is None  # untouched
+    assert app.validation_indices == set()
+    assert app._pending_validation_indices is None  # cleared
+    assert any("not present" in m for m in app._logs)
+
+
 def test_gui_settings_survive_through_full_sidecar_round_trip(fresh_state, populated_gui):
     """End-to-end: capture settings, persist via start_run, simulate process
     death (reset module state), find_incomplete_run reads the sidecar, the

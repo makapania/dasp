@@ -23193,6 +23193,16 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
+                # Stash the captured validation indices for application after
+                # the user re-loads the same data. Can't apply here — self.X
+                # is None at startup. _run_analysis_thread re-slices once the
+                # dataset_fingerprint check passes.
+                self._pending_validation_indices = (
+                    list(resumed.validation_indices)
+                    if resumed.validation_indices
+                    else None
+                )
+
                 # Auto-restore the captured GUI settings before forcing the
                 # persistence override. Order matters — if the override ran
                 # first, restoring would clobber bayesian_persistence_mode
@@ -25084,6 +25094,67 @@ class SpectralPredictApp:
                 overrides[model_name] = collector()
         return overrides if overrides else None
 
+    def _apply_pending_validation_indices(self):
+        """Apply validation indices captured at the prior run's start_run.
+
+        Called after the dataset_fingerprint check passes in
+        `_run_analysis_thread`. The indices are DataFrame labels; reapply
+        them to populate `self.validation_X` / `self.validation_y` /
+        `self.validation_indices` so the post-search validation step uses
+        the same partition the resumed trials trained on.
+
+        Silent no-op when:
+        - No pending indices stashed (fresh launch, or no validation in
+          the prior session).
+        - Validation already populated (user re-created the partition
+          manually before clicking Run Analysis — respect their choice).
+        - Any pending label is missing from the current data's index
+          (shouldn't happen post-fingerprint check; surface a warning
+          and skip rather than crash).
+        """
+        pending = getattr(self, "_pending_validation_indices", None)
+        if not pending:
+            return
+        if self.validation_X is not None and len(self.validation_X) > 0:
+            self._log_progress(
+                "[RUN] Validation set already populated by user; ignoring "
+                "the captured indices from the resumed sidecar."
+            )
+            self._pending_validation_indices = None
+            return
+        if self.X is None or self.y is None:
+            return  # caller's fingerprint check should have caught this
+
+        try:
+            missing = [i for i in pending if i not in self.X.index]
+            if missing:
+                self._log_progress(
+                    f"[RUN] {len(missing)} captured validation indices not "
+                    f"present in current data; skipping validation restore. "
+                    "Re-create the validation set manually before resuming."
+                )
+                self._pending_validation_indices = None
+                return
+
+            self.validation_indices = set(pending)
+            self.validation_X = self.X.loc[pending]
+            self.validation_y = self.y.loc[pending]
+            if hasattr(self, "validation_status_label"):
+                try:
+                    self.validation_status_label.config(
+                        text=f"Validation set restored from resume: "
+                             f"{len(pending)} samples"
+                    )
+                except Exception:
+                    pass
+            self._log_progress(
+                f"[RUN] Restored validation set from sidecar "
+                f"({len(pending)} samples). Trials will be evaluated "
+                "against the same partition the resumed run used."
+            )
+        finally:
+            self._pending_validation_indices = None
+
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
@@ -25156,6 +25227,30 @@ class SpectralPredictApp:
                                 _rs.discard_incomplete_run(rejected_id)
                             else:
                                 _rs.clear_resume_state()
+                            # Pending indices were tied to the rejected run —
+                            # discard them too so a future load doesn't apply
+                            # them to mismatched data.
+                            self._pending_validation_indices = None
+                        else:
+                            # Fingerprint matched. Apply pending validation
+                            # indices (T-49) before the search starts, so the
+                            # post-search RMSEP is computed against the same
+                            # partition the resumed trials trained on.
+                            self._apply_pending_validation_indices()
+
+                    # Capture validation indices so the same partition can
+                    # be reproduced on resume. Required for non-deterministic
+                    # algorithms (Random, Manual) where re-clicking "Create
+                    # Validation Set" would otherwise pick a different split,
+                    # potentially placing trial-trained samples into the new
+                    # validation partition (silent leakage on RMSEP). Labels
+                    # are passed as-is — start_run normalizes them (int-only
+                    # gets sorted; mixed/str preserves insertion order).
+                    _val_indices = (
+                        list(self.validation_indices)
+                        if getattr(self, "validation_indices", None)
+                        else None
+                    )
 
                     meta = _start_run_state(
                         label=tier,
@@ -25169,6 +25264,7 @@ class SpectralPredictApp:
                             else "never"
                         ),
                         gui_settings=capture_gui_settings(self),
+                        validation_indices=_val_indices,
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:
