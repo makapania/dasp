@@ -869,14 +869,13 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
     def _render_model(self) -> str:
         """Render model instantiation code."""
-        # If using class_weight (or auto, which resolves to class_weight at runtime
-        # for imbalanced data), add it to params for libraries that support it.
+        # NOTE: do NOT bake class_weight='balanced' into params here. Auto mode
+        # may resolve at runtime to "no correction" on mild-imbalance data
+        # (below the 3:1 threshold), and a baked kwarg would silently weight
+        # the loss anyway, contradicting the Auto-mode contract. The catch-all
+        # else branch + StandardScaler-wrapped path + PLS-DA path each emit a
+        # runtime conditional gated on IMBALANCE_METHOD == 'class_weight'.
         params = self._normalize_model_params(self.params)
-        if self._imbalance_method_is_class_weight_like():
-            if self.task_type == 'classification':
-                supports_class_weight = ['RandomForest', 'LogisticRegression', 'SVC']
-                if any(m in self.model_name for m in supports_class_weight):
-                    params['class_weight'] = 'balanced'
 
         if self.model_name.lower() == 'neuralboosted':
             warning = (
@@ -890,9 +889,10 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
 
         if self._needs_pls_da_pipeline():
             pls_params, lr_params = self._split_pls_da_params(self.params)
-            if self._imbalance_method_is_class_weight_like():
-                lr_params.setdefault('class_weight', 'balanced')
-            model_code = warning + self._render_pls_da_pipeline(pls_params, lr_params)
+            class_weight_conditional = self._imbalance_method_is_class_weight_like()
+            model_code = warning + self._render_pls_da_pipeline(
+                pls_params, lr_params, class_weight_conditional=class_weight_conditional
+            )
         elif self.task_type == 'one_class':
             model_code = warning + self._render_one_class_model(params)
         elif self._needs_standard_scaler() and not self._autoscale_enabled():
@@ -900,38 +900,43 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
 
-            if self._imbalance_method_is_class_weight_like():
-                # MLP doesn't accept class_weight as a constructor kwarg; injecting it
-                # raises TypeError on instantiation. sample_weight at fit() requires
-                # sklearn>=1.7 (our floor is 1.5), so threading it from exported code
-                # is unsafe. Runtime falls back to unweighted with a warning per
-                # search.py:4439-4444; mirror that behavior here.
-                if not model_class.startswith('MLP'):
-                    params_full.setdefault('class_weight', 'balanced')
+            # Runtime-conditional balanced kwarg (gated on resolved IMBALANCE_METHOD).
+            # MLP excluded — TypeError on class_weight, sklearn floor too low for
+            # sample_weight at fit. Runtime falls back to unweighted per
+            # search.py:4439-4444; mirror that here.
+            scaled_balanced_kwarg = None
+            if self._imbalance_method_is_class_weight_like() and not model_class.startswith('MLP'):
+                scaled_balanced_kwarg = ('class_weight', 'balanced')
 
             if 'random_state' not in params_full:
                 params_full['random_state'] = 42
 
             ctor_class = self._resolve_model_ctor_class()
-            model_code = warning + self._render_scaled_pipeline(params_full, ctor_class)
+            model_code = warning + self._render_scaled_pipeline(
+                params_full, ctor_class, balanced_kwarg=scaled_balanced_kwarg
+            )
         else:
             default_key = self._resolve_default_param_key()
             params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
 
+            # Per-library balanced-loss kwarg name (None = no constructor knob;
+            # XGBoost is handled via sample_weight at fit() time). Threaded as a
+            # *runtime conditional* on IMBALANCE_METHOD rather than baked into
+            # the constructor literal — necessary for Auto mode, because Auto
+            # may resolve to None on mild-imbalance data and we don't want a
+            # baked balanced kwarg to silently weight the loss in that case.
+            balanced_kwarg_name = None
+            balanced_kwarg_value = None
             if self._imbalance_method_is_class_weight_like():
-                # Library-aware balanced-loss dispatch. Pre-T-19 the catch-all path injected
-                # class_weight='balanced' for every model: LightGBM/RandomForest accept it,
-                # XGBoost silently ignores it (no balancing applied), CatBoost crashes on
-                # instantiation with TypeError. Map each library to its canonical kwarg
-                # instead. XGBoost has no constructor knob — sample_weight is threaded into
-                # the fit() call via _xgb_class_weight_needs_sample_weight().
                 if model_class.startswith('CatBoost'):
-                    params_full.setdefault('auto_class_weights', 'Balanced')
+                    balanced_kwarg_name = 'auto_class_weights'
+                    balanced_kwarg_value = 'Balanced'
                 elif model_class.startswith('XGBoost') or model_class.startswith('XGB'):
-                    pass
+                    pass  # sample_weight threaded at fit, not __init__
                 else:
-                    params_full.setdefault('class_weight', 'balanced')
+                    balanced_kwarg_name = 'class_weight'
+                    balanced_kwarg_value = 'balanced'
 
             # Avoid injecting random_state into estimators that don't accept it (e.g., PLSRegression)
             ctor_class = self._resolve_model_ctor_class()
@@ -971,12 +976,29 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             params_full = self._serialize_param_value(params_full)
             params_literal = repr(params_full)
 
-            model_code = (
-                warning
-                + f"\n# {ctor_class} with full parameter pass-through\n"
-                + f"model_params = {params_literal}\n"
-                + f"model = {ctor_class}(**model_params)\n"
-            )
+            if balanced_kwarg_name is not None:
+                # Runtime-conditional injection. Required so that Auto mode's
+                # post-data-load resolution can choose to NOT apply balanced
+                # weighting on mild-imbalance data (below the 3:1 threshold).
+                # Pre-fix-of-fixes the kwarg was baked into the constructor
+                # literal, which contradicted the Auto mode "no correction"
+                # contract on mild-imbalance data.
+                balanced_value_literal = repr(balanced_kwarg_value)
+                model_code = (
+                    warning
+                    + f"\n# {ctor_class} with full parameter pass-through\n"
+                    + f"model_params = {params_literal}\n"
+                    + f"if IMBALANCE_METHOD == 'class_weight':\n"
+                    + f"    model_params[{balanced_kwarg_name!r}] = {balanced_value_literal}\n"
+                    + f"model = {ctor_class}(**model_params)\n"
+                )
+            else:
+                model_code = (
+                    warning
+                    + f"\n# {ctor_class} with full parameter pass-through\n"
+                    + f"model_params = {params_literal}\n"
+                    + f"model = {ctor_class}(**model_params)\n"
+                )
         return (
             "\n# =============================================================================\n"
             "# MODEL DEFINITION\n"
@@ -1241,8 +1263,19 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                     lr_params[key] = value
         return pls_params, lr_params
 
-    def _render_pls_da_pipeline(self, pls_params: Dict[str, Any], lr_params: Dict[str, Any]) -> str:
-        """Render a PLS-DA pipeline (PLS scores + scaler + LR)."""
+    def _render_pls_da_pipeline(
+        self,
+        pls_params: Dict[str, Any],
+        lr_params: Dict[str, Any],
+        class_weight_conditional: bool = False,
+    ) -> str:
+        """Render a PLS-DA pipeline (PLS scores + scaler + LR).
+
+        ``class_weight_conditional``: when True, emit a runtime conditional
+        that injects ``class_weight='balanced'`` into the LR params only when
+        IMBALANCE_METHOD resolves to 'class_weight'. Required for Auto mode
+        correctness — see the catch-all branch's runtime-conditional emission.
+        """
         n_components = pls_params.pop('n_components', 10)
         pls_max_iter = pls_params.pop('max_iter', 500)
         pls_tol = pls_params.pop('tol', 1e-6)
@@ -1253,7 +1286,14 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             'random_state': 42,
         }
         lr_defaults.update(lr_params or {})
+        # Strip any literal class_weight; runtime conditional handles it.
+        lr_defaults.pop('class_weight', None)
         lr_params_literal = repr(lr_defaults)
+        class_weight_block = (
+            "if IMBALANCE_METHOD == 'class_weight':\n"
+            "    _lr_params['class_weight'] = 'balanced'\n"
+            if class_weight_conditional else ""
+        )
 
         return f'''
 # PLS-DA pipeline (PLS scores -> StandardScaler -> LogisticRegression)
@@ -1308,20 +1348,40 @@ pls = PLSTransformer(
 )
 import inspect as _inspect
 _lr_params = {lr_params_literal}
-_lr_sig = _inspect.signature(LogisticRegression)
+{class_weight_block}_lr_sig = _inspect.signature(LogisticRegression)
 _lr_filtered = {{k: v for k, v in _lr_params.items() if k in _lr_sig.parameters}}
 lr = LogisticRegression(**_lr_filtered)
 model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
 '''
 
-    def _render_scaled_pipeline(self, params_full: Dict[str, Any], ctor_class: str) -> str:
-        """Render a StandardScaler + model pipeline with full params."""
+    def _render_scaled_pipeline(
+        self,
+        params_full: Dict[str, Any],
+        ctor_class: str,
+        balanced_kwarg: Optional[Tuple[str, Any]] = None,
+    ) -> str:
+        """Render a StandardScaler + model pipeline with full params.
+
+        ``balanced_kwarg``: optional (name, value) tuple to inject as a
+        runtime conditional gated on IMBALANCE_METHOD == 'class_weight'.
+        Required for Auto mode correctness — see the catch-all branch's
+        runtime-conditional emission for rationale.
+        """
         params_full = self._serialize_param_value(params_full)
         params_literal = repr(params_full)
+        if balanced_kwarg is not None:
+            kwarg_name, kwarg_value = balanced_kwarg
+            conditional = (
+                f"if IMBALANCE_METHOD == 'class_weight':\n"
+                f"    model_params[{kwarg_name!r}] = {kwarg_value!r}\n"
+            )
+        else:
+            conditional = ""
         return (
             f"\n# {ctor_class} with full parameter pass-through\n"
             f"model_params = {params_literal}\n"
-            f"model = {ctor_class}(**model_params)\n"
+            + conditional
+            + f"model = {ctor_class}(**model_params)\n"
             "\n# Add StandardScaler for scale-sensitive models\n"
             "model = Pipeline([('scaler', StandardScaler()), ('model', model)])\n"
         )
@@ -1429,6 +1489,20 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         # The mutation of IMBALANCE_METHOD to 'class_weight' or None lets the
         # downstream resampler and sample_weight gates fire correctly without
         # needing to know about 'auto'.
+        # MLP exclusion warning (DeepSeek Q4): MLP can't accept class_weight as
+        # a constructor kwarg, and sample_weight at fit requires sklearn≥1.7
+        # which is above our pyproject floor. When Auto resolves to class_weight
+        # but the model is MLP, the user should know that the model trains
+        # unweighted despite the run printing "applying class_weight".
+        is_mlp_model = self._resolve_model_class_name().startswith('MLP')
+        mlp_warning_block = (
+            '\n    if IMBALANCE_METHOD == "class_weight":\n'
+            '        print("[Auto imbalance] note: MLP does not support '
+            'class_weight; model will train unweighted. Use SMOTE or another '
+            'resampling method for imbalanced MLP runs.")\n'
+            if is_mlp_model else ''
+        )
+
         auto_resolution_block = '''
 # Auto-mode resolution: classification only. If imbalance ratio ≥ 3:1, behave
 # like class_weight; otherwise no correction. Mutates IMBALANCE_METHOD so the
@@ -1448,8 +1522,7 @@ if IMBALANCE_METHOD == "auto":
             print(f"[Auto imbalance] ratio {_auto_ratio:.1f}:1 (below 3:1); no correction")
     else:
         IMBALANCE_METHOD = None
-        print("[Auto imbalance] single class detected; no correction")
-'''
+        print("[Auto imbalance] single class detected; no correction")''' + mlp_warning_block + '\n'
 
         return f'''
 # =============================================================================

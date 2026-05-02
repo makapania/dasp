@@ -74,12 +74,16 @@ def _execute(model_name: str, params: dict | None = None) -> dict:
 # ----------------------------------------------------------------------
 
 def test_catboost_emits_auto_class_weights_not_class_weight():
+    """Post-fix-of-fixes (DeepSeek Q2): CatBoost balanced-loss kwarg is now
+    injected via runtime conditional rather than baked into the params literal,
+    so Auto mode can correctly skip injection on balanced data."""
     script = _generate("CatBoost", params={"iterations": 30, "depth": 3})
-    assert "'auto_class_weights': 'Balanced'" in script, (
+    assert "model_params['auto_class_weights'] = 'Balanced'" in script, (
         "CatBoost must use auto_class_weights='Balanced'; class_weight kwarg "
         "raises TypeError on CatBoostClassifier instantiation."
     )
     assert "'class_weight': 'balanced'" not in script
+    assert "'auto_class_weights': 'Balanced'" not in script  # not in params literal
 
 
 def test_xgboost_does_not_inject_class_weight_in_params():
@@ -117,9 +121,10 @@ def test_mlp_class_weight_export_executes_without_typeerror():
 
 
 def test_svc_keeps_class_weight_balanced():
-    """SVC accepts class_weight natively; StandardScaler-wrapped path keeps it."""
+    """SVC accepts class_weight natively; StandardScaler-wrapped path injects
+    it via runtime conditional (post-fix-of-fixes for DeepSeek Q2)."""
     script = _generate("SVC", params={"C": 1.0})
-    assert "'class_weight': 'balanced'" in script
+    assert "model_params['class_weight'] = 'balanced'" in script
 
 
 def test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing():
@@ -141,14 +146,15 @@ def test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing():
 
 
 def test_lightgbm_keeps_class_weight_balanced():
+    """Post-fix-of-fixes runtime conditional emission (DeepSeek Q2)."""
     script = _generate("LightGBM")
-    assert "'class_weight': 'balanced'" in script
+    assert "model_params['class_weight'] = 'balanced'" in script
     assert "'auto_class_weights'" not in script
 
 
 def test_randomforest_keeps_class_weight_balanced():
     script = _generate("RandomForest")
-    assert "'class_weight': 'balanced'" in script
+    assert "model_params['class_weight'] = 'balanced'" in script
 
 
 def test_non_xgboost_does_not_emit_class_weight_sample_weight_block():

@@ -129,11 +129,14 @@ def test_auto_mode_emits_runtime_resolution_block():
     assert "Auto imbalance" in script
 
 
-def test_auto_mode_bakes_class_weight_for_supported_libs():
-    """Auto mode is treated like class_weight at codegen for libraries that
-    accept the kwarg natively (RandomForest, LightGBM, sklearn LR/SVC)."""
+def test_auto_mode_emits_runtime_conditional_class_weight_for_supported_libs():
+    """Post-fix-of-fixes (DeepSeek Q2): Auto mode injects class_weight via
+    runtime conditional, NOT baked into the params literal. Required so the
+    runtime resolution can correctly skip injection on balanced data."""
     script = _generate_auto("RandomForest")
-    assert "'class_weight': 'balanced'" in script
+    assert "model_params['class_weight'] = 'balanced'" in script
+    # Critical: NOT baked into the literal — that was the Q2 trap.
+    assert "'class_weight': 'balanced'" not in script
 
 
 def test_auto_mode_does_not_inject_class_weight_for_xgboost():
@@ -141,14 +144,18 @@ def test_auto_mode_does_not_inject_class_weight_for_xgboost():
     canonical balanced-loss path. Auto inherits that dispatch."""
     script = _generate_auto("XGBoost")
     assert "'class_weight': 'balanced'" not in script
+    assert "model_params['class_weight']" not in script  # also not as runtime conditional
     assert "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'" in script
 
 
 def test_auto_mode_uses_auto_class_weights_for_catboost():
-    """Auto mode + CatBoost: same canonical dispatch as class_weight + CatBoost."""
+    """Auto mode + CatBoost: runtime conditional injection of auto_class_weights
+    instead of baked literal (DeepSeek Q2 fix)."""
     script = _generate_auto("CatBoost", params={"iterations": 30, "depth": 3})
-    assert "'auto_class_weights': 'Balanced'" in script
+    assert "model_params['auto_class_weights'] = 'Balanced'" in script
     assert "'class_weight': 'balanced'" not in script
+    # Not in literal either — the trap.
+    assert "'auto_class_weights': 'Balanced'" not in script
 
 
 def test_auto_mode_does_not_inject_class_weight_for_mlp():
@@ -193,3 +200,93 @@ def test_auto_mode_balanced_data_skips_correction(model_name: str, params: dict)
     g = _execute_auto(model_name, X, y, params)
     assert "no correction" in g["_stdout"]
     assert "accuracy" in g
+
+
+# ----------------------------------------------------------------------
+# Q2 trap (DeepSeek HIGH): mild imbalance (2:1, below threshold) under Auto
+# must NOT leave a baked balanced kwarg on the model
+# ----------------------------------------------------------------------
+
+def _mild_imbalance_data(seed: int = 42, n_samples: int = 120) -> tuple[np.ndarray, np.ndarray]:
+    """2:1 ratio — below the 3:1 Auto threshold."""
+    return make_classification(
+        n_samples=n_samples,
+        n_features=20,
+        n_informative=10,
+        n_redundant=5,
+        n_classes=2,
+        weights=[0.66, 0.34],
+        random_state=seed,
+    )
+
+
+def _model_kwargs(model) -> dict:
+    """Extract get_params() from the inner classifier (unwraps Pipelines)."""
+    if hasattr(model, "steps"):
+        steps = dict(model.steps)
+        inner = steps.get("model") or steps.get("lr") or list(model.steps)[-1][1]
+    else:
+        inner = model
+    return inner.get_params() if hasattr(inner, "get_params") else {}
+
+
+@pytest.mark.parametrize(
+    "model_name,params,balanced_kwarg",
+    [
+        ("RandomForest", {"n_estimators": 30, "max_depth": 3}, "class_weight"),
+        ("LightGBM", {"n_estimators": 30, "max_depth": 3}, "class_weight"),
+        ("SVC", {"C": 1.0}, "class_weight"),
+        ("CatBoost", {"iterations": 30, "depth": 3}, "auto_class_weights"),
+        ("PLS", {"n_components": 3}, "class_weight"),
+    ],
+)
+def test_auto_mode_mild_imbalance_does_not_bake_balanced_kwarg(
+    model_name: str, params: dict, balanced_kwarg: str
+) -> None:
+    """DeepSeek HIGH (Q2): pre-fix, the codegen baked class_weight='balanced'
+    into the constructor literal under Auto mode regardless of resolution
+    outcome. On mild imbalance (2:1, below the 3:1 threshold) the runtime
+    resolution would print 'no correction' but the model would still train
+    with non-uniform weights. Fix-of-fixes makes the kwarg injection a
+    runtime conditional gated on IMBALANCE_METHOD == 'class_weight'.
+    """
+    X, y = _mild_imbalance_data()
+    g = _execute_auto(model_name, X, y, params)
+    assert "no correction" in g["_stdout"], (
+        f"Setup error: {model_name} on 2:1 data should resolve auto → no correction"
+    )
+    kwargs = _model_kwargs(g["model"])
+    val = kwargs.get(balanced_kwarg, "<absent>")
+    # Either absent entirely or explicitly None — both indicate no balanced
+    # weighting was applied. The trap was the value being 'balanced' / 'Balanced'.
+    assert val in (None, "<absent>"), (
+        f"{model_name} under Auto + mild imbalance must NOT have "
+        f"{balanced_kwarg} set; got {val!r}. This is the Q2 trap — model "
+        f"silently weights the loss while the run prints 'no correction'."
+    )
+
+
+@pytest.mark.parametrize(
+    "model_name,params,balanced_kwarg,expected_value",
+    [
+        ("RandomForest", {"n_estimators": 30, "max_depth": 3}, "class_weight", "balanced"),
+        ("LightGBM", {"n_estimators": 30, "max_depth": 3}, "class_weight", "balanced"),
+        ("SVC", {"C": 1.0}, "class_weight", "balanced"),
+        ("CatBoost", {"iterations": 30, "depth": 3}, "auto_class_weights", "Balanced"),
+        ("PLS", {"n_components": 3}, "class_weight", "balanced"),
+    ],
+)
+def test_auto_mode_severe_imbalance_applies_balanced_kwarg(
+    model_name: str, params: dict, balanced_kwarg: str, expected_value: str
+) -> None:
+    """Symmetric to the Q2 trap test: on severe imbalance (5:1, above
+    threshold) the runtime resolution mutates IMBALANCE_METHOD to
+    'class_weight' and the conditional kwarg injection fires."""
+    X, y = _imbalanced_data()
+    g = _execute_auto(model_name, X, y, params)
+    assert "applying class_weight" in g["_stdout"]
+    kwargs = _model_kwargs(g["model"])
+    assert kwargs.get(balanced_kwarg) == expected_value, (
+        f"{model_name} under Auto + severe imbalance should have "
+        f"{balanced_kwarg}={expected_value!r}; got {kwargs.get(balanced_kwarg)!r}"
+    )
