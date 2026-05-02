@@ -615,3 +615,23 @@ def test_discard_rejects_storage_path_traversal(fresh_state):
     assert any("outside optuna dir" in e for e in result.errors)
     # Off-path file must NOT have been deleted.
     assert fake_target.exists()
+
+
+def test_t44_no_n_trials_var_typo_in_gui():
+    """T-44: the GUI's start_run call site must read self.n_unified_trials,
+    not the non-existent self.n_trials_var. The hasattr-guarded read with
+    the wrong name silently short-circuited to None on every Bayesian
+    run, so RunMetadata.n_trials_per_model was always null in the
+    sidecar (resume banner showed "Trials per model (target): ?").
+
+    Pin this as a source-text regression — the typo would otherwise be
+    invisible at the Python level (hasattr makes it a silent no-op)."""
+    gui_src = (
+        Path(__file__).parent.parent / "spectral_predict_gui_optimized.py"
+    ).read_text(encoding="utf-8")
+    assert "n_trials_var" not in gui_src, (
+        "T-44 regression: 'n_trials_var' is not the actual Tk var name "
+        "(it's 'n_unified_trials'). The hasattr-guarded read at the "
+        "start_run call site silently zeroes RunMetadata.n_trials_per_model "
+        "if this typo comes back."
+    )
