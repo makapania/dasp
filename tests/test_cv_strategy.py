@@ -1364,9 +1364,13 @@ class TestRoundThreeReviewFixes:
 
     def test_one_class_bayesian_writes_cv_strategy_to_trial(self):
         """MAJOR 6: Bayesian one-class objective must write cv_strategy and
-        cv_n_repeats to trial.user_attrs so raw-study consumers can recover
-        the CV configuration. Previously only the converted result row
-        carried them."""
+        cv_n_repeats so raw-study consumers can recover the CV configuration.
+        Previously only the converted result row carried them.
+
+        T-42 Approach C: cv_strategy + cv_n_repeats moved from per-trial
+        user_attrs to study.user_attrs (constant per study; per-trial writes
+        were dead code that nobody read). The recovery contract is now via
+        study.user_attrs, not trial.user_attrs."""
         from spectral_predict.unified_bayesian import run_unified_bayesian
 
         rng = np.random.RandomState(0)
@@ -1382,10 +1386,10 @@ class TestRoundThreeReviewFixes:
             n_trials=2, cv_folds=3, cv_strategy='repeated_kfold',
             cv_n_repeats=2, verbose=False,
         )
-        # Raw-study consumer path
-        best = study.best_trial
-        assert best.user_attrs.get('cv_strategy') == 'repeated_kfold'
-        assert best.user_attrs.get('cv_n_repeats') == 2
+        # Raw-study consumer path: cv_strategy + cv_n_repeats live on the
+        # study, not the trials, after T-42 Approach C.
+        assert study.user_attrs.get('cv_strategy') == 'repeated_kfold'
+        assert study.user_attrs.get('cv_n_repeats') == 2
 
     def test_grid_search_repeated_kfold_classification_e2e_parity(self):
         """MAJOR 4: run_search classification + repeated_kfold must produce

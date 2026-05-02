@@ -50,7 +50,10 @@ def test_constants_hoisted_to_study_user_attrs():
 
 
 def test_early_stopping_hoisted_for_xgboost():
-    """For boosting models the hoisted value is the actual early_stopping_rounds."""
+    """For boosting models the hoisted value is the actual early_stopping_rounds.
+    Also verifies the per-trial write was removed (DeepSeek T-42 review LOW #3 —
+    PLS path always wrote None so its absence assertion didn't catch a
+    boosting-only regression)."""
     pytest.importorskip("xgboost")
     from spectral_predict import run_state, unified_bayesian
 
@@ -66,6 +69,36 @@ def test_early_stopping_hoisted_for_xgboost():
         random_state=42, verbose=False, progress_callback=None,
     )
     assert study.user_attrs.get("early_stopping_rounds") == 25
+    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    for trial in completed:
+        assert "early_stopping_rounds" not in trial.user_attrs
+
+
+def test_study_user_attrs_survive_copy_study_migration(tmp_path):
+    """DeepSeek T-42 review MEDIUM #2: T-41's auto-calc migrates the
+    in-memory study to SQLite via optuna.copy_study. T-42 trusts the
+    Optuna 4.8 contract that user_attrs survive that copy — verify
+    empirically the same way DeepSeek caught
+    create_study(load_if_exists=True, sampler=...)'s silent-ignore in T-41."""
+    from spectral_predict import unified_bayesian
+
+    study = optuna.create_study(direction="minimize")
+    study.set_user_attr("cv_strategy", "repeated_kfold")
+    study.set_user_attr("cv_n_repeats", 3)
+    study.set_user_attr("early_stopping_rounds", 50)
+    study.optimize(lambda t: t.suggest_float("x", 0, 1), n_trials=2)
+
+    sqlite_url = f"sqlite:///{(tmp_path / 'test_copy.db').as_posix()}"
+    migrated = unified_bayesian._migrate_study_to_sqlite(
+        study=study,
+        sqlite_url=sqlite_url,
+        study_name="test_copy",
+        random_state=42,
+    )
+    assert migrated.user_attrs.get("cv_strategy") == "repeated_kfold"
+    assert migrated.user_attrs.get("cv_n_repeats") == 3
+    assert migrated.user_attrs.get("early_stopping_rounds") == 50
+    assert len(migrated.trials) == 2
 
 
 def test_no_per_trial_writes_for_hoisted_keys():

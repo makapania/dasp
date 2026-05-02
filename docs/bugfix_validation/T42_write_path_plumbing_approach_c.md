@@ -107,16 +107,28 @@ sample size. The cleanup matters because:
 
 ## Test coverage
 
-`tests/test_t42_write_path_plumbing.py` — 5 cases, all green:
+`tests/test_t42_write_path_plumbing.py` — 6 cases, all green:
 
 - `test_constants_hoisted_to_study_user_attrs`
-- `test_early_stopping_hoisted_for_xgboost`
+- `test_early_stopping_hoisted_for_xgboost` (also asserts absence on
+  trial.user_attrs — DeepSeek review LOW #3)
+- `test_study_user_attrs_survive_copy_study_migration` (DeepSeek review
+  MEDIUM #2 — verifies the T-41 auto-migration preserves the hoisted
+  keys; same trap class as the
+  `create_study(load_if_exists=True, sampler=...)` silent-ignore)
 - `test_no_per_trial_writes_for_hoisted_keys`
 - `test_convert_study_reads_hoisted_early_stopping_rounds`
 - `test_legacy_study_fallback_to_trial_user_attrs`
 
-Plus the post-fix regression sweep — 132/132 across `test_t42`,
-`test_t41`, `test_run_state`, `test_unified_bayesian_baseline`,
+`tests/test_cv_strategy.py::test_one_class_bayesian_writes_cv_strategy_to_trial`
+updated to read from `study.user_attrs` instead of `best.user_attrs`
+(DeepSeek review HIGH #1 — pre-existing test that still asserted the
+old per-trial contract; the original audit doc's "132/132 green" claim
+was wrong because that test file was excluded from the initial sweep).
+
+Post-fix regression sweep — **225/225** across `test_t42`,
+`test_cv_strategy`, `test_t41`, `test_run_state`,
+`test_t43_resume_auto_restore`, `test_unified_bayesian_baseline`,
 `test_autoscale_bayesian`, `test_cv_pls_clamp` — all green.
 
 ## Out of scope (deferred follow-ups)
