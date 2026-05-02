@@ -1144,6 +1144,77 @@ def recommend_imbalance_method(y, task_type='classification'):
 
 
 # ============================================================================
+# AUTO MODE — runtime imbalance detection
+# ============================================================================
+
+AUTO_IMBALANCE_THRESHOLD = 3.0
+
+
+def _drop_nan_targets(y):
+    """Drop NaN entries from y. Counter() treats each NaN as its own hash,
+    so leaving them in produces spurious "minority class" entries and
+    silently wrong auto-resolution decisions."""
+    arr = np.asarray(y)
+    if arr.dtype.kind not in ('f', 'O'):
+        return arr  # int / bool labels can't be NaN
+    try:
+        mask = pd.isna(arr)
+    except Exception:
+        return arr
+    if not np.any(mask):
+        return arr
+    return arr[~mask]
+
+
+def resolve_auto_imbalance(y, task_type='classification', threshold=AUTO_IMBALANCE_THRESHOLD):
+    """Resolve `imbalance_method='auto'` to a concrete method based on data.
+
+    Calls :func:`detect_class_imbalance` and returns ``'class_weight'`` if the
+    severity threshold (default 3:1 majority:minority) is exceeded, else
+    ``None``. Caller is expected to substitute the returned method into the
+    rest of the run as if the user had picked it explicitly. NaN target rows
+    are dropped before counting classes — leaving them produces spurious
+    minority-class entries via Counter and silently wrong decisions.
+
+    Returns
+    -------
+    resolved : str or None
+        ``'class_weight'`` if imbalance detected, ``None`` if not, ``None`` for
+        non-classification tasks (auto-mode is classification-only).
+    info : dict
+        The full output of :func:`detect_class_imbalance` (or an empty dict for
+        non-classification). Useful for logging / audit trail.
+    """
+    if task_type != 'classification':
+        return None, {}
+    y_clean = _drop_nan_targets(y)
+    info = detect_class_imbalance(y_clean, threshold=threshold)
+    if info['is_imbalanced']:
+        return 'class_weight', info
+    return None, info
+
+
+def format_auto_imbalance_message(info, threshold=AUTO_IMBALANCE_THRESHOLD):
+    """Single source of truth for the user-facing Auto-mode audit line.
+    Both backend entry points and exported scripts render this so audit-trail
+    text is identical across run modes."""
+    if not info:
+        return "[Auto imbalance] no class info available; no correction applied"
+    if info.get('is_imbalanced'):
+        return (
+            f"[Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
+            f"({info['severity']}); applying class_weight"
+        )
+    if info.get('class_counts') and len(info['class_counts']) < 2:
+        return "[Auto imbalance] single class detected; no correction applied"
+    ratio = info.get('imbalance_ratio', 1.0)
+    return (
+        f"[Auto imbalance] ratio {ratio:.1f}:1 "
+        f"(below {threshold:.0f}:1 threshold); no correction applied"
+    )
+
+
+# ============================================================================
 # UPFRONT VALIDATION
 # ============================================================================
 
@@ -1185,7 +1256,7 @@ def validate_classification_config(y, imbalance_method, imbalance_params=None, n
                 but class 'minority_class' has only 3.
                 Options: set k_neighbors<=2, use random_undersampler, or use class_weight.
     """
-    if imbalance_method is None or imbalance_method == 'class_weight':
+    if imbalance_method is None or imbalance_method in ('class_weight', 'auto'):
         return True  # No resampling validation needed
 
     if imbalance_params is None:

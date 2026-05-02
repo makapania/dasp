@@ -22604,6 +22604,7 @@ class SpectralPredictApp:
 
         # Method descriptions
         descriptions = {
+            'auto': 'Auto - Detect imbalance at fit time; apply class_weight if ratio ≥ 3:1',
             'smote': 'SMOTE - Synthetic oversampling (standard)',
             'adasyn': 'ADASYN - Adaptive synthetic sampling',
             'borderline_smote': 'BorderlineSMOTE - Focus on borderline cases',
@@ -22667,7 +22668,7 @@ class SpectralPredictApp:
         """Return valid imbalance methods for a task type."""
         if task_type == 'classification':
             return [
-                'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                'auto', 'smote', 'adasyn', 'borderline_smote', 'random_undersampler',
                 'tomek_links', 'smote_tomek', 'smote_enn', 'class_weight'
             ]
         elif task_type == 'regression':
