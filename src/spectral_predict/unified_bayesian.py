@@ -2227,23 +2227,26 @@ def run_unified_bayesian(
                         return
                     except Exception as exc:
                         # Partial-success cleanup: copy_study may have created the
-                        # SQLite file before load_study failed. Without removing
-                        # it, the orphan accumulates on disk and the next session
-                        # offers a phantom Resume? prompt for trials nobody can
-                        # complete. _auto_migrated stays False so outer scope
-                        # doesn't try to restart on a half-broken study.
+                        # study row in SQLite before load_study failed. Use
+                        # optuna.delete_study to remove ONLY this study from
+                        # the database — multi-model runs share one SQLite file,
+                        # so unlinking the file would nuke prior models' trials.
+                        # _auto_migrated stays False so the outer scope doesn't
+                        # try to restart on a half-broken study.
                         logger.warning(
                             "T-41: SQLite migration failed; staying in-memory (no crash-resume for this run): %s",
                             exc,
                         )
                         try:
-                            from pathlib import Path as _Path
-                            orphan = _Path(_sqlite_path_from_url(storage_url))
-                            if orphan.exists():
-                                orphan.unlink(missing_ok=True)
-                        except OSError as cleanup_exc:
+                            optuna.delete_study(
+                                study_name=study_name,
+                                storage=storage_url,
+                            )
+                        except Exception as cleanup_exc:
+                            # KeyError if the study row was never written, or
+                            # any other delete failure — log and continue.
                             logger.warning(
-                                "T-41: could not clean up orphan SQLite after failed migration: %s",
+                                "T-41: could not delete failed-migration study from SQLite: %s",
                                 cleanup_exc,
                             )
                         if progress_callback:
