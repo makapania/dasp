@@ -4,6 +4,36 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-42 baseline measurement) — T-41 already closed the perf gap
+
+Critical empirical finding before implementing Approach C: **the post-T-41 baseline (`tests/_bench_bayesian_per_model.py` on `fix/T42-write-path-plumbing-approach-c` tip = T-43 commit `487b1d9`) shows SQLite WAL ratios already at the T-42 "definition of done" target.** Numbers (n_trials=10, synthetic data n=100, n_features=200):
+
+| Model | In-memory | SQLite WAL | Ratio | Overhead/trial |
+|---|---|---|---|---|
+| PLS | 0.28s | 0.20s | **0.69x** | -9ms |
+| Ridge | 0.18s | 0.19s | **1.06x** | +1ms |
+| RandomForest | 14.58s | 3.57s | **0.25x** | -1100ms (caching noise) |
+| LightGBM | 2.35s | 2.19s | **0.93x** | -16ms |
+| XGBoost | 4.06s | 4.09s | **1.01x** | +3ms |
+
+T-42's plan quoted XGBoost 1.36×, LightGBM 1.89×, PLS 28× from PRE-T-41 measurements. T-41's WAL pragmas + 30s SQLite busy_timeout collapsed the per-trial finalize cost from ~200ms to near-noise. **Approach C is no longer needed to make `'auto'` mode viable** — it already is.
+
+Proceeding with Approach C anyway because:
+1. The plan explicitly requested it.
+2. It's correct cleanup: `cv_strategy` and `cv_n_repeats` are written every trial (60+ writes per study) but read by nobody — `convert_study_to_dataframe` takes them as function parameters, never reads `trial.user_attrs`.
+3. `early_stopping_rounds` is constant per study but currently written per trial; can hoist to `study.user_attrs` and have `convert_study_to_dataframe` read it once.
+
+Per-trial set_user_attr counts (from `tests/_bench_t42_set_user_attr_count.py`):
+- PLS regression: 30 calls/trial (29 unique keys)
+- Ridge regression: 30 calls/trial (29 unique keys)
+- PLS-DA classification: 42 calls/trial (41 unique keys)
+
+Approach C savings: ~3 of 30 calls (10%) for regression, ~3 of 42 (~7%) for classification. At ~2ms WAL each, ~6ms/trial cumulative — modest but real cleanup.
+
+**Filed but deferred:** flipping T-41's default from `'never'` to `'auto'` is now justified by the bench data alone, doesn't depend on Approach C succeeding. Trivial follow-up ticket.
+
+---
+
 ## 2026-05-02 (T-43 implementation) — Tk var quirks + GUI introspection trade-offs
 
 **Architectural call: curated whitelist > auto-introspection for GUI settings capture.** The dasp GUI has ~700 Tk vars; auto-introspecting `vars(self)` for Tk types would silently capture display state (filter dropdowns, chart colors, exploratory-tab UI) and restore it on resume — surprising the user. Settled on a ~80-name `CAPTURABLE_SETTINGS` whitelist in `src/spectral_predict/run_gui_settings.py`. Trade-off: adding a new analysis-defining setting requires editing the whitelist (drift risk), but the contract is testable and predictable.

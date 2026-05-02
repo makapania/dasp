@@ -1065,10 +1065,11 @@ def create_unified_objective(
                         trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
-                # Raw-study consumers need cv_strategy to reconstruct the run
-                # (converted result rows already carry it via training_config).
-                trial.set_user_attr('cv_strategy', cv_strategy)
-                trial.set_user_attr('cv_n_repeats', cv_n_repeats)
+                # T-42 Approach C: cv_strategy and cv_n_repeats are now hoisted
+                # to study.user_attrs at study creation time (constant per
+                # study; previously rewritten on every trial finalize but read
+                # by nobody — convert_study_to_dataframe takes them as function
+                # parameters).
                 # Store preprocessing fields used by convert_study_to_dataframe
                 trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
                 trial.set_user_attr('window', preprocess_config.get('window', 0))
@@ -1450,12 +1451,11 @@ def create_unified_objective(
             trial.set_user_attr('subset_type', subset_type)
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
-            trial.set_user_attr('early_stopping_rounds', early_stopping_rounds if use_early_stopping else None)
             trial.set_user_attr('model_params', str(model_params))
-            # CV strategy + n_repeats on every trial so raw-study consumers don't
-            # lose the run configuration (converted result rows carry these too).
-            trial.set_user_attr('cv_strategy', cv_strategy)
-            trial.set_user_attr('cv_n_repeats', cv_n_repeats)
+            # T-42 Approach C: early_stopping_rounds + cv_strategy + cv_n_repeats
+            # are constant per study; hoisted to study.user_attrs at study
+            # creation time so the per-trial finalize commits one fewer write
+            # and the SQLite WAL log carries that much less duplication.
 
             # Fit on full training data for calibration metrics
             model.fit(X_final, y)
@@ -2122,6 +2122,24 @@ def run_unified_bayesian(
         )
         _sqlite_decided = (_persistence_mode == "never")  # 'never' is final
 
+    # T-42 Approach C: hoist the three keys that are constant per study to
+    # study.user_attrs so the per-trial finalize doesn't re-emit them. These
+    # survive migration via optuna.copy_study (preserves user_attrs along
+    # with trials). Applied to both branches above; resume picks up the
+    # existing study's user_attrs unchanged.
+    _hoist_es = (
+        early_stopping_rounds
+        if (
+            early_stopping_rounds is not None
+            and early_stopping_rounds > 0
+            and model_name in ('XGBoost', 'LightGBM', 'CatBoost')
+        )
+        else None
+    )
+    study.set_user_attr('cv_strategy', cv_strategy)
+    study.set_user_attr('cv_n_repeats', cv_n_repeats)
+    study.set_user_attr('early_stopping_rounds', _hoist_es)
+
     # --- auto-decision state ---
     _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
     _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (ratio ~1.2x)
@@ -2487,6 +2505,12 @@ def convert_study_to_dataframe(
     """
     results = []
 
+    # T-42 Approach C: early_stopping_rounds is hoisted to study.user_attrs.
+    # Read once outside the trial loop. Trial-level fallback handles studies
+    # finalized before the hoist (e.g., a SQLite from a prior dasp version
+    # picked up via the resume flow) — those still have the per-trial value.
+    _hoisted_es = study.user_attrs.get('early_stopping_rounds')
+
     for trial in study.trials:
         if trial.state != optuna.trial.TrialState.COMPLETE:
             continue
@@ -2528,7 +2552,11 @@ def convert_study_to_dataframe(
             'Folds': cv_folds,
             'Optimization': 'Unified Bayesian',
             'Imbalance': imbalance_method if imbalance_method else '—',
-            'early_stopping_rounds': trial.user_attrs.get('early_stopping_rounds', None),
+            'early_stopping_rounds': (
+                _hoisted_es
+                if _hoisted_es is not None
+                else trial.user_attrs.get('early_stopping_rounds', None)
+            ),
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
             # training_config mirrors search.py so model save/load can restore
