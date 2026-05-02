@@ -45,6 +45,41 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 
 ---
 
+## Amendments — 2026-05-02 (user re-validation pass)
+
+A second user-driven pass on 2026-05-02 confirmed verdict changes for six ticket entries. Original entries below are preserved as audit trail; the amended verdict is canonical going forward. See per-ticket inline markers (`> **Amended 2026-05-02:** ...`).
+
+| Ticket | Original verdict | Amended verdict | Rationale (short form) |
+|---|---|---|---|
+| **T-12** | KEEP | **SUBSUMED by T-45** | T-45 (`docs/plans/2026-05-02-T45-logger-warning-visibility-bundled-gui.md`, currently in flight on `fix/T45-logger-file-handler`) is the concrete implementation of the same disk-mirrored-logging concept. T-12 has no remaining unique scope. |
+| **T-15** | KEEP | **DROP** | LOGO is a footgun in the user's data regime (15 sites, N 5–100, 20× ratio); not field-mandated (Westad & Marini 2015 + Workman 2018 prefer external test sets); most chemometrics competitors don't expose group-aware CV. Memory: `project_t15_dropped_t16_reframed.md`. Investigation: `docs/bugfix_validation/T15_findings.md`. |
+| **T-16** | KEEP (block-bootstrap framing) | **REFRAMED — competitive model-comparison machinery survey + implementation** | Don't anchor to the FTIR Bone PLS paper's specific recipe. Survey what Unscrambler/SIMCA/OPUS/PLS_Toolbox expose for two-method comparison (bootstrap CIs, paired permutation, Wilcoxon, paired t, jackknife, Bayesian, AIC/BIC), then scope the smallest defensible shape. Memory: `project_t15_dropped_t16_reframed.md`. |
+| **T-19** | KEEP (publication-reproducibility framing) | **REFRAMED — expose model-native imbalance abilities** | Goal is exposing / auto-detecting `scale_pos_weight` (XGB), `is_unbalance` (LGBM), `auto_class_weights` (CatBoost), `class_weight` (LR/SVC/RF). Not reproducing one paper's specific configuration. Simpler scope than the original design doc. Memory: `project_t19_user_framing.md`. |
+| **T-22** | REFRAME (varsel stability bootstrap) | **REFRAMED — DEFERRED until concrete need** | Reframe is correct but the diagnostic is additive (not bug-class). Defer until a "is this wavelength real chemistry?" question hits a real analysis. Direct alternatives exist (FTIR band-assignment literature). The `VarselTransformer` infrastructure on the paused `fix/varsel-leakage` branch is the engine when work resumes. |
+| **T-31** | NEEDS_USER_DECISION | **KEEP** | User confirmed 2026-05-02 that "none of the above / could be multiple" output is useful for bone-FTIR / diagenesis specimens. Implementation must be true multi-class SIMCA per Oliveri & Downey 2012 — NOT an extension of the existing one-class `PCASIMCA` in `contamination.py` (that is a single-class membership detector, structurally wrong base). Memory: `project_t31_simca_confirmed.md`. |
+
+**Post-amendment summary counts:**
+
+| Verdict | Count | Notes |
+|---|---|---|
+| KEEP | 26 | original 27 minus T-15, with T-31 returning from NEEDS_USER_DECISION |
+| REFRAMED | 4 | T-01, T-16, T-19, T-22 (last is deferred) |
+| DROP | 4 | T-02, T-03, T-12 (subsumed by T-45), T-15 |
+| DEFER | 2 | T-05a, T-10b (unchanged) |
+| NEEDS_USER_DECISION | 0 | cleared |
+
+**Recommendations section below is now stale.** Original "Top 5 next actions" listed T-15 as #1 and T-16 in its block-bootstrap framing. Updated actionable order under master-rule + post-amendment dispositions:
+
+1. **T-19 reframed (expose model-native imbalance)** — ~1–2 days post-reframe scope; closes a real reproducibility gap with low risk.
+2. **T-16 reframed (competitive model-comparison machinery survey)** — survey first, scope after.
+3. **T-31 (Multi-class SIMCA)** — 1–2 weeks; new infrastructure, not a one-class extension.
+4. **T-17 (Multi-Y / PLS-2)** — 2–3 weeks; largest single-ticket effort but unlocks correlated-target modeling.
+5. **T-01 reframed (external-test-set workflow + RMSEP labeling)** — 2–3 days; canonical chemometrics solution to varsel-on-full-cal bias.
+
+T-22 stays parked. T-15 is closed.
+
+---
+
 ## P0 — Science integrity
 
 ### T-01: Per-fold variable selection leakage audit
@@ -104,6 +139,8 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 **Why:** No methodology question — this is a productivity infrastructure ticket. The user lost hours on a 19-hour CatBoost run. Optuna's built-in SQLite persistence (`storage="sqlite:///..."`) would make runs crash-recoverable. The coarse pause checkpoint, UI pause-state lies, and missing thread-alive check are all real UX failures.
 
 ### T-12: Disk-mirrored logging for long runs
+> **Amended 2026-05-02 → SUBSUMED by T-45.** T-45 is the concrete implementation of the same concept and is in flight on `fix/T45-logger-file-handler`. T-12 has no remaining unique scope.
+
 **Verdict:** KEEP
 **Why:** No methodology question — this is a debugging infrastructure ticket. Progress text is widget-only with a 2000-line cap; backend `print()` output is invisible in the bundle (`console=False`). A `logging.FileHandler` to `outputs/logs/<run-timestamp>.log` would enable post-mortem debugging.
 
@@ -120,10 +157,14 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 ## P1 — Scientific rigor for publication
 
 ### T-15: LeaveOneGroupOut / GroupKFold + group-column concept
+> **Amended 2026-05-02 → DROP.** LOGO is a footgun in the user's actual data regime (15 sites, N 5–100, 20× ratio); not field-mandated (Westad & Marini 2015 + Workman 2018); most chemometrics competitors don't expose it. Memory: `project_t15_dropped_t16_reframed.md`. Investigation: `docs/bugfix_validation/T15_findings.md`. The original KEEP rationale below is preserved as audit trail.
+
 **Verdict:** KEEP
 **Why:** Genuinely valuable for transferability claims. The FTIR Bone PLS paper's headline finding (MCC = 0.636 for LDA on PLS scores via pooled LOGO ≥5 sites) depends on holding out whole sites during CV. Standard 5-fold CV across pooled spectra is optimistically biased when within-site spectral correlations exist (same instrument, same operator, same sample-prep batch). LOGO is standard practice in multi-site bone-FTIR studies and in the broader chemometrics transferability literature (Filzmoser et al. 2009 rdCV, Westad & Marini 2015). Without LOGO, transfer claims aren't defensible to reviewers.
 
 ### T-16: Bootstrap CIs and paired permutation tests
+> **Amended 2026-05-02 → REFRAMED.** Drop the "FTIR Bone PLS paper headline" framing. Build instead as a **competitive model-comparison machinery survey + implementation**: catalog what Unscrambler/SIMCA/OPUS/PLS_Toolbox expose (bootstrap CIs, paired permutation, Wilcoxon signed-rank, paired t, jackknife, Bayesian, AIC/BIC), then scope the smallest defensible shape. Ships independently — no longer paired with T-15 (dropped). Memory: `project_t15_dropped_t16_reframed.md`.
+
 **Verdict:** KEEP
 **Why:** Two-sample inference machinery is standard in the applied domain. The FTIR Bone PLS paper's headline claim ("MCC gap +0.225, 95% CI excludes zero, p < 0.01") depends on site-level block bootstrap + paired permutation tests. Without this infrastructure, dasp cannot produce publication-defensible inferential claims about whether one method beats another. Efron & Tibshirani 1993 (bootstrap), Good 2000 (permutation tests) are canonical.
 
@@ -136,6 +177,8 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 **Why:** Class-imbalanced datasets need class stratification in the calibration/test split. Kennard-Stone (1969) selects samples to maximize coverage of feature space; stratified KS runs KS within each class then recombines. Standard in chemometrics for ensuring the test set inherits class balance.
 
 ### T-19: Model-native imbalance handling (loss reweighting)
+> **Amended 2026-05-02 → REFRAMED.** Goal is **exposing / auto-detecting** the model-native imbalance kwargs — `scale_pos_weight` (XGB), `is_unbalance` (LGBM), `auto_class_weights` (CatBoost), `class_weight` (LR/SVC/RF) — not reproducing the FTIR Bone PLS paper's specific configuration. Simpler scope than the original `docs/plans/2026-04-29-model-native-loss-reweighting.md` design doc; effort drops to ~1–2 days. Memory: `project_t19_user_framing.md`.
+
 **Verdict:** KEEP
 **Why:** Real gap verified by Codex audit. XGBoost, LightGBM, CatBoost construction sites in `models.py` never receive any imbalance-aware kwarg (`scale_pos_weight`, `is_unbalance`, `auto_class_weights`). The FTIR Bone PLS paper uses "XGBoost (scale_pos_weight)", "LightGBM (balanced)", "Logistic regression (EN, balanced)" — none reproducible in dasp without source edits. Resampling (SMOTE) and loss reweighting are different statistical interventions; chemometrics defaults to loss reweighting because it preserves real measurements. The design at `docs/plans/2026-04-29-model-native-loss-reweighting.md` is sound. The 5 PLS-DA sites + wrapper design + sklearn floor bump scope is correct. Effort: 5-7 days.
 
@@ -148,6 +191,8 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 **Why:** Savitzky & Golay 1964 assumes uniform sampling — the polynomial weights are derived for fixed-stride windows. scipy.signal.savgol_filter carries the same assumption. Non-uniform grids produce artefactual peak shifts that mimic real chemistry (apparent red/blue shifts from H-bonding). The plan at `docs/plans/2026-04-29-T21-sg-wavelength-uniformity-guard.md` correctly references PLS_Toolbox's `gridcheck` and OpenSpecy's `is_evenly_spaced()` as commercial/academic precedent. The warn-and-proceed design (not hard-raise) is appropriate for a GUI tool. Tolerance 0.01 CV is chemometrics-standard. This is a genuine scientific integrity guard, not an sklearn-purity concern.
 
 ### T-22: Multi-source consensus wavenumber selection
+> **Amended 2026-05-02 → REFRAMED, DEFERRED.** The April reframe (varsel stability bootstrap as chemistry-vs-noise diagnostic) is correct, but the diagnostic is additive (not bug-class) and 3–4 days of effort. Defer until a concrete "is this wavelength real chemistry?" question hits a real analysis — direct alternatives (FTIR band-assignment literature) cover the common cases. The paused `fix/varsel-leakage` branch's `VarselTransformer` infrastructure remains the engine when work resumes.
+
 **Verdict:** REFRAME
 **Why:** The original framing ("defends against reviewer 'cherry-picked channels' objection") is correct but undersells the methodological value. Under the master rule, this is the *right diagnostic for finding real chemistry* — stable wavelength selection across independent runs is evidence of real absorption bands / vibrational modes / functional groups. This connects directly to the varsel-finds-chemistry principle: if CARS selects 1650 cm⁻¹ across 6 independent runs, that's the amide I band, not search noise. The FTIR Bone PLS paper's "strict consensus" (all 6 sources agree → 10 wavenumbers → perfect classification) demonstrates this.
 **If REFRAME:** Reframe as "bootstrap stability diagnostic for variable selection" — run varsel N times with different seeds, report wavelength selection frequency. This is a separate diagnostic tool, not a fix for a bug. The `VarselTransformer` infrastructure from the worktree could serve as the engine for this (see Deliverable 2). Connect to the varsel-finds-chemistry memory.
@@ -189,6 +234,8 @@ lookup, (3) regression test sweep. Gate methodology + lessons learned are at
 **Why:** No methodology question — hygiene fix. `search.py:2313, 2789, 2834, 3091-3100, 3991-3999` contain debug prints that should be logger calls or removed.
 
 ### T-31: Multi-class SIMCA (true class-modeling, not anomaly detection)
+> **Amended 2026-05-02 → KEEP.** User confirmed 2026-05-02 that "none of the above / could be multiple" output is useful for bone-FTIR / diagenesis specimens. **Implementation note:** must be a true multi-class SIMCA per Oliveri & Downey 2012 (one PCA model per class + independent membership decisions per specimen) — NOT an extension of the existing one-class `PCASIMCA` in `contamination.py`, which is a single-class membership detector (structurally wrong base). Memory: `project_t31_simca_confirmed.md`.
+
 **Verdict:** NEEDS_USER_DECISION
 **Why:** SIMCA (Wold 1976, Oliveri & Downey 2012) is a standard chemometrics class-modeling method. The user's domain context supports it: fossil bone differs site-by-site (every site is "its own thing"), consolidants are often unknown, and specimens on a diagenetic continuum can legitimately belong to multiple classes or none. Discriminant classifiers (PLS-DA, RF, XGBoost) force every specimen into one of the trained classes — no "none of the above" output is possible. Multi-class SIMCA gives per-class membership decisions that are independent. However, this is a 1-2 week effort, and the user should confirm that the "none of the above" / "could be multiple" output is useful for their science before work begins.
 
@@ -230,6 +277,8 @@ The P3 drop list from the 2026-04-29 roadmap is **confirmed correct** under the 
 **Why:** Same class of issue as T-10 but in the NSGA-II path. Lower traffic than grid/Bayesian search.
 
 ### T-31 PENDING: Multi-class SIMCA
+> **Amended 2026-05-02 → KEEP** (see T-31 above and Amendments section). User confirmed 2026-05-02.
+
 **Verdict:** NEEDS_USER_DECISION (see T-31 above)
 **Why:** User must confirm "none of the above" output is useful for their bone-FTIR/diagenesis science before work begins.
 
@@ -261,6 +310,8 @@ Total: 35 items evaluated (32 tickets + T-05a, T-10b, T-31 PENDING, P3 drop list
 
 ## Deliverable 3: Recommendations
 
+> **Stale as of 2026-05-02 amendments above.** T-15 (was #1) is dropped; T-16 framing has changed; T-11 (was #3) merged; T-31 user-decision question (in §"Tickets the user should make decisions on") resolved as KEEP. See the Amendments section's revised Top-5 list. The original recommendations are preserved below for audit trail.
+
 ### Top 5 next actions (under the new framing)
 
 1. **T-15 (LeaveOneGroupOut by site)** — Highest leverage. Unlocks transferability claims for the FTIR Bone PLS paper. Prerequisite for T-16 (block bootstrap needs group labels). Effort: 3-5 days.
@@ -282,6 +333,13 @@ Total: 35 items evaluated (32 tickets + T-05a, T-10b, T-31 PENDING, P3 drop list
 3. **External-test-set workflow enhancement** — The canonical chemometrics workflow (Li 2009, Centner 1996, etc.) uses RMSEP on a held-out test set as the final performance metric. dasp's current external validation is single-shot. Enhance to support: (a) lock variables from a search, refit on new calibration set, evaluate on held-out test, (b) repeat across N random splits (the paper's "random-split sensitivity test"). Connects to gap analysis item #5.
 
 ### Tickets the user should make decisions on
+
+> **All three resolved 2026-05-02:**
+> - **T-31 (Multi-class SIMCA):** RESOLVED → KEEP. User confirmed the "none of the above / could be multiple" output is useful for bone-FTIR/diagenesis. See Amendments section.
+> - **T-01 reframe scope:** RESOLVED → KEEP. External-test-set workflow + reporting-language is the canonical chemometrics solution; `VarselTransformer` is repurposed as the engine for T-22 (deferred).
+> - **T-22 reframe:** RESOLVED → REFRAMED, DEFERRED. Worth the investment in principle but parked until a concrete "is this wavelength real chemistry?" question hits a real analysis. See Amendments section.
+
+(Original questions preserved below for audit trail.)
 
 1. **T-31 (Multi-class SIMCA)** — Confirm whether "none of the above" / "could be multiple" output is useful for bone-FTIR/diagenesis science. If yes, scope and prioritize. If no, drop.
 
