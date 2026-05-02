@@ -1,10 +1,12 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (T-36 + T-37 PRs open with post-merge review fix iterations applied) —
+> **Last updated:** 2026-05-01 (final adversarial sweep on T-36 + T-37 — 2 of 2 reviewers caught T-37's missing-merge-base; merged T-36 into T-37 to absorb fixes) —
+>
+> **Cross-family review (this session):** Two reviewers via `opencode-call` with full repo access — DeepSeek V4 Pro Max (DeepSeek API direct, max thinking) + MiMo 2.5 Pro Max (opencode-go subscription) — dispatched in parallel. **Both converged independently on the same structural finding:** T-37 was branched off T-36 at `1f49d73` BEFORE T-36's two post-merge review fix commits (`b92274c` + `afb52d9`) landed, so T-37 inherited the silent-mismatch bugs T-36 already fixed (3 HIGH + 4 MEDIUM + 2 LOW per MiMo's tally; equivalent ratings from DeepSeek). T-36 was rated READY_TO_MERGE by both reviewers with zero new findings. Resolution: merged T-36 tip `4d4c542` into T-37 at commit `78998d4` — source files (`search.py`, `unified_bayesian.py`, `code_generator.py`, `contamination.py`, `spectral_predict_gui_optimized.py`) merged cleanly, only PROJECT_STATUS.md and SESSION_LOG.md needed conflict resolution. 123 T-37+autoscale tests + 27 code-export tests all green post-merge.
 >
 > **PR state:**
-> - **PR #8 — T-36 autoscale (UV scaling) toggle** — branch `feature/T36-autoscale-toggle` at `afb52d9`. Original implementation (`2351c3c`) plus two post-merge review fix commits: `b92274c` closes 6 cross-family bot findings (Codex + DeepSeek V4 Pro Max + gemini-code-assist + CodeRabbit); `afb52d9` closes 4 pr-review-toolkit findings on `b92274c` (one of my fixes was dead code due to `_normalize_preprocess_for_pipeline` operation order, plus sibling `baseline_params` persistence gaps in regression/classification + Bayesian result rows, plus a `bool("False") == True` reintroduction in the GUI fallback chain). 117/117 T-36 tests pass.
-> - **PR #7 — T-37 TPE preprocessing discovery** — branch `feature/T37-tpe-preprocessing-discovery` at `6a0eb28`. Original Phase 7 fixes (`03d95cb`) plus one post-merge review fix commit (`6a0eb28`) closing 6 findings: `enable_autoscale` added to study fingerprint, window canonicalization at all_configs build, derivative+window pre-validation against `DERIVATIVE_WINDOW_RANGES`, `LogisticRegression` classification fallback (was broken `PLSRegression`+accuracy returning NaN), smoothing window/polyorder threaded through `run_tpe_preprocessing_discovery`, explicit `ValueError` mutual-exclusion guards. pr-review-toolkit verdict: **READY_TO_MERGE** with 2 LOW/MEDIUM follow-ups (missing test for the new mutual-exclusion ValueError; bare `except Exception` in `_quick_evaluate` could be narrowed to `ImportError`). 33/33 T-37 + 44/44 autoscale-Bayesian tests pass.
+> - **PR #8 — T-36 autoscale (UV scaling) toggle** — branch `feature/T36-autoscale-toggle` at `4d4c542`. Original implementation (`2351c3c`) plus two post-merge review fix commits: `b92274c` closes 6 cross-family bot findings (Codex + DeepSeek V4 Pro Max + gemini-code-assist + CodeRabbit); `afb52d9` closes 4 pr-review-toolkit findings on `b92274c` (one of my fixes was dead code due to `_normalize_preprocess_for_pipeline` operation order, plus sibling `baseline_params` persistence gaps in regression/classification + Bayesian result rows, plus a `bool("False") == True` reintroduction in the GUI fallback chain). Plus `4d4c542` doc commit. 117/117 T-36 tests pass. **Final adversarial sweep verdict: READY_TO_MERGE (zero findings).**
+> - **PR #7 — T-37 TPE preprocessing discovery** — branch `feature/T37-tpe-preprocessing-discovery` at `78998d4` (this branch). Includes original Phase 7 fixes (`03d95cb`), post-merge review fix commit (`6a0eb28`), and merge commit (`78998d4`) absorbing T-36's `b92274c` + `afb52d9` + `4d4c542` to close cross-family adversarial-review findings. Original Phase 7 fixes (`03d95cb`) plus one post-merge review fix commit (`6a0eb28`) closing 6 findings: `enable_autoscale` added to study fingerprint, window canonicalization at all_configs build, derivative+window pre-validation against `DERIVATIVE_WINDOW_RANGES`, `LogisticRegression` classification fallback (was broken `PLSRegression`+accuracy returning NaN), smoothing window/polyorder threaded through `run_tpe_preprocessing_discovery`, explicit `ValueError` mutual-exclusion guards. pr-review-toolkit verdict: **READY_TO_MERGE** with 2 LOW/MEDIUM follow-ups (missing test for the new mutual-exclusion ValueError; bare `except Exception` in `_quick_evaluate` could be narrowed to `ImportError`). 33/33 T-37 + 44/44 autoscale-Bayesian tests pass.
 >
 > **Architectural correction logged this session:** I initially told the user (incorrectly) that the grid-search path applied autoscale per-fold via the sklearn Pipeline mechanic, while the Bayesian path applied it pre-CV global — claiming this was a real divergence. **That was wrong.** The grid path uses `skip_spectral_preprocessing=True` at every call site of `_run_single_config`, which means `pipe_steps = []` for the inner CV loop (search.py:4243-4259); spectral preprocessing including the autoscale `StandardScaler` is `fit_transform`'d once on full training data at search.py:2061, and CV runs on the already-preprocessed `X_for_models`. So **both paths apply autoscale pre-CV global, by design, matching PLS_Toolbox / Unscrambler chemometrics convention.** No grid/Bayesian divergence exists. The misleading line 4270 path (`else` branch with full Pipeline construction) is reachable in principle but not exercised by the live grid call sites. See SESSION_LOG.md for the trace details so this doesn't get re-discovered.
 >
@@ -12,7 +14,9 @@
 > - **Gemini "Bayesian autoscale leakage" finding** — autoscale fits on full training data before CV in both paths. By ML orthodoxy this is mild leakage; by chemometrics convention (PLS_Toolbox / Unscrambler / SIMCA-P / Pirouette default behavior) it is correct. Project follows chemometrics convention. Bias is small for stable NIR data and dominated by sample-population shift risks that KS-style train/test splits address.
 > - **Gemini "code_generator export uses fit_transform not transform" finding** — entangled with the Bayesian leakage architectural rewrite above; not applicable until/unless that decision changes.
 >
-> **Doc nits + plan corrections done this commit (T-36 branch):**
+> **Doc nits + plan corrections done this commit (T-37 branch):**
+> - `docs/bugfix_validation/T37_tpe_preprocessing_discovery.md:97` — Phase 7 row was marked `_pending_` after commit `03d95cb` already landed; updated to landed-commit reference. Also added Phase 8 row for `6a0eb28`.
+> - `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md:74-82, 176, 235, 250` — internal contradiction between architecture (10 trials, median fit time) and examples / tasks / acceptance criteria (5 trials, mean fit time). Architecture is authoritative per the DeepSeek review. All inconsistent references updated to 10 trials / median to match.
 > - `docs/plans/2026-05-01-T36-autoscale-toggle.md:210` — fixed nonexistent `T34_autoscale_toggle.md` reference → `T36_autoscale_toggle.md`.
 > - `docs/plans/2026-05-01-T38-dead-preprocessing-cleanup.md:27-32` — corrected the false claim that `preprocessing_wrapper.py` is doubly orphaned. It is actively imported by `ensemble.py:18` and instantiated at `ensemble.py:1309`, exercised by 2 test files. Plan changed to NOT delete it.
 >
@@ -21,10 +25,46 @@
 > - pr-review-toolkit T-37 M2: bare `except Exception` in `_quick_evaluate` could be narrowed to `(ImportError, ModuleNotFoundError)`. Defensive over-catch, not a bug.
 > - pr-review-toolkit T-36 M2: `refined_config` doesn't carry an `'autoscale'` key, so the GUI fallback chain always falls through to `selected_model_config`. Works in practice today (selected_model_config always has 'Autoscale').
 > - pr-review-toolkit T-36 L1: `contamination.py` cache key omits `baseline_params`. Latent — no current producer emits per-row baseline_params.
+> - `tests/test_autoscale_bayesian.py:169` cache-key assertion uses bare substring `'apply_autoscale' in src` rather than asserting it appears specifically inside the `cache_key` tuple. Test passes today; would not catch a regression that drops `apply_autoscale` from the tuple but keeps it elsewhere in the function. Test-quality issue, not a bug.
 >
-> **Previously:** 2026-05-01 (post-T-36 ship — T-41 Bayesian SQLite auto-calculator plan filed in response to user-reported 5-28× Bayesian slowdown) —
+> **Previously:** 2026-05-01 (T-37 Phase 7 fix commit `03d95cb` — F2, F6, F9, F10, F12 all closed) —
 >
-> **T-41 Bayesian SQLite auto-calculator plan filed at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md`.** User reported Bayesian 5× slower than pre-T-11; investigation traced to T-11's per-trial Optuna SQLite writes. Benchmarks (`tests/_bench_bayesian_per_model.py`) show overhead is ~200ms/trial constant — fast models pay 8-10×, heavy models 1.36-1.89×. Plan: per-model auto-calculator (first 5 trials in-memory + decide based on mean fit time + migrate via `optuna.copy_study` if heavy), 3-way GUI override (Auto/Always-on/Always-off), WAL mode bundled in. ~180 LOC + tests. Branch `fix/T41-bayesian-sqlite-auto-calculator` reserved (off post-T-36 main).
+> **DeepSeek V4 Pro Max review trail (this session):**
+>
+> - **T-41 plan pre-implementation review** (read-only) — verdict: READY_WITH_PLAN_REVISIONS, 6 findings (2 HIGH, 2 MEDIUM, 4 LOW). All applied in commit `7861a81`. Critical empirical catch: DeepSeek tested `optuna.copy_study` + `optuna.load_study(sampler=TPESampler(...))` mid-run on Optuna 4.8 and confirmed TPE state is preserved. Key trap caught: `create_study(load_if_exists=True, sampler=...)` SILENTLY IGNORES the sampler kwarg on existing studies — the migration helper now uses `load_study(sampler=...)` explicitly. Plan also revised to use 10-trial median window (was 5-trial mean), corrected WAL durability claim, moved WAL pragma application from `start_run` to migration time (file doesn't exist until then), added stale-sidecar cleanup, added 4 missing tests.
+>
+> - **T-37 Phase 1 review of commit `ef5f61e`** by **GLM 5.1** (read-only, attribution corrected by user 2026-05-01 PM) — verdict: READY_WITH_REVISIONS. Re-prioritized findings against initial draft:
+>   - **MEDIUM F2:** `_tpe_baseline_params` never attached to output config dicts. Currently safe by coincidence (TPE defaults match `preprocess.py` defaults), fragile if either changes.
+>   - **MEDIUM F6:** `_quick_evaluate` PLS exception fallback uses `neg_root_mean_squared_error` regardless of task_type — wrong metric for classification/one_class when LightGBM is unavailable.
+>   - **MEDIUM F9:** Mutual exclusion test only checks `results is not None`, doesn't verify TPE actually ran vs smart_preprocess fallback. False confidence.
+>   - **MEDIUM F12:** Test coverage gaps — no `_apply_full_preprocessing` unit tests, no `_quick_evaluate` direct tests, no empty-TPE-result fallback test, no roundtrip-through-`build_preprocessing_pipeline` verification.
+>   - **LOW F1/F10:** `_resolve_window_choices` is dead code AND **GLM corrected a critical earlier misdiagnosis:** the apparent "fix" (varying search space per trial) **would break Optuna** — `trial.suggest_categorical` requires CONSTANT choices across trials per the ask/tell contract. The current "union + return-inf-on-invalid" approach is the correct workaround. Status: leave as-is; remove or comment the unused helper.
+>   - LOW F7, F8 (style/hygiene), several "NOT AN ISSUE" items (F4, F5, F11).
+>
+>   **Recommendation:** Phase 7 fix commit needed before T-37 ships, but smaller scope than original draft suggested. Fix F2 (~5 lines), F6 (~10 lines), F9 (test strengthening, ~15 lines), F12 (new tests, ~80 lines). Original "fix C1 by varying search space" approach explicitly rejected per GLM analysis.
+>
+> **T-41 plan ready for implementation** at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md` (revised to 10-trial median window, explicit `load_study(sampler=...)` mechanism, WAL durability honest, stale sidecar cleanup, 4 added tests). User has the prompt for dispatching implementation when ready.
+>
+> **Previously:** 2026-05-01 (post-T-37 ship — TPE preprocessing discovery implemented on `feature/T37-tpe-preprocessing-discovery`) —
+>
+> **T-37 TPE preprocessing discovery IMPLEMENTED.** Branch `feature/T37-tpe-preprocessing-discovery` at `03d95cb` (7 commits past T-36 tip `1f49d73`).
+>
+> Key wins:
+> - **New module `tpe_preprocessing_discovery.py`** — Optuna TPESampler(multivariate=True) over 5-D space (preproc x window x autoscale x baseline x smoothing), 75-trial default budget, model-agnostic LightGBM surrogate (Architecture A — preserves model diversity).
+> - **Derivative-aware windows** ported from `ga_preprocessing.py` DERIVATIVE_WINDOW_RANGES.
+> - **GUI checkbox + n_trials dropdown** in Preprocessing tab, mutual exclusion with smart/GA preprocessing.
+> - **Self-review caught two silent-mismatch bugs** before they shipped: (a) preprocess_cfg name field used pipeline name instead of display name with prefix cascades, (b) baseline/smoothing/autoscale doubling blocks re-doubled TPE-discovered per-config settings — guarded by nulling global flags inside TPE block.
+> - **Phase 7 fix commit (`03d95cb`)** closes GLM 5.1 review findings: F2 (_tpe_baseline_params now attached), F6 (_quick_evaluate branches on task_type), F9 (tpe_score propagated to result rows + test strengthening), F10 (_resolve_window_choices commented as RESERVED), F12 (12 new tests covering _apply_full_preprocessing, _quick_evaluate, empty-TPE fallback, pipeline roundtrip).
+>
+> Test coverage: **33 T-37 tests all green** (21 unit + 5 integration + 4 direct + 3 roundtrip/fallback). Module: 5 files changed, ~700 LOC new.
+>
+> Audit trail: `docs/bugfix_validation/T37_tpe_preprocessing_discovery.md`.
+>
+> **T-38 (dead preprocessing module cleanup) is now unblocked** — `ga_preprocessing.py` can be retired after T-37 merge.
+>
+> **Previously:** 2026-05-01 (post-T-36 ship — T-41 Bayesian SQLite auto-calculator plan filed in response to user-reported 5-28x Bayesian slowdown) —
+>
+> **T-41 Bayesian SQLite auto-calculator plan filed at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md`.** User reported Bayesian 5x slower than pre-T-11; investigation traced to T-11's per-trial Optuna SQLite writes. Benchmarks (`tests/_bench_bayesian_per_model.py`) show overhead is ~200ms/trial constant — fast models pay 8-10x, heavy models 1.36-1.89x. Plan: per-model auto-calculator (first 5 trials in-memory + decide based on mean fit time + migrate via `optuna.copy_study` if heavy), 3-way GUI override (Auto/Always-on/Always-off), WAL mode bundled in. ~180 LOC + tests. Branch `fix/T41-bayesian-sqlite-auto-calculator` reserved (off post-T-36 main).
 >
 > **Previously:** 2026-05-01 (overnight T-36 implementation — Codex-final READY_TO_MERGE_WITH_NITS_CLOSED, awaiting user PR open) —
 >
@@ -73,7 +113,7 @@
 > | Ticket | Title | Status | Plan |
 > |---|---|---|---|
 > | **T-36** | Autoscale (UV scaling) preprocessing toggle | IMPLEMENTED on `feature/T36-autoscale-toggle` (tip `2351c3c`); 13 commits, full review trail, awaiting PR | `docs/plans/2026-05-01-T36-autoscale-toggle.md` + `docs/bugfix_validation/T36_autoscale_toggle.md` |
-> | **T-37** | TPE quick preprocessing discovery (replaces basic + GA + exhaustive) | ROUGH_PLAN — UNBLOCKED by T-36 implementation | `docs/plans/2026-05-01-T37-tpe-quick-preprocessing-discovery.md` |
+> | **T-37** | TPE quick preprocessing discovery (replaces basic + GA + exhaustive) | **READY_TO_MERGE_WITH_NITS_CLOSED** on `feature/T37-tpe-preprocessing-discovery` (tip `03d95cb`); Phase 7 fix commit closes F2, F6, F9, F10, F12; 33 tests, all green | `docs/plans/2026-05-01-T37-tpe-quick-preprocessing-discovery.md` + `docs/bugfix_validation/T37_tpe_preprocessing_discovery.md` |
 > | **T-38** | Dead preprocessing module cleanup | ROUGH_PLAN — three modules deletable now (zero callers); `ga_preprocessing.py` retires after T-37 | `docs/plans/2026-05-01-T38-dead-preprocessing-cleanup.md` |
 >
 > **T-36 plan caught three pre-existing implementation bugs in a draft autoscale plan (DeepSeek V4 Pro draft, audited):**

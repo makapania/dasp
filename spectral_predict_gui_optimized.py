@@ -3220,6 +3220,11 @@ class SpectralPredictApp:
         self.smart_preprocess_importance = tk.StringVar(value="model_specific")
         self.smart_preprocess_n_top = tk.IntVar(value=7)
 
+        # TPE Preprocessing Discovery (T-37 — supersedes smart + GA)
+        self.enable_tpe_preprocessing = tk.BooleanVar(value=False)
+        self.tpe_preprocess_n_trials = tk.IntVar(value=75)
+        self.tpe_preprocess_n_top = tk.IntVar(value=10)
+
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
         self.n_estimators_100 = tk.BooleanVar(value=True)  # Default
@@ -11839,6 +11844,48 @@ class SpectralPredictApp:
 
         # Initially hide options
         self.smart_preproc_options_frame.grid_remove()
+
+        # ===== TPE PREPROCESSING DISCOVERY (T-37) =====
+        tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Quick Preprocessing Discovery",
+                                                                      subtitle="Optuna TPE search over 5-D space: preproc, window, autoscale, baseline, smoothing")
+        tpe_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        tpe_preproc_frame = tk.Frame(tpe_preproc_card, bg=self.colors['card_bg'])
+        tpe_preproc_frame.pack(fill='both', expand=True)
+
+        self.tpe_preproc_checkbox = ttk.Checkbutton(tpe_preproc_frame, text="Enable TPE Preprocessing Discovery",
+                                                    variable=self.enable_tpe_preprocessing,
+                                                    command=self._toggle_tpe_preprocessing_options)
+        self.tpe_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
+
+        ttk.Label(tpe_preproc_frame,
+                 text="Smart 5-D search (preproc x window x autoscale x baseline x smoothing) via Optuna TPE",
+                 style='Caption.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
+
+        self.tpe_preproc_options_frame = ttk.Frame(tpe_preproc_frame)
+        self.tpe_preproc_options_frame.grid(row=2, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
+
+        ttk.Label(self.tpe_preproc_options_frame, text="Trials:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        trials_combo = ttk.Combobox(self.tpe_preproc_options_frame, textvariable=self.tpe_preprocess_n_trials,
+                                     values=[50, 75, 100, 150], state="readonly", width=8)
+        trials_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(self.tpe_preproc_options_frame, text="Top Configs:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        n_top_spinbox2 = ttk.Spinbox(self.tpe_preproc_options_frame, from_=3, to=20,
+                                      textvariable=self.tpe_preprocess_n_top, width=8)
+        n_top_spinbox2.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+
+        ttk.Label(tpe_preproc_frame,
+                 text="5-D search space: 14 preproc x derivative-aware windows x autoscale x 5 baseline x smoothing",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        ttk.Label(tpe_preproc_frame,
+                 text="Evaluates via LightGBM proxy with CV. Model-agnostic — all enabled models tested against each config.",
+                 style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+        ttk.Label(tpe_preproc_frame,
+                 text="Runtime: ~1-3 min for 75 trials. Returns top N diverse preprocessing configs for grid search.",
+                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+
+        self.tpe_preproc_options_frame.grid_remove()
 
         # ===== GA AND EXHAUSTIVE PREPROCESSING =====
         ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Exhaustive Preprocessing",
@@ -22688,10 +22735,12 @@ class SpectralPredictApp:
         """Show/hide GA preprocessing options based on checkbox state."""
         if self.enable_ga_preprocessing.get():
             self.ga_preproc_options_frame.grid()
-            # Disable smart preprocessing if GA is enabled
             if self.enable_smart_preprocessing.get():
                 self.enable_smart_preprocessing.set(False)
                 self._toggle_smart_preprocessing_options()
+            if self.enable_tpe_preprocessing.get():
+                self.enable_tpe_preprocessing.set(False)
+                self._toggle_tpe_preprocessing_options()
         else:
             self.ga_preproc_options_frame.grid_remove()
 
@@ -22699,12 +22748,27 @@ class SpectralPredictApp:
         """Show/hide smart preprocessing options based on checkbox state."""
         if self.enable_smart_preprocessing.get():
             self.smart_preproc_options_frame.grid()
-            # Disable legacy GA if smart preprocessing is enabled
+            if self.enable_ga_preprocessing.get():
+                self.enable_ga_preprocessing.set(False)
+                self._toggle_ga_preprocessing_options()
+            if self.enable_tpe_preprocessing.get():
+                self.enable_tpe_preprocessing.set(False)
+                self._toggle_tpe_preprocessing_options()
+        else:
+            self.smart_preproc_options_frame.grid_remove()
+
+    def _toggle_tpe_preprocessing_options(self):
+        """Show/hide TPE preprocessing options based on checkbox state."""
+        if self.enable_tpe_preprocessing.get():
+            self.tpe_preproc_options_frame.grid()
+            if self.enable_smart_preprocessing.get():
+                self.enable_smart_preprocessing.set(False)
+                self._toggle_smart_preprocessing_options()
             if self.enable_ga_preprocessing.get():
                 self.enable_ga_preprocessing.set(False)
                 self._toggle_ga_preprocessing_options()
         else:
-            self.smart_preproc_options_frame.grid_remove()
+            self.tpe_preproc_options_frame.grid_remove()
 
     def _update_importance_description(self, event=None):
         """Update importance method description label based on selection."""
@@ -27125,6 +27189,10 @@ class SpectralPredictApp:
                         smart_preprocess=self.enable_smart_preprocessing.get(),
                         smart_preprocess_importance=self.smart_preprocess_importance.get(),
                         smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
+                        # T-37: TPE preprocessing discovery
+                        tpe_preprocess=self.enable_tpe_preprocessing.get(),
+                        tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
+                        tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                         # T-36: autoscale toggle (UV scaling)
                         autoscale=self.use_autoscale.get(),
                     )
@@ -27836,6 +27904,10 @@ class SpectralPredictApp:
                 smart_preprocess=self.enable_smart_preprocessing.get(),
                 smart_preprocess_importance=self.smart_preprocess_importance.get(),
                 smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
+                # T-37: TPE preprocessing discovery
+                tpe_preprocess=self.enable_tpe_preprocessing.get(),
+                tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
+                tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
