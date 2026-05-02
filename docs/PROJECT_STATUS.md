@@ -210,7 +210,7 @@
 >
 > **T-37 background:** Independent audits (Explore agent + DeepSeek V4 Pro via opencode-call) confirmed `ga_preprocessing.py`'s GA mode evaluates ~6× the entire 238-point search space, providing zero benefit over exhaustive on a discrete categorical space with no neighborhood structure. Basic and GA paths cover the same operation space with different search strategies; merge into one TPE-based path covering a richer 5-D space (preproc × window × autoscale × baseline × smoothing) at 75-100 trials.
 >
-> **T-38 deletes:** `learned_preprocessing.py` (775 LOC, zero callers), `ensemble_preprocessing.py` (701 LOC, dead `HAS_ENSEMBLE_PREPROCESSING` flag only), `preprocessing_wrapper.py` (220 LOC, only imported by ensemble_preprocessing). Retires `ga_preprocessing.py` after T-37 absorbs its useful insights (`DERIVATIVE_WINDOW_RANGES`, multi-seed robustness logic).
+> **T-38 deletes:** `learned_preprocessing.py` (775 LOC, zero callers) and `ensemble_preprocessing.py` (701 LOC, only referenced by the dead `HAS_ENSEMBLE_PREPROCESSING` flag at `gui:236-241`). **Note: this earlier note's claim that T-38 also deletes `preprocessing_wrapper.py` and retires `ga_preprocessing.py` was wrong** — `preprocessing_wrapper.py` is still imported by `ensemble.py:18` (CodeRabbit caught this during T-37 review), and `ga_preprocessing.py` retirement is a separate post-T-37-merge step kept out of T-38's scope. See the top-of-file status entry for the actual T-38 outcome.
 >
 > **Previously:** 2026-04-30 (evening — T-08 dropped, T-11 staged, T-15 dropped, T-16 reframed, T-19 user-framed) —
 >
