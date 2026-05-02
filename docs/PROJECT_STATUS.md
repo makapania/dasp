@@ -1,14 +1,45 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-38 + T-42 + T-43 ALL IMPLEMENTED — three branches ready for PRs) —
+> **Last updated:** 2026-05-02 (T-43 + T-42 + T-38 CONSOLIDATED — single branch ready for one PR) —
+>
+> **All three tickets land on `fix/bayesian-resume-and-cleanup` (tip `fe5e25d`, 11 commits off main).** User decision after the parallel pr-review-toolkit pass: ship as one PR rather than three. The per-ticket branches (`fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`) remain on origin as reference and can be deleted once the consolidated PR merges.
+>
+> **What's in the PR:**
+> 1. **T-43 (auto-restore GUI settings on resume):** ~86 analysis-defining Tk vars captured at `start_run` time and restored when the user accepts the resume banner — preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters, and the 6 `bayes_*` Bayesian-only baseline/smoothing/region/UVE controls. New `src/spectral_predict/run_gui_settings.py` module + extended `RunMetadata.gui_settings: dict | None` with `dataclasses.fields()` filter + type-guard for malformed sidecars + `RestoreReport` with `restored / skipped_unknown / skipped_no_var / errors` buckets and `fully_succeeded` property.
+> 2. **T-42 (Bayesian write-path Approach C):** hoisted three constant keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope. Two were dead writes (read by nobody); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Hoist guarded against silent overwrite on resume — disagreeing values keep the stored value and log a warning. `_supports_early_stopping(model_name)` helper de-duplicates the trial-time and study-hoist gates. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39.
+> 3. **T-38 (dead preprocessing cleanup):** deleted `learned_preprocessing.py` (775 LOC, zero callers) and `ensemble_preprocessing.py` (701 LOC, only referenced by a dead `HAS_ENSEMBLE_PREPROCESSING` flag). Did NOT delete `preprocessing_wrapper.py` (still imported by `ensemble.py:18`) or `tests/test_ensemble_preprocessing.py` (despite the matching name — actually tests `preprocessing_wrapper` and `ensemble`, both alive).
+>
+> **Surprise finding documented during T-42:** post-T-41 baseline benchmark already met T-42's "definition of done" target — PLS 0.69×, Ridge 1.06×, LightGBM 0.93×, XGBoost 1.01× SQLite-WAL ratios, all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41. Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — separate trivial follow-up ticket.
+>
+> **Review trail (8 passes, cross-family):**
+> 1. **T-43** post-`f934c81` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 2 HIGH + 1 MEDIUM closed in `3f071b3`.
+> 2. **T-43** post-`487b1d9` — Codex CLI: BLOCKERS, 1 HIGH (`bayes_*` whitelist gap) + 1 MEDIUM (`skipped_no_var` not surfaced) + 1 LOW (docstring drift) closed in `2568be8`.
+> 3. **T-42** post-`ab9d00f` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 1 HIGH (stale `test_cv_strategy.py` assertion) + 1 MEDIUM (copy_study migration test gap) + 1 LOW closed in `e1daaa6`.
+> 4. **T-42** post-`ab9d00f` — Codex CLI: READY_TO_MERGE; verified empirically that `optuna.copy_study` preserves user_attrs.
+> 5. **T-38** post-`2eaef4f` — DeepSeek V4 Pro Max: READY_TO_MERGE, auto-applied 2 doc fixes in `c0b4c20`.
+> 6. **T-38** post-`2eaef4f` — Codex CLI: READY_WITH_REVISIONS, 1 LOW (stale PROJECT_STATUS sentence) closed in `de55f32`.
+> 7. **Stacked diff** post-`de55f32` — pr-review-toolkit parallel-5 (code-reviewer / silent-failure-hunter / type-design-analyzer / pr-test-analyzer / comment-analyzer): 3 HIGH + 3 MEDIUM (model-mislabel in summarize, resume-Yes-None silent path, hoist-on-resume corruption + see-log pointer reliability + RestoreReport.fully_succeeded + `_supports_early_stopping` helper) plus comment-trail-prefix sweep all closed in `fe5e25d`.
+>
+> **Test coverage:** **252/252 + 1 skipped** across `test_t41_bayesian_sqlite_auto_calculator`, `test_t42_write_path_plumbing` (8 tests), `test_t43_resume_auto_restore` (26 tests), `test_run_state`, `test_cv_strategy`, `test_unified_bayesian_baseline`, `test_autoscale_bayesian`, `test_cv_pls_clamp`, `test_ensemble_preprocessing`, `test_ensemble_integration`. Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` post-T-38 deletion — clean.
+>
+> **Pre-existing bugs surfaced for separate follow-up tickets:**
+> - `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` (hasattr-guarded); the actual var is `self.n_unified_trials`. The hasattr guard short-circuits to None, so `n_trials_per_model` is always None in `start_run` metadata. T-43 captures `n_unified_trials` correctly via the whitelist.
+> - `logger.warning` invisible in bundled GUI (no `logging.basicConfig`); silent in production. Pre-existing pattern.
+> - `_apply_wal_pragmas` return value discarded at call sites despite the helper documenting "caller should surface that." Pre-existing T-41 follow-up.
+>
+> **Audit trail:**
+> - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
+> - T-43 + T-38: code + tests + this PROJECT_STATUS entry serve as audit trail.
+>
+> ---
+>
+> **Previously: per-ticket framing (now consolidated):**
 >
 > **T-38 dead preprocessing module cleanup — IMPLEMENTED on `fix/T38-dead-preprocessing-cleanup` (1 commit, branched off T-42 tip).** Deleted `src/spectral_predict/learned_preprocessing.py` (775 LOC, zero callers — imports torch but never wired into the GUI) and `src/spectral_predict/ensemble_preprocessing.py` (701 LOC, only referenced by a dead `HAS_ENSEMBLE_PREPROCESSING` flag in the GUI try/except block at `gui:236-241`). Removed the dead flag too. **Did NOT delete `preprocessing_wrapper.py`** (still imported by `ensemble.py:18`) — plan was corrected on this point during T-37 review. Also did NOT delete `tests/test_ensemble_preprocessing.py` despite its matching name — that file actually tests `preprocessing_wrapper` and `ensemble`, both alive (the test name is misleading). Updated build-time torch-exclusion comments + `BUNDLED_APP_BUILD_GUIDE_PY312.md` Step 3 rationale. 244/244 across the regression sweep + clean `pkgutil.walk_packages` sanity-import of all `spectral_predict.*` submodules.
 >
 > ---
 >
 > **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `5670c26`, 3 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
->
-> **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `e1daaa6`, 2 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
 >
 > **Surprise empirical finding (changes T-42's framing):** the post-T-41 baseline benchmark (`tests/_bench_bayesian_per_model.py`, n_trials=10, synthetic n=100, n_features=200) **already met T-42's "definition of done" target**: PLS 0.69×, Ridge 1.06×, RandomForest 0.25× (caching), LightGBM 0.93×, XGBoost 1.01× — all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41 measurements. **Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — file as a separate trivial follow-up ticket.** Approaches A and D no longer needed.
 >
