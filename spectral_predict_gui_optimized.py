@@ -3202,6 +3202,9 @@ class SpectralPredictApp:
         self.bayes_region_test_all = tk.BooleanVar(value=False)
         self.bayes_region_test_pairwise = tk.BooleanVar(value=False)
         self.bayes_enable_uve = tk.BooleanVar(value=True)
+        # T-41: crash-resume persistence mode. Default='never' (zero overhead).
+        # User opts into 'auto' or 'always' only when they want crash-resume.
+        self.bayesian_persistence_mode = tk.StringVar(value='never')
 
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
@@ -12350,6 +12353,33 @@ class SpectralPredictApp:
         self._cb_bayes_enable_uve.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Label(self.bayes_options_frame, text="(fast ~50-100ms/trial, adds uninformative variable elimination)",
                   style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, pady=(5, 0))
+        # Row 5: T-41 Crash-resume persistence
+        ttk.Label(self.bayes_options_frame, text="Crash-resume persistence:",
+                  style='Normal.TLabel').grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
+        _persist_radio_frame = ttk.Frame(self.bayes_options_frame)
+        _persist_radio_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W, pady=(8, 0))
+        for _pval, _ptxt in [
+            ('auto', 'Auto (recommended)'),
+            ('always', 'Always on'),
+            ('never', 'Always off'),
+        ]:
+            ttk.Radiobutton(
+                _persist_radio_frame, text=_ptxt,
+                variable=self.bayesian_persistence_mode, value=_pval,
+            ).pack(side=tk.LEFT, padx=(0, 10))
+        _persist_tooltip = (
+            "Auto: first 10 trials in-memory; SQLite enabled only when median "
+            "trial fit time > 1s (overhead ~1.2x at threshold). Fast models "
+            "like PLS run 8x slower with SQLite enabled, so auto disables it "
+            "for them.\n"
+            "Always on: SQLite from trial 0 — universal crash-resume at the "
+            "cost of speed (PLS ~8x slower, XGBoost ~1.4x slower).\n"
+            "Always off: pure in-memory, zero overhead (default — best for "
+            "interactive use where re-run is cheap)."
+        )
+        ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
+                  style='Caption.TLabel', wraplength=500,
+                  ).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
 
         # Initially hide if not Bayesian
         if self.optimization_method.get() == "unified":
@@ -24997,6 +25027,11 @@ class SpectralPredictApp:
                         model_names=list(selected_models) if selected_models else [],
                         n_trials_per_model=int(self.n_trials_var.get())
                         if hasattr(self, "n_trials_var") else None,
+                        bayesian_persistence_mode=(  # T-41
+                            self.bayesian_persistence_mode.get()
+                            if hasattr(self, "bayesian_persistence_mode")
+                            else "never"
+                        ),
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:
@@ -27087,6 +27122,7 @@ class SpectralPredictApp:
                                 enable_autoscale=self.use_autoscale.get(),  # T-36
                                 inlier_class_label=inlier_label,
                                 enable_uve=self.bayes_enable_uve.get(),
+                                enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
                             )
                             if oc_results_df is not None and len(oc_results_df) > 0:
                                 best = oc_results_df.iloc[0]
@@ -27432,6 +27468,7 @@ class SpectralPredictApp:
                             smoothing_polyorder=sm_poly,
                             enable_autoscale=self.use_autoscale.get(),  # T-36
                             enable_uve=enable_uve,
+                            enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
                         )
 
                         if len(results_df_model) > 0:

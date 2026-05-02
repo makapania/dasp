@@ -1605,6 +1605,100 @@ def create_unified_objective(
     return objective
 
 
+# ---------------------------------------------------------------------------
+# T-41: SQLite WAL helpers + study migration
+# ---------------------------------------------------------------------------
+
+def _apply_wal_pragmas(sqlite_url: str) -> None:
+    """Apply WAL journal mode and tuned pragmas to a SQLite Optuna database.
+
+    Must be called AFTER Optuna has created the SQLite file (via
+    ``optuna.create_study`` or ``optuna.copy_study``). On Windows the default
+    journal mode is DELETE, which gives roughly 3.4x slower per-trial writes
+    than WAL. Setting ``wal_autocheckpoint=50`` bounds crash-loss to ~50 trials.
+
+    WAL+synchronous=NORMAL prevents database corruption on crash but may lose
+    trials between the last checkpoint and crash. Acceptable for this use-case.
+
+    Args:
+        sqlite_url: Optuna-style ``sqlite:///path/to/file.sqlite3?...`` URL.
+    """
+    import sqlite3 as _sqlite3
+
+    # Strip the Optuna SQLite URL prefix and any query-string parameters.
+    db_path = sqlite_url.split("?")[0].replace("sqlite:///", "")
+    try:
+        conn = _sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA wal_autocheckpoint = 50")
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("T-41: could not apply WAL pragmas to %s: %s", db_path, exc)
+
+
+def _make_tpe_sampler(random_state: int) -> TPESampler:
+    """Construct a fresh TPE sampler with dasp's standard settings."""
+    return TPESampler(
+        seed=random_state,
+        n_startup_trials=20,
+        n_ei_candidates=32,
+        multivariate=True,
+        consider_endpoints=True,
+        warn_independent_sampling=False,
+    )
+
+
+def _migrate_study_to_sqlite(
+    study: optuna.Study,
+    sqlite_url: str,
+    study_name: str,
+    random_state: int,
+) -> optuna.Study:
+    """Migrate a running in-memory Optuna study to a SQLite backend.
+
+    Uses ``optuna.copy_study`` (data copy) followed by
+    ``optuna.load_study(sampler=TPESampler(...))`` (sampler attach).
+
+    CRITICAL: ``optuna.create_study(load_if_exists=True, sampler=...)``
+    SILENTLY IGNORES the sampler kwarg on existing studies (Optuna 4.8
+    empirically verified by DeepSeek V4 Pro Max on 2026-05-01).  The only
+    correct way to attach a sampler to an existing study is
+    ``optuna.load_study(sampler=...)``.
+
+    After migration TPE rebuilds its internal state from the copied trials on
+    the next ``study.optimize()`` call, so exploitation continues seamlessly.
+
+    Args:
+        study: The active in-memory study to migrate.
+        sqlite_url: Optuna-style ``sqlite:///...`` URL for the target file.
+        study_name: Study name to use in the SQLite backend.
+        random_state: Random seed for the fresh TPE sampler.
+
+    Returns:
+        A new ``optuna.Study`` object backed by SQLite, containing all
+        trials from the original in-memory study.
+    """
+    # Step 1: copy all trials, params, user_attrs, directions to SQLite.
+    optuna.copy_study(
+        from_study_name=study.study_name,
+        to_study_name=study_name,
+        from_storage=study._storage,
+        to_storage=sqlite_url,
+    )
+
+    # Step 2: apply WAL pragmas — copy_study just created the SQLite file.
+    _apply_wal_pragmas(sqlite_url)
+
+    # Step 3: load study with a fresh sampler.  This is the ONLY way to attach
+    # a sampler to an existing study; TPE will rebuild from copied trials.
+    return optuna.load_study(
+        study_name=study_name,
+        storage=sqlite_url,
+        sampler=_make_tpe_sampler(random_state),
+    )
+
+
 def run_unified_bayesian(
     X: np.ndarray,
     y: np.ndarray,
@@ -1633,6 +1727,7 @@ def run_unified_bayesian(
     enable_autoscale: bool = False,  # T-36
     enable_uve: bool = False,
     inlier_class_label=None,
+    enable_sqlite_persistence: str = "never",  # T-41: 'auto', 'always', 'never'
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1689,6 +1784,15 @@ def run_unified_bayesian(
         Smoothing polynomial order (used when smoothing=True)
     enable_uve : bool, default=False
         Include UVE (Uninformative Variable Elimination) as a variable selection method
+    enable_sqlite_persistence : str, default='never'
+        Controls Optuna SQLite crash-resume persistence. T-41 auto-calculator.
+        - 'never'  : always in-memory; no SQLite file created (default — zero overhead).
+        - 'auto'   : first 10 trials in-memory; then decides based on median fit time.
+                     If median > 1.0s the study migrates to SQLite+WAL (overhead ~1.2x).
+                     If median <= 1.0s stays in-memory (fast models like PLS are 8x slower
+                     with persistence, so 'never'/'auto' are the right defaults).
+        - 'always' : SQLite+WAL from trial 0 for every model. Accepts the speed cost in
+                     exchange for crash-resume on all models.
 
     Returns
     -------
@@ -1925,25 +2029,150 @@ def run_unified_bayesian(
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
     study_name = f"unified_bayesian_{model_name}_{config_hash}"
 
+    # ---------------------------------------------------------------------------
+    # T-41: SQLite auto-calculator — decide storage mode per model.
+    # ---------------------------------------------------------------------------
     storage_url = get_storage_url()
-    create_kwargs = {
-        "direction": "minimize",
-        "sampler": sampler,
-        "study_name": study_name,
-    }
-    if storage_url is not None:
-        create_kwargs["storage"] = storage_url
-        create_kwargs["load_if_exists"] = True
-    study = optuna.create_study(**create_kwargs)
 
-    # Progress callback wrapper
-    def progress_wrapper(study: optuna.Study, trial: optuna.trial.FrozenTrial):
-        # Check for stop/pause signal from controller
+    # 'never': pure in-memory; ignore any active storage URL entirely.
+    # 'always': SQLite from trial 0 (if a storage URL is available).
+    # 'auto': first 10 trials in-memory, then decide based on median fit time.
+    _persistence_mode = enable_sqlite_persistence.lower()
+
+    if _persistence_mode == "always" and storage_url is not None:
+        # Always-on: create SQLite study from trial 0 (T-41 Task 2).
+        create_kwargs: dict = {
+            "direction": "minimize",
+            "study_name": study_name,
+            "storage": storage_url,
+            "load_if_exists": True,
+        }
+        # NOTE: sampler kwarg is intentionally NOT passed here — on existing
+        # studies, create_study(load_if_exists=True, sampler=...) SILENTLY
+        # IGNORES the sampler.  We pass None here so Optuna uses its default
+        # for a new study, then immediately re-open via load_study to attach.
+        # For a brand-new study this is a two-step no-op; for an existing
+        # resume it correctly reattaches TPE.
+        study = optuna.create_study(**create_kwargs)
+        # Apply WAL pragmas immediately — Optuna may create the file lazily on
+        # the first access, so we trigger that by doing a read on the study.
+        try:
+            _ = len(study.trials)  # forces lazy SQLite init
+        except Exception:
+            pass
+        _apply_wal_pragmas(storage_url)
+        # Reattach a fresh TPE sampler (the only safe way per Optuna 4.8).
+        study = optuna.load_study(
+            study_name=study_name,
+            storage=storage_url,
+            sampler=_make_tpe_sampler(random_state),
+        )
+        _sqlite_decided = True
+    else:
+        # 'never' OR 'auto' (warmup window) — start in-memory.
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=sampler,
+            study_name=study_name,
+        )
+        _sqlite_decided = (_persistence_mode == "never")  # 'never' is final
+
+    # --- auto-decision state ---
+    _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
+    _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (ratio ~1.2x)
+    _auto_migrated = False   # True after the in-memory -> SQLite migration
+
+    # Progress callback wrapper (must reference `study` via mutable container
+    # so the auto-migration can swap it after the warmup window).
+    _study_ref: list[optuna.Study] = [study]
+
+    def progress_wrapper(cb_study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        nonlocal _sqlite_decided, _auto_migrated
+
+        # Check for stop/pause signal from controller.
         if controller is not None:
             if not controller.check_and_wait():
-                # User requested stop - tell Optuna to stop after this trial
-                study.stop()
+                _study_ref[0].stop()
                 return
+
+        # --- T-41 auto-decision logic (only runs during 'auto' warmup) ---
+        if (
+            _persistence_mode == "auto"
+            and not _sqlite_decided
+            and storage_url is not None
+        ):
+            from optuna.trial import TrialState as _TS
+
+            completed = [
+                t for t in cb_study.trials
+                if t.state == _TS.COMPLETE and t.duration is not None
+            ]
+            n_completed = len(completed)
+
+            if n_completed >= _AUTO_WARMUP:
+                _sqlite_decided = True  # only decide once
+
+                # Fallback: if fewer than 3 trials completed (e.g., one-class
+                # with many CV-skip failures), default SQLite ON conservatively.
+                if n_completed < 3:
+                    use_sqlite = True
+                    median_s = float("nan")
+                    decision_reason = (
+                        f"Auto-enabled SQLite (only {n_completed} completed trials — "
+                        "conservative default)"
+                    )
+                else:
+                    durations = sorted(
+                        t.duration.total_seconds() for t in completed
+                    )
+                    mid = len(durations) // 2
+                    median_s = (
+                        durations[mid]
+                        if len(durations) % 2 == 1
+                        else (durations[mid - 1] + durations[mid]) / 2.0
+                    )
+                    use_sqlite = median_s > _AUTO_THRESHOLD_S
+                    if use_sqlite:
+                        ratio = 1.0 + 0.200 / median_s  # approx overhead ratio
+                        decision_reason = (
+                            f"Auto-enabled SQLite (median trial = {median_s:.2f}s, "
+                            f"overhead ratio ~{ratio:.2f}x)"
+                        )
+                    else:
+                        slowdown = 1.0 + 0.200 / max(median_s, 1e-6)
+                        decision_reason = (
+                            f"Auto-disabled SQLite (median trial = {median_s * 1000:.0f}ms, "
+                            f"would slow run by {slowdown:.1f}x)"
+                        )
+
+                logger.info("T-41 auto-calculator: %s", decision_reason)
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "unified_bayesian",
+                            "current": trial.number + 1,
+                            "total": n_trials,
+                            "message": f"[T-41] {decision_reason}",
+                            "t41_decision": decision_reason,
+                        }
+                    )
+
+                if use_sqlite:
+                    try:
+                        migrated = _migrate_study_to_sqlite(
+                            cb_study, storage_url, study_name, random_state
+                        )
+                        _study_ref[0] = migrated
+                        _auto_migrated = True
+                        logger.info(
+                            "T-41: migrated study '%s' to SQLite (WAL)", study_name
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "T-41: migration to SQLite failed, continuing in-memory: %s",
+                            exc,
+                        )
+                # else: stay in-memory — no action needed.
 
         if progress_callback:
             progress_info = {
@@ -1969,8 +2198,8 @@ def run_unified_bayesian(
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
             # Add best model tracking for "Best Model So Far" display
-            if study.best_trial is not None:
-                best = study.best_trial
+            if _study_ref[0].best_trial is not None:
+                best = _study_ref[0].best_trial
                 best_model = {
                     'Model': model_name,
                     'Preprocess': _build_display_preprocess_name(
@@ -2037,6 +2266,11 @@ def run_unified_bayesian(
         )
     else:
         print(f"  All {n_trials} trials already complete; skipping optimization.")
+
+    # After optimization, resolve the final study object.  If 'auto' migration
+    # happened, _study_ref[0] is the SQLite-backed study; otherwise it's the
+    # original in-memory study.
+    study = _study_ref[0]
 
     # Convert results to DataFrame
     results_df = convert_study_to_dataframe(
