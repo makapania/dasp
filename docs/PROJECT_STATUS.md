@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-05-02 (T-43 + T-42 + T-38 CONSOLIDATED — single branch ready for one PR) —
 >
-> **All three tickets land on `fix/bayesian-resume-and-cleanup` (tip `fe5e25d`, 11 commits off main).** User decision after the parallel pr-review-toolkit pass: ship as one PR rather than three. The per-ticket branches (`fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`) remain on origin as reference and can be deleted once the consolidated PR merges.
+> **All four tickets (T-43 + T-42 + T-38 + T-49) land on `fix/bayesian-resume-and-cleanup` (tip `6465306`, 14 commits off main).** User decision after the parallel pr-review-toolkit pass: ship as one PR rather than three. T-49 was originally filed as a follow-up but the user (correctly) flagged it as a correctness blocker for the resume flow and folded it into the same PR. The per-ticket branches (`fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`) remain on origin as reference and can be deleted once the consolidated PR merges.
 >
 > **What's in the PR:**
 > 1. **T-43 (auto-restore GUI settings on resume):** ~91 analysis-defining Tk vars captured at `start_run` time and restored when the user accepts the resume banner — preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters, the 6 `bayes_*` Bayesian-only controls, and the 5 external-validation-set Tk vars. New `src/spectral_predict/run_gui_settings.py` module + extended `RunMetadata.gui_settings: dict | None` with `dataclasses.fields()` filter + type-guard for malformed sidecars + `RestoreReport` with `restored / skipped_unknown / skipped_no_var / errors` buckets and `fully_succeeded` property. **Plus T-49 (folded in):** validation set indices persisted alongside `gui_settings` in the sidecar so non-deterministic algorithms (Random, Manual) and hand-picked partitions resume without silent leakage. New `_apply_pending_validation_indices` GUI helper re-slices `self.X` / `self.y` after the fingerprint check passes; respects the user's manual re-creation if they did one before clicking Run Analysis; defense-in-depth on missing labels.
@@ -11,14 +11,15 @@
 >
 > **Surprise finding documented during T-42:** post-T-41 baseline benchmark already met T-42's "definition of done" target — PLS 0.69×, Ridge 1.06×, LightGBM 0.93×, XGBoost 1.01× SQLite-WAL ratios, all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41. Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — separate trivial follow-up ticket.
 >
-> **Review trail (8 passes, cross-family):**
+> **Review trail (7 review passes + 1 user catch, cross-family):**
 > 1. **T-43** post-`f934c81` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 2 HIGH + 1 MEDIUM closed in `3f071b3`.
 > 2. **T-43** post-`487b1d9` — Codex CLI: BLOCKERS, 1 HIGH (`bayes_*` whitelist gap) + 1 MEDIUM (`skipped_no_var` not surfaced) + 1 LOW (docstring drift) closed in `2568be8`.
 > 3. **T-42** post-`ab9d00f` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 1 HIGH (stale `test_cv_strategy.py` assertion) + 1 MEDIUM (copy_study migration test gap) + 1 LOW closed in `e1daaa6`.
 > 4. **T-42** post-`ab9d00f` — Codex CLI: READY_TO_MERGE; verified empirically that `optuna.copy_study` preserves user_attrs.
 > 5. **T-38** post-`2eaef4f` — DeepSeek V4 Pro Max: READY_TO_MERGE, auto-applied 2 doc fixes in `c0b4c20`.
 > 6. **T-38** post-`2eaef4f` — Codex CLI: READY_WITH_REVISIONS, 1 LOW (stale PROJECT_STATUS sentence) closed in `de55f32`.
-> 7. **Stacked diff** post-`de55f32` — pr-review-toolkit parallel-5 (code-reviewer / silent-failure-hunter / type-design-analyzer / pr-test-analyzer / comment-analyzer): 3 HIGH + 3 MEDIUM (model-mislabel in summarize, resume-Yes-None silent path, hoist-on-resume corruption + see-log pointer reliability + RestoreReport.fully_succeeded + `_supports_early_stopping` helper) plus comment-trail-prefix sweep all closed in `fe5e25d`.
+> 7. **Stacked diff** post-`de55f32` — pr-review-toolkit parallel-5 (code-reviewer / silent-failure-hunter / type-design-analyzer / pr-test-analyzer / comment-analyzer): 3 HIGH + 3 MEDIUM closed in `fe5e25d`.
+> 8. **User catch** during review wrap-up: validation partition not maintained on resume — silent leakage on Random/Manual algorithms, silent skip if user forgets the button on deterministic algorithms. Originally filed as T-49 follow-up; user (correctly) called it a correctness blocker. Folded in at `6465306` with 8 new tests.
 >
 > **Test coverage:** **257/257 + 1 skipped** across `test_t41_bayesian_sqlite_auto_calculator`, `test_t42_write_path_plumbing` (8 tests), `test_t43_resume_auto_restore` (33 tests including the 8 new T-49 cases), `test_run_state`, `test_cv_strategy`, `test_unified_bayesian_baseline`, `test_autoscale_bayesian`, `test_cv_pls_clamp`, `test_ensemble_preprocessing`, `test_ensemble_integration`. Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` post-T-38 deletion — clean.
 >
@@ -31,7 +32,7 @@
 >
 > **Audit trail:**
 > - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
-> - T-43 + T-38: code + tests + this PROJECT_STATUS entry serve as audit trail.
+> - T-43 + T-38 + T-49: code + tests + this PROJECT_STATUS entry serve as audit trail. T-49 plan doc (`docs/plans/2026-05-02-T49-...md`) is marked IMPLEMENTED with implementation summary.
 >
 > ---
 >
