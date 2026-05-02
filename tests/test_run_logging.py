@@ -30,11 +30,13 @@ def fresh_logging(tmp_path, monkeypatch):
     yield rl, rp, tmp_path
 
     # Clean up: detach any handlers + restore stdout/stderr if the test
-    # installed the tee proxy.
-    logger = logging.getLogger("dasp.run")
-    for handler in list(logger.handlers):
-        handler.close()
-        logger.removeHandler(handler)
+    # installed the tee proxy. T-45 added the spectral_predict logger
+    # handler too — clean both so tests don't leak state into siblings.
+    for logger_name in ("dasp.run", "spectral_predict"):
+        sp_logger = logging.getLogger(logger_name)
+        for handler in list(sp_logger.handlers):
+            handler.close()
+            sp_logger.removeHandler(handler)
     if rl._original_stdout is not None:
         sys.stdout = rl._original_stdout
         sys.stderr = rl._original_stderr
@@ -239,3 +241,161 @@ def test_rotating_handler_rolls_over_at_threshold(fresh_logging, monkeypatch):
     # exist after this volume. Use glob to handle path differences.
     backups = list(path.parent.glob(f"{path.name}.*"))
     assert backups, f"expected at least one backup, got none in {list(path.parent.iterdir())}"
+
+
+# ---------------------------------------------------------------------------
+# T-45: app-lifetime logger handler
+# ---------------------------------------------------------------------------
+
+
+def test_setup_app_logger_creates_dasp_log_at_user_data_dir(fresh_logging):
+    """T-45: setup_app_logger writes to <user_data_dir>/dasp.log so module
+    warnings (sidecar corruption, WAL rejection, capture-time Tk failures)
+    survive in the bundled GUI where stderr is /dev/null."""
+    rl, _, tmp_path = fresh_logging
+
+    path = rl.setup_app_logger()
+    assert path is not None
+    assert path.name == "dasp.log"
+    assert path.parent.name == "dasp"
+
+    # Module loggers (run_state, run_gui_settings, unified_bayesian) all
+    # use logger = logging.getLogger(__name__), so they propagate up to
+    # the spectral_predict logger where the T-45 handler attached.
+    sp_logger = logging.getLogger("spectral_predict")
+    assert any(
+        h.__class__.__name__ == "_SafeRotatingFileHandler"
+        for h in sp_logger.handlers
+    )
+
+
+def test_setup_app_logger_captures_module_warnings(fresh_logging):
+    """End-to-end: a logger.warning from a child logger (the same
+    'spectral_predict.run_state' shape used in production) lands in
+    dasp.log."""
+    rl, _, _ = fresh_logging
+    path = rl.setup_app_logger()
+    assert path is not None
+
+    child = logging.getLogger("spectral_predict.run_state")
+    child.warning("T-45 smoke test: corrupted sidecar coerced to never")
+
+    for h in logging.getLogger("spectral_predict").handlers:
+        h.flush()
+
+    contents = path.read_text(encoding="utf-8")
+    assert "T-45 smoke test" in contents
+    assert "WARNING" in contents
+    assert "spectral_predict.run_state" in contents
+
+
+def test_setup_app_logger_idempotent(fresh_logging):
+    """Idempotent: a second call returns the same path AND doesn't add a
+    duplicate handler (which would double-log every warning)."""
+    rl, _, _ = fresh_logging
+
+    path1 = rl.setup_app_logger()
+    path2 = rl.setup_app_logger()
+    assert path1 == path2
+
+    sp_logger = logging.getLogger("spectral_predict")
+    file_handlers = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+    ]
+    assert len(file_handlers) == 1, (
+        f"setup_app_logger must not double-attach; got {len(file_handlers)}"
+    )
+
+
+def test_setup_app_logger_dedups_after_module_reload(fresh_logging):
+    """T-45 fix-of-fixes (Codex MEDIUM): a stale handler from a previous
+    module incarnation must not cause a second handler to attach. The
+    fresh_logging fixture pops run_logging from sys.modules between tests;
+    if a prior test left a handler on the spectral_predict logger and the
+    fixture's logger-cleanup hadn't run yet, _app_log_path on the new
+    module would be None but the handler would still be there. Without
+    the dedup, calling setup_app_logger would stack a second handler
+    pointing at the same file."""
+    rl, _, tmp_path = fresh_logging
+
+    path = rl.setup_app_logger()
+    assert path is not None
+
+    sp_logger = logging.getLogger("spectral_predict")
+    handlers_before = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+    ]
+    assert len(handlers_before) == 1
+
+    # Simulate a module reload: pop run_logging, re-import, call setup
+    # again. The handler from the first call is still on the logger
+    # (cleanup hasn't run yet — that's the failure scenario).
+    sys.modules.pop("spectral_predict.run_logging", None)
+    rl_reloaded = importlib.import_module("spectral_predict.run_logging")
+    path2 = rl_reloaded.setup_app_logger()
+    assert path2 == path
+
+    handlers_after = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+    ]
+    assert len(handlers_after) == 1, (
+        f"Module reload must reuse existing handler, got "
+        f"{len(handlers_after)} handlers attached"
+    )
+
+
+def test_cli_main_calls_setup_app_logger(fresh_logging, monkeypatch):
+    """T-45 fix-of-fixes (Codex HIGH): the `spectral-predict` console
+    script is a third Tk-launching path (interactive_gui.py creates a
+    Tk root). Without setup_app_logger called from cli.main, console-
+    script users got the same /dev/null stderr the bundled GUI used to
+    have — defeating T-45's stated goal that "no startup path leaves
+    the user without diagnostics".
+
+    Verify cli.main calls setup_app_logger before doing anything else
+    that could raise (argparse error, missing file, etc.). Use a sentinel
+    sys.argv that triggers --version exit so we don't actually run a
+    full pipeline — just need to confirm the import-and-call happened."""
+    rl, _, _ = fresh_logging
+
+    called: list[bool] = []
+    monkeypatch.setattr(rl, "setup_app_logger", lambda: called.append(True) or None)
+
+    # Re-import cli with the patched run_logging in place so cli's
+    # `from .run_logging import setup_app_logger` picks up the monkeypatch.
+    sys.modules.pop("spectral_predict.cli", None)
+    cli = importlib.import_module("spectral_predict.cli")
+    monkeypatch.setattr(cli, "setup_app_logger", lambda: called.append(True) or None,
+                        raising=False)
+
+    monkeypatch.setattr(sys, "argv", ["spectral-predict", "--version"])
+    with pytest.raises(SystemExit):
+        cli.main()
+
+    assert called, (
+        "cli.main must call setup_app_logger so console-script users "
+        "get the same observability the bundled GUI gets"
+    )
+
+
+def test_setup_app_logger_swallows_setup_failure(fresh_logging, monkeypatch):
+    """Logger setup is best-effort: if get_user_data_dir() raises
+    (read-only filesystem, missing env var on a misconfigured host), the
+    function returns None and the caller continues. App startup must not
+    hang on a logger config failure."""
+    rl, rp, _ = fresh_logging
+
+    def _explode():
+        raise OSError("simulated read-only filesystem")
+
+    monkeypatch.setattr(rp, "get_user_data_dir", _explode)
+    # Also patch where setup_app_logger imports from.
+    monkeypatch.setattr(
+        "spectral_predict.resource_paths.get_user_data_dir", _explode
+    )
+
+    path = rl.setup_app_logger()
+    assert path is None, "setup must swallow the exception and return None"

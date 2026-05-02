@@ -15,6 +15,16 @@ from .interactive_gui import run_interactive_loading_gui
 
 def main():
     """Main CLI entry point."""
+    # T-45: same observability surface the bundled GUI uses. The console
+    # script is a third Tk-launching path (interactive_gui.py creates a Tk
+    # root); without this call, sidecar/WAL/Tk-capture warnings vanish in
+    # the same way they did in the GUI before T-45. Best-effort.
+    try:
+        from .run_logging import setup_app_logger
+        setup_app_logger()
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(
         description="Spectral Predict - Automated spectral analysis software",
         formatter_class=argparse.RawDescriptionHelpFormatter,

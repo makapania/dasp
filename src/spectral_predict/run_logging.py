@@ -297,6 +297,87 @@ def setup_run_logger(
         return logger, log_path
 
 
+_app_log_path: Path | None = None
+_app_logger_lock = threading.RLock()
+_APP_LOG_MAX_BYTES = 1_000_000  # 1 MB per file — module warnings only, not run output
+_APP_LOG_BACKUP_COUNT = 3       # 4 MB total ceiling
+
+
+def setup_app_logger() -> Path | None:
+    """Wire a RotatingFileHandler to the ``spectral_predict`` logger.
+
+    Module-level ``logger.warning`` calls in run_state, run_gui_settings,
+    and unified_bayesian propagate up to the ``spectral_predict`` logger.
+    Without a handler attached there, those warnings vanish in the bundled
+    PyInstaller GUI (no console attached → stderr is /dev/null).
+
+    Distinct from ``setup_run_logger``: that wires a per-run log keyed to
+    Run Analysis click time. This wires an app-lifetime log so warnings
+    from app startup (e.g. corrupted resume sidecar) and from module-level
+    paths that aren't behind the dasp.run logger still land somewhere
+    diagnosable. Both can coexist — the run logger is in
+    ``logs/run_<timestamp>.log``; this one is at the top level
+    ``<user_data_dir>/dasp.log``.
+
+    Idempotent: a second call returns the same path without re-adding the
+    handler. Returns the path on success, ``None`` if setup failed (the
+    GUI keeps starting either way — logger visibility is best-effort).
+    """
+    global _app_log_path
+    with _app_logger_lock:
+        if _app_log_path is not None:
+            return _app_log_path
+
+        try:
+            from spectral_predict.resource_paths import get_user_data_dir
+
+            log_path = get_user_data_dir() / "dasp.log"
+            sp_logger = logging.getLogger("spectral_predict")
+
+            # Defense against module-reload double-attach: if a prior
+            # incarnation of this module already attached a handler to the
+            # same dasp.log path, the global was lost on reload but the
+            # handler survived on the logger. Reuse it instead of stacking.
+            # Match by class NAME, not isinstance — module reload creates
+            # a fresh _SafeRotatingFileHandler class object that fails
+            # isinstance against the survivor from the prior incarnation.
+            target_path = str(log_path)
+            for existing in sp_logger.handlers:
+                if existing.__class__.__name__ == "_SafeRotatingFileHandler" and (
+                    getattr(existing, "baseFilename", None) == target_path
+                ):
+                    _app_log_path = log_path
+                    return log_path
+
+            handler = _SafeRotatingFileHandler(
+                log_path,
+                maxBytes=_APP_LOG_MAX_BYTES,
+                backupCount=_APP_LOG_BACKUP_COUNT,
+                encoding="utf-8",
+                delay=False,
+            )
+            handler.setLevel(logging.WARNING)
+            handler.setFormatter(
+                logging.Formatter(
+                    fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            sp_logger.addHandler(handler)
+            if sp_logger.level == logging.NOTSET or sp_logger.level > logging.WARNING:
+                sp_logger.setLevel(logging.WARNING)
+
+            _app_log_path = log_path
+            return log_path
+        except Exception:
+            return None
+
+
+def get_app_log_path() -> Path | None:
+    """Return the app-lifetime log file path, or None if setup hasn't run."""
+    return _app_log_path
+
+
 def get_active_log_path() -> Path | None:
     """Return the active log file path, or None if no run logger has been set up."""
     return _active_log_path

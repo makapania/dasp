@@ -1,6 +1,10 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-47 MERGED to main + T-46 IMPLEMENTED) —
+> **Last updated:** 2026-05-02 (T-46 MERGED to main + T-45 IMPLEMENTED) —
+>
+> **T-46 MERGED via PR #12 at merge commit `08b20ea`.** Branch deleted from origin and locally. Both call sites of `_apply_wal_pragmas` now surface WAL rejection via the right channel; OneDrive/Dropbox/network-share users get a structured warning event instead of silent throughput halving.
+>
+> **T-45 IMPLEMENTED on `fix/T45-logger-file-handler` (off post-T-46 main).** Wired a `RotatingFileHandler` to the `spectral_predict` logger at app startup (1 MB per file, 3 backups, 4 MB total ceiling). Module-level `logger.warning` calls in `run_state` (corrupt-sidecar coercion, malformed `gui_settings`, empty-SQLite cleanup), `run_gui_settings` (capture-time Tk failures), and `unified_bayesian` (WAL rejection, T-42 hoist mismatch, migration failures) now land in `<user_data_dir>/dasp.log` instead of vanishing into PyInstaller's null stderr. New `setup_app_logger()` function in `src/spectral_predict/run_logging.py` — distinct from the existing `setup_run_logger()` (per-run, keyed to Run Analysis click): app-lifetime log catches startup-path warnings BEFORE the user clicks Run, plus all `spectral_predict.*` propagated warnings during the run. 4 new regression tests (`test_setup_app_logger_creates_dasp_log_at_user_data_dir`, `test_setup_app_logger_captures_module_warnings`, `test_setup_app_logger_idempotent`, `test_setup_app_logger_swallows_setup_failure`) + 11 existing `test_run_logging.py` tests joined the consolidated sweep. 279 + 1 skipped. **Pipeline behavior unchanged** — pure observability fix; warnings that already existed but were going to /dev/null now go to a file the user can find.
 >
 > **T-47 MERGED via PR #11 at merge commit `a29ad2d`.** Default-flip + DeepSeek follow-ups all rebased onto main; both T-47 commits + branch deleted from origin and locally. The dataclass-vs-function default symmetry + the deliberate "never"-kept legacy-sidecar/corruption-coercion fallbacks are now load-bearing in 3 regression tests.
 >
