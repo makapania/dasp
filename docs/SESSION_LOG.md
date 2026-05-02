@@ -4,6 +4,34 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-19 reframed — exported-code class_weight bugs) — XGBoost silent no-op + CatBoost/MLP TypeError
+
+T-19 reframed scope (per `project_t19_user_framing.md` — "expose model-native abilities, not paper reproducibility") surfaced three real bug classes in `code_generator.py`'s `imbalance_method='class_weight'` path:
+
+1. **CatBoost catch-all-else branch (`code_generator.py:917` pre-fix):** `params_full.setdefault('class_weight', 'balanced')` for CatBoost → `TypeError: unexpected keyword argument 'class_weight'` on `CatBoostClassifier.__init__`. Hard crash on instantiation. Verified empirically before the fix.
+
+2. **XGBoost catch-all-else branch (same site):** `XGBClassifier(class_weight='balanced')` does NOT raise. `class_weight` lands in `get_params()` but XGBoost's loss function ignores it entirely at fit time. **Silent unweighted training while the user believes imbalance handling was applied.** This is the worst kind of bug — no error, no warning, wrong predictions. Discovered via empirical instantiation test, not docs.
+
+3. **MLP StandardScaler-wrapped branch (`code_generator.py:904` pre-fix):** same `TypeError` as CatBoost. The `_needs_standard_scaler()` branch (`SVC/MLP/MLPClassifier/NeuralBoosted/Ridge/Lasso/ElasticNet`) was unconditionally injecting `class_weight='balanced'`. **I missed this in the initial T-19 fix because I had wrongly asserted to my reviewers that the StandardScaler path was correct-and-untouched.** GLM 5.1 caught it. Lesson: cross-family RLHF orthogonality earns its slot when I'm asserting things I haven't fully verified.
+
+**Why the runtime path doesn't crash for any of these:** `search.py:4418-4435` uses `hasattr(model, 'class_weight')` to gate the kwarg injection. Default `XGBClassifier()` and `CatBoostClassifier()` have NO `class_weight` attribute → falls through to sample_weight at fit() (which works). MLP same path → sklearn≥1.7 sample_weight, otherwise warning. Runtime is correct; only EXPORTED code was broken because the export emits `class_weight='balanced'` directly into the constructor.
+
+**Fix:** library-aware dispatch per kwarg shape:
+- CatBoost → `auto_class_weights='Balanced'`
+- XGBoost → no `__init__` kwarg; thread `sample_weight=compute_sample_weight('balanced', y)` into per-fold + final fit() calls (uniformly correct for binary AND multiclass; mirrors runtime)
+- MLP → no `class_weight` injection; mirror runtime fallback (unweighted, sklearn floor 1.5 below 1.7 sample_weight requirement)
+- Others (LightGBM/RandomForest/sklearn LR/SVC/NeuralBoosted) keep `class_weight='balanced'` — works natively.
+
+**Conditional fit_kwargs emission (GLM MEDIUM):** initial T-19 commit emitted `fit_kwargs = {}` and `**fit_kwargs` for ALL classification models even when sample_weight wasn't being threaded. Pure noise in generated code; readers wonder what the empty dict was supposed to carry. Fix-of-fixes commit makes the `fit_kwargs` plumbing conditional on `xgb_sample_weight=True`.
+
+**Indentation discipline noted in code:** `sample_weight_block_cv` prefixes 4 spaces (lands inside for-loop body); `sample_weight_block_final` prefixes 0 spaces (module-level). Comment in template warns against "normalizing" prefixes during refactor — would silently break layout. Tests pin via `exec()` of generated code, so refactor breakage fails fast in CI.
+
+**Cross-family review pattern (3 reviewers, all closed):** GLM 5.1 (twice — once via diff bundle through llm-call/z.ai, once via opencode-call after user routing correction) + DeepSeek V4 Pro Max via opencode-call. GLM caught the MLP gap I had wrongly asserted was correct. DeepSeek validated multiclass `compute_sample_weight` correctness (`n_samples / (n_classes * count)` formula handles n_classes>2 uniformly; XGBoost's `fit(sample_weight=...)` accepts per-sample weights in multiclass mode). Two LOW findings deferred (duplicate `compute_sample_weight` import in CV + final-model sections — Python handles dedup as no-op; `startswith('XGB')` redundant after canonicalization — harmless until a hypothetical `XGBaseline` model is added).
+
+**Operational lesson:** opencode-call agents leave the working tree on the branch they checked out. After the agent returns, **verify branch state before continuing** — I lost a few minutes when an MLP edit landed on `main` instead of `fix/T19-expose-model-native-imbalance` because the GLM agent had `git checkout main`'d during its review. Memory `feedback_parallel_review_reroute.md` captures the routing-correction lesson; the branch-state lesson is implicit in this entry.
+
+---
+
 ## 2026-05-02 (open-ticket re-validation pass) — roadmap doc had drifted from memory; reconcile through amendment block, not rewrite
 
 User asked: "look through all of the open tickets and check that they are all 'real', not problems we are trying to solve that are not relevant for chemometric literature." Recurring failure mode in this repo: tickets get filed by importing sklearn-pipeline-purity instincts onto per-spectrum chemometrics ops (T-01/T-02/T-03 leakage panic, T-08 CARS framing). The April 2026-04-30 master-rule re-evaluation cleaned that out, but three ticket dispositions had evolved further in memory without the canonical roadmap doc tracking it: T-15 was DROPPED (memory `project_t15_dropped_t16_reframed.md`), T-16 was REFRAMED to "competitive model-comparison machinery survey" (same memory), T-19 was REFRAMED to "expose model-native abilities, not reproduce a publication framework" (memory `project_t19_user_framing.md`). Roadmap doc still showed all three as KEEP under the original framings.

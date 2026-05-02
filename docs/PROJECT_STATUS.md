@@ -1,6 +1,45 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (open-ticket disposition reconciled through 2026-05-02 — see Amendments block in roadmap doc).
+> **Last updated:** 2026-05-02 (T-19 reframed branch implemented + reviewed; awaiting PR open).
+>
+> ## T-19 reframed — IMPLEMENTED on `fix/T19-expose-model-native-imbalance` (3 commits, awaiting user PR)
+>
+> Tip: `bdeb735` (commits: `3c63ffe` initial fix → `765a82f` GLM MEDIUMs closed → `bdeb735` DeepSeek residual multiclass test). Pushed to origin. **NOT MERGED — user opens PRs.**
+>
+> **Bug class:** exported scripts under `imbalance_method='class_weight'` were broken in three ways:
+> - **CatBoost**: `class_weight='balanced'` injected into `__init__` → `TypeError: unexpected keyword argument 'class_weight'`. Hard crash on instantiation.
+> - **XGBoost**: `class_weight='balanced'` accepted by `__init__` but **silently ignored at fit time** (XGBoost has no class_weight kwarg in its loss). User runs the export and gets unweighted predictions while believing imbalance was handled.
+> - **MLP** (StandardScaler-wrapped path, GLM finding): same `TypeError` as CatBoost — MLPClassifier has no `class_weight` kwarg.
+>
+> **Fix:** library-aware dispatch in `code_generator._render_model()` catch-all else branch + StandardScaler-wrapped path:
+> - CatBoost → `auto_class_weights='Balanced'` (canonical CatBoost balanced-loss kwarg)
+> - XGBoost → `sample_weight=compute_sample_weight('balanced', y)` threaded into per-fold and final fit() calls (mirrors `search.py:4418-4435` runtime path; uniformly correct for binary AND multiclass)
+> - MLP → no class_weight injection (mirrors runtime fallback at `search.py:4439-4444`; sklearn≥1.7 sample_weight at fit() is above the pyproject 1.5 floor)
+> - Other libraries (LightGBM/RandomForest/sklearn LR/SVC/NeuralBoosted) keep `class_weight='balanced'` — works natively.
+>
+> **Conditional fit_kwargs emission** (GLM finding): non-XGBoost paths under any imbalance method no longer emit `fit_kwargs = {}` and `**fit_kwargs` noise into generated code. Plain `.fit(X, y)` returns when sample_weight isn't being threaded.
+>
+> **Indentation discipline noted in code:** `sample_weight_block_cv` prefixes 4 spaces (lands inside for-loop body); `sample_weight_block_final` prefixes 0 spaces (module-level). Comment in `_render_cross_validation()` warns against "normalizing" prefixes during refactor.
+>
+> **Test coverage:** 18 new regression tests in `tests/test_t19_class_weight_per_library.py` — per-library kwarg emission contracts + end-to-end `exec()` of generated scripts on synthetic imbalanced data (binary + 3-class for XGBoost) + MLP no-injection + SVC keeps class_weight + non-XGBoost noise-free + negative controls (SMOTE / no-imbalance modes unchanged). Plus consolidated 11-file regression sweep at **282 + 1 skipped**, exact match to baseline (no regression).
+>
+> **Cross-family review trail (3 reviewers):**
+> 1. **GLM 5.1 via opencode-call** (z.ai routing approved per-conversation for parallel-review pattern; memory `feedback_glm_routing.md` updated): READY_WITH_REVISIONS — 1 MEDIUM (MLP gap I had wrongly asserted was untouched-correct) + 1 MEDIUM (fit_kwargs noise) closed in `765a82f`. 1 LOW (`startswith('XGB')` redundant after canonicalization) deferred — harmless.
+> 2. **DeepSeek V4 Pro Max via opencode-call**: no HIGH or MEDIUM. 3 LOW/Informational findings — 2 already addressed by `765a82f` (overlap with GLM); 1 (duplicate `compute_sample_weight` import in CV + final-model sections) deferred per "defer LOW unless surgical" — Python handles dedup as no-op. Residual-risk multiclass test added in `bdeb735`.
+> 3. **GLM 5.1 via llm-call/z.ai (initial dispatch with diff bundle, before user routing correction)**: same MEDIUM-1 (MLP) and MEDIUM-2 (fit_kwargs) caught — confirms GLM's RLHF brings consistent value across both routing paths.
+>
+> **Out of scope (deliberately deferred to follow-up tickets if user wants):**
+> - **Auto mode** (`imbalance_method='auto'` with severity threshold from `detect_class_imbalance`) — additive, not bug-class.
+> - Custom resampling-aware estimator wrapper for the SMOTE × class_weight combo — fragile under imblearn fit_params; defer.
+> - Per-model imbalance dropdowns + numeric `scale_pos_weight` entry — UI surgery, larger scope.
+> - MLP sample_weight threading via sklearn ≥1.7 floor bump — separate version-policy decision.
+>
+> **Lessons documented in SESSION_LOG (this date):**
+> - GLM caught MLP path that I had explicitly asserted was correct in my review prompt. Cross-family RLHF orthogonality earned its slot. (Memory: keep dispatching parallel reviewers via opencode-call when materials need to be shared.)
+> - Routing correction for parallel reviewers is surgical, not full-panel re-launch. (Memory: `feedback_parallel_review_reroute.md`.)
+> - opencode-call agents leave the working tree on the branch they checked out. After the agent returns, verify branch state before continuing — I lost a few minutes when an MLP edit landed on `main` instead of `fix/T19`.
+>
+> ---
 >
 > ## Open-ticket re-validation pass (2026-05-02)
 >
