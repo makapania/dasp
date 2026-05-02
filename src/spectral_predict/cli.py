@@ -25,6 +25,20 @@ def main():
     except Exception:
         pass
 
+    # T-50: same cleanup wiring as the bundled GUI — keeps the slow disk
+    # leak bounded for users who only ever invoke via the console script.
+    try:
+        from .run_state import cleanup_old_sqlite_files
+        deleted, freed = cleanup_old_sqlite_files()
+        if deleted:
+            import logging as _logging
+            _logging.getLogger("spectral_predict").info(
+                "T-50: cleaned up %d stale Optuna SQLite files (%.1f MB freed)",
+                deleted, freed / 1_048_576,
+            )
+    except Exception:
+        pass
+
     parser = argparse.ArgumentParser(
         description="Spectral Predict - Automated spectral analysis software",
         formatter_class=argparse.RawDescriptionHelpFormatter,

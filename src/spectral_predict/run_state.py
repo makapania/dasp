@@ -41,7 +41,7 @@ import sqlite3
 import tempfile
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -78,6 +78,15 @@ _active_run_id: str | None = None
 _active_metadata: "RunMetadata | None" = None
 _is_resuming: bool = False
 _SIDECAR_NAME = "active_run.json"
+
+# T-50: stale-SQLite cleanup policy. Old completed runs accumulate in
+# `<user_data_dir>/dasp/optuna/` because mark_complete() deliberately leaves
+# trial archives in place for post-hoc inspection (see its docstring).
+_KEEP_LAST_N_RUNS = 5
+_DELETE_AFTER_DAYS = 30
+# A `*.sqlite3-wal` sibling whose mtime is within this window means another
+# dasp instance is actively writing — never touch the underlying .sqlite3.
+_WAL_SAFETY_WINDOW_HOURS = 1
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
@@ -706,6 +715,132 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
         storage_deleted=storage_deleted,
         errors=errors,
     )
+
+
+def cleanup_old_sqlite_files() -> tuple[int, int]:
+    """Best-effort cleanup of stale Optuna SQLite trial archives.
+
+    Old `<run_id>.sqlite3` files accumulate in ``<user_data_dir>/dasp/optuna/``
+    because :func:`mark_complete` deliberately leaves them for post-hoc
+    inspection. ~50 MB/month under normal use; this function bounds the leak.
+
+    Policy:
+      * Keep the ``_KEEP_LAST_N_RUNS`` newest by mtime.
+      * Additionally delete anything older than ``_DELETE_AFTER_DAYS`` (overrides
+        keep-N — a single 31-day-old file is fair game).
+      * Never touch the active run's storage_path (read from active_run.json).
+      * Never touch a file whose ``-wal`` sibling was modified within the last
+        ``_WAL_SAFETY_WINDOW_HOURS`` (concurrent dasp instance safeguard).
+      * For each deleted ``.sqlite3``, also unlink matching ``-shm`` / ``-wal``.
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(files_deleted, bytes_freed)``. Per-file failures (file locked,
+        permission denied) are logged at WARNING and the count under-reports;
+        the function never blocks app startup.
+    """
+    try:
+        optuna_dir = get_user_optuna_dir()
+    except OSError as exc:
+        logger.warning("T-50: cannot resolve optuna dir: %s", exc)
+        return (0, 0)
+
+    if not optuna_dir.exists():
+        return (0, 0)
+
+    active_storage = _read_active_storage_path_safely(optuna_dir)
+    now = datetime.now()
+    cutoff_age = now - timedelta(days=_DELETE_AFTER_DAYS)
+    wal_safety = now - timedelta(hours=_WAL_SAFETY_WINDOW_HOURS)
+
+    active_key = (
+        os.path.normcase(str(active_storage)) if active_storage is not None else None
+    )
+    candidates: list[tuple[Path, datetime]] = []
+    for path in optuna_dir.glob("*.sqlite3"):
+        if active_key is not None:
+            try:
+                path_key = os.path.normcase(str(path.resolve()))
+            except OSError:
+                path_key = os.path.normcase(str(path))
+            if path_key == active_key:
+                continue
+        wal = path.with_suffix(".sqlite3-wal")
+        if wal.exists():
+            try:
+                wal_mtime = datetime.fromtimestamp(wal.stat().st_mtime)
+            except OSError:
+                continue  # can't stat sibling — be conservative, skip
+            if wal_mtime > wal_safety:
+                continue  # likely active in another dasp instance
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime)
+        except OSError:
+            continue
+        candidates.append((path, mtime))
+
+    # Newest first so the keep-set is the K most recent.
+    candidates.sort(key=lambda pair: pair[1], reverse=True)
+    keep = {p for p, _ in candidates[:_KEEP_LAST_N_RUNS]}
+    to_delete = [
+        (p, m) for (p, m) in candidates
+        if p not in keep or m < cutoff_age
+    ]
+
+    deleted = 0
+    bytes_freed = 0
+    for path, _ in to_delete:
+        try:
+            size = path.stat().st_size
+        except OSError as exc:
+            logger.warning("T-50: cannot stat %s: %s", path, exc)
+            continue
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("T-50: could not delete stale SQLite %s: %s", path, exc)
+            continue
+        deleted += 1
+        bytes_freed += size
+        for sibling in (
+            path.with_suffix(".sqlite3-shm"),
+            path.with_suffix(".sqlite3-wal"),
+        ):
+            try:
+                sibling_size = sibling.stat().st_size
+                sibling.unlink()
+                bytes_freed += sibling_size
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "T-50: could not delete sibling %s: %s", sibling, exc
+                )
+    return (deleted, bytes_freed)
+
+
+def _read_active_storage_path_safely(optuna_dir: Path) -> Path | None:
+    """Read ``storage_path`` from the active-run sidecar without raising.
+
+    Returns the resolved Path of the SQLite file the active run owns, or None
+    if there is no sidecar / the sidecar is malformed / the path can't be
+    resolved. Cleanup callers use this to skip the active file.
+    """
+    sidecar = optuna_dir / _SIDECAR_NAME
+    if not sidecar.exists():
+        return None
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return None
+    raw = data.get("storage_path") if isinstance(data, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return Path(raw).resolve()
+    except OSError:
+        return None
 
 
 def _reset_for_tests() -> None:

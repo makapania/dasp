@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -615,6 +617,163 @@ def test_discard_rejects_storage_path_traversal(fresh_state):
     assert any("outside optuna dir" in e for e in result.errors)
     # Off-path file must NOT have been deleted.
     assert fake_target.exists()
+
+
+# ---------------------------------------------------------------------------
+# T-50: cleanup_old_sqlite_files — bound the slow disk leak from accumulated
+# Optuna trial archives. mark_complete() deliberately leaves SQLite files in
+# place for post-hoc inspection; without periodic cleanup, ~50 MB/month grows
+# in <user_data_dir>/dasp/optuna/.
+# ---------------------------------------------------------------------------
+
+
+def _seed_sqlite(path: Path, age_days: float, *, content: bytes = b"sqlite") -> None:
+    """Write a fake .sqlite3 file with mtime age_days in the past."""
+    path.write_bytes(content)
+    age = (datetime.now() - timedelta(days=age_days)).timestamp()
+    os.utime(path, (age, age))
+
+
+def test_t50_cleanup_keeps_last_k(fresh_state):
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    # 8 files, mtime 7..0 days old (file7 is oldest, file0 is newest).
+    for i in range(8):
+        _seed_sqlite(optuna_dir / f"file{i}.sqlite3", age_days=i)
+
+    deleted, freed = rs.cleanup_old_sqlite_files()
+
+    assert deleted == 3, (
+        f"keep-last-{rs._KEEP_LAST_N_RUNS} should delete (8 - 5) = 3 oldest"
+    )
+    assert freed > 0
+    survivors = sorted(p.name for p in optuna_dir.glob("*.sqlite3"))
+    # 5 newest = file0..file4.
+    assert survivors == [f"file{i}.sqlite3" for i in range(5)]
+
+
+def test_t50_cleanup_skips_active_run_storage(fresh_state):
+    """The file the live sidecar points at must never be deleted, even if
+    it's the oldest on disk — a crashed run might still be resumable."""
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    active = optuna_dir / "active.sqlite3"
+    _seed_sqlite(active, age_days=999)  # ancient — would normally be culled
+    # Five other recent files so the active is past the keep-K cutoff too.
+    for i in range(5):
+        _seed_sqlite(optuna_dir / f"recent{i}.sqlite3", age_days=i)
+
+    sidecar = optuna_dir / "active_run.json"
+    sidecar.write_text(
+        json.dumps({"run_id": "abc", "storage_path": str(active)}),
+        encoding="utf-8",
+    )
+
+    deleted, _ = rs.cleanup_old_sqlite_files()
+
+    assert active.exists(), "active run's storage must survive"
+    # Total files = 6; keep-5 of the recent set. active is past keep AND
+    # past 30-day cutoff, so without the active-skip guard it would be the
+    # one deleted. With the guard, it survives — count is 0.
+    assert deleted == 0
+
+
+def test_t50_cleanup_skips_recent_wal_sibling(fresh_state):
+    """A *.sqlite3-wal whose mtime is within the safety window means another
+    dasp instance is mid-write; the .sqlite3 must be left alone."""
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    # Both files older than 30 days so the age-cutoff would normally delete
+    # both regardless of keep-K.
+    held = optuna_dir / "held.sqlite3"
+    free = optuna_dir / "free.sqlite3"
+    _seed_sqlite(held, age_days=60)
+    _seed_sqlite(free, age_days=60)
+
+    # Fresh -wal sibling on `held` only.
+    held_wal = optuna_dir / "held.sqlite3-wal"
+    held_wal.write_bytes(b"wal")  # mtime defaults to now → inside safety window
+
+    deleted, _ = rs.cleanup_old_sqlite_files()
+
+    assert held.exists(), "file with active -wal sibling must survive"
+    assert held_wal.exists(), "active -wal must not be touched"
+    assert not free.exists(), "file without active -wal must be deleted"
+    assert deleted == 1
+
+
+def test_t50_cleanup_unlinks_shm_and_wal_siblings(fresh_state):
+    """When a .sqlite3 is deleted, any orphan -shm / -wal siblings (left over
+    from interrupted runs) must be cleaned up too — they're useless without
+    the parent DB and contribute to the disk leak."""
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    doomed = optuna_dir / "doomed.sqlite3"
+    _seed_sqlite(doomed, age_days=60)
+    # Orphan -wal old enough that it's outside the safety window.
+    doomed_shm = optuna_dir / "doomed.sqlite3-shm"
+    doomed_wal = optuna_dir / "doomed.sqlite3-wal"
+    doomed_shm.write_bytes(b"shm")
+    doomed_wal.write_bytes(b"wal")
+    old_mtime = (datetime.now() - timedelta(days=60)).timestamp()
+    os.utime(doomed_wal, (old_mtime, old_mtime))
+
+    deleted, freed = rs.cleanup_old_sqlite_files()
+
+    assert deleted == 1
+    assert not doomed.exists()
+    assert not doomed_shm.exists(), "orphan -shm must be unlinked"
+    assert not doomed_wal.exists(), "orphan -wal must be unlinked"
+    # bytes_freed should include all three files (sqlite=6 + shm=3 + wal=3 = 12).
+    assert freed == len(b"sqlite") + len(b"shm") + len(b"wal")
+
+
+def test_t50_cleanup_age_cutoff_overrides_keep_count(fresh_state):
+    """Three files, all older than 30 days: even though count <= keep-K=5,
+    the age cutoff is hard — they all go."""
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    for i in range(3):
+        _seed_sqlite(optuna_dir / f"ancient{i}.sqlite3", age_days=60)
+
+    deleted, _ = rs.cleanup_old_sqlite_files()
+
+    assert deleted == 3, "30-day age cutoff overrides keep-K"
+    assert list(optuna_dir.glob("*.sqlite3")) == []
+
+
+def test_t50_cleanup_swallows_unlink_failure(fresh_state, monkeypatch):
+    """Cleanup is best-effort: a single locked/permission-denied file must
+    not abort the whole pass — other deletable files still get cleaned."""
+    rs, rp, _ = fresh_state
+    optuna_dir = rp.get_user_optuna_dir()
+
+    # 8 files so 3 are eligible for deletion under keep-5.
+    for i in range(8):
+        _seed_sqlite(optuna_dir / f"file{i}.sqlite3", age_days=i)
+
+    real_unlink = Path.unlink
+    poisoned = optuna_dir / "file7.sqlite3"  # the oldest; first to be deleted
+
+    def flaky_unlink(self, *args, **kwargs):
+        if self == poisoned:
+            raise OSError("simulated lock")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    deleted, _ = rs.cleanup_old_sqlite_files()
+
+    assert deleted == 2, "one locked file under-reports; the other 2 succeed"
+    assert poisoned.exists(), "the locked file is left behind"
+    # The other two oldest (file6, file5) should be gone.
+    assert not (optuna_dir / "file6.sqlite3").exists()
+    assert not (optuna_dir / "file5.sqlite3").exists()
 
 
 def test_t44_no_phantom_hasattr_typos_in_gui():
