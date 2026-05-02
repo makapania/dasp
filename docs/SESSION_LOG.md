@@ -14,6 +14,8 @@ Plan correction from earlier (T-37 review by CodeRabbit) held: `preprocessing_wr
 
 Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` after deletion — clean. 244/244 across the broader regression sweep.
 
+**DeepSeek V4 Pro post-push review (2026-05-02):** READY_TO_MERGE. Zero HIGH findings. One MEDIUM (M1): the plan doc still said "delete tests/test_ensemble_preprocessing.py" despite the implementation correctly preserving it — plan text never re-synced after the T-37 correction. Three LOW: stale `__pycache__/.pyc` files for the deleted modules (gitignored, harmless), T-21 audit doc references `ensemble_preprocessing.py` as a 28-call-site SG location (now obsolete; T-21 unguarded count drops to ~59), and Feb 2026 archival design docs reference the deleted modules in mapping tables (historical artifacts, no action). Applied M1 (plan doc text) and L2 (T-21 footnote) as follow-up doc-only commit. Confirmed via DeepSeek: no `.dasp` save format, Inno Setup, hiddenimports, datas, or config file references the deleted names; `model_io.py:176` saves only `type(model).__name__` so legacy `.dasp` files cannot encode `StackedPreprocessing*` (the class was never wired into a code path that produced model objects).
+
 ---
 
 ## 2026-05-02 (T-42 + T-43 cross-family review trail) — Codex caught a T-43 silent-failure that DeepSeek missed; DeepSeek caught a stale T-42 test that pr-review-toolkit / Codex would have missed

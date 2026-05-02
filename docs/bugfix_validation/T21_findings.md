@@ -82,7 +82,7 @@ files**. Among production code (excluding tests/docs/codex_reviews):
 | File | Count |
 |------|-------|
 | `spectral_predict_gui_optimized.py` | 36 (e.g. `_build_transform_from_config` at lines 1908, 1941–1971) |
-| `src/spectral_predict/ensemble_preprocessing.py` | 28 |
+| `src/spectral_predict/ensemble_preprocessing.py` | 28 (DELETED in T-38, 2026-05-01 — remaining unguarded count drops to ~59) |
 | `src/spectral_predict/ga_preprocessing.py` | 12 |
 | `src/spectral_predict/preprocess.py` (transformer + pipeline builder) | 6 |
 | `src/spectral_predict/preprocessing_discovery.py` | 3 |
