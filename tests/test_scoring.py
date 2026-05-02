@@ -588,21 +588,33 @@ class TestT29ExceptionHandling:
         finally:
             _sk_metrics.f1_score = original_f1
 
-    def test_t29_metric_failure_logs_warning(self, caplog):
-        """T-29: when a metric raises (e.g. roc_auc on a single-class fold),
-        the silent 0.0/None sentinel should now be accompanied by a logged
-        warning so the user can distinguish failure from real bad scores."""
+    def test_t29_metric_failure_logs_warning(self, caplog, monkeypatch):
+        """T-29: when a metric raises (e.g. shape mismatch or any sklearn
+        ValueError), the silent 0.0/None sentinel should now be accompanied
+        by a logged warning so the user can distinguish failure from real
+        bad scores. Monkeypatched because modern sklearn (>=1.4) handles
+        the natural single-class roc_auc case via UndefinedMetricWarning +
+        NaN instead of raising — the bare-except bug fires for any other
+        exception class (TypeError, shape mismatch, etc.) that sklearn
+        does still raise."""
         import logging
 
+        from spectral_predict import scoring as scoring_module
         from spectral_predict.scoring import compute_imbalance_metrics
 
-        # Single-class y_true with proba forces roc_auc to raise
-        # ValueError("Only one class present in y_true").
-        y_true = np.array([0, 0, 0, 0, 0])
-        y_pred = np.array([0, 0, 0, 0, 0])
-        y_proba = np.array(
-            [[1.0, 0.0]] * 5
-        )  # binary-style proba so the binary roc_auc branch triggers
+        # Force the binary roc_auc call inside compute_imbalance_metrics
+        # to raise so the T-29 except branch runs.
+        def boom(*_a, **_kw):
+            raise ValueError("simulated sklearn failure")
+
+        # The function imports roc_auc_score locally; patch it on the
+        # sklearn module so the local import gets the patched callable.
+        import sklearn.metrics as _sk_metrics
+        monkeypatch.setattr(_sk_metrics, "roc_auc_score", boom)
+
+        y_true = np.array([0, 1, 0, 1, 0])
+        y_pred = np.array([0, 1, 0, 1, 0])
+        y_proba = np.array([[1.0, 0.0]] * 5)
 
         with caplog.at_level(logging.WARNING, logger="spectral_predict.scoring"):
             metrics = compute_imbalance_metrics(y_true, y_pred, y_proba)
