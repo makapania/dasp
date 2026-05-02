@@ -57786,7 +57786,14 @@ def main():
                 deleted, freed / 1_048_576,
             )
     except Exception:
-        pass
+        # GLM M1 / DeepSeek L2 (T-50 fix-of-fixes): preserve best-effort
+        # contract but surface structural cleanup failures (TypeError etc.
+        # — distinct from per-file warnings the function itself emits) to
+        # dasp.log via debug. Without this they vanish silently.
+        import logging as _logging
+        _logging.getLogger("spectral_predict").debug(
+            "T-50: cleanup failed (non-fatal)", exc_info=True
+        )
 
     root = tk.Tk()
 

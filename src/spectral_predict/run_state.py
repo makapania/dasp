@@ -806,6 +806,12 @@ def cleanup_old_sqlite_files() -> tuple[int, int]:
         for sibling in (
             path.with_suffix(".sqlite3-shm"),
             path.with_suffix(".sqlite3-wal"),
+            # GLM M2 (T-50 fix-of-fixes): when WAL is rejected (network share,
+            # AV-shimmed path — see _apply_wal_pragmas in unified_bayesian.py),
+            # SQLite falls back to rollback-journal mode, leaving orphan
+            # `<id>.sqlite3-journal` files. Cleanup the parent without these
+            # would leak the journal forever.
+            path.with_suffix(".sqlite3-journal"),
         ):
             try:
                 sibling_size = sibling.stat().st_size
@@ -825,7 +831,8 @@ def _read_active_storage_path_safely(optuna_dir: Path) -> Path | None:
 
     Returns the resolved Path of the SQLite file the active run owns, or None
     if there is no sidecar / the sidecar is malformed / the path can't be
-    resolved. Cleanup callers use this to skip the active file.
+    resolved / the resolved path escapes ``optuna_dir`` (tampered sidecar).
+    Cleanup callers use this to skip the active file.
     """
     sidecar = optuna_dir / _SIDECAR_NAME
     if not sidecar.exists():
@@ -838,9 +845,21 @@ def _read_active_storage_path_safely(optuna_dir: Path) -> Path | None:
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        return Path(raw).resolve()
+        resolved = Path(raw).resolve()
     except OSError:
         return None
+    # DeepSeek M2 / GLM L3 (T-50 fix-of-fixes): match the defense-in-depth
+    # posture of resume_run / discard_incomplete_run, which both refuse to
+    # trust a sidecar storage_path that resolves outside the optuna dir.
+    # A tampered sidecar pointing at /etc/passwd wouldn't match any glob
+    # candidate anyway (no functional gap today), but the inconsistency is
+    # a refactor hazard.
+    try:
+        if not resolved.is_relative_to(optuna_dir.resolve()):
+            return None
+    except OSError:
+        return None
+    return resolved
 
 
 def _reset_for_tests() -> None:
