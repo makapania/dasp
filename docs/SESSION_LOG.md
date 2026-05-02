@@ -4,6 +4,30 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-41 final review pass) — multi-pass review trail caught real bugs each round
+
+T-41 took 8 review passes before merge. Each pass caught real bugs the prior passes missed. Lessons worth saving for the overnight-run protocol and future ticket reviews:
+
+**Each reviewer family caught distinct bug classes:**
+- **DeepSeek V4 Pro Max (max thinking, full repo via opencode-call):** caught the `_study_ref` mutable-container swap not redirecting Optuna's writes (HIGH#1) and the `cb_study.stop()` vs `_study_ref[0].stop()` post-migration crash (HIGH#2). These are semantic-level bugs about Optuna's optimize-loop reference capture — exactly the kind of trap that requires deep reasoning about library internals. DeepSeek empirically verified Optuna 4.8 behavior via subprocess tests.
+- **GLM 5.1 (z.ai sub via opencode-call):** caught the no-integration-test gap for the cb_study.stop()→restart pattern. Tests passed but exercised the helper, not the integration. GLM's domain-knowledge depth on Optuna API contracts (load_if_exists+sampler silently ignoring) was decisive.
+- **Codex CLI:** caught phantom resume prompts for in-memory crashes (no SQLite to resume from but sidecar exists), and docstring/tooltip drift after the default flip.
+- **pr-review-toolkit (5 specialist agents in parallel):** silent-failure-hunter caught 4 HIGHs the prior passes missed — WAL pragma silent rejection (no return-value check), orphan SQLite from partial-success migration, start_run-failure silent downgrade, resume-override `set("always")` failure but lying banner. type-design-analyzer caught the `enable_sqlite_persistence: str` silent-fallthrough on typos.
+- **User runtime verification:** caught the resume-banner-is-a-no-op bug that none of the bot reviews would have caught — required actually clicking through the GUI flow.
+
+**Key meta-lesson:** the silent-failure findings consistently came from ONE reviewer family per pass, not multiple. Single-family review at a single point in time misses bugs that another family or runtime testing would catch. Cross-family review at multiple checkpoints is what produces the convergence.
+
+**Architectural traps worth keeping front-of-mind for similar work:**
+1. `optuna.create_study(load_if_exists=True, sampler=...)` SILENTLY IGNORES the sampler kwarg on existing studies. Use `optuna.copy_study` + `optuna.load_study(sampler=TPESampler(...))` for sampler attachment. This trap would have shipped if not for DeepSeek's empirical testing.
+2. `study.optimize()` captures the study by reference; swapping a closure-bound mutable container does NOT redirect Optuna's writes. Trials post-swap go to the original object. Pattern: stop the loop, restart on the migrated study from the outer scope.
+3. `Study.stop()` requires the study currently being optimized. Calling it on a different study (e.g., a migrated SQLite study after the in-memory study aborted) raises RuntimeError mid-optimize. Pattern: use the cb_study reference Optuna passes to the callback, not a closure-captured reference.
+4. `PRAGMA journal_mode=WAL` does NOT raise on rejection — it returns the journal mode that was actually applied. Filesystems that reject WAL (network shares, AV-shimmed paths) silently fall back to DELETE mode. Always read the row.
+5. Multi-model Bayesian runs share one SQLite file (one `storage_url` per `start_run`, multiple models per run). File-level cleanup (`Path.unlink`) on a per-model failure can nuke prior models' trials. Use study-scoped operations (`optuna.delete_study`).
+
+**For future ticket reviews:** dispatch the cross-family panel ONCE per significant change (post-implementation, post-fix-of-fixes); don't trust a single family or a single point in time. The pr-review-toolkit parallel-5 fan-out was the highest-yield single review pass.
+
+---
+
 ## 2026-05-01 (T-41 implementation) — SQLite auto-calculator, WAL, default-never
 
 **Three implementation traps worth logging:**
