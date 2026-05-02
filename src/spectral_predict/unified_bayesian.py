@@ -1784,15 +1784,22 @@ def run_unified_bayesian(
         Smoothing polynomial order (used when smoothing=True)
     enable_uve : bool, default=False
         Include UVE (Uninformative Variable Elimination) as a variable selection method
-    enable_sqlite_persistence : str, default='never'
+    enable_sqlite_persistence : str, default='auto'
         Controls Optuna SQLite crash-resume persistence. T-41 auto-calculator.
-        - 'never'  : always in-memory; no SQLite file created (default — zero overhead).
-        - 'auto'   : first 10 trials in-memory; then decides based on median fit time.
-                     If median > 1.0s the study migrates to SQLite+WAL (overhead ~1.2x).
-                     If median <= 1.0s stays in-memory (fast models like PLS are 8x slower
-                     with persistence, so 'never'/'auto' are the right defaults).
+        - 'auto'   : (default) first 10 trials in-memory; then decides based on median fit
+                     time. If median > 1.0s the study migrates to SQLite+WAL (overhead
+                     ~1.2x). If median <= 1.0s stays in-memory (fast models like PLS are 8x
+                     slower with persistence, so the auto-calculator keeps them in-memory).
         - 'always' : SQLite+WAL from trial 0 for every model. Accepts the speed cost in
                      exchange for crash-resume on all models.
+        - 'never'  : always in-memory; no SQLite file created. Zero overhead but no
+                     crash-resume even for slow models.
+
+        The default was 'never' briefly during T-41 ship; flipped back to 'auto' on
+        2026-05-02 for resume-path troubleshooting after the user reported the resume
+        banner was a no-op (root cause: GUI radio button at 'never' silently ignored the
+        loaded SQLite URL). With the resume-override fix and the auto-decision restart
+        pattern in place, 'auto' is again a sensible default.
 
     Returns
     -------
