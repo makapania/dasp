@@ -1059,24 +1059,18 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         X = X[~nan_mask]
         y = y[~nan_mask]
 
-    # T-19 Auto mode: resolve `imbalance_method='auto'` to a concrete method based
-    # on the training data's class ratio. If imbalanced (≥3:1), behave like
-    # `class_weight`; otherwise leave model unweighted. Resolution happens once
-    # at the run level (not per fold) — stratified CV preserves global ratios
-    # tightly enough that per-fold drift rarely flips the decision.
+    # Auto-mode imbalance resolution: classify the run-level y once and
+    # substitute 'class_weight' or None for the rest of the search. Resolution
+    # is run-level (not per-fold) — stratified CV preserves global ratios
+    # tightly enough that per-fold drift rarely flips the decision. Audit
+    # message goes through both logger.info (T-45 file handler) and stdout
+    # (console runs). NaN-dropping happens inside resolve_auto_imbalance.
     if imbalance_method == 'auto' and task_type == 'classification':
-        from spectral_predict.imbalance import resolve_auto_imbalance
+        from spectral_predict.imbalance import resolve_auto_imbalance, format_auto_imbalance_message
         resolved, info = resolve_auto_imbalance(y.values, task_type=task_type)
-        if resolved == 'class_weight':
-            print(
-                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
-                f"({info['severity']}); applying class_weight"
-            )
-        else:
-            print(
-                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
-                f"(below 3:1 threshold); no correction applied"
-            )
+        message = format_auto_imbalance_message(info)
+        logger.info(message)
+        print(f"  {message}")
         imbalance_method = resolved
 
     X_np = X.values

@@ -66,6 +66,7 @@ def _execute(model_name: str, params: dict | None = None) -> dict:
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
         exec(script, g)
+    g["_stdout"] = buf.getvalue()
     return g
 
 
@@ -74,7 +75,7 @@ def _execute(model_name: str, params: dict | None = None) -> dict:
 # ----------------------------------------------------------------------
 
 def test_catboost_emits_auto_class_weights_not_class_weight():
-    """Post-fix-of-fixes (DeepSeek Q2): CatBoost balanced-loss kwarg is now
+    """Post-fix-of-fixes: CatBoost balanced-loss kwarg is now
     injected via runtime conditional rather than baked into the params literal,
     so Auto mode can correctly skip injection on balanced data."""
     script = _generate("CatBoost", params={"iterations": 30, "depth": 3})
@@ -120,9 +121,22 @@ def test_mlp_class_weight_export_executes_without_typeerror():
     assert isinstance(g["accuracy"], float)
 
 
+def test_mlp_explicit_class_weight_emits_unweighted_warning():
+    """MLP under explicit class_weight (not auto) cannot accept the kwarg
+    and trains unweighted. The exported script must emit a warning so the
+    user sees the silent drop — parity with search.py runtime warnings.warn.
+    Pre-fix the warning was gated inside `if IMBALANCE_METHOD == 'auto':`,
+    so explicit-mode users got no signal that their choice was dropped."""
+    g = _execute("MLP", params={"hidden_layer_sizes": (10,), "max_iter": 50})
+    assert "MLP does not support class_weight" in g["_stdout"], (
+        "Explicit class_weight + MLP should emit a warning that the model "
+        "trains unweighted — pre-fix the warning was auto-mode-only."
+    )
+
+
 def test_svc_keeps_class_weight_balanced():
     """SVC accepts class_weight natively; StandardScaler-wrapped path injects
-    it via runtime conditional (post-fix-of-fixes for DeepSeek Q2)."""
+    it via runtime conditional (post-fix-of-fixes)."""
     script = _generate("SVC", params={"C": 1.0})
     assert "model_params['class_weight'] = 'balanced'" in script
 
@@ -146,7 +160,7 @@ def test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing():
 
 
 def test_lightgbm_keeps_class_weight_balanced():
-    """Post-fix-of-fixes runtime conditional emission (DeepSeek Q2)."""
+    """Post-fix-of-fixes runtime conditional emission."""
     script = _generate("LightGBM")
     assert "model_params['class_weight'] = 'balanced'" in script
     assert "'auto_class_weights'" not in script
@@ -194,7 +208,7 @@ def test_generated_script_executes_under_class_weight(model_name: str, params: d
 
 
 def test_xgboost_class_weight_export_handles_multiclass():
-    """Per DeepSeek residual-risk #2: scale_pos_weight is binary-only, but
+    """scale_pos_weight is binary-only, but
     sample_weight=compute_sample_weight('balanced', y) handles n_classes>2
     uniformly. Pin end-to-end on a 3-class imbalanced dataset."""
     X, y = make_classification(

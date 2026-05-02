@@ -130,7 +130,7 @@ def test_auto_mode_emits_runtime_resolution_block():
 
 
 def test_auto_mode_emits_runtime_conditional_class_weight_for_supported_libs():
-    """Post-fix-of-fixes (DeepSeek Q2): Auto mode injects class_weight via
+    """Post-fix-of-fixes: Auto mode injects class_weight via
     runtime conditional, NOT baked into the params literal. Required so the
     runtime resolution can correctly skip injection on balanced data."""
     script = _generate_auto("RandomForest")
@@ -150,7 +150,7 @@ def test_auto_mode_does_not_inject_class_weight_for_xgboost():
 
 def test_auto_mode_uses_auto_class_weights_for_catboost():
     """Auto mode + CatBoost: runtime conditional injection of auto_class_weights
-    instead of baked literal (DeepSeek Q2 fix)."""
+    instead of baked literal."""
     script = _generate_auto("CatBoost", params={"iterations": 30, "depth": 3})
     assert "model_params['auto_class_weights'] = 'Balanced'" in script
     assert "'class_weight': 'balanced'" not in script
@@ -203,7 +203,7 @@ def test_auto_mode_balanced_data_skips_correction(model_name: str, params: dict)
 
 
 # ----------------------------------------------------------------------
-# Q2 trap (DeepSeek HIGH): mild imbalance (2:1, below threshold) under Auto
+# Bug class: mild imbalance (2:1, below threshold) under Auto
 # must NOT leave a baked balanced kwarg on the model
 # ----------------------------------------------------------------------
 
@@ -243,12 +243,12 @@ def _model_kwargs(model) -> dict:
 def test_auto_mode_mild_imbalance_does_not_bake_balanced_kwarg(
     model_name: str, params: dict, balanced_kwarg: str
 ) -> None:
-    """DeepSeek HIGH (Q2): pre-fix, the codegen baked class_weight='balanced'
-    into the constructor literal under Auto mode regardless of resolution
-    outcome. On mild imbalance (2:1, below the 3:1 threshold) the runtime
-    resolution would print 'no correction' but the model would still train
-    with non-uniform weights. Fix-of-fixes makes the kwarg injection a
-    runtime conditional gated on IMBALANCE_METHOD == 'class_weight'.
+    """Bug class: codegen baked class_weight='balanced' into the constructor
+    literal under Auto mode regardless of resolution outcome. On mild
+    imbalance (2:1, below the 3:1 threshold) the runtime resolution would
+    print 'no correction' but the model would still train with non-uniform
+    weights. Fix-of-fixes makes the kwarg injection a runtime conditional
+    gated on IMBALANCE_METHOD == 'class_weight'.
     """
     X, y = _mild_imbalance_data()
     g = _execute_auto(model_name, X, y, params)
@@ -292,13 +292,43 @@ def test_auto_mode_severe_imbalance_applies_balanced_kwarg(
     )
 
 
+def test_auto_mode_xgboost_mild_imbalance_does_not_emit_sample_weight_at_fit():
+    """XGBoost-specific Q2 trap: the runtime-conditional sample_weight block
+    inside the CV/final fit must NOT execute when Auto resolves to None on
+    mild imbalance. We verify by inspecting the generated script — under mild
+    imbalance, the resolved IMBALANCE_METHOD is None, so the
+    `if IMBALANCE_METHOD == 'class_weight':` gate around the sample_weight
+    computation falls through. Other libraries are kwarg-baked and check
+    via model.get_params(); XGBoost has no analogous post-hoc hook so we
+    pin the script text + post-resolution IMBALANCE_METHOD value."""
+    X, y = _mild_imbalance_data()
+    g = _execute_auto("XGBoost", X, y, {"n_estimators": 30, "max_depth": 3})
+    # Auto must have resolved to None ("no correction") on the 2:1 data
+    assert "no correction" in g["_stdout"]
+    # And IMBALANCE_METHOD in the script's globals is None post-resolution
+    assert g.get("IMBALANCE_METHOD") is None, (
+        "Under Auto + mild imbalance, IMBALANCE_METHOD must mutate to None "
+        "so the XGBoost sample_weight block doesn't fire."
+    )
+
+
+def test_auto_mode_xgboost_severe_imbalance_emits_sample_weight_at_fit():
+    """Symmetric to the mild-imbalance test: on severe imbalance, the
+    resolved IMBALANCE_METHOD is 'class_weight' and the sample_weight block
+    fires inside the fit() calls."""
+    X, y = _imbalanced_data()
+    g = _execute_auto("XGBoost", X, y, {"n_estimators": 30, "max_depth": 3})
+    assert "applying class_weight" in g["_stdout"]
+    assert g.get("IMBALANCE_METHOD") == "class_weight"
+
+
 def test_auto_mode_mlp_severe_imbalance_emits_both_resolution_and_warning():
-    """Codex LOW (post-Q2 review): the MLP-specific 'model will train
-    unweighted' note is emitted from code_generator.py inside the auto
-    resolution block, but no end-to-end test exercises Auto+MLP+severe.
-    A future indentation/refactor break would slip through. Pin both the
-    standard 'applying class_weight' resolution message AND the MLP-specific
-    follow-up warning so MLP users see why no balancing is happening."""
+    """The MLP-specific 'model will train unweighted' note is emitted from
+    code_generator.py inside the auto resolution block, but no end-to-end
+    test exercises Auto+MLP+severe. A future indentation/refactor break
+    would slip through. Pin both the standard 'applying class_weight'
+    resolution message AND the MLP-specific follow-up warning so MLP users
+    see why no balancing is happening."""
     X, y = _imbalanced_data()
     g = _execute_auto("MLP", X, y, params={"hidden_layer_sizes": (10,), "max_iter": 50})
     assert "applying class_weight" in g["_stdout"], (

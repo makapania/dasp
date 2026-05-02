@@ -26,6 +26,7 @@ from .templates.validation import (
     PREDICTION_TEMPLATE,
 )
 from .templates.visualization import get_visualization_code, VISUALIZATION_IMPORTS
+from .imbalance import AUTO_IMBALANCE_THRESHOLD
 
 
 @dataclass
@@ -900,10 +901,9 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
 
-            # Runtime-conditional balanced kwarg (gated on resolved IMBALANCE_METHOD).
-            # MLP excluded — TypeError on class_weight, sklearn floor too low for
-            # sample_weight at fit. Runtime falls back to unweighted per
-            # search.py:4439-4444; mirror that here.
+            # MLP excluded: it accepts neither class_weight kwarg (TypeError) nor
+            # sample_weight at fit (requires sklearn>=1.7, above pyproject floor).
+            # Runtime path treats this case as unweighted; mirror it here.
             scaled_balanced_kwarg = None
             if self._imbalance_method_is_class_weight_like() and not model_class.startswith('MLP'):
                 scaled_balanced_kwarg = ('class_weight', 'balanced')
@@ -1208,12 +1208,12 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         return normalized in scale_models and not self._needs_pls_da_pipeline()
 
     def _imbalance_method_is_class_weight_like(self) -> bool:
-        """Both 'class_weight' (explicit) and 'auto' (resolves to class_weight at
-        runtime if data is imbalanced) trigger the same code-generation paths:
-        per-library balanced kwargs in __init__ and the XGBoost sample_weight
-        block at fit. For Auto + balanced data, the baked class_weight='balanced'
-        is mathematically a no-op (uniform per-class weights ≈ 1) and the
-        runtime resolution prevents the sample_weight block from firing."""
+        """Both 'class_weight' (explicit) and 'auto' (which resolves to
+        'class_weight' at runtime if data is imbalanced) trigger the same
+        code-generation paths: per-library balanced kwargs and the XGBoost
+        sample_weight block. For 'auto', whether those paths actually apply
+        weights is gated at runtime on IMBALANCE_METHOD == 'class_weight';
+        see _render_model for the runtime-conditional emission contract."""
         if not self.imbalance_method:
             return False
         return self.imbalance_method.lower() in ('class_weight', 'auto')
@@ -1481,48 +1481,58 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         method = self.imbalance_method.lower()
         params = self.config.get('imbalance_params', {}) or {}
 
-        # T-19 Auto mode emission: when the user picked 'auto', the exported
-        # script needs to resolve at runtime (against whichever y the user is
-        # using) rather than baking a class_weight or no-correction decision
-        # at code-gen time. Mirrors `imbalance.resolve_auto_imbalance` and the
-        # runtime resolution in search.py / nsga2_search.py / unified_bayesian.py.
-        # The mutation of IMBALANCE_METHOD to 'class_weight' or None lets the
-        # downstream resampler and sample_weight gates fire correctly without
-        # needing to know about 'auto'.
-        # MLP exclusion warning (DeepSeek Q4): MLP can't accept class_weight as
-        # a constructor kwarg, and sample_weight at fit requires sklearn≥1.7
-        # which is above our pyproject floor. When Auto resolves to class_weight
-        # but the model is MLP, the user should know that the model trains
-        # unweighted despite the run printing "applying class_weight".
+        # Auto-mode resolution emission: when the user picked 'auto', the
+        # exported script resolves at runtime (against the actual y) rather
+        # than baking a class_weight or no-correction decision at code-gen
+        # time. The mutation of IMBALANCE_METHOD to 'class_weight' or None
+        # lets the downstream resampler and sample_weight gates fire without
+        # needing to know about 'auto'. NaN target rows are dropped before
+        # counting — Counter() treats each NaN as a distinct hash, producing
+        # spurious minority-class entries and wrong decisions silently.
+        # MLP warning fires on the *resolved* IMBALANCE_METHOD so it appears
+        # under both explicit 'class_weight' mode AND auto-resolved-to-
+        # class_weight mode — runtime parity with search.py's warnings.warn.
         is_mlp_model = self._resolve_model_class_name().startswith('MLP')
         mlp_warning_block = (
-            '\n    if IMBALANCE_METHOD == "class_weight":\n'
-            '        print("[Auto imbalance] note: MLP does not support '
-            'class_weight; model will train unweighted. Use SMOTE or another '
-            'resampling method for imbalanced MLP runs.")\n'
+            '\nif IMBALANCE_METHOD == "class_weight":\n'
+            '    print("[Imbalance] note: MLP does not support class_weight; '
+            'model will train unweighted. Use SMOTE or another resampling '
+            'method for imbalanced MLP runs.")\n'
             if is_mlp_model else ''
         )
 
-        auto_resolution_block = '''
-# Auto-mode resolution: classification only. If imbalance ratio ≥ 3:1, behave
-# like class_weight; otherwise no correction. Mutates IMBALANCE_METHOD so the
-# downstream gates inside the CV/final-fit blocks see the resolved value.
-if IMBALANCE_METHOD == "auto":
-    from collections import Counter as _AutoCounter
-    _auto_counts = _AutoCounter(y)
-    if len(_auto_counts) >= 2:
-        _auto_maj = max(_auto_counts.values())
-        _auto_min = max(min(_auto_counts.values()), 1)
-        _auto_ratio = _auto_maj / _auto_min
-        if _auto_ratio >= 3.0:
-            IMBALANCE_METHOD = "class_weight"
-            print(f"[Auto imbalance] ratio {_auto_ratio:.1f}:1; applying class_weight")
-        else:
-            IMBALANCE_METHOD = None
-            print(f"[Auto imbalance] ratio {_auto_ratio:.1f}:1 (below 3:1); no correction")
-    else:
-        IMBALANCE_METHOD = None
-        print("[Auto imbalance] single class detected; no correction")''' + mlp_warning_block + '\n'
+        auto_resolution_block = (
+            '\n# Auto-mode resolution: classification only. If imbalance ratio'
+            f' ≥ {AUTO_IMBALANCE_THRESHOLD:.0f}:1, behave like class_weight;'
+            ' otherwise no correction.\n'
+            '# Mutates IMBALANCE_METHOD so the downstream gates inside the\n'
+            '# CV/final-fit blocks see the resolved value.\n'
+            'if IMBALANCE_METHOD == "auto":\n'
+            '    import numpy as _np_auto\n'
+            '    import pandas as _pd_auto\n'
+            '    from collections import Counter as _AutoCounter\n'
+            '    _y_auto = _np_auto.asarray(y)\n'
+            '    if _y_auto.dtype.kind in ("f", "O"):\n'
+            '        _nan_mask = _pd_auto.isna(_y_auto)\n'
+            '        if _nan_mask.any():\n'
+            '            _y_auto = _y_auto[~_nan_mask]\n'
+            '    _auto_counts = _AutoCounter(_y_auto)\n'
+            '    if len(_auto_counts) >= 2:\n'
+            '        _auto_maj = max(_auto_counts.values())\n'
+            '        _auto_min = max(min(_auto_counts.values()), 1)\n'
+            '        _auto_ratio = _auto_maj / _auto_min\n'
+            f'        if _auto_ratio >= {AUTO_IMBALANCE_THRESHOLD}:\n'
+            '            IMBALANCE_METHOD = "class_weight"\n'
+            '            print(f"[Auto imbalance] ratio {_auto_ratio:.1f}:1;'
+            ' applying class_weight")\n'
+            '        else:\n'
+            '            IMBALANCE_METHOD = None\n'
+            f'            print(f"[Auto imbalance] ratio {{_auto_ratio:.1f}}:1'
+            f' (below {AUTO_IMBALANCE_THRESHOLD:.0f}:1); no correction")\n'
+            '    else:\n'
+            '        IMBALANCE_METHOD = None\n'
+            '        print("[Auto imbalance] single class detected; no correction")\n'
+        ) + mlp_warning_block
 
         return f'''
 # =============================================================================
