@@ -1,6 +1,28 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (post-T-36 ship — T-41 Bayesian SQLite auto-calculator plan filed in response to user-reported 5-28× Bayesian slowdown) —
+> **Last updated:** 2026-05-01 (T-36 + T-37 PRs open with post-merge review fix iterations applied) —
+>
+> **PR state:**
+> - **PR #8 — T-36 autoscale (UV scaling) toggle** — branch `feature/T36-autoscale-toggle` at `afb52d9`. Original implementation (`2351c3c`) plus two post-merge review fix commits: `b92274c` closes 6 cross-family bot findings (Codex + DeepSeek V4 Pro Max + gemini-code-assist + CodeRabbit); `afb52d9` closes 4 pr-review-toolkit findings on `b92274c` (one of my fixes was dead code due to `_normalize_preprocess_for_pipeline` operation order, plus sibling `baseline_params` persistence gaps in regression/classification + Bayesian result rows, plus a `bool("False") == True` reintroduction in the GUI fallback chain). 117/117 T-36 tests pass.
+> - **PR #7 — T-37 TPE preprocessing discovery** — branch `feature/T37-tpe-preprocessing-discovery` at `6a0eb28`. Original Phase 7 fixes (`03d95cb`) plus one post-merge review fix commit (`6a0eb28`) closing 6 findings: `enable_autoscale` added to study fingerprint, window canonicalization at all_configs build, derivative+window pre-validation against `DERIVATIVE_WINDOW_RANGES`, `LogisticRegression` classification fallback (was broken `PLSRegression`+accuracy returning NaN), smoothing window/polyorder threaded through `run_tpe_preprocessing_discovery`, explicit `ValueError` mutual-exclusion guards. pr-review-toolkit verdict: **READY_TO_MERGE** with 2 LOW/MEDIUM follow-ups (missing test for the new mutual-exclusion ValueError; bare `except Exception` in `_quick_evaluate` could be narrowed to `ImportError`). 33/33 T-37 + 44/44 autoscale-Bayesian tests pass.
+>
+> **Architectural correction logged this session:** I initially told the user (incorrectly) that the grid-search path applied autoscale per-fold via the sklearn Pipeline mechanic, while the Bayesian path applied it pre-CV global — claiming this was a real divergence. **That was wrong.** The grid path uses `skip_spectral_preprocessing=True` at every call site of `_run_single_config`, which means `pipe_steps = []` for the inner CV loop (search.py:4243-4259); spectral preprocessing including the autoscale `StandardScaler` is `fit_transform`'d once on full training data at search.py:2061, and CV runs on the already-preprocessed `X_for_models`. So **both paths apply autoscale pre-CV global, by design, matching PLS_Toolbox / Unscrambler chemometrics convention.** No grid/Bayesian divergence exists. The misleading line 4270 path (`else` branch with full Pipeline construction) is reachable in principle but not exercised by the live grid call sites. See SESSION_LOG.md for the trace details so this doesn't get re-discovered.
+>
+> **Deferred deliberately (chemometrics-convention calls, NOT bugs):**
+> - **Gemini "Bayesian autoscale leakage" finding** — autoscale fits on full training data before CV in both paths. By ML orthodoxy this is mild leakage; by chemometrics convention (PLS_Toolbox / Unscrambler / SIMCA-P / Pirouette default behavior) it is correct. Project follows chemometrics convention. Bias is small for stable NIR data and dominated by sample-population shift risks that KS-style train/test splits address.
+> - **Gemini "code_generator export uses fit_transform not transform" finding** — entangled with the Bayesian leakage architectural rewrite above; not applicable until/unless that decision changes.
+>
+> **Doc nits + plan corrections done this commit (T-36 branch):**
+> - `docs/plans/2026-05-01-T36-autoscale-toggle.md:210` — fixed nonexistent `T34_autoscale_toggle.md` reference → `T36_autoscale_toggle.md`.
+> - `docs/plans/2026-05-01-T38-dead-preprocessing-cleanup.md:27-32` — corrected the false claim that `preprocessing_wrapper.py` is doubly orphaned. It is actively imported by `ensemble.py:18` and instantiated at `ensemble.py:1309`, exercised by 2 test files. Plan changed to NOT delete it.
+>
+> **Open follow-ups (NOT done — not "definitely broken"):**
+> - pr-review-toolkit T-37 M1: missing regression test for the new mutual-exclusion `ValueError`. Coverage gap, not a bug.
+> - pr-review-toolkit T-37 M2: bare `except Exception` in `_quick_evaluate` could be narrowed to `(ImportError, ModuleNotFoundError)`. Defensive over-catch, not a bug.
+> - pr-review-toolkit T-36 M2: `refined_config` doesn't carry an `'autoscale'` key, so the GUI fallback chain always falls through to `selected_model_config`. Works in practice today (selected_model_config always has 'Autoscale').
+> - pr-review-toolkit T-36 L1: `contamination.py` cache key omits `baseline_params`. Latent — no current producer emits per-row baseline_params.
+>
+> **Previously:** 2026-05-01 (post-T-36 ship — T-41 Bayesian SQLite auto-calculator plan filed in response to user-reported 5-28× Bayesian slowdown) —
 >
 > **T-41 Bayesian SQLite auto-calculator plan filed at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md`.** User reported Bayesian 5× slower than pre-T-11; investigation traced to T-11's per-trial Optuna SQLite writes. Benchmarks (`tests/_bench_bayesian_per_model.py`) show overhead is ~200ms/trial constant — fast models pay 8-10×, heavy models 1.36-1.89×. Plan: per-model auto-calculator (first 5 trials in-memory + decide based on mean fit time + migrate via `optuna.copy_study` if heavy), 3-way GUI override (Auto/Always-on/Always-off), WAL mode bundled in. ~180 LOC + tests. Branch `fix/T41-bayesian-sqlite-auto-calculator` reserved (off post-T-36 main).
 >
