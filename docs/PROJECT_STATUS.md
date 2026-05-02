@@ -1,25 +1,36 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (T-41 IMPLEMENTED on `fix/T41-bayesian-sqlite-auto-calculator`) —
+> **Last updated:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
 >
-> **T-41 Bayesian SQLite auto-calculator + WAL mode — IMPLEMENTED, READY FOR PR.**
-> Branch `fix/T41-bayesian-sqlite-auto-calculator`.
+> **T-41 Bayesian SQLite auto-calculator + WAL mode — MERGED via PR #9.** Five rebase commits on main: `cd406f0` (feat) → `e99d35a` (DeepSeek HIGH/MEDIUM + resume bug + default 'auto') → `2087134` (docs) → `081ad6a` (pr-review-toolkit findings: silent failures + Literal validation + cleanup gates) → `f745d37` (DeepSeek Finding 1: multi-model SQLite collateral deletion via `optuna.delete_study` instead of `Path.unlink`).
 >
-> **What shipped:**
-> - `enable_sqlite_persistence` parameter on `run_unified_bayesian` (default `'never'`).
-> - Auto-calculator: first 10 trials in-memory; at trial 10, median fit time > 1.0s → migrate to SQLite+WAL, else stay in-memory. Fallback: < 3 completions → SQLite ON conservatively.
-> - `_migrate_study_to_sqlite` helper: `optuna.copy_study` + `optuna.load_study(sampler=TPESampler(...))`. The two-step pattern is critical — `create_study(load_if_exists=True, sampler=...)` SILENTLY IGNORES the sampler on existing studies.
-> - WAL pragmas applied at migration time (not at `start_run`). `journal_mode=WAL` is file-persistent; `wal_autocheckpoint=50` is per-connection only (see SESSION_LOG.md for the full nuance).
-> - `start_run` accepts `bayesian_persistence_mode`; for `'never'` no SQLite URL is generated at all (zero I/O).
-> - Stale-sidecar cleanup in `mark_complete()` and `clear_resume_state()`.
-> - GUI: 3-way radio buttons (Auto/Always on/Always off) with tooltip in Bayesian Options panel. Default `'never'`.
-> - 16 T-41 tests + 29 run_state regression tests + 46 unified_bayesian/autoscale/cv_pls_clamp tests — all 91 passing.
+> **Default flipped from plan's `'auto'`→`'never'`→`'auto'` during review:** User originally requested `'never'` ("99.99% of the time this would not be used"), then flipped back to `'auto'` for resume-path troubleshooting. Resume reliability now confirmed end-to-end.
 >
-> **Default is `'never'` (user override from plan's `'auto'`):** User: "99.99% of the time this would not be used." Zero overhead by default; opt in to `'auto'` or `'always'` for crash-resume.
+> **Review trail (8 passes total):**
+> 1. DeepSeek V4 Pro Max pre-implementation: 6 plan findings, all applied
+> 2. DeepSeek V4 Pro Max post-`cd406f0`: 2 HIGH (study_ref doesn't redirect Optuna writes; cb_study.stop crash) + 1 MEDIUM + 1 LOW, all closed
+> 3. GLM 5.1 post-`e99d35a`: READY_TO_MERGE; 1 MEDIUM (integration test gap) deferred
+> 4. Codex post-`e99d35a`: READY_WITH_REVISIONS; 1 MEDIUM (phantom resume prompt for in-memory crashes) folded into T-43, 1 LOW fixed
+> 5. pr-review-toolkit (5 specialist agents in parallel): 1 type-design HIGH + 4 silent-failure HIGHs + 4 MEDIUMs + comment-quality polish — all closed in `081ad6a`
+> 6. DeepSeek V4 Pro Max post-`081ad6a`: 1 MEDIUM (multi-model collateral deletion) + 2 LOWs, MEDIUM closed in `f745d37`
+> 7. User runtime verification: resume banner → recreate settings → click Run Analysis → SQLite study picks up trial-level state ✓
 >
-> **Performance with default `'never'`:** PLS Bayesian runs at pre-T-11 in-memory speed (~1.0x ratio). No SQLite overhead unless user explicitly selects `'auto'` or `'always'`.
+> **Type design:** `PersistenceMode = Literal["auto","always","never"]` shared between `RunMetadata` and `run_unified_bayesian`; validated at all three call boundaries (`__post_init__`, `start_run`, `run_unified_bayesian` entry); `from_dict` coerces corrupted sidecar values to `'never'` with warning instead of crashing the resume flow.
+>
+> **Architecture (final):** auto-decision callback aborts in-memory `optimize()` via `cb_study.stop()`; outer scope detects `_auto_migrated` and restarts `optimize()` on the migrated SQLite-backed study so trials 11..N persist directly. Multi-model migration failures use `optuna.delete_study` (study-scoped) not `Path.unlink` (file-scoped) so prior models' trials survive a later model's failed migration on the shared SQLite.
+>
+> **Test coverage:** 127/127 passing across `test_t41_bayesian_sqlite_auto_calculator` (23) + `test_run_state` (29) + `test_unified_bayesian_baseline` (36) + `test_autoscale_bayesian` (14) + `test_cv_pls_clamp` (25). New test classes added in `081ad6a`: `TestPersistenceModeValidation`, `TestCleanupByTrialCount`, `TestWALPragmaReturnValue`, `TestMigrationOrphanCleanup`.
+>
+> **Performance:**
+> - `'never'` mode: pre-T-11 in-memory speed (~1.0× ratio). Default for users who don't need crash-resume.
+> - `'auto'` mode: PLS/Ridge stay in-memory (median fit < 1s); LightGBM/XGBoost migrate at trial 11. XGBoost runs at ~1.36× WAL overhead; that's the residual `set_user_attr` cost which T-42 (filed) targets to push toward ~1.15×.
+> - `'always'` mode: SQLite+WAL from trial 0; PLS pays ~8× cost in exchange for universal crash-resume.
 >
 > **Audit trail:** `docs/bugfix_validation/T41_bayesian_sqlite_auto_calculator.md`.
+>
+> **Open follow-ups (filed):**
+> - **T-42** (`docs/plans/2026-05-01-T42-bayesian-write-path-plumbing.md`): hoist constant `set_user_attr` keys to `study.set_user_attr` and batch per-trial keys; brings XGBoost overhead toward 1.15× as prerequisite for promoting `'auto'` from troubleshooting-default to no-regret-default.
+> - **T-43** (`docs/plans/2026-05-02-T43-resume-auto-restore-settings.md`): auto-restore GUI settings on resume so users don't have to manually recreate preprocessing/model settings before clicking Run Analysis.
 >
 > **Previously:** 2026-05-01 (T-36 + T-37 BOTH MERGED to main after final cross-family adversarial sweep) —
 >
