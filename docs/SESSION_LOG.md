@@ -4,6 +4,88 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (open-ticket re-validation pass) — roadmap doc had drifted from memory; reconcile through amendment block, not rewrite
+
+User asked: "look through all of the open tickets and check that they are all 'real', not problems we are trying to solve that are not relevant for chemometric literature." Recurring failure mode in this repo: tickets get filed by importing sklearn-pipeline-purity instincts onto per-spectrum chemometrics ops (T-01/T-02/T-03 leakage panic, T-08 CARS framing). The April 2026-04-30 master-rule re-evaluation cleaned that out, but three ticket dispositions had evolved further in memory without the canonical roadmap doc tracking it: T-15 was DROPPED (memory `project_t15_dropped_t16_reframed.md`), T-16 was REFRAMED to "competitive model-comparison machinery survey" (same memory), T-19 was REFRAMED to "expose model-native abilities, not reproduce a publication framework" (memory `project_t19_user_framing.md`). Roadmap doc still showed all three as KEEP under the original framings.
+
+User confirmed the three pre-existing reframes during this session and made one new decision: **T-31 (Multi-class SIMCA) confirmed as a real need** (was NEEDS_USER_DECISION). Bone-FTIR / diagenesis specimens can legitimately belong to multiple classes or none; discriminant classifiers force every specimen into one trained class with no "none of the above" output. Saved to memory: `project_t31_simca_confirmed.md`. Implementation must be true multi-class SIMCA per Oliveri & Downey 2012 (one PCA model per class + independent membership decisions per specimen) — NOT an extension of the existing one-class `PCASIMCA` in `contamination.py` (single-class membership detector, structurally wrong base for class-modeling).
+
+Also surfaced: T-12 (disk-mirrored logging) is fully **subsumed by T-45** (logger warnings invisible in bundled GUI, current branch `fix/T45-logger-file-handler`). Same underlying need; T-45 has the concrete plan. T-12 closed without separate work.
+
+**Approach for the doc update — preserve audit trail, don't rewrite:** added a top-level `## Amendments — 2026-05-02 (user re-validation pass)` block listing the six dispositions (T-12 SUBSUMED, T-15 DROP, T-16 REFRAMED, T-19 REFRAMED, T-22 REFRAMED-DEFERRED, T-31 KEEP) with summary table and revised post-amendment counts + Top-5 actionable order. Inline `> **Amended 2026-05-02:** ...` markers on each affected ticket entry. Original verdicts and rationale preserved verbatim below — important so a future re-evaluation can see *why* each was originally KEPT and what changed. Just rewriting the original verdicts in place would have lost the audit trail and let the same false-alarm patterns sneak back in next ticket-filing pass.
+
+**Lesson:** memory updates are fine for ad-hoc decisions, but when a disposition lands that overrides a canonical roadmap doc, the doc needs to be amended in the same session — otherwise the next agent reading the doc cold will re-apply the stale verdict. The amendment-block-plus-inline-marker pattern is the right shape: amendment block visible at the top for cold reads, inline markers visible during ticket-by-ticket review, original audit trail preserved underneath.
+
+**Net post-amendment dispositions on currently-open tickets:** zero phantom chemometrics tickets remain. Newer T-33 through T-49 are all GUI/infrastructure (resume lifecycle, logging, type cleanup) — no chemometrics framing at risk. Top 5 actionable: T-19 reframed (~1-2d), T-16 reframed survey, T-31 SIMCA (1-2w), T-17 PLS-2 (2-3w), T-01 reframed (~2-3d).
+
+---
+
+## 2026-05-02 (housekeeping flag) — SESSION_LOG is 1800+ lines past archive threshold
+
+CLAUDE.md says move older entries to `docs/SESSION_LOG_ARCHIVE.md` once SESSION_LOG.md exceeds ~200 lines. File is now 1800+ lines (~9× the threshold). Deferred archiving across the last several sessions because each one had higher-priority ticket work and an archive cut would noise up an unrelated commit. **Recommended next maintenance window:** archive everything before 2026-04-30 (the master-rule re-evaluation entry is the natural cut point — pre-April-30 entries are about phantom-leakage tickets that were retired during that pass, so they're safe to archive). File a separate ticket for it; don't piggyback on a feature/bug PR.
+
+---
+
+## 2026-05-02 (T-44 phantom-hasattr survey) — `hasattr(self, X)` + `self.X.get()` is a silent-no-op trap class
+
+T-44's typo (`n_trials_var` instead of `n_unified_trials`) was invisible at the Python level because `hasattr` makes a wrong-name read a no-op rather than an `AttributeError`. The hasattr guard was added defensively to handle "Tk var might not be created yet on this code path" — but it converts every typo at the same site into a silent fallthrough. Pre-T-44, `RunMetadata.n_trials_per_model` was always None in every sidecar; the resume banner showed "?". Nobody noticed for months.
+
+DeepSeek V4 Pro Max's T-44 sibling-survey audited ~18 inline `hasattr(self, X) + self.X.get()` patterns in the GUI and found **one more phantom**: `task_type_var` at `spectral_predict_gui_optimized.py:30859` (actual var is `task_type` at line 2856). Same class, same shape — folded into the T-44 PR.
+
+**The other ~230 multi-line `hasattr(self, X)` patterns weren't fully audited.** A guard on one line and the `.get()` access on a later line is harder to typo (you'd have to introduce the wrong name twice), but not impossible.
+
+**Recommended permanent fix:** ruff AST visitor that flags `hasattr(obj, name)` where `name` is a string literal that never appears in any `obj.name = ...` assignment in the same class. Closes the class. Out of scope for T-44 itself.
+
+**Rule for future sessions:** when reviewing GUI changes that touch Tk var access, check that the `hasattr` guard name matches the `.get()` access name AND that the var is actually defined in `__init__`. Don't trust the lack of `AttributeError` to mean the code works.
+
+---
+
+## 2026-05-02 (T-45 dedup test) — `isinstance` across module reload silently fails
+
+T-45's MEDIUM fix (Codex finding) was: scan `spectral_predict` logger handlers for an existing `_SafeRotatingFileHandler` pointing at the same `dasp.log` path, reuse if found, only attach a new one otherwise. First implementation used `isinstance(existing, _SafeRotatingFileHandler)` — looks correct.
+
+Test caught it failing: `tests/test_run_logging.py::test_setup_app_logger_dedups_after_module_reload` pops `spectral_predict.run_logging` from `sys.modules`, re-imports, calls `setup_app_logger` again, asserts only one handler attached. **Got 2 handlers.**
+
+Root cause: module reload creates a fresh `_SafeRotatingFileHandler` *class object*. Handlers attached by the old module instance are instances of the OLD class. `isinstance(old_handler, NEW_class)` returns False. The dedup check structurally couldn't find them.
+
+**Fix:** match by `existing.__class__.__name__ == "_SafeRotatingFileHandler"` instead. Class-name strings are reload-stable.
+
+**Rule for future sessions:** any "is this object an instance of MyClass" check across a module-reload boundary needs class-name matching, not `isinstance`. Bites in:
+- Logging (handlers survive on the logger after the module reloads)
+- Plugin systems (registered classes outlive the plugin module)
+- Any test that pops + reimports a module and then checks objects from before the pop
+
+This is also why the `fresh_logging` fixture in `test_run_logging.py` cleans handlers from the `spectral_predict` logger at teardown — leaving them attached to a logger that survives the test would let them be inherited by the next test, which is the failure mode this rule guards.
+
+---
+
+## 2026-05-02 (DeepSeek routing through opencode-call) — pre-emptive routing refusals are subagent misjudgments
+
+The `opencode-call` agent's `deepseek` alias correctly routes to DeepSeek API direct (per `feedback_deepseek_routing.md`). During T-45 review dispatch, the agent pre-emptively refused, claiming opencode's `deepseek/` provider routes through opencode-go (which is forbidden by the routing memory). Result: T-45 shipped with Codex-only review.
+
+User confirmed "deepseek should be working." Retry on T-44 with explicit instruction succeeded.
+
+**Rule for future sessions:** when `opencode-call` (or any subagent) refuses to dispatch a model on routing-policy grounds, **retry with an explicit "the alias is known-working; proceed and report the actual error verbatim if it genuinely fails."** Don't accept pre-emptive refusals as truth. The subagent's understanding of its own routing config can be stale or pessimistic.
+
+Memory at `feedback_deepseek_routing.md` updated with the working-channel confirmation.
+
+---
+
+## 2026-05-02 (user feedback) — bugs vs methodology changes vs polish
+
+User course-corrected mid-session: "remember that for every ticket it has to be evaluated as to whether or not it really is relevant for chemometrics" + "we don't just make changes unthinkingly" + "if it is a real bug that means something does not work do 45. the point of my warning was there were a number of suggested changes to pipeline to deal with leakage that were not relevant for chemometrics on NIR data. i want to avoid changing the way the program works. bugs are fine."
+
+The framing the user wants:
+- **Bug fixes** (something is silently broken / metadata is wrong / a code path doesn't do what it claims) → ship.
+- **Pipeline methodology changes** (refactoring SNV / autoscale / SG / baseline / variable-selection to address ML "leakage" objections from per-fold-fitting orthodoxy) → STOP. Confirm with user. Default to NO. Chemometrics-community convention is the authority here, not ML orthodoxy.
+- **Pure engineering polish** (test infrastructure for already-covered surfaces, comment cleanup, tests pinning low-probability regressions, "defense-in-depth" on already-working code) → defer unless trivial.
+
+Applied: T-45 / T-46 / T-47 / T-44 all shipped (bug fixes / observability / behavioral defaults that materially affect what most users get). T-48 deferred (real-Tk integration tests for surfaces already pinned by `_FakeGUI` shim tests — pure polish).
+
+Memory at `feedback_chemometrics_relevance_per_ticket.md`. The earlier-but-related `feedback_chemometrics_conventions.md` covers the methodology side specifically (don't flag SNV/autoscale-pre-CV/variable-selection-on-full-training as leakage).
+
+---
+
 ## 2026-05-02 (T-46 review by DeepSeek) — recent merges can reclassify edge cases as common cases
 
 T-46 plan was filed when `bayesian_persistence_mode='never'` was the default — the auto-migration code path was a rare edge case. Plan said: site 1 (always-on) gets `progress_callback`; site 2 (auto-migration) gets only `logger.warning` because no callback in scope and the failure mode was rare.

@@ -1,10 +1,62 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-45 MERGED + T-44 IMPLEMENTED) —
+> **Last updated:** 2026-05-02 (open-ticket disposition reconciled through 2026-05-02 — see Amendments block in roadmap doc).
 >
-> **T-45 MERGED via PR #13 at merge commit `2333fae`.** Branch deleted on origin and locally. App-lifetime file handler at `<user_data_dir>/dasp.log` now catches module warnings from all three startup paths (bundled GUI, console-script, future entry points). Codex caught a HIGH (cli.main bypass) + MEDIUM (module-reload double-attach) post-PR; both closed in `66e1da1`. DeepSeek pair attempted but routing-blocked this round (opencode-call's deepseek alias goes through opencode-go which the routing memory forbids); routing constraint surfaced as a separate concern.
+> ## Open-ticket re-validation pass (2026-05-02)
 >
-> **T-44 IMPLEMENTED on `fix/T44-n-trials-var-typo` (off post-T-45 main).** One-line typo fix at `spectral_predict_gui_optimized.py:25264` — read site was `self.n_trials_var.get()` guarded by `hasattr(self, "n_trials_var")`, but the actual Tk var is `self.n_unified_trials`. The hasattr guard silently short-circuited to None on every Bayesian `start_run` call, so `RunMetadata.n_trials_per_model` was always null in every sidecar and the resume banner showed "Trials per model (target): ?" instead of the actual count. T-43 captures `n_unified_trials` correctly via the whitelist so resume restoration was unaffected; only the audit-trail metadata field was broken. Pinned with a source-text regression test (`test_t44_no_n_trials_var_typo_in_gui`) since the typo is silent at the Python level — hasattr makes it a no-op rather than an AttributeError. 282 + 1 skipped. **Pipeline behavior unchanged** — pure metadata-correctness bug fix.
+> User-driven check that all currently-open tickets are "real" chemometrics work, not phantom problems imported from sklearn-pipeline-purity instincts (the recurring failure mode that produced the original T-01/02/03 leakage panic and T-08 CARS framing). Six dispositions amended in `docs/RECONCILED_ROADMAP_2026-04-30_REEVALUATED.md` (top-of-doc Amendments block, with inline `> **Amended 2026-05-02:**` markers preserving original verdicts as audit trail):
+>
+> | Ticket | Original | Amended | Notes |
+> |---|---|---|---|
+> | T-12 | KEEP | **SUBSUMED by T-45** | T-45 already merged via PR #13 at `2333fae`. T-12 closed without separate work. |
+> | T-15 | KEEP | **DROP** | LOGO is a footgun in user's data regime; not field-mandated. Memory: `project_t15_dropped_t16_reframed.md`. |
+> | T-16 | KEEP (block-bootstrap) | **REFRAMED — competitive model-comparison machinery survey** | Survey what Unscrambler/SIMCA/OPUS/PLS_Toolbox expose, then scope. |
+> | T-19 | KEEP (publication-reproducibility) | **REFRAMED — expose model-native abilities** | Just expose `scale_pos_weight`/`is_unbalance`/`auto_class_weights`/`class_weight`. Simpler scope; ~1-2d. |
+> | T-22 | REFRAME | **REFRAMED, DEFERRED** | Varsel stability bootstrap is additive, not bug-class. Defer until concrete need. |
+> | T-31 | NEEDS_USER_DECISION | **KEEP** | Multi-class SIMCA confirmed real. Implementation must be true multi-class per Oliveri & Downey 2012, NOT extension of one-class `PCASIMCA`. Memory: `project_t31_simca_confirmed.md`. |
+>
+> **Net effect on currently-open tickets:** zero phantom chemometrics tickets remain. T-33 through T-49 are all GUI/infrastructure (resume lifecycle, logging, type cleanup) — no chemometrics framing at risk. Updated Top-5 actionable order under master rule + post-amendment dispositions: T-19 reframed (~1-2d) → T-16 reframed survey → T-31 SIMCA (1-2w) → T-17 PLS-2 (2-3w) → T-01 reframed (~2-3d). Detail and lessons in SESSION_LOG entry of same date.
+>
+> ---
+>
+> ## Session arc (2026-05-02 overnight)
+>
+> Five PRs merged onto `main`, one filed ticket deferred as polish-only. Main is at `3870b29`. Working tree clean; no orphan branches.
+>
+> | Order | Ticket | PR | Merge commit | Verdict |
+> |---|---|---|---|---|
+> | 1 | Consolidated T-43 + T-49 + T-42 + T-38 (resume reliability + Bayesian write-path cleanup) | #10 | `f063d9e` | DeepSeek READY_TO_MERGE; Codex READY_WITH_REVISIONS — 1 MEDIUM closed |
+> | 2 | T-47 (default flip `'never'` → `'auto'`) | #11 | `a29ad2d` | DeepSeek READY_WITH_REVISIONS — 1 MEDIUM + 2 LOW closed |
+> | 3 | T-46 (surface `_apply_wal_pragmas` return value) | #12 | `08b20ea` | DeepSeek READY_WITH_REVISIONS — 1 cross-cutting MEDIUM (auto-migration path under T-47's new default) closed; Codex READY_WITH_REVISIONS — 1 LOW closed by same fix |
+> | 4 | T-45 (file-handler logger for bundled GUI) | #13 | `2333fae` | Codex READY_WITH_REVISIONS — 1 HIGH (cli.main bypass) + 1 MEDIUM (module-reload dedup) closed; DeepSeek retro confirmed nothing missed |
+> | 5 | T-44 (`n_trials_var` typo + sibling `task_type_var`) | #14 | `3870b29` | DeepSeek + Codex paired — DeepSeek surveyed all hasattr-phantom sites and found 1 sibling MEDIUM (`task_type_var` at gui:30859), folded into same PR |
+> | — | T-48 (real-Tk integration tests) | — | deferred | Polish, not a bug — existing `_FakeGUI` shim tests already pin all three contracts; per "bugs vs methodology vs polish" rule, defer |
+>
+> **Test coverage:** 282 passed + 1 skipped across the consolidated regression sweep (`test_t41_bayesian_sqlite_auto_calculator`, `test_t42_write_path_plumbing`, `test_t43_resume_auto_restore`, `test_run_state`, `test_run_logging`, `test_cv_strategy`, `test_unified_bayesian_baseline`, `test_autoscale_bayesian`, `test_cv_pls_clamp`, `test_ensemble_preprocessing`, `test_ensemble_integration`).
+>
+> ## What's working now (post-session)
+>
+> - **Resume from sidecar restores ~91 GUI settings + validation indices.** Non-deterministic algorithms (Random, Manual) and hand-picked partitions resume without silent leakage. T-43 + T-49 closed both halves.
+> - **Bayesian persistence default is `'auto'`** — most users get crash-resume without thinking about it; benchmark numbers (post-T-42) show all models within 1.06× of in-memory throughput, well under the 1.15× target. Users wanting pre-T-11 in-memory speed set the radio to "Never on".
+> - **WAL rejection surfaces visibly** at both SQLite call sites (always-on + auto-migration), via both progress_callback (GUI) and logger.warning (file log). OneDrive/Dropbox-synced data dirs no longer silently halve Bayesian throughput.
+> - **Module warnings land on disk.** `<user_data_dir>/dasp.log` (1 MB × 3 backups) catches sidecar corruption, capture-time Tk failures, WAL rejection, T-42 hoist mismatches, etc. — for the bundled GUI AND the `spectral-predict` console script. Pre-T-45, all of these vanished into PyInstaller's `nul` stderr.
+> - **Sidecar metadata is honest.** `n_trials_per_model` and `task_type` now reflect actual GUI state instead of always being None / silently inferred-from-y.
+>
+> ## Things to note for future sessions
+>
+> - **DeepSeek routing through `opencode-call` IS working** — the agent's earlier pre-emptive refusal claiming opencode-go routing was a misjudgment. When the agent refuses on routing grounds, retry with explicit instruction to attempt the dispatch and report the actual error verbatim. Memory updated at `feedback_deepseek_routing.md`.
+> - **`hasattr(self, ...)` phantom-typo class is latent** — DeepSeek's T-44 sibling-survey audited 18 inline `hasattr(self, X) + self.X.get()` sites and found 2 phantoms (`n_trials_var`, `task_type_var`). The other ~230 multi-line `hasattr` patterns in the GUI weren't fully audited — same class of bug could exist there. **Recommended follow-up:** ruff AST visitor that flags `hasattr(obj, name)` where `name` is a string literal that never appears in any `obj.name = ...` assignment in the same class. Closes the class permanently; out of scope for T-44.
+> - **The ticket-evaluation rule** (memory at `feedback_chemometrics_relevance_per_ticket.md`): bug fixes that preserve pipeline behavior are fine; pipeline methodology changes (refactoring SNV/autoscale/SG/baseline/variable-selection to chase ML "leakage" objections) need user confirmation; pure engineering polish defers. T-48 was deferred under this rule.
+> - **Cross-ticket interactions matter at review time** — T-46's plan was filed when `'never'` was the default, but T-47 (which flipped to `'auto'`) merged earlier in the same session. That reclassified T-46's auto-migration code path from "rare edge case" to "most-traveled WAL surface". DeepSeek caught this in cross-family review by integrating session context. Per-ticket reviewers in isolation would have missed it. Logged in SESSION_LOG.
+> - **Two-pair contracts in default-related code** — T-47 surfaced four textual default sites for one field (dataclass default + function default + legacy-sidecar fallback + corruption coercion). The first two are "default for unspecified input" (flip together); the latter two are "fallback for malformed input" (decide separately). Conflating them is a common refactor mistake. Tests pin both halves of the asymmetry. Logged in SESSION_LOG.
+>
+> ---
+>
+> ## Detailed entries (most recent first)
+>
+> **2026-05-02 — T-44 MERGED via PR #14 at `3870b29`.** One-line typo fix at `spectral_predict_gui_optimized.py:25264` — read site was `self.n_trials_var.get()` guarded by `hasattr(self, "n_trials_var")`, but the actual Tk var is `self.n_unified_trials`. The hasattr guard silently short-circuited to None on every Bayesian `start_run` call, so `RunMetadata.n_trials_per_model` was always null in every sidecar and the resume banner showed "Trials per model (target): ?" instead of the actual count. T-43 captures `n_unified_trials` correctly via the whitelist so resume restoration was unaffected; only the audit-trail metadata field was broken. DeepSeek post-PR review surveyed sibling `hasattr(self, ...)` sites and surfaced one phantom MEDIUM at `gui:30859` (`task_type_var` read but actual var is `task_type`); folded into same PR rather than filing a separate ticket. Pinned with a class-of-bug source-text regression test (`test_t44_no_phantom_hasattr_typos_in_gui`) covering both phantom names. 282 + 1 skipped. Pipeline behavior unchanged.
+>
+> **2026-05-02 — T-45 MERGED via PR #13 at `2333fae`.** App-lifetime file handler at `<user_data_dir>/dasp.log` now catches module warnings from all three startup paths (bundled GUI, console-script, future entry points). Codex caught a HIGH (cli.main bypass) + MEDIUM (module-reload double-attach) post-PR; both closed in `66e1da1`. DeepSeek pair attempted but routing-blocked at first attempt (subagent misjudgment); retroactive review on T-44 dispatch confirmed nothing Codex missed at HIGH/MEDIUM.
 >
 > ---
 >
