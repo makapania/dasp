@@ -3202,9 +3202,12 @@ class SpectralPredictApp:
         self.bayes_region_test_all = tk.BooleanVar(value=False)
         self.bayes_region_test_pairwise = tk.BooleanVar(value=False)
         self.bayes_enable_uve = tk.BooleanVar(value=True)
-        # T-41: crash-resume persistence mode. Default='never' (zero overhead).
-        # User opts into 'auto' or 'always' only when they want crash-resume.
-        self.bayesian_persistence_mode = tk.StringVar(value='never')
+        # T-41: crash-resume persistence mode. Default flipped back to 'auto'
+        # 2026-05-02 for troubleshooting (was 'never' until resume reliability
+        # is confirmed end-to-end). 'auto' = first 10 trials in-memory then
+        # auto-decide; 'always' = SQLite from trial 0; 'never' = pure
+        # in-memory, ignore active storage URL.
+        self.bayesian_persistence_mode = tk.StringVar(value='auto')
 
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
@@ -23171,13 +23174,26 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
+                # T-41 resume bug fix: force persistence mode to 'always' so
+                # that when the user clicks Run Analysis, run_unified_bayesian
+                # actually uses the SQLite store at _active_storage_url. With
+                # the default 'auto' (or 'never'), the resumed URL would be
+                # ignored — auto's warmup creates a fresh in-memory study, and
+                # never short-circuits SQLite entirely. Either way, the user
+                # would see "Resuming…" but get a fresh run.
+                try:
+                    if hasattr(self, "bayesian_persistence_mode"):
+                        self.bayesian_persistence_mode.set("always")
+                except Exception:
+                    pass
                 # Surface a status banner so the user knows to re-load data.
                 try:
                     if hasattr(self, "progress_status"):
                         self.progress_status.config(
                             text=(
                                 "Resuming previous run — load the same data + "
-                                "settings and click Run Analysis."
+                                "settings and click Run Analysis. (Persistence "
+                                "auto-set to Always-on for this session.)"
                             )
                         )
                 except Exception:

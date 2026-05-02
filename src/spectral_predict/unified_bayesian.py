@@ -1727,7 +1727,7 @@ def run_unified_bayesian(
     enable_autoscale: bool = False,  # T-36
     enable_uve: bool = False,
     inlier_class_label=None,
-    enable_sqlite_persistence: str = "never",  # T-41: 'auto', 'always', 'never'
+    enable_sqlite_persistence: str = "auto",  # T-41: 'auto', 'always', 'never' (default flipped to auto 2026-05-02 for troubleshooting)
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -2090,9 +2090,13 @@ def run_unified_bayesian(
         nonlocal _sqlite_decided, _auto_migrated
 
         # Check for stop/pause signal from controller.
+        # DeepSeek HIGH #2 fix: stop() must target cb_study (the study Optuna
+        # is actively optimizing) not _study_ref[0]. After auto-migration,
+        # _study_ref[0] is the migrated SQLite study which is NOT in the
+        # optimize loop, and Study.stop() on it would raise RuntimeError.
         if controller is not None:
             if not controller.check_and_wait():
-                _study_ref[0].stop()
+                cb_study.stop()
                 return
 
         # --- T-41 auto-decision logic (only runs during 'auto' warmup) ---
@@ -2103,23 +2107,29 @@ def run_unified_bayesian(
         ):
             from optuna.trial import TrialState as _TS
 
+            # DeepSeek MEDIUM #1 fix: gate on TOTAL trials seen, not completed
+            # ones. Otherwise one-class runs with high CV-skip rates can stall
+            # the warmup-window decision past the entire trial budget. The
+            # n_completed < 3 fallback is now reachable.
+            total_seen = len(cb_study.trials)
             completed = [
                 t for t in cb_study.trials
                 if t.state == _TS.COMPLETE and t.duration is not None
             ]
             n_completed = len(completed)
 
-            if n_completed >= _AUTO_WARMUP:
+            if total_seen >= _AUTO_WARMUP:
                 _sqlite_decided = True  # only decide once
 
                 # Fallback: if fewer than 3 trials completed (e.g., one-class
-                # with many CV-skip failures), default SQLite ON conservatively.
+                # with many CV-skip failures), default SQLite ON conservatively
+                # — we don't trust an empty-distribution decision.
                 if n_completed < 3:
                     use_sqlite = True
                     median_s = float("nan")
                     decision_reason = (
-                        f"Auto-enabled SQLite (only {n_completed} completed trials — "
-                        "conservative default)"
+                        f"Auto-enabled SQLite (only {n_completed} of {total_seen} "
+                        "trials completed — conservative default)"
                     )
                 else:
                     durations = sorted(
@@ -2158,6 +2168,13 @@ def run_unified_bayesian(
                     )
 
                 if use_sqlite:
+                    # DeepSeek HIGH #1 fix: Optuna's optimize() loop holds a
+                    # direct reference to the in-memory study. Swapping
+                    # _study_ref[0] in the callback does NOT redirect Optuna's
+                    # writes — post-migration trials silently land in the
+                    # in-memory study and are lost from the SQLite resume
+                    # store. We must abort optimize() here, then restart it
+                    # on the migrated SQLite study from the outer scope.
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state
@@ -2165,8 +2182,12 @@ def run_unified_bayesian(
                         _study_ref[0] = migrated
                         _auto_migrated = True
                         logger.info(
-                            "T-41: migrated study '%s' to SQLite (WAL)", study_name
+                            "T-41: migrated study '%s' to SQLite (WAL); "
+                            "stopping in-memory loop to restart on SQLite-backed study",
+                            study_name,
                         )
+                        cb_study.stop()  # abort outer optimize() — outer loop will restart on _study_ref[0]
+                        return
                     except Exception as exc:
                         logger.warning(
                             "T-41: migration to SQLite failed, continuing in-memory: %s",
@@ -2267,9 +2288,35 @@ def run_unified_bayesian(
     else:
         print(f"  All {n_trials} trials already complete; skipping optimization.")
 
+    # DeepSeek HIGH #1 fix: if 'auto' triggered a mid-run migration, the
+    # callback called cb_study.stop() to abort optimize() on the in-memory
+    # study (because Optuna's optimize loop holds a direct reference and
+    # would silently keep writing in-memory). Now restart optimize() on the
+    # SQLite-backed study so trials 11..N land directly in SQLite — both
+    # crash-resumable AND visible to convert_study_to_dataframe.
+    if _auto_migrated:
+        from optuna.trial import TrialState as _TS_post
+        already_done_post = sum(
+            1 for t in _study_ref[0].trials
+            if t.state in (_TS_post.COMPLETE, _TS_post.PRUNED)
+        )
+        remaining_post = max(0, n_trials - already_done_post)
+        if remaining_post > 0:
+            logger.info(
+                "T-41: restarting optimize() on SQLite-backed study for %d remaining trials",
+                remaining_post,
+            )
+            _study_ref[0].optimize(
+                objective,
+                n_trials=remaining_post,
+                callbacks=[progress_wrapper],
+                show_progress_bar=verbose and not progress_callback,
+            )
+
     # After optimization, resolve the final study object.  If 'auto' migration
-    # happened, _study_ref[0] is the SQLite-backed study; otherwise it's the
-    # original in-memory study.
+    # happened, _study_ref[0] is the SQLite-backed study (now containing all
+    # trials post the restart above); otherwise it's the original in-memory
+    # study.
     study = _study_ref[0]
 
     # Convert results to DataFrame
