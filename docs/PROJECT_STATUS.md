@@ -1,8 +1,29 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-19 reframed: bug-fix + Auto mode both on branch; awaiting DeepSeek review of Auto mode + user PR open).
+> **Last updated:** 2026-05-03 (T-19 MERGED via PR #15 at `1d2bf6d`; quick-wins batch — 5 branches pushed, awaiting user PR open).
 >
-> ## T-19 reframed — IMPLEMENTED on `fix/T19-expose-model-native-imbalance` (5 commits, awaiting user PR)
+> ## Quick-wins batch — 5 PRs READY ON ORIGIN (awaiting user PR open)
+>
+> All branched off main (post-PR #15 merge), all bug-fix-class except T-30 (hygiene-class with CAUTION caveat applied). All tested. Test-merge with main: clean for all five. The user opens PRs.
+>
+> | Ticket | Branch | Tip | LOC | Surface |
+> |---|---|---|---|---|
+> | T-50 | `fix/T50-cleanup-stale-optuna-sqlite` | `d09b241` | +362/-5 | Auto-cleanup stale Optuna SQLite trial archives at app startup. `cleanup_old_sqlite_files()` in `run_state.py` + GUI/CLI wiring. 6 regression tests. Cross-family reviewed (DeepSeek + GLM via opencode-call) — 3 surgical MEDIUMs closed in fix-of-fixes commit `d09b241`. |
+> | T-14 | `fix/T14-version-string-single-source` | `9fd411a` | +49/-2 | Two stale-version-string sites: `report.py:139` hardcoded `v0.4.0` (Spectral Predict version, drift) → reads `__version__`; `code_generator.py:373` hardcoded Python `3.9.0` (notebook language_info, project is now Python 3.12+) → uses `sys.version_info`. 2 regression tests pin both surfaces. The original ticket framing's third site (`__init__.py:3`) was the source of truth, no change needed. |
+> | T-29 | `fix/T29-scoring-no-bare-except` | `d0df57b` | +90/-14 | Three bare `except:` in `compute_imbalance_metrics` (scoring.py:582/590/608) had two real bugs: (1) swallowed KeyboardInterrupt/SystemExit so Ctrl-C during long Bayesian/grid runs got eaten mid-scoring; (2) silent metric failure made a leaderboard 0.0 indistinguishable from a real model 0.0. Fix: `except Exception:` + `logger.warning()`, kept existing 0.0/None sentinel returns (pipeline behavior unchanged per the chemometrics-relevance rule — changing 0.0→NaN would shift ranking semantics). 2 regression tests. Test-fix follow-up commit `d0df57b` because modern sklearn doesn't actually raise on single-class roc_auc — monkeypatch was needed to force the exception path. |
+> | T-32 | `fix/T32-sample-weight-resampling-mismatch` | `8b79874` | +148/-4 | `_run_single_fold` (search.py:~4109): post-fix call to `final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)` passed pre-resampling y alongside post-resampling X and sample_weight → sklearn raised ValueError on every SMOTE+sample_weight-supporting-classifier combination. Fix: thread `y_train_for_model` through the post-loop fit() and transform .fit() calls so X/y/sample_weight stay length-consistent. Also fixes a latent secondary bug where Y-aware transformers downstream of a resampler saw matched-X / unmatched-y. 2 regression tests with a `RidgeClassifier` fit() spy pinning length-equality. Pipeline behavior unchanged for any path without a resampler. |
+> | T-30 | `fix/T30-remove-debug-prints` | `b683edd` | +0/-20 | 7 unambiguous `[DEBUG]`-prefixed `print()` leftovers in `search.py` removed (variable-selection + scoring-output paths, fired per-trial during Bayesian search). Per the T-30 ticket caveat about user-facing prints, ONLY the unambiguous `[DEBUG]` markers were touched; the other ~1200 print() calls in src/ deliberately untouched. No functional change. |
+>
+> **Process lessons captured this batch:**
+> 1. **Commit before yielding control.** Long pytest runs / agent dispatch / `git push` can collide with parallel sessions or hooks that swap branches and clobber uncommitted working-tree work. Memory entry `feedback_commit_before_yielding_control.md` filed. T-50 lost ~30 min to this; T-14/T-29/T-32/T-30 followed an "edit → compile → commit IMMEDIATELY → only then run long sweeps" pattern with no further loss.
+> 2. **`pytest | tail` masks pytest's exit code** because the pipe inherits `tail`'s exit. T-29's "atomic burst" (compile && pytest && commit && push) silently committed despite a failing test because the `| tail -10` made pytest always exit 0. Workaround: drop the `| tail`, use `2>&1 | grep -E "passed|failed"` if length matters, or split into separate steps. T-32 onwards used the corrected pattern.
+> 3. **DeepSeek false positive on bytes_freed ordering** (T-50 review): claimed `bytes_freed += sibling_size` ran before `sibling.unlink()`. Code reading shows it ran after — the increment is at the line *after* unlink in the same try block, so unlink-OSError correctly skips the increment via except. Cross-family review caught one real bug class GLM missed and one false positive — net positive but reviewers aren't infallible.
+>
+> **What's next (open-ticket roster after this batch):** T-20 (saved-model ↔ exported-script reproducibility test, pairs with T-19 freshness) per the original continuation prompt suggestion. Then the bigger arcs: T-31 multi-class SIMCA (1-2w), T-16 reframed model-comparison machinery survey, T-17 PLS-2 (2-3w), T-01 reframed (~2-3d).
+>
+> ---
+>
+> ## T-19 reframed — MERGED via PR #15 at `1d2bf6d` (2026-05-03)
 >
 > Tip: `0b1d4a2` (commits: `3c63ffe` initial bug fix → `765a82f` GLM MEDIUMs closed → `bdeb735` DeepSeek residual multiclass test → `9cea07c` PROJECT_STATUS+SESSION_LOG → `0b1d4a2` **Auto mode**). Pushed to origin. **NOT MERGED — user opens PRs.**
 >
