@@ -57761,6 +57761,17 @@ def main():
         except Exception:
             pass
 
+    # T-45: route module-level logger.warning calls to a file under
+    # <user_data_dir>/dasp.log. In the bundled PyInstaller GUI, stderr
+    # is /dev/null (no console window), so corrupt-sidecar coercions,
+    # WAL rejections, and capture-time Tk failures vanish without this.
+    # Best-effort: errors here don't block app start.
+    try:
+        from spectral_predict.run_logging import setup_app_logger
+        setup_app_logger()
+    except Exception:
+        pass
+
     root = tk.Tk()
 
     # Set window icon (taskbar and title bar). Belt-and-suspenders:
