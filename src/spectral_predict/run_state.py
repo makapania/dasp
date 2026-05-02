@@ -37,15 +37,33 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from spectral_predict.resource_paths import get_user_optuna_dir
 
 logger = logging.getLogger(__name__)
+
+# Closed set of legal persistence-mode values, shared by RunMetadata and
+# run_unified_bayesian's enable_sqlite_persistence parameter so the two stay
+# in sync. Invalid values raise ValueError at the call boundary instead of
+# silently falling through to the in-memory branch.
+PersistenceMode = Literal["auto", "always", "never"]
+_VALID_PERSISTENCE_MODES = ("auto", "always", "never")
+
+
+def _validate_persistence_mode(value: str) -> str:
+    """Raise ValueError if `value` isn't one of the three legal modes."""
+    if value not in _VALID_PERSISTENCE_MODES:
+        raise ValueError(
+            f"persistence mode must be one of {_VALID_PERSISTENCE_MODES}, got {value!r}"
+        )
+    return value
 
 
 _lock = threading.Lock()
@@ -112,15 +130,27 @@ class RunMetadata:
     model_names: list[str]
     n_trials_per_model: int | None
     started_iso: str
-    bayesian_persistence_mode: str = "never"  # T-41: audit log field
+    bayesian_persistence_mode: PersistenceMode = "never"  # T-41
+
+    def __post_init__(self) -> None:
+        _validate_persistence_mode(self.bayesian_persistence_mode)
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunMetadata":
-        # Tolerate older sidecars that predate the bayesian_persistence_mode field.
-        data.setdefault("bayesian_persistence_mode", "never")
+        # Older sidecars predate the field; default to 'never'. Unknown values
+        # (e.g. corrupted sidecar) coerce to 'never' rather than crashing the
+        # resume flow — but log a warning so the issue isn't invisible.
+        mode = data.get("bayesian_persistence_mode", "never")
+        if mode not in _VALID_PERSISTENCE_MODES:
+            logger.warning(
+                "T-41: sidecar has invalid bayesian_persistence_mode=%r; coercing to 'never'",
+                mode,
+            )
+            mode = "never"
+        data["bayesian_persistence_mode"] = mode
         return cls(**data)
 
 
@@ -149,31 +179,56 @@ def _sidecar_path() -> Path:
 
 
 def _cleanup_empty_sqlite(meta: "RunMetadata") -> None:
-    """T-41: delete the SQLite file if it was never written to.
+    """T-41: delete the SQLite file if it has no trial rows.
 
-    When all models stay in-memory (e.g., all fast / 'never' mode), Optuna
-    never creates the SQLite file OR creates an essentially-empty shell.  We
-    delete it so the next session's ``find_incomplete_run()`` doesn't offer a
-    phantom "Resume?" that has nothing to resume.
+    When all models stay in-memory, Optuna either never creates the file or
+    creates an essentially-empty shell. We delete it so the next session's
+    ``find_incomplete_run()`` doesn't offer a phantom "Resume?".
 
-    This is best-effort — failures are logged at DEBUG, never raised.
-
-    Definition of "empty": file doesn't exist, OR size < 32 KB (Optuna's
-    minimum meaningful SQLite schema is ~20 KB; a file with completed trials
-    is well above 32 KB for any real workload).
+    Trial-count gate (not file size): a tiny one-class run can produce a
+    real <32 KB SQLite, so the prior size threshold could destroy the only
+    successful trial's record. Open the DB, count rows in `trials`, delete
+    only when count == 0. Lock-failures (AV, in-use) surface at WARNING so
+    silent disk-leaks don't accumulate.
     """
-    _EMPTY_THRESHOLD_BYTES = 32 * 1024  # 32 KB
+    if not meta.storage_path:
+        return
+    sqlite_path = Path(meta.storage_path)
+    if not sqlite_path.exists():
+        return  # never created — nothing to clean up
+
     try:
-        if not meta.storage_path:
+        conn = sqlite3.connect(str(sqlite_path), timeout=2.0)
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM trials").fetchone()
+            trial_count = int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            # Schema not initialized — file exists but Optuna never wrote.
+            trial_count = 0
+        else:
+            logger.warning(
+                "T-41: stale-SQLite cleanup skipped (lock/AV/permission?): %s", exc
+            )
             return
-        sqlite_path = Path(meta.storage_path)
-        if not sqlite_path.exists():
-            return  # never created — nothing to clean up
-        if sqlite_path.stat().st_size < _EMPTY_THRESHOLD_BYTES:
-            sqlite_path.unlink(missing_ok=True)
-            logger.debug("T-41: removed empty SQLite file %s", sqlite_path)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("T-41: stale-sidecar cleanup skipped: %s", exc)
+    except sqlite3.DatabaseError as exc:
+        logger.warning("T-41: stale-SQLite cleanup skipped (corrupt file?): %s", exc)
+        return
+
+    if trial_count > 0:
+        return  # has real data; keep it
+
+    try:
+        sqlite_path.unlink(missing_ok=True)
+        logger.debug("T-41: removed empty SQLite file %s", sqlite_path)
+    except FileNotFoundError:
+        pass  # raced with another instance
+    except OSError as exc:
+        logger.warning(
+            "T-41: could not remove empty SQLite file %s: %s", sqlite_path, exc
+        )
 
 
 def fingerprint_dataset(X, y) -> str:
@@ -216,7 +271,7 @@ def start_run(
     dataset_fingerprint: str | None = None,
     model_names: list[str] | None = None,
     n_trials_per_model: int | None = None,
-    bayesian_persistence_mode: str = "never",  # T-41: 'auto', 'always', 'never'
+    bayesian_persistence_mode: PersistenceMode = "never",
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -229,6 +284,7 @@ def start_run(
     generated (``get_storage_url()`` returns ``None``). This saves I/O and
     avoids orphaned ``.sqlite3`` sidecars for all-in-memory sessions.
     """
+    _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
         # Cluster C fix: idempotent path returns the cached original metadata,

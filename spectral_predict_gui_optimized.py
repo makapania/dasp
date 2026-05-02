@@ -23176,28 +23176,49 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
-                # T-41 resume bug fix: force persistence mode to 'always' so
-                # that when the user clicks Run Analysis, run_unified_bayesian
-                # actually uses the SQLite store at _active_storage_url. With
-                # the default 'auto' (or 'never'), the resumed URL would be
-                # ignored — auto's warmup creates a fresh in-memory study, and
-                # never short-circuits SQLite entirely. Either way, the user
-                # would see "Resuming…" but get a fresh run.
+                # Force 'always' on resume — under 'auto' or 'never', the loaded
+                # SQLite URL would be ignored and the user would get a fresh run
+                # despite the banner. silent-failure HIGH#4: if the set fails,
+                # show a recovery error rather than a banner that lies.
+                _override_ok = False
                 try:
                     if hasattr(self, "bayesian_persistence_mode"):
                         self.bayesian_persistence_mode.set("always")
-                except Exception:
-                    pass
-                # Surface a status banner so the user knows to re-load data.
+                        _override_ok = (
+                            self.bayesian_persistence_mode.get() == "always"
+                        )
+                except Exception as set_err:
+                    try:
+                        self._log_progress(
+                            f"[RUN] T-41: resume override (set persistence='always') failed: {set_err}"
+                        )
+                    except Exception:
+                        pass
+
+                if _override_ok:
+                    banner_text = (
+                        "Resuming previous run — load the same data + settings "
+                        "and click Run Analysis. (Persistence auto-set to "
+                        "Always-on for this session.)"
+                    )
+                else:
+                    banner_text = (
+                        "Resume queued, but the persistence radio button could "
+                        "not be auto-set. Set 'Crash-resume persistence' to "
+                        "'Always on' manually before clicking Run Analysis, "
+                        "otherwise the resumed SQLite store will be ignored."
+                    )
+                    try:
+                        messagebox.showwarning(
+                            "Resume needs manual step",
+                            banner_text,
+                        )
+                    except Exception:
+                        pass
+
                 try:
                     if hasattr(self, "progress_status"):
-                        self.progress_status.config(
-                            text=(
-                                "Resuming previous run — load the same data + "
-                                "settings and click Run Analysis. (Persistence "
-                                "auto-set to Always-on for this session.)"
-                            )
-                        )
+                        self.progress_status.config(text=banner_text)
                 except Exception:
                     pass
         else:
@@ -25065,6 +25086,31 @@ class SpectralPredictApp:
                 except Exception as run_err:
                     # Logging-only failure path; in-memory Optuna fallback still works.
                     self._log_progress(f"[RUN] Run-state init failed: {run_err}")
+                    # silent-failure HIGH#3: if the user explicitly asked for
+                    # crash-resume (auto/always) and start_run failed, surface
+                    # a visible warning so they know they're running without
+                    # persistence — otherwise their explicit choice is silently
+                    # downgraded to in-memory.
+                    try:
+                        _persist_choice = (
+                            self.bayesian_persistence_mode.get()
+                            if hasattr(self, "bayesian_persistence_mode")
+                            else "never"
+                        )
+                    except Exception:
+                        _persist_choice = "never"
+                    if _persist_choice in ("auto", "always"):
+                        try:
+                            messagebox.showwarning(
+                                "Crash-resume disabled",
+                                "Bayesian crash-resume could not be enabled for "
+                                "this run because the SQLite store could not be "
+                                f"initialized:\n\n{run_err}\n\nThe run will "
+                                "continue in-memory. If it crashes you will not "
+                                "be able to resume.",
+                            )
+                        except Exception:
+                            pass
 
             # Determine task type
             task_type_setting = self.task_type.get()
