@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-42 + T-43 cross-family review trail) — Codex caught a T-43 silent-failure that DeepSeek missed; DeepSeek caught a stale T-42 test that pr-review-toolkit / Codex would have missed
+
+Two-ticket overnight queue. After implementation of each ticket, dispatched DeepSeek V4 Pro Max via opencode-call. Per the protocol, after every 2 tickets ALSO ran Codex via the codex-reviewer agent — the cross-family check that has caught real bugs in prior tickets (T-41 phantom resume prompts, docstring drift).
+
+**The Codex-only finding (T-43 BLOCKER):** the GUI has TWO parallel sets of baseline/smoothing/region/UVE Tk vars — the "general" ones (`enable_baseline`, `baseline_method`, `enable_smoothing`, `region_test_all_individual`, `region_test_pairwise`, `enable_uve` if it existed) AND a Bayesian-specific set (`bayes_enable_baseline`, `bayes_baseline_method`, `bayes_enable_smoothing`, `bayes_region_test_all`, `bayes_region_test_pairwise`, `bayes_enable_uve`). The Bayesian path at `spectral_predict_gui_optimized.py:27554-27570` reads the bayes_* set; my whitelist captured only the general set. Resume of a Bayesian run would have silently used bayes_* defaults despite the banner claiming "settings restored" — the exact silent-failure trap T-43 was meant to close. DeepSeek had reviewed the same diff in pass 1 and didn't catch this; Codex did because it traced the actual analysis read path back from the run_unified_bayesian call site.
+
+**The DeepSeek-only finding (T-42 HIGH):** my audit doc claimed "132/132 regression tests green" but I had only run a curated sweep that excluded `tests/test_cv_strategy.py`. That file's `test_one_class_bayesian_writes_cv_strategy_to_trial` still asserted `best.user_attrs.get('cv_strategy')` against the keys I'd just removed from per-trial scope. Codex didn't flag this in its T-42 pass (verdict: READY_TO_MERGE, after empirically verifying user_attrs survive `optuna.copy_study`); DeepSeek flagged it as a sweep-coverage gap. Lesson: for tickets that change shared contracts (in this case, "where to read cv_strategy from"), the regression sweep must include EVERY test file that touches the contract surface, not just the new ticket's own tests.
+
+**Cross-family complementarity confirmed.** Each reviewer caught what the other missed:
+- Codex traced runtime read paths through GUI surface code and caught the bayes_* whitelist gap.
+- DeepSeek empirically tested Optuna 4.8 behavior (would have caught a copy_study user_attrs trap if it existed; verified ours doesn't) AND caught the test-coverage gap by exhaustively grep'ing for stale assertions on the changed surface.
+
+For overnight protocols: the every-2-tickets Codex pass paired with per-ticket DeepSeek isn't redundancy — it's distinct family-orthogonal coverage.
+
+---
+
 ## 2026-05-02 (T-42 baseline measurement) — T-41 already closed the perf gap
 
 Critical empirical finding before implementing Approach C: **the post-T-41 baseline (`tests/_bench_bayesian_per_model.py` on `fix/T42-write-path-plumbing-approach-c` tip = T-43 commit `487b1d9`) shows SQLite WAL ratios already at the T-42 "definition of done" target.** Numbers (n_trials=10, synthetic data n=100, n_features=200):

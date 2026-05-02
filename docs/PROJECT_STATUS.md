@@ -1,6 +1,34 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-43 IMPLEMENTED + DeepSeek-reviewed — branch ready for PR) —
+> **Last updated:** 2026-05-02 (T-42 + T-43 BOTH IMPLEMENTED + cross-family-reviewed — branches ready for PRs) —
+>
+> **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `e1daaa6`, 2 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
+>
+> **Surprise empirical finding (changes T-42's framing):** the post-T-41 baseline benchmark (`tests/_bench_bayesian_per_model.py`, n_trials=10, synthetic n=100, n_features=200) **already met T-42's "definition of done" target**: PLS 0.69×, Ridge 1.06×, RandomForest 0.25× (caching), LightGBM 0.93×, XGBoost 1.01× — all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41 measurements. **Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — file as a separate trivial follow-up ticket.** Approaches A and D no longer needed.
+>
+> **T-42 review trail (2 passes, cross-family):**
+> 1. DeepSeek V4 Pro Max post-`ab9d00f`: READY_WITH_REVISIONS — 1 HIGH (test_cv_strategy.py still asserted old per-trial contract; audit doc's "132/132 green" claim was wrong because that file was excluded from the curated sweep) + 1 MEDIUM (no test that user_attrs survive copy_study migration — same trap class as T-41's `load_if_exists+sampler` silent-ignore) + 1 LOW (XGBoost trial-absence assertion missing) all closed in `e1daaa6`. Wider sweep now 225/225 green.
+> 2. Codex CLI post-`ab9d00f` (paired with T-43 review per overnight protocol): READY_TO_MERGE. Verified empirically against installed Optuna source that `copy_study()` does preserve user_attrs (study.py:1567-1568); confirmed ordering safety (study.set_user_attr lands before progress_wrapper closure runs); confirmed no other readers of the three keys remain in `trial.user_attrs`.
+>
+> **T-43 resume auto-restore GUI settings — IMPLEMENTED on `fix/T43-resume-auto-restore-settings` (tip `2568be8`, 3 commits).** Closes the user-reported gap from T-41 verification: previously the user had to manually recreate every preprocessing/model setting before the resumed SQLite study would actually pick up trial-level state. Now ~86 analysis-defining Tk vars (preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters, **plus the 6 `bayes_*` Bayesian-only baseline/smoothing/region/UVE controls Codex flagged as missing**) are auto-restored from the sidecar.
+>
+> **Architecture:** `RunMetadata.gui_settings: dict | None` (extended schema, backward-compat via `dataclasses.fields()` filter + type-guard). New `src/spectral_predict/run_gui_settings.py` module with `CAPTURABLE_SETTINGS` whitelist + `capture_gui_settings(gui)` + `restore_gui_settings(gui, dict) -> RestoreReport` + `summarize_gui_settings()`. GUI captures at `start_run` time and restores BEFORE the existing 'always' persistence override (order matters — comment + new test document this).
+>
+> **T-43 review trail (2 passes, cross-family):**
+> 1. DeepSeek V4 Pro Max post-`f934c81`: READY_WITH_REVISIONS — 2 HIGH (banner-lies-on-errors + missing type-guard on gui_settings) + 1 MEDIUM (Tcl quirk: `IntVar.set("abc")` doesn't raise) all closed in `3f071b3`.
+> 2. Codex CLI post-`487b1d9`: BLOCKERS — 1 HIGH (the 6 `bayes_*` Tk vars at gui:27554-27570 weren't in the whitelist; resumed Bayesian runs would silently use defaults despite the banner claiming "settings restored" — the exact silent-failure trap T-43 was meant to close) + 1 MEDIUM (skipped_no_var bucket not surfaced in resume log) + 1 LOW (docstring drift) all closed in `2568be8`.
+>
+> **Pre-existing bug surfaced for follow-up (NOT a T-43 regression):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` guarded by `hasattr`; the actual var is `self.n_unified_trials`, so `n_trials_per_model` is always None in `start_run` metadata. T-43 itself captures `n_unified_trials` correctly via the whitelist. To file as a separate ticket.
+>
+> **Test coverage:** 23/23 T-43 tests + 6/6 T-42 tests + the 225/225 wider regression sweep = comprehensive coverage of the resume-auto-restore + write-path-cleanup surface.
+>
+> **Audit trail:**
+> - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
+> - T-43: code + tests speak for themselves; no separate audit doc.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
 >
 > **T-43 resume auto-restore GUI settings — IMPLEMENTED on `fix/T43-resume-auto-restore-settings` (tip `3f071b3`, 2 commits).** Closes the user-reported gap from T-41 verification: previously the user had to manually recreate every preprocessing/model setting before the resumed SQLite study would actually pick up trial-level state. Now, when the user accepts the resume banner, ~80 analysis-defining Tk vars (preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters) are auto-restored from the sidecar — they just click Run Analysis.
 >
