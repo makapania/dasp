@@ -1144,6 +1144,38 @@ def recommend_imbalance_method(y, task_type='classification'):
 
 
 # ============================================================================
+# AUTO MODE — runtime imbalance detection + per-library balanced-loss dispatch
+# ============================================================================
+
+AUTO_IMBALANCE_THRESHOLD = 3.0
+
+
+def resolve_auto_imbalance(y, task_type='classification', threshold=AUTO_IMBALANCE_THRESHOLD):
+    """Resolve `imbalance_method='auto'` to a concrete method based on data.
+
+    Calls :func:`detect_class_imbalance` and returns ``'class_weight'`` if the
+    severity threshold (default 3:1 majority:minority) is exceeded, else
+    ``None``. Caller is expected to substitute the returned method into the
+    rest of the run as if the user had picked it explicitly.
+
+    Returns
+    -------
+    resolved : str or None
+        ``'class_weight'`` if imbalance detected, ``None`` if not, ``None`` for
+        non-classification tasks (auto-mode is classification-only).
+    info : dict
+        The full output of :func:`detect_class_imbalance` (or an empty dict for
+        non-classification). Useful for logging / audit trail.
+    """
+    if task_type != 'classification':
+        return None, {}
+    info = detect_class_imbalance(y, threshold=threshold)
+    if info['is_imbalanced']:
+        return 'class_weight', info
+    return None, info
+
+
+# ============================================================================
 # UPFRONT VALIDATION
 # ============================================================================
 
@@ -1185,7 +1217,7 @@ def validate_classification_config(y, imbalance_method, imbalance_params=None, n
                 but class 'minority_class' has only 3.
                 Options: set k_neighbors<=2, use random_undersampler, or use class_weight.
     """
-    if imbalance_method is None or imbalance_method == 'class_weight':
+    if imbalance_method is None or imbalance_method in ('class_weight', 'auto'):
         return True  # No resampling validation needed
 
     if imbalance_params is None:

@@ -1793,6 +1793,23 @@ def run_nsga2_search(
         print(f"Warning: NSGA-II search does not support {cv_strategy} CV; falling back to K-fold.")
         cv_strategy = 'kfold'
 
+    # T-19 Auto mode: resolve `imbalance_method='auto'` based on the training
+    # data's class ratio. Mirrors the run_search entry-point logic.
+    if imbalance_method == 'auto' and task_type == 'classification':
+        from spectral_predict.imbalance import resolve_auto_imbalance
+        resolved, info = resolve_auto_imbalance(np.asarray(y), task_type=task_type)
+        if resolved == 'class_weight':
+            print(
+                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
+                f"({info['severity']}); applying class_weight"
+            )
+        else:
+            print(
+                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
+                f"(below 3:1 threshold); no correction applied"
+            )
+        imbalance_method = resolved
+
     # Use user-specified models or defaults
     if models is None:
         models = MODEL_TYPES

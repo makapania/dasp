@@ -1059,6 +1059,26 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         X = X[~nan_mask]
         y = y[~nan_mask]
 
+    # T-19 Auto mode: resolve `imbalance_method='auto'` to a concrete method based
+    # on the training data's class ratio. If imbalanced (≥3:1), behave like
+    # `class_weight`; otherwise leave model unweighted. Resolution happens once
+    # at the run level (not per fold) — stratified CV preserves global ratios
+    # tightly enough that per-fold drift rarely flips the decision.
+    if imbalance_method == 'auto' and task_type == 'classification':
+        from spectral_predict.imbalance import resolve_auto_imbalance
+        resolved, info = resolve_auto_imbalance(y.values, task_type=task_type)
+        if resolved == 'class_weight':
+            print(
+                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
+                f"({info['severity']}); applying class_weight"
+            )
+        else:
+            print(
+                f"  [Auto imbalance] ratio {info['imbalance_ratio']:.1f}:1 "
+                f"(below 3:1 threshold); no correction applied"
+            )
+        imbalance_method = resolved
+
     X_np = X.values
     y_np = y.values
     wavelengths = X.columns.values
