@@ -440,6 +440,55 @@ def test_restore_then_override_persistence_mode_order(fresh_state):
     assert gui.bayesian_persistence_mode.get() == "always"
 
 
+def test_bayesian_specific_controls_in_whitelist(fresh_state):
+    """Codex T-43 review HIGH: the Bayesian path reads bayes_* Tk vars at
+    analysis time (gui:27554-27570). Without them in the whitelist a
+    resumed Bayesian run silently uses defaults."""
+    _, _, rgs, _ = fresh_state
+    required = {
+        "bayes_enable_baseline",
+        "bayes_baseline_method",
+        "bayes_enable_smoothing",
+        "bayes_region_test_all",
+        "bayes_region_test_pairwise",
+        "bayes_enable_uve",
+    }
+    assert required.issubset(set(rgs.CAPTURABLE_SETTINGS))
+
+
+def test_bayesian_specific_controls_round_trip(fresh_state):
+    """End-to-end: capture + restore preserves the bayes_* vars exactly."""
+    _, _, rgs, _ = fresh_state
+    gui = _FakeGUI(
+        bayes_enable_baseline=True,
+        bayes_baseline_method="airpls",
+        bayes_enable_smoothing=True,
+        bayes_region_test_all=True,
+        bayes_region_test_pairwise=False,
+        bayes_enable_uve=False,
+        # Plus a non-bayes setting to confirm both paths captured.
+        use_snv=True,
+    )
+    captured = rgs.capture_gui_settings(gui)
+    assert captured["bayes_enable_baseline"] is True
+    assert captured["bayes_baseline_method"] == "airpls"
+    assert captured["bayes_enable_uve"] is False
+
+    blank = _FakeGUI(
+        bayes_enable_baseline=False,
+        bayes_baseline_method="als",
+        bayes_enable_smoothing=False,
+        bayes_region_test_all=False,
+        bayes_region_test_pairwise=True,
+        bayes_enable_uve=True,
+        use_snv=False,
+    )
+    rgs.restore_gui_settings(blank, captured)
+    assert blank.bayes_enable_baseline.get() is True
+    assert blank.bayes_baseline_method.get() == "airpls"
+    assert blank.bayes_enable_uve.get() is False
+
+
 def test_summarize_includes_key_facts(fresh_state, populated_gui):
     _, _, rgs, _ = fresh_state
     captured = rgs.capture_gui_settings(populated_gui)

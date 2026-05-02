@@ -17,9 +17,11 @@ Drift handling:
 - New settings: add to ``CAPTURABLE_SETTINGS``. Older sidecars without
   the new key are treated as "no value to restore" (no crash, no warning).
 - Removed settings: stale keys in older sidecars are silently dropped at
-  restore time (returned in ``RestoreReport.skipped``).
+  restore time (reported as ``RestoreReport.skipped_unknown``).
+- Whitelisted but absent on the GUI (partially-initialized): reported as
+  ``RestoreReport.skipped_no_var``.
 - Renamed settings: handled by adding the new name to the whitelist; old
-  name is dropped silently.
+  name lands in ``skipped_unknown``.
 
 Dataset paths (``spectral_data_path``, ``reference_file``,
 ``combined_data_file``) are deliberately omitted: the dataset can move
@@ -69,6 +71,17 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "baseline_airpls_lambda",
     "baseline_advanced_algorithm",
     "baseline_advanced_lam",
+    # --- Bayesian-only baseline / smoothing / region / UVE controls ---
+    # The Bayesian path reads a parallel set of "bayes_*" Tk vars at
+    # analysis time (gui:27554-27570). Without these in the whitelist,
+    # a resumed Bayesian run silently uses defaults despite the banner
+    # claiming "settings restored" (Codex T-43 review HIGH).
+    "bayes_enable_baseline",
+    "bayes_baseline_method",
+    "bayes_enable_smoothing",
+    "bayes_region_test_all",
+    "bayes_region_test_pairwise",
+    "bayes_enable_uve",
     # --- smoothing ---
     "enable_smoothing",
     "smoothing_window",

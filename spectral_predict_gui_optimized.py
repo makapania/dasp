@@ -23235,6 +23235,18 @@ class SpectralPredictApp:
                                 "setting(s) from sidecar are not in the "
                                 "current build — ignored."
                             )
+                        # Codex T-43 review MEDIUM: skipped_no_var represents
+                        # whitelisted keys whose Tk var no longer exists on
+                        # this build (renamed/deleted). Surface them too —
+                        # otherwise the user sees "Restored N" while a
+                        # silently-dropped setting goes unmentioned.
+                        if report.skipped_no_var:
+                            preview = ", ".join(report.skipped_no_var[:5])
+                            self._log_progress(
+                                f"[RUN] T-43: {len(report.skipped_no_var)} "
+                                "whitelisted setting(s) have no matching "
+                                f"variable on this build (skipped): {preview}"
+                            )
                     except Exception as restore_err:
                         restore_summary = " Settings restore FAILED — see log."
                         self._log_progress(
