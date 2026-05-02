@@ -4,6 +4,20 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-43 implementation) — Tk var quirks + GUI introspection trade-offs
+
+**Architectural call: curated whitelist > auto-introspection for GUI settings capture.** The dasp GUI has ~700 Tk vars; auto-introspecting `vars(self)` for Tk types would silently capture display state (filter dropdowns, chart colors, exploratory-tab UI) and restore it on resume — surprising the user. Settled on a ~80-name `CAPTURABLE_SETTINGS` whitelist in `src/spectral_predict/run_gui_settings.py`. Trade-off: adding a new analysis-defining setting requires editing the whitelist (drift risk), but the contract is testable and predictable.
+
+**Tcl quirk: `tk.IntVar.set("not-a-number")` does NOT raise.** Tcl stores the string verbatim; the `_tkinter.TclError: expected integer but got "abc"` surfaces on the next `.get()`. Caught during DeepSeek MEDIUM #3 review. Defense pattern: read back via `.get()` after every `.set()` in `restore_gui_settings`, compare to expected, push mismatch to `report.errors`. This protects against crafted/corrupted sidecars rather than against normal capture (`.get()` returns the right type for the Var).
+
+**Order-dependent contract: restore-then-override-persistence-mode.** In `_check_for_incomplete_run`, we restore captured settings BEFORE forcing `bayesian_persistence_mode='always'`. If a future refactor inverts the order, restore would clobber 'always' back to whatever the previous run was using ('auto'/'never'), and the resumed SQLite URL would be silently ignored. Comment + new test (`test_restore_then_override_persistence_mode_order`) document this.
+
+**`from_dict` filtering pattern for forward-compat:** `dataclasses.fields(cls)` gives the known field set. Filter the input dict before `cls(**filtered)` so future builds adding a new field don't TypeError on older Python. Plus a type guard: `gui_settings` of wrong type (string, list) coerces to None with a logger warning. Without the type guard, a corrupted sidecar passes the field filter and crashes downstream in `restore_gui_settings.items()`.
+
+**Pre-existing bug surfaced (DeepSeek LOW #7, deferred):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` (guarded by `hasattr`). The actual var is `self.n_unified_trials`. The `hasattr` guard causes `n_trials_per_model=None` in every Bayesian `start_run` call. T-43 captures `n_unified_trials` correctly, so the resume flow has the right value — but the run-state metadata's `n_trials_per_model` field is always None. File a separate ticket.
+
+---
+
 ## 2026-05-02 (T-41 final review pass) — multi-pass review trail caught real bugs each round
 
 T-41 took 8 review passes before merge. Each pass caught real bugs the prior passes missed. Lessons worth saving for the overnight-run protocol and future ticket reviews:

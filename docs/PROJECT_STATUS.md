@@ -1,6 +1,23 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
+> **Last updated:** 2026-05-02 (T-43 IMPLEMENTED + DeepSeek-reviewed — branch ready for PR) —
+>
+> **T-43 resume auto-restore GUI settings — IMPLEMENTED on `fix/T43-resume-auto-restore-settings` (tip `3f071b3`, 2 commits).** Closes the user-reported gap from T-41 verification: previously the user had to manually recreate every preprocessing/model setting before the resumed SQLite study would actually pick up trial-level state. Now, when the user accepts the resume banner, ~80 analysis-defining Tk vars (preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters) are auto-restored from the sidecar — they just click Run Analysis.
+>
+> **Architecture:** `RunMetadata.gui_settings: dict | None` (extended schema, backward-compat via `dataclasses.fields()` filter). New `src/spectral_predict/run_gui_settings.py` module with `CAPTURABLE_SETTINGS` whitelist + `capture_gui_settings(gui)` + `restore_gui_settings(gui, dict) -> RestoreReport` + `summarize_gui_settings()` for the resume prompt. GUI captures at `start_run` time and restores BEFORE the existing 'always' persistence override (order matters — comment in code).
+>
+> **Review trail (1 pass):**
+> 1. DeepSeek V4 Pro Max post-`f934c81`: READY_WITH_REVISIONS — 2 HIGH (banner-lies-on-errors + missing type-guard on `gui_settings`) + 1 MEDIUM (Tcl quirk: `IntVar.set("abc")` doesn't raise) all closed in `3f071b3`. 5 LOW deferred (whitelist debt for variable_penalty/gap_penalty, pre-existing `n_trials_var` typo at gui:25123, ga_preprocess settings on the T-38 deletion path).
+>
+> **Pre-existing bug surfaced for follow-up (NOT a T-43 regression):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` guarded by `hasattr`; the actual var is `self.n_unified_trials`, so `n_trials_per_model` is always None in `start_run` metadata. T-43 itself captures `n_unified_trials` correctly via the whitelist. To file as a separate ticket.
+>
+> **Test coverage:** 19/19 T-43 tests + 29 run_state + 23 T-41 = 71/71 passing (~18s on `.venv312`).
+>
+> **Audit trail:** code + tests speak for themselves; no `bugfix_validation/` doc filed for this small ticket.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
 >
 > **T-41 Bayesian SQLite auto-calculator + WAL mode — MERGED via PR #9.** Five rebase commits on main: `cd406f0` (feat) → `e99d35a` (DeepSeek HIGH/MEDIUM + resume bug + default 'auto') → `2087134` (docs) → `081ad6a` (pr-review-toolkit findings: silent failures + Literal validation + cleanup gates) → `f745d37` (DeepSeek Finding 1: multi-model SQLite collateral deletion via `optuna.delete_study` instead of `Path.unlink`).
 >
