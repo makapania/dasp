@@ -8,6 +8,7 @@ model configurations and analysis results for scientific publication.
 import json
 import base64
 import gzip
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -370,7 +371,15 @@ class CodeGenerator:
                 },
                 'language_info': {
                     'name': 'python',
-                    'version': '3.9.0'
+                    # T-14: report the actual runtime Python version instead
+                    # of a stale hardcoded value. The project is Python 3.12+
+                    # only; hardcoded "3.9.0" misled anyone reading the
+                    # generated notebook's metadata.
+                    'version': (
+                        f'{sys.version_info.major}.'
+                        f'{sys.version_info.minor}.'
+                        f'{sys.version_info.micro}'
+                    )
                 }
             },
             'cells': cells

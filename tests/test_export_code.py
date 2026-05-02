@@ -194,6 +194,27 @@ def test_jupyter_notebook_generation(sample_model_config):
     assert 'PLS' in source
 
 
+def test_t14_notebook_language_version_reflects_runtime(sample_model_config):
+    """T-14: the generated notebook's language_info.version must reflect the
+    actual runtime Python version, not a hardcoded stale value (the prior bug
+    was a hardcoded '3.9.0' that misled anyone reading the notebook metadata
+    after the project moved to Python 3.12+)."""
+    import sys
+
+    options = ExportOptions(format='notebook', include_data=False)
+    generator = CodeGenerator(sample_model_config, options)
+    notebook = generator.generate_notebook()
+
+    actual = notebook['metadata']['language_info']['version']
+    expected = (
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    )
+    assert actual == expected, (
+        f"notebook language_info.version must mirror runtime Python "
+        f"({expected}), got hardcoded {actual!r}"
+    )
+
+
 def test_colab_notebook_features(sample_model_config, sample_spectral_data):
     """Test Colab-ready notebook with data embedding."""
     X, y, wavelengths = sample_spectral_data
