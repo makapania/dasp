@@ -98,6 +98,48 @@ def test_xgboost_threads_sample_weight_via_fit_kwargs():
     assert "fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)" in script
 
 
+def test_mlp_does_not_get_class_weight_injected():
+    """MLP rejects class_weight kwarg with TypeError; injecting it crashes the
+    exported script. sample_weight at fit() requires sklearn>=1.7 which is above
+    the pyproject floor, so we mirror the runtime fallback (unweighted) here."""
+    script = _generate("MLP", params={"hidden_layer_sizes": (10,), "max_iter": 50})
+    assert "'class_weight': 'balanced'" not in script, (
+        "MLP must not have class_weight injected — MLPClassifier.__init__() "
+        "raises TypeError on unexpected keyword argument."
+    )
+
+
+def test_mlp_class_weight_export_executes_without_typeerror():
+    """End-to-end: MLP+class_weight exported script runs (crashed pre-fix)."""
+    g = _execute("MLP", params={"hidden_layer_sizes": (10,), "max_iter": 50})
+    assert "accuracy" in g
+    assert isinstance(g["accuracy"], float)
+
+
+def test_svc_keeps_class_weight_balanced():
+    """SVC accepts class_weight natively; StandardScaler-wrapped path keeps it."""
+    script = _generate("SVC", params={"C": 1.0})
+    assert "'class_weight': 'balanced'" in script
+
+
+def test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing():
+    """Pre-T-19 fix-of-fixes the catch-all fit_kwargs={} appeared even for
+    non-XGBoost paths under class_weight — pure noise. Conditional emission
+    removes it. Pin so a future refactor doesn't reintroduce the noise."""
+    for name, params in [
+        ("CatBoost", {"iterations": 30, "depth": 3}),
+        ("LightGBM", {"n_estimators": 30, "max_depth": 3}),
+        ("RandomForest", {"n_estimators": 30, "max_depth": 3}),
+        ("MLP", {"hidden_layer_sizes": (10,), "max_iter": 50}),
+        ("SVC", {"C": 1.0}),
+    ]:
+        script = _generate(name, params=params)
+        assert "fit_kwargs" not in script, (
+            f"{name} should not emit fit_kwargs plumbing in class_weight mode "
+            f"— it's pure noise when sample_weight isn't being threaded."
+        )
+
+
 def test_lightgbm_keeps_class_weight_balanced():
     script = _generate("LightGBM")
     assert "'class_weight': 'balanced'" in script

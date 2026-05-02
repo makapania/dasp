@@ -901,7 +901,13 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             params_full.update(params)
 
             if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
-                params_full.setdefault('class_weight', 'balanced')
+                # MLP doesn't accept class_weight as a constructor kwarg; injecting it
+                # raises TypeError on instantiation. sample_weight at fit() requires
+                # sklearn>=1.7 (our floor is 1.5), so threading it from exported code
+                # is unsafe. Runtime falls back to unweighted with a warning per
+                # search.py:4439-4444; mirror that behavior here.
+                if not model_class.startswith('MLP'):
+                    params_full.setdefault('class_weight', 'balanced')
 
             if 'random_state' not in params_full:
                 params_full['random_state'] = 42
@@ -1557,16 +1563,23 @@ def _regression_resample(X_vals, y_vals, method_name, params):
         )
 
         xgb_sample_weight = self._xgb_class_weight_needs_sample_weight()
+        # Conditional template emission: only thread sample_weight when XGBoost
+        # is the model under imbalance_method='class_weight'. Other classifiers
+        # bake balanced loss into __init__ kwargs and need a plain fit() call.
+        # Indentation discipline: sample_weight_block_cv prefixes 4 spaces (lands
+        # inside the for-loop body); sample_weight_block_final prefixes 0 spaces
+        # (module-level). Don't normalize prefixes when refactoring.
         sample_weight_import = (
             'from sklearn.utils.class_weight import compute_sample_weight\n'
             if xgb_sample_weight else ''
         )
-        sample_weight_block = (
+        sample_weight_block_cv = (
             "    fit_kwargs = {}\n"
             "    if IMBALANCE_METHOD == 'class_weight':\n"
             "        fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_fold)\n"
-            if xgb_sample_weight else "    fit_kwargs = {}\n"
+            if xgb_sample_weight else ""
         )
+        cv_fit_kwargs_spread = ", **fit_kwargs" if xgb_sample_weight else ""
 
         if self.task_type == 'classification':
             return f'''
@@ -1605,7 +1618,7 @@ for train_idx, test_idx in cv.split({x_var}, y):
             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
 
     fold_model = clone(model)
-{sample_weight_block}    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+{sample_weight_block_cv}    fold_model.fit(X_train_fold, y_train_fold{cv_fit_kwargs_spread})
     y_pred_fold = fold_model.predict(X_test)
 
     for local_i, sample_idx in enumerate(test_idx):
@@ -1725,12 +1738,13 @@ y_pred_cv = all_y_pred_arr
                 'from sklearn.utils.class_weight import compute_sample_weight\n'
                 if xgb_sample_weight else ''
             )
-            sample_weight_block = (
+            sample_weight_block_final = (
                 "fit_kwargs = {}\n"
                 "if IMBALANCE_METHOD == 'class_weight':\n"
                 "    fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_full)\n"
-                if xgb_sample_weight else "fit_kwargs = {}\n"
+                if xgb_sample_weight else ""
             )
+            final_fit_kwargs_spread = ", **fit_kwargs" if xgb_sample_weight else ""
             return f'''
 # =============================================================================
 # TRAIN FINAL MODEL (with imbalance handling)
@@ -1743,7 +1757,7 @@ if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersamp
     if resampler is not None:
         X_train_full, y_train_full = resampler.fit_resample(X_train_full, y_train_full)
 
-{sample_weight_block}model.fit(X_train_full, y_train_full, **fit_kwargs)
+{sample_weight_block_final}model.fit(X_train_full, y_train_full{final_fit_kwargs_spread})
 print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
 '''
 
