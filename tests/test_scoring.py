@@ -557,5 +557,62 @@ class TestLinsCCC:
         assert abs(lins_ccc(y_list, y_series) - 1.0) < 1e-12
 
 
+# ---------------------------------------------------------------------------
+# T-29: bare `except:` in compute_imbalance_metrics swallowed KeyboardInterrupt
+# (Ctrl-C during long Bayesian/grid runs got eaten) AND silently returned 0.0
+# sentinel values (a leaderboard 0.0 was indistinguishable from a model that
+# really scored 0.0).
+# ---------------------------------------------------------------------------
+
+
+class TestT29ExceptionHandling:
+    def test_t29_keyboard_interrupt_propagates(self):
+        """T-29: bare `except:` used to catch KeyboardInterrupt and silently
+        eat it, leaving long searches uninterruptible. Replacing with
+        `except Exception:` lets KeyboardInterrupt propagate normally."""
+        from spectral_predict.scoring import compute_imbalance_metrics
+        from sklearn import metrics as _sk_metrics
+
+        # Force f1_score to raise KeyboardInterrupt mid-call.
+        original_f1 = _sk_metrics.f1_score
+
+        def boom(*_a, **_kw):
+            raise KeyboardInterrupt
+
+        _sk_metrics.f1_score = boom
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                compute_imbalance_metrics(
+                    np.array([0, 1, 0, 1]), np.array([0, 1, 0, 1])
+                )
+        finally:
+            _sk_metrics.f1_score = original_f1
+
+    def test_t29_metric_failure_logs_warning(self, caplog):
+        """T-29: when a metric raises (e.g. roc_auc on a single-class fold),
+        the silent 0.0/None sentinel should now be accompanied by a logged
+        warning so the user can distinguish failure from real bad scores."""
+        import logging
+
+        from spectral_predict.scoring import compute_imbalance_metrics
+
+        # Single-class y_true with proba forces roc_auc to raise
+        # ValueError("Only one class present in y_true").
+        y_true = np.array([0, 0, 0, 0, 0])
+        y_pred = np.array([0, 0, 0, 0, 0])
+        y_proba = np.array(
+            [[1.0, 0.0]] * 5
+        )  # binary-style proba so the binary roc_auc branch triggers
+
+        with caplog.at_level(logging.WARNING, logger="spectral_predict.scoring"):
+            metrics = compute_imbalance_metrics(y_true, y_pred, y_proba)
+
+        assert metrics["roc_auc"] is None  # sentinel preserved (pipeline-stable)
+        assert any("T-29: roc_auc failed" in rec.message for rec in caplog.records), (
+            f"expected T-29 roc_auc warning; got log records: "
+            f"{[r.message for r in caplog.records]!r}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1,10 +1,13 @@
 """Scoring and ranking functions."""
 
 import ast
+import logging
 
 import numpy as np
 import pandas as pd
 from sklearn.metrics import confusion_matrix
+
+logger = logging.getLogger(__name__)
 
 
 def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penalty=0,
@@ -579,7 +582,13 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
     try:
         metrics['f1_weighted'] = f1_score(y_true, y_pred, average='weighted', zero_division=0)
         metrics['f1_macro'] = f1_score(y_true, y_pred, average='macro', zero_division=0)
-    except:
+    except Exception as exc:
+        # T-29: was a bare `except:` that swallowed KeyboardInterrupt and
+        # SystemExit too — Ctrl-C during long searches hit this and got
+        # eaten. `except Exception:` lets system-exits propagate. The
+        # warning surfaces silent metric failure so a leaderboard 0.0 can
+        # be distinguished from a real model-scored-badly 0.0.
+        logger.warning("T-29: f1 score failed (%s); using 0.0 sentinel", exc)
         metrics['f1_weighted'] = 0.0
         metrics['f1_macro'] = 0.0
 
@@ -587,7 +596,10 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
     try:
         metrics['precision_weighted'] = precision_score(y_true, y_pred, average='weighted', zero_division=0)
         metrics['recall_weighted'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
-    except:
+    except Exception as exc:
+        logger.warning(
+            "T-29: precision/recall failed (%s); using 0.0 sentinel", exc
+        )
         metrics['precision_weighted'] = 0.0
         metrics['recall_weighted'] = 0.0
 
@@ -605,7 +617,12 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
                 # Macro: equal weight per class (better for imbalanced data)
                 metrics['roc_auc'] = roc_auc_score(y_true, y_pred_proba,
                                                    multi_class='ovr', average='macro')
-        except:
+        except Exception as exc:
+            # ROC AUC commonly fails on small/extreme-imbalance CV folds
+            # with "Only one class present in y_true" — log so the user
+            # knows roc_auc=None means computation failed, not "no proba
+            # provided" (the y_pred_proba-is-None branch returns None too).
+            logger.warning("T-29: roc_auc failed (%s); using None sentinel", exc)
             metrics['roc_auc'] = None
     else:
         metrics['roc_auc'] = None
