@@ -187,6 +187,38 @@ def test_generated_script_executes_under_class_weight(model_name: str, params: d
     assert 0.0 <= g["accuracy"] <= 1.0
 
 
+def test_xgboost_class_weight_export_handles_multiclass():
+    """Per DeepSeek residual-risk #2: scale_pos_weight is binary-only, but
+    sample_weight=compute_sample_weight('balanced', y) handles n_classes>2
+    uniformly. Pin end-to-end on a 3-class imbalanced dataset."""
+    X, y = make_classification(
+        n_samples=180,
+        n_features=20,
+        n_informative=12,
+        n_redundant=4,
+        n_classes=3,
+        n_clusters_per_class=1,
+        weights=[0.6, 0.3, 0.1],
+        random_state=42,
+    )
+    config = {
+        "model_name": "XGBoost",
+        "preprocessing": "raw",
+        "task_type": "classification",
+        "params": {"n_estimators": 30, "max_depth": 3},
+        "cv_folds": 3,
+        "imbalance_method": "class_weight",
+    }
+    opts = ExportOptions(include_data=True, data_X=X.copy(), data_y=y.copy())
+    script = CodeGenerator(config, opts).generate_script()
+    g: dict = {}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        exec(script, g)
+    assert "accuracy" in g
+    assert isinstance(g["accuracy"], float)
+
+
 def test_xgboost_balanced_weight_applied_at_fit():
     """End-to-end check that sample_weight actually flows to XGBoost.fit()."""
     g = _execute("XGBoost")
