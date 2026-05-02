@@ -779,8 +779,41 @@ class TestPersistenceModeValidation:
             rs.start_run(bayesian_persistence_mode="ON")  # case-sensitive
         rs._reset_for_tests()
 
+    def test_default_persistence_mode_is_auto(self, tmp_path, monkeypatch):
+        """T-47: start_run() with no kwarg picks 'auto' so users get
+        crash-resume out of the box. The post-T-42 baseline benchmark
+        showed PLS/Ridge/LightGBM/XGBoost SQLite ratios all <=1.06×, so
+        the default-flip carries no measurable cost."""
+        from spectral_predict import run_state as rs
+
+        monkeypatch.setattr(rs, "get_user_optuna_dir", lambda: tmp_path)
+        rs._reset_for_tests()
+        meta = rs.start_run(label="t47", dataset_fingerprint="abc",
+                            model_names=["pls"], n_trials_per_model=1)
+        assert meta.bayesian_persistence_mode == "auto"
+        assert meta.storage_url, "auto default must produce a SQLite URL"
+        rs._reset_for_tests()
+
+    def test_dataclass_default_persistence_mode_matches_start_run(self):
+        """T-47: RunMetadata() constructed directly (without start_run)
+        agrees with start_run's default. Inconsistency between the two
+        was the original footgun the consolidated flip closes."""
+        from spectral_predict.run_state import RunMetadata
+
+        meta = RunMetadata(
+            run_id="x", storage_path="/tmp/x.sqlite3", storage_url="",
+            label=None, dataset_fingerprint=None, model_names=[],
+            n_trials_per_model=None, started_iso="2026-05-02T00:00:00",
+        )
+        assert meta.bayesian_persistence_mode == "auto"
+
     def test_corrupted_sidecar_mode_coerces_to_never(self):
-        """from_dict tolerates garbage in legacy sidecars — coerces to 'never'."""
+        """from_dict tolerates garbage in legacy sidecars — coerces to 'never'.
+
+        T-47 deliberately did NOT flip this fallback to 'auto'. Corruption
+        coercion is a safety net for malformed input and stays at the
+        most defensive choice; only the field default for unspecified
+        input flipped."""
         from spectral_predict import run_state as rs
 
         meta = rs.RunMetadata.from_dict({

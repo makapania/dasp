@@ -130,7 +130,7 @@ class RunMetadata:
     model_names: list[str]
     n_trials_per_model: int | None
     started_iso: str
-    bayesian_persistence_mode: PersistenceMode = "never"  # T-41
+    bayesian_persistence_mode: PersistenceMode = "auto"
     # Snapshot of GUI settings at start_run time. None when no settings
     # were captured (older sidecars, headless callers). Stored as a flat
     # dict[str, JSON-serializable] so future GUI additions auto-flow
@@ -346,7 +346,7 @@ def start_run(
     dataset_fingerprint: str | None = None,
     model_names: list[str] | None = None,
     n_trials_per_model: int | None = None,
-    bayesian_persistence_mode: PersistenceMode = "never",
+    bayesian_persistence_mode: PersistenceMode = "auto",
     gui_settings: dict[str, Any] | None = None,
     validation_indices: list[Any] | None = None,
 ) -> RunMetadata:

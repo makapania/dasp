@@ -1,6 +1,14 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-43 + T-42 + T-38 CONSOLIDATED — single branch ready for one PR) —
+> **Last updated:** 2026-05-02 (PR #10 MERGED to main + T-47 IMPLEMENTED on its own branch) —
+>
+> **PR #10 (consolidated T-43 + T-42 + T-38 + T-49) MERGED via merge commit `f063d9e`.** 17 commits flattened onto main. Final fix-of-fixes commit `30fa673` closed the Codex post-PR MEDIUM (partial-mutation in `_apply_pending_validation_indices` when X/y indices disagreed on a captured label — silent skip of validation metrics). Cross-family review verdicts on the PR: DeepSeek V4 Pro Max READY_TO_MERGE (5 MEDIUM, 4 LOW deferred); Codex CLI READY_WITH_REVISIONS (1 MEDIUM closed). Per-ticket branches deleted on origin + locally: `fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`, `fix/bayesian-resume-and-cleanup`.
+>
+> **T-47 IMPLEMENTED on `fix/T47-bayesian-persistence-default-auto` (off post-PR-10 main).** One-line behavioral flip: `bayesian_persistence_mode` field default flips from `'never'` → `'auto'` at both surfaces — `RunMetadata` dataclass field default + `start_run()` function default — keeping the two consistent. Legacy-sidecar fallback in `from_dict` (line 162) and corruption-coercion path (line 168) deliberately stay at `'never'` — those are safety nets for malformed input, not "the field default for unspecified input". Justified by the post-T-42 baseline benchmark: PLS 0.69×, Ridge 1.06×, RandomForest 0.25× (caching), LightGBM 0.93×, XGBoost 1.01× — all well below the plan's 1.15×/1.30× targets. Crash-resume now on by default; users who want the prior in-memory-only behavior set the radio to "Never on". 2 new regression tests (`test_default_persistence_mode_is_auto`, `test_dataclass_default_persistence_mode_matches_start_run`); 260 + 1 skipped across the consolidated sweep.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-43 + T-42 + T-38 + T-49 CONSOLIDATED — single PR shipped) —
 >
 > **All four tickets (T-43 + T-42 + T-38 + T-49) land on `fix/bayesian-resume-and-cleanup` (tip `6465306`, 14 commits off main).** User decision after the parallel pr-review-toolkit pass: ship as one PR rather than three. T-49 was originally filed as a follow-up but the user (correctly) flagged it as a correctness blocker for the resume flow and folded it into the same PR. The per-ticket branches (`fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`) remain on origin as reference and can be deleted once the consolidated PR merges.
 >

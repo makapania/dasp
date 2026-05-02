@@ -4,6 +4,21 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-47) — "default value" vs "fallback for malformed input" are distinct concerns
+
+T-47 plan said one-liner: flip `bayesian_persistence_mode` default `'never'` → `'auto'`. The field has FOUR sites in `run_state.py` that look like defaults but split into two semantic categories:
+
+- **Field defaults (flipped to `'auto'`):** dataclass field at `RunMetadata` line 133, `start_run()` parameter at line 349. These represent "what to do when the caller didn't specify". Users today want `'auto'`.
+- **Safety fallbacks (kept at `'never'`):** `from_dict` legacy-sidecar fallback at line 162 (sidecar predates T-41, missing the field), corruption-coercion at line 168 (sidecar HAS the field but value is junk like `"GARBAGE"`). These represent "what to do when input is malformed".
+
+Conflating them is the common refactor mistake — and not theoretical. Flipping the corruption-coercion to `'auto'` would silently start writing SQLite based on garbage input. Flipping the legacy fallback would change resume behavior of pre-T-41 sidecars without the user agreeing.
+
+**Lesson:** when flipping a "default", inventory every textual default for the field, then classify each as "unspecified-input default" (safe to flip with the rest) or "malformed-input fallback" (decide separately on what's safest, often distinct). The plan's "one-liner" framing collapses that distinction; the implementation should not.
+
+Two regression tests pin this contract: `test_default_persistence_mode_is_auto` (start_run + RunMetadata both `'auto'` when unspecified) and the existing `test_corrupted_sidecar_mode_coerces_to_never` (corruption stays `'never'`). The pair makes the asymmetry explicit at the test level.
+
+---
+
 ## 2026-05-02 (T-49 user-caught) — validation partition is decided AT START not AT END
 
 User asked during the consolidated PR wrap-up: "for the pause function, when it restarts does it also maintain the external validation set? or does that not really matter since only calculated at the end?"
