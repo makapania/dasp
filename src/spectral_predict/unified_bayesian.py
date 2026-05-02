@@ -1695,6 +1695,7 @@ def _migrate_study_to_sqlite(
     sqlite_url: str,
     study_name: str,
     random_state: int,
+    progress_callback: Optional[Callable] = None,
 ) -> optuna.Study:
     """Migrate a running in-memory Optuna study to a SQLite backend.
 
@@ -1715,6 +1716,13 @@ def _migrate_study_to_sqlite(
         sqlite_url: Optuna-style ``sqlite:///...`` URL for the target file.
         study_name: Study name to use in the SQLite backend.
         random_state: Random seed for the fresh TPE sampler.
+        progress_callback: Optional event sink for surfacing WAL rejection
+            to the GUI. When the auto-migration path lands on a filesystem
+            that refuses WAL (OneDrive, Dropbox, network share), the user
+            needs to know — under T-47's 'auto' default this is the common
+            case, not an edge case. ``None`` (default) keeps the helper
+            usable from headless callers and tests; logger.warning still
+            fires on rejection regardless of callback presence.
 
     Returns:
         A new ``optuna.Study`` object backed by SQLite, containing all
@@ -1729,7 +1737,31 @@ def _migrate_study_to_sqlite(
     )
 
     # Step 2: apply WAL pragmas — copy_study just created the SQLite file.
-    _apply_wal_pragmas(sqlite_url)
+    # The helper itself logs on rejection; add a migration-context warning
+    # so the lifecycle phase ("rejected DURING auto-migrate") is recoverable
+    # from the log alone, and (T-46 follow-up after DeepSeek MEDIUM) push
+    # to progress_callback so the GUI surfaces this under the post-T-47
+    # default — auto-migration is now the common WAL-touching path.
+    if not _apply_wal_pragmas(sqlite_url):
+        logger.warning(
+            "T-46: WAL rejected during auto-migration to %s — the migrated "
+            "study will run with the slower DELETE journal mode. Move the "
+            "dasp data directory to a local (non-synced) drive for best "
+            "performance.",
+            sqlite_url,
+        )
+        if progress_callback is not None:
+            progress_callback({
+                "stage": "unified_bayesian",
+                "message": (
+                    "[T-46] WARNING: WAL journal mode rejected during "
+                    "auto-migration to SQLite — Bayesian search will run "
+                    "with the slower DELETE journal mode. Move the dasp "
+                    "data directory to a local (non-synced) drive for "
+                    "best performance."
+                ),
+                "t41_decision": "wal_rejected_at_migration",
+            })
 
     # Step 3: load study with a fresh sampler.  This is the ONLY way to attach
     # a sampler to an existing study; TPE will rebuild from copied trials.
@@ -2114,7 +2146,19 @@ def run_unified_bayesian(
             _ = len(study.trials)  # forces lazy SQLite init
         except Exception:
             pass
-        _apply_wal_pragmas(storage_url)
+        if not _apply_wal_pragmas(storage_url):
+            if progress_callback is not None:
+                progress_callback({
+                    "stage": "unified_bayesian",
+                    "message": (
+                        "[T-46] WARNING: WAL journal mode rejected by the "
+                        "filesystem — Bayesian search will run with the "
+                        "slower DELETE journal mode. Move the dasp data "
+                        "directory to a local (non-synced) drive for best "
+                        "performance."
+                    ),
+                    "t41_decision": "wal_rejected",
+                })
         # Reattach a fresh TPE sampler (the only safe way per Optuna 4.8).
         study = optuna.load_study(
             study_name=study_name,
@@ -2269,7 +2313,8 @@ def run_unified_bayesian(
                     # 11..N land directly in SQLite.
                     try:
                         migrated = _migrate_study_to_sqlite(
-                            cb_study, storage_url, study_name, random_state
+                            cb_study, storage_url, study_name, random_state,
+                            progress_callback=progress_callback,
                         )
                         _study_ref[0] = migrated
                         _auto_migrated = True

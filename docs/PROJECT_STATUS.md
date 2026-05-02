@@ -1,6 +1,14 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (PR #10 MERGED to main + T-47 IMPLEMENTED + DeepSeek MEDIUM/LOWs closed) —
+> **Last updated:** 2026-05-02 (T-47 MERGED to main + T-46 IMPLEMENTED) —
+>
+> **T-47 MERGED via PR #11 at merge commit `a29ad2d`.** Default-flip + DeepSeek follow-ups all rebased onto main; both T-47 commits + branch deleted from origin and locally. The dataclass-vs-function default symmetry + the deliberate "never"-kept legacy-sidecar/corruption-coercion fallbacks are now load-bearing in 3 regression tests.
+>
+> **T-46 IMPLEMENTED on `fix/T46-wal-pragma-surface-return` (off post-T-47 main).** Surface `_apply_wal_pragmas` return value at both call sites — pre-T-46 silent fallback to DELETE journal mode now signals through the right channel. Site 1 (`run_unified_bayesian:2117`, always-on path): captured return + `progress_callback({"t41_decision": "wal_rejected", ...})`. Site 2 (`_migrate_study_to_sqlite:1693`, auto-migration path): captured return + contextual `logger.warning("T-46: WAL rejected during auto-migration to ...")` AND (post-DeepSeek-MEDIUM follow-up) progress_callback emission with `t41_decision: "wal_rejected_at_migration"` — under the post-T-47 'auto' default, auto-migration is the COMMON WAL-touching path, so logger-only surfacing was inadequate (invisible in bundled GUI per T-45). 3 new regression tests (`test_wal_rejection_surfaces_via_progress_callback`, `test_wal_rejection_surfaces_at_auto_migration_site`, `test_migrate_without_callback_still_logs_on_wal_rejection`) — last one pins the headless-caller log surface so a future refactor can't silently drop the unconditional log. 264 + 1 skipped across the consolidated sweep. **Cross-family review:** DeepSeek V4 Pro Max READY_WITH_REVISIONS (1 MEDIUM caught the auto-migration site gap under T-47's new default + 3 LOW deferred); Codex CLI READY_WITH_REVISIONS (1 LOW — same site-2 test gap, closed by the same fix). DeepSeek's MEDIUM was effectively load-bearing because of T-47's recent merge — auto-migration changed from edge case to common case the day before. **OneDrive/Dropbox-synced data dirs no longer silently halve Bayesian throughput on either persistence mode** (the failure mode the ticket was filed against).
+>
+> ---
+>
+> **Previously:** 2026-05-02 (PR #10 MERGED + T-47 IMPLEMENTED) —
 >
 > **PR #10 (consolidated T-43 + T-42 + T-38 + T-49) MERGED via merge commit `f063d9e`.** 17 commits flattened onto main. Final fix-of-fixes commit `30fa673` closed the Codex post-PR MEDIUM (partial-mutation in `_apply_pending_validation_indices` when X/y indices disagreed on a captured label — silent skip of validation metrics). Cross-family review verdicts on the PR: DeepSeek V4 Pro Max READY_TO_MERGE (5 MEDIUM, 4 LOW deferred); Codex CLI READY_WITH_REVISIONS (1 MEDIUM closed). Per-ticket branches deleted on origin + locally: `fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`, `fix/bayesian-resume-and-cleanup`.
 >
