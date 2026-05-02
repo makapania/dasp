@@ -1,10 +1,14 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-19 reframed branch implemented + reviewed; awaiting PR open).
+> **Last updated:** 2026-05-02 (T-19 reframed: bug-fix + Auto mode both on branch; awaiting DeepSeek review of Auto mode + user PR open).
 >
-> ## T-19 reframed — IMPLEMENTED on `fix/T19-expose-model-native-imbalance` (3 commits, awaiting user PR)
+> ## T-19 reframed — IMPLEMENTED on `fix/T19-expose-model-native-imbalance` (5 commits, awaiting user PR)
 >
-> Tip: `bdeb735` (commits: `3c63ffe` initial fix → `765a82f` GLM MEDIUMs closed → `bdeb735` DeepSeek residual multiclass test). Pushed to origin. **NOT MERGED — user opens PRs.**
+> Tip: `0b1d4a2` (commits: `3c63ffe` initial bug fix → `765a82f` GLM MEDIUMs closed → `bdeb735` DeepSeek residual multiclass test → `9cea07c` PROJECT_STATUS+SESSION_LOG → `0b1d4a2` **Auto mode**). Pushed to origin. **NOT MERGED — user opens PRs.**
+>
+> **Two parts shipped together:**
+> 1. **Bug fix** (commits `3c63ffe`/`765a82f`/`bdeb735`): exported scripts under `imbalance_method='class_weight'` were broken for CatBoost/XGBoost/MLP. Library-aware dispatch in `code_generator._render_model()`.
+> 2. **Auto mode** (commit `0b1d4a2`): new `'auto'` dropdown option + helper + runtime-resolution at all three search entry points + codegen-time emission of post-data-load resolution block. Resolves to `class_weight` or `None` based on `detect_class_imbalance(y, threshold=3.0)`. The user's framing memo `project_t19_user_framing.md` calls Auto mode the priority — without it T-19 isn't done. Per-model UI dropdowns (separate selectors for `is_unbalance` / `scale_pos_weight` / `auto_class_weights`) remain deferred — explicit user direction that those add UI surface without correctness/speed improvement.
 >
 > **Bug class:** exported scripts under `imbalance_method='class_weight'` were broken in three ways:
 > - **CatBoost**: `class_weight='balanced'` injected into `__init__` → `TypeError: unexpected keyword argument 'class_weight'`. Hard crash on instantiation.
@@ -21,23 +25,37 @@
 >
 > **Indentation discipline noted in code:** `sample_weight_block_cv` prefixes 4 spaces (lands inside for-loop body); `sample_weight_block_final` prefixes 0 spaces (module-level). Comment in `_render_cross_validation()` warns against "normalizing" prefixes during refactor.
 >
-> **Test coverage:** 18 new regression tests in `tests/test_t19_class_weight_per_library.py` — per-library kwarg emission contracts + end-to-end `exec()` of generated scripts on synthetic imbalanced data (binary + 3-class for XGBoost) + MLP no-injection + SVC keeps class_weight + non-XGBoost noise-free + negative controls (SMOTE / no-imbalance modes unchanged). Plus consolidated 11-file regression sweep at **282 + 1 skipped**, exact match to baseline (no regression).
+> **Auto mode mechanics (commit `0b1d4a2`):**
+> - GUI: `'auto'` is the 9th classification option in the imbalance dropdown. Tooltip explains the 3:1 trigger.
+> - Helper `imbalance.resolve_auto_imbalance(y, task_type, threshold=3.0)` returns `('class_weight', info)` on imbalanced data, `(None, info)` on balanced data, `(None, {})` for regression. Single source of truth.
+> - Runtime resolution at the entry of `run_search`, `run_nsga2_search`, `run_unified_bayesian`. Mutates `imbalance_method` to either `'class_weight'` or `None` so downstream code paths fire correctly without needing to know about `'auto'`. Audit print on either path: `[Auto imbalance] ratio X.X:1; applying class_weight` or `[Auto imbalance] ratio X.X:1 (below 3:1); no correction`.
+> - Code generator: emits a runtime-resolution block at the end of `_render_imbalance_handling()`. Generated scripts mutate `IMBALANCE_METHOD` post-data-load. Per-library kwargs (`auto_class_weights` for CatBoost, `sample_weight` for XGBoost via `fit_kwargs`) are baked at codegen time as if `'auto'` were `'class_weight'`; on balanced data the runtime resolution prevents the `sample_weight` block from firing and the baked `class_weight='balanced'` is mathematically a no-op (uniform per-class weights).
+> - `validate_classification_config` accepts `'auto'` the same as `'class_weight'`.
+> - **Resolution scope: once at run-entry, against global y (not per-fold).** Stratified CV preserves global ratios tightly enough that per-fold drift rarely flips the decision; per-fold check is feasible follow-up if needed.
 >
-> **Cross-family review trail (3 reviewers):**
-> 1. **GLM 5.1 via opencode-call** (z.ai routing approved per-conversation for parallel-review pattern; memory `feedback_glm_routing.md` updated): READY_WITH_REVISIONS — 1 MEDIUM (MLP gap I had wrongly asserted was untouched-correct) + 1 MEDIUM (fit_kwargs noise) closed in `765a82f`. 1 LOW (`startswith('XGB')` redundant after canonicalization) deferred — harmless.
-> 2. **DeepSeek V4 Pro Max via opencode-call**: no HIGH or MEDIUM. 3 LOW/Informational findings — 2 already addressed by `765a82f` (overlap with GLM); 1 (duplicate `compute_sample_weight` import in CV + final-model sections) deferred per "defer LOW unless surgical" — Python handles dedup as no-op. Residual-risk multiclass test added in `bdeb735`.
-> 3. **GLM 5.1 via llm-call/z.ai (initial dispatch with diff bundle, before user routing correction)**: same MEDIUM-1 (MLP) and MEDIUM-2 (fit_kwargs) caught — confirms GLM's RLHF brings consistent value across both routing paths.
+> **Test coverage:**
+> - **17 Auto-mode tests** in `tests/test_t19_auto_mode.py`: resolver contract (imbalanced/balanced/regression/custom-threshold) + codegen emission per library (CatBoost auto_class_weights, XGBoost sample_weight, RF/LightGBM class_weight, MLP no-injection) + end-to-end `exec()` on imbalanced AND balanced synthetic data for each library.
+> - **18 class_weight tests** in `tests/test_t19_class_weight_per_library.py` — per-library kwarg emission contracts + end-to-end exec (binary + 3-class for XGBoost) + MLP no-injection + SVC keeps class_weight + non-XGBoost noise-free + negative controls.
+> - **Consolidated regression sweep**: 336 passed + 2 skipped (12-file sweep including `test_imbalance.py`). Pre-Auto baseline was 282+1; +54 from imbalance suite when included. No regressions.
+>
+> **Cross-family review trail (review of bug-fix portion completed; Auto mode under review):**
+> 1. **GLM 5.1 via opencode-call** (bug-fix review): READY_WITH_REVISIONS — 1 MEDIUM (MLP gap I had wrongly asserted was untouched-correct) + 1 MEDIUM (fit_kwargs noise) closed in `765a82f`. 1 LOW deferred — harmless.
+> 2. **DeepSeek V4 Pro Max via opencode-call** (bug-fix review): no HIGH or MEDIUM. 3 LOW/Informational findings — 2 already addressed by `765a82f`; 1 (duplicate `compute_sample_weight` import) deferred per "defer LOW unless surgical." Residual-risk multiclass test added in `bdeb735`.
+> 3. **GLM 5.1 via llm-call/z.ai (initial bundle review, before routing correction)**: same MEDIUMs caught — confirms GLM's RLHF brings consistent value across both routing paths.
+> 4. **DeepSeek V4 Pro Max review of Auto mode (commit `0b1d4a2`)**: dispatched, in flight at filing time. Findings will be applied as fix-of-fixes commits on the same branch before user opens PR.
 >
 > **Out of scope (deliberately deferred to follow-up tickets if user wants):**
-> - **Auto mode** (`imbalance_method='auto'` with severity threshold from `detect_class_imbalance`) — additive, not bug-class.
+> - **Per-model imbalance dropdowns** (separate selectors for `is_unbalance` / `scale_pos_weight` / `auto_class_weights`) — UI surgery without correctness/speed gain. User explicitly walked this back: "if we don't need to expose and do as good with just 2 then that si fine." Memory: `feedback_t19_auto_mode_deferred.md`.
 > - Custom resampling-aware estimator wrapper for the SMOTE × class_weight combo — fragile under imblearn fit_params; defer.
-> - Per-model imbalance dropdowns + numeric `scale_pos_weight` entry — UI surgery, larger scope.
 > - MLP sample_weight threading via sklearn ≥1.7 floor bump — separate version-policy decision.
+> - Per-fold Auto-mode resolution (vs the current run-entry global resolution) — feasible if stratified CV class drift becomes a concern; not currently a real failure mode.
 >
-> **Lessons documented in SESSION_LOG (this date):**
-> - GLM caught MLP path that I had explicitly asserted was correct in my review prompt. Cross-family RLHF orthogonality earned its slot. (Memory: keep dispatching parallel reviewers via opencode-call when materials need to be shared.)
+> **Lessons documented in SESSION_LOG / memory (this date):**
+> - GLM caught MLP path that I had explicitly asserted was correct in my review prompt. Cross-family RLHF orthogonality earned its slot.
 > - Routing correction for parallel reviewers is surgical, not full-panel re-launch. (Memory: `feedback_parallel_review_reroute.md`.)
-> - opencode-call agents leave the working tree on the branch they checked out. After the agent returns, verify branch state before continuing — I lost a few minutes when an MLP edit landed on `main` instead of `fix/T19`.
+> - opencode-call agents leave the working tree on the branch they checked out. Verify branch state after each agent returns — an MLP edit landed on `main` instead of `fix/T19` once.
+> - Don't conflate "if we don't need to expose" with "defer Auto mode." The user's walkback was about per-model UI dropdowns specifically; Auto mode itself is the priority. (Memory: `feedback_t19_auto_mode_deferred.md`.)
+> - Commit before yielding control to long pytest runs / agent dispatch / git push — parallel sessions can collide and clobber uncommitted work. (Memory: `feedback_commit_before_yielding_control.md`.)
 >
 > ---
 >

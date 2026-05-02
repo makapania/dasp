@@ -4,6 +4,18 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-19 Auto mode) — scope-correction trap: don't conflate "expose" walkback with Auto deferral
+
+T-19's user-framing memo (`project_t19_user_framing.md`) called for either (a) per-model UI dropdowns or (b) Auto mode. Mid-session the user said: "the issue is correctness and speed. if we dont need to expose and do as good with just 2 then that si fine." I read that as deferring Auto mode AND per-model dropdowns. Wrong. The user clarified shortly after: **"no, that memory is wrong. the automode is the highest priority. another agent is also working but it needs to be done."** The walkback was about (a) per-model UI surgery (separate dropdowns for `is_unbalance` / `scale_pos_weight` / `auto_class_weights`), not (b) Auto mode itself. Auto mode IS the simpler-shape interpretation of "expose or auto-detect" — single dropdown option, automatic.
+
+**Lesson for scoping decisions on user feedback:** when a user says "if X isn't needed that's fine," confirm what X refers to before shrinking scope. Pattern-match the comment to the *specific* prior ask it might walk back, not to the whole feature. The framing memo had two acceptable shapes; the walkback only ruled out one of them.
+
+**Auto mode mechanics shipped (commit `0b1d4a2`):** new `'auto'` GUI dropdown option; helper `imbalance.resolve_auto_imbalance(y, task_type, threshold=3.0)` returns `('class_weight', info)` or `(None, info)`; runtime resolution at the entry of `run_search` / `run_nsga2_search` / `run_unified_bayesian` mutates `imbalance_method` in-place so downstream code paths fire correctly without needing to know about `'auto'`. Code generator emits a runtime-resolution block at the end of `_render_imbalance_handling()` that mutates `IMBALANCE_METHOD` post-data-load in the generated script. Per-library kwargs (`auto_class_weights` for CatBoost, `sample_weight` for XGBoost via `fit_kwargs`) are baked at codegen time as if `'auto'` were `'class_weight'`; on balanced data the runtime resolution prevents the `sample_weight` block from firing and the baked `class_weight='balanced'` is mathematically a no-op (uniform per-class weights). Resolution happens once at run-entry against global y, not per-fold — stratified CV preserves global ratios tightly enough that per-fold drift rarely flips the decision.
+
+**Operational lesson (separate but co-occurring this session):** opencode-call agents leave the working tree on the branch they checked out, AND parallel sessions on other machines can stash/checkout/reset the working tree underneath you. **Commit ASAP after implementation, before any operation that yields control** (long pytest, agent dispatch, even `git push`). Memory: `feedback_commit_before_yielding_control.md`. Also lost ~10 minutes mid-session when a parallel session stashed my Auto-mode draft as `user-deferred-T19-auto-mode-draft` and reset HEAD; reflog + stash list recovered it intact.
+
+---
+
 ## 2026-05-02 (T-19 reframed — exported-code class_weight bugs) — XGBoost silent no-op + CatBoost/MLP TypeError
 
 T-19 reframed scope (per `project_t19_user_framing.md` — "expose model-native abilities, not paper reproducibility") surfaced three real bug classes in `code_generator.py`'s `imbalance_method='class_weight'` path:
