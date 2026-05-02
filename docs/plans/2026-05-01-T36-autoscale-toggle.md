@@ -207,7 +207,7 @@ The original plan (DeepSeek V4 Pro draft) had three implementation bugs that wou
 
 ### Task 17: Validation note
 
-- [ ] Write `docs/bugfix_validation/T34_autoscale_toggle.md` documenting the field-alignment check (SIMCA default vs PLS_Toolbox/Unscrambler optional), the empirical motivation, and the test sweep results.
+- [ ] Write `docs/bugfix_validation/T36_autoscale_toggle.md` documenting the field-alignment check (SIMCA default vs PLS_Toolbox/Unscrambler optional), the empirical motivation, and the test sweep results.
 
 ### Task 18: PR
 

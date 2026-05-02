@@ -27,9 +27,9 @@
 ### 3. `src/spectral_predict/preprocessing_wrapper.py` (220 lines)
 
 - **Purpose:** Thin stateless transformer (`PreprocessorConfig`) to reconstruct preprocessing from stored config dict instead of fitted objects.
-- **Usage:** Only imported by `ensemble_preprocessing.py` (itself dead). Doubly orphaned.
-- **Tests:** None.
-- **Action:** Delete file (after ensemble_preprocessing is deleted).
+- **Usage:** **NOT dead — actively used by `ensemble.py`.** Imported at `ensemble.py:18` and instantiated at `ensemble.py:1309` (the `create_ensemble_from_config` helper). Also exercised by `tests/test_ensemble_preprocessing.py` and `tests/test_ensemble_integration.py`. (Original draft of this plan claimed it was only imported by `ensemble_preprocessing.py` — that was wrong; CodeRabbit caught it during PR #7 review.)
+- **Tests:** Two integration test files exercise the wrapper.
+- **Action:** **Do NOT delete.** Keep as-is unless `ensemble.py` itself is being retired (which is out of scope for T-38).
 
 ## Module to retire after T-37
 

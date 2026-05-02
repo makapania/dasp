@@ -4,6 +4,46 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-01 (afternoon) — Architectural correction: grid path does NOT do per-fold autoscale via Pipeline mechanic
+
+**Trace error worth logging so it doesn't get re-made:**
+
+I (and Gemini's PR #7 review summary) initially believed the grid-search path applied autoscale per-fold via the sklearn Pipeline mechanic, while the Bayesian path applied it pre-CV global. We claimed this was a real divergence between the two paths. **It is not.**
+
+The actual flow:
+1. `search.py:2061` — `prep_pipeline = Pipeline(prep_pipe_steps)` then `X_preprocessed = prep_pipeline.fit_transform(X_np, y_np)` on **full** training data. The autoscale `StandardScaler` step (added by `build_preprocessing_pipeline` when `autoscale=True`) is fit AND transformed here. Result is `X_preprocessed`.
+2. `search.py:2276` — `_run_single_config(X=X_for_models, ..., skip_spectral_preprocessing=True, ...)` — the **already-preprocessed** `X_for_models` (column-filtered `X_preprocessed`) is passed in.
+3. `_run_single_config` at `search.py:4243-4259` — when `skip_spectral_preprocessing=True` (which **every live caller** passes — verified by `grep skip_spectral_preprocessing=True src/spectral_predict/search.py`), `pipe_steps = []` and only an imbalance transformer is added if needed. **No spectral preprocessing in the inner CV pipeline.**
+4. `_run_single_fold` calls `pipe_clone.fit(X_train, y_train)` on the training fold of the **already-autoscaled** `X_for_models`. Pipeline only contains the model (and maybe imbalance) — autoscale is already baked in.
+
+The misleading code path is `search.py:4260-4286` (the `else` branch with the full `build_preprocessing_pipeline` call inside `_run_single_config`). That branch is reachable in principle but no live caller passes `skip_spectral_preprocessing=False` for spectral preprocessing. Reading that branch as if it were the canonical flow leads to the wrong conclusion.
+
+**Implication:** Both grid and Bayesian apply autoscale **pre-CV global**, by design, matching PLS_Toolbox / Unscrambler / SIMCA-P / Pirouette chemometrics convention. The "Gemini Bayesian leakage" finding is a chemometrics-vs-ML-convention question, not a path-divergence bug. There is nothing to "fix" to make grid and Bayesian agree — they already agree.
+
+**Why the Pipeline mechanic doesn't bite for the per-spectrum ops (SNV, SG, baseline) elsewhere in the codebase:** those ops compute within-row math, so per-fold-via-Pipeline gives the same numerical result as global. Autoscale is the first cross-sample step in `build_preprocessing_pipeline`, so per-fold-via-Pipeline would diverge from global — but the live grid path never actually goes through the per-fold-via-Pipeline branch because of `skip_spectral_preprocessing=True`.
+
+**Where per-fold-via-Pipeline DOES happen:** the `_rebuild_model_from_row` validation rebuild path at `search.py:305-394`. That is a separate flow (used by `compute_validation_metrics_for_top_models` to rebuild a fitted estimator from a saved row for held-out validation). The T-36 fix-of-fixes commit `afb52d9` added an `autoscale=False` keyword arg to that function so the per-model `StandardScaler` is skipped when autoscale was already applied during search — preserving the pre-CV-global semantics through the rebuild path.
+
+**Verification command:** `grep -n "skip_spectral_preprocessing=True" src/spectral_predict/search.py | head` — every live call site passes `True`.
+
+---
+
+## 2026-05-01 (afternoon) — Sibling silent-failure-fix gap: pr-review-toolkit caught a fix-that-was-dead-code
+
+**Trace error worth logging:**
+
+T-36 commit `b92274c` added a display-name fallback parser at `contamination.py:1118-1136` to extract baseline / smoothing / autoscale flags from suffixed pipeline names like `"als+sg0+snv+autoscale"` for legacy `.dasp` files without explicit columns. **The fix was dead code on the legacy path it claimed to handle.**
+
+Root cause: `_normalize_preprocess_for_pipeline()` at `contamination.py:1081` ran BEFORE the new parser. That helper collapses any unbuildable name to `'raw'` (the last-resort fallback at `contamination.py:930`). So for a legacy row with `Preprocess="als+sg0+snv+autoscale"` and no `PreprocessBase` column, by the time the new `'+'`-parser ran, `preprocess_name` was already `'raw'` and there was no `'+'` to split on. The fix never fired for the case it was designed for.
+
+Fix in `afb52d9`: move the `'+'`-parser BEFORE `_normalize_preprocess_for_pipeline()`. Now the parser sees the original suffixed name, extracts the baseline/smoothing/autoscale flags, rebuilds `preprocess_name` from the residual core parts, and only THEN normalizes. Mirrors the order used in `search.py:548-562` for the same kind of legacy fallback.
+
+**Why my own tests didn't catch it:** the new tests use rows that already have explicit columns (`Autoscale=True`, `baseline_method="als"`), so the parser branch was never the source of truth for them. A test that explicitly constructs a legacy row (only `Preprocess="als+sg0+snv+autoscale"`, no other columns) would have caught it. None exists.
+
+**Lesson for future fix passes:** when adding a fallback parser meant to handle a legacy data shape, write a test that exercises ONLY the fallback path (drop all the columns the modern path uses). Otherwise the test exercises the explicit-column path and the fallback parser is never reached.
+
+---
+
 ## 2026-05-01 (overnight) — T-36 autoscale toggle implemented end-to-end; Codex caught 3 downstream silent-mismatch paths DeepSeek missed
 
 **Tip:** `2351c3c` on `feature/T36-autoscale-toggle` (13 commits past `da51f60`). Branch ready for PR.
