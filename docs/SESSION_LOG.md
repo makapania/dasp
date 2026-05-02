@@ -4,7 +4,31 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
-## 2026-05-01 (afternoon) — Architectural correction: grid path does NOT do per-fold autoscale via Pipeline mechanic
+## 2026-05-01 (evening) — Final adversarial sweep caught T-37's missing-merge-base; merged T-36 fixes into T-37
+
+**Trace pattern worth logging so it doesn't get re-made:**
+
+When two feature branches are developed in parallel and one keeps getting fix commits while the other has already branched off the older tip, the second branch will inherit silent-mismatch bugs that look fixed in the first branch's history. Standard PR review tools (Codex, gemini-code-assist, CodeRabbit, pr-review-toolkit) operating on a single branch's diff against `main` cannot catch this — they don't see the sister branch.
+
+What happened: T-37 was branched off T-36 at `1f49d73` (T-36's then-tip). T-36 then received `b92274c` (6 cross-family review findings) + `afb52d9` (4 pr-review-toolkit findings) + `4d4c542` (docs). T-37 had its own independent post-merge review iteration (`6a0eb28`) but never absorbed T-36's. Three HIGH + four MEDIUM + two LOW T-37 bugs all traced to "T-36 fix not in T-37."
+
+How it was caught: a final adversarial sweep dispatched **two cross-family reviewers in parallel via `opencode-call`** with full repo access — DeepSeek V4 Pro Max (DeepSeek API direct, max thinking) + MiMo 2.5 Pro Max (opencode-go subscription). Both reviewers, independently, identified the merge-base gap as the root cause of every T-37 finding. The convergence is high-signal — when family-orthogonal models agree on a structural finding, the bar for false positive is low.
+
+What the in-band reviews missed: each in-band review (the cross-family bot panel from earlier in the session, plus pr-review-toolkit) operated on diff-against-main scope. They couldn't see "T-37 lacks T-36's fixes" because that's not a diff-against-main fact — it's a relative-to-sister-branch fact. The final sweep with full repo access was what surfaced it.
+
+Fix: `git merge feature/T36-autoscale-toggle` into T-37 (commit `78998d4`). Source merged cleanly (the only changes T-36 made post-`1f49d73` were targeted line additions to functions T-37 also touched but in non-overlapping regions). Doc files (PROJECT_STATUS.md, SESSION_LOG.md) needed manual conflict resolution — took T-37's already-comprehensive versions which were the superset.
+
+**Lessons:**
+
+1. When developing sister branches in parallel and one accumulates fix commits, the other should be rebased onto the first's tip (or merged from it) before final review. Otherwise the in-band review bots will miss the inheritance gap.
+
+2. A final cross-family adversarial sweep with full repo access is structurally different from in-band PR review. Use it as the last gate when sister branches have been evolving in parallel.
+
+3. Convergence between family-orthogonal models on the SAME finding is much higher-signal than either model alone. Two independent panels catching the same structural pattern is a "definitely broken" indicator without needing further verification beyond the initial sanity check.
+
+---
+
+## 2026-05-01 (afternoon, late) — Architectural correction: grid path does NOT do per-fold autoscale via Pipeline mechanic
 
 **Trace error worth logging so it doesn't get re-made:**
 
@@ -28,7 +52,7 @@ The misleading code path is `search.py:4260-4286` (the `else` branch with the fu
 
 ---
 
-## 2026-05-01 (afternoon) — Sibling silent-failure-fix gap: pr-review-toolkit caught a fix-that-was-dead-code
+## 2026-05-01 (afternoon, late) — Sibling silent-failure-fix gap: pr-review-toolkit caught a fix-that-was-dead-code
 
 **Trace error worth logging:**
 
@@ -44,6 +68,127 @@ Fix in `afb52d9`: move the `'+'`-parser BEFORE `_normalize_preprocess_for_pipeli
 
 ---
 
+## 2026-05-01 (afternoon) — DeepSeek V4 Pro external reviews of T-41 plan and T-37 Phase 1; Bayesian SQLite slowdown root-caused
+
+### T-41 Bayesian SQLite slowdown — root cause and plan
+
+User reported Bayesian search 5× slower than pre-T-11. Codex investigation pointed at T-11's per-trial Optuna SQLite writes. Empirical benchmarks (`tests/_bench_bayesian_sqlite.py` and `tests/_bench_bayesian_per_model.py`) confirmed:
+
+| Model | In-memory | SQLite default | SQLite WAL |
+|---|---|---|---|
+| PLS | 30 ms | 600 ms | 244 ms (8.13×) |
+| Ridge | 21 ms | n/a | 215 ms (10.16×) |
+| LightGBM | 276 ms | n/a | 520 ms (1.89×) |
+| XGBoost | 534 ms | n/a | 728 ms (1.36×) |
+
+**Key finding:** SQLite overhead is roughly constant ~200ms/trial regardless of model. Ratio = `1 + (200ms / fit_time_ms)`. Fast models (PLS, Ridge) get crushed; heavy models (XGBoost, LightGBM) tolerate it.
+
+**Architecture decision:** per-model auto-calculator. First N trials in-memory, measure fit time, migrate to SQLite+WAL via `optuna.copy_study` if median > 1.0s. Mixed-model runs naturally per-model because GUI loops over `selected_models` calling `run_unified_bayesian` once per model. 3-way GUI override (Auto/Always-on/Always-off). T-41 plan filed at `docs/plans/2026-05-01-T41-bayesian-sqlite-auto-calculator.md`.
+
+### DeepSeek V4 Pro pre-implementation review of T-41 plan
+
+DeepSeek V4 Pro Max thinking (direct API per routing rule, NOT opencode-go) ran an empirical adversarial review of the T-41 plan. Verdict: READY_WITH_PLAN_REVISIONS. **6 findings, all applied in commit `7861a81`:**
+
+- **HIGH #1 (Task 4 — sampler attach):** plan's handwavy "recreate the TPE sampler if needed" was a footgun. `optuna.create_study(load_if_exists=True, sampler=...)` SILENTLY IGNORES the sampler kwarg on existing studies. Plan now explicitly prescribes `optuna.copy_study` followed by `optuna.load_study(sampler=TPESampler(...))` (the only way to attach a sampler to an existing study). DeepSeek empirically tested this on Optuna 4.8 — TPE state preserved across migration, post-migration trials show clear TPE-guided exploitation (best=3.93 startup → best=0.043 trial 9).
+
+- **HIGH #2 (Task 2 — "release the SQLite handle"):** ambiguous and incorrect. `start_run()` doesn't actually create the SQLite file (Optuna does so lazily on first access). No "handle" exists to release. Replaced with "do not pass `storage` kwarg to `optuna.create_study`; the `_active_storage_url` global stays set for subsequent models."
+
+- **MEDIUM:** warmup window 5→10 trials with median (was mean). TPE's `n_startup_trials=20` random-sampling regime can produce wildly different first-5 trial times (e.g., n_components=1 PLS vs n_components=20). 10 trials with median is robust. Added fallback: if completed trials < 3, default SQLite ON conservatively.
+
+- **MEDIUM:** WAL durability claim "still crash-safe under WAL semantics" was overstated. Corrected: WAL+sync=NORMAL prevents database CORRUPTION but may lose UNCHECKPOINTED trials. Set `PRAGMA wal_autocheckpoint=50` to bound loss to ~50 trials per crash event.
+
+- **LOW:** WAL pragma application moved from `start_run` to migration time (file doesn't exist until then), Always-off branch skips URL generation entirely, stale sidecar cleanup added in `mark_complete`, 4 tests added (TPE-continues-learning, mixed-model-independence, auto-decision-surfacing, one-class-uses-same-path).
+
+**Lesson:** `optuna.copy_study` mid-run migration WORKS, but the canonical pattern requires `load_study(sampler=...)` not `create_study(load_if_exists=True, sampler=...)`. The latter silently no-ops the sampler arg on existing studies — the kind of bug that ships and hides for months.
+
+### GLM 5.1 external review of T-37 Phase 1 commit `ef5f61e` (attribution corrected)
+
+User dispatched T-37 implementation in parallel; Phase 1-6 commits landed (`ef5f61e` through `7d8f940`) before main Claude reviewed. External read-only review of Phase 1 returned READY_WITH_REVISIONS — refined ratings vs an earlier draft analysis. Initial main-Claude commit (`fd0072a`) misattributed this review to DeepSeek V4 Pro; corrected by user — these were **GLM 5.1's findings**.
+
+**GLM's most important contribution: a critical correction on the proposed fix.** The dead-code `_resolve_window_choices` originally looked like a missing window-constraint enforcement that should be wired into `_objective`. **GLM caught that this would break Optuna:**
+
+> `trial.suggest_categorical` requires the search space to be CONSTANT across trials per Optuna's ask/tell interface contract. Varying window choices per preprocessing type per trial would corrupt TPE's KDE-based posterior models. The current "suggest from union, ignore invalid combos" approach is the correct workaround.
+
+So the dead-code finding is real (remove or comment as reserved) but the apparent "fix" is wrong-headed. The startup-trial waste (~30-40% of 20 random startup trials hit invalid combos) is the unavoidable tradeoff of operating TPE on a 5-D space with mostly-categorical axes. If startup efficiency becomes a concern, bump `n_startup_trials`, don't restrict the search space.
+
+**GLM's confirmed Phase 7 fix list (smaller than the original draft suggested):**
+
+- **MEDIUM F2:** `_tpe_baseline_params` never written to output dicts (currently safe by coincidence)
+- **MEDIUM F6:** `_quick_evaluate` PLS fallback uses RMSE for all task types
+- **MEDIUM F9:** Mutual exclusion test only checks `results is not None`, doesn't verify TPE actually ran
+- **MEDIUM F12:** Test coverage gaps (`_apply_full_preprocessing` not unit-tested, `_quick_evaluate` not direct-tested, empty-TPE-result fallback untested, roundtrip-through-`build_preprocessing_pipeline` unverified)
+- **LOW:** F7 mutation hygiene, F8 print-vs-logger, F10 dead `_resolve_window_choices` (remove or comment)
+- **NOT-AN-ISSUE:** F4 polyorder for raw/snv (correctly None), F5 one-class baseline/smoothing reset (no doubling blocks exist), F11 display name order (matches between paths)
+
+Original "F1: derivative-window enforcement missing — fix by per-trial dynamic search space" downgraded to LOW after GLM's Optuna-semantics correction.
+
+**Phase 7 fix commit:** ~110 LOC total (5 + 10 + 15 + 80 lines for F2/F6/F9/F12). None falsify Architecture A.
+
+### T-37 Phase 7 fix commit (`03d95cb`) — F2, F6, F9, F10, F12 closed
+
+All GLM 5.1 findings from the Phase 1 review are now resolved:
+- **F2** (`_tpe_baseline_params`): added to TPE output dict; downstream `build_preprocessing_pipeline` now receives explicit params instead of coincidentally-aligned defaults.
+- **F6** (`_quick_evaluate` fallback): branches on `task_type` — regression keeps `neg_root_mean_squared_error`, classification uses `accuracy`, one_class returns `-np.inf` (don't pollute TPE with garbage).
+- **F9** (mutual exclusion test): `tpe_score` propagated to result rows in `search.py` (3 result-path sites); integration tests now assert `tpe_score` column presence + non-null + `smart_score` absence.
+- **F10** (`_resolve_window_choices`): commented as RESERVED with explanation that per-trial dynamic search space would break Optuna's ask/tell contract.
+- **F12** (coverage gaps): 12 new tests added — `TestApplyFullPreprocessing` (5), `TestQuickEvaluateDirect` (4), `TestEmptyTPEFallback` (1), `TestPipelineRoundtrip` (2). All green.
+
+**Surprise during implementation:** `run_search` returns `(df_ranked, label_encoder)`, not a plain list. The original F9 test iterated over the tuple and hit `TypeError: argument of type 'NoneType' is not iterable` when `label_encoder` was `None`. Fixed by unpacking the tuple and using DataFrame column assertions.
+
+**Self-review verdict:** READY_TO_PR. No silent-mismatch paths detected in downstream consumers (model_io doesn't read baseline_params directly; validation rebuild threads it through `build_preprocessing_pipeline` correctly). `tpe_score=None` on non-TPE rows is harmless data inflation.
+
+### Cross-cutting takeaway
+
+Two patterns recurred across all three reviews (DeepSeek on T-41, self-review + GLM on T-37):
+
+1. **Silent degradation through coincidental alignment.** `create_study(load_if_exists=True, sampler=...)` would have aligned with the loaded study's pre-existing sampler IF Optuna re-attached it (it doesn't). `_tpe_baseline_params` aligns with `preprocess.py` defaults today (might not tomorrow). The kind of failure that ships and breaks months later.
+
+2. **Domain-knowledge gaps in code review.** GLM caught the Optuna ask/tell-interface constraint that an initial diff-only read missed — an external reviewer with deep knowledge of the specific library can catch failure modes that whole-codebase but library-shallow reviewers can't. Cross-family review also matters: DeepSeek and GLM agreed on most findings but GLM's domain expertise on Optuna's API contract was decisive on F1/F10. Family-orthogonal panels (Anthropic + DeepSeek + Zhipu/GLM) catch what a single-family review misses.
+
+---
+
+## 2026-05-01 (midday) — T-37 TPE preprocessing discovery implemented; self-review caught 2 silent-mismatch bugs
+
+**Tip:** `5ca7080` on `feature/T37-tpe-preprocessing-discovery` (5 commits past T-36 tip `1f49d73`).
+
+### What shipped
+
+A new TPE-based preprocessing discovery mode that replaces the basic exhaustive + GA paths with a smarter Optuna TPE search:
+
+- **Architecture A** (model-agnostic surrogate): LightGBM proxy evaluates preprocessing quality, returns top-N diverse configs, search loop tests ALL enabled models against each — preserves model diversity.
+- **5-D search space**: preproc (14 cat) x window (derivative-aware, ported from ga_preprocessing) x autoscale (T-36, bool) x baseline (5 cat) x smoothing (bool).
+- **multivariate=True** TPESampler exploits the ordered-window dimension — justifies TPE over exhaustive on an otherwise-categorical space.
+- **75-trial default** (50/75/100/150 GUI dropdown), 20 random startup.
+- **Diversity selection** ported from preprocessing_discovery.py's `select_diverse_configs` — ensures top-N configs span different preprocessing families, not all variants of one.
+- **Output contract identical to basic discovery** — the search loop doesn't know whether configs came from TPE or exhaustive.
+
+### Self-review caught 2 silent-mismatch bugs
+
+Following the T-36 lesson (audit ALL 6 consumer surfaces when adding a new flag):
+
+1. **preprocess_cfg["name"] used pipeline_name instead of display_name.** The `name` field was set to the clean pipeline name (e.g. "deriv") instead of the display name with all prefix cascades (e.g. "als+sg0+deriv_snv_w23+autoscale"). Result rows and validation rebuild parse the Preprocess column for baseline/smoothing/autoscale prefixes — missing prefixes would silently lose those downstream settings. Fixed by using the already-computed `display_name`.
+
+2. **Baseline/smoothing/autoscale doubling blocks re-doubled TPE-discovered per-config settings.** The doubling blocks (search.py ~1893-1888 and ~5521-5535) run unconditionally after the config-building phase. TPE configs already have per-config baseline/smoothing/autoscale values — the global doubling would add extra config variants with overridden values. Fixed by nulling global flags (`baseline_method = None; autoscale = False; smoothing = False`) inside the TPE success block so doubling blocks are no-ops.
+
+### Architecture insight: TPE is model-agnostic
+
+The TPE path does NOT use the user's selected models to evaluate preprocessing quality — it uses a LightGBM proxy (same surrogate as basic discovery). This is by design (Architecture A from the user's constraint). Per-model parallel mini-studies (Architecture B) would produce per-model preprocessing configs, collapsing model x preprocessing diversity. The current approach preserves the same output contract as basic discovery.
+
+### Test coverage
+
+21 new tests in `tests/test_tpe_preprocessing_discovery.py` — all green:
+- 3 module structure (import, DERIVATIVE_WINDOW_RANGES, BASELINE_METHODS)
+- 5 end-to-end (regression/classification/one_class/diversity/dimensions)
+- 4 dimension disablement (individual axes + all-disabled)
+- 5 edge cases (tiny dataset, constant columns, n_top, windows, progress)
+- 3 integration (run_search + run_one_class_search + mutual exclusion with smart)
+- 1 reproducibility (deterministic with seed=42)
+
+### Next session
+
+T-37 is ready for review. T-38 (dead preprocessing module cleanup) is unblocked.
+
+---
 ## 2026-05-01 (overnight) — T-36 autoscale toggle implemented end-to-end; Codex caught 3 downstream silent-mismatch paths DeepSeek missed
 
 **Tip:** `2351c3c` on `feature/T36-autoscale-toggle` (13 commits past `da51f60`). Branch ready for PR.

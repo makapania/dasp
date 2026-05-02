@@ -951,10 +951,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                ga_preprocess_generations=30,
                ga_preprocess_cv_folds=5,
                ga_quick_mode=False,
-               # Smart preprocessing discovery parameters (NEW - replaces GA)
-               smart_preprocess=False,
-               smart_preprocess_importance='model_specific',
-               smart_preprocess_n_top=10,
+                # Smart preprocessing discovery parameters (NEW - replaces GA)
+                smart_preprocess=False,
+                smart_preprocess_importance='model_specific',
+                smart_preprocess_n_top=10,
+                # TPE preprocessing discovery parameters (T-37 — supersedes smart + GA)
+                tpe_preprocess=False,
+                tpe_preprocess_n_trials=75,
+                tpe_preprocess_n_top=10,
                # GA variable selection parameters
                ga_population_size=64,
                ga_generations=100,
@@ -1309,11 +1313,23 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # Initialize preprocessing control flag
     skip_normal_preprocessing = False
 
+    # T-37 fix (post-merge review): explicit mutual-exclusion guard for
+    # preprocessing-discovery flags. The per-branch gates below all use
+    # `flag and not other_flag` shorthand, which silently drops into
+    # normal-preprocessing fallback when callers (tests, scripts) accidentally
+    # pass two flags True. Raise here so the caller learns about it.
+    _discovery_flags = sum(bool(f) for f in (smart_preprocess, tpe_preprocess, ga_preprocess))
+    if _discovery_flags > 1:
+        raise ValueError(
+            "smart_preprocess, tpe_preprocess, and ga_preprocess are mutually "
+            "exclusive — set at most one to True"
+        )
+
     # ═══════════════════════════════════════════════════════════════════════════
     # SMART PREPROCESSING DISCOVERY (NEW - replaces GA preprocessing)
     # Uses NSGA-II-style importance-guided wavelength selection
     # ═══════════════════════════════════════════════════════════════════════════
-    if smart_preprocess:
+    if smart_preprocess and not tpe_preprocess:
         if progress_callback:
             progress_callback({
                 'stage': 'smart_preprocessing',
@@ -1411,10 +1427,120 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             ga_preprocess = False  # Disable old GA since we're using smart preprocessing
 
     # ═══════════════════════════════════════════════════════════════════════════
+    # TPE PREPROCESSING DISCOVERY (T-37 — supersedes smart + GA)
+    # Uses Optuna TPE to search a 5-D space (preproc × window × autoscale ×
+    # baseline × smoothing) with a LightGBM proxy.  Returns top-N diverse
+    # configs tested against ALL enabled models — preserves model diversity.
+    # ═══════════════════════════════════════════════════════════════════════════
+    if tpe_preprocess and not smart_preprocess:
+        if progress_callback:
+            progress_callback({
+                'stage': 'tpe_preprocessing',
+                'message': 'TPE preprocessing discovery...',
+                'current': 0,
+                'total': tpe_preprocess_n_trials,
+            })
+
+        print(f"\n{'='*70}")
+        print("TPE PREPROCESSING DISCOVERY")
+        print(f"{'='*70}")
+        print(f"  Trials: {tpe_preprocess_n_trials}")
+        print(f"  Top-N configs: {tpe_preprocess_n_top}")
+        print(f"  CV folds: {folds}")
+        print(f"  Task type: {task_type}")
+        print(f"{'='*70}\n")
+
+        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+
+        def tpe_progress(current, total, message):
+            if progress_callback:
+                progress_callback({
+                    'stage': 'tpe_preprocessing',
+                    'message': message,
+                    'current': current,
+                    'total': total,
+                })
+
+        discovered_configs = run_tpe_preprocessing_discovery(
+            X.values,
+            y.values,
+            task_type=task_type,
+            n_trials=tpe_preprocess_n_trials,
+            n_top=tpe_preprocess_n_top,
+            cv_folds=folds,
+            enable_autoscale=autoscale,
+            enable_baseline=(baseline_method is not None),
+            enable_smoothing=smoothing,
+            # T-37 fix (post-merge review): pass user smoothing settings so
+            # TPE evaluates the same chain the grid will later rebuild.
+            smoothing_window=smoothing_window,
+            smoothing_polyorder=smoothing_polyorder,
+            progress_callback=tpe_progress,
+        )
+
+        if not discovered_configs:
+            print("WARNING: TPE preprocessing discovery found no valid configs!")
+            print("Falling back to default preprocessing...")
+            tpe_preprocess = False
+        else:
+            preprocess_configs = []
+            for cfg in discovered_configs:
+                base_name = cfg['preprocessing']
+                window = cfg.get('window')
+                deriv = cfg.get('deriv')
+
+                if base_name in ('raw', 'snv'):
+                    pipeline_name = base_name
+                elif base_name.startswith('snv_deriv'):
+                    pipeline_name = 'snv_deriv'
+                elif base_name.endswith('_snv'):
+                    pipeline_name = 'deriv_snv'
+                elif base_name.startswith('deriv'):
+                    pipeline_name = 'deriv'
+                else:
+                    pipeline_name = base_name
+
+                display_name = base_name
+                if window:
+                    display_name += f'_w{window}'
+                if cfg.get('_tpe_baseline_method'):
+                    display_name = f"{cfg['_tpe_baseline_method']}+{display_name}"
+                if cfg.get('_tpe_smoothing'):
+                    display_name = f"sg0+{display_name}"
+                if cfg.get('_tpe_autoscale'):
+                    display_name = f"{display_name}+autoscale"
+
+                preprocess_configs.append({
+                    "name": display_name,
+                    "base_name": pipeline_name,
+                    "deriv": deriv,
+                    "window": window,
+                    "polyorder": cfg.get('polyorder'),
+                    "interference": interference_to_add,
+                    "baseline_method": cfg.get('_tpe_baseline_method'),
+                    "baseline_params": cfg.get('_tpe_baseline_params'),
+                    "smoothing": cfg.get('_tpe_smoothing', False),
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                    "autoscale": cfg.get('_tpe_autoscale', False),
+                    "tpe_score": cfg.get('score'),
+                })
+
+            print(f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search")
+            print(f"{'='*70}\n")
+
+            skip_normal_preprocessing = True
+            ga_preprocess = False
+            smart_preprocess = False
+            baseline_method = None   # TPE configs already have per-config baseline
+            autoscale = False        # TPE configs already have per-config autoscale
+            smoothing = False        # TPE configs already have per-config smoothing
+
+    # ═══════════════════════════════════════════════════════════════════════════
     # GA PREPROCESSING OPTIMIZATION (LEGACY - kept for backward compatibility)
     # When enabled, this REPLACES user-selected preprocessing with GA-optimized config
     # ═══════════════════════════════════════════════════════════════════════════
-    if ga_preprocess and not smart_preprocess:
+    if ga_preprocess and not smart_preprocess and not tpe_preprocess:
         if progress_callback:
             progress_callback({
                 'stage': 'ga_preprocessing',
@@ -4797,6 +4923,7 @@ def _run_single_config(
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,
         "imbalance_params": imbalance_params,
+        "tpe_score": preprocess_cfg.get("tpe_score"),
     }
 
     # Add training configuration for tracking data state
@@ -5147,6 +5274,10 @@ def run_one_class_search(
     smart_preprocess=False,
     smart_preprocess_importance='model_specific',
     smart_preprocess_n_top=10,
+    # T-37: TPE preprocessing discovery (supersedes smart + GA)
+    tpe_preprocess=False,
+    tpe_preprocess_n_trials=75,
+    tpe_preprocess_n_top=10,
     # Variable selection
     variable_selection_methods=None,
     variable_counts=None,
@@ -5311,8 +5442,17 @@ def run_one_class_search(
     if window_sizes is None:
         window_sizes = [7, 19]
 
+    # T-37 fix (post-merge review): explicit mutual-exclusion guard, mirroring
+    # the same guard added to run_search above so scripted callers learn about
+    # conflicting flags instead of silently falling back to normal preprocessing.
+    if sum(bool(f) for f in (smart_preprocess, tpe_preprocess)) > 1:
+        raise ValueError(
+            "smart_preprocess and tpe_preprocess are mutually exclusive — "
+            "set at most one to True"
+        )
+
     preprocess_configs = []
-    if smart_preprocess:
+    if smart_preprocess and not tpe_preprocess:
         from .preprocessing_discovery import discover_preprocessing
 
         # Wrap progress callback to match discovery's (current, total, msg) signature
@@ -5358,6 +5498,67 @@ def run_one_class_search(
             logger.info(
                 "Smart preprocessing discovered %d configs", len(preprocess_configs)
             )
+
+    if tpe_preprocess and not smart_preprocess:
+        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+
+        def tpe_oc_progress(current, total, message):
+            if progress_callback:
+                progress_callback({
+                    'stage': 'tpe_preprocessing',
+                    'message': message,
+                    'current': current,
+                    'total': total,
+                })
+
+        discovered = run_tpe_preprocessing_discovery(
+            X_np, y_oc, task_type='one_class',
+            n_trials=tpe_preprocess_n_trials,
+            n_top=tpe_preprocess_n_top,
+            cv_folds=folds,
+            enable_autoscale=autoscale,
+            enable_baseline=(baseline_method is not None),
+            enable_smoothing=enable_smoothing,
+            # T-37 fix (post-merge review): pass user smoothing settings so
+            # TPE evaluates the same chain the grid will later rebuild.
+            smoothing_window=smoothing_window,
+            smoothing_polyorder=smoothing_polyorder,
+            progress_callback=tpe_oc_progress,
+        )
+        if discovered:
+            preprocess_configs = []
+            for cfg in discovered:
+                disc_name = cfg.get('preprocessing', 'raw')
+                disc_deriv = cfg.get('deriv')
+                disc_window = cfg.get('window')
+                pipeline_method = disc_name
+                for d in [4, 3, 2, 1]:
+                    pipeline_method = pipeline_method.replace(str(d), '')
+                display_name = disc_name + (f'_w{disc_window}' if disc_window else '')
+                if cfg.get('_tpe_baseline_method'):
+                    display_name = f"{cfg['_tpe_baseline_method']}+{display_name}"
+                if cfg.get('_tpe_smoothing'):
+                    display_name = f"sg0+{display_name}"
+                if cfg.get('_tpe_autoscale'):
+                    display_name = f"{display_name}+autoscale"
+                preprocess_configs.append({
+                    'method': pipeline_method,
+                    'name': display_name,
+                    'deriv': disc_deriv,
+                    'window': disc_window,
+                    'polyorder': cfg.get('polyorder'),
+                    'baseline_method': cfg.get('_tpe_baseline_method'),
+                    'baseline_params': cfg.get('_tpe_baseline_params'),
+                    'smoothing': cfg.get('_tpe_smoothing', False),
+                    'smoothing_window': smoothing_window,
+                    'smoothing_polyorder': smoothing_polyorder,
+                    'autoscale': cfg.get('_tpe_autoscale', False),
+                    'tpe_score': cfg.get('score'),
+                })
+            logger.info(
+                "TPE preprocessing discovered %d configs", len(preprocess_configs)
+            )
+            autoscale = False  # TPE configs already have per-config autoscale
 
     if not preprocess_configs:
         for method in preprocessing_methods:
@@ -5658,6 +5859,7 @@ def run_one_class_search(
                     "scaler": cv_result.get('cal_scaler'),
                     "pca_reducer": cv_result.get('cal_pca_reducer'),
                     "oc_score_stats": cv_result.get('oc_score_stats'),
+                    "tpe_score": preprocess_cfg.get("tpe_score"),
                 }
 
                 # Training config for model reproducibility (mirrors regression/classification)
@@ -6232,6 +6434,7 @@ def run_one_class_search(
                                 "scaler": cv_result.get('cal_scaler'),
                                 "pca_reducer": cv_result.get('cal_pca_reducer'),
                                 "oc_score_stats": cv_result.get('oc_score_stats'),
+                                "tpe_score": preprocess_cfg.get("tpe_score"),
                             }
 
                             # Training config for model reproducibility

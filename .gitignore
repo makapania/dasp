@@ -80,3 +80,19 @@ nul
 # One-off outputs
 *.stats
 .codex-gitconfig
+
+# AI assistant temp files
+.opencode-prompts/
+
+# Crash dumps
+bash.exe.stackdump
+
+# One-off benchmark / comparison scripts (not part of test suite)
+tests/_bench_*.py
+tests/_compare_*
+
+# Local reference data
+reftir/
+
+# Binary model files (generated artifacts)
+*.dasp

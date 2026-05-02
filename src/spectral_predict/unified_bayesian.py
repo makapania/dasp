@@ -1913,6 +1913,7 @@ def run_unified_bayesian(
         f"baseline={baseline_method or 'none'}|"
         f"baseline_params={_baseline_params_str}|"
         f"smoothing={smoothing}_{smoothing_window}_{smoothing_polyorder}|"
+        f"autoscale={enable_autoscale}|"
         f"uve={enable_uve}|"
         f"inlier={inlier_class_label}|"
         f"wl_shape={_wavelength_shape}|"
