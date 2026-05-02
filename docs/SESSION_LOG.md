@@ -4,6 +4,18 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-47 follow-up) — DeepSeek caught the missing absent-key fallback test
+
+DeepSeek V4 Pro Max review of the T-47 default-flip identified a MEDIUM gap: the test suite had no regression covering from_dict with the bayesian_persistence_mode key absent entirely. Every existing from_dict test explicitly included the key (sometimes with garbage, sometimes with a real value), so a future refactor accidentally flipping data.get("bayesian_persistence_mode", "never") to data.get(..., "auto") would have landed silently.
+
+The corruption-coercion test (test_corrupted_sidecar_mode_coerces_to_never) covers the case where the key is present with a junk value — it triggers the validate-and-coerce branch at run_state.py:163-168. But absent-key takes a *different* branch: the data.get(..., "never") default at line 162 is consumed before validation runs, so the coercion log never fires. That distinct path needed its own test.
+
+Added test_legacy_sidecar_without_persistence_mode_defaults_to_never to pin it. Two LOWs closed in the same commit: plan-doc step 3 said "confirm default also auto" for unified_bayesian.py:1771 but it was already auto since T-41 (no change needed, only verification); and added a comment above the GUI hasattr(self, "bayesian_persistence_mode") else "never" fallback in spectral_predict_gui_optimized.py:25266 distinguishing it from a user-facing default — it's a malformed-Tk-state safety net, sibling to the from_dict fallbacks, deliberately at "never" and not to be "fixed" alongside any future field-default flip.
+
+**Lesson reinforced:** the SESSION_LOG entry above ([T-47] "default value vs fallback for malformed input") was the right framing, but the *test coverage* didn't yet pin the absent-key half of the legacy-sidecar story. "One pair of contracts" → "three test cases" (field-default flipped, corruption coerced, absent-key fallback held). Sweep: 261 + 1 skipped (was 260+1 pre-fix).
+
+---
+
 ## 2026-05-02 (T-47) — "default value" vs "fallback for malformed input" are distinct concerns
 
 T-47 plan said one-liner: flip `bayesian_persistence_mode` default `'never'` → `'auto'`. The field has FOUR sites in `run_state.py` that look like defaults but split into two semantic categories:

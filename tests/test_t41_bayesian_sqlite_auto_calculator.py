@@ -829,6 +829,35 @@ class TestPersistenceModeValidation:
         })
         assert meta.bayesian_persistence_mode == "never"
 
+    def test_legacy_sidecar_without_persistence_mode_defaults_to_never(self):
+        """T-47: pre-T-41 sidecars lack the bayesian_persistence_mode key
+        entirely. The from_dict fallback at run_state.py:162 deliberately
+        stays at 'never' (NOT flipped to 'auto') — a legacy sidecar
+        author never opted into SQLite persistence, so resuming such a
+        run should not silently start writing a SQLite file.
+
+        This test pins the deliberate kept-fallback half of the T-47
+        two-pair contract: field defaults flipped to 'auto', safety
+        fallbacks (this one + the corruption-coercion path) kept at
+        'never'. A future refactor that conflates the two and changes
+        data.get(..., "never") to data.get(..., "auto") will
+        be caught by this test."""
+        from spectral_predict import run_state as rs
+
+        legacy = {
+            "run_id": "abc",
+            "storage_path": "/tmp/x.sqlite3",
+            "storage_url": "",
+            "label": None,
+            "dataset_fingerprint": None,
+            "model_names": [],
+            "n_trials_per_model": None,
+            "started_iso": "2026-05-01T00:00:00",
+            # bayesian_persistence_mode deliberately absent — pre-T-41 shape
+        }
+        meta = rs.RunMetadata.from_dict(legacy)
+        assert meta.bayesian_persistence_mode == "never"
+
 
 class TestCleanupByTrialCount:
     """MEDIUM-3 fix: cleanup gates on trial count, not file size — a tiny

@@ -29,7 +29,7 @@ Two locations:
 
 1. `src/spectral_predict/run_state.py:start_run`: change the `bayesian_persistence_mode: PersistenceMode = "never"` default to `"auto"`.
 2. `spectral_predict_gui_optimized.py` Tk var: `self.bayesian_persistence_mode = tk.StringVar(value='auto')` is already `'auto'` post-T-41 (the user's flip earlier). Verify no GUI radio-button callback overrides at startup.
-3. `src/spectral_predict/unified_bayesian.py:run_unified_bayesian` `enable_sqlite_persistence` parameter: confirm default also `'auto'`.
+3. `src/spectral_predict/unified_bayesian.py:run_unified_bayesian` `enable_sqlite_persistence` parameter is already `'auto'` (set during T-41 at line 1771); no change required — verify only.
 
 Update `docs/PROJECT_STATUS.md` Performance section to reflect the new default.
 
