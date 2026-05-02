@@ -2531,8 +2531,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                             print(f"     UVE prefilter skipped: only {n_features_varsel} features (min 3)")
 
                         # Loop over each selected variable selection method
-                        # DEBUG: Print what methods will be processed
-                        print(f"[DEBUG] Processing variable selection methods: {selected_methods}")
                         for varsel_method in selected_methods:
                             # Check for pause/stop
                             if controller and not controller.check_and_wait():
@@ -3002,9 +3000,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 if not valid_variable_counts:
                                     print(f"  WARNING: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
 
-                                # DEBUG: Show importances summary for this method
-                                print(f"  [DEBUG] {varsel_method} importances: min={np.min(importances):.4f}, max={np.max(importances):.4f}, std={np.std(importances):.4f}")
-
                                 # Apply edge masking for Savitzky-Golay derivatives
                                 # SKIP when wavelength restriction is active - restricted wavelengths
                                 # are from middle of spectrum, not SG boundary edges
@@ -3044,11 +3039,6 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     # Select top N most important features based on preprocessed importances
                                     # Use stable sort to ensure deterministic feature ordering when importances are tied
                                     top_indices = np.argsort(importances, kind='stable')[-n_top:][::-1]
-
-                                    # DEBUG: Show first 5 selected wavelengths for comparison
-                                    if n_top == valid_variable_counts[0]:  # Only for first subset size
-                                        selected_wls = wavelengths_varsel[top_indices[:5]]
-                                        print(f"\n      [DEBUG] Top 5 wavelengths for {varsel_method}: {selected_wls}")
 
                                     # For derivative preprocessing: importances are computed on transformed features
                                     # We must use the TRANSFORMED data and skip reapplying preprocessing
@@ -3304,17 +3294,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             print("  Subset models may rank higher due to lower variable counts.")
             print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
 
-    # DEBUG: Count results before scoring
-    print(f"\n[DEBUG] Results before scoring: {len(df_results)} rows")
-    if "SubsetTag" in df_results.columns:
-        print(f"[DEBUG] SubsetTag counts BEFORE scoring:\n{df_results['SubsetTag'].value_counts().to_string()}")
-
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, gap_penalty)
-
-    # DEBUG: Count results after scoring
-    print(f"\n[DEBUG] Results after scoring: {len(df_ranked)} rows")
-    if "SubsetTag" in df_ranked.columns:
-        print(f"[DEBUG] SubsetTag counts AFTER scoring:\n{df_ranked['SubsetTag'].value_counts().to_string()}")
 
     # =========================================================================
     # COMPUTE VALIDATION METRICS FOR TOP MODELS (if validation set provided)
