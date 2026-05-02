@@ -233,13 +233,6 @@ except ImportError:
     HAS_UNIFIED_BAYESIAN = False
     run_unified_bayesian = None
 
-try:
-    from spectral_predict.ensemble_preprocessing import StackedPreprocessingRegressor
-    HAS_ENSEMBLE_PREPROCESSING = True
-except ImportError:
-    HAS_ENSEMBLE_PREPROCESSING = False
-    StackedPreprocessingRegressor = None
-
 # Check for CatBoost availability
 try:
     from catboost import CatBoostRegressor

@@ -1,6 +1,12 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-42 + T-43 BOTH IMPLEMENTED + cross-family-reviewed — branches ready for PRs) —
+> **Last updated:** 2026-05-02 (T-38 + T-42 + T-43 ALL IMPLEMENTED — three branches ready for PRs) —
+>
+> **T-38 dead preprocessing module cleanup — IMPLEMENTED on `fix/T38-dead-preprocessing-cleanup` (1 commit, branched off T-42 tip).** Deleted `src/spectral_predict/learned_preprocessing.py` (775 LOC, zero callers — imports torch but never wired into the GUI) and `src/spectral_predict/ensemble_preprocessing.py` (701 LOC, only referenced by a dead `HAS_ENSEMBLE_PREPROCESSING` flag in the GUI try/except block at `gui:236-241`). Removed the dead flag too. **Did NOT delete `preprocessing_wrapper.py`** (still imported by `ensemble.py:18`) — plan was corrected on this point during T-37 review. Also did NOT delete `tests/test_ensemble_preprocessing.py` despite its matching name — that file actually tests `preprocessing_wrapper` and `ensemble`, both alive (the test name is misleading). Updated build-time torch-exclusion comments + `BUNDLED_APP_BUILD_GUIDE_PY312.md` Step 3 rationale. 244/244 across the regression sweep + clean `pkgutil.walk_packages` sanity-import of all `spectral_predict.*` submodules.
+>
+> ---
+>
+> **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `5670c26`, 3 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
 >
 > **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `e1daaa6`, 2 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
 >
@@ -337,7 +343,7 @@
 - `pyproject.toml` deps audited via AST scan. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1`. Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11`.
 
 **Intentionally NOT declared as required:**
-- **`torch`** — `src/spectral_predict/learned_preprocessing.py` imports torch but is **not wired into the GUI**. Dead import block at `gui:165-170` removed 2026-04-17. If/when learned_preprocessing is wired into the GUI: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch" message in the GUI.
+- **`torch`** — no in-tree module imports it. T-38 deleted the last importer (`learned_preprocessing.py`); the dead `HAS_ENSEMBLE_PREPROCESSING` flag was removed at the same time. The build still excludes torch defensively in case a transitive PyInstaller import sneaks it in.
 - **`agilent-ir-formats`** — no Python 3.12 wheel on PyPI. Stays in optional `[agilent]` extra. .seq file loading raises a clear ImportError from `agilent_reader.py:62` until upstream ships a 3.12 wheel.
 
 **Open follow-up if bundle parallelism becomes a real bottleneck:** fix the PyInstaller spawned-child runtime hook (the argv-parse crash in `multiprocessing.freeze_support()`) so loky can be used in the bundle. Tractable but non-trivial — would need a custom runtime hook + verification across the supported Windows targets.

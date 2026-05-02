@@ -259,8 +259,9 @@ a = Analysis(
     excludes=[
         'pytest', 'IPython', 'jupyter', 'notebook',
         'PyQt5', 'PyQt6', 'PySide2', 'PySide6',
-        # Exclude torch — learned_preprocessing is dead code in the GUI;
-        # bundling torch would add ~800MB for an unreachable feature.
+        # Exclude torch — no in-tree module imports it (T-38 deleted the
+        # last importer, learned_preprocessing.py). Bundling torch would
+        # add ~800MB for nothing.
         'torch', 'torchvision', 'torchaudio',
     ],
     win_no_prefer_redirects=False,

@@ -4,6 +4,18 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-38 dead preprocessing cleanup) — plan correction held; test name was misleading
+
+Plan correction from earlier (T-37 review by CodeRabbit) held: `preprocessing_wrapper.py` is alive and stays (imported by `ensemble.py:18`); only `learned_preprocessing.py` (775 LOC) and `ensemble_preprocessing.py` (701 LOC) deleted, plus the dead `HAS_ENSEMBLE_PREPROCESSING` import block at `gui:236-241`.
+
+**Test-name misdirection:** the plan mentioned deleting `tests/test_ensemble_preprocessing.py` along with `ensemble_preprocessing.py`. **Did NOT delete that test file** — despite the matching name, it imports from `preprocessing_wrapper` and `ensemble` (both alive), NOT from `ensemble_preprocessing` (deleted). 19 tests in that file + the integration suite all green post-deletion. The plan's instruction to delete the test was a misread of CodeRabbit's earlier correction; the test name reflects what it tests (preprocessing for ensemble use), not which module it depends on.
+
+**Build-time torch exclusion:** the `spectral_predict_py312.spec` excludes `torch`/`torchvision`/`torchaudio` with a comment that referenced `learned_preprocessing.py` as the rationale. Updated the comment — `learned_preprocessing.py` is gone, but the exclusion stays as belt-and-braces against a transitive PyInstaller import.
+
+Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` after deletion — clean. 244/244 across the broader regression sweep.
+
+---
+
 ## 2026-05-02 (T-42 + T-43 cross-family review trail) — Codex caught a T-43 silent-failure that DeepSeek missed; DeepSeek caught a stale T-42 test that pr-review-toolkit / Codex would have missed
 
 Two-ticket overnight queue. After implementation of each ticket, dispatched DeepSeek V4 Pro Max via opencode-call. Per the protocol, after every 2 tickets ALSO ran Codex via the codex-reviewer agent — the cross-family check that has caught real bugs in prior tickets (T-41 phantom resume prompts, docstring drift).
