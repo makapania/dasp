@@ -1729,7 +1729,17 @@ def _migrate_study_to_sqlite(
     )
 
     # Step 2: apply WAL pragmas — copy_study just created the SQLite file.
-    _apply_wal_pragmas(sqlite_url)
+    # The helper itself logs on rejection; add a migration-context warning
+    # so the lifecycle phase ("rejected DURING auto-migrate") is recoverable
+    # from the log alone instead of having to correlate timestamps.
+    if not _apply_wal_pragmas(sqlite_url):
+        logger.warning(
+            "T-46: WAL rejected during auto-migration to %s — the migrated "
+            "study will run with the slower DELETE journal mode. Move the "
+            "dasp data directory to a local (non-synced) drive for best "
+            "performance.",
+            sqlite_url,
+        )
 
     # Step 3: load study with a fresh sampler.  This is the ONLY way to attach
     # a sampler to an existing study; TPE will rebuild from copied trials.
@@ -2114,7 +2124,19 @@ def run_unified_bayesian(
             _ = len(study.trials)  # forces lazy SQLite init
         except Exception:
             pass
-        _apply_wal_pragmas(storage_url)
+        if not _apply_wal_pragmas(storage_url):
+            if progress_callback is not None:
+                progress_callback({
+                    "stage": "unified_bayesian",
+                    "message": (
+                        "[T-46] WARNING: WAL journal mode rejected by the "
+                        "filesystem — Bayesian search will run with the "
+                        "slower DELETE journal mode. Move the dasp data "
+                        "directory to a local (non-synced) drive for best "
+                        "performance."
+                    ),
+                    "t41_decision": "wal_rejected",
+                })
         # Reattach a fresh TPE sampler (the only safe way per Optuna 4.8).
         study = optuna.load_study(
             study_name=study_name,

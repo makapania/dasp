@@ -930,6 +930,59 @@ class TestWALPragmaReturnValue:
             mode = conn.execute("PRAGMA journal_mode").fetchone()[0].lower()
         assert mode == "wal"
 
+    def test_wal_rejection_surfaces_via_progress_callback(
+        self, fresh_run_state, monkeypatch
+    ):
+        """T-46: when _apply_wal_pragmas returns False at the always-on
+        SQLite call site in run_unified_bayesian, the rejection is pushed
+        into progress_callback as a structured warning event. The pre-T-46
+        bug: silent fallback to DELETE journal mode with no user-visible
+        signal — runs got slower for no apparent reason."""
+        rs, state_dir = fresh_run_state
+        X, y, wavelengths = _make_synthetic_data()
+
+        rs.start_run(
+            label="t46",
+            dataset_fingerprint="t46",
+            model_names=["PLS"],
+            n_trials_per_model=3,
+            bayesian_persistence_mode="always",  # forces SQLite-from-trial-0
+        )
+
+        events: list[dict] = []
+
+        def _capture(evt):
+            events.append(evt)
+
+        # Force the helper to report rejection without actually mutating
+        # disk state — exercises the surfacing path independent of any
+        # filesystem-specific WAL behavior.
+        from spectral_predict import unified_bayesian as ub
+        monkeypatch.setattr(ub, "_apply_wal_pragmas", lambda _url: False)
+
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        run_unified_bayesian(
+            X=X, y=y, wavelengths=wavelengths,
+            model_name="PLS",
+            n_trials=3,
+            cv_folds=3,
+            random_state=42,
+            verbose=False,
+            enable_sqlite_persistence="always",
+            progress_callback=_capture,
+        )
+
+        wal_events = [
+            e for e in events if e.get("t41_decision") == "wal_rejected"
+        ]
+        assert wal_events, (
+            "WAL rejection at the always-on SQLite site must surface as a "
+            "structured warning event in progress_callback (no silent "
+            "fallback to slower DELETE journal mode)"
+        )
+        assert "WAL" in wal_events[0]["message"]
+        rs._reset_for_tests()
+
 
 class TestMigrationOrphanCleanup:
     """HIGH-2 fix: when migration partway-fails, the orphan SQLite file is
