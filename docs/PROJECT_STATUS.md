@@ -1,6 +1,27 @@
 # Project Status
 
-> **Last updated:** 2026-05-01 (T-36 + T-37 BOTH MERGED to main after final cross-family adversarial sweep) —
+> **Last updated:** 2026-05-01 (T-41 IMPLEMENTED on `fix/T41-bayesian-sqlite-auto-calculator`) —
+>
+> **T-41 Bayesian SQLite auto-calculator + WAL mode — IMPLEMENTED, READY FOR PR.**
+> Branch `fix/T41-bayesian-sqlite-auto-calculator`.
+>
+> **What shipped:**
+> - `enable_sqlite_persistence` parameter on `run_unified_bayesian` (default `'never'`).
+> - Auto-calculator: first 10 trials in-memory; at trial 10, median fit time > 1.0s → migrate to SQLite+WAL, else stay in-memory. Fallback: < 3 completions → SQLite ON conservatively.
+> - `_migrate_study_to_sqlite` helper: `optuna.copy_study` + `optuna.load_study(sampler=TPESampler(...))`. The two-step pattern is critical — `create_study(load_if_exists=True, sampler=...)` SILENTLY IGNORES the sampler on existing studies.
+> - WAL pragmas applied at migration time (not at `start_run`). `journal_mode=WAL` is file-persistent; `wal_autocheckpoint=50` is per-connection only (see SESSION_LOG.md for the full nuance).
+> - `start_run` accepts `bayesian_persistence_mode`; for `'never'` no SQLite URL is generated at all (zero I/O).
+> - Stale-sidecar cleanup in `mark_complete()` and `clear_resume_state()`.
+> - GUI: 3-way radio buttons (Auto/Always on/Always off) with tooltip in Bayesian Options panel. Default `'never'`.
+> - 16 T-41 tests + 29 run_state regression tests + 46 unified_bayesian/autoscale/cv_pls_clamp tests — all 91 passing.
+>
+> **Default is `'never'` (user override from plan's `'auto'`):** User: "99.99% of the time this would not be used." Zero overhead by default; opt in to `'auto'` or `'always'` for crash-resume.
+>
+> **Performance with default `'never'`:** PLS Bayesian runs at pre-T-11 in-memory speed (~1.0x ratio). No SQLite overhead unless user explicitly selects `'auto'` or `'always'`.
+>
+> **Audit trail:** `docs/bugfix_validation/T41_bayesian_sqlite_auto_calculator.md`.
+>
+> **Previously:** 2026-05-01 (T-36 + T-37 BOTH MERGED to main after final cross-family adversarial sweep) —
 >
 > **PR #8 (T-36) MERGED** at `ff03193` (rebase merge: `bc989f2` + `ffd6451` + `ff03193`). Final adversarial sweep verdict: READY_TO_MERGE with zero new findings from both reviewers.
 >

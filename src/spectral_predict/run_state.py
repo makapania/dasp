@@ -35,6 +35,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -43,6 +44,8 @@ from datetime import datetime
 from pathlib import Path
 
 from spectral_predict.resource_paths import get_user_optuna_dir
+
+logger = logging.getLogger(__name__)
 
 
 _lock = threading.Lock()
@@ -109,12 +112,15 @@ class RunMetadata:
     model_names: list[str]
     n_trials_per_model: int | None
     started_iso: str
+    bayesian_persistence_mode: str = "never"  # T-41: audit log field
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict) -> "RunMetadata":
+        # Tolerate older sidecars that predate the bayesian_persistence_mode field.
+        data.setdefault("bayesian_persistence_mode", "never")
         return cls(**data)
 
 
@@ -140,6 +146,34 @@ class DiscardResult:
 
 def _sidecar_path() -> Path:
     return get_user_optuna_dir() / _SIDECAR_NAME
+
+
+def _cleanup_empty_sqlite(meta: "RunMetadata") -> None:
+    """T-41: delete the SQLite file if it was never written to.
+
+    When all models stay in-memory (e.g., all fast / 'never' mode), Optuna
+    never creates the SQLite file OR creates an essentially-empty shell.  We
+    delete it so the next session's ``find_incomplete_run()`` doesn't offer a
+    phantom "Resume?" that has nothing to resume.
+
+    This is best-effort — failures are logged at DEBUG, never raised.
+
+    Definition of "empty": file doesn't exist, OR size < 32 KB (Optuna's
+    minimum meaningful SQLite schema is ~20 KB; a file with completed trials
+    is well above 32 KB for any real workload).
+    """
+    _EMPTY_THRESHOLD_BYTES = 32 * 1024  # 32 KB
+    try:
+        if not meta.storage_path:
+            return
+        sqlite_path = Path(meta.storage_path)
+        if not sqlite_path.exists():
+            return  # never created — nothing to clean up
+        if sqlite_path.stat().st_size < _EMPTY_THRESHOLD_BYTES:
+            sqlite_path.unlink(missing_ok=True)
+            logger.debug("T-41: removed empty SQLite file %s", sqlite_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("T-41: stale-sidecar cleanup skipped: %s", exc)
 
 
 def fingerprint_dataset(X, y) -> str:
@@ -182,6 +216,7 @@ def start_run(
     dataset_fingerprint: str | None = None,
     model_names: list[str] | None = None,
     n_trials_per_model: int | None = None,
+    bayesian_persistence_mode: str = "never",  # T-41: 'auto', 'always', 'never'
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -189,6 +224,10 @@ def start_run(
     sidecar. Subsequent calls in the same search return the existing
     metadata so all `create_study` callers within one Run Analysis click
     share one SQLite file.
+
+    T-41: when ``bayesian_persistence_mode='never'``, no SQLite URL is
+    generated (``get_storage_url()`` returns ``None``). This saves I/O and
+    avoids orphaned ``.sqlite3`` sidecars for all-in-memory sessions.
     """
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
@@ -201,25 +240,33 @@ def start_run(
             return _active_metadata
 
         run_id = uuid.uuid4().hex[:12]
-        storage_path = get_user_optuna_dir() / f"{run_id}.sqlite3"
-        # Optuna's SQLite URL needs forward slashes even on Windows.
-        # Kimi MINOR #7: extend the busy timeout. Default SQLite lock-wait is
-        # short; Windows + concurrent dasp instances can hit "database is
-        # locked" errors mid-trial. 30s gives the contended writer plenty of
-        # time to finish without false-failing the optimization.
-        storage_url = (
-            f"sqlite:///{storage_path.as_posix()}?check_same_thread=False&timeout=30"
-        )
+
+        # T-41: skip SQLite URL entirely for 'never' mode — saves I/O and
+        # avoids the stale-sidecar problem (no SQLite file → no orphan).
+        if bayesian_persistence_mode == "never":
+            storage_path = get_user_optuna_dir() / f"{run_id}.sqlite3"
+            storage_url = None  # type: ignore[assignment]
+        else:
+            storage_path = get_user_optuna_dir() / f"{run_id}.sqlite3"
+            # Optuna's SQLite URL needs forward slashes even on Windows.
+            # Kimi MINOR #7: extend the busy timeout. Default SQLite lock-wait
+            # is short; Windows + concurrent dasp instances can hit "database
+            # is locked" errors mid-trial. 30s gives the contended writer
+            # plenty of time to finish without false-failing the optimization.
+            storage_url = (
+                f"sqlite:///{storage_path.as_posix()}?check_same_thread=False&timeout=30"
+            )
 
         meta = RunMetadata(
             run_id=run_id,
             storage_path=str(storage_path),
-            storage_url=storage_url,
+            storage_url=storage_url or "",  # empty string when 'never'
             label=label,
             dataset_fingerprint=dataset_fingerprint,
             model_names=list(model_names or []),
             n_trials_per_model=n_trials_per_model,
             started_iso=datetime.now().isoformat(),
+            bayesian_persistence_mode=bayesian_persistence_mode,
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
@@ -275,6 +322,13 @@ def mark_complete() -> None:
                 # Re-raise — the GUI handler at the call site already wraps
                 # mark_complete() in try/except and surfaces the failure.
                 raise
+
+        # T-41 stale-sidecar cleanup: if the SQLite file was never written to
+        # (all models stayed in-memory) the file either doesn't exist or is
+        # essentially empty. Delete it so the next session's find_incomplete_run()
+        # doesn't offer a phantom "Resume?" for a run with nothing to resume.
+        if _active_metadata is not None:
+            _cleanup_empty_sqlite(_active_metadata)
 
         # Sidecar either didn't exist, didn't belong to us, or was deleted.
         # Either way, our run is done — clear in-memory state.
@@ -355,9 +409,14 @@ def clear_resume_state() -> None:
     fingerprint mismatches go through `discard_incomplete_run` instead
     (Kimi MAJOR #3b). The sidecar persists; future launches will re-offer
     it for inspection.
+
+    T-41: also cleans up empty SQLite files from all-in-memory sessions so
+    the next launch doesn't offer a phantom "Resume?" with nothing to resume.
     """
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
     with _lock:
+        if _active_metadata is not None:
+            _cleanup_empty_sqlite(_active_metadata)
         _active_storage_url = None
         _active_run_id = None
         _active_metadata = None

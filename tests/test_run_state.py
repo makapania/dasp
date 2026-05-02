@@ -50,6 +50,7 @@ def test_start_run_writes_sidecar_and_url(fresh_state):
         dataset_fingerprint="abc123",
         model_names=["pls", "ridge"],
         n_trials_per_model=100,
+        bayesian_persistence_mode="auto",  # T-41: opt into SQLite to test URL
     )
 
     assert meta.run_id
@@ -336,7 +337,8 @@ def test_unified_bayesian_uses_storage_when_active(fresh_state):
     # Simulate the production code path: GUI calls start_run() at the top
     # of _run_analysis_thread, then unified_bayesian.run_unified_bayesian()
     # calls optuna.create_study with the active storage URL.
-    meta = rs.start_run(label="x", model_names=["pls"])
+    meta = rs.start_run(label="x", model_names=["pls"],
+                        bayesian_persistence_mode="auto")  # T-41: need SQLite URL
     assert rs.get_storage_url() == meta.storage_url
 
     import optuna
@@ -439,7 +441,8 @@ def test_mark_complete_raises_on_unlink_failure(fresh_state, monkeypatch):
     """
     rs, rp, _ = fresh_state
 
-    meta = rs.start_run(label="x", model_names=["m"])
+    meta = rs.start_run(label="x", model_names=["m"],
+                        bayesian_persistence_mode="auto")  # T-41: need SQLite URL
     sidecar = rp.get_user_optuna_dir() / "active_run.json"
     assert sidecar.exists()
 

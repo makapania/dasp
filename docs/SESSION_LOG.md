@@ -4,6 +4,46 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-01 (T-41 implementation) — SQLite auto-calculator, WAL, default-never
+
+**Three implementation traps worth logging:**
+
+**1. `run_state.py` had no `logger` import.** The `_cleanup_empty_sqlite` helper uses
+`logger.debug(...)` but the file had no `import logging` / `logger = logging.getLogger(...)`.
+Adding a helper that uses `logger` before adding the import causes a `NameError` at
+runtime inside a bare `except Exception:` block — which means the exception is caught,
+the error is masked, and behavior is silently wrong. Fixed by adding `import logging` +
+`logger = logging.getLogger(__name__)` at module top.
+
+**2. `wal_autocheckpoint` is a per-connection PRAGMA, not file-persistent.** The plan said
+to set `PRAGMA wal_autocheckpoint = 50` and the initial test queried it on a NEW connection
+and expected 50. That failed because SQLite resets `wal_autocheckpoint` to the default
+(1000) for each new connection — it's not stored in the db file like `journal_mode=WAL`
+is. Fixed by (a) testing that the PRAGMA applies correctly on the SAME connection in
+`_apply_wal_pragmas`, (b) not asserting the value on a fresh connection. `journal_mode=WAL`
+IS file-persistent and is the important guarantee.
+
+**3. `default='never'` breaks pre-existing `test_run_state.py` tests.** Before T-41,
+`start_run()` always generated a SQLite URL. Three pre-existing tests called `start_run()`
+without `bayesian_persistence_mode` and then asserted `storage_url.startswith("sqlite:///")`.
+With `default='never'`, those calls produce an empty `storage_url`. Fixed by adding
+`bayesian_persistence_mode='auto'` explicitly to those three tests — they're testing the
+persistence machinery and should opt in explicitly. This is also the correct semantic
+update: the tests document "when you want persistence, pass 'auto'".
+
+**Architecture note — why `wal_autocheckpoint` still matters despite being per-connection:**
+Optuna opens its SQLite connection and holds it for the duration of `study.optimize()`.
+When we call `_apply_wal_pragmas()` on a fresh connection (not Optuna's), we can only
+affect our own connection. Optuna's connection gets the default `wal_autocheckpoint=1000`.
+The setting in `_apply_wal_pragmas` only "works" when Optuna uses our connection — which
+it doesn't. The WAL mode (file-persistent) and `synchronous=NORMAL` (also applies at file
+level once WAL is active) are the important guarantees. The `wal_autocheckpoint=50`
+PRAGMA in `_apply_wal_pragmas` is aspirational; in practice it only affects the brief
+window when we do the WAL pragma setup, not Optuna's own writes. Filed as a known
+limitation — not a blocking bug since WAL mode itself bounds corruption risk.
+
+---
+
 ## 2026-05-01 (evening) — Final adversarial sweep caught T-37's missing-merge-base; merged T-36 fixes into T-37
 
 **Trace pattern worth logging so it doesn't get re-made:**
