@@ -30856,8 +30856,8 @@ For detailed documentation, see the User Guide.
 
             # Determine task type from target column or results
             task_type = 'regression'  # Default
-            if hasattr(self, 'task_type_var'):
-                task_type = self.task_type_var.get()
+            if hasattr(self, 'task_type'):
+                task_type = self.task_type.get()
             elif hasattr(self, 'y') and self.y is not None:
                 # Infer from data
                 import numpy as np
