@@ -22,10 +22,12 @@
 >
 > **Test coverage:** **252/252 + 1 skipped** across `test_t41_bayesian_sqlite_auto_calculator`, `test_t42_write_path_plumbing` (8 tests), `test_t43_resume_auto_restore` (26 tests), `test_run_state`, `test_cv_strategy`, `test_unified_bayesian_baseline`, `test_autoscale_bayesian`, `test_cv_pls_clamp`, `test_ensemble_preprocessing`, `test_ensemble_integration`. Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` post-T-38 deletion — clean.
 >
-> **Pre-existing bugs surfaced for separate follow-up tickets:**
-> - `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` (hasattr-guarded); the actual var is `self.n_unified_trials`. The hasattr guard short-circuits to None, so `n_trials_per_model` is always None in `start_run` metadata. T-43 captures `n_unified_trials` correctly via the whitelist.
-> - `logger.warning` invisible in bundled GUI (no `logging.basicConfig`); silent in production. Pre-existing pattern.
-> - `_apply_wal_pragmas` return value discarded at call sites despite the helper documenting "caller should surface that." Pre-existing T-41 follow-up.
+> **Follow-up tickets filed (NOT in this PR):**
+> - **T-44** (`docs/plans/2026-05-02-T44-n-trials-var-typo.md`): `n_trials_var` typo at `gui:25123`; hasattr-guarded so silent-no-op. T-43 captures `n_unified_trials` correctly so resume-restore is unaffected; only the sidecar's `n_trials_per_model` field is wrong. ~5 LOC.
+> - **T-45** (`docs/plans/2026-05-02-T45-logger-warning-visibility-bundled-gui.md`): `logger.warning` calls invisible in the bundled GUI (no `logging.basicConfig` anywhere). Silent in production for sidecar corruption, WAL rejection, capture-time Tk failures, and the new T-42 hoist mismatch warning. File-handler at app startup is the cheap fix.
+> - **T-46** (`docs/plans/2026-05-02-T46-wal-pragma-return-not-surfaced.md`): `_apply_wal_pragmas` return value discarded at both call sites despite "caller should surface that" docstring. OneDrive/Dropbox-synced data dirs silently fall back to DELETE journal mode.
+> - **T-47** (`docs/plans/2026-05-02-T47-flip-bayesian-persistence-default-to-auto.md`): one-liner default flip from `'never'` to `'auto'`. Justified by the T-42 baseline benchmark numbers (XGBoost 1.01×, LightGBM 0.93× — well below 1.15× target). Gated on this PR merging first.
+> - **T-48** (`docs/plans/2026-05-02-T48-real-tk-integration-tests-for-resume.md`): real-Tk integration tests for the resume flow. Pins Tcl set/get-verify behavior + order-dependent restore-then-override contract on the actual method instead of `_FakeGUI` shims. Belt-and-braces; current shim coverage is sound at the unit level.
 >
 > **Audit trail:**
 > - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
