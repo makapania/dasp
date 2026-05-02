@@ -43,7 +43,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from spectral_predict.resource_paths import get_user_optuna_dir
 
@@ -131,6 +131,22 @@ class RunMetadata:
     n_trials_per_model: int | None
     started_iso: str
     bayesian_persistence_mode: PersistenceMode = "never"  # T-41
+    # Snapshot of GUI settings at start_run time. None when no settings
+    # were captured (older sidecars, headless callers). Stored as a flat
+    # dict[str, JSON-serializable] so future GUI additions auto-flow
+    # through without schema migration; restore tolerates missing/unknown
+    # keys.
+    gui_settings: dict[str, Any] | None = None
+    # External validation set indices (DataFrame index labels — can be int
+    # or string depending on how the user loaded the data). Used with .loc
+    # to re-slice the same calibration / validation partition the resumed
+    # trials trained on, which prevents silent leakage when the original
+    # algorithm was non-deterministic (Random) or hand-picked (Manual).
+    # Deterministic algorithms (SPXY / Kennard-Stone / Stratified) would
+    # reproduce the same indices from data + algorithm + percentage, but
+    # persisting the indices is cheaper and removes an entire class of
+    # "user forgets to click Create Validation Set on resume" footguns.
+    validation_indices: list[Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -151,7 +167,47 @@ class RunMetadata:
             )
             mode = "never"
         data["bayesian_persistence_mode"] = mode
-        return cls(**data)
+
+        # Ignore unknown fields so a future schema addition can land without
+        # breaking older Python builds that lack the field. Without this,
+        # `cls(**data)` would TypeError on the unknown kwarg.
+        known = {f.name for f in dataclasses.fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+
+        # Type guard: a corrupted sidecar storing `gui_settings: "malformed"`
+        # (string instead of dict) would pass the field filter and crash
+        # later in restore_gui_settings when `.items()` is called on a
+        # string. Coerce to None with a warning so the resume flow degrades
+        # to "no auto-restore" rather than surfacing a generic outer-handler
+        # exception.
+        gs = filtered.get("gui_settings")
+        if gs is not None and not isinstance(gs, dict):
+            logger.warning(
+                "sidecar gui_settings has unexpected type %s; coercing to "
+                "None (auto-restore disabled for this resume)",
+                type(gs).__name__,
+            )
+            filtered["gui_settings"] = None
+
+        # Same defense for validation_indices: must be a list of JSON
+        # scalars (int or str — DataFrame index labels can be either).
+        # A non-list or a list with non-scalar entries means corrupted
+        # state — degrade to "no validation restore" rather than blindly
+        # slicing with garbage labels.
+        vi = filtered.get("validation_indices")
+        if vi is not None:
+            if not isinstance(vi, list) or not all(
+                isinstance(x, (int, str)) and not isinstance(x, bool)
+                for x in vi
+            ):
+                logger.warning(
+                    "sidecar validation_indices has unexpected shape %s; "
+                    "coercing to None (validation restore disabled for "
+                    "this resume)",
+                    type(vi).__name__,
+                )
+                filtered["validation_indices"] = None
+        return cls(**filtered)
 
 
 @dataclasses.dataclass
@@ -266,12 +322,33 @@ def fingerprint_dataset(X, y) -> str:
         return "unknown"
 
 
+def _coerce_validation_indices(raw) -> list[Any] | None:
+    """Normalize validation index labels for sidecar persistence.
+
+    Returns a deterministic list of ints (sorted) when every label is
+    int-typed; otherwise preserves insertion order. Filters non-scalar
+    entries silently — caller is the GUI which already constrains input
+    to DataFrame index labels.
+    """
+    cleaned = [
+        x for x in raw
+        if isinstance(x, (int, str)) and not isinstance(x, bool)
+    ]
+    if not cleaned:
+        return None
+    if all(isinstance(x, int) for x in cleaned):
+        return sorted(cleaned)
+    return cleaned
+
+
 def start_run(
     label: str | None = None,
     dataset_fingerprint: str | None = None,
     model_names: list[str] | None = None,
     n_trials_per_model: int | None = None,
     bayesian_persistence_mode: PersistenceMode = "never",
+    gui_settings: dict[str, Any] | None = None,
+    validation_indices: list[Any] | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -323,6 +400,14 @@ def start_run(
             n_trials_per_model=n_trials_per_model,
             started_iso=datetime.now().isoformat(),
             bayesian_persistence_mode=bayesian_persistence_mode,
+            gui_settings=dict(gui_settings) if gui_settings else None,
+            validation_indices=(
+                # Preserve label type (int or str) — DataFrame .loc slicing
+                # is type-sensitive. Sort only when all labels are int; for
+                # mixed/str labels keep insertion order.
+                _coerce_validation_indices(validation_indices)
+                if validation_indices else None
+            ),
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url

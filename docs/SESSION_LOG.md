@@ -4,6 +4,99 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-02 (T-49 user-caught) — validation partition is decided AT START not AT END
+
+User asked during the consolidated PR wrap-up: "for the pause function, when it restarts does it also maintain the external validation set? or does that not really matter since only calculated at the end?"
+
+**The framing is the trap.** Validation metrics (RMSEP / R²pred / val_Accuracy) ARE only computed at the end of the search — but the validation *partition* is decided BEFORE the search runs (when the user clicks "Create Validation Set"). The Bayesian trials train on the calibration partition only. If on resume the user creates a different validation set:
+
+- **Deterministic algorithms (SPXY / Kennard-Stone / Stratified):** same data + same algorithm + same % gives the same partition. The captured Tk vars (now in `CAPTURABLE_SETTINGS`) are sufficient — IF the user remembers to click "Create Validation Set" again.
+- **Random algorithm:** re-clicking gives a DIFFERENT random draw. Some samples that the resumed Bayesian trials trained on can land in the new "validation" set → silent leakage on RMSEP.
+- **Manual algorithm:** there's no algorithmic way to reproduce the partition; the indices must persist or the resumed run is broken.
+- **Even for deterministic algorithms:** if the user forgets to click the button, `validation_X` is None and the post-search validation step silently skips. Banner says "settings restored" but key state is missing.
+
+User's judgment: this is a correctness blocker, not a deferred follow-up. Folded into the consolidated PR.
+
+**Architecture:** added `RunMetadata.validation_indices: list[Any] | None` (Any because DataFrame index labels can be int or str). Sidecar persists labels as-is; `from_dict` type-guards against malformed shapes. GUI's `_check_for_incomplete_run` stashes captured indices on `self._pending_validation_indices`; new `_apply_pending_validation_indices` helper re-slices `self.X` / `self.y` after the fingerprint check passes in `_run_analysis_thread`. The helper has three guard cases: respect user's manual re-creation, skip-on-missing-label as defense in depth, no-op when no pending indices.
+
+**Lesson logged:** the question "does it matter only at the end?" is the same shape as "does the per-trial cv_strategy attr matter?" — both look like post-hoc state but are actually preconditions of the search. When auditing a resume flow, list every piece of state the search consumes BEFORE the first trial, not just what it produces. Validation partition belongs in that list; T-43 missed it.
+
+---
+
+## 2026-05-02 (T-38 dead preprocessing cleanup) — plan correction held; test name was misleading
+
+Plan correction from earlier (T-37 review by CodeRabbit) held: `preprocessing_wrapper.py` is alive and stays (imported by `ensemble.py:18`); only `learned_preprocessing.py` (775 LOC) and `ensemble_preprocessing.py` (701 LOC) deleted, plus the dead `HAS_ENSEMBLE_PREPROCESSING` import block at `gui:236-241`.
+
+**Test-name misdirection:** the plan mentioned deleting `tests/test_ensemble_preprocessing.py` along with `ensemble_preprocessing.py`. **Did NOT delete that test file** — despite the matching name, it imports from `preprocessing_wrapper` and `ensemble` (both alive), NOT from `ensemble_preprocessing` (deleted). 19 tests in that file + the integration suite all green post-deletion. The plan's instruction to delete the test was a misread of CodeRabbit's earlier correction; the test name reflects what it tests (preprocessing for ensemble use), not which module it depends on.
+
+**Build-time torch exclusion:** the `spectral_predict_py312.spec` excludes `torch`/`torchvision`/`torchaudio` with a comment that referenced `learned_preprocessing.py` as the rationale. Updated the comment — `learned_preprocessing.py` is gone, but the exclusion stays as belt-and-braces against a transitive PyInstaller import.
+
+Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` after deletion — clean. 244/244 across the broader regression sweep.
+
+**DeepSeek V4 Pro post-push review (2026-05-02):** READY_TO_MERGE. Zero HIGH findings. One MEDIUM (M1): the plan doc still said "delete tests/test_ensemble_preprocessing.py" despite the implementation correctly preserving it — plan text never re-synced after the T-37 correction. Three LOW: stale `__pycache__/.pyc` files for the deleted modules (gitignored, harmless), T-21 audit doc references `ensemble_preprocessing.py` as a 28-call-site SG location (now obsolete; T-21 unguarded count drops to ~59), and Feb 2026 archival design docs reference the deleted modules in mapping tables (historical artifacts, no action). Applied M1 (plan doc text) and L2 (T-21 footnote) as follow-up doc-only commit. Confirmed via DeepSeek: no `.dasp` save format, Inno Setup, hiddenimports, datas, or config file references the deleted names; `model_io.py:176` saves only `type(model).__name__` so legacy `.dasp` files cannot encode `StackedPreprocessing*` (the class was never wired into a code path that produced model objects).
+
+---
+
+## 2026-05-02 (T-42 + T-43 cross-family review trail) — Codex caught a T-43 silent-failure that DeepSeek missed; DeepSeek caught a stale T-42 test that pr-review-toolkit / Codex would have missed
+
+Two-ticket overnight queue. After implementation of each ticket, dispatched DeepSeek V4 Pro Max via opencode-call. Per the protocol, after every 2 tickets ALSO ran Codex via the codex-reviewer agent — the cross-family check that has caught real bugs in prior tickets (T-41 phantom resume prompts, docstring drift).
+
+**The Codex-only finding (T-43 BLOCKER):** the GUI has TWO parallel sets of baseline/smoothing/region/UVE Tk vars — the "general" ones (`enable_baseline`, `baseline_method`, `enable_smoothing`, `region_test_all_individual`, `region_test_pairwise`, `enable_uve` if it existed) AND a Bayesian-specific set (`bayes_enable_baseline`, `bayes_baseline_method`, `bayes_enable_smoothing`, `bayes_region_test_all`, `bayes_region_test_pairwise`, `bayes_enable_uve`). The Bayesian path at `spectral_predict_gui_optimized.py:27554-27570` reads the bayes_* set; my whitelist captured only the general set. Resume of a Bayesian run would have silently used bayes_* defaults despite the banner claiming "settings restored" — the exact silent-failure trap T-43 was meant to close. DeepSeek had reviewed the same diff in pass 1 and didn't catch this; Codex did because it traced the actual analysis read path back from the run_unified_bayesian call site.
+
+**The DeepSeek-only finding (T-42 HIGH):** my audit doc claimed "132/132 regression tests green" but I had only run a curated sweep that excluded `tests/test_cv_strategy.py`. That file's `test_one_class_bayesian_writes_cv_strategy_to_trial` still asserted `best.user_attrs.get('cv_strategy')` against the keys I'd just removed from per-trial scope. Codex didn't flag this in its T-42 pass (verdict: READY_TO_MERGE, after empirically verifying user_attrs survive `optuna.copy_study`); DeepSeek flagged it as a sweep-coverage gap. Lesson: for tickets that change shared contracts (in this case, "where to read cv_strategy from"), the regression sweep must include EVERY test file that touches the contract surface, not just the new ticket's own tests.
+
+**Cross-family complementarity confirmed.** Each reviewer caught what the other missed:
+- Codex traced runtime read paths through GUI surface code and caught the bayes_* whitelist gap.
+- DeepSeek empirically tested Optuna 4.8 behavior (would have caught a copy_study user_attrs trap if it existed; verified ours doesn't) AND caught the test-coverage gap by exhaustively grep'ing for stale assertions on the changed surface.
+
+For overnight protocols: the every-2-tickets Codex pass paired with per-ticket DeepSeek isn't redundancy — it's distinct family-orthogonal coverage.
+
+---
+
+## 2026-05-02 (T-42 baseline measurement) — T-41 already closed the perf gap
+
+Critical empirical finding before implementing Approach C: **the post-T-41 baseline (`tests/_bench_bayesian_per_model.py` on `fix/T42-write-path-plumbing-approach-c` tip = T-43 commit `487b1d9`) shows SQLite WAL ratios already at the T-42 "definition of done" target.** Numbers (n_trials=10, synthetic data n=100, n_features=200):
+
+| Model | In-memory | SQLite WAL | Ratio | Overhead/trial |
+|---|---|---|---|---|
+| PLS | 0.28s | 0.20s | **0.69x** | -9ms |
+| Ridge | 0.18s | 0.19s | **1.06x** | +1ms |
+| RandomForest | 14.58s | 3.57s | **0.25x** | -1100ms (caching noise) |
+| LightGBM | 2.35s | 2.19s | **0.93x** | -16ms |
+| XGBoost | 4.06s | 4.09s | **1.01x** | +3ms |
+
+T-42's plan quoted XGBoost 1.36×, LightGBM 1.89×, PLS 28× from PRE-T-41 measurements. T-41's WAL pragmas + 30s SQLite busy_timeout collapsed the per-trial finalize cost from ~200ms to near-noise. **Approach C is no longer needed to make `'auto'` mode viable** — it already is.
+
+Proceeding with Approach C anyway because:
+1. The plan explicitly requested it.
+2. It's correct cleanup: `cv_strategy` and `cv_n_repeats` are written every trial (60+ writes per study) but read by nobody — `convert_study_to_dataframe` takes them as function parameters, never reads `trial.user_attrs`.
+3. `early_stopping_rounds` is constant per study but currently written per trial; can hoist to `study.user_attrs` and have `convert_study_to_dataframe` read it once.
+
+Per-trial set_user_attr counts (from `tests/_bench_t42_set_user_attr_count.py`):
+- PLS regression: 30 calls/trial (29 unique keys)
+- Ridge regression: 30 calls/trial (29 unique keys)
+- PLS-DA classification: 42 calls/trial (41 unique keys)
+
+Approach C savings: ~3 of 30 calls (10%) for regression, ~3 of 42 (~7%) for classification. At ~2ms WAL each, ~6ms/trial cumulative — modest but real cleanup.
+
+**Filed but deferred:** flipping T-41's default from `'never'` to `'auto'` is now justified by the bench data alone, doesn't depend on Approach C succeeding. Trivial follow-up ticket.
+
+---
+
+## 2026-05-02 (T-43 implementation) — Tk var quirks + GUI introspection trade-offs
+
+**Architectural call: curated whitelist > auto-introspection for GUI settings capture.** The dasp GUI has ~700 Tk vars; auto-introspecting `vars(self)` for Tk types would silently capture display state (filter dropdowns, chart colors, exploratory-tab UI) and restore it on resume — surprising the user. Settled on a ~80-name `CAPTURABLE_SETTINGS` whitelist in `src/spectral_predict/run_gui_settings.py`. Trade-off: adding a new analysis-defining setting requires editing the whitelist (drift risk), but the contract is testable and predictable.
+
+**Tcl quirk: `tk.IntVar.set("not-a-number")` does NOT raise.** Tcl stores the string verbatim; the `_tkinter.TclError: expected integer but got "abc"` surfaces on the next `.get()`. Caught during DeepSeek MEDIUM #3 review. Defense pattern: read back via `.get()` after every `.set()` in `restore_gui_settings`, compare to expected, push mismatch to `report.errors`. This protects against crafted/corrupted sidecars rather than against normal capture (`.get()` returns the right type for the Var).
+
+**Order-dependent contract: restore-then-override-persistence-mode.** In `_check_for_incomplete_run`, we restore captured settings BEFORE forcing `bayesian_persistence_mode='always'`. If a future refactor inverts the order, restore would clobber 'always' back to whatever the previous run was using ('auto'/'never'), and the resumed SQLite URL would be silently ignored. Comment + new test (`test_restore_then_override_persistence_mode_order`) document this.
+
+**`from_dict` filtering pattern for forward-compat:** `dataclasses.fields(cls)` gives the known field set. Filter the input dict before `cls(**filtered)` so future builds adding a new field don't TypeError on older Python. Plus a type guard: `gui_settings` of wrong type (string, list) coerces to None with a logger warning. Without the type guard, a corrupted sidecar passes the field filter and crashes downstream in `restore_gui_settings.items()`.
+
+**Pre-existing bug surfaced (DeepSeek LOW #7, deferred):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` (guarded by `hasattr`). The actual var is `self.n_unified_trials`. The `hasattr` guard causes `n_trials_per_model=None` in every Bayesian `start_run` call. T-43 captures `n_unified_trials` correctly, so the resume flow has the right value — but the run-state metadata's `n_trials_per_model` field is always None. File a separate ticket.
+
+---
+
 ## 2026-05-02 (T-41 final review pass) — multi-pass review trail caught real bugs each round
 
 T-41 took 8 review passes before merge. Each pass caught real bugs the prior passes missed. Lessons worth saving for the overnight-run protocol and future ticket reviews:

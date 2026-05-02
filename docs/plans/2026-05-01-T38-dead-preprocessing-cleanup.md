@@ -21,8 +21,8 @@
 
 - **Purpose:** Stacked-preprocessing ensemble — `StackedPreprocessingRegressor` / `StackedPreprocessingClassifier` train same base model on multiple preprocessed views, combine via Ridge meta-model.
 - **Usage:** Imported at `gui:237` to set `HAS_ENSEMBLE_PREPROCESSING = True`, but the flag is never read in any functional code path. Not in `search.py`.
-- **Tests:** Has `tests/test_ensemble_preprocessing.py` — also delete.
-- **Action:** Delete `ensemble_preprocessing.py`, delete `tests/test_ensemble_preprocessing.py`, remove the dead `HAS_ENSEMBLE_PREPROCESSING` import block from GUI.
+- **Tests:** `tests/test_ensemble_preprocessing.py` exists with the matching name BUT actually imports from `preprocessing_wrapper` + `ensemble` (both alive) — **do NOT delete it.** Plan corrected 2026-05-01 during T-37 review; original draft incorrectly proposed deletion.
+- **Action:** Delete `ensemble_preprocessing.py` only. Remove the dead `HAS_ENSEMBLE_PREPROCESSING` import block from GUI. **Keep** `tests/test_ensemble_preprocessing.py`.
 
 ### 3. `src/spectral_predict/preprocessing_wrapper.py` (220 lines)
 
@@ -51,7 +51,7 @@
 ## Tasks
 
 1. Verify zero-call-site claims one more time via fresh `grep` before deletion (modules may have been re-wired since this audit).
-2. Delete the three dead modules + their tests in a single commit.
+2. Delete the two dead modules (`learned_preprocessing.py`, `ensemble_preprocessing.py`) in a single commit. **Do NOT delete** `tests/test_ensemble_preprocessing.py` — it tests live modules despite the misleading name (corrected 2026-05-01).
 3. Remove the dead `HAS_ENSEMBLE_PREPROCESSING` flag from GUI.
 4. Run full test sweep to confirm no regressions.
 5. After T-37 ships: separate commit retiring `ga_preprocessing.py`.

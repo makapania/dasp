@@ -1,6 +1,91 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
+> **Last updated:** 2026-05-02 (T-43 + T-42 + T-38 CONSOLIDATED — single branch ready for one PR) —
+>
+> **All four tickets (T-43 + T-42 + T-38 + T-49) land on `fix/bayesian-resume-and-cleanup` (tip `6465306`, 14 commits off main).** User decision after the parallel pr-review-toolkit pass: ship as one PR rather than three. T-49 was originally filed as a follow-up but the user (correctly) flagged it as a correctness blocker for the resume flow and folded it into the same PR. The per-ticket branches (`fix/T43-resume-auto-restore-settings`, `fix/T42-write-path-plumbing-approach-c`, `fix/T38-dead-preprocessing-cleanup`) remain on origin as reference and can be deleted once the consolidated PR merges.
+>
+> **What's in the PR:**
+> 1. **T-43 (auto-restore GUI settings on resume):** ~91 analysis-defining Tk vars captured at `start_run` time and restored when the user accepts the resume banner — preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters, the 6 `bayes_*` Bayesian-only controls, and the 5 external-validation-set Tk vars. New `src/spectral_predict/run_gui_settings.py` module + extended `RunMetadata.gui_settings: dict | None` with `dataclasses.fields()` filter + type-guard for malformed sidecars + `RestoreReport` with `restored / skipped_unknown / skipped_no_var / errors` buckets and `fully_succeeded` property. **Plus T-49 (folded in):** validation set indices persisted alongside `gui_settings` in the sidecar so non-deterministic algorithms (Random, Manual) and hand-picked partitions resume without silent leakage. New `_apply_pending_validation_indices` GUI helper re-slices `self.X` / `self.y` after the fingerprint check passes; respects the user's manual re-creation if they did one before clicking Run Analysis; defense-in-depth on missing labels.
+> 2. **T-42 (Bayesian write-path Approach C):** hoisted three constant keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope. Two were dead writes (read by nobody); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Hoist guarded against silent overwrite on resume — disagreeing values keep the stored value and log a warning. `_supports_early_stopping(model_name)` helper de-duplicates the trial-time and study-hoist gates. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39.
+> 3. **T-38 (dead preprocessing cleanup):** deleted `learned_preprocessing.py` (775 LOC, zero callers) and `ensemble_preprocessing.py` (701 LOC, only referenced by a dead `HAS_ENSEMBLE_PREPROCESSING` flag). Did NOT delete `preprocessing_wrapper.py` (still imported by `ensemble.py:18`) or `tests/test_ensemble_preprocessing.py` (despite the matching name — actually tests `preprocessing_wrapper` and `ensemble`, both alive).
+>
+> **Surprise finding documented during T-42:** post-T-41 baseline benchmark already met T-42's "definition of done" target — PLS 0.69×, Ridge 1.06×, LightGBM 0.93×, XGBoost 1.01× SQLite-WAL ratios, all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41. Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — separate trivial follow-up ticket.
+>
+> **Review trail (7 review passes + 1 user catch, cross-family):**
+> 1. **T-43** post-`f934c81` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 2 HIGH + 1 MEDIUM closed in `3f071b3`.
+> 2. **T-43** post-`487b1d9` — Codex CLI: BLOCKERS, 1 HIGH (`bayes_*` whitelist gap) + 1 MEDIUM (`skipped_no_var` not surfaced) + 1 LOW (docstring drift) closed in `2568be8`.
+> 3. **T-42** post-`ab9d00f` — DeepSeek V4 Pro Max: READY_WITH_REVISIONS, 1 HIGH (stale `test_cv_strategy.py` assertion) + 1 MEDIUM (copy_study migration test gap) + 1 LOW closed in `e1daaa6`.
+> 4. **T-42** post-`ab9d00f` — Codex CLI: READY_TO_MERGE; verified empirically that `optuna.copy_study` preserves user_attrs.
+> 5. **T-38** post-`2eaef4f` — DeepSeek V4 Pro Max: READY_TO_MERGE, auto-applied 2 doc fixes in `c0b4c20`.
+> 6. **T-38** post-`2eaef4f` — Codex CLI: READY_WITH_REVISIONS, 1 LOW (stale PROJECT_STATUS sentence) closed in `de55f32`.
+> 7. **Stacked diff** post-`de55f32` — pr-review-toolkit parallel-5 (code-reviewer / silent-failure-hunter / type-design-analyzer / pr-test-analyzer / comment-analyzer): 3 HIGH + 3 MEDIUM closed in `fe5e25d`.
+> 8. **User catch** during review wrap-up: validation partition not maintained on resume — silent leakage on Random/Manual algorithms, silent skip if user forgets the button on deterministic algorithms. Originally filed as T-49 follow-up; user (correctly) called it a correctness blocker. Folded in at `6465306` with 8 new tests.
+>
+> **Test coverage:** **257/257 + 1 skipped** across `test_t41_bayesian_sqlite_auto_calculator`, `test_t42_write_path_plumbing` (8 tests), `test_t43_resume_auto_restore` (33 tests including the 8 new T-49 cases), `test_run_state`, `test_cv_strategy`, `test_unified_bayesian_baseline`, `test_autoscale_bayesian`, `test_cv_pls_clamp`, `test_ensemble_preprocessing`, `test_ensemble_integration`. Sanity-imported every `spectral_predict.*` submodule via `pkgutil.walk_packages` post-T-38 deletion — clean.
+>
+> **Follow-up tickets filed (NOT in this PR):**
+> - **T-44** (`docs/plans/2026-05-02-T44-n-trials-var-typo.md`): `n_trials_var` typo at `gui:25123`; hasattr-guarded so silent-no-op. T-43 captures `n_unified_trials` correctly so resume-restore is unaffected; only the sidecar's `n_trials_per_model` field is wrong. ~5 LOC.
+> - **T-45** (`docs/plans/2026-05-02-T45-logger-warning-visibility-bundled-gui.md`): `logger.warning` calls invisible in the bundled GUI (no `logging.basicConfig` anywhere). Silent in production for sidecar corruption, WAL rejection, capture-time Tk failures, and the new T-42 hoist mismatch warning. File-handler at app startup is the cheap fix.
+> - **T-46** (`docs/plans/2026-05-02-T46-wal-pragma-return-not-surfaced.md`): `_apply_wal_pragmas` return value discarded at both call sites despite "caller should surface that" docstring. OneDrive/Dropbox-synced data dirs silently fall back to DELETE journal mode.
+> - **T-47** (`docs/plans/2026-05-02-T47-flip-bayesian-persistence-default-to-auto.md`): one-liner default flip from `'never'` to `'auto'`. Justified by the T-42 baseline benchmark numbers (XGBoost 1.01×, LightGBM 0.93× — well below 1.15× target). Gated on this PR merging first.
+> - **T-48** (`docs/plans/2026-05-02-T48-real-tk-integration-tests-for-resume.md`): real-Tk integration tests for the resume flow. Pins Tcl set/get-verify behavior + order-dependent restore-then-override contract on the actual method instead of `_FakeGUI` shims. Belt-and-braces; current shim coverage is sound at the unit level.
+>
+> **Audit trail:**
+> - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
+> - T-43 + T-38 + T-49: code + tests + this PROJECT_STATUS entry serve as audit trail. T-49 plan doc (`docs/plans/2026-05-02-T49-...md`) is marked IMPLEMENTED with implementation summary.
+>
+> ---
+>
+> **Previously: per-ticket framing (now consolidated):**
+>
+> **T-38 dead preprocessing module cleanup — IMPLEMENTED on `fix/T38-dead-preprocessing-cleanup` (1 commit, branched off T-42 tip).** Deleted `src/spectral_predict/learned_preprocessing.py` (775 LOC, zero callers — imports torch but never wired into the GUI) and `src/spectral_predict/ensemble_preprocessing.py` (701 LOC, only referenced by a dead `HAS_ENSEMBLE_PREPROCESSING` flag in the GUI try/except block at `gui:236-241`). Removed the dead flag too. **Did NOT delete `preprocessing_wrapper.py`** (still imported by `ensemble.py:18`) — plan was corrected on this point during T-37 review. Also did NOT delete `tests/test_ensemble_preprocessing.py` despite its matching name — that file actually tests `preprocessing_wrapper` and `ensemble`, both alive (the test name is misleading). Updated build-time torch-exclusion comments + `BUNDLED_APP_BUILD_GUIDE_PY312.md` Step 3 rationale. 244/244 across the regression sweep + clean `pkgutil.walk_packages` sanity-import of all `spectral_predict.*` submodules.
+>
+> ---
+>
+> **T-42 Bayesian write-path Approach C — IMPLEMENTED on `fix/T42-write-path-plumbing-approach-c` (tip `5670c26`, 3 commits, branched off T-43 tip).** Hoisted three constant `set_user_attr` keys (`cv_strategy`, `cv_n_repeats`, `early_stopping_rounds`) from per-trial to per-study scope in `unified_bayesian.py`. Two were dead writes (read by nobody — `convert_study_to_dataframe` takes them as function parameters); the third is now read once outside the trial loop with a trial-level fallback for legacy/migrated studies. Per-trial set_user_attr count: PLS regression 30→27, Ridge regression 30→27, PLS-DA classification 42→39 (each model saves 3 writes/trial).
+>
+> **Surprise empirical finding (changes T-42's framing):** the post-T-41 baseline benchmark (`tests/_bench_bayesian_per_model.py`, n_trials=10, synthetic n=100, n_features=200) **already met T-42's "definition of done" target**: PLS 0.69×, Ridge 1.06×, RandomForest 0.25× (caching), LightGBM 0.93×, XGBoost 1.01× — all well below the plan's 1.15× / 1.30× targets. T-41's WAL pragmas + 30s `busy_timeout` collapsed per-trial overhead to near-noise; the plan's 1.36× / 1.89× ratios were PRE-T-41 measurements. **Flipping T-41's default from `'never'` to `'auto'` is now justified by bench data alone — file as a separate trivial follow-up ticket.** Approaches A and D no longer needed.
+>
+> **T-42 review trail (2 passes, cross-family):**
+> 1. DeepSeek V4 Pro Max post-`ab9d00f`: READY_WITH_REVISIONS — 1 HIGH (test_cv_strategy.py still asserted old per-trial contract; audit doc's "132/132 green" claim was wrong because that file was excluded from the curated sweep) + 1 MEDIUM (no test that user_attrs survive copy_study migration — same trap class as T-41's `load_if_exists+sampler` silent-ignore) + 1 LOW (XGBoost trial-absence assertion missing) all closed in `e1daaa6`. Wider sweep now 225/225 green.
+> 2. Codex CLI post-`ab9d00f` (paired with T-43 review per overnight protocol): READY_TO_MERGE. Verified empirically against installed Optuna source that `copy_study()` does preserve user_attrs (study.py:1567-1568); confirmed ordering safety (study.set_user_attr lands before progress_wrapper closure runs); confirmed no other readers of the three keys remain in `trial.user_attrs`.
+>
+> **T-43 resume auto-restore GUI settings — IMPLEMENTED on `fix/T43-resume-auto-restore-settings` (tip `2568be8`, 3 commits).** Closes the user-reported gap from T-41 verification: previously the user had to manually recreate every preprocessing/model setting before the resumed SQLite study would actually pick up trial-level state. Now ~86 analysis-defining Tk vars (preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters, **plus the 6 `bayes_*` Bayesian-only baseline/smoothing/region/UVE controls Codex flagged as missing**) are auto-restored from the sidecar.
+>
+> **Architecture:** `RunMetadata.gui_settings: dict | None` (extended schema, backward-compat via `dataclasses.fields()` filter + type-guard). New `src/spectral_predict/run_gui_settings.py` module with `CAPTURABLE_SETTINGS` whitelist + `capture_gui_settings(gui)` + `restore_gui_settings(gui, dict) -> RestoreReport` + `summarize_gui_settings()`. GUI captures at `start_run` time and restores BEFORE the existing 'always' persistence override (order matters — comment + new test document this).
+>
+> **T-43 review trail (2 passes, cross-family):**
+> 1. DeepSeek V4 Pro Max post-`f934c81`: READY_WITH_REVISIONS — 2 HIGH (banner-lies-on-errors + missing type-guard on gui_settings) + 1 MEDIUM (Tcl quirk: `IntVar.set("abc")` doesn't raise) all closed in `3f071b3`.
+> 2. Codex CLI post-`487b1d9`: BLOCKERS — 1 HIGH (the 6 `bayes_*` Tk vars at gui:27554-27570 weren't in the whitelist; resumed Bayesian runs would silently use defaults despite the banner claiming "settings restored" — the exact silent-failure trap T-43 was meant to close) + 1 MEDIUM (skipped_no_var bucket not surfaced in resume log) + 1 LOW (docstring drift) all closed in `2568be8`.
+>
+> **Pre-existing bug surfaced for follow-up (NOT a T-43 regression):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` guarded by `hasattr`; the actual var is `self.n_unified_trials`, so `n_trials_per_model` is always None in `start_run` metadata. T-43 itself captures `n_unified_trials` correctly via the whitelist. To file as a separate ticket.
+>
+> **Test coverage:** 23/23 T-43 tests + 6/6 T-42 tests + the 225/225 wider regression sweep = comprehensive coverage of the resume-auto-restore + write-path-cleanup surface.
+>
+> **Audit trail:**
+> - T-42: `docs/bugfix_validation/T42_write_path_plumbing_approach_c.md`.
+> - T-43: code + tests speak for themselves; no separate audit doc.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
+>
+> **T-43 resume auto-restore GUI settings — IMPLEMENTED on `fix/T43-resume-auto-restore-settings` (tip `3f071b3`, 2 commits).** Closes the user-reported gap from T-41 verification: previously the user had to manually recreate every preprocessing/model setting before the resumed SQLite study would actually pick up trial-level state. Now, when the user accepts the resume banner, ~80 analysis-defining Tk vars (preprocessing toggles, autoscale, baseline, smoothing, variable selection, model selection, n_trials, tier, CV strategy, imbalance method, one-class hyperparameters) are auto-restored from the sidecar — they just click Run Analysis.
+>
+> **Architecture:** `RunMetadata.gui_settings: dict | None` (extended schema, backward-compat via `dataclasses.fields()` filter). New `src/spectral_predict/run_gui_settings.py` module with `CAPTURABLE_SETTINGS` whitelist + `capture_gui_settings(gui)` + `restore_gui_settings(gui, dict) -> RestoreReport` + `summarize_gui_settings()` for the resume prompt. GUI captures at `start_run` time and restores BEFORE the existing 'always' persistence override (order matters — comment in code).
+>
+> **Review trail (1 pass):**
+> 1. DeepSeek V4 Pro Max post-`f934c81`: READY_WITH_REVISIONS — 2 HIGH (banner-lies-on-errors + missing type-guard on `gui_settings`) + 1 MEDIUM (Tcl quirk: `IntVar.set("abc")` doesn't raise) all closed in `3f071b3`. 5 LOW deferred (whitelist debt for variable_penalty/gap_penalty, pre-existing `n_trials_var` typo at gui:25123, ga_preprocess settings on the T-38 deletion path).
+>
+> **Pre-existing bug surfaced for follow-up (NOT a T-43 regression):** `spectral_predict_gui_optimized.py:25123` reads `self.n_trials_var.get()` guarded by `hasattr`; the actual var is `self.n_unified_trials`, so `n_trials_per_model` is always None in `start_run` metadata. T-43 itself captures `n_unified_trials` correctly via the whitelist. To file as a separate ticket.
+>
+> **Test coverage:** 19/19 T-43 tests + 29 run_state + 23 T-41 = 71/71 passing (~18s on `.venv312`).
+>
+> **Audit trail:** code + tests speak for themselves; no `bugfix_validation/` doc filed for this small ticket.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-41 MERGED to main after 5-pass review trail) —
 >
 > **T-41 Bayesian SQLite auto-calculator + WAL mode — MERGED via PR #9.** Five rebase commits on main: `cd406f0` (feat) → `e99d35a` (DeepSeek HIGH/MEDIUM + resume bug + default 'auto') → `2087134` (docs) → `081ad6a` (pr-review-toolkit findings: silent failures + Literal validation + cleanup gates) → `f745d37` (DeepSeek Finding 1: multi-model SQLite collateral deletion via `optuna.delete_study` instead of `Path.unlink`).
 >
@@ -159,7 +244,7 @@
 >
 > **T-37 background:** Independent audits (Explore agent + DeepSeek V4 Pro via opencode-call) confirmed `ga_preprocessing.py`'s GA mode evaluates ~6× the entire 238-point search space, providing zero benefit over exhaustive on a discrete categorical space with no neighborhood structure. Basic and GA paths cover the same operation space with different search strategies; merge into one TPE-based path covering a richer 5-D space (preproc × window × autoscale × baseline × smoothing) at 75-100 trials.
 >
-> **T-38 deletes:** `learned_preprocessing.py` (775 LOC, zero callers), `ensemble_preprocessing.py` (701 LOC, dead `HAS_ENSEMBLE_PREPROCESSING` flag only), `preprocessing_wrapper.py` (220 LOC, only imported by ensemble_preprocessing). Retires `ga_preprocessing.py` after T-37 absorbs its useful insights (`DERIVATIVE_WINDOW_RANGES`, multi-seed robustness logic).
+> **T-38 deletes:** `learned_preprocessing.py` (775 LOC, zero callers) and `ensemble_preprocessing.py` (701 LOC, only referenced by the dead `HAS_ENSEMBLE_PREPROCESSING` flag at `gui:236-241`). **Note: this earlier note's claim that T-38 also deletes `preprocessing_wrapper.py` and retires `ga_preprocessing.py` was wrong** — `preprocessing_wrapper.py` is still imported by `ensemble.py:18` (CodeRabbit caught this during T-37 review), and `ga_preprocessing.py` retirement is a separate post-T-37-merge step kept out of T-38's scope. See the top-of-file status entry for the actual T-38 outcome.
 >
 > **Previously:** 2026-04-30 (evening — T-08 dropped, T-11 staged, T-15 dropped, T-16 reframed, T-19 user-framed) —
 >
@@ -292,7 +377,7 @@
 - `pyproject.toml` deps audited via AST scan. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1`. Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11`.
 
 **Intentionally NOT declared as required:**
-- **`torch`** — `src/spectral_predict/learned_preprocessing.py` imports torch but is **not wired into the GUI**. Dead import block at `gui:165-170` removed 2026-04-17. If/when learned_preprocessing is wired into the GUI: (a) add torch to required deps (~800MB install cost), or (b) keep torch optional + show a clear "this feature requires torch" message in the GUI.
+- **`torch`** — no in-tree module imports it. T-38 deleted the last importer (`learned_preprocessing.py`); the dead `HAS_ENSEMBLE_PREPROCESSING` flag was removed at the same time. The build still excludes torch defensively in case a transitive PyInstaller import sneaks it in.
 - **`agilent-ir-formats`** — no Python 3.12 wheel on PyPI. Stays in optional `[agilent]` extra. .seq file loading raises a clear ImportError from `agilent_reader.py:62` until upstream ships a 3.12 wheel.
 
 **Open follow-up if bundle parallelism becomes a real bottleneck:** fix the PyInstaller spawned-child runtime hook (the argv-parse crash in `multiprocessing.freeze_support()`) so loky can be used in the bundle. Tractable but non-trivial — would need a custom runtime hook + verification across the supported Windows targets.

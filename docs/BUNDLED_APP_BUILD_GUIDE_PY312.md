@@ -49,7 +49,7 @@ Download from <https://jrsoftware.org/isdl.php>. The build script auto-detects `
 
 1. **Icon creation** — Converts `asp_logo_final.png` to `asp_logo.ico` using Pillow.
 2. **PyInstaller build** — Invokes PyInstaller from `.venv312` against `spectral_predict_py312.spec`.
-3. **Post-build torch cleanup** — `shutil.rmtree` removes `_internal/torch/`, `torchvision/`, `torchaudio/`. The `learned_preprocessing` module imports torch but is dead code in the GUI; bundling torch would add ~800 MB for no benefit. Filtering inside the spec causes PyInstaller TOC corruption (see Troubleshooting), so cleanup is post-COLLECT.
+3. **Post-build torch cleanup** — `shutil.rmtree` removes `_internal/torch/`, `torchvision/`, `torchaudio/`. T-38 deleted the last in-tree importer (`learned_preprocessing.py`), so torch should never be bundled in the first place; this is belt-and-braces for transitive PyInstaller imports. Filtering inside the spec causes PyInstaller TOC corruption (see Troubleshooting), so cleanup is post-COLLECT.
 4. **Pandas self-repair** — Byte-compares `_internal/pandas/util/__init__.py` against the venv version and restores when mismatched. PyInstaller 6.18 occasionally overwrites this file with `packaging/_structures.py` content (intermittent, ~1 in 3 rebuilds). See Troubleshooting.
 5. **Inno Setup** — If `ISCC.exe` is found, runs `installer/spectral_predict_py312.iss` to produce the installer .exe.
 

@@ -233,13 +233,6 @@ except ImportError:
     HAS_UNIFIED_BAYESIAN = False
     run_unified_bayesian = None
 
-try:
-    from spectral_predict.ensemble_preprocessing import StackedPreprocessingRegressor
-    HAS_ENSEMBLE_PREPROCESSING = True
-except ImportError:
-    HAS_ENSEMBLE_PREPROCESSING = False
-    StackedPreprocessingRegressor = None
-
 # Check for CatBoost availability
 try:
     from catboost import CatBoostRegressor
@@ -23152,16 +23145,40 @@ class SpectralPredictApp:
             else "?"
         )
 
-        message = (
-            f"Found an unfinished Bayesian run from {started_str}.\n\n"
-            f"Run id: {meta.run_id}\n"
-            f"Models: {models_str}\n"
-            f"Trials per model (target): {n_trials_str}\n\n"
-            "Resume?\n\n"
-            "  • Yes — keep the SQLite store. Re-load the same data and\n"
-            "    click Run Analysis to continue from where it left off.\n"
-            "  • No — delete the unfinished run and start fresh next time."
-        )
+        # T-43: include captured GUI-settings summary in the resume prompt
+        # so the user sees exactly what auto-restore will set before they
+        # accept. Older sidecars lack gui_settings — fall back to the
+        # original "load the same data + settings" wording.
+        try:
+            from spectral_predict.run_gui_settings import summarize_gui_settings
+            settings_summary = summarize_gui_settings(meta.gui_settings)
+        except Exception:
+            settings_summary = ""
+
+        if settings_summary:
+            message = (
+                f"Found an unfinished Bayesian run from {started_str}.\n\n"
+                f"Run id: {meta.run_id}\n"
+                f"Models: {models_str}\n"
+                f"Trials per model (target): {n_trials_str}\n\n"
+                f"Captured settings:\n{settings_summary}\n\n"
+                "Resume?\n\n"
+                "  • Yes — restore the captured settings and keep the SQLite\n"
+                "    store. Re-load the same data and click Run Analysis to\n"
+                "    continue from where it left off.\n"
+                "  • No — delete the unfinished run and start fresh next time."
+            )
+        else:
+            message = (
+                f"Found an unfinished Bayesian run from {started_str}.\n\n"
+                f"Run id: {meta.run_id}\n"
+                f"Models: {models_str}\n"
+                f"Trials per model (target): {n_trials_str}\n\n"
+                "Resume?\n\n"
+                "  • Yes — keep the SQLite store. Re-load the same data and\n"
+                "    click Run Analysis to continue from where it left off.\n"
+                "  • No — delete the unfinished run and start fresh next time."
+            )
 
         try:
             answer = messagebox.askyesnocancel(
@@ -23176,10 +23193,80 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
+                # Stash the captured validation indices for application after
+                # the user re-loads the same data. Can't apply here — self.X
+                # is None at startup. _run_analysis_thread re-slices once the
+                # dataset_fingerprint check passes.
+                self._pending_validation_indices = (
+                    list(resumed.validation_indices)
+                    if resumed.validation_indices
+                    else None
+                )
+
+                # Auto-restore the captured GUI settings before forcing the
+                # persistence override. Order matters — if the override ran
+                # first, restoring would clobber bayesian_persistence_mode
+                # back to whatever the previous run was using (likely
+                # 'auto'), and the resumed SQLite URL would be ignored.
+                restore_summary = ""
+                if resumed.gui_settings:
+                    try:
+                        from spectral_predict.run_gui_settings import (
+                            restore_gui_settings,
+                        )
+                        report = restore_gui_settings(self, resumed.gui_settings)
+                        # Surface restore errors in the banner itself, not just
+                        # the scrollable log — a "Restored N settings" message
+                        # with hidden errors is a silent-failure trap.
+                        if report.errors:
+                            # Inline the first error in the banner. The
+                            # "see log" pointer alone is unreliable at
+                            # startup — progress_text isn't on-screen yet
+                            # and the run logger hasn't been wired up, so
+                            # _log_progress lands somewhere the user can't
+                            # find without clicking around.
+                            first_err = report.errors[0]
+                            restore_summary = (
+                                f" Restored {report.total_restored} of "
+                                f"{report.total_restored + len(report.errors)} "
+                                f"settings; first failure: {first_err}."
+                            )
+                            self._log_progress(
+                                f"[RUN] {len(report.errors)} setting(s) failed to "
+                                f"restore: {'; '.join(report.errors[:3])}"
+                            )
+                        else:
+                            restore_summary = (
+                                f" Restored {report.total_restored} settings."
+                            )
+                        if report.skipped_unknown:
+                            self._log_progress(
+                                f"[RUN] {len(report.skipped_unknown)} "
+                                "setting(s) from sidecar are not in the "
+                                "current build — ignored."
+                            )
+                        # skipped_no_var represents whitelisted keys whose Tk
+                        # var no longer exists on this build (renamed or
+                        # deleted setting). Surface them so the user knows
+                        # some captured settings dropped silently, instead of
+                        # seeing "Restored N" with no follow-up.
+                        if report.skipped_no_var:
+                            preview = ", ".join(report.skipped_no_var[:5])
+                            self._log_progress(
+                                f"[RUN] {len(report.skipped_no_var)} "
+                                "whitelisted setting(s) have no matching "
+                                f"variable on this build (skipped): {preview}"
+                            )
+                    except Exception as restore_err:
+                        restore_summary = " Settings restore FAILED — see log."
+                        self._log_progress(
+                            f"[RUN] GUI-settings restore failed: {restore_err}"
+                        )
+
                 # Force 'always' on resume — under 'auto' or 'never', the loaded
                 # SQLite URL would be ignored and the user would get a fresh run
-                # despite the banner. silent-failure HIGH#4: if the set fails,
-                # show a recovery error rather than a banner that lies.
+                # despite the banner. If the set fails, surface a recovery error
+                # rather than letting the banner lie about persistence.
                 _override_ok = False
                 try:
                     if hasattr(self, "bayesian_persistence_mode"):
@@ -23190,16 +23277,16 @@ class SpectralPredictApp:
                 except Exception as set_err:
                     try:
                         self._log_progress(
-                            f"[RUN] T-41: resume override (set persistence='always') failed: {set_err}"
+                            f"[RUN] resume override (set persistence='always') failed: {set_err}"
                         )
                     except Exception:
                         pass
 
                 if _override_ok:
                     banner_text = (
-                        "Resuming previous run — load the same data + settings "
-                        "and click Run Analysis. (Persistence auto-set to "
-                        "Always-on for this session.)"
+                        "Resuming previous run — load the same data and click "
+                        "Run Analysis. (Persistence auto-set to Always-on for "
+                        f"this session.{restore_summary})"
                     )
                 else:
                     banner_text = (
@@ -23219,6 +23306,25 @@ class SpectralPredictApp:
                 try:
                     if hasattr(self, "progress_status"):
                         self.progress_status.config(text=banner_text)
+                except Exception:
+                    pass
+            else:
+                # resume_run returns None on silent-rejection paths: tampered
+                # storage_path outside user_optuna_dir, OSError on path.resolve,
+                # or missing SQLite (which auto-discards the sidecar). The user
+                # clicked Yes; they need to know why nothing happened — otherwise
+                # they'll click Run Analysis expecting resume and silently get
+                # a fresh run.
+                try:
+                    messagebox.showwarning(
+                        "Resume failed",
+                        "The previous run could not be resumed. Likely "
+                        "causes: the SQLite store is missing (the sidecar "
+                        "has been cleared automatically), the sidecar's "
+                        "storage path resolved outside the expected "
+                        "directory, or the path could not be read. Start "
+                        "a fresh analysis on the same data to begin again.",
+                    )
                 except Exception:
                     pass
         else:
@@ -24988,6 +25094,72 @@ class SpectralPredictApp:
                 overrides[model_name] = collector()
         return overrides if overrides else None
 
+    def _apply_pending_validation_indices(self):
+        """Apply validation indices captured at the prior run's start_run.
+
+        Called after the dataset_fingerprint check passes in
+        `_run_analysis_thread`. The indices are DataFrame labels; reapply
+        them to populate `self.validation_X` / `self.validation_y` /
+        `self.validation_indices` so the post-search validation step uses
+        the same partition the resumed trials trained on.
+
+        Silent no-op when:
+        - No pending indices stashed (fresh launch, or no validation in
+          the prior session).
+        - Validation already populated (user re-created the partition
+          manually before clicking Run Analysis — respect their choice).
+        - Any pending label is missing from the current data's index
+          (shouldn't happen post-fingerprint check; surface a warning
+          and skip rather than crash).
+        """
+        pending = getattr(self, "_pending_validation_indices", None)
+        if not pending:
+            return
+        if self.validation_X is not None and len(self.validation_X) > 0:
+            self._log_progress(
+                "[RUN] Validation set already populated by user; ignoring "
+                "the captured indices from the resumed sidecar."
+            )
+            self._pending_validation_indices = None
+            return
+        if self.X is None or self.y is None:
+            return  # caller's fingerprint check should have caught this
+
+        try:
+            missing_labels = [
+                i for i in pending
+                if i not in self.X.index or i not in self.y.index
+            ]
+            if missing_labels:
+                self._log_progress(
+                    f"[RUN] {len(missing_labels)} captured validation indices "
+                    f"not present in current data; skipping validation restore. "
+                    "Re-create the validation set manually before resuming."
+                )
+                self._pending_validation_indices = None
+                return
+
+            new_validation_X = self.X.loc[pending]
+            new_validation_y = self.y.loc[pending]
+            self.validation_indices = set(pending)
+            self.validation_X = new_validation_X
+            self.validation_y = new_validation_y
+            if hasattr(self, "validation_status_label"):
+                try:
+                    self.validation_status_label.config(
+                        text=f"Validation set restored from resume: "
+                             f"{len(pending)} samples"
+                    )
+                except Exception:
+                    pass
+            self._log_progress(
+                f"[RUN] Restored validation set from sidecar "
+                f"({len(pending)} samples). Trials will be evaluated "
+                "against the same partition the resumed run used."
+            )
+        finally:
+            self._pending_validation_indices = None
+
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
@@ -24998,6 +25170,7 @@ class SpectralPredictApp:
                 start_run as _start_run_state,
                 fingerprint_dataset,
             )
+            from spectral_predict.run_gui_settings import capture_gui_settings
 
             # T-11 A: spin up disk-mirrored logging at search start. Idempotent
             # across threads (worker + GUI share one file). The path lands in
@@ -25059,6 +25232,30 @@ class SpectralPredictApp:
                                 _rs.discard_incomplete_run(rejected_id)
                             else:
                                 _rs.clear_resume_state()
+                            # Pending indices were tied to the rejected run —
+                            # discard them too so a future load doesn't apply
+                            # them to mismatched data.
+                            self._pending_validation_indices = None
+                        else:
+                            # Fingerprint matched. Apply pending validation
+                            # indices (T-49) before the search starts, so the
+                            # post-search RMSEP is computed against the same
+                            # partition the resumed trials trained on.
+                            self._apply_pending_validation_indices()
+
+                    # Capture validation indices so the same partition can
+                    # be reproduced on resume. Required for non-deterministic
+                    # algorithms (Random, Manual) where re-clicking "Create
+                    # Validation Set" would otherwise pick a different split,
+                    # potentially placing trial-trained samples into the new
+                    # validation partition (silent leakage on RMSEP). Labels
+                    # are passed as-is — start_run normalizes them (int-only
+                    # gets sorted; mixed/str preserves insertion order).
+                    _val_indices = (
+                        list(self.validation_indices)
+                        if getattr(self, "validation_indices", None)
+                        else None
+                    )
 
                     meta = _start_run_state(
                         label=tier,
@@ -25071,6 +25268,8 @@ class SpectralPredictApp:
                             if hasattr(self, "bayesian_persistence_mode")
                             else "never"
                         ),
+                        gui_settings=capture_gui_settings(self),
+                        validation_indices=_val_indices,
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:
