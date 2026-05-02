@@ -1609,32 +1609,64 @@ def create_unified_objective(
 # T-41: SQLite WAL helpers + study migration
 # ---------------------------------------------------------------------------
 
-def _apply_wal_pragmas(sqlite_url: str) -> None:
-    """Apply WAL journal mode and tuned pragmas to a SQLite Optuna database.
+def _sqlite_path_from_url(sqlite_url: str) -> str:
+    """Extract the filesystem path from an Optuna ``sqlite:///...`` URL.
 
-    Must be called AFTER Optuna has created the SQLite file (via
-    ``optuna.create_study`` or ``optuna.copy_study``). On Windows the default
-    journal mode is DELETE, which gives roughly 3.4x slower per-trial writes
-    than WAL. Setting ``wal_autocheckpoint=50`` bounds crash-loss to ~50 trials.
+    Uses urllib.parse so UNC and four-slash forms (``sqlite:////host/share/..``)
+    don't silently turn into a different path than what Optuna writes to.
+    """
+    import os as _os
+    import urllib.parse
 
-    WAL+synchronous=NORMAL prevents database corruption on crash but may lose
-    trials between the last checkpoint and crash. Acceptable for this use-case.
+    parsed = urllib.parse.urlparse(sqlite_url)
+    # urlparse on sqlite:///path puts the body in .path with a leading slash.
+    # On Windows that becomes "/C:/.../file.sqlite3"; strip the leading slash
+    # so sqlite3.connect sees a native path.
+    raw = parsed.path
+    if _os.name == "nt" and raw.startswith("/") and len(raw) > 2 and raw[2] == ":":
+        raw = raw[1:]
+    return raw
 
-    Args:
-        sqlite_url: Optuna-style ``sqlite:///path/to/file.sqlite3?...`` URL.
+
+def _apply_wal_pragmas(sqlite_url: str) -> bool:
+    """Apply WAL + tuned pragmas to a SQLite Optuna database.
+
+    Returns True iff WAL mode was actually accepted by the engine. A return
+    value of False means the filesystem rejected WAL (network share, certain
+    AV-shimmed paths) and SQLite silently fell back to its previous mode —
+    the user is paying the auto-calc decision cost without getting the WAL
+    speedup. Caller should surface that.
+
+    SQLite's ``PRAGMA journal_mode = WAL`` does NOT raise on rejection; it
+    returns the journal mode that was actually applied. We must read the
+    row and verify, otherwise the silent-fallback case is invisible.
     """
     import sqlite3 as _sqlite3
 
-    # Strip the Optuna SQLite URL prefix and any query-string parameters.
-    db_path = sqlite_url.split("?")[0].replace("sqlite:///", "")
+    db_path = _sqlite_path_from_url(sqlite_url)
     try:
         conn = _sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA wal_autocheckpoint = 50")
-        conn.close()
+        try:
+            cur = conn.execute("PRAGMA journal_mode = WAL")
+            row = cur.fetchone()
+            applied = (row[0].lower() if row and row[0] else "?")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA wal_autocheckpoint = 50")
+        finally:
+            conn.close()
     except Exception as exc:  # noqa: BLE001
         logger.warning("T-41: could not apply WAL pragmas to %s: %s", db_path, exc)
+        return False
+
+    if applied != "wal":
+        logger.warning(
+            "T-41: filesystem rejected WAL on %s (got journal_mode=%r); "
+            "crash-resume writes will be slower than expected",
+            db_path,
+            applied,
+        )
+        return False
+    return True
 
 
 def _make_tpe_sampler(random_state: int) -> TPESampler:
@@ -1727,7 +1759,7 @@ def run_unified_bayesian(
     enable_autoscale: bool = False,  # T-36
     enable_uve: bool = False,
     inlier_class_label=None,
-    enable_sqlite_persistence: str = "auto",  # T-41: 'auto', 'always', 'never' (default flipped to auto 2026-05-02 for troubleshooting)
+    enable_sqlite_persistence: "PersistenceMode" = "auto",  # T-41: 'auto' | 'always' | 'never'
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -1976,7 +2008,13 @@ def run_unified_bayesian(
     # from a prior regression run — the trial values would be wrong but
     # Optuna would happily resume.
     import hashlib as _hashlib
-    from spectral_predict.run_state import get_storage_url
+    from spectral_predict.run_state import (
+        PersistenceMode,
+        _validate_persistence_mode,
+        get_storage_url,
+    )
+
+    _validate_persistence_mode(enable_sqlite_persistence)
 
     # Kimi MINOR #6: omit n_trials from the identity hash. If included,
     # changing the trial target (100 → 200) creates a new study and orphans
@@ -2044,7 +2082,7 @@ def run_unified_bayesian(
     # 'never': pure in-memory; ignore any active storage URL entirely.
     # 'always': SQLite from trial 0 (if a storage URL is available).
     # 'auto': first 10 trials in-memory, then decide based on median fit time.
-    _persistence_mode = enable_sqlite_persistence.lower()
+    _persistence_mode = enable_sqlite_persistence  # already validated above
 
     if _persistence_mode == "always" and storage_url is not None:
         # Always-on: create SQLite study from trial 0 (T-41 Task 2).
@@ -2175,31 +2213,47 @@ def run_unified_bayesian(
                     )
 
                 if use_sqlite:
-                    # DeepSeek HIGH #1 fix: Optuna's optimize() loop holds a
-                    # direct reference to the in-memory study. Swapping
-                    # _study_ref[0] in the callback does NOT redirect Optuna's
-                    # writes — post-migration trials silently land in the
-                    # in-memory study and are lost from the SQLite resume
-                    # store. We must abort optimize() here, then restart it
-                    # on the migrated SQLite study from the outer scope.
+                    # Optuna.optimize() captures the study by reference; swapping
+                    # _study_ref here doesn't redirect writes. Stop the in-memory
+                    # loop, the outer scope restarts on _study_ref[0] so trials
+                    # 11..N land directly in SQLite.
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state
                         )
                         _study_ref[0] = migrated
                         _auto_migrated = True
-                        logger.info(
-                            "T-41: migrated study '%s' to SQLite (WAL); "
-                            "stopping in-memory loop to restart on SQLite-backed study",
-                            study_name,
-                        )
-                        cb_study.stop()  # abort outer optimize() — outer loop will restart on _study_ref[0]
+                        cb_study.stop()
                         return
                     except Exception as exc:
+                        # Partial-success cleanup: copy_study may have created the
+                        # SQLite file before load_study failed. Without removing
+                        # it, the orphan accumulates on disk and the next session
+                        # offers a phantom Resume? prompt for trials nobody can
+                        # complete. _auto_migrated stays False so outer scope
+                        # doesn't try to restart on a half-broken study.
                         logger.warning(
-                            "T-41: migration to SQLite failed, continuing in-memory: %s",
+                            "T-41: SQLite migration failed; staying in-memory (no crash-resume for this run): %s",
                             exc,
                         )
+                        try:
+                            from pathlib import Path as _Path
+                            orphan = _Path(_sqlite_path_from_url(storage_url))
+                            if orphan.exists():
+                                orphan.unlink(missing_ok=True)
+                        except OSError as cleanup_exc:
+                            logger.warning(
+                                "T-41: could not clean up orphan SQLite after failed migration: %s",
+                                cleanup_exc,
+                            )
+                        if progress_callback:
+                            progress_callback({
+                                "stage": "unified_bayesian",
+                                "current": trial.number + 1,
+                                "total": n_trials,
+                                "message": f"[T-41] WARNING: SQLite migration failed — staying in-memory (no crash-resume). Reason: {exc}",
+                                "t41_decision": "migration_failed_inmemory",
+                            })
                 # else: stay in-memory — no action needed.
 
         if progress_callback:
@@ -2295,30 +2349,33 @@ def run_unified_bayesian(
     else:
         print(f"  All {n_trials} trials already complete; skipping optimization.")
 
-    # DeepSeek HIGH #1 fix: if 'auto' triggered a mid-run migration, the
-    # callback called cb_study.stop() to abort optimize() on the in-memory
-    # study (because Optuna's optimize loop holds a direct reference and
-    # would silently keep writing in-memory). Now restart optimize() on the
-    # SQLite-backed study so trials 11..N land directly in SQLite — both
-    # crash-resumable AND visible to convert_study_to_dataframe.
+    # Auto-migration aborted the in-memory loop; restart on the SQLite study
+    # so trials 11..N persist. Skip restart if the user pressed Stop during
+    # migration (MEDIUM #1 — without this, one extra trial runs after Stop).
     if _auto_migrated:
-        from optuna.trial import TrialState as _TS_post
-        already_done_post = sum(
-            1 for t in _study_ref[0].trials
-            if t.state in (_TS_post.COMPLETE, _TS_post.PRUNED)
+        user_stopped_during_migration = (
+            controller is not None and not controller.check_and_wait()
         )
-        remaining_post = max(0, n_trials - already_done_post)
-        if remaining_post > 0:
-            logger.info(
-                "T-41: restarting optimize() on SQLite-backed study for %d remaining trials",
-                remaining_post,
+        if user_stopped_during_migration:
+            logger.info("T-41: user pressed Stop during migration; skipping restart")
+        else:
+            from optuna.trial import TrialState as _TS_post
+            already_done_post = sum(
+                1 for t in _study_ref[0].trials
+                if t.state in (_TS_post.COMPLETE, _TS_post.PRUNED)
             )
-            _study_ref[0].optimize(
-                objective,
-                n_trials=remaining_post,
-                callbacks=[progress_wrapper],
-                show_progress_bar=verbose and not progress_callback,
-            )
+            remaining_post = max(0, n_trials - already_done_post)
+            if remaining_post > 0:
+                logger.info(
+                    "T-41: restarting optimize() on SQLite-backed study for %d remaining trials",
+                    remaining_post,
+                )
+                _study_ref[0].optimize(
+                    objective,
+                    n_trials=remaining_post,
+                    callbacks=[progress_wrapper],
+                    show_progress_bar=verbose and not progress_callback,
+                )
 
     # After optimization, resolve the final study object.  If 'auto' migration
     # happened, _study_ref[0] is the SQLite-backed study (now containing all
