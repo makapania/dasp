@@ -332,6 +332,23 @@ def setup_app_logger() -> Path | None:
             from spectral_predict.resource_paths import get_user_data_dir
 
             log_path = get_user_data_dir() / "dasp.log"
+            sp_logger = logging.getLogger("spectral_predict")
+
+            # Defense against module-reload double-attach: if a prior
+            # incarnation of this module already attached a handler to the
+            # same dasp.log path, the global was lost on reload but the
+            # handler survived on the logger. Reuse it instead of stacking.
+            # Match by class NAME, not isinstance — module reload creates
+            # a fresh _SafeRotatingFileHandler class object that fails
+            # isinstance against the survivor from the prior incarnation.
+            target_path = str(log_path)
+            for existing in sp_logger.handlers:
+                if existing.__class__.__name__ == "_SafeRotatingFileHandler" and (
+                    getattr(existing, "baseFilename", None) == target_path
+                ):
+                    _app_log_path = log_path
+                    return log_path
+
             handler = _SafeRotatingFileHandler(
                 log_path,
                 maxBytes=_APP_LOG_MAX_BYTES,
@@ -346,7 +363,6 @@ def setup_app_logger() -> Path | None:
                     datefmt="%Y-%m-%d %H:%M:%S",
                 )
             )
-            sp_logger = logging.getLogger("spectral_predict")
             sp_logger.addHandler(handler)
             if sp_logger.level == logging.NOTSET or sp_logger.level > logging.WARNING:
                 sp_logger.setLevel(logging.WARNING)
