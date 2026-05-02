@@ -615,3 +615,31 @@ def test_discard_rejects_storage_path_traversal(fresh_state):
     assert any("outside optuna dir" in e for e in result.errors)
     # Off-path file must NOT have been deleted.
     assert fake_target.exists()
+
+
+def test_t44_no_phantom_hasattr_typos_in_gui():
+    """T-44: hasattr-guarded reads of phantom attribute names silently
+    short-circuit to the fallback path, with no AttributeError to alert
+    a developer. Two known phantoms surfaced during T-44 + DeepSeek
+    sibling-survey:
+
+    - n_trials_var (actual: n_unified_trials) — silently zeroes
+      RunMetadata.n_trials_per_model in every sidecar.
+    - task_type_var (actual: task_type) — silently falls through to
+      inference-from-y in _save_selected_ensemble; 'auto' radio value
+      can't be reproduced by inference, and y=None falls all the way
+      to the 'regression' default regardless of the actual radio.
+
+    Source-text regression catches both. Class-of-bug pin (any rename
+    that re-introduces the wrong name in any future call site fails)."""
+    gui_src = (
+        Path(__file__).parent.parent / "spectral_predict_gui_optimized.py"
+    ).read_text(encoding="utf-8")
+    phantoms = ["n_trials_var", "task_type_var"]
+    found = [name for name in phantoms if name in gui_src]
+    assert not found, (
+        f"T-44 regression: phantom-hasattr typo(s) re-introduced: {found}. "
+        f"These attribute names don't exist on SpectralPredictApp; the "
+        f"hasattr guard silently skips them. Use the actual Tk var names: "
+        f"n_unified_trials (NOT n_trials_var), task_type (NOT task_type_var)."
+    )

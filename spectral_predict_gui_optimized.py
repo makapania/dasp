@@ -25261,8 +25261,8 @@ class SpectralPredictApp:
                         label=tier,
                         dataset_fingerprint=fingerprint,
                         model_names=list(selected_models) if selected_models else [],
-                        n_trials_per_model=int(self.n_trials_var.get())
-                        if hasattr(self, "n_trials_var") else None,
+                        n_trials_per_model=int(self.n_unified_trials.get())
+                        if hasattr(self, "n_unified_trials") else None,
                         # T-41 + T-47: the literal 'never' below is a
                         # safety-net fallback for a corrupted GUI state
                         # (Tk var missing entirely), NOT the user-facing
@@ -30856,8 +30856,8 @@ For detailed documentation, see the User Guide.
 
             # Determine task type from target column or results
             task_type = 'regression'  # Default
-            if hasattr(self, 'task_type_var'):
-                task_type = self.task_type_var.get()
+            if hasattr(self, 'task_type'):
+                task_type = self.task_type.get()
             elif hasattr(self, 'y') and self.y is not None:
                 # Infer from data
                 import numpy as np

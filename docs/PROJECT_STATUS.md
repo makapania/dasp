@@ -1,6 +1,14 @@
 # Project Status
 
-> **Last updated:** 2026-05-02 (T-46 MERGED to main + T-45 IMPLEMENTED) —
+> **Last updated:** 2026-05-02 (T-45 MERGED + T-44 IMPLEMENTED) —
+>
+> **T-45 MERGED via PR #13 at merge commit `2333fae`.** Branch deleted on origin and locally. App-lifetime file handler at `<user_data_dir>/dasp.log` now catches module warnings from all three startup paths (bundled GUI, console-script, future entry points). Codex caught a HIGH (cli.main bypass) + MEDIUM (module-reload double-attach) post-PR; both closed in `66e1da1`. DeepSeek pair attempted but routing-blocked this round (opencode-call's deepseek alias goes through opencode-go which the routing memory forbids); routing constraint surfaced as a separate concern.
+>
+> **T-44 IMPLEMENTED on `fix/T44-n-trials-var-typo` (off post-T-45 main).** One-line typo fix at `spectral_predict_gui_optimized.py:25264` — read site was `self.n_trials_var.get()` guarded by `hasattr(self, "n_trials_var")`, but the actual Tk var is `self.n_unified_trials`. The hasattr guard silently short-circuited to None on every Bayesian `start_run` call, so `RunMetadata.n_trials_per_model` was always null in every sidecar and the resume banner showed "Trials per model (target): ?" instead of the actual count. T-43 captures `n_unified_trials` correctly via the whitelist so resume restoration was unaffected; only the audit-trail metadata field was broken. Pinned with a source-text regression test (`test_t44_no_n_trials_var_typo_in_gui`) since the typo is silent at the Python level — hasattr makes it a no-op rather than an AttributeError. 282 + 1 skipped. **Pipeline behavior unchanged** — pure metadata-correctness bug fix.
+>
+> ---
+>
+> **Previously:** 2026-05-02 (T-46 MERGED + T-45 IMPLEMENTED) —
 >
 > **T-46 MERGED via PR #12 at merge commit `08b20ea`.** Branch deleted from origin and locally. Both call sites of `_apply_wal_pragmas` now surface WAL rejection via the right channel; OneDrive/Dropbox/network-share users get a structured warning event instead of silent throughput halving.
 >
