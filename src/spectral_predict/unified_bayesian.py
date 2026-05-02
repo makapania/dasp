@@ -88,6 +88,17 @@ PREPROCESSING_OPTIONS = [
 PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps', 'n_jobs'}
 
 
+# Boosting models that honor `early_stopping_rounds` in the per-trial path.
+# Single source of truth so the trial-time gate (use_early_stopping inside
+# objective) and the study-level hoist gate stay in sync. Add a model here
+# if it gains early-stopping support.
+_EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
+
+
+def _supports_early_stopping(model_name: str) -> bool:
+    return model_name in _EARLY_STOPPING_MODELS
+
+
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
     """Return model params that can round-trip through str() and ast.literal_eval()."""
     try:
@@ -825,7 +836,7 @@ def create_unified_objective(
     use_early_stopping = (
         early_stopping_rounds is not None and
         early_stopping_rounds > 0 and
-        model_name in ('XGBoost', 'LightGBM', 'CatBoost')
+        _supports_early_stopping(model_name)
     )
 
     # Determine scoring
@@ -1065,11 +1076,9 @@ def create_unified_objective(
                         trial.set_user_attr('oc_score_stats', cv_result['oc_score_stats'])
                 trial.set_user_attr('preprocess', preprocess_config)
                 trial.set_user_attr('params', oc_params)
-                # T-42 Approach C: cv_strategy and cv_n_repeats are now hoisted
-                # to study.user_attrs at study creation time (constant per
-                # study; previously rewritten on every trial finalize but read
-                # by nobody — convert_study_to_dataframe takes them as function
-                # parameters).
+                # cv_strategy and cv_n_repeats live on the study, not the
+                # trial — they're constants and convert_study_to_dataframe
+                # takes them as function parameters anyway.
                 # Store preprocessing fields used by convert_study_to_dataframe
                 trial.set_user_attr('preprocessing', preprocess_config.get('name', 'raw'))
                 trial.set_user_attr('window', preprocess_config.get('window', 0))
@@ -1452,10 +1461,10 @@ def create_unified_objective(
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
             trial.set_user_attr('model_params', str(model_params))
-            # T-42 Approach C: early_stopping_rounds + cv_strategy + cv_n_repeats
-            # are constant per study; hoisted to study.user_attrs at study
-            # creation time so the per-trial finalize commits one fewer write
-            # and the SQLite WAL log carries that much less duplication.
+            # early_stopping_rounds + cv_strategy + cv_n_repeats live on the
+            # study, not the trial — they're constants per study, hoisted at
+            # create_study time so the per-trial finalize doesn't re-emit
+            # them on every write.
 
             # Fit on full training data for calibration metrics
             model.fit(X_final, y)
@@ -2122,23 +2131,46 @@ def run_unified_bayesian(
         )
         _sqlite_decided = (_persistence_mode == "never")  # 'never' is final
 
-    # T-42 Approach C: hoist the three keys that are constant per study to
-    # study.user_attrs so the per-trial finalize doesn't re-emit them. These
-    # survive migration via optuna.copy_study (preserves user_attrs along
-    # with trials). Applied to both branches above; resume picks up the
-    # existing study's user_attrs unchanged.
+    # Hoist the three keys that are constant per study (cv_strategy,
+    # cv_n_repeats, early_stopping_rounds) to study.user_attrs so the
+    # per-trial finalize doesn't re-emit them. Optuna preserves user_attrs
+    # across optuna.copy_study (auto-migration in T-41) and across the
+    # resume path's load_study, so a study that already carries these
+    # values keeps them.
+    #
+    # On resume, the existing values represent the contract the prior
+    # trials were trained under. Overwriting them with the current call's
+    # arguments would silently corrupt the audit trail (convert_study_to_
+    # dataframe reads early_stopping_rounds once and applies it to every
+    # trial row). Only set if absent; if the new args disagree with the
+    # stored values, log a warning so a developer/API caller can spot the
+    # mismatch.
     _hoist_es = (
         early_stopping_rounds
         if (
             early_stopping_rounds is not None
             and early_stopping_rounds > 0
-            and model_name in ('XGBoost', 'LightGBM', 'CatBoost')
+            and _supports_early_stopping(model_name)
         )
         else None
     )
-    study.set_user_attr('cv_strategy', cv_strategy)
-    study.set_user_attr('cv_n_repeats', cv_n_repeats)
-    study.set_user_attr('early_stopping_rounds', _hoist_es)
+    _hoist_pairs = (
+        ('cv_strategy', cv_strategy),
+        ('cv_n_repeats', cv_n_repeats),
+        ('early_stopping_rounds', _hoist_es),
+    )
+    for _key, _val in _hoist_pairs:
+        if _key in study.user_attrs:
+            if study.user_attrs[_key] != _val:
+                logger.warning(
+                    "study.user_attrs[%r]=%r already set by prior session; "
+                    "current call passed %r — keeping the stored value to "
+                    "preserve the audit trail. Pass matching arguments on "
+                    "resume to silence this warning.",
+                    _key, study.user_attrs[_key], _val,
+                )
+        else:
+            study.set_user_attr(_key, _val)
 
     # --- auto-decision state ---
     _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
@@ -2505,10 +2537,10 @@ def convert_study_to_dataframe(
     """
     results = []
 
-    # T-42 Approach C: early_stopping_rounds is hoisted to study.user_attrs.
-    # Read once outside the trial loop. Trial-level fallback handles studies
-    # finalized before the hoist (e.g., a SQLite from a prior dasp version
-    # picked up via the resume flow) — those still have the per-trial value.
+    # early_stopping_rounds is constant per study and lives on study.user_attrs.
+    # Read once outside the trial loop. The trial-level fallback below handles
+    # legacy studies finalized before the hoist landed — a SQLite from a prior
+    # dasp version picked up via the resume flow still has the per-trial value.
     _hoisted_es = study.user_attrs.get('early_stopping_rounds')
 
     for trial in study.trials:

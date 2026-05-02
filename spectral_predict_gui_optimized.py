@@ -23193,11 +23193,11 @@ class SpectralPredictApp:
         if answer:
             resumed = resume_run(meta.run_id)
             if resumed is not None:
-                # T-43: auto-restore the captured GUI settings before forcing
-                # the persistence override. Order matters — if we did the
-                # override first, restoring would clobber it back to whatever
-                # the previous run was using (likely 'auto'), and the resumed
-                # SQLite URL would be ignored.
+                # Auto-restore the captured GUI settings before forcing the
+                # persistence override. Order matters — if the override ran
+                # first, restoring would clobber bayesian_persistence_mode
+                # back to whatever the previous run was using (likely
+                # 'auto'), and the resumed SQLite URL would be ignored.
                 restore_summary = ""
                 if resumed.gui_settings:
                     try:
@@ -23207,16 +23207,23 @@ class SpectralPredictApp:
                         report = restore_gui_settings(self, resumed.gui_settings)
                         # Surface restore errors in the banner itself, not just
                         # the scrollable log — a "Restored N settings" message
-                        # with hidden errors is a silent-failure trap (DeepSeek
-                        # T-43 review HIGH #1).
+                        # with hidden errors is a silent-failure trap.
                         if report.errors:
+                            # Inline the first error in the banner. The
+                            # "see log" pointer alone is unreliable at
+                            # startup — progress_text isn't on-screen yet
+                            # and the run logger hasn't been wired up, so
+                            # _log_progress lands somewhere the user can't
+                            # find without clicking around.
+                            first_err = report.errors[0]
                             restore_summary = (
-                                f" Restored {report.total_restored} settings "
-                                f"({len(report.errors)} errors — see log)."
+                                f" Restored {report.total_restored} of "
+                                f"{report.total_restored + len(report.errors)} "
+                                f"settings; first failure: {first_err}."
                             )
                             self._log_progress(
-                                f"[RUN] T-43: {len(report.errors)} setting(s) "
-                                f"failed to restore: {'; '.join(report.errors[:3])}"
+                                f"[RUN] {len(report.errors)} setting(s) failed to "
+                                f"restore: {'; '.join(report.errors[:3])}"
                             )
                         else:
                             restore_summary = (
@@ -23224,32 +23231,32 @@ class SpectralPredictApp:
                             )
                         if report.skipped_unknown:
                             self._log_progress(
-                                f"[RUN] T-43: {len(report.skipped_unknown)} "
+                                f"[RUN] {len(report.skipped_unknown)} "
                                 "setting(s) from sidecar are not in the "
                                 "current build — ignored."
                             )
-                        # Codex T-43 review MEDIUM: skipped_no_var represents
-                        # whitelisted keys whose Tk var no longer exists on
-                        # this build (renamed/deleted). Surface them too —
-                        # otherwise the user sees "Restored N" while a
-                        # silently-dropped setting goes unmentioned.
+                        # skipped_no_var represents whitelisted keys whose Tk
+                        # var no longer exists on this build (renamed or
+                        # deleted setting). Surface them so the user knows
+                        # some captured settings dropped silently, instead of
+                        # seeing "Restored N" with no follow-up.
                         if report.skipped_no_var:
                             preview = ", ".join(report.skipped_no_var[:5])
                             self._log_progress(
-                                f"[RUN] T-43: {len(report.skipped_no_var)} "
+                                f"[RUN] {len(report.skipped_no_var)} "
                                 "whitelisted setting(s) have no matching "
                                 f"variable on this build (skipped): {preview}"
                             )
                     except Exception as restore_err:
                         restore_summary = " Settings restore FAILED — see log."
                         self._log_progress(
-                            f"[RUN] T-43: GUI-settings restore failed: {restore_err}"
+                            f"[RUN] GUI-settings restore failed: {restore_err}"
                         )
 
                 # Force 'always' on resume — under 'auto' or 'never', the loaded
                 # SQLite URL would be ignored and the user would get a fresh run
-                # despite the banner. silent-failure HIGH#4: if the set fails,
-                # show a recovery error rather than a banner that lies.
+                # despite the banner. If the set fails, surface a recovery error
+                # rather than letting the banner lie about persistence.
                 _override_ok = False
                 try:
                     if hasattr(self, "bayesian_persistence_mode"):
@@ -23260,7 +23267,7 @@ class SpectralPredictApp:
                 except Exception as set_err:
                     try:
                         self._log_progress(
-                            f"[RUN] T-41: resume override (set persistence='always') failed: {set_err}"
+                            f"[RUN] resume override (set persistence='always') failed: {set_err}"
                         )
                     except Exception:
                         pass
@@ -23289,6 +23296,25 @@ class SpectralPredictApp:
                 try:
                     if hasattr(self, "progress_status"):
                         self.progress_status.config(text=banner_text)
+                except Exception:
+                    pass
+            else:
+                # resume_run returns None on silent-rejection paths: tampered
+                # storage_path outside user_optuna_dir, OSError on path.resolve,
+                # or missing SQLite (which auto-discards the sidecar). The user
+                # clicked Yes; they need to know why nothing happened — otherwise
+                # they'll click Run Analysis expecting resume and silently get
+                # a fresh run.
+                try:
+                    messagebox.showwarning(
+                        "Resume failed",
+                        "The previous run could not be resumed. Likely "
+                        "causes: the SQLite store is missing (the sidecar "
+                        "has been cleared automatically), the sidecar's "
+                        "storage path resolved outside the expected "
+                        "directory, or the path could not be read. Start "
+                        "a fresh analysis on the same data to begin again.",
+                    )
                 except Exception:
                     pass
         else:
@@ -25142,7 +25168,7 @@ class SpectralPredictApp:
                             if hasattr(self, "bayesian_persistence_mode")
                             else "never"
                         ),
-                        gui_settings=capture_gui_settings(self),  # T-43
+                        gui_settings=capture_gui_settings(self),
                     )
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:

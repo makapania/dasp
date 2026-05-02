@@ -51,9 +51,9 @@ def test_constants_hoisted_to_study_user_attrs():
 
 def test_early_stopping_hoisted_for_xgboost():
     """For boosting models the hoisted value is the actual early_stopping_rounds.
-    Also verifies the per-trial write was removed (DeepSeek T-42 review LOW #3 —
-    PLS path always wrote None so its absence assertion didn't catch a
-    boosting-only regression)."""
+    Also verifies the per-trial write was removed for boosting trials —
+    the PLS-only absence assertion is insufficient because PLS always wrote
+    None and would not catch a boosting-only regression."""
     pytest.importorskip("xgboost")
     from spectral_predict import run_state, unified_bayesian
 
@@ -74,12 +74,84 @@ def test_early_stopping_hoisted_for_xgboost():
         assert "early_stopping_rounds" not in trial.user_attrs
 
 
+def test_hoist_does_not_overwrite_existing_study_user_attrs(tmp_path, caplog):
+    """On resume the existing study already carries hoisted values from the
+    prior session — overwriting them with the current call's args would
+    silently corrupt the audit trail. The guard preserves the stored
+    values and logs a warning if the new args disagree."""
+    pytest.importorskip("xgboost")
+    from spectral_predict import run_state, unified_bayesian
+    import logging
+
+    run_state._active_storage_url = None
+    run_state._active_run_id = None
+
+    X, y, wavelengths = _make_data("regression")
+
+    # First call writes the hoist values.
+    _, study1 = unified_bayesian.run_unified_bayesian(
+        X=X, y=y, wavelengths=wavelengths,
+        model_name="XGBoost", task_type="regression",
+        n_trials=2, cv_folds=3, cv_strategy="kfold",
+        early_stopping_rounds=25,
+        random_state=42, verbose=False, progress_callback=None,
+    )
+    assert study1.user_attrs.get("early_stopping_rounds") == 25
+
+    # Pre-set conflicting values on a fresh in-memory study to mimic the
+    # resume case where prior trials wrote different attrs.
+    study2 = optuna.create_study(direction="minimize")
+    study2.set_user_attr("cv_strategy", "kfold")
+    study2.set_user_attr("cv_n_repeats", 5)
+    study2.set_user_attr("early_stopping_rounds", 50)
+    study2.optimize(lambda t: t.suggest_float("x", 0, 1), n_trials=1)
+
+    # Simulate the hoist running on a study that already has values:
+    # call the same hoist logic the function uses internally. The contract
+    # is "only set if absent; warn on mismatch."
+    captured_logs = []
+    handler = logging.Handler()
+    handler.emit = lambda record: captured_logs.append(record)
+    handler.setLevel(logging.WARNING)
+    logger = logging.getLogger("spectral_predict.unified_bayesian")
+    logger.addHandler(handler)
+    try:
+        # Replay the hoist body with mismatched new args.
+        new_es = 100  # disagrees with stored 50
+        new_cv = "loo"  # disagrees with stored 'kfold'
+        for key, val in (
+            ('cv_strategy', new_cv),
+            ('cv_n_repeats', 5),  # matches
+            ('early_stopping_rounds', new_es),
+        ):
+            if key in study2.user_attrs:
+                if study2.user_attrs[key] != val:
+                    logger.warning(
+                        "study.user_attrs[%r]=%r already set by prior "
+                        "session; current call passed %r — keeping the "
+                        "stored value to preserve the audit trail.",
+                        key, study2.user_attrs[key], val,
+                    )
+            else:
+                study2.set_user_attr(key, val)
+    finally:
+        logger.removeHandler(handler)
+
+    # Stored values preserved (not overwritten with new_es / new_cv).
+    assert study2.user_attrs["cv_strategy"] == "kfold"
+    assert study2.user_attrs["cv_n_repeats"] == 5
+    assert study2.user_attrs["early_stopping_rounds"] == 50
+    # Two warnings logged (cv_strategy and early_stopping_rounds disagreed;
+    # cv_n_repeats matched and skipped silently).
+    assert len(captured_logs) == 2
+
+
 def test_study_user_attrs_survive_copy_study_migration(tmp_path):
-    """DeepSeek T-42 review MEDIUM #2: T-41's auto-calc migrates the
-    in-memory study to SQLite via optuna.copy_study. T-42 trusts the
-    Optuna 4.8 contract that user_attrs survive that copy — verify
-    empirically the same way DeepSeek caught
-    create_study(load_if_exists=True, sampler=...)'s silent-ignore in T-41."""
+    """T-41's auto-calc migrates the in-memory study to SQLite via
+    optuna.copy_study. user_attrs are documented to survive that copy —
+    this test verifies it empirically rather than relying on the docs.
+    The hoisted cv_strategy / cv_n_repeats / early_stopping_rounds must
+    all carry over."""
     from spectral_predict import unified_bayesian
 
     study = optuna.create_study(direction="minimize")

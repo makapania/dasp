@@ -72,10 +72,11 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "baseline_advanced_algorithm",
     "baseline_advanced_lam",
     # --- Bayesian-only baseline / smoothing / region / UVE controls ---
-    # The Bayesian path reads a parallel set of "bayes_*" Tk vars at
-    # analysis time (gui:27554-27570). Without these in the whitelist,
-    # a resumed Bayesian run silently uses defaults despite the banner
-    # claiming "settings restored" (Codex T-43 review HIGH).
+    # The Bayesian search path reads a parallel set of "bayes_*" Tk vars
+    # at analysis time. Without them in the whitelist, a resumed Bayesian
+    # run silently uses defaults despite the banner claiming "settings
+    # restored" — exactly the silent-failure mode the resume flow is
+    # meant to close.
     "bayes_enable_baseline",
     "bayes_baseline_method",
     "bayes_enable_smoothing",
@@ -208,6 +209,11 @@ class RestoreReport:
     def total_restored(self) -> int:
         return len(self.restored)
 
+    @property
+    def fully_succeeded(self) -> bool:
+        """True iff at least one setting was restored and none failed."""
+        return bool(self.restored) and not self.errors
+
 
 def capture_gui_settings(gui_obj: Any) -> dict[str, Any]:
     """Snapshot the analysis-defining Tk vars from ``gui_obj``.
@@ -230,7 +236,7 @@ def capture_gui_settings(gui_obj: Any) -> dict[str, Any]:
             captured[name] = getter()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "T-43: capture skipped %s (Tk var read failed: %s)", name, exc
+                "capture skipped %s (Tk var read failed: %s)", name, exc
             )
     return captured
 
@@ -308,10 +314,20 @@ def summarize_gui_settings(settings: dict[str, Any] | None) -> str:
         v = settings.get(key)
         return default if v is None else v
 
+    # Filter against an explicit model-name set rather than any `use_*` key —
+    # preprocessing toggles share the prefix (`use_snv`, `use_sg1`, etc.)
+    # and would otherwise be reported as models in the resume banner.
+    _MODEL_USE_KEYS = frozenset({
+        "use_pls", "use_plsda", "use_ridge", "use_lasso", "use_elasticnet",
+        "use_randomforest", "use_lightgbm", "use_xgboost", "use_catboost",
+        "use_neuralboosted", "use_svr", "use_svm", "use_mlp",
+        "use_ocsvm", "use_isolation_forest", "use_elliptic_envelope",
+        "use_lof", "use_pca_simca",
+    })
     enabled_models = sorted(
         name.removeprefix("use_")
         for name in settings
-        if name.startswith("use_") and bool(settings[name])
+        if name in _MODEL_USE_KEYS and bool(settings[name])
     )
     enabled_preproc = sorted(
         name.removeprefix("use_")
