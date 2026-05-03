@@ -832,12 +832,17 @@ def test_pls_da_binary_classification_parity_no_imbalance(tmp_path):
 
     # Params mirror what the runtime emits: prefixed keys routed by
     # _split_pls_da_params. n_components=3 picks a rank well below the
-    # 60-sample / 80-feature regime.
+    # 60-sample / 80-feature regime. lr__random_state is explicit (rather
+    # than relying on _render_pls_da_pipeline's internal lr_defaults at
+    # code_generator.py:1300) so the contract is documented at the test
+    # site — if a future codegen change drops the internal random_state
+    # default, this test still pins the deterministic-LR contract.
     params = {
         "pls__n_components": 3,
         "lr__C": 1.0,
         "lr__solver": "lbfgs",
         "lr__max_iter": 1000,
+        "lr__random_state": 42,
     }
 
     # In-process Pipeline: same shape as what _render_pls_da_pipeline emits.
