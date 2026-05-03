@@ -1397,13 +1397,40 @@ class SpectralOptimizationProblem(Problem):
                 )
                 pipe_steps.append(('imbalance', imbalance_transformer))
 
-            # Step 2: Handle class_weight for models that support it
+            # Step 2: Handle class_weight for classification models. Different
+            # families use different kwargs / mechanisms — mirrors search.py:
+            # 4411-4448 and the GUI dispatcher fix from c395317.
+            #   PLS-DA tail LR     -> handled at LR-construction site below
+            #   CatBoost           -> auto_class_weights='Balanced' (no class_weight kwarg)
+            #   has class_weight   -> set_params(class_weight='balanced')   (RF/SVC/LightGBM/RidgeClassifier-like)
+            #   sample_weight only -> use_sample_weight_for_classification flag, threaded
+            #                         per-fold to cross_val_score / cross_val_score_with_early_stopping
+            #
+            # Without this discriminator the prior `hasattr(model, 'class_weight')`-only
+            # path silently no-op'd for CatBoost (no class_weight attr) and XGBoost
+            # (no class_weight attr; only sample_weight at fit time), so NSGA-II's
+            # Pareto evaluation ranked individuals on UNWEIGHTED scores when the
+            # user selected class_weight imbalance for those families — silent
+            # contract violation.
+            use_sample_weight_for_classification = False
             if self.imbalance_method == 'class_weight' and self.task_type == 'classification':
-                if hasattr(model, 'class_weight'):
+                if model_type == 'PLS-DA':
+                    pass  # Handled at LR-construction site below
+                elif model_type == 'CatBoost':
+                    try:
+                        model.set_params(auto_class_weights='Balanced')
+                    except Exception:
+                        pass
+                elif hasattr(model, 'class_weight'):
                     try:
                         model.set_params(class_weight='balanced')
                     except Exception:
                         pass
+                else:
+                    import inspect as _inspect
+                    _model_fit_sig = _inspect.signature(model.fit) if hasattr(model, 'fit') else None
+                    if _model_fit_sig and 'sample_weight' in _model_fit_sig.parameters:
+                        use_sample_weight_for_classification = True
 
             # Step 3: Build model pipeline based on model type
             if self.task_type == 'classification' and model_type in ('PLS', 'PLS-DA'):
@@ -1472,17 +1499,28 @@ class SpectralOptimizationProblem(Problem):
                 return rmse
             else:
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+                # Per-fold balanced sample_weight for sample_weight-only classifiers
+                # (XGBoost-like). The early-stopping helper slices it per train_idx;
+                # sklearn's native cross_val_score does the same via fit_params.
+                _balanced_sw = None
+                if use_sample_weight_for_classification:
+                    from sklearn.utils.class_weight import compute_sample_weight
+                    _balanced_sw = compute_sample_weight('balanced', self.y)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     if use_early_stopping:
                         scores = cross_val_score_with_early_stopping(
                             pipeline_model, X_subset, self.y, cv=cv,
                             scoring='accuracy',
-                            early_stopping_rounds=self.early_stopping_rounds
+                            early_stopping_rounds=self.early_stopping_rounds,
+                            sample_weight=_balanced_sw,
                         )
                     else:
+                        _cv_kwargs = dict(cv=cv, scoring='accuracy')
+                        if _balanced_sw is not None:
+                            _cv_kwargs['fit_params'] = {'model__sample_weight': _balanced_sw}
                         scores = cross_val_score(
-                            pipeline_model, X_subset, self.y, cv=cv, scoring='accuracy'
+                            pipeline_model, X_subset, self.y, **_cv_kwargs
                         )
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
