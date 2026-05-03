@@ -1245,8 +1245,9 @@ def create_unified_objective(
             #   CatBoost           -> auto_class_weights='Balanced' (no class_weight kwarg)
             #   has class_weight   -> set_params(class_weight='balanced')   (RF/SVC/LightGBM/RidgeClassifier-like)
             #   sample_weight only -> use_sample_weight_for_classification flag, threaded
-            #                         per-fold + on calibration refit (XGBoost-like)
-            #   MLP / no support   -> warn loudly; train UNWEIGHTED (user should switch to SMOTE/ADASYN)
+            #                         per-fold + on calibration refit (XGBoost / MLPClassifier-like;
+            #                         MLPClassifier.fit DOES expose sample_weight in current sklearn,
+            #                         so it routes here rather than to a no-support warning branch)
             #
             # Without this discriminator the prior `hasattr(model, 'class_weight')`-only
             # path silently no-op'd for CatBoost (no class_weight attr) and XGBoost
