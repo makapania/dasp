@@ -944,16 +944,27 @@ def build_imbalance_transformer(method, task_type='classification', random_state
     ...     'binning', task_type='regression', random_state=42, n_bins=5
     ... )
     """
-    # Sentinel guard: 'class_weight' / 'auto' are model-parameter flags, not
-    # resamplers. Route through ClassificationResampler regardless of task_type
-    # so its built-in no-op short-circuit kicks in. Pre-fix, regression callers
-    # passing these sentinels (corrupted metadata or future feature) would hit
-    # the regression else-clause and raise ValueError. (Reachability today: low,
-    # since resolve_auto_imbalance returns None for non-classification and
-    # class_weight isn't a regression dropdown option — but defense-in-depth
-    # symmetry with the classification path costs nothing.)
+    # 'class_weight' / 'auto' are classification-only sentinels. Classification
+    # routes them to ClassificationResampler whose fit() no-ops — safe because
+    # callers inject class_weight='balanced' at model construction
+    # (search.py:4418-4421, unified_bayesian.py:1238-1241, nsga2_search.py:1401-1405).
+    # The regression path has no equivalent compensation: sklearn regressors do
+    # not accept class_weight, and there is no sentinel-to-sample-weight mapping
+    # on the regression side. Silent routing would produce an unweighted-and-
+    # unresampled regression model — wrong scientific output without surfacing.
+    # Fail loud instead.
     if isinstance(method, str) and method.lower() in ('class_weight', 'auto'):
-        return ClassificationResampler(method=method, random_state=random_state, **params)
+        if task_type == 'classification':
+            return ClassificationResampler(method=method, random_state=random_state, **params)
+        raise ValueError(
+            f"build_imbalance_transformer received {method!r} for "
+            f"task_type={task_type!r}. 'class_weight' and 'auto' are "
+            f"classification-only model-parameter sentinels — sklearn "
+            f"regressors do not accept class_weight, and there is no "
+            f"compensating sample-weight mapping on the regression path. "
+            f"For regression imbalance, use 'undersample', 'oversample', "
+            f"'smogn', 'smotetomek', 'binning', 'rare_boost', or 'balanced'."
+        )
 
     if task_type == 'classification':
         return ClassificationResampler(method=method, random_state=random_state, **params)

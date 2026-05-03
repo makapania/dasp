@@ -1,6 +1,99 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 (Model Dev refined-model class_weight dispatcher — round-1 fix `4dcedbc`, round-2 fix-of-fixes `c395317` after convergent HIGH from DeepSeek + Codex caught silent CatBoost/XGBoost unweighted training. Round-2 verified by GLM 5.1 max + Codex convergence; pushed to `origin/main`).
+> **Last updated:** 2026-05-05 evening — PR #39 expanded from pure docs to docs + 3-file correctness fix after a 4-way cross-family investigation (silent-failure-hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) identified a transferred-justification fallacy in the `class_weight`/`auto` factory routing. Plus PR #38 still 4-way convergent READY_TO_MERGE and the 6 morning PRs (#32–#37). **8 PRs ready for user merge** (PR #39 needs title update from `docs(session-end)` to reflect the code fix on push).
+>
+> ## Session 2026-05-05 evening — factory + needs_resampling_pipeline asymmetry fix (PR #39)
+>
+> ### What happened
+>
+> 1. A prior agent's "trivial defense-in-depth" patch for `RegressionResampler.fit_resample` (`f6ccfd1`) was committed locally, then reset before push when the user surfaced doubts about silent-failure shape.
+> 2. A four-way cross-family investigation was run on the contested no-op: silent-failure-hunter (Claude) + Codex GPT-5.5 + GLM 5.1 (z.ai) + DeepSeek V4 Pro Max (max-thinking, DeepSeek API). All four converged on "no-op is wrong" — the shape-pattern-match transferred without the safety-justification across the classification/regression boundary. Vote on remedy: 2-1 toward `raise ValueError` (Codex+GLM) over warn-and-no-op (DeepSeek). User directive: scientific accuracy over user convenience → raise.
+> 3. The same misanalysis was identified at *two* layers, not one: the inner `RegressionResampler.fit_resample` patch (already reverted) AND the factory `build_imbalance_transformer` (lines 947-956 pre-fix, silently routing regression+sentinel to ClassificationResampler's no-op regardless of task_type — same shape, same broken safety justification). The factory layer is reachable today via the GUI ensemble-reload path (`spectral_predict_gui_optimized.py:37587`) loading a saved classification config into a regression context.
+>
+> ### Sites fixed
+>
+> | # | File:line | Function | Change |
+> |---|---|---|---|
+> | 1 | `imbalance.py:947-967` | `build_imbalance_transformer` factory | Split sentinel guard by task_type. Classification: keep route-to-no-op (compensation is real). Regression: raise `ValueError` with diagnostic message naming the classification-only nature of the sentinel and listing valid regression methods. |
+> | 2 | `unified_bayesian.py:156` | `_needs_resampling_pipeline` | Guard both `'class_weight'` AND `'auto'` (was `'class_weight'` only). Brings into line with `search.py:289`. Defense-in-depth against future `'auto'`-resolution-delay refactors. |
+> | 3 | `nsga2_search.py:142` | `_needs_resampling_pipeline` | Same as #2. |
+>
+> ### Sites NOT touched (deliberate)
+>
+> - `ClassificationResampler.fit:244` no-op stays as-is. Architecturally fragile (a future bypass-the-router caller would silently train an unweighted classifier) but produces correct scientific output today because every integrated caller compensates at construction. Filed in SESSION_LOG as a future hardening item; not expanded into present scope per "fix what's wrong, don't redesign around it."
+>
+> ### Test contract update
+>
+> - `tests/test_imbalance.py`: parametrized regression-task no-op test split into two — `test_classification_sentinels_no_op` (4 cases including `CLASS_WEIGHT`/`Auto` to exercise the `.lower()` in the factory guard) and `test_regression_sentinels_raise` (4 cases, `pytest.raises(ValueError, match="classification-only")`).
+> - 165 passed + 1 skipped across `test_imbalance.py` + `test_t19_class_weight_per_library.py` + `test_t32_sample_weight_resampling.py` + `test_unified_bayesian_baseline.py` + `test_cv_strategy.py`. No regressions.
+>
+> ### Pre-merge verification (Codex GPT-5.5 + MiMo 2.5 Pro)
+>
+> - **Codex GPT-5.5**: NEEDS_CHANGES on a documentation LOW (test parametrize claimed 4 cases, was 2 — fixed by expanding to 4 cases as above). Code itself verified correct.
+> - **MiMo 2.5 Pro**: READY_TO_MERGE. Notably traced the `ValueError` through the GUI exception handlers and confirmed it surfaces to the user — the inner `try/except` at `spectral_predict_gui_optimized.py:37595,37722` catches only `ImportError`, so the `ValueError` propagates to the outer `except Exception` at `:38614` and renders via `messagebox.showerror`. Same for both reachable GUI call sites. Loud-failure end-to-end verified, not just at the API layer.
+> - **MiMo non-blocking informational** (future awareness): caller guards at `search.py:4374`, `unified_bayesian.py:1231`, `nsga2_search.py:1394+` check `!= 'class_weight'` but not `!= 'auto'`. Currently safe because `'auto'` is resolved at run-entry; for regression `'auto'` reaches the factory and now raises. The factory is the single enforcement point; the `_needs_resampling_pipeline` dual-sentinel guard is defense-in-depth only. Acceptable architecture, flagged for future awareness.
+>
+> ### Lessons
+>
+> Detailed writeup in SESSION_LOG.md — four lessons captured: transferred-justification fallacy in defense-in-depth; cross-family panels reveal values disagreements that single-reviewer panels can't; "verification" reviews check reachability not remedy-fitness; the "skips the misleading print()" argument is circular self-justification.
+>
+> ## Session 2026-05-05 afternoon — class_weight sister-site bug class fully closed (PR #38)
+>
+> ### What shipped
+>
+> | PR | Branch | Scope | Reviewers | Verdict |
+> |---|---|---|---|---|
+> | #38 | `fix/Tclass-weight-discriminator-sister-sites` | Bayesian + NSGA-II classification: 4 sister sites of the GUI dispatcher bug (4dcedbc/c395317) had the same defective `hasattr(model, 'class_weight')`-only check; pre-fix, every Bayesian trial AND NSGA-II evaluation for CatBoost/XGBoost classifier under `imbalance_method='class_weight'` (or `'auto'` → it) trained UNWEIGHTED. User-visible calibration metrics (Accuracy / F1 / AUC etc. shown in Bayesian Results panel and NSGA-II Pareto results) reflected the wrong model. Plus 4 cv_utils CV helpers extended to thread sample_weight per-fold; sklearn 1.8 metadata-routing compat for the non-boosting fallback; def-in-depth `'auto'` guards in `_needs_resampling_pipeline`; explicit CatBoost branch added to canonical `search.py:4418-4435` for codebase-wide consistency. | DeepSeek + GLM + Codex (round 1, all caught the same 4th sister site = convergent HIGH); Kimi K2.6 (round 2, exhaustive sister-site sweep confirmed exhaustive). 4-way convergent verdict: **READY_TO_MERGE**. | Ready, NOT MERGED |
+>
+> ### Sites fixed (all 4 confirmed exhaustive by Kimi)
+>
+> | # | File:line | Function | Symptom |
+> |---|---|---|---|
+> | 1 | `unified_bayesian.py:1259` | `objective()` discriminator | Trial-time CV scores AND calibration refit at line 1532 produced unweighted metrics for CatBoost/XGBoost |
+> | 2 | `nsga2_search.py:1420` | `SearchProblem._evaluate` | Pareto front built on unweighted scores |
+> | 3 | `nsga2_search.py:3175` | `_compute_classification_cv_metrics` | NSGA-II Results-panel `*_cv` columns on unweighted models |
+> | 4 | `nsga2_search.py:3596` | `_compute_calibration_metrics` | NSGA-II Results-panel non-`*_cv` calibration columns on unweighted models (4th site, caught by Codex+GLM+DeepSeek convergence) |
+> | def-in-depth | `unified_bayesian.py:156` + `nsga2_search.py:142` | `_needs_resampling_pipeline` | Missing `'auto'` guard (currently unreachable) |
+> | consistency | `search.py:4424` | `_run_single_fold` setup | Was using sample_weight fallback for CatBoost; now explicit `auto_class_weights` branch (mechanism-aligned with codebase convention) |
+>
+> ### Test coverage
+>
+> - **437 passed + 2 skipped** across the consolidated 13-file regression sweep + `test_class_weight_sister_sites.py` (9 new tests) + `test_imbalance.py` (62) + `test_nsga2_search.py` (34). Pre-PR baseline was 333 + 1 skipped.
+> - End-to-end: parametrized over CatBoost + XGBoost, Bayesian search runs twice (with/without `class_weight`), assert calibration metrics differ. Pre-fix the assertion would FAIL because both calls produced identical (unweighted) calibration metrics.
+> - Plumbing: sample_weight propagates through `cross_val_predict_pooled` and `cross_val_predict_with_early_stopping` on imbalanced data.
+> - Defense-in-depth: `_needs_resampling_pipeline('auto', 'classification') is False` in both modules.
+>
+> ### Lessons captured
+>
+> Detailed writeup in SESSION_LOG.md — three high-leverage lessons:
+> 1. **Four-way convergent reviews on a fix-of-fixes commit is the strongest signal possible.** Codex + GLM + DeepSeek + Kimi all independently confirmed READY_TO_MERGE on round-2 commit `724847d` (the `_compute_calibration_metrics` 4th sister site fix + `set_fit_request` clone-before-mutate + search.py CatBoost branch + test `importorskip` fix).
+> 2. **The 4th sister site (`_compute_calibration_metrics`) was the most insidious of the four** because it computes the CALIBRATION metrics shown right next to the `_cv` metrics in the Results panel. Pre-fix you'd see `Accuracy=0.85 / Accuracycv=0.78` where Accuracy came from an unweighted refit and Accuracycv came from a weighted CV — visually inconsistent but only a red flag if you knew to look.
+> 3. **`set_fit_request` mutation is sticky** on the estimator instance even after `sklearn.config_context(enable_metadata_routing=True)` exits. Cloning the model first via `sklearn.base.clone` before set_fit_request is the right pattern — caught by GLM's grep-then-read sweep, not flagged by Codex's call-graph reasoning despite the same trace going through both.
+>
+> ### Deferred follow-ups (filed for next agent)
+>
+> Continuation prompt at `docs/CONTINUATION_PROMPT_2026-05-06_validation_rebuild.md` covers:
+>
+> - **MEDIUM (Kimi)** — `compute_validation_metrics_for_top_models` at `search.py:408`: validation-set metric computation rebuilds models via `_rebuild_model_from_row` but doesn't thread `imbalance_method`. XGBoost retrains unweighted there; PLS-DA's `class_weight='balanced'` is baked into the LR constructor at search.py:4488 but never serialized into the captured params dict, so reconstruction loses it. Affects only `val_*` columns. Reached when `validation_count > 0` in `run_search` / `run_bayesian_search`.
+> - **LOW (Kimi)** — `_reconstruct_models_from_results` at `gui:23643`: ensemble-reconstruction path fits rebuilt pipelines at 4 sites without applying class_weight / auto_class_weights / sample_weight. Affects only "Train Ensemble" feature.
+> - **PR #33 deferred** — pr-test-analyzer's 2 HIGHs (behavioral `assert "'n_jobs': 1" in script` test + architectural module-walk test). Pin tests are structural only.
+> - **PR #33 LOW** — `code_generator.py` KNOWN ISSUE comment incorrectly claims LightGBM gets a `verbose=0` re-injection (only CatBoost does). 1-line comment fix.
+> - **PR #32 MEDIUM** — pr-test-analyzer flagged missing LightGBM + CatBoost auto-with-correction parity rows for symmetry with the XGBoost row. ~80 LOC.
+>
+> ## Session 2026-05-05 morning — 6 PRs opened (#32–#37), all reviewed
+>
+> ### Morning PRs (still open, all reviewed clean)
+>
+> | PR | Branch | Scope | Reviewers | Verdict |
+> |---|---|---|---|---|
+> | #36 | `fix/Tgui-auto-resume-tooltip-speed-wording` | P0 user ask: refresh Bayesian crash-resume tooltip — drop stale T-41 planning-era speed claims (`PLS 8x slower`, `XGBoost 1.4x slower`) that became wrong after T-42's per-trial-write hoist. Replace with `~1.06x of in-memory in benchmarks`. Adjacent stale code comment in `unified_bayesian.py:2232` updated. | None — user-approved wording | READY_TO_MERGE |
+> | #32 | `fix/T20-imbalanced-auto-parity-row` | P1a: closes deferred Codex MEDIUM from PR #22. Adds `test_xgboost_binary_classification_parity_auto_with_correction` mirroring the explicit `class_weight` row but with `imbalance_method='auto'` and `expect_stdout_marker='applying class_weight'`. | DeepSeek + GLM cross-family + pr-test-analyzer | All 3 READY_TO_MERGE / Approve, zero HIGH (1 deferred MEDIUM: LightGBM/CatBoost auto-with-correction symmetry rows) |
+> | #33 | `fix/T20-pipeline-params-strip-bare-njobs` | P1b: closes deferred Codex MEDIUM. `_PIPELINE_PARAMS` was incorrectly stripping bare `n_jobs` from user model params; downstream `setdefault('n_jobs', -1)` then silently overrode user-set determinism (`n_jobs=1` → `-1`). Sister site at `unified_bayesian.PIPELINE_PARAMS:88`. KNOWN ISSUE comment for `verbose` deferred. Round-2 fix-of-fixes (`b3c5994`) added 2 structural pin tests. | DeepSeek + GLM + Codex (round 1: convergent HIGH on sister site → fixed); pr-review-toolkit suite (round 2: code-reviewer clean, silent-failure-hunter HIGH on `search.py:4827 PIPELINE_META_PARAMS` verbose, pr-test-analyzer 2 HIGHs deferred) | READY_TO_MERGE post fix-of-fixes; 2 pr-test-analyzer HIGHs (behavioral test + architectural test) deferred |
+> | #34 | `fix/Tridge-classifier-dead-code-delete` | P1c: deletes unreachable `RidgeClassifier` branch at `models.py:471-473`. No entry point can select Ridge for classification (registry / tier / GUI / `is_valid_model` all exclude it). Defensive scaffolding for a feature that never shipped. | code-reviewer | Clean (3 LOW informational) |
+> | #35 | `fix/Tplsda-ndim-fallback-codegen-port` | P1d: ports the `ndim>2` fallback from `models.PLSTransformer.transform` to the codegen's inline `PLSTransformer.transform`. Currently unreachable (PLS-DA always fits 1D y); future-proofs against T-17 (PLS-2). | code-reviewer | Clean (1 LOW about pre-existing 111-char line that mirrors models.py) |
+> | #37 | `docs/morning-2026-05-05-session-end` | Morning docs: PROJECT_STATUS + SESSION_LOG with the 5 morning PRs and three process lessons. | None (pure docs) | n/a |
+>
+> ---
 >
 > ## Session 2026-05-05 — refined-model imbalance dispatcher (PUSHED)
 >
