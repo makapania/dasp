@@ -41,8 +41,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Read VERSION from the package's __version__ so the build artefact filenames
+# can never drift from the runtime version (T-14 / T-14b).
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from spectral_predict import __version__ as VERSION  # noqa: E402
 
-VERSION = "0.5.0b1"
 APP_NAME = "SpectralPredict-py312"
 PROJECT_ROOT = Path(__file__).parent
 DIST_DIR = PROJECT_ROOT / "dist"

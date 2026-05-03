@@ -5,6 +5,63 @@ All notable changes to Spectral Predict will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> Note: the entries between `0.1.0` (early 2025) and `0.5.0b1` (April 2026)
+> were not maintained in this file. The git history under
+> `git log v0.1.0..0.5.0b1` (or commit `bbf7766` for the b1 cut) is the
+> authoritative record for that period.
+
+## [0.5.0b2] - 2026-05-03
+
+Second beta of the 0.5.0 cycle. Bug-fix-and-observability batch on top of
+`0.5.0b1`, plus one user-visible behavior change (T-19 Auto mode).
+
+### Added
+
+- **T-19** — model-native imbalance handling exposed through the Search tab,
+  including an `Auto` mode that resolves to a sensible per-model default at
+  runtime (instead of forcing the user to pick one). Boosting paths thread
+  `sample_weight` correctly across resamplers.
+
+### Changed
+
+- **T-47** — Bayesian persistence default flipped from `"never"` to `"auto"`.
+  Searches are now resumable out of the box; users get the recovery path
+  without having to opt in.
+- **T-14 / T-14b** — every version-displaying surface (report footer,
+  exported-script header, exported-notebook metadata, GUI title bar,
+  in-canvas version label, PyInstaller `version_info.txt`, Inno Setup
+  `MyAppVersion`, build script `VERSION`) now derives from the canonical
+  `spectral_predict.__version__`. Bumping the version in one place updates
+  every artefact in lockstep. Regression tests pin the contract.
+
+### Fixed
+
+- **T-06 / T-06b** — canonical Araújo-2001 SPA enumeration; parallelised seed
+  loop via joblib threading.
+- **T-21** — hides x-unit Convert button in cases that produced a non-uniform
+  wavelength grid for Savitzky–Golay derivatives.
+- **T-11** — pause/resume hardening, Optuna SQLite storage, on-disk run logs,
+  study-name fingerprint completeness, narrowed import catches.
+- **T-29** — replaced bare `except:` in scoring with `except Exception` and
+  warning emission, so silent metric failures surface in the run log.
+- **T-30** — removed leftover `[DEBUG]` and `[PLS-DA DEBUG]` `print()` calls
+  from `search.py` (`calibration_transfer.py` and `nsga2_search.py` triage
+  follow as T-30b).
+- **T-32** — corrected `y_train_for_model` threading through resampler +
+  `sample_weight` path (boosting models on imbalanced classification).
+- **T-38** — deleted dead preprocessing modules and a dead GUI flag.
+- **T-42 / T-43 / T-44** — sidecar metadata correctness: write-path plumbing,
+  resume restore validation indices, n_trials variable typo fix,
+  task_type sibling phantom hasattr.
+- **T-45** — wired file handler so module `logger.warning` lands on disk;
+  CLI bypass + reload dedup follow-ups closed.
+- **T-46** — surfaced `_apply_wal_pragmas` return value at both call sites.
+- **T-47** — fix-of-fixes for the `auto` default flip (DeepSeek MEDIUM + 2
+  LOWs).
+- **T-49** — persisted validation indices on resume (correctness blocker).
+- **T-50** — auto-cleanup of stale Optuna SQLite trial archives at app
+  startup; configurable retention is queued as T-50b.
+
 ## [0.1.0] - 2025-01-27
 
 ### Added
