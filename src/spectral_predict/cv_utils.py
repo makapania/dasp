@@ -504,18 +504,19 @@ def cross_val_predict_pooled(
     ndarray
         Per-sample predictions, averaged across repeats for repeated CV.
     """
-    if not _is_repeated_cv(cv):
-        if fit_params:
-            return cross_val_predict(
-                model, X, y, cv=cv, n_jobs=n_jobs, method=method,
-                fit_params=fit_params,
-            )
+    # When no fit_params, delegate to sklearn's optimized cross_val_predict
+    # for non-repeated CV. When fit_params IS supplied, force the manual loop
+    # so per-fold slicing goes through _slice_fit_params — sklearn 1.8 removed
+    # the legacy `fit_params=` kwarg in favour of metadata routing
+    # (`set_config(enable_metadata_routing=True)` + `set_fit_request(...)`),
+    # which would require global state mutation we'd rather avoid here.
+    if not _is_repeated_cv(cv) and not fit_params:
         return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
 
-    # Repeated CV: accumulate predictions per sample, then reduce.
+    # Manual loop: handles repeated CV AND any cv with fit_params.
     # For classifier predict, reduce by majority vote (averaging integer class
     # labels produces nonsensical fractional "predictions"). For regression or
-    # predict_proba, average across repeats.
+    # predict_proba, average across repeats (or just place if non-repeated).
     n_samples = X.shape[0]
     use_majority_vote = method == 'predict' and _model_is_classifier(model)
 
@@ -797,9 +798,11 @@ def cross_validate_with_early_stopping(
         use_early_stopping = False
 
     # If not a boosting model or early stopping disabled, use standard cross_validate.
-    # Thread sample_weight via fit_params if provided — the 'model__sample_weight'
-    # prefix matches the codebase convention used by unified_bayesian and
-    # nsga2_search when the per-trial Pipeline's terminal step is named 'model'.
+    # When sample_weight is provided, route via sklearn's metadata routing API
+    # (sklearn >= 1.4; in 1.8+ the legacy `fit_params=` kwarg was removed). We
+    # scope `set_config(enable_metadata_routing=True)` to a context manager so
+    # global config isn't mutated for callers who are not opted in. The terminal
+    # estimator opts in to receiving sample_weight via `set_fit_request`.
     if not use_early_stopping:
         cv_kwargs: Dict[str, Any] = dict(
             cv=cv, scoring=scoring,
@@ -807,7 +810,15 @@ def cross_validate_with_early_stopping(
             return_estimator=return_estimator, error_score='raise',
         )
         if sample_weight is not None:
-            cv_kwargs['fit_params'] = {'model__sample_weight': sample_weight}
+            import sklearn
+            inner = _get_model_from_pipeline(model)
+            if hasattr(inner, 'set_fit_request'):
+                inner.set_fit_request(sample_weight=True)
+            with sklearn.config_context(enable_metadata_routing=True):
+                return cross_validate(
+                    model, X, y, params={'sample_weight': sample_weight},
+                    **cv_kwargs,
+                )
         return cross_validate(model, X, y, **cv_kwargs)
 
     # Handle scoring - convert string to dict for uniform handling

@@ -1520,12 +1520,27 @@ class SpectralOptimizationProblem(Problem):
                             sample_weight=_balanced_sw,
                         )
                     else:
-                        _cv_kwargs = dict(cv=cv, scoring='accuracy')
+                        # sklearn 1.8 removed the legacy `fit_params=` kwarg for
+                        # cross_val_score; sample_weight must flow via metadata
+                        # routing (see cross_validate_with_early_stopping for the
+                        # matching pattern).
                         if _balanced_sw is not None:
-                            _cv_kwargs['fit_params'] = {'model__sample_weight': _balanced_sw}
-                        scores = cross_val_score(
-                            pipeline_model, X_subset, self.y, **_cv_kwargs
-                        )
+                            import sklearn
+                            from spectral_predict.cv_utils import _get_model_from_pipeline
+                            _inner = _get_model_from_pipeline(pipeline_model)
+                            if hasattr(_inner, 'set_fit_request'):
+                                _inner.set_fit_request(sample_weight=True)
+                            with sklearn.config_context(enable_metadata_routing=True):
+                                scores = cross_val_score(
+                                    pipeline_model, X_subset, self.y, cv=cv,
+                                    scoring='accuracy',
+                                    params={'sample_weight': _balanced_sw},
+                                )
+                        else:
+                            scores = cross_val_score(
+                                pipeline_model, X_subset, self.y, cv=cv,
+                                scoring='accuracy',
+                            )
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
 
