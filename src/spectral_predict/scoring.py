@@ -572,9 +572,28 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
 
     metrics = {}
 
+    # T-29 fix-of-fixes (DeepSeek HIGH-1): pre-compute diagnostic context once
+    # so all warning messages can include n / n_classes without recomputing.
+    # Also used for the balanced_accuracy wrap below — closes the asymmetry
+    # where balanced_accuracy was the only metric outside a try/except.
+    _y_true_arr = np.asarray(y_true)
+    _diag_n = len(_y_true_arr)
+    _diag_n_classes = len(np.unique(_y_true_arr)) if _diag_n else 0
+
     # Balanced accuracy (macro-averaged recall)
     # Adjusts for class imbalance - treats all classes equally
-    metrics['balanced_accuracy'] = balanced_accuracy_score(y_true, y_pred)
+    # T-29 fix-of-fixes (DeepSeek HIGH-1): wrapped to match the other metrics —
+    # was the only call outside a try/except, so a ValueError here crashed
+    # the whole compute_imbalance_metrics call instead of returning a partial
+    # dict like every other metric does.
+    try:
+        metrics['balanced_accuracy'] = balanced_accuracy_score(y_true, y_pred)
+    except Exception as exc:
+        logger.warning(
+            "T-29: balanced_accuracy failed (n=%d, n_classes=%d, exc=%s); "
+            "using 0.0 sentinel", _diag_n, _diag_n_classes, exc,
+        )
+        metrics['balanced_accuracy'] = 0.0
 
     # F1 scores
     # Weighted: accounts for class frequency in the dataset
@@ -587,8 +606,13 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
         # SystemExit too — Ctrl-C during long searches hit this and got
         # eaten. `except Exception:` lets system-exits propagate. The
         # warning surfaces silent metric failure so a leaderboard 0.0 can
-        # be distinguished from a real model-scored-badly 0.0.
-        logger.warning("T-29: f1 score failed (%s); using 0.0 sentinel", exc)
+        # be distinguished from a real model-scored-badly 0.0. Diagnostic
+        # context (n, n_classes) added in the fix-of-fixes pass per cross-
+        # family review feedback (DeepSeek MEDIUM / GLM LOW).
+        logger.warning(
+            "T-29: f1 score failed (n=%d, n_classes=%d, exc=%s); "
+            "using 0.0 sentinel", _diag_n, _diag_n_classes, exc,
+        )
         metrics['f1_weighted'] = 0.0
         metrics['f1_macro'] = 0.0
 
@@ -598,7 +622,8 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
         metrics['recall_weighted'] = recall_score(y_true, y_pred, average='weighted', zero_division=0)
     except Exception as exc:
         logger.warning(
-            "T-29: precision/recall failed (%s); using 0.0 sentinel", exc
+            "T-29: precision/recall failed (n=%d, n_classes=%d, exc=%s); "
+            "using 0.0 sentinel", _diag_n, _diag_n_classes, exc,
         )
         metrics['precision_weighted'] = 0.0
         metrics['recall_weighted'] = 0.0
@@ -622,7 +647,10 @@ def compute_imbalance_metrics(y_true, y_pred, y_pred_proba=None):
             # with "Only one class present in y_true" — log so the user
             # knows roc_auc=None means computation failed, not "no proba
             # provided" (the y_pred_proba-is-None branch returns None too).
-            logger.warning("T-29: roc_auc failed (%s); using None sentinel", exc)
+            logger.warning(
+                "T-29: roc_auc failed (n=%d, n_classes=%d, exc=%s); "
+                "using None sentinel", _diag_n, _diag_n_classes, exc,
+            )
             metrics['roc_auc'] = None
     else:
         metrics['roc_auc'] = None
