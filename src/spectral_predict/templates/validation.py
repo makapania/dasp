@@ -164,11 +164,12 @@ for train_idx, test_idx in cv.split(X_final, y):
     y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
-        # np.ravel + [0] scalarises the prediction so Counter (used below for
-        # majority voting) can hash it. Most sklearn classifiers return predict
-        # shape (n,), where indexing already gives a scalar — np.ravel is a
-        # no-op there. CatBoost multi-class returns (n, 1) (one column with the
-        # predicted class label per sample); without scalarising, Counter hits
+        # np.ravel + [0] yields a hashable scalar so Counter (used below for
+        # majority voting) accepts it. Most sklearn classifiers return predict
+        # shape (n,), where y_pred_fold[i] is already a hashable numpy scalar;
+        # np.ravel reshapes it to (1,) and [0] recovers the same scalar.
+        # CatBoost multi-class returns (n, 1) (one column with the predicted
+        # class label per sample); without this unwrap, Counter hits
         # `TypeError: unhashable type: 'numpy.ndarray'`.
         preds_per_sample.setdefault(int(sample_idx), []).append(
             np.ravel(y_pred_fold[local_i])[0]
