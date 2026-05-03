@@ -57773,6 +57773,29 @@ def main():
     except Exception:
         pass
 
+    # T-50: bound the slow disk leak from accumulated Optuna SQLite trial
+    # archives. Runs after the app logger so cleanup warnings land in
+    # dasp.log; runs before any new run writes its sidecar so the active-
+    # run guard sees the previous (crashed-or-clean) sidecar, not ours.
+    try:
+        from spectral_predict.run_state import cleanup_old_sqlite_files
+        deleted, freed = cleanup_old_sqlite_files()
+        if deleted:
+            import logging as _logging
+            _logging.getLogger("spectral_predict").info(
+                "T-50: cleaned up %d stale Optuna SQLite files (%.1f MB freed)",
+                deleted, freed / 1_048_576,
+            )
+    except Exception:
+        # GLM M1 / DeepSeek L2 (T-50 fix-of-fixes): preserve best-effort
+        # contract but surface structural cleanup failures (TypeError etc.
+        # — distinct from per-file warnings the function itself emits) to
+        # dasp.log via debug. Without this they vanish silently.
+        import logging as _logging
+        _logging.getLogger("spectral_predict").debug(
+            "T-50: cleanup failed (non-fatal)", exc_info=True
+        )
+
     root = tk.Tk()
 
     # Set window icon (taskbar and title bar). Belt-and-suspenders:
