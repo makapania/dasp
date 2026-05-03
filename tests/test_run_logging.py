@@ -494,6 +494,49 @@ def test_t29b_setup_run_logger_does_not_double_attach(fresh_logging):
     )
 
 
+def test_t29b_setup_run_logger_dedups_after_module_reload(fresh_logging):
+    """T-29b fix-of-fixes (DeepSeek MEDIUM): the prior
+    test_t29b_setup_run_logger_does_not_double_attach test short-circuits on
+    the ``_active_log_path is not None`` early-return before reaching the
+    T-29b dedup scan, so the scan was effectively dead code under that
+    test. Without a module-reload test, the dedup defense (which mirrors
+    setup_app_logger's pattern at test_setup_app_logger_dedups_after_module_reload)
+    is unverified.
+
+    Mirrors the setup_app_logger module-reload test: pop run_logging, re-
+    import, call setup_run_logger again. The handler from the first call
+    is still on the spectral_predict logger (the fresh_logging fixture
+    cleanup hasn't run yet); the dedup scan must reuse it instead of
+    stacking a second."""
+    rl, _, _ = fresh_logging
+
+    _, run_path = rl.setup_run_logger(capture_stdout=False)
+
+    sp_logger = logging.getLogger("spectral_predict")
+    target_path = str(run_path)
+    handlers_before = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+        and getattr(h, "baseFilename", None) == target_path
+    ]
+    assert len(handlers_before) == 1
+
+    sys.modules.pop("spectral_predict.run_logging", None)
+    rl_reloaded = importlib.import_module("spectral_predict.run_logging")
+    rl_reloaded.setup_run_logger(capture_stdout=False)
+
+    handlers_after = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+        and getattr(h, "baseFilename", None) == target_path
+    ]
+    assert len(handlers_after) == 1, (
+        f"T-29b dedup scan must reuse the existing per-run handler on "
+        f"spectral_predict after a module reload; got {len(handlers_after)} "
+        f"handlers attached for baseFilename={target_path!r}"
+    )
+
+
 def test_t29b_setup_run_logger_sets_warning_level_on_spectral_predict(fresh_logging):
     """T-29b: ``setup_run_logger`` must ensure the ``spectral_predict``
     logger's level allows WARNING through, otherwise the per-run handler
