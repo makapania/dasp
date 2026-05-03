@@ -4,6 +4,25 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-04 overnight (T-30b + P3 + T-20c PLS-DA/MLP) — author-intent-tagged debug blocks; the asymmetry between two files IS the finding; dead-code defensive scaffolding masquerading as a bug
+
+**Three more PRs added on top of the session-2026-05-04 batch — all pushed, none merged.**
+
+Three non-obvious lessons earned this overnight session:
+
+**1. `calibration_transfer.py` vs `nsga2_search.py` — the asymmetry between the two files IS the T-30b finding.** Continuation prompt assumed both files needed triage. Reality: `calibration_transfer.py`'s CTAI block (~25 prints) was tagged with `# Enhanced validation with debug logging` at the source — the author's stated intent was debug logging but they used `print()` everywhere, including a giant `=== CTAI Debug Information ===` header. Meanwhile `nsga2_search.py`'s 43 prints are ALL properly gated behind `verbose >= 1` / `verbose >= 2` / `gen % 10 == 0` flags or are unconditional warnings (CV-strategy fallback, no-feasible, user-cancelled). The module already has `logger` set up. The author structured nsga2_search correctly from the start. **For files with pre-existing verbosity gating, the right action is "leave alone" — deleting prints would degrade UX.** T-30b's value lives entirely in CTAI; nsga2 was already done. The lesson: read the author's intent in comments and verbosity gates BEFORE bulk-editing prints.
+
+**2. "Looks like a real export bug" can be unreachable defensive scaffolding.** P2 (Ridge classifier export investigation) traced what looked like a clean codegen mismatch: `code_generator._resolve_model_ctor_class` returns `'Ridge'` (regressor) for `task_type='classification'` — should be `'RidgeClassifier'`. The runtime branch in `models.py:471-473` builds `RidgeClassifier(random_state=42, **params)` for `model_name='Ridge', task_type='classification'`, suggesting Ridge classification is a real feature with a broken export path. **But verify reachability before fixing.** `model_registry.CLASSIFICATION_MODELS`, `model_config.CLASSIFICATION_TIERS`, the GUI's `valid_models_classification` list (lines 32479 + 33425), and `is_valid_model('Ridge', 'classification')` ALL exclude Ridge from classification. The runtime branch is dead code — defensive scaffolding for a feature that never shipped. The export-resolver mismatch is consistent-with-dead-code, not a bug. **Per the user's "engineering polish defers" rule, adding Ridge classification as a real feature is out-of-scope; the right move was to file as a deferred ticket and walk away.** Saved ~1-2h that would have gone into a feature-disguised-as-fix.
+
+**3. Cross-family review for tiny test-only PRs is still worth dispatching when the test machinery is non-trivial.** T-20c added a PLS-DA parity row (~75 lines) and an MLP marker test. Both passed locally on first try. The continuation prompt called cross-family review "WORTH IT given the Pipeline complexity." GLM 5.1's review verified the param-routing trace through `_split_pls_da_params` (codegen line 1261) → `_render_pls_da_pipeline` (codegen line 1280) and confirmed the in-process Pipeline lands on identical PLSTransformer + LogisticRegression params. GLM caught a LOW about the codegen's `_lr_filtered = {k: v for k, v in _lr_params.items() if k in _lr_sig.parameters}` filter — pre-existing latent fragility (silent drop if sklearn renames a param), not introduced by this PR, no action required. **For test-machinery tickets, the review value is verifying the test catches the bug class it claims to catch.** GLM's per-axis verification (param routing, PLSTransformer equivalence, determinism, test value) is exactly the right structure for a parity-test review.
+
+**Operational lessons (carried forward):**
+- **Commit before yielding control** — followed throughout this session (4 separate commits across 3 branches before any agent dispatch). No losses.
+- **For stacked PRs that depend on unmerged parent branches: branch off the parent, not main.** P4's PLS-DA parity row needed the T-20 test-runner helpers from PR #22 → #23 → #24's stack. Branching off `fix/Tcv-catboost-multiclass-cv-pooling-scalarise` (PR #24's branch) was correct; the attempt to branch off main first surfaced the helper absence immediately.
+- **DEFAULT_PARAMS merge mirroring is still the parity contract** — MLP marker test required `from spectral_predict.templates.models import DEFAULT_PARAMS` + `params_full = DEFAULT_PARAMS['MLPClassifier'].copy(); params_full.update(test_params)` to reproduce the codegen's full param set in-process. Hardcoding MLP defaults would have been brittle; importing the same source-of-truth is the right pattern.
+
+---
+
 ## 2026-05-04 (T-14b + T-20 + T-20b + codegen fix + T-29b — five PRs in flight) — regression-net loop closed in same session; CatBoost multiclass shape quirk; predict_proba is load-bearing for classification parity
 
 **Five tickets shipped in one session via stacked PRs (#21-#25), none merged yet — user opens/merges.**

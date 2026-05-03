@@ -1,6 +1,30 @@
 # Project Status
 
-> **Last updated:** 2026-05-04 (T-14b + T-20 + T-20b + codegen-fix + T-29b — 5 PRs in flight off main at `1247389`; not yet merged).
+> **Last updated:** 2026-05-04 overnight (T-30b + P3 .ravel() + T-20c PLS-DA/MLP — 3 more PRs added on top of the 5-PR session-2026-05-04 batch; **8 PRs total in flight, none merged**).
+>
+> ## Session 2026-05-04 overnight — 3 additional PRs (NOT MERGED)
+>
+> | PR | Branch tip | Base | What it ships | Reviews |
+> |---|---|---|---|---|
+> | #27 | `4ddffe6` | `main` | T-30b: print() triage in `calibration_transfer.py` (66→41 prints kept; CTAI's debug-instrumentation block demoted to `logger.debug`, explicit "=== Debug Information ===" header deleted, user-facing CTAI summary + NS-PFCE progress messages preserved). `nsga2_search.py` untouched — all 43 prints already properly verbosity-gated. | DeepSeek + GLM cross-family complete. **Both READY_TO_MERGE — no findings.** GLM noted one LOW about pre-existing dual-emission pattern at `nsga2_search.py:1804-1805` (out of T-30b scope). |
+> | #26 | `ec7d90f` | `main` | P3 defensive `.ravel()` on classification CV-fold predict in `templates/validation.py:160`. Mirrors the regression template's existing pattern (line 103). Closes the GLM MEDIUM hygiene finding from PR #24's review. | No formal cross-family review (one-line hygiene change; DeepSeek's broader codebase logger-pattern verification on T-30b indirectly validated the defensive style). |
+> | #28 | `18548d2` | `fix/Tcv-...` (PR #24) | T-20c: PLS-DA parity row + MLP imbalance-is-no-op marker. PLS-DA pins the three-step Pipeline contract (PLS scores → StandardScaler → LogisticRegression) end-to-end; MLP marker pins that `imbalance_method='class_weight'` is a no-op for MLPClassifier. Tip `18548d2` applied DeepSeek L1 (explicit `lr__random_state: 42` in test params, decouples test from codegen's internal `lr_defaults`). | DeepSeek + GLM cross-family complete. Both **READY_TO_MERGE.** GLM 1 LOW (pre-existing `_lr_filtered` inspection-filter pattern, out of scope). DeepSeek 2 MEDIUM + 2 LOW: L1 applied as fix-of-fixes; M1 (stdout marker for codegen-path proof) and M2 (port `ndim>2` fallback to inline `PLSTransformer` for future PLS-2) deferred per standing engineering-polish rule; L2 withdrawn by reviewer. |
+>
+> **Session timing:** all overnight branches pushed by ~01:00 local. Cross-family reviews dispatched in parallel for T-30b (returned READY_TO_MERGE × 2) and T-20c (GLM returned, DeepSeek pending).
+>
+> **Working tree at session-end snapshot:** clean on `main` after this doc commit. Untracked artifacts to ignore: `.review-tmp/` and the weirdly-named `C\357\200\272UsersmsponAppDataLocalTempopencodesearch_t30.py` left over from the previous session.
+>
+> **Test sweep state at session-end:** all branches green at `327 passed + 1 skipped` on the consolidated 13-file regression sweep. T-20 parity matrix at **19 rows** with PLS-DA + MLP marker added (was 17 on the T-20b branch).
+>
+> ### P2 — Ridge classifier export investigation (filed; deferred)
+>
+> Outcome: **dead code, NOT a bug fix.** `code_generator._resolve_model_ctor_class` returns plain `'Ridge'` for `task_type='classification'` (not `'RidgeClassifier'`), and `_resolve_default_param_key` likewise has no Ridge classification mapping. Initially looked like a real export bug.
+>
+> But the runtime branch in `models.py:471-473` that builds `RidgeClassifier(random_state=42, **params)` is **unreachable**: `model_registry.CLASSIFICATION_MODELS` excludes Ridge; `model_config.CLASSIFICATION_TIERS` excludes Ridge from every tier; the GUI's `valid_models_classification` list at `spectral_predict_gui_optimized.py:32479` and `:33425` explicitly excludes Ridge; and `is_valid_model('Ridge', 'classification')` returns False. The runtime code path is defensive scaffolding that no entry point selects.
+>
+> Per the user's "engineering polish defers" rule, adding Ridge classification as a real feature requires registry + tier + export-resolver + DEFAULT_PARAMS + test additions and is a feature, not a bug. Filed here as a future cleanup ticket: either remove the `models.py:471-473` runtime dead code (smallest change, eliminates inconsistency) or add Ridge classification end-to-end as a real feature.
+>
+> ---
 >
 > ## Session 2026-05-04 — five PRs in flight (NOT MERGED — user opens/merges)
 >
@@ -27,11 +51,11 @@
 >
 > **Deferred follow-up tickets (next-session priority):**
 >
-> - **T-30b** (continuation prompt scope): triage `print()` calls in `calibration_transfer.py` (66 prints) + `nsga2_search.py` (42 prints). Per-file user judgment needed (legitimate user-facing progress messages exist). Cross-family review WORTH IT per continuation prompt.
-> - **Ridge classifier export investigation**: `code_generator._resolve_model_ctor_class` returns plain `'Ridge'` (sklearn regressor) for `task_type='classification'` task, not `'RidgeClassifier'`. Likely pre-existing codegen bug. Worth a small ticket: investigate runtime path, fix the resolver, add a parity row to the T-20 matrix.
-> - **PLS-DA parity row**: needs Pipeline-matching scaffolding (PLS scores → StandardScaler → LogisticRegression). Non-trivial in-process construction — separate ticket if user wants T-20 matrix exhaustive.
-> - **MLP parity marker test**: MLP intentionally has no native imbalance support; would benefit from a documenting test that pins "MLP imbalance is no-op" so future codegen changes can't accidentally start applying class_weight.
-> - **Per-fold metric defensive .ravel** (GLM MEDIUM on PR #24): `templates/validation.py:167-168`'s `accuracy_score`/`f1_score` calls pass raw `y_pred_fold` which is `(n, 1)` for CatBoost multiclass. Today sklearn auto-broadcasts; future shape changes could silently produce wrong answers. One-line `.ravel()` on line 160 (mirroring regression template's pattern). Tiny hygiene ticket.
+> - **T-30b** ✅ shipped overnight as PR #27 — `calibration_transfer.py` triaged (66 → 41 prints kept; 1 deleted, 20 demoted to `logger.debug`). `nsga2_search.py` confirmed already-clean (all 43 prints properly verbosity-gated).
+> - **Ridge classifier export investigation** ✅ investigated overnight — dead code, NOT a bug fix. See P2 section above. Future cleanup ticket: either remove `models.py:471-473` runtime dead code or add Ridge classification as a real feature.
+> - **PLS-DA parity row** ✅ shipped overnight on the T-20c branch (`fix/T20c-pls-da-parity-row`, tip `6bc2b20`). Pipeline-matching scaffolding done; runs at `rtol=1e-3, atol=1e-6` like the rest of the classification matrix.
+> - **MLP parity marker test** ✅ shipped overnight on the same T-20c branch. Pins MLP+`class_weight`=no-op contract via predict_proba parity (catches the same bug class as T-19's source-inspection tests via numerical equivalence).
+> - **Per-fold metric defensive .ravel** ✅ shipped overnight as PR #26.
 >
 > **Process lessons captured this session:**
 > 1. **Stacked-PR pattern with chained bases successfully kept review cost linear.** PR #22 → #23 → #24 form a foundation → extension → bug-fix-from-extension chain. Reviewers see only the new content per layer (`git diff base..HEAD`); after each merge, child PRs rebase onto post-merge main and their bases auto-update. Without stacking, T-20b would have to wait for T-20 to merge before being reviewable; same cascade for the codegen fix.
