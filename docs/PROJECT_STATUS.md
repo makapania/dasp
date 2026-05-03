@@ -1,6 +1,34 @@
 # Project Status
 
-> **Last updated:** 2026-05-04 overnight (T-30b + P3 .ravel() + T-20c PLS-DA/MLP — 3 more PRs added on top of the 5-PR session-2026-05-04 batch; **8 PRs total in flight, none merged**).
+> **Last updated:** 2026-05-04 (codex round 2 — independent codex review of all 8 outstanding PRs; 4 fix-of-fixes commits applied; **1 real production bug closed on PR #24 that DeepSeek + GLM both missed**).
+>
+> ## Session 2026-05-04 codex-review round
+>
+> Dispatched 8 codex-reviewer agents in parallel against PRs #21–#28. Findings + dispositions:
+>
+> | PR | Codex verdict | Fix-of-fixes |
+> |---|---|---|
+> | #21 T-14b | 2 MEDIUM | **Both applied** (`ca79f10`): build-guide doc-drift on `BUNDLED_APP_BUILD_GUIDE_PY312.md:22`, GUI version-drift test rigor (added bare `0.5.0` to ban-list, replaced repo-wide `_DASP_VERSION` substring check with two specific f-string-interpolation assertions on each display site). |
+> | #22 T-20 | 1 HIGH + 2 MEDIUM + 1 LOW | HIGH addressed via docstring (`250559d`) — the file claimed T-32 coverage but no row exercises a resampler+sample_weight path; T-32 is actually pinned by `tests/test_t32_sample_weight_resampling.py`. Two MEDIUMs deferred (note in PR #22 description): `_PIPELINE_PARAMS` strips bare `n_jobs` then re-injects `-1` for XGB/LGBM (multi-threaded determinism drift potential); auto-resolves-to-class_weight imbalanced row missing. |
+> | #23 T-20b | CLEAN | None. Convergent with prior DeepSeek + GLM verdicts. |
+> | #24 codegen-fix | **1 MEDIUM — real production bug** | **Applied** (`dfeb27d`). Codex traced the call graph and found that the imbalance-aware classification CV path (`code_generator._render_cross_validation_with_imbalance` at `:1761-1769`) bypasses `templates/validation.py` entirely and had the SAME unfixed pooling bug. **CatBoost multiclass + class_weight / auto / resampling exports were ALL silently broken** before this catch (the codegen routes via `code_generator.py:1435-1436` whenever `imbalance_method` is set). Cross-family DeepSeek + GLM both missed this because they reviewed only `templates/validation.py`. The same `.ravel()` fix mirrored to the imbalance-aware path closes the bug class fully. |
+> | #25 T-29b | CLEAN (partial) | None. Codex's local PowerShell sandbox tripped Windows ConstrainedLanguage-mode errors during investigation — the verdict is real but coverage on the specific concerns I asked about (file-handle leak, attach/detach thread-safety, log-record propagation) was incomplete. Prior DeepSeek + GLM cross-family review covers these more thoroughly. |
+> | #26 P3 .ravel() | CLEAN | None. Verified `.ravel()` semantics against every supported classifier (PLS-DA / RF / LightGBM / XGBoost / CatBoost / SVC / MLP / RidgeClassifier / NeuralBoostedClassifier). LOW residual risk only. |
+> | #27 T-30b | READY_TO_MERGE | None. Codex confirmed `setup_run_logger()` tees backend `print()` output into the per-run log via stdout capture (`run_logging.py:240-263`), so the kept user-facing CTAI/NS-PFCE prints are visible in run logs. Logger setup correct; package-tree `WARNING` floor at `run_logging.py:359/368` keeps the new `logger.debug` calls silent in normal app logs (intentional). |
+> | #28 T-20c | 1 MEDIUM + 1 LOW | Both **deferred**. MEDIUM: `_split_pls_da_params` silently drops `scaler__*` keys (codegen drops at `code_generator.py:1270`); fixing requires the codegen to actually route scaler params, a production change beyond test-PR scope. LOW: MLP stdout marker assumes stdout emission, would not catch a future shift to `warnings.warn` / `logger.warning`. |
+>
+> **Tally**: 1 HIGH (defused via docstring), 5 MEDIUM (3 applied as fix-of-fixes, 2 deferred), 2 LOW (deferred). One real production bug closed on PR #24 — codex's call-graph trace was the highest-leverage finding of the round.
+>
+> **Why this matters**: cross-family review (DeepSeek + GLM) is great at within-file logic, but codex's call-graph reasoning caught a bug that lived across two file boundaries — the `_render_cross_validation` dispatcher routing to a different inline template under `imbalance_method`. **Cross-family + codex are complementary review structures**; either one alone would have shipped a broken-for-CatBoost-multiclass-imbalance regression.
+>
+> **Branch tips after fix-of-fixes (round 2)**:
+> - PR #21: `ca79f10` (codex MEDIUM × 2)
+> - PR #22: `250559d` (docstring T-32 clarification)
+> - PR #24: `dfeb27d` (real bug closure on imbalance-aware CV path)
+> - PR #28: `b6960a1` (unchanged from earlier MLP warning marker addition)
+> - PR #23, #25, #26, #27: unchanged (codex CLEAN)
+>
+> ## Session 2026-05-04 overnight — 3 additional PRs (NOT MERGED)
 >
 > ## Session 2026-05-04 overnight — 3 additional PRs (NOT MERGED)
 >

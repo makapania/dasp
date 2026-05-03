@@ -4,6 +4,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-04 codex round 2 — call-graph reasoning catches a cross-file bug that within-file cross-family review missed
+
+**Single non-obvious lesson, but a high-leverage one:**
+
+**Cross-family LLM review (DeepSeek + GLM) and codex are complementary, not redundant.** Dispatched codex against all 8 outstanding PRs after the cross-family + pr-review-toolkit passes had cleared everything. Codex caught a real production bug on PR #24 that both DeepSeek and GLM missed:
+
+- PR #24's title is `fix(codegen): scalarise predictions in classification CV pooling`. The fix added `np.ravel(...)[0]` to `templates/validation.py`'s CV pooling block to handle CatBoost multiclass's `(n, 1)` predict() shape.
+- DeepSeek + GLM both reviewed only `templates/validation.py` and confirmed the fix was correct in that file.
+- **Codex traced the call graph** from the codegen dispatcher: `code_generator._render_cross_validation` at line 1435-1436 routes to `_render_cross_validation_with_imbalance()` whenever `self.imbalance_method` is set, **bypassing `templates/validation.py` entirely**. That alternate inline template at line ~1761 had the SAME pre-PR-#24 unfixed pooling pattern.
+- **Result**: every CatBoost multiclass export with `class_weight` / `auto` / SMOTE / random_undersampler / etc. was silently broken before codex's catch — the script would crash before reaching the parity-test appendix with `TypeError: unhashable type: 'numpy.ndarray'`.
+
+**Why DeepSeek + GLM missed it**: both reviewers are strong at within-file reasoning (logic, types, edge cases in the diff they're given). They don't typically grep the surrounding codebase for *other* sites that share the bug class. Codex's tool-use loop (it runs `git grep` / `rg` / file-reads as part of investigation) catches sister-site regressions that pure-text review misses.
+
+**Generalisable pattern**: when a fix targets a specific code path (e.g., one of two CV templates), **search for sister sites of the same bug class** before declaring the fix complete. The grep query that would have caught this: `rg "y_pred_fold\[local_i\]" src/spectral_predict/` returns 2 hits — `templates/validation.py:163` (PR #24 fixes this) and `code_generator.py:1764` (PR #24 misses this). One grep, two seconds.
+
+**Other lessons from the codex round**:
+- **Codex's PowerShell sandbox is fragile on Windows.** The Windows ConstrainedLanguage-mode policy blocked Select-String multi-path queries on PR #25 + PR #27 reviews; the helper recovered by switching to `codex exec` with the diff captured into the prompt directly. For complex investigations where this matters, prefer the `codex exec` path from the start.
+- **Codex's docstring-vs-coverage HIGH on PR #22 was meta-review value.** The file's docstring claimed T-32 coverage, but no row in the matrix actually exercised T-32's surface (which lives in `tests/test_t32_sample_weight_resampling.py`). Within-file reviewers won't flag a documentation/coverage mismatch like this — they're reasoning about what the test does, not what it claims to do.
+
+---
+
 ## 2026-05-04 overnight (T-30b + P3 + T-20c PLS-DA/MLP) — author-intent-tagged debug blocks; the asymmetry between two files IS the finding; dead-code defensive scaffolding masquerading as a bug
 
 **Three more PRs added on top of the session-2026-05-04 batch — all pushed, none merged.**
