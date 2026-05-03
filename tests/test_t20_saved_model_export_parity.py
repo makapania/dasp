@@ -568,11 +568,14 @@ def test_xgboost_multiclass_classification_parity(tmp_path):
 # LightGBM — sklearn-API native class_weight kwarg path (T-20b)
 # ---------------------------------------------------------------------------
 
-# Same shape as _XGB_BASE_PARAMS but with LightGBM-appropriate verbosity
-# silencing. Codegen injects n_jobs=-1 via setdefault for LGBM/XGB; explicit
-# n_jobs=1 here so the merged params are deterministic single-threaded in
-# both the in-process fit and the subprocess fit. verbose=-1 suppresses the
-# voluminous LightGBM training log.
+# Same shape as _XGB_BASE_PARAMS. Explicit n_jobs=1 so multi-threaded
+# determinism isn't a worry across CI hosts; cross-family review confirmed
+# the codegen's n_jobs=-1 setdefault at code_generator._render_model uses a
+# startswith check that does not actually match LightGBM's resolved class
+# name, so the injection is dead code there — passing n_jobs=1 explicitly
+# pins both the in-process and subprocess paths regardless. verbose=-1
+# suppresses the voluminous LightGBM training log so failure stdout stays
+# diagnostic.
 _LGBM_BASE_PARAMS = {
     "n_estimators": 30,
     "max_depth": 4,
