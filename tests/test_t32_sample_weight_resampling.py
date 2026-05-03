@@ -116,8 +116,8 @@ def test_t32_resampler_extends_y_for_downstream_fit():
     )
 
     # All three lengths must agree post-resample. SMOTE upsamples the
-    # minority to match the majority count (20+20 = 40 from the original
-    # 18+4 train fold) — but the exact count depends on SMOTE's internals,
+    # minority to match the majority count (≈30 + 30 = 60 from the original
+    # 30 + 8 train fold) — but the exact count depends on SMOTE's internals,
     # so the regression test pins length-equality rather than the exact value.
     assert captured["X_len"] == captured["y_len"], (
         f"X length {captured['X_len']} != y length {captured['y_len']} — "
@@ -133,4 +133,55 @@ def test_t32_resampler_extends_y_for_downstream_fit():
     assert captured["y_len"] > len(train_idx), (
         f"SMOTE didn't actually resample: y_len={captured['y_len']} <= "
         f"train_idx len {len(train_idx)} — test premise broken"
+    )
+
+
+def test_t32_undersampler_reduces_y_for_downstream_fit():
+    """T-32 fix-of-fixes (GLM MEDIUM-2): RandomUnderSampler reduces y instead
+    of growing it like SMOTE. The chained y_train_for_model pattern handles
+    both directions correctly via duck-typing on hasattr(step, 'fit_resample')
+    — pin the reduction direction so a future refactor that special-cased
+    oversampling would fail this test."""
+    from imblearn.under_sampling import RandomUnderSampler
+
+    X, y = _imbalanced_binary()
+    captured: dict[str, object] = {}
+
+    class _SpyRidge(RidgeClassifier):
+        def fit(self, X_inner, y_inner, sample_weight=None):
+            captured["X_len"] = len(X_inner)
+            captured["y_len"] = len(y_inner)
+            captured["sw_len"] = (
+                len(sample_weight) if sample_weight is not None else None
+            )
+            return super().fit(X_inner, y_inner, sample_weight=sample_weight)
+
+    pipe = ImbPipeline([
+        ("rus", RandomUnderSampler(random_state=0)),
+        ("model", _SpyRidge()),
+    ])
+
+    train_idx = np.arange(len(y) - 4)
+    test_idx = np.arange(len(y) - 4, len(y))
+
+    _run_single_fold(
+        pipe=pipe,
+        X=X,
+        y=y,
+        train_idx=train_idx,
+        test_idx=test_idx,
+        task_type="classification",
+        is_binary_classification=True,
+        use_sample_weight_for_classification=True,
+    )
+
+    # Lengths must agree post-undersample.
+    assert captured["X_len"] == captured["y_len"]
+    assert captured["sw_len"] == captured["y_len"]
+    # And undersampling actually reduced y vs the pre-resample train fold
+    # (which was 38 samples = 30 majority + 8 minority; RUS undersamples
+    # majority to minority count → 8 + 8 = 16).
+    assert captured["y_len"] < len(train_idx), (
+        f"RandomUnderSampler didn't actually reduce: y_len={captured['y_len']} "
+        f">= train_idx len {len(train_idx)} — test premise broken"
     )
