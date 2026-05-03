@@ -785,3 +785,154 @@ def test_catboost_multiclass_classification_parity(tmp_path):
         imbalance_method=None,
         tmp_path=tmp_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# PLS-DA — Pipeline of PLS scores -> StandardScaler -> LogisticRegression (T-20c)
+# ---------------------------------------------------------------------------
+
+
+def test_pls_da_binary_classification_parity_no_imbalance(tmp_path):
+    """T-20c: PLS-DA pipeline parity (PLS scores -> StandardScaler -> LR).
+
+    PLS-DA is the canonical chemometrics classifier and the export path
+    (``code_generator._render_pls_da_pipeline``) emits a three-step Pipeline:
+
+        Pipeline([
+            ('pls',    PLSTransformer(n_components=N, scale=False)),
+            ('scaler', StandardScaler()),
+            ('lr',     LogisticRegression(C=, solver=, max_iter=, random_state=42))
+        ])
+
+    The runtime builds the same Pipeline at ``search.py:373-387`` using
+    ``spectral_predict.models.PLSTransformer``. The exported script defines
+    its own minimal ``PLSTransformer`` inline (codegen lines 1314-1355) but
+    the fit/transform behavior is equivalent for 1-D y (no ndim>2 branch),
+    so predict_proba parity holds.
+
+    Param-routing contract: the codegen splits prefixed keys via
+    ``_split_pls_da_params`` — ``pls__*`` keys go to PLSTransformer kwargs,
+    ``lr__*`` keys go to LogisticRegression. The in-process test must use
+    the same prefixes in the params dict and instantiate the components
+    with the same effective values.
+
+    ``scale=False`` is mandatory for the PLS step (chemometrics convention,
+    avoids double-scaling SNV-preprocessed spectra; matches the runtime's
+    hardcoded ``PLSTransformer(scale=False)`` at ``search.py:373-387`` and
+    ``models.py:244``). ``n_components=3`` keeps the PLS stage well below
+    the rank ceiling for the synthetic 60-sample/80-feature data.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.models import PLSTransformer
+
+    X_train, y_train, X_test = _make_binary_classification_data()
+
+    # Params mirror what the runtime emits: prefixed keys routed by
+    # _split_pls_da_params. n_components=3 picks a rank well below the
+    # 60-sample / 80-feature regime. lr__random_state is explicit (rather
+    # than relying on _render_pls_da_pipeline's internal lr_defaults at
+    # code_generator.py:1300) so the contract is documented at the test
+    # site — if a future codegen change drops the internal random_state
+    # default, this test still pins the deterministic-LR contract.
+    params = {
+        "pls__n_components": 3,
+        "lr__C": 1.0,
+        "lr__solver": "lbfgs",
+        "lr__max_iter": 1000,
+        "lr__random_state": 42,
+    }
+
+    # In-process Pipeline: same shape as what _render_pls_da_pipeline emits.
+    # PLSTransformer defaults to max_iter=500, tol=1e-6, scale=False — the
+    # codegen pops the same defaults from pls_params (code_generator.py:1293-1296).
+    pls = PLSTransformer(n_components=3, max_iter=500, tol=1e-6, scale=False)
+    lr = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000, random_state=42)
+    model = Pipeline(
+        [("pls", pls), ("scaler", StandardScaler()), ("lr", lr)]
+    )
+
+    _run_parity(
+        model=model,
+        model_name="PLS-DA",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# MLP — no-op imbalance marker (T-20c follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_mlp_binary_classification_imbalance_is_no_op_marker(tmp_path):
+    """Marker: MLP + ``imbalance_method='class_weight'`` MUST be a no-op.
+
+    MLPClassifier accepts neither ``class_weight`` (TypeError on
+    ``__init__``) nor ``sample_weight`` at fit() under the pyproject's
+    sklearn floor. The codegen at ``code_generator.py:918-923`` explicitly
+    excludes MLP from class_weight injection in the StandardScaler-wrapped
+    path, mirroring the runtime fallback at ``search.py:4439-4444``
+    (unweighted training, with a warning emitted to the user).
+
+    This test pins the no-op behavior end-to-end via the T-20 parity
+    contract. The in-process MLP has no imbalance kwargs (mirrors the
+    runtime fallback). The codegen is asked for ``imbalance_method=
+    'class_weight'``; if it ever starts injecting class_weight or
+    sample_weight into the MLP path, the exported script's predict_proba
+    will diverge from the saved model's and this test fails.
+
+    Pairs with the static-source-check tests in
+    ``tests/test_t19_class_weight_per_library.py`` (which assert
+    ``'class_weight': 'balanced'`` is NOT in the generated script) — this
+    parity test catches the same bug class via a different angle (numerical
+    equivalence rather than source inspection), guarding against regressions
+    that look correct in source but fit differently at runtime.
+    """
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.templates.models import DEFAULT_PARAMS
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+
+    # Mirror the codegen's DEFAULT_PARAMS merge: copy the MLPClassifier
+    # defaults, then override with our test-specific params (small network
+    # + low max_iter to keep subprocess startup the bottleneck). The codegen
+    # does the same in code_generator._render_scaled_pipeline.
+    params = {"hidden_layer_sizes": (10,), "max_iter": 50, "random_state": 42}
+    mlp_params_full = DEFAULT_PARAMS["MLPClassifier"].copy()
+    mlp_params_full.update(params)
+
+    # In-process model: no imbalance kwargs (mirrors runtime fallback).
+    # StandardScaler wraps because MLP is in SCALE_SENSITIVE_MODELS
+    # (search.py:113); the codegen wraps via _render_scaled_pipeline.
+    mlp = MLPClassifier(**mlp_params_full)
+    model = Pipeline([("scaler", StandardScaler()), ("model", mlp)])
+
+    _run_parity(
+        model=model,
+        model_name="MLP",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="class_weight",  # Marker: must be no-op for MLP.
+        tmp_path=tmp_path,
+        # Pin the user-facing warning. The codegen at code_generator.py:1510-1516
+        # emits "[Imbalance] note: MLP does not support class_weight; ..." under
+        # IMBALANCE_METHOD == 'class_weight' so users know imbalance was silently
+        # dropped. If a future refactor silences this warning while keeping
+        # numerical no-op behavior, parity would still pass but users would be
+        # misled (they'd think balancing was applied).
+        expect_stdout_marker="MLP does not support class_weight",
+    )
