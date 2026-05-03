@@ -24,8 +24,14 @@
 >
 > ### Test contract update
 >
-> - `tests/test_imbalance.py`: parametrized regression-task no-op test split into two — `test_classification_sentinels_no_op` (4 cases, no-op preserved) and `test_regression_sentinels_raise` (2 cases, `pytest.raises(ValueError, match="classification-only")`).
+> - `tests/test_imbalance.py`: parametrized regression-task no-op test split into two — `test_classification_sentinels_no_op` (4 cases including `CLASS_WEIGHT`/`Auto` to exercise the `.lower()` in the factory guard) and `test_regression_sentinels_raise` (4 cases, `pytest.raises(ValueError, match="classification-only")`).
 > - 165 passed + 1 skipped across `test_imbalance.py` + `test_t19_class_weight_per_library.py` + `test_t32_sample_weight_resampling.py` + `test_unified_bayesian_baseline.py` + `test_cv_strategy.py`. No regressions.
+>
+> ### Pre-merge verification (Codex GPT-5.5 + MiMo 2.5 Pro)
+>
+> - **Codex GPT-5.5**: NEEDS_CHANGES on a documentation LOW (test parametrize claimed 4 cases, was 2 — fixed by expanding to 4 cases as above). Code itself verified correct.
+> - **MiMo 2.5 Pro**: READY_TO_MERGE. Notably traced the `ValueError` through the GUI exception handlers and confirmed it surfaces to the user — the inner `try/except` at `spectral_predict_gui_optimized.py:37595,37722` catches only `ImportError`, so the `ValueError` propagates to the outer `except Exception` at `:38614` and renders via `messagebox.showerror`. Same for both reachable GUI call sites. Loud-failure end-to-end verified, not just at the API layer.
+> - **MiMo non-blocking informational** (future awareness): caller guards at `search.py:4374`, `unified_bayesian.py:1231`, `nsga2_search.py:1394+` check `!= 'class_weight'` but not `!= 'auto'`. Currently safe because `'auto'` is resolved at run-entry; for regression `'auto'` reaches the factory and now raises. The factory is the single enforcement point; the `_needs_resampling_pipeline` dual-sentinel guard is defense-in-depth only. Acceptable architecture, flagged for future awareness.
 >
 > ### Lessons
 >

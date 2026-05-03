@@ -753,12 +753,13 @@ class TestBuildImbalanceTransformer:
         with pytest.raises(ValueError, match="Unknown"):
             transformer.fit_resample(X, y)
 
-    @pytest.mark.parametrize("sentinel", ["class_weight", "auto"])
+    @pytest.mark.parametrize("sentinel", ["class_weight", "auto", "CLASS_WEIGHT", "Auto"])
     def test_classification_sentinels_no_op(self, sentinel):
         """'class_weight' / 'auto' on the classification path route to
         ClassificationResampler whose fit_resample no-ops. Safe because
         callers inject class_weight='balanced' at model construction
-        (search.py, unified_bayesian.py, nsga2_search.py)."""
+        (search.py, unified_bayesian.py, nsga2_search.py). Case variants
+        exercise the .lower() in the factory guard."""
         import numpy as np
         import pandas as pd
 
@@ -771,15 +772,16 @@ class TestBuildImbalanceTransformer:
         assert X_res is X
         assert y_res is y
 
-    @pytest.mark.parametrize("sentinel", ["class_weight", "auto"])
+    @pytest.mark.parametrize("sentinel", ["class_weight", "auto", "CLASS_WEIGHT", "Auto"])
     def test_regression_sentinels_raise(self, sentinel):
         """'class_weight' / 'auto' on the regression path must raise — there
         is no compensating sample-weight mapping for sklearn regressors, so
         silent routing would train an unweighted-and-unresampled regression
-        model (silent-failure shape). Cross-family review (Codex GPT-5.5,
-        GLM 5.1, DeepSeek V4 Pro Max, silent-failure-hunter) converged on
+        model (silent-failure shape). Cross-family review (silent-failure-
+        hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) converged on
         loud-raise after the prior no-op was identified as transferred-
-        justification fallacy."""
+        justification fallacy. Case variants exercise the .lower() in the
+        factory guard."""
         with pytest.raises(ValueError, match="classification-only"):
             build_imbalance_transformer(sentinel, task_type="regression", random_state=42)
 
