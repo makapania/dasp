@@ -766,28 +766,18 @@ def test_catboost_binary_classification_parity_class_weight(tmp_path):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Codegen CV pooling bug surfaced by T-20b: CatBoostClassifier."
-        "predict() returns shape (n, 1) for multiclass, but the CV "
-        "majority-vote block in templates/validation.py "
-        "(CROSS_VALIDATION_CLASSIFICATION_TEMPLATE, ~line 163-176) calls "
-        "Counter(preds_per_sample[i]) which can't hash ndarrays. The "
-        "exported script crashes before reaching the parity-test "
-        "appendix. Fix needs the validation template to scalarise the "
-        "prediction (e.g. int(np.ravel(y_pred_fold[local_i])[0])) — "
-        "filed as follow-up ticket. When fixed, this test will start "
-        "passing and strict=True forces the marker to be removed."
-    ),
-)
 def test_catboost_multiclass_classification_parity(tmp_path):
     """Multi-class CatBoost — pins the multi-output predict_proba shape
     parity. CatBoost infers multi-class objective from the y label set.
 
-    Currently xfailed: see the marker for the codegen bug T-20b surfaced.
-    Test code itself is correct; the xfail is on a downstream codegen
-    issue, not on the parity contract."""
+    Was xfail-strict in T-20b: ``CatBoostClassifier.predict()`` returns
+    shape ``(n, 1)`` for multiclass, and the CV majority-vote block in
+    ``templates/validation.py``'s CROSS_VALIDATION_CLASSIFICATION_TEMPLATE
+    couldn't hash 1-element ndarrays. Fixed upstream by PR #26's defensive
+    ``.ravel()`` at the per-fold predict site (``templates/validation.py``
+    line 160), which flattens the ``(n, 1)`` shape to ``(n,)`` before the
+    pooling block runs. Marker removed; this is now a regular passing
+    parity test."""
     pytest.importorskip("catboost")
     from catboost import CatBoostClassifier
 
