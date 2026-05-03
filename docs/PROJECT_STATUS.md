@@ -1,16 +1,27 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 (Model Dev refined-model crash on `imbalance_method='class_weight'` / `'auto'` — fixed in commit `4dcedbc`, see SESSION_LOG.md). Pre-existing baseline still **360 passed, 1 skipped** plus 4 new regression cases on `ClassificationResampler` no-op behavior.
+> **Last updated:** 2026-05-05 (Model Dev refined-model class_weight dispatcher — round-1 fix `4dcedbc`, round-2 fix-of-fixes `c395317` after convergent HIGH from DeepSeek + Codex caught silent CatBoost/XGBoost unweighted training. Round-2 verified by GLM 5.1 max + Codex convergence; pushed to `origin/main`).
 >
-> ## Session 2026-05-05 — refined-model imbalance crash (commit `4dcedbc`, NOT pushed yet)
+> ## Session 2026-05-05 — refined-model imbalance dispatcher (PUSHED)
+>
+> **Three commits to `origin/main`:**
+> - `4dcedbc` round-1: stops the crash, but had silent CatBoost/XGBoost gap
+> - `4bd5d30` docs: round-1 root-cause writeup in SESSION_LOG
+> - `c395317` round-2: closes silent gap; `auto_class_weights='Balanced'` for CatBoost; `compute_sample_weight('balanced', y)` threaded for XGBoost at 3 fit sites; MLP message via `_log_progress` (visible in PyInstaller bundle); defense-in-depth at 4 layers
 >
 > **User report**: running any classifier from Model Development → Refine raised `ValueError: Unknown resampling method: class_weight` from `imbalance.py:252`. Broken for all classifier model types since T-19 (`1d2bf6d`) made the auto→class_weight resolution path more reachable in saved-and-reloaded model configs.
 >
-> **Fix**: two-layer, mirrors `search.py:4411-4470`. (1) `_run_refined_model_thread` now resolves `'auto'` via `resolve_auto_imbalance` and applies `class_weight='balanced'` to the model directly (with PLS-DA's LR tail wired via shared `_lr_kwargs`), then clears the variable so no resampler step is appended. (2) `ClassificationResampler.fit / fit_resample` no-ops on `'class_weight'` / `'auto'` sentinels as defense in depth. Regression test added in `tests/test_imbalance.py` covering both sentinels case-insensitively.
+> **Round-1 fix (`4dcedbc`)**: GUI dispatcher routes `class_weight` via `model.set_params(class_weight='balanced')` with `hasattr` guard + clear `loaded_imbalance_method=None`; `ClassificationResampler` no-ops on sentinels as defense in depth.
 >
-> **Test sweep**: `tests/test_imbalance.py` 58 passed + 1 skipped (was 54 + 1 skipped pre-fix; +4 from new no-op parametrize). Full sweep not re-run for this isolated GUI/imbalance-only fix.
+> **Round-1 review (DeepSeek V4 Pro Max + Codex, parallel)**: convergent HIGH — `hasattr(model, 'class_weight')` returns False for CatBoostClassifier (uses `auto_class_weights`) and XGBClassifier (only `sample_weight` at fit). Both classifiers silently trained UNWEIGHTED — wrong numbers, no crash. Violated the "Refine reproduces Results" contract.
 >
-> **Push status**: committed locally on `main`, **not pushed**. User to push when ready.
+> **Round-2 fix-of-fixes (`c395317`)**: discriminator now branches on `model_name` first (PLS-DA / CatBoost / hasattr / sample_weight fallback / MLP / no-support); `use_sample_weight_for_classification` flag drives `compute_sample_weight('balanced', y)` at 3 fit sites; `warnings.warn` → `self._log_progress` for PyInstaller-bundle visibility; `_fit_with_early_stopping` extended with optional `sample_weight=None` kwarg; explicit `'auto'` guard added to `_needs_resampling_pipeline`; `build_imbalance_transformer` sentinel guard extended to regression task.
+>
+> **Round-2 review (GLM 5.1 max + Codex, convergent)**: both READY_TO_PUSH / CONFIRM_READY_TO_PUSH. Codex's call-graph trace verified `'model'` step name consistent across all 3 GUI pipeline-build paths, sample_weight reaches XGBClassifier.fit() through `**fit_kwargs`, codegen export-path already handles CatBoost/XGBoost analogously (no parallel bug), and saved-config backward compatibility is intact. One stale-comment nit (RidgeClassifier mentioned under sample_weight fallback though code routes via class_weight branch) deferred per engineering-polish rule.
+>
+> **Test sweep**: `tests/test_imbalance.py` 62 passed + 1 skipped (was 54 + 1 pre-session; +4 round-1 sentinel no-op + +4 round-2 regression-task sentinel). py_compile clean.
+>
+> **Generalisable lesson** (filed in SESSION_LOG): `hasattr(model, '<flag>')` alone is NOT a sufficient discriminator for model-parameter flags across the sklearn ecosystem. CatBoost / XGBoost / MLP all need different routing. Canonical pattern: branch on model_name first for known per-library kwargs → hasattr → inspect.signature(model.fit) for sample_weight-only → warn for no-support. Mirrored in `search.py:4411-4448` and now in `_run_refined_model_thread`.
 >
 > ---
 >

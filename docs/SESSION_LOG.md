@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-05 Round-2 fix-of-fixes: silent-unweighted CatBoost/XGBoost class_weight (commit `c395317`)
+
+After commit `4dcedbc` shipped, dispatched two cross-family reviewers (DeepSeek V4 Pro Max via opencode-call, Codex via codex-reviewer agent) to verify the fix held across all model types — user's emphasis: "the key is to make sure this works for all model types and analysis types." **Both independently flagged the same HIGH:** the round-1 fix used `hasattr(model, 'class_weight')` to gate routing, which returns False for CatBoostClassifier (uses `auto_class_weights`/`class_weights`) and XGBClassifier (only supports `sample_weight` at fit time). Round-1 fell into the warning branch and silently cleared `loaded_imbalance_method`, so both classifiers trained UNWEIGHTED whenever a user picked `class_weight` or `auto` (resolved to `class_weight`) for them. **No crash — silently wrong numbers**, violating the foundational "Refine reproduces Results" contract.
+
+Convergent HIGH from two independent reviewers is the user's standing signal that a finding is real. Round-2 fix in `c395317`:
+- GUI dispatcher branches on `model_name` first: PLS-DA → `_lr_kwargs` LR tail; CatBoost → `model.set_params(auto_class_weights='Balanced')` (parity with `code_generator.py:946`); `hasattr` → `set_params(class_weight='balanced')`; sample_weight-fallback (XGBoost / RidgeClassifier-style — detected via `inspect.signature(model.fit)`) → sets `use_sample_weight_for_classification` flag.
+- The flag drives `compute_sample_weight('balanced', y_train)` at three fit sites: early-stopping fold via new `sample_weight=` kwarg on `_fit_with_early_stopping` (extended in `cv_utils.py`); non-early-stopping fold via `pipe_fold.fit(X, y, model__sample_weight=...)` sklearn fit_param routing; final-pipeline fit on full data via the same routing. The `'model'` step name is consistent across all three GUI pipeline-build paths (GA / derivative+subset / raw) for non-PLS-DA models — Codex confirmed via call-graph trace at lines 37608-37614 / 37736-37742 / 37791-37797.
+- All `warnings.warn` calls in the discriminator replaced by `self._log_progress` so messages reach users in the bundled .exe (PyInstaller detaches stderr to nul; warnings.warn is invisible there). MLP message rewritten to be explicitly directive ("switch to SMOTE / ADASYN / SMOTE-Tomek, or pick RandomForest/SVC/LightGBM/CatBoost/XGBoost/NeuralBoosted/PLS-DA").
+- Defense-in-depth additions from DeepSeek MEDIUMs: `_needs_resampling_pipeline` early-return now explicitly guards `'auto'` (was correct-by-accident); `build_imbalance_transformer` routes both sentinels through `ClassificationResampler` regardless of task_type so the no-op short-circuits even on the regression path.
+
+Round-2 review: GLM 5.1 max via z.ai (user's explicit reviewer pick) returned READY_TO_PUSH with 5 non-blocking observations (engineering polish only). Codex via codex-reviewer for cross-family convergence — CONFIRM_READY_TO_PUSH with 10-point call-graph trace and one stale-comment nit (line 37414 still mentions RidgeClassifier under sample_weight fallback though actual code correctly routes it via the hasattr branch — non-blocking, deferred per engineering-polish rule).
+
+**Generalisable lesson #2** (extending the round-1 lesson about dropdown-mixes-flags-and-methods): when applying a "model-parameter flag" to a model, `hasattr(model, '<flag_name>')` is NOT a sufficient discriminator across the sklearn ecosystem. CatBoost uses `auto_class_weights`, XGBoost uses `sample_weight` at fit time, MLP uses neither. The canonical pattern (now enshrined in `search.py:4411-4448` and mirrored in the GUI's refined-model thread) is to branch on model_name FIRST for known per-library kwargs, fall back to `hasattr` for sklearn-conformant models, then fall back to `inspect.signature(model.fit)` for sample_weight-only models, then warn for the no-support case. Any future code path that applies model kwargs across heterogeneous estimators must follow this discriminator order — `hasattr` alone produces silent unweighted training for the boosting libraries.
+
+**Test sweep**: `tests/test_imbalance.py` 62 passed + 1 skipped (was 58 + 1 after round-1; +4 from round-2's regression-task sentinel parametrize). py_compile clean across all 4 src files + GUI.
+
+**Push status (after this entry):** `main` at `c395317` (round-2 fix) + docs commits, all pushed to `origin/main`.
+
+---
+
 ## 2026-05-05 Model Dev "refined model" crash on imbalance_method='class_weight' / 'auto' (commit `4dcedbc`)
 
 **Symptom (user report):** running any classifier from Model Development → Refine raised `ValueError: Unknown resampling method: class_weight. Available: ['smote', ...]` from `imbalance.py:252`, traceback through `spectral_predict_gui_optimized.py:37849` (`step.fit_resample(...)` in the early-stopping fold loop). Confirmed broken for **all** classifier model types, not model-specific.
