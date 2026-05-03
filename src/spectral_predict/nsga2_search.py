@@ -3106,6 +3106,10 @@ def _compute_classification_cv_metrics(
             X_train, X_test = X_subset[train_idx], X_subset[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
+            # Reset per-fold scratch state so the PLS-DA branch (which doesn't
+            # set _per_fold_sw) cannot NameError at the fit site below.
+            _per_fold_sw = None
+
             # Apply imbalance resampling to training data (inside CV fold)
             X_train_resampled, y_train_resampled = X_train, y_train
             if imbalance_transformer is not None and _needs_resampling_pipeline(imbalance_method, 'classification'):
@@ -3140,12 +3144,32 @@ def _compute_classification_cv_metrics(
                 ])
             else:
                 model = _build_model(model_type, model_param, 'classification', random_state, hyperparams)
-                # Apply class_weight if specified and model supports it
-                if imbalance_method == 'class_weight' and model is not None and hasattr(model, 'class_weight'):
-                    try:
-                        model.set_params(class_weight='balanced')
-                    except Exception:
-                        pass
+                # Apply class_weight if specified — full discriminator mirroring
+                # search.py:4411-4448 / c395317. The prior hasattr-only check
+                # silently no-op'd for CatBoost (auto_class_weights, not
+                # class_weight) and XGBoost (sample_weight only at fit time), so
+                # the F1/AUC/etc. METRICS DISPLAYED to the user in the NSGA-II
+                # Results panel were computed on an UNWEIGHTED model — silent
+                # contract violation. Per-fold sample_weight is computed AFTER
+                # the in-fold resampler step so weights match the resampled y.
+                _per_fold_sw = None
+                if imbalance_method == 'class_weight' and model is not None:
+                    if model_type == 'CatBoost':
+                        try:
+                            model.set_params(auto_class_weights='Balanced')
+                        except Exception:
+                            pass
+                    elif hasattr(model, 'class_weight'):
+                        try:
+                            model.set_params(class_weight='balanced')
+                        except Exception:
+                            pass
+                    else:
+                        import inspect as _inspect
+                        _model_fit_sig = _inspect.signature(model.fit) if hasattr(model, 'fit') else None
+                        if _model_fit_sig and 'sample_weight' in _model_fit_sig.parameters:
+                            from sklearn.utils.class_weight import compute_sample_weight
+                            _per_fold_sw = compute_sample_weight('balanced', y_train_resampled)
 
             if model is None:
                 continue
@@ -3153,7 +3177,10 @@ def _compute_classification_cv_metrics(
             # Fit and predict
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')
-                model.fit(X_train_resampled, y_train_resampled)
+                if _per_fold_sw is not None:
+                    model.fit(X_train_resampled, y_train_resampled, sample_weight=_per_fold_sw)
+                else:
+                    model.fit(X_train_resampled, y_train_resampled)
                 y_pred = model.predict(X_test)
 
             # Compute F1, Precision, Recall
