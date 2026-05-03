@@ -1,6 +1,35 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 afternoon — PR #38 4-way convergent READY_TO_MERGE on the class_weight discriminator sister-site fix (3 silently-broken sites + 1 calibration-refit site closed via Codex+GLM+DeepSeek HIGH catches; Kimi K2.6 sister-site sweep confirmed exhaustive — no 5th site). Plus 6 morning PRs (#32–#37) closing the 2026-05-04 deferred backlog. **7 PRs ready for user merge.**
+> **Last updated:** 2026-05-05 evening — PR #39 expanded from pure docs to docs + 3-file correctness fix after a 4-way cross-family investigation (silent-failure-hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) identified a transferred-justification fallacy in the `class_weight`/`auto` factory routing. Plus PR #38 still 4-way convergent READY_TO_MERGE and the 6 morning PRs (#32–#37). **8 PRs ready for user merge** (PR #39 needs title update from `docs(session-end)` to reflect the code fix on push).
+>
+> ## Session 2026-05-05 evening — factory + needs_resampling_pipeline asymmetry fix (PR #39)
+>
+> ### What happened
+>
+> 1. A prior agent's "trivial defense-in-depth" patch for `RegressionResampler.fit_resample` (`f6ccfd1`) was committed locally, then reset before push when the user surfaced doubts about silent-failure shape.
+> 2. A four-way cross-family investigation was run on the contested no-op: silent-failure-hunter (Claude) + Codex GPT-5.5 + GLM 5.1 (z.ai) + DeepSeek V4 Pro Max (max-thinking, DeepSeek API). All four converged on "no-op is wrong" — the shape-pattern-match transferred without the safety-justification across the classification/regression boundary. Vote on remedy: 2-1 toward `raise ValueError` (Codex+GLM) over warn-and-no-op (DeepSeek). User directive: scientific accuracy over user convenience → raise.
+> 3. The same misanalysis was identified at *two* layers, not one: the inner `RegressionResampler.fit_resample` patch (already reverted) AND the factory `build_imbalance_transformer` (lines 947-956 pre-fix, silently routing regression+sentinel to ClassificationResampler's no-op regardless of task_type — same shape, same broken safety justification). The factory layer is reachable today via the GUI ensemble-reload path (`spectral_predict_gui_optimized.py:37587`) loading a saved classification config into a regression context.
+>
+> ### Sites fixed
+>
+> | # | File:line | Function | Change |
+> |---|---|---|---|
+> | 1 | `imbalance.py:947-967` | `build_imbalance_transformer` factory | Split sentinel guard by task_type. Classification: keep route-to-no-op (compensation is real). Regression: raise `ValueError` with diagnostic message naming the classification-only nature of the sentinel and listing valid regression methods. |
+> | 2 | `unified_bayesian.py:156` | `_needs_resampling_pipeline` | Guard both `'class_weight'` AND `'auto'` (was `'class_weight'` only). Brings into line with `search.py:289`. Defense-in-depth against future `'auto'`-resolution-delay refactors. |
+> | 3 | `nsga2_search.py:142` | `_needs_resampling_pipeline` | Same as #2. |
+>
+> ### Sites NOT touched (deliberate)
+>
+> - `ClassificationResampler.fit:244` no-op stays as-is. Architecturally fragile (a future bypass-the-router caller would silently train an unweighted classifier) but produces correct scientific output today because every integrated caller compensates at construction. Filed in SESSION_LOG as a future hardening item; not expanded into present scope per "fix what's wrong, don't redesign around it."
+>
+> ### Test contract update
+>
+> - `tests/test_imbalance.py`: parametrized regression-task no-op test split into two — `test_classification_sentinels_no_op` (4 cases, no-op preserved) and `test_regression_sentinels_raise` (2 cases, `pytest.raises(ValueError, match="classification-only")`).
+> - 165 passed + 1 skipped across `test_imbalance.py` + `test_t19_class_weight_per_library.py` + `test_t32_sample_weight_resampling.py` + `test_unified_bayesian_baseline.py` + `test_cv_strategy.py`. No regressions.
+>
+> ### Lessons
+>
+> Detailed writeup in SESSION_LOG.md — four lessons captured: transferred-justification fallacy in defense-in-depth; cross-family panels reveal values disagreements that single-reviewer panels can't; "verification" reviews check reachability not remedy-fitness; the "skips the misleading print()" argument is circular self-justification.
 >
 > ## Session 2026-05-05 afternoon — class_weight sister-site bug class fully closed (PR #38)
 >

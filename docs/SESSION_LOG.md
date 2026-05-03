@@ -4,6 +4,33 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-05 evening — transferred-justification fallacy in `class_weight` defense-in-depth (factory + RegressionResampler)
+
+A prior agent attempted a "trivial defense-in-depth fix" for `RegressionResampler.fit_resample` mirroring the `ClassificationResampler.fit:244` no-op for `'class_weight'`/`'auto'` sentinels. That patch (`f6ccfd1`) was committed locally then reset before push. A four-way investigation (silent-failure-hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) unanimously confirmed the no-op is **wrong** — the mirror form was correct but the *safety justification* did not transfer across the classification/regression boundary. Two of three external reviewers voted to fail loud over warn-and-no-op; the dissenting vote (DeepSeek) was on project-coherence grounds, not correctness grounds.
+
+**Why the mirror failed.** The line-244 ClassificationResampler no-op is safe because the classifier itself receives `class_weight='balanced'` at construction time on three integrated paths (`search.py:4418-4421`, `unified_bayesian.py:1238-1241`, `nsga2_search.py:1401-1405`) — the resampler is no-op'd, but the model is still weighted. The regression side has **zero compensating mechanism**: sklearn regressors do not accept `class_weight`, and there is no project-level sentinel-to-sample-weight mapping. A regression no-op produces an unweighted-AND-unresampled model that ranks against properly-handled siblings in CV results — silent wrong scientific output.
+
+**The same fallacy lived at two layers**, not one: the original `RegressionResampler.fit_resample` patch (now reverted) AND the factory `build_imbalance_transformer` (lines 947-956 pre-fix, which silently routed `(task_type='regression', method='class_weight')` to ClassificationResampler's no-op regardless of task_type — same shape-pattern-match across the boundary, same broken safety justification). The factory layer was actually *more* reachable than the inner-class layer: GUI ensemble-reload at `spectral_predict_gui_optimized.py:37587` calls the factory with `loaded_imbalance_method` from saved configs, which can plausibly carry a stale classification-trained `'class_weight'` value into a regression context.
+
+**Fix shape (this session, on top of `c372ab2`):**
+1. **Factory split by task_type**: classification path keeps the route-to-no-op (compensation is real); regression path raises `ValueError` with diagnostic message naming the classification-only nature of the sentinel and listing valid regression methods. (`imbalance.py:947-967`.)
+2. **`_needs_resampling_pipeline` consistency**: `unified_bayesian.py:156` and `nsga2_search.py:142` previously guarded `'class_weight'` only; brought into line with `search.py:289` which guards both `('class_weight', 'auto')`. Per the search.py comment, the second guard prevents a future refactor that delays `'auto'` resolution from accidentally wrapping it in ImbPipeline.
+3. **Test contract update**: `tests/test_imbalance.py` parametrized regression-task no-op test split into two — `test_classification_sentinels_no_op` (4 cases, no-op preserved) and `test_regression_sentinels_raise` (2 cases, `pytest.raises(ValueError, match="classification-only")`).
+
+**Sites NOT touched (deliberate):** `ClassificationResampler.fit:244` no-op stays as-is. It is architecturally fragile (a future bypass-the-router caller would silently train an unweighted classifier) but produces correct scientific output today because every integrated caller compensates at construction. Per "fix what's wrong, don't redesign around it" — file as a future hardening item, don't expand the present fix scope.
+
+**Generalisable lessons:**
+
+1. **Transferred-justification fallacy.** When mirroring a defensive pattern across modules, you must verify the *safety conditions* that made the pattern correct in the original location also hold in the new location. Pattern shape doesn't carry safety with it. The chemometrics-specific sharpening: `class_weight` is a classification-only mechanism in sklearn; ANY defensive code that treats `'class_weight'` as a no-oppable input on the regression side is implicitly claiming a compensation path exists when it doesn't.
+
+2. **Cross-family panel reveals values disagreements that single-reviewer panels can't.** The 4-way verdict was 4/4 on substance (no-op is wrong) but split 2-1 on remedy (raise vs warn). The split itself was informative — it surfaced that "raise" and "warn" express different priors (programmer-discipline vs chemometrics-pragmatism). Single-reviewer would have hidden the values dimension behind one verdict.
+
+3. **5-minute "verification" reviews check reachability, not remedy-fitness.** The original DeepSeek-V4-Pro pass that "verified" the bad fix in 5 minutes was checking whether the branch was reachable (correct: it wasn't). It did NOT evaluate whether the chosen remedy was appropriate given the asymmetric compensation. The fresh DeepSeek-V4-Pro-Max max-thinking pass (~6 min) caught the asymmetry immediately — different question, different review depth.
+
+4. **The "skips the misleading print()" argument is circular.** The original commit message argued the no-op "correctly skips" the post-resample print() at imbalance.py:545-546. This argument presupposes the conclusion — it only applies if you've decided to no-op. If the remedy is `raise ValueError`, the print() never runs because the function exits via the exception. Watch for this shape of self-justifying defensive-code commit message.
+
+---
+
 ## 2026-05-05 afternoon — class_weight discriminator sister-site bug class fully closed (PR #38, four-way convergent review)
 
 The c395317 GUI fix from earlier 2026-05-05 closed the `_run_refined_model_thread` instance of a defective `hasattr(model, 'class_weight')`-only check. PR #38 closed FOUR more sister sites of the same bug class — `unified_bayesian.objective`, `nsga2_search._evaluate`, `nsga2_search._compute_classification_cv_metrics`, `nsga2_search._compute_calibration_metrics`. Pre-fix, every Bayesian trial AND every NSGA-II individual evaluation for CatBoost/XGBoost classifier under `imbalance_method='class_weight'` (or `'auto'` resolving to it) trained UNWEIGHTED — silent contract violation, wrong user-visible Accuracy / F1 / AUC / etc.

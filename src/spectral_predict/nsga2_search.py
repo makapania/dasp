@@ -139,7 +139,10 @@ def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) 
     """
     if imbalance_method is None:
         return False
-    if imbalance_method == 'class_weight':
+    # 'auto' resolves to 'class_weight' or None at run-entry; both short-circuit
+    # here as defense-in-depth so a future refactor that delays resolution can't
+    # accidentally wrap them in ImbPipeline.
+    if imbalance_method in ('class_weight', 'auto'):
         return False
 
     if task_type == 'classification':
