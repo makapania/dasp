@@ -1,0 +1,38 @@
+[llm-call] glm → zai/glm-5.1
+Here is the review of the two preprocessing functions. 
+
+### 1. `preprocess_spectra`
+**Verdict:** **CLEAN**
+
+**Explanation:** 
+This function applies Standard Normal Variate (SNV) preprocessing. SNV is a row-wise operation: it calculates the mean and standard deviation for each individual spectrum (row) independently to center and scale it. 
+
+Even though the function stacks the training and test sets together using `np.vstack`, it calculates the mean and standard deviation along `axis=1` (across the columns/wavelengths of a single row). Because no statistics are shared or aggregated across different samples (rows), the test data does not influence the preprocessing of the training data, and vice versa. Therefore, there is no data leakage.
+
+---
+
+### 2. `baseline_correct`
+**Verdict:** **LEAKAGE**
+
+**Explanation:** 
+This function calculates a single baseline by computing the median along `axis=0` (down the rows/sample axis) of the **combined** training and test datasets (`X_all`). 
+
+By doing this, the test data directly influences the baseline value that gets subtracted from the training data. When evaluating machine learning models, the test set must act as "unseen" data. By including `X_test` in the median calculation, information from the test set leaks into the training set, which can lead to overly optimistic performance metrics and poor generalization to truly unseen future data.
+
+**How to fix it:**
+To fix this, you should compute the baseline using *only* the training data, and then subtract that exact same baseline from both the training data and the test data:
+
+```python
+def baseline_correct(X_train: np.ndarray, X_test: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Apply asymmetric least squares baseline correction to all spectra."""
+    # Calculate baseline ONLY from training data
+    baseline = np.median(X_train, axis=0)
+    
+    # Apply the same baseline to both train and test
+    X_train_corrected = X_train - baseline
+    X_test_corrected = X_test - baseline
+    
+    return X_train_corrected, X_test_corrected
+```
+
+===ELAPSED_SEC: 12===

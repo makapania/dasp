@@ -1,0 +1,65 @@
+[llm-call] glm → zai/glm-5.1
+Here is a detailed review of the provided functions. I have identified a few critical bugs, potential runtime errors, and mathematical edge cases that need to be addressed.
+
+### 1. `normalize_to_unit_area`
+
+**Bugs & Issues:**
+*   **Incorrect Broadcasting (Critical Bug):** `spectra.sum(axis=1)` returns a 1D array of shape `(n_samples,)`. In NumPy, dividing a 2D array `(n_samples, n_wavelengths)` by a 1D array `(n_samples,)` does not divide row-by-row. Instead, NumPy broadcasts the 1D array across the columns, matching the trailing dimensions. This will result in an output of shape `(n_samples, n_wavelengths)` where column $i$ is divided by area $i$, rather than row $i$ being divided by area $i$. 
+*   **Division by Zero:** If a row in `spectra` contains all zeros (or negative values that sum perfectly to zero), `areas` will contain a `0`. This will raise a `ZeroDivisionError` and return a row of `NaN`s or `Inf`s. 
+*   **Negative Values:** If a spectrum contains negative values (common with baseline-corrected or noisy spectra), its sum could be zero or negative. Normalizing by a negative number flips the relative intensities of the spectrum, and normalizing to a sum of `1.0` no longer represents a physical "area" or probability distribution.
+
+**Fixes:**
+1.  Reshape `areas` to `(n_samples, 1)` so NumPy correctly broadcasts the division across the rows. You can do this using `areas[:, np.newaxis]` or `keepdims=True`.
+2.  Add a small epsilon to the denominator to prevent division by zero, or handle zero-sum rows explicitly.
+
+**Proposed Code:**
+```python
+def normalize_to_unit_area(spectra: np.ndarray) -> np.ndarray:
+    """Normalize each spectrum so it has unit area (sum = 1)."""
+    # keepdims=True ensures the result has shape (n_samples, 1) for correct broadcasting
+    areas = spectra.sum(axis=1, keepdims=True)
+    
+    # Prevent division by zero by adding a tiny epsilon (or you could mask/raise an error)
+    epsilon = np.finfo(spectra.dtype).eps
+    return spectra / (areas + epsilon)
+```
+
+---
+
+### 2. `signal_to_noise`
+
+**Bugs & Issues:**
+*   **Zero Noise causes Crash (Runtime Error):** If the data in the `noise_region` is perfectly flat (e.g., all zeros, or all identical constants), the standard deviation will be `0.0`. This will trigger a `ZeroDivisionError` and return `Inf` or `NaN`.
+*   **Empty Slicing:** If `noise_region` evaluates to an empty slice (e.g., `slice(0, 0)`), `spectra[:, noise_region]` will be an empty array. Calling `.std(axis=1)` on an empty array results in `NaN`, which will propagate through the division.
+*   **Negative Spectral Values:** While spectra are typically non-negative, if they contain negative values, `np.max()` might pick a value that isn't the true analytical "peak" of the spectrum. 
+
+**Fixes:**
+1.  Calculate noise first and replace zero-standard-deviations with a very small number (epsilon) to prevent application crashes on clean signals.
+2.  Ensure the `noise_region` yields valid data.
+
+**Proposed Code:**
+```python
+def signal_to_noise(spectra: np.ndarray, noise_region: slice) -> np.ndarray:
+    """Estimate signal-to-noise ratio for each spectrum."""
+    signal = spectra.max(axis=1)
+    noise = spectra[:, noise_region].std(axis=1)
+    
+    # Prevent division by zero if the noise region is completely flat
+    noise[noise == 0] = np.finfo(spectra.dtype).eps
+    
+    return signal / noise
+```
+
+---
+
+### System-Wide / Architectural Edge Cases
+
+If you put these two functions together in a pipeline, there are two major edge cases to consider:
+
+1. **Floating-Point Precision Loss (`normalize_to_unit_area` -> `signal_to_noise`):**
+   If your spectral values are very large integers (e.g., unscaled 16-bit detector counts), their sum might exceed the maximum precision of a standard 32-bit or 64-bit float. When you divide by this massive sum, you lose relative precision. Subsequently passing this normalized data into `signal_to_noise` might result in artificially high or undefined noise due to floating-point truncation. **Fix:** Ensure `spectra` is cast to `np.float64` *before* normalizing.
+
+2. **Hardcoded `axis=1` assumption:**
+   Both functions strictly assume the spectra are along `axis=1` (rows). If a user passes a single 1D spectrum (a 1D array), `spectra.max(axis=1)` will throw an `AxisError: axis 1 is out of bounds`. **Fix:** If 1D inputs are possible, you should add a check at the top of the functions to expand 1D arrays into 2D arrays (e.g., `if spectra.ndim == 1: spectra = spectra[np.newaxis, :]`).
+
+===ELAPSED_SEC: 28===

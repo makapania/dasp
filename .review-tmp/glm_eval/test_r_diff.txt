@@ -1,0 +1,89 @@
+commit 4dcedbca35c5a834df14074ceb9f4bbd191795e7
+Author: Makapania <matt.sponheimer@gmail.com>
+Date:   Sun May 3 10:17:29 2026 -0600
+
+    fix: refined-model thread crashed on imbalance_method='class_weight' / 'auto'
+    
+    The Model Development "refined model" path constructed
+    ClassificationResampler('class_weight') and inserted it as a Pipeline step.
+    'class_weight' is a model-parameter sentinel (per _needs_resampling_pipeline
+    and validate_classification_config), not a resampler — so when CV called
+    step.fit_resample() the resampler exploded with "Unknown resampling method:
+    class_weight". This regressed all classifier model types in Model Dev once
+    T-19 (commit 1d2bf6d) made auto-mode resolution route 'class_weight' values
+    into the same path more frequently.
+    
+    Two-layer fix mirroring search.py:4411-4470:
+    
+    1. spectral_predict_gui_optimized.py (_run_refined_model_thread): after
+       reading loaded_imbalance_method, resolve 'auto' via resolve_auto_imbalance,
+       then for 'class_weight' apply class_weight='balanced' via model.set_params
+       (with hasattr guard + MLP/no-support warnings) and clear the variable so
+       no resampler step is appended downstream. PLS-DA routes the kwarg to its
+       LogisticRegression tail via a shared _lr_kwargs dict consumed at all three
+       pipeline-build sites (GA / derivative+subset / raw). Without this the no-op
+       in (2) would silently drop class_weight handling.
+    
+    2. src/spectral_predict/imbalance.py (ClassificationResampler.fit /
+       fit_resample): defense-in-depth no-op for 'class_weight' / 'auto' sentinels
+       so any future caller that misroutes them doesn't crash mid-CV.
+    
+    Regression test: tests/test_imbalance.py adds parametrized assertions that
+    both sentinels (case-insensitive) return input unchanged from fit_resample.
+    
+    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/src/spectral_predict/imbalance.py b/src/spectral_predict/imbalance.py
+index bf5e5e1..dfc0fae 100644
+--- a/src/spectral_predict/imbalance.py
++++ b/src/spectral_predict/imbalance.py
+@@ -236,6 +236,14 @@ class ClassificationResampler(BaseEstimator):
+ 
+     def fit(self, X, y=None):
+         """Fit the resampler (creates internal resampler object)."""
++        # 'class_weight' and 'auto' are model-parameter sentinels, not resampler
++        # methods — see _needs_resampling_pipeline() / validate_classification_config().
++        # If a caller still routes them through this factory, no-op so the pipeline
++        # doesn't crash; the model receives class_weight='balanced' at construction
++        # time in the actual call site.
++        if isinstance(self.method, str) and self.method.lower() in ('class_weight', 'auto'):
++            self.resampler_ = None
++            return self
+         # Create resampler based on method name
+         if isinstance(self.method, str):
+             method_map = {
+@@ -280,6 +288,10 @@ class ClassificationResampler(BaseEstimator):
+         """
+         self.fit(X, y)
+ 
++        # No-op for 'class_weight' / 'auto' sentinels — see fit() for rationale.
++        if self.resampler_ is None:
++            return X, y
++
+         original_size = len(y)
+         original_class_counts = Counter(y)
+ 
+diff --git a/tests/test_imbalance.py b/tests/test_imbalance.py
+index 3f08903..e4e0113 100644
+--- a/tests/test_imbalance.py
++++ b/tests/test_imbalance.py
+@@ -351,6 +351,19 @@ class TestClassificationResampler:
+         X_res, y_res = resampler.fit_resample(X, y)
+         assert len(X_res) > 0
+ 
++    @pytest.mark.parametrize("sentinel", ["class_weight", "auto", "CLASS_WEIGHT", "Auto"])
++    def test_class_weight_and_auto_are_no_ops(self, sentinel, imbalanced_data):
++        """Regression: GUI's refined-model path may route 'class_weight' or 'auto'
++        sentinels through the resampler factory (these are model-parameter flags,
++        not actual resamplers). Pre-fix this raised ValueError mid-CV. Post-fix
++        the resampler returns input unchanged so the pipeline can proceed; the
++        actual class_weight='balanced' kwarg is applied to the model elsewhere."""
++        X, y = imbalanced_data
++        resampler = ClassificationResampler(method=sentinel, random_state=42)
++        X_res, y_res = resampler.fit_resample(X, y)
++        assert X_res is X
++        assert y_res is y
++
+ 
+ # =============================================================================
+ # Regression Resampler Tests

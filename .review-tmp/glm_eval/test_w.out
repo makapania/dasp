@@ -1,0 +1,13 @@
+[llm-call] glm → zai/glm-5.1
+Here are the public functions and classes in the provided file, along with brief descriptions:
+
+* **`suggest_preprocessing`**: Suggests and returns a preprocessing configuration dictionary (including SNV, derivatives, baseline, smoothing, and autoscale) for a given Optuna trial.
+* **`apply_preprocessing`**: Applies a specified preprocessing configuration pipeline to raw spectral data.
+* **`suggest_model_params`**: Suggests model hyperparameters (e.g., components for PLS, depth for tree models) tailored to the specified model type.
+* **`suggest_one_class_params`**: Suggests hyperparameters optimized for one-class classification models.
+* **`compute_importances`**: Computes spectral feature importances using specified methods (e.g., built-in importance, CARS, or UVE).
+* **`create_unified_objective`**: Creates and returns the Optuna objective function that evaluates a configuration trial using cross-validation and returns a metric score.
+* **`run_unified_bayesian`**: Runs the unified Bayesian optimization loop over a defined number of trials to jointly find the best preprocessing, feature selection, and model hyperparameters.
+* **`convert_study_to_dataframe`**: Converts a completed Optuna optimization study into a standardized Pandas DataFrame containing parameters and metrics for all successful trials.
+
+===ELAPSED_SEC: 9===

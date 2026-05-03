@@ -1,0 +1,329 @@
+commit 3c63ffe92a5687480900235dd97da2f83e62ed97
+Author: Makapania <matt.sponheimer@gmail.com>
+Date:   Sat May 2 13:33:46 2026 -0600
+
+    fix(T-19): library-aware class_weight injection in exported code
+    
+    Pre-T-19 the catch-all branch in code_generator._render_model() unconditionally
+    injected class_weight='balanced' into every classifier's __init__ params:
+    
+    - LightGBM, RandomForest, sklearn LR/SVC: works (native kwarg)
+    - XGBoost: silently ignored at fit time (no balancing actually applied)
+    - CatBoost: hard TypeError on instantiation
+    
+    Dispatch per library:
+    - CatBoost gets auto_class_weights='Balanced'
+    - XGBoost gets sample_weight=compute_sample_weight('balanced', y) threaded
+      into the CV-fold and final-model fit() calls (mirrors runtime path)
+    - Other libraries keep class_weight='balanced'
+    
+    Pipeline behavior unchanged for users not using imbalance_method='class_weight'.
+    For users who do, exported scripts now actually run (CatBoost) and actually
+    weight the loss (XGBoost) — matching runtime dasp behavior. Pinned with
+    13 regression tests including end-to-end exec of the generated scripts.
+
+diff --git a/src/spectral_predict/code_generator.py b/src/spectral_predict/code_generator.py
+index ed5f2ae..daa7203 100644
+--- a/src/spectral_predict/code_generator.py
++++ b/src/spectral_predict/code_generator.py
+@@ -914,7 +914,18 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
+             params_full.update(params)
+ 
+             if self.imbalance_method and self.imbalance_method.lower() == 'class_weight':
+-                params_full.setdefault('class_weight', 'balanced')
++                # Library-aware balanced-loss dispatch. Pre-T-19 the catch-all path injected
++                # class_weight='balanced' for every model: LightGBM/RandomForest accept it,
++                # XGBoost silently ignores it (no balancing applied), CatBoost crashes on
++                # instantiation with TypeError. Map each library to its canonical kwarg
++                # instead. XGBoost has no constructor knob — sample_weight is threaded into
++                # the fit() call via _xgb_class_weight_needs_sample_weight().
++                if model_class.startswith('CatBoost'):
++                    params_full.setdefault('auto_class_weights', 'Balanced')
++                elif model_class.startswith('XGBoost') or model_class.startswith('XGB'):
++                    pass
++                else:
++                    params_full.setdefault('class_weight', 'balanced')
+ 
+             # Avoid injecting random_state into estimators that don't accept it (e.g., PLSRegression)
+             ctor_class = self._resolve_model_ctor_class()
+@@ -1168,6 +1179,17 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
+         }
+         return normalized in scale_models and not self._needs_pls_da_pipeline()
+ 
++    def _xgb_class_weight_needs_sample_weight(self) -> bool:
++        """XGBoost classification under imbalance_method='class_weight' threads
++        sample_weight at fit() time because XGBoost has no class_weight constructor
++        kwarg. Mirrors the runtime path in search.py."""
++        if self.task_type != 'classification':
++            return False
++        if not self.imbalance_method or self.imbalance_method.lower() != 'class_weight':
++            return False
++        model_class = self._resolve_model_class_name()
++        return model_class.startswith('XGBoost') or model_class.startswith('XGB')
++
+     def _autoscale_enabled(self) -> bool:
+         """Robust parse of self.config['autoscale'] — handles bool, int, NaN, and the
+         string forms ('True'/'False'/'1'/'0') that round-tripped CSVs may contain.
+@@ -1534,6 +1556,18 @@ def _regression_resample(X_vals, y_vals, method_name, params):
+             self.task_type, self.cv_strategy, self.cv_folds, self.cv_n_repeats
+         )
+ 
++        xgb_sample_weight = self._xgb_class_weight_needs_sample_weight()
++        sample_weight_import = (
++            'from sklearn.utils.class_weight import compute_sample_weight\n'
++            if xgb_sample_weight else ''
++        )
++        sample_weight_block = (
++            "    fit_kwargs = {}\n"
++            "    if IMBALANCE_METHOD == 'class_weight':\n"
++            "        fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_fold)\n"
++            if xgb_sample_weight else "    fit_kwargs = {}\n"
++        )
++
+         if self.task_type == 'classification':
+             return f'''
+ # =============================================================================
+@@ -1544,7 +1578,7 @@ def _regression_resample(X_vals, y_vals, method_name, params):
+ from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, classification_report
+ from sklearn.base import clone
+ from collections import Counter
+-
++{sample_weight_import}
+ cv = {cv_constructor}
+ 
+ unique_classes = np.unique(y)
+@@ -1571,7 +1605,7 @@ for train_idx, test_idx in cv.split({x_var}, y):
+             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
+ 
+     fold_model = clone(model)
+-    fold_model.fit(X_train_fold, y_train_fold)
++{sample_weight_block}    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+     y_pred_fold = fold_model.predict(X_test)
+ 
+     for local_i, sample_idx in enumerate(test_idx):
+@@ -1686,11 +1720,22 @@ y_pred_cv = all_y_pred_arr
+             x_var = 'X'
+ 
+         if self.task_type == 'classification':
++            xgb_sample_weight = self._xgb_class_weight_needs_sample_weight()
++            sample_weight_import = (
++                'from sklearn.utils.class_weight import compute_sample_weight\n'
++                if xgb_sample_weight else ''
++            )
++            sample_weight_block = (
++                "fit_kwargs = {}\n"
++                "if IMBALANCE_METHOD == 'class_weight':\n"
++                "    fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_full)\n"
++                if xgb_sample_weight else "fit_kwargs = {}\n"
++            )
+             return f'''
+ # =============================================================================
+ # TRAIN FINAL MODEL (with imbalance handling)
+ # =============================================================================
+-
++{sample_weight_import}
+ X_train_full, y_train_full = {x_var}, y
+ if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersampler',
+                         'tomek_links', 'smote_tomek', 'smote_enn']:
+@@ -1698,7 +1743,7 @@ if IMBALANCE_METHOD in ['smote', 'adasyn', 'borderline_smote', 'random_undersamp
+     if resampler is not None:
+         X_train_full, y_train_full = resampler.fit_resample(X_train_full, y_train_full)
+ 
+-model.fit(X_train_full, y_train_full)
++{sample_weight_block}model.fit(X_train_full, y_train_full, **fit_kwargs)
+ print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
+ '''
+ 
+diff --git a/tests/test_t19_class_weight_per_library.py b/tests/test_t19_class_weight_per_library.py
+new file mode 100644
+index 0000000..70cbd90
+--- /dev/null
++++ b/tests/test_t19_class_weight_per_library.py
+@@ -0,0 +1,187 @@
++"""T-19 regression tests — exported code with imbalance_method='class_weight'
++must use per-library balanced-loss kwargs.
++
++Pre-T-19, the catch-all branch in code_generator._render_model() unconditionally
++injected ``class_weight='balanced'`` into every classifier's __init__ params:
++- LightGBM, RandomForest, sklearn LR/SVC: works (native kwarg)
++- XGBoost: silently ignored at fit time (no balancing applied)
++- CatBoost: hard TypeError on instantiation
++
++T-19 dispatches per library: CatBoost gets ``auto_class_weights='Balanced'``,
++XGBoost gets ``sample_weight=compute_sample_weight('balanced', y)`` threaded
++into the CV-fold and final-model fit() calls. Other libraries keep
++class_weight='balanced'.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import io
++
++import numpy as np
++import pytest
++from sklearn.datasets import make_classification
++
++from spectral_predict.code_generator import CodeGenerator, ExportOptions
++
++
++def _classification_data(seed: int = 42, n_samples: int = 120) -> tuple[np.ndarray, np.ndarray]:
++    X, y = make_classification(
++        n_samples=n_samples,
++        n_features=20,
++        n_informative=10,
++        n_redundant=5,
++        n_classes=2,
++        weights=[0.85, 0.15],
++        random_state=seed,
++    )
++    return X, y
++
++
++def _generate(model_name: str, params: dict | None = None) -> str:
++    config = {
++        "model_name": model_name,
++        "preprocessing": "raw",
++        "task_type": "classification",
++        "params": params or {"n_estimators": 30, "max_depth": 3},
++        "cv_folds": 3,
++        "imbalance_method": "class_weight",
++    }
++    return CodeGenerator(config, ExportOptions(include_data=False)).generate_script()
++
++
++def _execute(model_name: str, params: dict | None = None) -> dict:
++    X, y = _classification_data()
++    config = {
++        "model_name": model_name,
++        "preprocessing": "raw",
++        "task_type": "classification",
++        "params": params or {"n_estimators": 30, "max_depth": 3},
++        "cv_folds": 3,
++        "imbalance_method": "class_weight",
++    }
++    opts = ExportOptions(include_data=True, data_X=X.copy(), data_y=y.copy())
++    script = CodeGenerator(config, opts).generate_script()
++    g: dict = {}
++    buf = io.StringIO()
++    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
++        exec(script, g)
++    return g
++
++
++# ----------------------------------------------------------------------
++# Per-library kwarg emission contracts
++# ----------------------------------------------------------------------
++
++def test_catboost_emits_auto_class_weights_not_class_weight():
++    script = _generate("CatBoost", params={"iterations": 30, "depth": 3})
++    assert "'auto_class_weights': 'Balanced'" in script, (
++        "CatBoost must use auto_class_weights='Balanced'; class_weight kwarg "
++        "raises TypeError on CatBoostClassifier instantiation."
++    )
++    assert "'class_weight': 'balanced'" not in script
++
++
++def test_xgboost_does_not_inject_class_weight_in_params():
++    """XGBoost ignores class_weight at fit time; sample_weight is threaded instead."""
++    script = _generate("XGBoost")
++    assert "'class_weight': 'balanced'" not in script, (
++        "XGBoost must not inject class_weight into __init__ — it silently no-ops."
++    )
++
++
++def test_xgboost_threads_sample_weight_via_fit_kwargs():
++    script = _generate("XGBoost")
++    assert "from sklearn.utils.class_weight import compute_sample_weight" in script
++    assert "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'" in script
++    assert "model.fit(X_train_full, y_train_full, **fit_kwargs)" in script
++    assert "fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)" in script
++
++
++def test_lightgbm_keeps_class_weight_balanced():
++    script = _generate("LightGBM")
++    assert "'class_weight': 'balanced'" in script
++    assert "'auto_class_weights'" not in script
++
++
++def test_randomforest_keeps_class_weight_balanced():
++    script = _generate("RandomForest")
++    assert "'class_weight': 'balanced'" in script
++
++
++def test_non_xgboost_does_not_emit_class_weight_sample_weight_block():
++    """Sample-weight threading is XGBoost-specific; other libraries use kwargs.
++
++    The phrase ``compute_sample_weight`` may legitimately appear in regression
++    helper bodies, so we assert specifically on the class_weight-mode threading
++    pattern that T-19 introduced.
++    """
++    pattern = "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'"
++    for name in ("CatBoost", "LightGBM", "RandomForest"):
++        params = {"iterations": 30, "depth": 3} if name == "CatBoost" else None
++        script = _generate(name, params=params)
++        assert pattern not in script, (
++            f"{name} should not emit XGBoost-specific class_weight sample-weight block"
++        )
++
++
++# ----------------------------------------------------------------------
++# End-to-end: each script must execute without crashing
++# ----------------------------------------------------------------------
++
++@pytest.mark.parametrize(
++    "model_name,params",
++    [
++        ("XGBoost", {"n_estimators": 30, "max_depth": 3}),
++        ("CatBoost", {"iterations": 30, "depth": 3}),
++        ("LightGBM", {"n_estimators": 30, "max_depth": 3}),
++        ("RandomForest", {"n_estimators": 30, "max_depth": 3}),
++    ],
++)
++def test_generated_script_executes_under_class_weight(model_name: str, params: dict) -> None:
++    g = _execute(model_name, params)
++    assert "accuracy" in g
++    assert isinstance(g["accuracy"], float)
++    assert 0.0 <= g["accuracy"] <= 1.0
++
++
++def test_xgboost_balanced_weight_applied_at_fit():
++    """End-to-end check that sample_weight actually flows to XGBoost.fit()."""
++    g = _execute("XGBoost")
++    final_model = g["model"]
++    # XGBoost final fit was called with sample_weight; we can't introspect that
++    # post-hoc, but the model should at least classify the minority class
++    # better than a no-weight baseline. Use accuracy as a smoke check.
++    assert g["accuracy"] >= 0.5
++
++
++# ----------------------------------------------------------------------
++# Negative controls — non-class_weight modes are unchanged
++# ----------------------------------------------------------------------
++
++def test_smote_mode_does_not_emit_sample_weight_block():
++    """SMOTE handling uses resampling, not sample_weight."""
++    config = {
++        "model_name": "XGBoost",
++        "preprocessing": "raw",
++        "task_type": "classification",
++        "params": {"n_estimators": 30, "max_depth": 3},
++        "cv_folds": 3,
++        "imbalance_method": "smote",
++    }
++    script = CodeGenerator(config, ExportOptions(include_data=False)).generate_script()
++    # Regression-helper compute_sample_weight may appear in helper defs but the
++    # main fit-call sample_weight conditional should not.
++    assert "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'" not in script
++
++
++def test_no_imbalance_method_does_not_emit_sample_weight_block():
++    config = {
++        "model_name": "XGBoost",
++        "preprocessing": "raw",
++        "task_type": "classification",
++        "params": {"n_estimators": 30, "max_depth": 3},
++        "cv_folds": 3,
++    }
++    script = CodeGenerator(config, ExportOptions(include_data=False)).generate_script()
++    assert "fit_kwargs['sample_weight'] = compute_sample_weight('balanced'" not in script

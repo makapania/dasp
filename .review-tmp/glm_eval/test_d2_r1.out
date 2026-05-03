@@ -1,0 +1,33 @@
+[llm-call] glm → zai/glm-5.1
+Here is the review of the two preprocessing functions based on potential bugs and data-leakage issues.
+
+### 1. `smooth_spectra`
+*   **Verdict:** **CLEAN**
+*   **Explanation:** The Savitzky-Golay filter is a local, sample-by-sample operation. Applying it to the entire dataset at once (`X_all`) does not introduce data leakage. Each spectrum is smoothed independently based solely on its own local signal characteristics; no information is shared or inferred across the rows of the matrix. 
+*   *Note on Best Practice:* While functionally clean, stacking the arrays is an unnecessary overhead. It would be slightly more memory-efficient to apply the filter directly to `X_train` and `X_test` individually and return them. However, as written, it does not mathematically bias or leak data.
+
+### 2. `normalize_features`
+*   **Verdict:** **LEAKAGE**
+*   **Explanation:** This function calculates the mean and standard deviation across *both* the training and testing datasets combined (`X_all.mean()`). This introduces **data leakage**. Standardization parameters must be calculated exclusively on the training set to simulate real-world conditions where the model is blind to the test data. If test data is included in calculating the mean and variance, the model secretly learns information about the test set's distribution, which can lead to artificially inflated performance metrics. 
+
+### Recommended Fix for `normalize_features`
+To resolve the leakage, calculate the statistics using only `X_train` and then use those fixed statistics to transform both datasets:
+
+```python
+def normalize_features(
+    X_train: np.ndarray,
+    X_test: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Normalize each wavelength feature to zero mean / unit std."""
+    # Calculate statistics ONLY on the training data
+    train_mean = X_train.mean(axis=0)
+    train_std = X_train.std(axis=0)
+    
+    # Apply the same transformation to both datasets
+    X_train_norm = (X_train - train_mean) / train_std
+    X_test_norm = (X_test - train_mean) / train_std
+    
+    return X_train_norm, X_test_norm
+```
+
+===ELAPSED_SEC: 12===

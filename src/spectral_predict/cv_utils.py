@@ -811,12 +811,18 @@ def cross_validate_with_early_stopping(
         )
         if sample_weight is not None:
             import sklearn
-            inner = _get_model_from_pipeline(model)
-            if hasattr(inner, 'set_fit_request'):
-                inner.set_fit_request(sample_weight=True)
+            # Clone first so set_fit_request doesn't mutate the caller's
+            # estimator instance (the routing-state setter is sticky and
+            # would persist past the config_context exit, polluting the
+            # original model for any downstream caller).
+            model_for_routing = clone(model)
+            _inner = _get_model_from_pipeline(model_for_routing)
+            if hasattr(_inner, 'set_fit_request'):
+                _inner.set_fit_request(sample_weight=True)
             with sklearn.config_context(enable_metadata_routing=True):
                 return cross_validate(
-                    model, X, y, params={'sample_weight': sample_weight},
+                    model_for_routing, X, y,
+                    params={'sample_weight': sample_weight},
                     **cv_kwargs,
                 )
         return cross_validate(model, X, y, **cv_kwargs)

@@ -1,0 +1,16 @@
+[llm-call] glm → zai/glm-5.1
+Here is the review of the two preprocessing functions. 
+
+### 1. `smooth_spectra`
+* **Verdict:** **LEAKAGE**
+* **Explanation:** 
+  This function applies the Savitzky-Golay filter to a combined array (`np.vstack([X_train, X_test])`). A Savitzky-Golay filter works by fitting a polynomial to a sliding window of data points. By concatenating the datasets, the filter uses data points from `X_test` to calculate the smoothed values for `X_train` (specifically for the spectra at the boundary of the train/test split), and vice versa. 
+  To prevent data leakage, the smoothing filter should be applied to `X_train` and `X_test` independently. (Note: Because the function does not need to learn any parameters from the training data to apply to the test data, stateless independent application is the correct approach here).
+
+### 2. `normalize_features`
+* **Verdict:** **LEAKAGE**
+* **Explanation:** 
+  This function calculates the mean and standard deviation using the combined `X_all` array (which includes `X_test`). This is a classic data-leakage scenario: information from the unseen test set (its distribution) is directly incorporated into the training set during the normalization step. This would result in overly optimistic model evaluation.
+  To fix this, the mean and standard deviation should be calculated using *only* `X_train`. Then, `X_train` and `X_test` should both be normalized using those training-specific statistics (i.e., `X_test = (X_test - train_mean) / train_std`).
+
+===ELAPSED_SEC: 12===

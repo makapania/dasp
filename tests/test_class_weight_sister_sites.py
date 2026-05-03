@@ -8,13 +8,22 @@ XGBoost (uses `sample_weight` at fit time, no constructor kwarg).
 Sites covered by this test module:
     1. unified_bayesian.py:1238  — Bayesian objective discriminator
     2. nsga2_search.py:1400      — NSGA-II main-eval discriminator
-    3. nsga2_search.py:3106      — _compute_classification_metrics (display metrics)
+    3. nsga2_search.py:3106      — _compute_classification_cv_metrics (display CV metrics)
+    4. nsga2_search.py:3437      — _compute_calibration_metrics (calibration refit)
 
 Plus two defense-in-depth gaps (the 'auto' guard in _needs_resampling_pipeline
 in both unified_bayesian.py:156 and nsga2_search.py:142).
 
 Plus the cv_utils plumbing extensions (sample_weight propagation through
 cross_val_predict_pooled, cross_val_predict_with_early_stopping, etc.).
+
+Note on optional-dependency skip pattern: prefer
+``pytest.mark.skipif(_HAS_CATBOOST is False, ...)`` over
+``pytest.importorskip(...)`` inside ``pytest.param`` marks. ``importorskip``
+raises ``Skipped`` at parametrize-collection time, which propagates out of
+the entire param list and skips ALL parameters of the parametrized method
+(including ones that don't need the optional dep). The find_spec-based bool
+condition is evaluated per-param without raising.
 
 Test strategy
 -------------
@@ -27,11 +36,18 @@ from __future__ import annotations
 
 import sys
 import os
+import importlib.util
 
 import numpy as np
 import pytest
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import KFold, StratifiedKFold
+
+# Optional-dependency probes via find_spec — does NOT raise on absence,
+# unlike pytest.importorskip which raises Skipped at collection time and
+# kills the entire parametrize set.
+_HAS_CATBOOST = importlib.util.find_spec("catboost") is not None
+_HAS_XGBOOST = importlib.util.find_spec("xgboost") is not None
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -242,12 +258,10 @@ class TestBayesianClassWeightDiscriminator:
         "model_name",
         [
             pytest.param("CatBoost", marks=pytest.mark.skipif(
-                not pytest.importorskip("catboost", reason="catboost optional"),
-                reason="catboost not installed",
+                not _HAS_CATBOOST, reason="catboost not installed",
             )),
             pytest.param("XGBoost", marks=pytest.mark.skipif(
-                not pytest.importorskip("xgboost", reason="xgboost optional"),
-                reason="xgboost not installed",
+                not _HAS_XGBOOST, reason="xgboost not installed",
             )),
         ],
     )

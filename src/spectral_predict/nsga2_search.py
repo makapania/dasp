@@ -1526,13 +1526,18 @@ class SpectralOptimizationProblem(Problem):
                         # matching pattern).
                         if _balanced_sw is not None:
                             import sklearn
+                            from sklearn.base import clone as _sk_clone
                             from spectral_predict.cv_utils import _get_model_from_pipeline
-                            _inner = _get_model_from_pipeline(pipeline_model)
+                            # Clone first so set_fit_request doesn't mutate the
+                            # caller's pipeline_model — the routing-state setter
+                            # persists past the config_context exit.
+                            _routed_model = _sk_clone(pipeline_model)
+                            _inner = _get_model_from_pipeline(_routed_model)
                             if hasattr(_inner, 'set_fit_request'):
                                 _inner.set_fit_request(sample_weight=True)
                             with sklearn.config_context(enable_metadata_routing=True):
                                 scores = cross_val_score(
-                                    pipeline_model, X_subset, self.y, cv=cv,
+                                    _routed_model, X_subset, self.y, cv=cv,
                                     scoring='accuracy',
                                     params={'sample_weight': _balanced_sw},
                                 )
@@ -3441,6 +3446,7 @@ def _compute_calibration_metrics(
     n_wavelengths: int,
     model_types: List[str],
     task_type: str,
+    imbalance_method: Optional[str] = None,
 ) -> Dict[str, float]:
     """
     Compute calibration (training set) metrics for a single NSGA-II solution.
@@ -3459,6 +3465,16 @@ def _compute_calibration_metrics(
         List of model types used in optimization
     task_type : str
         'regression' or 'classification'
+    imbalance_method : str or None, default=None
+        Imbalance handling. ``'class_weight'`` (or ``'auto'`` resolving to it)
+        applies the canonical class_weight discriminator (mirroring search.py:
+        4411-4448 / c395317): PLS-DA tail LR gets ``class_weight='balanced'``,
+        CatBoost gets ``auto_class_weights='Balanced'``, models with
+        ``class_weight`` attribute get ``set_params(class_weight='balanced')``,
+        XGBoost-style sample_weight-only models get balanced ``sample_weight``
+        at fit time. Without this, the user-visible Accuracy / F1 / AUC etc.
+        for CatBoost/XGBoost classifiers under class_weight described an
+        UNWEIGHTED model (Codex HIGH on PR #38).
 
     Returns
     -------
@@ -3548,10 +3564,15 @@ def _compute_calibration_metrics(
                 lr_C = hyperparams.get('lr_C', 1.0) if hyperparams else 1.0
                 lr_solver = hyperparams.get('lr_solver', 'lbfgs') if hyperparams else 'lbfgs'
                 lr_max_iter = hyperparams.get('lr_max_iter', 1000) if hyperparams else 1000
+                _lr_kwargs: Dict[str, Any] = dict(
+                    C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42,
+                )
+                if imbalance_method == 'class_weight' and task_type == 'classification':
+                    _lr_kwargs['class_weight'] = 'balanced'
                 model = Pipeline([
                     ('pls', pls_transformer),
                     ('scaler', StandardScaler()),
-                    ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42))
+                    ('lr', LogisticRegression(**_lr_kwargs))
                 ])
             else:
                 # Regression: use PLSRegression directly
@@ -3567,8 +3588,38 @@ def _compute_calibration_metrics(
             else:
                 return {'Accuracy': np.nan, 'ROC_AUC': np.nan, 'F1': np.nan, 'Precision': np.nan, 'Recall': np.nan}
 
+        # Apply class_weight discriminator for non-PLS-DA classifiers (Codex HIGH
+        # on PR #38). Mirrors search.py:4411-4448 + c395317. Without this the
+        # user-visible Accuracy / F1 / AUC etc. for CatBoost / XGBoost under
+        # imbalance_method='class_weight' described an UNWEIGHTED model.
+        _cal_sample_weight = None
+        if (
+            imbalance_method == 'class_weight'
+            and task_type == 'classification'
+            and model_type not in ('PLS', 'PLS-DA')
+        ):
+            if model_type == 'CatBoost':
+                try:
+                    model.set_params(auto_class_weights='Balanced')
+                except Exception:
+                    pass
+            elif hasattr(model, 'class_weight'):
+                try:
+                    model.set_params(class_weight='balanced')
+                except Exception:
+                    pass
+            else:
+                import inspect as _inspect
+                _model_fit_sig = _inspect.signature(model.fit) if hasattr(model, 'fit') else None
+                if _model_fit_sig and 'sample_weight' in _model_fit_sig.parameters:
+                    from sklearn.utils.class_weight import compute_sample_weight
+                    _cal_sample_weight = compute_sample_weight('balanced', y)
+
         # Fit on full training data
-        model.fit(X_subset, y)
+        if _cal_sample_weight is not None:
+            model.fit(X_subset, y, sample_weight=_cal_sample_weight)
+        else:
+            model.fit(X_subset, y)
 
         # Predict on training data
         y_pred = model.predict(X_subset)
@@ -3802,7 +3853,8 @@ def convert_nsga2_to_v1_format(
             # Classification: compute calibration and CV metrics
             if X is not None and y is not None:
                 cal_metrics = _compute_calibration_metrics(
-                    X, y, solution, n_wavelengths, model_types, task_type
+                    X, y, solution, n_wavelengths, model_types, task_type,
+                    imbalance_method=imbalance_method,
                 )
                 row['Accuracy'] = cal_metrics.get('Accuracy', np.nan)
                 row['ROC_AUC'] = cal_metrics.get('ROC_AUC', np.nan)
