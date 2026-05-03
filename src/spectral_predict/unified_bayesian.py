@@ -2229,7 +2229,7 @@ def run_unified_bayesian(
 
     # --- auto-decision state ---
     _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
-    _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (ratio ~1.2x)
+    _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (post-T-42 ratio ~1.0-1.06x)
     _auto_migrated = False   # True after the in-memory -> SQLite migration
 
     # Progress callback wrapper (must reference `study` via mutable container
