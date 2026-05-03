@@ -1,6 +1,29 @@
 # Project Status
 
-> **Last updated:** 2026-05-04 (codex round 2 — independent codex review of all 8 outstanding PRs; 4 fix-of-fixes commits applied; **1 real production bug closed on PR #24 that DeepSeek + GLM both missed**).
+> **Last updated:** 2026-05-04 (post-merge — all 8 outstanding PRs squash-merged to main; post-merge regression sweep **360 passed, 1 skipped**, no regressions).
+>
+> ## Session 2026-05-04 — 8 PRs MERGED to main
+>
+> | PR | Squash-merge SHA | Ticket / scope |
+> |---|---|---|
+> | #21 | `35c3fc9` | T-14b: PyInstaller + GUI version-drift sites; cut 0.5.0b2 |
+> | #25 | `1d18a50` | T-29b: per-run-log visibility for `spectral_predict.*` warnings |
+> | #26 | `cc8c63a` | P3: defensive `.ravel()` on classification CV-fold predict |
+> | #27 | `9eabce0` | T-30b: print triage in `calibration_transfer.py` |
+> | #22 | `0e7eeb6` | T-20: saved-model ↔ exported-script parity test foundation |
+> | #29 | `9ff30f7` | T-20b: extend parity matrix to LightGBM + CatBoost (replaces auto-closed #23) |
+> | #30 | `94f57ba` | codegen-fix: scalarise predictions across plain + imbalance-aware CV pooling (replaces auto-closed #24; closed the codex-caught bug class fully) |
+> | #31 | `52ad273` | T-20c: PLS-DA parity row + MLP imbalance no-op marker (replaces auto-closed #28) |
+>
+> **Stack-rebase note**: GitHub auto-closed PRs #23 / #24 / #28 when their stacked base branches were deleted by parent squash-merges. Each was rebased locally onto post-parent main and reopened as a new PR (#29 / #30 / #31) targeting main. All squashed-merge clean.
+>
+> **Post-merge regression sweep**: **360 passed, 1 skipped** across the consolidated 13-file regression sweep + `test_t14b_pyinstaller_and_gui_version_drift` + `test_t20_saved_model_export_parity`. Math: 327 base + 6 T-29b + 8 T-14b + 19 T-20-family = 360. Zero failures, zero integration issues. All branches deleted from origin + locally.
+>
+> **Merge-cascade lesson** (filed for future stacked-merge sessions): when GitHub auto-closes a stacked PR after its base branch is deleted, the PR cannot be reopened or have its base changed via `gh pr edit --base`. The clean recovery is: rebase the head branch locally onto post-parent main with `git rebase --onto origin/main <last-parent-commit> <head>`, force-push, then `gh pr create --base main --head <head>` to open a new PR. The new PR number replaces the old one in the merge queue.
+>
+> ---
+>
+> ## Session 2026-05-04 codex-review round (pre-merge)
 >
 > ## Session 2026-05-04 codex-review round
 >
