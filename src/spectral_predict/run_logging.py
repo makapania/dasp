@@ -282,6 +282,31 @@ def setup_run_logger(
         )
         logger.addHandler(fh)
 
+        # T-29b: also attach the same per-run handler to the
+        # ``spectral_predict`` logger so WARNING-level messages from any
+        # ``spectral_predict.*`` child logger (search.py, scoring.py,
+        # run_state.py, etc.) land in BOTH the per-run forensic log and
+        # the app-lifetime ``dasp.log``. Without this, a user investigating
+        # a strange leaderboard via the GUI's "View log" button finds
+        # nothing — the warning is in dasp.log, which is the rotating
+        # app-lifetime file, not the per-run forensic file.
+        #
+        # Defense against module-reload double-attach (mirroring
+        # setup_app_logger's pattern): if a prior incarnation already
+        # attached a handler with the same baseFilename to spectral_predict,
+        # skip re-attaching.
+        sp_logger = logging.getLogger("spectral_predict")
+        target_path = str(log_path)
+        per_run_already_on_sp = any(
+            existing.__class__.__name__ == "_SafeRotatingFileHandler" and
+            getattr(existing, "baseFilename", None) == target_path
+            for existing in sp_logger.handlers
+        )
+        if not per_run_already_on_sp:
+            sp_logger.addHandler(fh)
+            if sp_logger.level == logging.NOTSET or sp_logger.level > logging.WARNING:
+                sp_logger.setLevel(logging.WARNING)
+
         logger.info("=== DASP run log ===")
         logger.info("Path: %s", log_path)
         logger.info("Python: %s", sys.version.split()[0])
