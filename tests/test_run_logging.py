@@ -399,3 +399,114 @@ def test_setup_app_logger_swallows_setup_failure(fresh_logging, monkeypatch):
 
     path = rl.setup_app_logger()
     assert path is None, "setup must swallow the exception and return None"
+
+
+# ---------------------------------------------------------------------------
+# T-29b: per-run-log visibility for spectral_predict.* warnings
+# ---------------------------------------------------------------------------
+
+
+def test_t29b_module_warning_lands_in_per_run_log(fresh_logging):
+    """T-29b: ``logger.warning`` calls under ``spectral_predict.*`` must
+    land in the per-run forensic log (``run_<timestamp>.log``) so users
+    investigating a strange leaderboard via the GUI's "View log" button
+    actually see them. Before T-29b they only landed in the rotating
+    app-lifetime ``dasp.log``, which the GUI doesn't surface."""
+    rl, _, _ = fresh_logging
+
+    rl.setup_app_logger()
+    _, run_path = rl.setup_run_logger(capture_stdout=False)
+
+    child = logging.getLogger("spectral_predict.search")
+    child.warning("T-29b smoke test: scoring metric returned NaN")
+
+    for h in logging.getLogger("spectral_predict").handlers:
+        h.flush()
+
+    contents = run_path.read_text(encoding="utf-8")
+    assert "T-29b smoke test" in contents, (
+        f"warning must appear in per-run log {run_path}; contents:\n{contents}"
+    )
+
+
+def test_t29b_module_warning_lands_in_both_logs(fresh_logging):
+    """T-29b: a warning during a run must land in BOTH the per-run log
+    AND the app-lifetime ``dasp.log`` — the per-run handler is added on
+    top of the existing dasp.log handler, not in place of it."""
+    rl, _, _ = fresh_logging
+
+    app_path = rl.setup_app_logger()
+    _, run_path = rl.setup_run_logger(capture_stdout=False)
+
+    child = logging.getLogger("spectral_predict.scoring")
+    child.warning("T-29b dual-log: bare except suppressed metric failure")
+
+    for h in logging.getLogger("spectral_predict").handlers:
+        h.flush()
+
+    assert app_path is not None
+    app_contents = app_path.read_text(encoding="utf-8")
+    run_contents = run_path.read_text(encoding="utf-8")
+    assert "T-29b dual-log" in app_contents, "must remain in dasp.log"
+    assert "T-29b dual-log" in run_contents, "must also land in run log"
+
+
+def test_t29b_warning_only_in_app_log_outside_run(fresh_logging):
+    """T-29b: a warning emitted BEFORE ``setup_run_logger`` is called must
+    land only in ``dasp.log`` — the per-run handler doesn't exist yet, so
+    nothing should appear in any per-run log file."""
+    rl, _, _ = fresh_logging
+
+    app_path = rl.setup_app_logger()
+
+    child = logging.getLogger("spectral_predict.run_state")
+    child.warning("T-29b pre-run: sidecar corrupted at startup")
+
+    for h in logging.getLogger("spectral_predict").handlers:
+        h.flush()
+
+    assert app_path is not None
+    assert "T-29b pre-run" in app_path.read_text(encoding="utf-8")
+    # No run log should exist yet.
+    assert rl.get_active_log_path() is None
+
+
+def test_t29b_setup_run_logger_does_not_double_attach(fresh_logging):
+    """T-29b: calling ``setup_run_logger`` twice must not stack two
+    per-run handlers on the ``spectral_predict`` logger (which would
+    cause every warning to be written to the per-run log twice)."""
+    rl, _, _ = fresh_logging
+
+    rl.setup_run_logger(capture_stdout=False)
+    rl.setup_run_logger(capture_stdout=False)  # idempotent
+
+    sp_logger = logging.getLogger("spectral_predict")
+    file_handlers = [
+        h for h in sp_logger.handlers
+        if h.__class__.__name__ == "_SafeRotatingFileHandler"
+    ]
+    # Exactly one handler per file path: at most one for dasp.log (if
+    # setup_app_logger ran) plus one for the per-run file.
+    base_filenames = [getattr(h, "baseFilename", None) for h in file_handlers]
+    assert len(set(base_filenames)) == len(base_filenames), (
+        f"setup_run_logger must not double-attach a handler with the same "
+        f"baseFilename to spectral_predict; got: {base_filenames}"
+    )
+
+
+def test_t29b_setup_run_logger_sets_warning_level_on_spectral_predict(fresh_logging):
+    """T-29b: ``setup_run_logger`` must ensure the ``spectral_predict``
+    logger's level allows WARNING through, otherwise the per-run handler
+    attached there would silently filter out the very warnings it exists
+    to capture. Mirrors the pattern in ``setup_app_logger``."""
+    rl, _, _ = fresh_logging
+
+    sp_logger = logging.getLogger("spectral_predict")
+    sp_logger.setLevel(logging.CRITICAL)  # too restrictive
+
+    rl.setup_run_logger(capture_stdout=False)
+
+    assert sp_logger.level <= logging.WARNING, (
+        "setup_run_logger must lower spectral_predict.level to WARNING if "
+        "it was set higher; otherwise warnings vanish"
+    )
