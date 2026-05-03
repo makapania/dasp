@@ -214,7 +214,7 @@ def test_t14_report_version_matches_package_version(tmp_path, regression_results
     # re-hardcode the *current* canonical value (v0.5.0b1) and the
     # positive assertion above would still pass — drift would only show
     # up after the next bump. Pinning known-stale values fails fast.
-    for stale in ("v0.4.0", "v0.3.0", "v0.2.0"):
+    for stale in ("v0.4.0", "v0.3.0", "v0.2.0", "v0.5.0b1"):
         assert stale not in content, (
             f"Report footer contains stale version string {stale!r}; "
             "version drift has regressed"

@@ -8,7 +8,7 @@
 ; installed at a time, regardless of which Python runtime it bundles.
 
 #define MyAppName "Spectral Predict"
-#define MyAppVersion "0.5.0b1"
+#define MyAppVersion "0.5.0b2"
 #define MyAppPublisher "Spectral Predict"
 #define MyAppURL "https://github.com/makapania/dasp"
 #define MyAppExeName "SpectralPredict-py312.exe"

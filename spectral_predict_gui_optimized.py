@@ -164,6 +164,8 @@ except ImportError:
 # Import search controller for pause/resume/stop
 from spectral_predict.search_controller import SearchController
 
+from spectral_predict import __version__ as _DASP_VERSION
+
 # Analysis subset pure-logic helpers
 from spectral_predict.analysis_subset import (
     compute_matches,
@@ -2553,7 +2555,7 @@ class SpectralPredictApp:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("ASP - Advanced Spectral Prediction  —  BETA 0.5.0b1")
+        self.root.title(f"ASP - Advanced Spectral Prediction  —  BETA {_DASP_VERSION}")
 
         # Set minimum window size for usability
         self.root.minsize(1200, 700)
@@ -4660,7 +4662,7 @@ class SpectralPredictApp:
                 bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
 
         tk.Label(text_frame,
-                text="v0.5.0b1",
+                text=f"v{_DASP_VERSION}",
                 font=('Segoe UI', 9),
                 fg=self.colors['text_light'],
                 bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
