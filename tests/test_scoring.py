@@ -557,5 +557,102 @@ class TestLinsCCC:
         assert abs(lins_ccc(y_list, y_series) - 1.0) < 1e-12
 
 
+# ---------------------------------------------------------------------------
+# T-29: bare `except:` in compute_imbalance_metrics swallowed KeyboardInterrupt
+# (Ctrl-C during long Bayesian/grid runs got eaten) AND silently returned 0.0
+# sentinel values (a leaderboard 0.0 was indistinguishable from a model that
+# really scored 0.0).
+# ---------------------------------------------------------------------------
+
+
+class TestT29ExceptionHandling:
+    def test_t29_keyboard_interrupt_propagates(self, monkeypatch):
+        """T-29: bare `except:` used to catch KeyboardInterrupt and silently
+        eat it, leaving long searches uninterruptible. Replacing with
+        `except Exception:` lets KeyboardInterrupt propagate normally.
+
+        Fix-of-fixes (GLM MEDIUM-3): use pytest's monkeypatch fixture
+        instead of manual try/finally save/restore for consistency with the
+        warning-test below."""
+        from spectral_predict.scoring import compute_imbalance_metrics
+        import sklearn.metrics as _sk_metrics
+
+        def boom(*_a, **_kw):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(_sk_metrics, "f1_score", boom)
+
+        with pytest.raises(KeyboardInterrupt):
+            compute_imbalance_metrics(
+                np.array([0, 1, 0, 1]), np.array([0, 1, 0, 1])
+            )
+
+    @pytest.mark.parametrize(
+        "metric_name, expected_warning_substr, expected_metric_key, expected_sentinel",
+        [
+            ("balanced_accuracy_score", "T-29: balanced_accuracy failed", "balanced_accuracy", 0.0),
+            ("f1_score", "T-29: f1 score failed", "f1_weighted", 0.0),
+            ("precision_score", "T-29: precision/recall failed", "precision_weighted", 0.0),
+            ("recall_score", "T-29: precision/recall failed", "recall_weighted", 0.0),
+            ("roc_auc_score", "T-29: roc_auc failed", "roc_auc", None),
+        ],
+    )
+    def test_t29_metric_failure_logs_warning(
+        self, caplog, monkeypatch,
+        metric_name, expected_warning_substr, expected_metric_key, expected_sentinel,
+    ):
+        """T-29 fix-of-fixes (DeepSeek HIGH-1, MEDIUM-5 / GLM MEDIUM-1): all
+        FIVE sklearn metric calls inside compute_imbalance_metrics now have
+        symmetric exception handling. Pre-fix-of-fixes only roc_auc was
+        tested; HIGH-1 also exposed that balanced_accuracy was the one
+        unwrapped call, so wrapping it AND testing it closes both findings.
+
+        Fixture pattern: monkeypatch sklearn.metrics.<metric_name> to raise
+        ValueError, run compute_imbalance_metrics, assert (a) the matching
+        T-29 warning lands in caplog with diagnostic context (n=, n_classes=)
+        and (b) the sentinel value is preserved (0.0 or None)."""
+        import logging
+
+        from spectral_predict.scoring import compute_imbalance_metrics
+        import sklearn.metrics as _sk_metrics
+
+        def boom(*_a, **_kw):
+            raise ValueError("simulated sklearn failure")
+
+        # The function imports its metrics locally on each call, so patching
+        # on the sklearn.metrics module surface picks up at next call.
+        monkeypatch.setattr(_sk_metrics, metric_name, boom)
+
+        y_true = np.array([0, 1, 0, 1, 0])
+        y_pred = np.array([0, 1, 0, 1, 0])
+        # roc_auc only fires when y_pred_proba is supplied — otherwise the
+        # function early-returns roc_auc=None without entering the try.
+        y_proba = np.array([[1.0, 0.0]] * 5) if metric_name == "roc_auc_score" else None
+
+        with caplog.at_level(logging.WARNING, logger="spectral_predict.scoring"):
+            metrics = compute_imbalance_metrics(y_true, y_pred, y_proba)
+
+        assert metrics[expected_metric_key] == expected_sentinel or (
+            metrics[expected_metric_key] is None and expected_sentinel is None
+        )
+        assert any(
+            expected_warning_substr in rec.message for rec in caplog.records
+        ), (
+            f"expected warning substring {expected_warning_substr!r}; "
+            f"got log records: {[r.message for r in caplog.records]!r}"
+        )
+        # T-29 fix-of-fixes: warnings must include diagnostic breadcrumbs
+        # (n_classes is the most useful — distinguishes "all-same-class CV
+        # fold" from "general numeric failure"). Pin presence rather than
+        # exact format so future tweaks to the message don't break the test.
+        target_record = next(
+            r for r in caplog.records if expected_warning_substr in r.message
+        )
+        assert "n_classes=" in target_record.message, (
+            f"warning message missing n_classes diagnostic: "
+            f"{target_record.message!r}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
