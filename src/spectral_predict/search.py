@@ -4189,22 +4189,6 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             y_pred = pipe_clone.predict(X_test)
         y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
 
-        # PLS-DA Debug logging - diagnose all-same-class predictions
-        if hasattr(pipe_clone, 'named_steps') and 'pls' in pipe_clone.named_steps:
-            pls = pipe_clone.named_steps['pls']
-            lr = pipe_clone.named_steps['lr']
-            X_scores_test = pls.transform(X_test)
-            y_train_int = y_train.astype(int) if hasattr(y_train, 'astype') else np.array(y_train).astype(int)
-            print(f"[PLS-DA DEBUG]")
-            print(f"  y_train unique: {np.unique(y_train)}, counts: {np.bincount(y_train_int)}")
-            print(f"  PLS scores shape: {X_scores_test.shape}")
-            print(f"  PLS scores mean per sample (first 5): {X_scores_test.mean(axis=1)[:5]}")
-            print(f"  PLS scores std: {X_scores_test.std():.6f}")
-            print(f"  LR classes_: {lr.classes_}")
-            print(f"  LR coef_ sum: {np.abs(lr.coef_).sum():.6f}")
-            print(f"  LR intercept_: {lr.intercept_}")
-            print(f"  y_pred unique: {np.unique(y_pred)}, counts: {np.bincount(y_pred.astype(int))}")
-
         acc = accuracy_score(y_test, y_pred)
 
         # Use is_binary_classification flag (determined from full dataset) for consistent averaging
