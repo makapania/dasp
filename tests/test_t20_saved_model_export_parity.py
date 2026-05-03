@@ -1,19 +1,11 @@
 """T-20: saved-model ↔ exported-script reproducibility test.
 
 T-19 fixed model-native imbalance handling and Auto-mode runtime resolution
-across the export-code surface — the bug class lived in the parity contract
-between the runtime (``model_io.save_model`` / ``load_model``) and the
-exported Python script (``code_generator.CodeGenerator.generate_script``).
-Without an explicit parity test pinning the contract, the next regression
-slips silently.
-
-Scope note (T-32 coverage): T-32's fix targets sample_weight threading
-through the resampler at ``search.py:4082-4098`` (``_run_single_fold``)
-and is directly pinned by ``tests/test_t32_sample_weight_resampling.py``.
-The matrix below does NOT include a resampler + sample_weight parity row,
-so a T-32 regression would not surface here — it would surface in the
-dedicated T-32 file. The rows in this file focus on the T-19 surface
-(class_weight + auto-mode for the boosting / sklearn classifier families).
+across the export-code surface; T-32 fixed sample_weight threading through
+the resampler. Both bugs lived in the parity contract between the runtime
+(``model_io.save_model`` / ``load_model``) and the exported Python script
+(``code_generator.CodeGenerator.generate_script``). Without an explicit
+parity test pinning the contract, the next regression slips silently.
 
 What this test pins
 -------------------
@@ -770,14 +762,13 @@ def test_catboost_multiclass_classification_parity(tmp_path):
     """Multi-class CatBoost — pins the multi-output predict_proba shape
     parity. CatBoost infers multi-class objective from the y label set.
 
-    Was xfail-strict in T-20b: ``CatBoostClassifier.predict()`` returns
-    shape ``(n, 1)`` for multiclass, and the CV majority-vote block in
-    ``templates/validation.py``'s CROSS_VALIDATION_CLASSIFICATION_TEMPLATE
-    couldn't hash 1-element ndarrays. Fixed upstream by PR #26's defensive
-    ``.ravel()`` at the per-fold predict site (``templates/validation.py``
-    line 160), which flattens the ``(n, 1)`` shape to ``(n,)`` before the
-    pooling block runs. Marker removed; this is now a regular passing
-    parity test."""
+    Was xfail in T-20b due to a codegen CV-pooling bug
+    (``CatBoostClassifier.predict()`` returns shape ``(n, 1)`` for
+    multiclass; the validation template's ``Counter(ndarray)`` call
+    crashed before reaching the parity-test appendix). Fixed by
+    scalarising at ``templates/validation.py``'s
+    CROSS_VALIDATION_CLASSIFICATION_TEMPLATE; the xfail marker has
+    been removed and this is now a regular passing parity test."""
     pytest.importorskip("catboost")
     from catboost import CatBoostClassifier
 
