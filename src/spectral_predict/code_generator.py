@@ -1336,6 +1336,8 @@ class PLSTransformer:
         X_scores = self.pls_.transform(X)
         if X_scores.ndim == 1:
             X_scores = X_scores.reshape(-1, 1)
+        elif X_scores.ndim > 2:
+            X_scores = X_scores[:, :, 0] if X_scores.shape[2] == 1 else X_scores.reshape(X_scores.shape[0], -1)
         return X_scores
 
     def fit_transform(self, X, y):
