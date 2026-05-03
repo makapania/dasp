@@ -860,3 +860,67 @@ def test_pls_da_binary_classification_parity_no_imbalance(tmp_path):
         imbalance_method=None,
         tmp_path=tmp_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# MLP — no-op imbalance marker (T-20c follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_mlp_binary_classification_imbalance_is_no_op_marker(tmp_path):
+    """Marker: MLP + ``imbalance_method='class_weight'`` MUST be a no-op.
+
+    MLPClassifier accepts neither ``class_weight`` (TypeError on
+    ``__init__``) nor ``sample_weight`` at fit() under the pyproject's
+    sklearn floor. The codegen at ``code_generator.py:918-923`` explicitly
+    excludes MLP from class_weight injection in the StandardScaler-wrapped
+    path, mirroring the runtime fallback at ``search.py:4439-4444``
+    (unweighted training, with a warning emitted to the user).
+
+    This test pins the no-op behavior end-to-end via the T-20 parity
+    contract. The in-process MLP has no imbalance kwargs (mirrors the
+    runtime fallback). The codegen is asked for ``imbalance_method=
+    'class_weight'``; if it ever starts injecting class_weight or
+    sample_weight into the MLP path, the exported script's predict_proba
+    will diverge from the saved model's and this test fails.
+
+    Pairs with the static-source-check tests in
+    ``tests/test_t19_class_weight_per_library.py`` (which assert
+    ``'class_weight': 'balanced'`` is NOT in the generated script) — this
+    parity test catches the same bug class via a different angle (numerical
+    equivalence rather than source inspection), guarding against regressions
+    that look correct in source but fit differently at runtime.
+    """
+    from sklearn.neural_network import MLPClassifier
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.templates.models import DEFAULT_PARAMS
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+
+    # Mirror the codegen's DEFAULT_PARAMS merge: copy the MLPClassifier
+    # defaults, then override with our test-specific params (small network
+    # + low max_iter to keep subprocess startup the bottleneck). The codegen
+    # does the same in code_generator._render_scaled_pipeline.
+    params = {"hidden_layer_sizes": (10,), "max_iter": 50, "random_state": 42}
+    mlp_params_full = DEFAULT_PARAMS["MLPClassifier"].copy()
+    mlp_params_full.update(params)
+
+    # In-process model: no imbalance kwargs (mirrors runtime fallback).
+    # StandardScaler wraps because MLP is in SCALE_SENSITIVE_MODELS
+    # (search.py:113); the codegen wraps via _render_scaled_pipeline.
+    mlp = MLPClassifier(**mlp_params_full)
+    model = Pipeline([("scaler", StandardScaler()), ("model", mlp)])
+
+    _run_parity(
+        model=model,
+        model_name="MLP",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="class_weight",  # Marker: must be no-op for MLP.
+        tmp_path=tmp_path,
+    )
