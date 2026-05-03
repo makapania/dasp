@@ -1,6 +1,0 @@
-[llm-call] glm → zai/glm-5.1
-fix: prevent ClassificationResampler crash on class_weight/auto sentinels
-
-ClassificationResampler.fit() and fit_resample() now treat 'class_weight' and 'auto' as no-ops rather than raising ValueError on an unknown method. These strings are model-parameter sentinels, not actual resampling strategies, so the resampler returns its input unchanged and the calling code applies class_weight='balanced' directly to the model. A parametrized regression test confirms the identity behavior for both sentinels regardless of case.
-
-===ELAPSED_SEC: 4===
