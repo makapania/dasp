@@ -148,13 +148,41 @@ def _run_parity(
     params: dict,
     imbalance_method: str | None,
     tmp_path: Path,
-    rtol: float = 1e-5,
-    atol: float = 1e-8,
+    rtol: float | None = None,
+    atol: float | None = None,
+    fit_kwargs: dict | None = None,
 ) -> None:
+    """Run save→export→exec→compare parity for one (model, config) row.
+
+    For classification, predictions are compared via ``predict_proba`` (full
+    probability vectors), not ``predict`` (hard labels). Hard labels mask
+    probability drift up to the nearest class boundary — DeepSeek's T-20
+    review empirically demonstrated 0.296 probability drift with identical
+    hard labels. ``predict_proba`` makes the parity assertion sensitive to
+    the kind of regressions T-19/T-32 actually fixed.
+
+    For regression, ``predict`` is the right comparison (continuous output,
+    no quantisation).
+
+    ``fit_kwargs`` is forwarded to the in-process ``model.fit(...)`` call.
+    For XGBoost + ``class_weight`` (or auto-resolves-to-class_weight), pass
+    ``{'sample_weight': compute_sample_weight('balanced', y_train)}`` to
+    match what the codegen emits for the runtime fit (templates/validation
+    + code_generator._render_final_model_with_imbalance:1880-1886).
+    """
     n_vars = X_train.shape[1]
 
+    if rtol is None:
+        # Looser tolerance for classification: predict_proba is a learned
+        # function and tiny float-arithmetic-order divergences are
+        # legitimate. Tight tolerance for regression: it should match
+        # essentially exactly.
+        rtol = 1e-3 if task_type == "classification" else 1e-5
+    if atol is None:
+        atol = 1e-6 if task_type == "classification" else 1e-8
+
     # 1. Train in test process.
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, **(fit_kwargs or {}))
 
     # 2. Save via model_io.
     save_path = tmp_path / "model.dasp"
@@ -183,16 +211,22 @@ def _run_parity(
     # 4. Append our own predict-and-dump block. ``model`` is module-level in
     # the generated script (see FINAL_MODEL_TEMPLATE in
     # spectral_predict/templates/validation.py:226: ``model.fit(X_final, y)``).
+    # Classification compares predict_proba (full probability vectors) so
+    # that drift smaller than the class-boundary quantisation is detectable.
     X_test_path = tmp_path / "X_test.npy"
     pred_out_path = tmp_path / "script_predictions.npy"
     np.save(X_test_path, X_test)
+    if task_type == "classification":
+        predict_call = "model.predict_proba(_X_test_t20)"
+    else:
+        predict_call = "model.predict(_X_test_t20).ravel()"
     appendix = textwrap.dedent(
         f"""
 
         # ===== T-20 parity-test appendix =====
         import numpy as _np_t20
         _X_test_t20 = _np_t20.load(r"{X_test_path}")
-        _predictions_t20 = model.predict(_X_test_t20).ravel()
+        _predictions_t20 = {predict_call}
         _np_t20.save(r"{pred_out_path}", _predictions_t20)
         """
     )
@@ -215,9 +249,14 @@ def _run_parity(
     )
 
     # 6. Compare loaded saved model's predictions to script's predictions.
+    # Use predict_proba for classification (sensitive to drift below class
+    # boundary), predict for regression (continuous output).
     script_predictions = np.load(pred_out_path)
     loaded = load_model(str(save_path))
-    saved_predictions = loaded["model"].predict(X_test).ravel()
+    if task_type == "classification":
+        saved_predictions = loaded["model"].predict_proba(X_test)
+    else:
+        saved_predictions = loaded["model"].predict(X_test).ravel()
 
     np.testing.assert_allclose(
         script_predictions,
@@ -360,6 +399,25 @@ def test_random_forest_multiclass_classification_parity(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# Common XGBoost params: tree_method='hist' + n_jobs=1 makes both the
+# in-process fit and the subprocess fit deterministic and version-stable.
+# The codegen path injects tree_method='hist' / n_jobs=-1 via setdefault
+# (code_generator.py:962-964, 987-988), so test params explicitly setting
+# both keeps the merged params identical in both paths and removes a
+# latent fragility (multi-threaded determinism depends on XGBoost version
+# and CPU). use_label_encoder is intentionally absent — XGBoost 3.x emits
+# a deprecation warning otherwise.
+_XGB_BASE_PARAMS = {
+    "n_estimators": 30,
+    "max_depth": 4,
+    "learning_rate": 0.1,
+    "random_state": 42,
+    "tree_method": "hist",
+    "n_jobs": 1,
+    "eval_metric": "logloss",
+}
+
+
 def test_xgboost_binary_classification_parity_no_imbalance(tmp_path):
     """Boosting baseline. XGBoost is the headline model for the T-19
     sample_weight fix, so we want to confirm the no-imbalance path is clean
@@ -368,14 +426,7 @@ def test_xgboost_binary_classification_parity_no_imbalance(tmp_path):
     from xgboost import XGBClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data()
-    params = {
-        "n_estimators": 30,
-        "max_depth": 4,
-        "learning_rate": 0.1,
-        "random_state": 42,
-        "use_label_encoder": False,
-        "eval_metric": "logloss",
-    }
+    params = dict(_XGB_BASE_PARAMS)
     _run_parity(
         model=XGBClassifier(**params),
         model_name="XGBoost",
@@ -390,31 +441,24 @@ def test_xgboost_binary_classification_parity_no_imbalance(tmp_path):
 
 
 def test_xgboost_binary_classification_parity_class_weight(tmp_path):
-    """T-19 highest-leverage row: XGBoost + class_weight imbalance. This is
-    the surface where the runtime↔export divergence used to hide.
-    XGBoost has no class_weight kwarg directly, so the runtime path
-    translates to scale_pos_weight or sample_weight; the exported script
-    must follow the same translation."""
+    """T-19 highest-leverage row: XGBoost + class_weight imbalance.
+
+    The codegen path emits ``model.fit(X, y, sample_weight=
+    compute_sample_weight('balanced', y))`` for XGBoost +
+    imbalance_method='class_weight'
+    (code_generator._render_final_model_with_imbalance:1880-1886). The
+    in-process model must apply the same sample_weight at fit time;
+    using ``scale_pos_weight`` instead would mean the two paths use
+    different weighting mechanisms — the test would only pass on
+    datasets where both produce trivially identical predictions
+    (DeepSeek HIGH-2 from T-20 review)."""
     pytest.importorskip("xgboost")
+    from sklearn.utils.class_weight import compute_sample_weight
     from xgboost import XGBClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    # Use scale_pos_weight rather than relying on the exported script to
-    # derive it from y; this isolates the parity assertion to "same params,
-    # same data, same predictions" — the runtime and the script both see
-    # the explicit scale_pos_weight via the params dict.
-    n_pos = int(y_train.sum())
-    n_neg = int((1 - y_train).sum())
-    scale_pos_weight = max(n_neg / max(n_pos, 1), 1.0)
-    params = {
-        "n_estimators": 30,
-        "max_depth": 4,
-        "learning_rate": 0.1,
-        "random_state": 42,
-        "use_label_encoder": False,
-        "eval_metric": "logloss",
-        "scale_pos_weight": scale_pos_weight,
-    }
+    params = dict(_XGB_BASE_PARAMS)
+    sample_weight = compute_sample_weight("balanced", y_train)
     _run_parity(
         model=XGBClassifier(**params),
         model_name="XGBoost",
@@ -425,29 +469,29 @@ def test_xgboost_binary_classification_parity_class_weight(tmp_path):
         params=params,
         imbalance_method="class_weight",
         tmp_path=tmp_path,
+        fit_kwargs={"sample_weight": sample_weight},
     )
 
 
-def test_xgboost_binary_classification_parity_auto(tmp_path):
-    """T-19 Auto-mode runtime resolution: the exported script must resolve
-    imbalance_method='auto' to the same concrete method the runtime did at
-    train time. This is the parity surface T-19 explicitly closed."""
+def test_xgboost_binary_classification_parity_auto_no_correction(tmp_path):
+    """T-19 Auto-mode runtime resolution — the auto-resolves-to-None path.
+
+    With BALANCED data (ratio < 3:1), the script's auto-resolution block
+    (code_generator._render_imbalance_handling:1518-1548) mutates
+    IMBALANCE_METHOD to None. Downstream gates do not fire; the script
+    fits without sample_weight. The in-process model must do the same.
+
+    Originally this test used imbalanced data so auto resolved to
+    class_weight, which made the test mechanically identical to
+    ``test_xgboost_binary_classification_parity_class_weight`` (DeepSeek
+    HIGH-3 from T-20 review). Reworked to balanced data so the auto path
+    is now a genuinely distinct code path."""
     pytest.importorskip("xgboost")
     from xgboost import XGBClassifier
 
-    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    n_pos = int(y_train.sum())
-    n_neg = int((1 - y_train).sum())
-    scale_pos_weight = max(n_neg / max(n_pos, 1), 1.0)
-    params = {
-        "n_estimators": 30,
-        "max_depth": 4,
-        "learning_rate": 0.1,
-        "random_state": 42,
-        "use_label_encoder": False,
-        "eval_metric": "logloss",
-        "scale_pos_weight": scale_pos_weight,
-    }
+    # Balanced ~50/50 — auto-resolution → None
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=False)
+    params = dict(_XGB_BASE_PARAMS)
     _run_parity(
         model=XGBClassifier(**params),
         model_name="XGBoost",
@@ -464,21 +508,18 @@ def test_xgboost_binary_classification_parity_auto(tmp_path):
 def test_xgboost_multiclass_classification_parity(tmp_path):
     """Multi-class boosting parity — covers the multi-output path on the
     T-19 surface. softprob/softmax mismatch between runtime and script
-    would surface here."""
+    would surface here. Multi-class predict_proba returns shape
+    (n_samples, n_classes); assert_allclose handles the 2-D array."""
     pytest.importorskip("xgboost")
     from xgboost import XGBClassifier
 
     X_train, y_train, X_test = _make_multiclass_classification_data(n_classes=3)
-    params = {
-        "n_estimators": 30,
-        "max_depth": 4,
-        "learning_rate": 0.1,
-        "random_state": 42,
-        "use_label_encoder": False,
+    params = dict(_XGB_BASE_PARAMS)
+    params.update({
         "eval_metric": "mlogloss",
         "objective": "multi:softprob",
         "num_class": 3,
-    }
+    })
     _run_parity(
         model=XGBClassifier(**params),
         model_name="XGBoost",
