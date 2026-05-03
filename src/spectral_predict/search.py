@@ -282,8 +282,11 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     if imbalance_method is None:
         return False
 
-    # class_weight doesn't need resampling pipeline (it's a model parameter)
-    if imbalance_method == 'class_weight':
+    # class_weight / auto don't need resampling pipeline — they're model-parameter
+    # sentinels (auto is resolved into class_weight or None at run-entry; both
+    # short-circuit here as defense-in-depth so a future refactor that delays
+    # resolution can't accidentally wrap them in ImbPipeline).
+    if imbalance_method in ('class_weight', 'auto'):
         return False
 
     # Classification resampling methods need imblearn Pipeline

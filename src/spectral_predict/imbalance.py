@@ -944,6 +944,17 @@ def build_imbalance_transformer(method, task_type='classification', random_state
     ...     'binning', task_type='regression', random_state=42, n_bins=5
     ... )
     """
+    # Sentinel guard: 'class_weight' / 'auto' are model-parameter flags, not
+    # resamplers. Route through ClassificationResampler regardless of task_type
+    # so its built-in no-op short-circuit kicks in. Pre-fix, regression callers
+    # passing these sentinels (corrupted metadata or future feature) would hit
+    # the regression else-clause and raise ValueError. (Reachability today: low,
+    # since resolve_auto_imbalance returns None for non-classification and
+    # class_weight isn't a regression dropdown option — but defense-in-depth
+    # symmetry with the classification path costs nothing.)
+    if isinstance(method, str) and method.lower() in ('class_weight', 'auto'):
+        return ClassificationResampler(method=method, random_state=random_state, **params)
+
     if task_type == 'classification':
         return ClassificationResampler(method=method, random_state=random_state, **params)
 

@@ -753,6 +753,28 @@ class TestBuildImbalanceTransformer:
         with pytest.raises(ValueError, match="Unknown"):
             transformer.fit_resample(X, y)
 
+    @pytest.mark.parametrize("sentinel", ["class_weight", "auto"])
+    @pytest.mark.parametrize("task_type", ["classification", "regression"])
+    def test_class_weight_auto_sentinels_no_op_both_task_types(self, sentinel, task_type):
+        """Regression: 'class_weight' / 'auto' are model-parameter sentinels and
+        must no-op regardless of task_type. Pre-fix-of-fixes the regression path
+        raised ValueError on these (sentinel guard was classification-only).
+        Defense-in-depth: both branches now route through ClassificationResampler
+        which short-circuits at fit_resample."""
+        import numpy as np
+        import pandas as pd
+
+        transformer = build_imbalance_transformer(
+            sentinel, task_type=task_type, random_state=42
+        )
+        # Build doesn't raise; fit_resample no-ops and returns input unchanged.
+        X = pd.DataFrame(np.random.randn(20, 5)).values
+        y = pd.Series(np.arange(20) % 2 if task_type == "classification"
+                      else np.linspace(0.0, 1.0, 20)).values
+        X_res, y_res = transformer.fit_resample(X, y)
+        assert X_res is X
+        assert y_res is y
+
 
 # =============================================================================
 # Recommendation Tests

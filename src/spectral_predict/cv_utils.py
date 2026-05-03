@@ -563,7 +563,8 @@ def _fit_with_early_stopping(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    early_stopping_rounds: int = 40
+    early_stopping_rounds: int = 40,
+    sample_weight: np.ndarray | None = None,
 ) -> None:
     """Fit a boosting model with early stopping.
 
@@ -581,14 +582,24 @@ def _fit_with_early_stopping(
         Validation targets for early stopping
     early_stopping_rounds : int, default=50
         Number of rounds without improvement before stopping
+    sample_weight : ndarray or None, default=None
+        Optional per-sample weights threaded into the booster's ``fit``.
+        XGBoost has no native ``class_weight`` kwarg; per-sample balanced
+        weights via ``compute_sample_weight('balanced', y)`` is the canonical
+        path for imbalanced XGBoost classification (mirrors search.py:4427).
     """
+    fit_kwargs: dict = {}
+    if sample_weight is not None:
+        fit_kwargs['sample_weight'] = sample_weight
+
     if isinstance(model, XGBOOST_MODELS):
         # Set early_stopping_rounds before fitting
         model.set_params(early_stopping_rounds=early_stopping_rounds)
         model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            verbose=False
+            verbose=False,
+            **fit_kwargs,
         )
 
     elif isinstance(model, LIGHTGBM_MODELS):
@@ -598,7 +609,8 @@ def _fit_with_early_stopping(
             callbacks=[
                 lgb.early_stopping(stopping_rounds=early_stopping_rounds, verbose=False),
                 lgb.log_evaluation(period=0)  # Suppress output
-            ]
+            ],
+            **fit_kwargs,
         )
 
     elif CATBOOST_AVAILABLE and isinstance(model, CATBOOST_MODELS):
@@ -611,11 +623,12 @@ def _fit_with_early_stopping(
             X_train, y_train,
             eval_set=(X_val, y_val),  # CatBoost uses tuple, not list
             early_stopping_rounds=early_stopping_rounds,
-            verbose=0  # CatBoost prefers int over bool
+            verbose=0,  # CatBoost prefers int over bool
+            **fit_kwargs,
         )
     else:
         # Not a boosting model - standard fit
-        model.fit(X_train, y_train)
+        model.fit(X_train, y_train, **fit_kwargs)
 
 
 def _compute_score(y_true: np.ndarray, y_pred: np.ndarray, scoring: str) -> float:

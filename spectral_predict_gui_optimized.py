@@ -37407,37 +37407,67 @@ F1 Score:  {f1:.4f}
                 print(format_auto_imbalance_message(resolved_info))
                 loaded_imbalance_method = resolved_method  # 'class_weight' or None
 
-            # Routed to the LogisticRegression tail for PLS-DA (mirrors search.py:4469-4470),
-            # consumed at the three LR-construction sites below.
-            apply_class_weight_to_lr = False
+            # Apply class_weight to the model directly (NOT as a resampler step) —
+            # mirrors search.py:4411-4448. Different model families use different
+            # kwargs for class weighting:
+            #   - LogisticRegression (PLS-DA tail), RF, SVC, LightGBM, NeuralBoosted: class_weight='balanced'
+            #   - CatBoost: auto_class_weights='Balanced'  (no class_weight kwarg; mirrors code_generator.py:946)
+            #   - XGBoost, RidgeClassifier: per-fold sample_weight=compute_sample_weight('balanced', y) at fit time
+            #   - MLP / NeuralBoosted-MLP / others with neither: cannot apply — must use a resampler instead
+            apply_class_weight_to_lr = False              # PLS-DA → LR tail
+            use_sample_weight_for_classification = False  # XGBoost / sample_weight-only fallback
             if loaded_imbalance_method == 'class_weight' and task_type == 'classification':
-                import warnings as _warnings
                 if model_name == 'PLS-DA':
-                    # The 'classifier' is the LogisticRegression tail, not the PLS transformer.
                     apply_class_weight_to_lr = True
-                    print(f"DEBUG: Will apply class_weight='balanced' to PLS-DA LogisticRegression tail")
+                    self._log_progress(
+                        f"Imbalance: applying class_weight='balanced' to PLS-DA LogisticRegression tail"
+                    )
+                elif model_name == 'CatBoost':
+                    # CatBoost classifier exposes auto_class_weights, not class_weight.
+                    try:
+                        model.set_params(auto_class_weights='Balanced')
+                        self._log_progress(
+                            f"Imbalance: applied auto_class_weights='Balanced' to CatBoost"
+                        )
+                    except Exception as e:
+                        self._log_progress(
+                            f"Imbalance WARNING: CatBoost set_params(auto_class_weights='Balanced') failed: {e}. "
+                            f"Model will train UNWEIGHTED. Consider switching to SMOTE/ADASYN."
+                        )
                 elif hasattr(model, 'class_weight'):
                     try:
                         model.set_params(class_weight='balanced')
-                        print(f"DEBUG: Applied class_weight='balanced' to {model_name}")
+                        self._log_progress(
+                            f"Imbalance: applied class_weight='balanced' to {model_name}"
+                        )
                     except Exception as e:
-                        _warnings.warn(
-                            f"{model_name} has class_weight attribute but set_params failed: {e}. "
-                            f"Consider using SMOTE or other resampling method.",
-                            UserWarning,
+                        self._log_progress(
+                            f"Imbalance WARNING: {model_name} has class_weight attribute but set_params failed: {e}. "
+                            f"Model will train UNWEIGHTED. Consider switching to SMOTE/ADASYN."
                         )
                 else:
-                    if model_name in ('MLP', 'MLPClassifier'):
-                        _warnings.warn(
-                            f"{model_name} does not support class_weight. For imbalanced "
-                            f"classification with MLP, use SMOTE or other resampling methods instead.",
-                            UserWarning,
+                    # Sample_weight fallback for XGBoost / RidgeClassifier-style models
+                    # (mirrors search.py:4427-4432). Detection via fit() signature.
+                    import inspect as _inspect
+                    _model_fit_sig = _inspect.signature(model.fit) if hasattr(model, 'fit') else None
+                    if _model_fit_sig and 'sample_weight' in _model_fit_sig.parameters:
+                        use_sample_weight_for_classification = True
+                        self._log_progress(
+                            f"Imbalance: {model_name} supports sample_weight; will compute "
+                            f"compute_sample_weight('balanced', y_train) per fold and pass to fit()"
+                        )
+                    elif model_name in ('MLP', 'MLPClassifier'):
+                        self._log_progress(
+                            f"Imbalance WARNING: {model_name} does NOT support class_weight or sample_weight. "
+                            f"Class-weighting was requested but cannot be applied — model will train UNWEIGHTED. "
+                            f"For imbalanced classification with MLP, switch the imbalance method to "
+                            f"SMOTE / ADASYN / SMOTE-Tomek, or pick a model that supports class_weight "
+                            f"(RandomForest, SVC, LightGBM, CatBoost, XGBoost, NeuralBoosted, PLS-DA)."
                         )
                     else:
-                        _warnings.warn(
-                            f"{model_name} does not support class_weight. Consider using "
-                            f"SMOTE or other resampling methods for imbalanced data.",
-                            UserWarning,
+                        self._log_progress(
+                            f"Imbalance WARNING: {model_name} does not support class_weight or sample_weight. "
+                            f"Model will train UNWEIGHTED. Consider switching to SMOTE / ADASYN / SMOTE-Tomek."
                         )
                 # Strip from imbalance_method so no resampler step is appended downstream.
                 loaded_imbalance_method = None
@@ -37926,11 +37956,22 @@ F1 Score:  {f1:.4f}
                             else:
                                 y_test_es = y_test
 
+                            # Per-fold balanced sample weights for sample_weight-only models
+                            # (XGBoost class_weight path — mirrors search.py:4068, 4088).
+                            # Computed AFTER any in-fold resampler so weights match resampled y.
+                            _es_sample_weight = None
+                            if use_sample_weight_for_classification:
+                                from sklearn.utils.class_weight import compute_sample_weight
+                                _es_sample_weight = compute_sample_weight(
+                                    'balanced', y_train_fold
+                                )
+
                             _fit_with_early_stopping(
                                 final_model_fold,
                                 X_train_transformed, y_train_fold,
                                 X_test_transformed, y_test_es,
-                                early_stopping_rounds
+                                early_stopping_rounds,
+                                sample_weight=_es_sample_weight,
                             )
                             y_pred = final_model_fold.predict(X_test_transformed)
 
@@ -37954,7 +37995,16 @@ F1 Score:  {f1:.4f}
                                 y_proba = pipe_fold.predict_proba(X_test)
                                 all_y_proba.append(y_proba)
                     else:
-                        pipe_fold.fit(X_train, y_train)
+                        # Per-fold balanced sample weights threaded via the 'model'
+                        # step name (sklearn fit_params convention) for sample_weight-only
+                        # classifiers like XGBoost — mirrors search.py:4068, 4098.
+                        _fit_kwargs = {}
+                        if use_sample_weight_for_classification:
+                            from sklearn.utils.class_weight import compute_sample_weight
+                            _fit_kwargs['model__sample_weight'] = compute_sample_weight(
+                                'balanced', y_train
+                            )
+                        pipe_fold.fit(X_train, y_train, **_fit_kwargs)
                         y_pred = pipe_fold.predict(X_test)
                 except ValueError as e:
                     if y_transform_active and any(kw in str(e).lower() for kw in ('log', 'positive', 'negative', 'sqrt', 'domain')):
@@ -38231,7 +38281,18 @@ Configuration:
             # Fit final pipeline on full dataset for model persistence
             # Clone the pipeline and fit on all data
             final_pipe = clone(pipe)
-            final_pipe.fit(X_raw, y_array)
+            # Mirror the per-fold sample_weight wiring: full-data balanced weights
+            # for sample_weight-only classifiers (XGBoost). PLS-DA / CatBoost / RF /
+            # SVC / LightGBM / NeuralBoosted carry their class_weight or
+            # auto_class_weights kwarg on the model itself, so they don't need
+            # anything extra here.
+            _final_fit_kwargs = {}
+            if use_sample_weight_for_classification:
+                from sklearn.utils.class_weight import compute_sample_weight
+                _final_fit_kwargs['model__sample_weight'] = compute_sample_weight(
+                    'balanced', y_array
+                )
+            final_pipe.fit(X_raw, y_array, **_final_fit_kwargs)
 
             # --- Calibration metrics (predict on training data) ---
             cal_text = ""
