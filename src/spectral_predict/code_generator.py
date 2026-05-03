@@ -8,6 +8,7 @@ model configurations and analysis results for scientific publication.
 import json
 import base64
 import gzip
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
@@ -371,7 +372,15 @@ class CodeGenerator:
                 },
                 'language_info': {
                     'name': 'python',
-                    'version': '3.9.0'
+                    # T-14: report the actual runtime Python version instead
+                    # of a stale hardcoded value. The project is Python 3.12+
+                    # only; hardcoded "3.9.0" misled anyone reading the
+                    # generated notebook's metadata.
+                    'version': (
+                        f'{sys.version_info.major}.'
+                        f'{sys.version_info.minor}.'
+                        f'{sys.version_info.micro}'
+                    )
                 }
             },
             'cells': cells
@@ -589,6 +598,10 @@ def _decode_embedded_data(encoded_str):
         if self.imbalance_method and self.imbalance_method.lower() in classification_resample_methods:
             extra_packages += ', imbalanced-learn'
 
+        # T-14 fix-of-fixes (DeepSeek HIGH #2): pass the live __version__ so
+        # generated scripts no longer claim "v3". Imported here lazily to keep
+        # the top-of-module import block focused on third-party deps.
+        from . import __version__ as _dasp_version
         return HEADER_TEMPLATE.format(
             date=datetime.now().strftime('%Y-%m-%d'),
             model_name=self.model_name,
@@ -597,7 +610,8 @@ def _decode_embedded_data(encoded_str):
             variable_selection_info=var_sel_info,
             cv_folds=self.cv_folds,
             extra_packages=extra_packages,
-            imports='\n'.join(imports)
+            imports='\n'.join(imports),
+            dasp_version=_dasp_version,
         )
 
     def _format_model_details(self) -> str:
