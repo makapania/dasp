@@ -443,6 +443,25 @@ def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
     return out
 
 
+def _slice_fit_params(fit_params: Optional[Dict[str, Any]], train_idx, n_samples: int) -> Dict[str, Any]:
+    """Slice array-valued fit_params per train_idx, leaving scalars untouched.
+
+    Used by the manual repeated-CV loop in cross_val_predict_pooled (and friends)
+    to mirror sklearn's auto-slicing of `params` in cross_val_predict for arrays
+    whose length matches the sample count (sample_weight, sample-indexed metadata).
+    Non-array values pass through verbatim.
+    """
+    if not fit_params:
+        return {}
+    sliced: Dict[str, Any] = {}
+    for key, value in fit_params.items():
+        if isinstance(value, np.ndarray) and value.shape and value.shape[0] == n_samples:
+            sliced[key] = value[train_idx]
+        else:
+            sliced[key] = value
+    return sliced
+
+
 def cross_val_predict_pooled(
     model,
     X: np.ndarray,
@@ -450,6 +469,7 @@ def cross_val_predict_pooled(
     cv,
     n_jobs: int = 1,
     method: str = 'predict',
+    fit_params: Optional[Dict[str, Any]] = None,
 ) -> np.ndarray:
     """Cross-validated predictions that work for all CV strategies including repeated CV.
 
@@ -471,6 +491,13 @@ def cross_val_predict_pooled(
         Number of parallel jobs (only for non-repeated CV).
     method : str, default='predict'
         Prediction method ('predict' or 'predict_proba').
+    fit_params : dict or None, default=None
+        Per-fold fit kwargs forwarded to ``model.fit`` (e.g.
+        ``{'model__sample_weight': sw}`` for a Pipeline whose terminal step is
+        named ``model``). Array values whose length matches X are sliced per
+        train_idx; scalars pass through unchanged. Required for sample_weight-
+        only classifiers (XGBoost, RidgeClassifier) under
+        imbalance_method='class_weight'.
 
     Returns
     -------
@@ -478,6 +505,11 @@ def cross_val_predict_pooled(
         Per-sample predictions, averaged across repeats for repeated CV.
     """
     if not _is_repeated_cv(cv):
+        if fit_params:
+            return cross_val_predict(
+                model, X, y, cv=cv, n_jobs=n_jobs, method=method,
+                fit_params=fit_params,
+            )
         return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
 
     # Repeated CV: accumulate predictions per sample, then reduce.
@@ -491,7 +523,10 @@ def cross_val_predict_pooled(
         votes_per_sample: List[list] = [[] for _ in range(n_samples)]
         for train_idx, test_idx in cv.split(X, y):
             model_clone = clone(model)
-            model_clone.fit(X[train_idx], y[train_idx])
+            model_clone.fit(
+                X[train_idx], y[train_idx],
+                **_slice_fit_params(fit_params, train_idx, n_samples),
+            )
             preds = np.ravel(model_clone.predict(X[test_idx]))
             for i, sample_idx in enumerate(test_idx):
                 votes_per_sample[sample_idx].append(preds[i])
@@ -506,7 +541,10 @@ def cross_val_predict_pooled(
 
     for train_idx, test_idx in cv.split(X, y):
         model_clone = clone(model)
-        model_clone.fit(X[train_idx], y[train_idx])
+        model_clone.fit(
+            X[train_idx], y[train_idx],
+            **_slice_fit_params(fit_params, train_idx, n_samples),
+        )
         if method == 'predict_proba':
             preds = model_clone.predict_proba(X[test_idx])
         else:
@@ -681,7 +719,8 @@ def cross_validate_with_early_stopping(
     early_stopping_rounds: int = 40,
     n_jobs: int = 1,
     return_train_score: bool = False,
-    return_estimator: bool = False
+    return_estimator: bool = False,
+    sample_weight: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """Cross-validate with early stopping support for boosting models.
 
@@ -757,13 +796,19 @@ def cross_validate_with_early_stopping(
         )
         use_early_stopping = False
 
-    # If not a boosting model or early stopping disabled, use standard cross_validate
+    # If not a boosting model or early stopping disabled, use standard cross_validate.
+    # Thread sample_weight via fit_params if provided — the 'model__sample_weight'
+    # prefix matches the codebase convention used by unified_bayesian and
+    # nsga2_search when the per-trial Pipeline's terminal step is named 'model'.
     if not use_early_stopping:
-        return cross_validate(
-            model, X, y, cv=cv, scoring=scoring,
+        cv_kwargs: Dict[str, Any] = dict(
+            cv=cv, scoring=scoring,
             n_jobs=n_jobs, return_train_score=return_train_score,
-            return_estimator=return_estimator, error_score='raise'
+            return_estimator=return_estimator, error_score='raise',
         )
+        if sample_weight is not None:
+            cv_kwargs['fit_params'] = {'model__sample_weight': sample_weight}
+        return cross_validate(model, X, y, **cv_kwargs)
 
     # Handle scoring - convert string to dict for uniform handling
     if isinstance(scoring, str):
@@ -791,6 +836,8 @@ def cross_validate_with_early_stopping(
     for train_idx, val_idx in cv.split(X, y):
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
+        # Per-fold slice of sample_weight when provided
+        sw_train = sample_weight[train_idx] if sample_weight is not None else None
 
         # Clone model for this fold
         model_clone = clone(model)
@@ -806,7 +853,13 @@ def cross_validate_with_early_stopping(
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
+                    # Resampler changes y AND sample count; recompute sw_train
+                    # from post-resample y so balanced weighting matches the
+                    # reduced/augmented training set.
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                    if sw_train is not None:
+                        from sklearn.utils.class_weight import compute_sample_weight
+                        sw_train = compute_sample_weight('balanced', y_train)
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
@@ -816,11 +869,13 @@ def cross_validate_with_early_stopping(
                 final_model_clone,
                 X_train_transformed, y_train,
                 X_val_transformed, y_val,
-                early_stopping_rounds
+                early_stopping_rounds,
+                sample_weight=sw_train,
             )
         else:
             _fit_with_early_stopping(
-                model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds
+                model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds,
+                sample_weight=sw_train,
             )
 
         fit_time = time.time() - fit_start
@@ -885,7 +940,8 @@ def cross_val_predict_with_early_stopping(
     y: np.ndarray,
     cv,
     early_stopping_rounds: int = 40,
-    method: str = 'predict'
+    method: str = 'predict',
+    sample_weight: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Get cross-validated predictions with early stopping support.
 
@@ -906,6 +962,15 @@ def cross_val_predict_with_early_stopping(
         Early stopping rounds for boosting models
     method : str, default='predict'
         Method to call ('predict' or 'predict_proba')
+    sample_weight : ndarray or None, default=None
+        Per-sample weights of length n_samples. Sliced per train_idx and
+        threaded into ``_fit_with_early_stopping`` for the boosting fold-fit
+        (where it routes to the booster's native ``sample_weight`` fit kwarg).
+        For the non-boosting fallback path, the caller-provided ``sample_weight``
+        is wrapped into ``fit_params={'model__sample_weight': sample_weight}``
+        so the Pipeline's per-fold sklearn fit slices it correctly. Required
+        for sample_weight-only classifiers (XGBoost) under
+        imbalance_method='class_weight'.
 
     Returns
     -------
@@ -920,8 +985,15 @@ def cross_val_predict_with_early_stopping(
         early_stopping_rounds > 0
     )
 
-    # If not a boosting model, use pooled cross_val_predict (handles repeated CV)
+    # If not a boosting model, use pooled cross_val_predict (handles repeated CV).
+    # The 'model' step prefix matches the codebase convention used by
+    # unified_bayesian and nsga2_search when constructing the per-trial Pipeline.
     if not use_early_stopping:
+        if sample_weight is not None:
+            return cross_val_predict_pooled(
+                model, X, y, cv=cv, method=method,
+                fit_params={'model__sample_weight': sample_weight},
+            )
         return cross_val_predict_pooled(model, X, y, cv=cv, method=method)
 
     # Manual CV loop with early stopping (handles repeated CV via accumulation)
@@ -943,6 +1015,9 @@ def cross_val_predict_with_early_stopping(
     for train_idx, val_idx in cv.split(X, y):
         X_train, X_val = X[train_idx], X[val_idx]
         y_train, y_val = y[train_idx], y[val_idx]
+        # Per-fold slice of sample_weight when provided (mirrors sklearn's
+        # native auto-slicing of fit_params arrays whose length matches X).
+        sw_train = sample_weight[train_idx] if sample_weight is not None else None
 
         model_clone = clone(model)
         final_model_clone = _get_model_from_pipeline(model_clone)
@@ -954,7 +1029,13 @@ def cross_val_predict_with_early_stopping(
 
             for step_name, step in model_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
+                    # Resampler changes y AND sample count; recompute sw_train
+                    # from the post-resample y so balanced weighting matches
+                    # the reduced/augmented training set.
                     X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                    if sw_train is not None:
+                        from sklearn.utils.class_weight import compute_sample_weight
+                        sw_train = compute_sample_weight('balanced', y_train)
                 elif hasattr(step, 'transform'):
                     step.fit(X_train_transformed, y_train)
                     X_train_transformed = step.transform(X_train_transformed)
@@ -964,7 +1045,8 @@ def cross_val_predict_with_early_stopping(
                 final_model_clone,
                 X_train_transformed, y_train,
                 X_val_transformed, y_val,
-                early_stopping_rounds
+                early_stopping_rounds,
+                sample_weight=sw_train,
             )
 
             if method == 'predict_proba':
@@ -973,7 +1055,8 @@ def cross_val_predict_with_early_stopping(
                 preds = final_model_clone.predict(X_val_transformed)
         else:
             _fit_with_early_stopping(
-                model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds
+                model_clone, X_train, y_train, X_val, y_val, early_stopping_rounds,
+                sample_weight=sw_train,
             )
 
             if method == 'predict_proba':
@@ -1013,7 +1096,8 @@ def cross_val_score_with_early_stopping(
     cv,
     scoring: str = 'neg_root_mean_squared_error',
     early_stopping_rounds: int = 40,
-    n_jobs: int = 1
+    n_jobs: int = 1,
+    sample_weight: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Cross-validation scores with early stopping support.
 
@@ -1045,6 +1129,7 @@ def cross_val_score_with_early_stopping(
     results = cross_validate_with_early_stopping(
         model, X, y, cv=cv, scoring=scoring,
         early_stopping_rounds=early_stopping_rounds,
-        n_jobs=n_jobs
+        n_jobs=n_jobs,
+        sample_weight=sample_weight,
     )
     return results['test_score']
