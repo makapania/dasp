@@ -1,11 +1,19 @@
 """T-20: saved-model ↔ exported-script reproducibility test.
 
 T-19 fixed model-native imbalance handling and Auto-mode runtime resolution
-across the export-code surface; T-32 fixed sample_weight threading through
-the resampler. Both bugs lived in the parity contract between the runtime
-(``model_io.save_model`` / ``load_model``) and the exported Python script
-(``code_generator.CodeGenerator.generate_script``). Without an explicit
-parity test pinning the contract, the next regression slips silently.
+across the export-code surface — the bug class lived in the parity contract
+between the runtime (``model_io.save_model`` / ``load_model``) and the
+exported Python script (``code_generator.CodeGenerator.generate_script``).
+Without an explicit parity test pinning the contract, the next regression
+slips silently.
+
+Scope note (T-32 coverage): T-32's fix targets sample_weight threading
+through the resampler at ``search.py:4082-4098`` (``_run_single_fold``)
+and is directly pinned by ``tests/test_t32_sample_weight_resampling.py``.
+The matrix below does NOT include a resampler + sample_weight parity row,
+so a T-32 regression would not surface here — it would surface in the
+dedicated T-32 file. The rows in this file focus on the T-19 surface
+(class_weight + auto-mode for the boosting / sklearn classifier families).
 
 What this test pins
 -------------------
