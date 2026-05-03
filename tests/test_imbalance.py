@@ -351,6 +351,19 @@ class TestClassificationResampler:
         X_res, y_res = resampler.fit_resample(X, y)
         assert len(X_res) > 0
 
+    @pytest.mark.parametrize("sentinel", ["class_weight", "auto", "CLASS_WEIGHT", "Auto"])
+    def test_class_weight_and_auto_are_no_ops(self, sentinel, imbalanced_data):
+        """Regression: GUI's refined-model path may route 'class_weight' or 'auto'
+        sentinels through the resampler factory (these are model-parameter flags,
+        not actual resamplers). Pre-fix this raised ValueError mid-CV. Post-fix
+        the resampler returns input unchanged so the pipeline can proceed; the
+        actual class_weight='balanced' kwarg is applied to the model elsewhere."""
+        X, y = imbalanced_data
+        resampler = ClassificationResampler(method=sentinel, random_state=42)
+        X_res, y_res = resampler.fit_resample(X, y)
+        assert X_res is X
+        assert y_res is y
+
 
 # =============================================================================
 # Regression Resampler Tests

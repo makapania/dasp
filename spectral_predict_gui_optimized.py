@@ -37390,6 +37390,63 @@ F1 Score:  {f1:.4f}
                     print(f"  imbalance_method: {loaded_imbalance_method}")
                     print(f"  imbalance_params: {loaded_imbalance_params}")
 
+            # Resolve 'auto' (T-19) to a concrete method based on y, mirroring
+            # search.py:1068-1074. Then apply 'class_weight' as a model kwarg —
+            # NOT as a pipeline step — mirroring search.py:4411-4448. This keeps
+            # the refined-model path semantically aligned with the search path
+            # and prevents ClassificationResampler from receiving non-resampler
+            # sentinels (which would crash at fit_resample).
+            if loaded_imbalance_method == 'auto' and task_type == 'classification':
+                from spectral_predict.imbalance import (
+                    resolve_auto_imbalance,
+                    format_auto_imbalance_message,
+                )
+                resolved_method, resolved_info = resolve_auto_imbalance(
+                    y_array, task_type=task_type
+                )
+                print(format_auto_imbalance_message(resolved_info))
+                loaded_imbalance_method = resolved_method  # 'class_weight' or None
+
+            # Routed to the LogisticRegression tail for PLS-DA (mirrors search.py:4469-4470),
+            # consumed at the three LR-construction sites below.
+            apply_class_weight_to_lr = False
+            if loaded_imbalance_method == 'class_weight' and task_type == 'classification':
+                import warnings as _warnings
+                if model_name == 'PLS-DA':
+                    # The 'classifier' is the LogisticRegression tail, not the PLS transformer.
+                    apply_class_weight_to_lr = True
+                    print(f"DEBUG: Will apply class_weight='balanced' to PLS-DA LogisticRegression tail")
+                elif hasattr(model, 'class_weight'):
+                    try:
+                        model.set_params(class_weight='balanced')
+                        print(f"DEBUG: Applied class_weight='balanced' to {model_name}")
+                    except Exception as e:
+                        _warnings.warn(
+                            f"{model_name} has class_weight attribute but set_params failed: {e}. "
+                            f"Consider using SMOTE or other resampling method.",
+                            UserWarning,
+                        )
+                else:
+                    if model_name in ('MLP', 'MLPClassifier'):
+                        _warnings.warn(
+                            f"{model_name} does not support class_weight. For imbalanced "
+                            f"classification with MLP, use SMOTE or other resampling methods instead.",
+                            UserWarning,
+                        )
+                    else:
+                        _warnings.warn(
+                            f"{model_name} does not support class_weight. Consider using "
+                            f"SMOTE or other resampling methods for imbalanced data.",
+                            UserWarning,
+                        )
+                # Strip from imbalance_method so no resampler step is appended downstream.
+                loaded_imbalance_method = None
+
+            # Shared LR kwargs for the three PLS-DA tail-construction sites below.
+            _lr_kwargs = {'max_iter': 1000, 'random_state': 42}
+            if apply_class_weight_to_lr:
+                _lr_kwargs['class_weight'] = 'balanced'
+
             # Initialize variables that may only be set in certain paths
             # (needed later for validation prediction)
             prep_pipeline = None
@@ -37514,7 +37571,7 @@ F1 Score:  {f1:.4f}
                     pipe_steps.extend([
                         ('pls', model),
                         ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-                        ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                        ('lr', LogisticRegression(**_lr_kwargs))
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
@@ -37642,7 +37699,7 @@ F1 Score:  {f1:.4f}
                     pipe_steps.extend([
                         ('pls', model),
                         ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-                        ('lr', LogisticRegression(max_iter=1000, random_state=42))
+                        ('lr', LogisticRegression(**_lr_kwargs))
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
@@ -37698,7 +37755,7 @@ F1 Score:  {f1:.4f}
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.append(('pls', model))
                     pipe_steps.append(('scaler', StandardScaler()))  # Scale PLS scores for LogisticRegression
-                    pipe_steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
+                    pipe_steps.append(('lr', LogisticRegression(**_lr_kwargs)))
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
                 elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):

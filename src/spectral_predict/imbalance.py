@@ -236,6 +236,14 @@ class ClassificationResampler(BaseEstimator):
 
     def fit(self, X, y=None):
         """Fit the resampler (creates internal resampler object)."""
+        # 'class_weight' and 'auto' are model-parameter sentinels, not resampler
+        # methods — see _needs_resampling_pipeline() / validate_classification_config().
+        # If a caller still routes them through this factory, no-op so the pipeline
+        # doesn't crash; the model receives class_weight='balanced' at construction
+        # time in the actual call site.
+        if isinstance(self.method, str) and self.method.lower() in ('class_weight', 'auto'):
+            self.resampler_ = None
+            return self
         # Create resampler based on method name
         if isinstance(self.method, str):
             method_map = {
@@ -279,6 +287,10 @@ class ClassificationResampler(BaseEstimator):
         This is the main method called during pipeline training.
         """
         self.fit(X, y)
+
+        # No-op for 'class_weight' / 'auto' sentinels — see fit() for rationale.
+        if self.resampler_ is None:
+            return X, y
 
         original_size = len(y)
         original_class_counts = Counter(y)
