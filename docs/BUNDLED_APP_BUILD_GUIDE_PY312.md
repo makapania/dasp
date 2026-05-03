@@ -19,7 +19,7 @@ This single command handles everything:
 
 **Output:**
 - `dist/SpectralPredict-py312/SpectralPredict-py312.exe` — standalone bundle (~1.4 GB folder)
-- `dist/installer/SpectralPredict_Setup_py312_0.5.0b1.exe` — single-file installer (~299 MB, LZMA2-compressed)
+- `dist/installer/SpectralPredict_Setup_py312_<version>.exe` — single-file installer (~299 MB, LZMA2-compressed); `<version>` matches whatever `version.py` declares (e.g. `0.5.0b2` for the current release)
 
 ---
 

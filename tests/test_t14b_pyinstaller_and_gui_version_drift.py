@@ -28,10 +28,13 @@ def _read(relpath: str) -> str:
 
 
 def test_gui_has_no_hardcoded_b1_literal():
-    """The GUI must not contain a hardcoded ``0.5.0b1`` (or any prior beta)
-    literal anywhere — both display sites should drive from ``__version__``."""
+    """The GUI must not contain a hardcoded ``0.5.0b1`` (or bare ``0.5.0``,
+    or any prior beta) literal anywhere — both display sites should drive
+    from ``__version__``. Bare ``0.5.0`` is included so a developer can't
+    re-hardcode one display site to the major.minor.patch core while leaving
+    the beta suffix off."""
     src = _read("spectral_predict_gui_optimized.py")
-    for stale in ("0.5.0b1", "0.4.0", "0.3.0", "0.2.0"):
+    for stale in ("0.5.0b1", "0.5.0", "0.4.0", "0.3.0", "0.2.0"):
         assert stale not in src, (
             f"GUI source contains stale version literal {stale!r}; "
             "version drift has regressed (T-14b)"
@@ -40,14 +43,25 @@ def test_gui_has_no_hardcoded_b1_literal():
 
 def test_gui_imports_dasp_version():
     """GUI must import ``__version__`` from the package so the title bar and
-    version label render the live value."""
+    version label render the live value. Both specific display sites must
+    embed ``_DASP_VERSION`` via f-string interpolation — not just appear
+    somewhere in the file (e.g. only on the import line). A repo-wide
+    presence check would let a developer hardcode one display site while
+    keeping the other ``_DASP_VERSION``-driven."""
     src = _read("spectral_predict_gui_optimized.py")
     assert "from spectral_predict import __version__" in src, (
         "GUI must import __version__ from spectral_predict to avoid drift"
     )
-    # Both display sites must use the imported value.
-    assert "self.root.title(f\"ASP - Advanced Spectral Prediction" in src
-    assert "_DASP_VERSION" in src
+    # Title bar (line ~2558): must f-string-interpolate _DASP_VERSION.
+    assert "BETA {_DASP_VERSION}" in src, (
+        "GUI title bar must f-string-interpolate {_DASP_VERSION}; "
+        "any other format risks reintroducing a hardcoded literal"
+    )
+    # Canvas version label (line ~4665): must f-string-interpolate _DASP_VERSION.
+    assert 'f"v{_DASP_VERSION}"' in src, (
+        "GUI canvas version label must f-string-interpolate {_DASP_VERSION}; "
+        "any other format risks reintroducing a hardcoded literal"
+    )
 
 
 # ---------------------------------------------------------------------------
