@@ -1020,8 +1020,14 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             + model_code
         )
 
-    # Pipeline-specific params that should never be passed to model constructors
-    _PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps', 'n_jobs'}
+    # Pipeline-specific params that should never be passed to model constructors.
+    # n_jobs is intentionally NOT included: it is a model constructor kwarg for
+    # XGBoost / LightGBM / RandomForest / sklearn, not a sklearn Pipeline kwarg.
+    # Stripping it would silently drop a user-set determinism choice (n_jobs=1)
+    # that the downstream setdefault('n_jobs', -1) would then overwrite with the
+    # parallel default — exactly the runtime-vs-export drift T-20 parity tests
+    # exist to catch.
+    _PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 
     def _normalize_model_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Strip pipeline prefixes from params for base estimators."""
