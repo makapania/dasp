@@ -37,6 +37,10 @@
 >
 > Detailed writeup in SESSION_LOG.md — four lessons captured: transferred-justification fallacy in defense-in-depth; cross-family panels reveal values disagreements that single-reviewer panels can't; "verification" reviews check reachability not remedy-fitness; the "skips the misleading print()" argument is circular self-justification.
 >
+> ### Deferred follow-ups added this session
+>
+> - **T-resume-y-variable-restore (UX bug, user-reported 2026-05-05 evening)** — When a classification run is disrupted (crash / interruption) and the user clicks Resume, the y reference variable selection appears to default back to the project's first-load default (a regression variable), not the classification variable saved with the original run. Symptom: the resume flow doesn't successfully restart — appears to surface as an error or silent no-restart. Investigation needed to confirm root cause: (a) is the y-variable selection saved in `run_state.py` sidecar at all? (b) if saved, is `restore_gui_settings` reading it back? (c) if read back, is the GUI's variable-dropdown actually being set programmatically during the resume dialog flow? Reproduction: start classification analysis with non-default y variable → kill mid-run → relaunch GUI → click Resume → check whether the y-variable dropdown matches the original. Filed for next agent to investigate; verify the fix is really needed (per user's "double-check" rule) before patching — could be a UX-only papercut or a state-restoration gap with broader implications.
+>
 > ## Session 2026-05-05 afternoon — class_weight sister-site bug class fully closed (PR #38)
 >
 > ### What shipped
