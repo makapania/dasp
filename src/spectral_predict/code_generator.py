@@ -1032,11 +1032,11 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
     # architectural smell. It IS a sklearn Pipeline kwarg AND a model kwarg
     # (RandomForest / SVM / LightGBM all accept verbose). At the codegen
     # export site, _normalize_model_params receives bare model params, so
-    # stripping plain verbose silently drops a user-set verbose=N. CatBoost
-    # and LightGBM get a verbose=0 re-injection at lines 974-975 that masks
-    # the issue for those two libraries; RandomForest / SVM users would lose
-    # their setting. Fixing requires either context-aware stripping or a
-    # rename pass — file as a separate ticket if it surfaces in real use.
+    # stripping plain verbose silently drops a user-set verbose=N. Only
+    # CatBoost gets a verbose=0 re-injection at lines 974-975, which masks
+    # the issue for CatBoost; LightGBM / RandomForest / SVM users would
+    # lose their setting. Fixing requires either context-aware stripping
+    # or a rename pass — file as a separate ticket if it surfaces in real use.
     _PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 
     def _normalize_model_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
