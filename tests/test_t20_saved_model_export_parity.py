@@ -928,4 +928,11 @@ def test_mlp_binary_classification_imbalance_is_no_op_marker(tmp_path):
         params=params,
         imbalance_method="class_weight",  # Marker: must be no-op for MLP.
         tmp_path=tmp_path,
+        # Pin the user-facing warning. The codegen at code_generator.py:1510-1516
+        # emits "[Imbalance] note: MLP does not support class_weight; ..." under
+        # IMBALANCE_METHOD == 'class_weight' so users know imbalance was silently
+        # dropped. If a future refactor silences this warning while keeping
+        # numerical no-op behavior, parity would still pass but users would be
+        # misled (they'd think balancing was applied).
+        expect_stdout_marker="MLP does not support class_weight",
     )
