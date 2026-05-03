@@ -4,6 +4,28 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-04 stacked-PR merge cascade — GitHub auto-closes stacked PRs the moment their base branch is deleted, and they cannot be reopened
+
+When the 8-PR queue went through squash-merge, the four stacked PRs (#23 → #24 → #28 on top of #22) hit a workflow gotcha that's not obvious from the GitHub docs:
+
+1. Squash-merge PR #22. Its branch `fix/T20-...` is deleted from origin (gh's `--delete-branch` flag).
+2. PR #23 had `baseRefName=fix/T20-...`. When that base branch is deleted, **GitHub does NOT auto-redirect the base to main** — it auto-closes the PR.
+3. **The closed PR cannot be reopened** (`gh pr reopen 23` returns `Could not open the pull request`).
+4. **The closed PR's base cannot be changed** (`gh pr edit 23 --base main` returns `Cannot change the base branch of a closed pull request`).
+5. The recovery is: rebase the head branch locally onto post-parent main with `git rebase --onto origin/main <last-parent-commit> <head-branch>`, force-push, then `gh pr create --base main --head <head>` to open a NEW PR with a new number. The old PR stays closed.
+
+This happened three times tonight — PRs #23 / #24 / #28 became #29 / #30 / #31 after the cascade. Each rebase-and-reopen was a 2-3 minute mechanical step but the *first* one is a stop-and-figure-it-out moment if you don't know the pattern.
+
+**Generalisable pattern**: when squash-merging a stacked queue, after each parent merges, immediately:
+1. `git fetch --all --prune` to drop the deleted base from local refs.
+2. `git checkout <child-branch>` and `git rebase --onto origin/main <pre-rebase-parent-tip-SHA> <child-branch>`. Use the parent's pre-rebase tip SHA, not the squashed commit SHA — git skips the parent's commits cleanly when their content is now in main as a single squashed commit.
+3. Force-push the child with `--force-with-lease`.
+4. **Open a new PR** (the old PR is dead). Title and body can be reused verbatim.
+
+**Bonus side-finding during the cascade**: an `xfail(strict=True)` test that PR #29 (T-20b) inherited from PR #23 went XPASS-strict after rebase — PR #26's defensive `.ravel()` had landed before the T-20 stack and quietly fixed the bug class the xfail was waiting for. The XPASS-strict failure was actually a signal that the fix had cross-pollinated; flipping the marker (commit `792ce20`) was the right resolution. Lesson: when rebasing a stacked test PR onto a moved main, run the test suite immediately after rebase to catch xfail markers that have become stale.
+
+---
+
 ## 2026-05-04 codex round 2 — call-graph reasoning catches a cross-file bug that within-file cross-family review missed
 
 **Single non-obvious lesson, but a high-leverage one:**
