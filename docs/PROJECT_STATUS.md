@@ -1,6 +1,20 @@
 # Project Status
 
-> **Last updated:** 2026-05-04 (post-merge — all 8 outstanding PRs squash-merged to main; post-merge regression sweep **360 passed, 1 skipped**, no regressions).
+> **Last updated:** 2026-05-05 (Model Dev refined-model crash on `imbalance_method='class_weight'` / `'auto'` — fixed in commit `4dcedbc`, see SESSION_LOG.md). Pre-existing baseline still **360 passed, 1 skipped** plus 4 new regression cases on `ClassificationResampler` no-op behavior.
+>
+> ## Session 2026-05-05 — refined-model imbalance crash (commit `4dcedbc`, NOT pushed yet)
+>
+> **User report**: running any classifier from Model Development → Refine raised `ValueError: Unknown resampling method: class_weight` from `imbalance.py:252`. Broken for all classifier model types since T-19 (`1d2bf6d`) made the auto→class_weight resolution path more reachable in saved-and-reloaded model configs.
+>
+> **Fix**: two-layer, mirrors `search.py:4411-4470`. (1) `_run_refined_model_thread` now resolves `'auto'` via `resolve_auto_imbalance` and applies `class_weight='balanced'` to the model directly (with PLS-DA's LR tail wired via shared `_lr_kwargs`), then clears the variable so no resampler step is appended. (2) `ClassificationResampler.fit / fit_resample` no-ops on `'class_weight'` / `'auto'` sentinels as defense in depth. Regression test added in `tests/test_imbalance.py` covering both sentinels case-insensitively.
+>
+> **Test sweep**: `tests/test_imbalance.py` 58 passed + 1 skipped (was 54 + 1 skipped pre-fix; +4 from new no-op parametrize). Full sweep not re-run for this isolated GUI/imbalance-only fix.
+>
+> **Push status**: committed locally on `main`, **not pushed**. User to push when ready.
+>
+> ---
+>
+> ## Session 2026-05-04 (post-merge — all 8 outstanding PRs squash-merged to main; post-merge regression sweep **360 passed, 1 skipped**, no regressions).
 >
 > ## Session 2026-05-04 — 8 PRs MERGED to main
 >

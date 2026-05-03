@@ -4,6 +4,24 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-05 Model Dev "refined model" crash on imbalance_method='class_weight' / 'auto' (commit `4dcedbc`)
+
+**Symptom (user report):** running any classifier from Model Development → Refine raised `ValueError: Unknown resampling method: class_weight. Available: ['smote', ...]` from `imbalance.py:252`, traceback through `spectral_predict_gui_optimized.py:37849` (`step.fit_resample(...)` in the early-stopping fold loop). Confirmed broken for **all** classifier model types, not model-specific.
+
+**Root cause:** `_run_refined_model_thread` constructed `ClassificationResampler('class_weight')` and inserted it as a Pipeline step. But `class_weight` is a model-parameter sentinel (per the contracts in `_needs_resampling_pipeline` at `search.py:286` and `validate_classification_config` at `imbalance.py:1259`), not an actual resampler — so when CV called `step.fit_resample()`, the resampler factory exploded on the unknown method name. The canonical pattern in `search.py:4411-4470` is: for `'class_weight'`, call `model.set_params(class_weight='balanced')` (with `hasattr` guard + sample_weight fallback + MLP warning), then **do not** pass `'class_weight'` into `build_imbalance_transformer` / `build_preprocessing_pipeline`. The refined-model thread skipped the entire model-kwarg routing step and just shoved the sentinel through the resampler pipeline.
+
+**Why it became visible recently:** T-19 (commit `1d2bf6d`, "expose model-native imbalance handling — bug-fix + Auto mode") added runtime resolution where `imbalance_method='auto'` mutates to `'class_weight'` (or None) at run-entry inside the search modules. The refined-model thread *consumes* `selected_model_config['imbalance_method']` from saved results — so any saved-then-reloaded model whose original search resolved auto → class_weight (or whose user picked class_weight directly) feeds the sentinel into the broken path. Pre-T-19 this was less likely to trigger because auto-resolution didn't exist; post-T-19 every Auto-mode user with imbalanced data hits it on the first refined-model run.
+
+**Fix shape (two layers, mirroring `search.py:4411-4470`):**
+1. `_run_refined_model_thread`: after reading `loaded_imbalance_method`, resolve `'auto'` via `resolve_auto_imbalance(y_array, task_type)`, then for `'class_weight'` call `model.set_params(class_weight='balanced')` with the standard guards, and clear `loaded_imbalance_method = None` so no resampler step is appended downstream. PLS-DA routes the kwarg to its `LogisticRegression` tail via a shared `_lr_kwargs` dict consumed at all three pipeline-build sites (GA / derivative+subset / raw).
+2. `ClassificationResampler.fit / fit_resample`: defense-in-depth no-op for `'class_weight'` / `'auto'` sentinels (case-insensitive). Ensures any future caller that misroutes them returns input unchanged instead of crashing mid-CV.
+
+**Lesson for similar bug shape:** "model-parameter flag listed in the same dropdown as resampler methods" is a recurring gotcha pattern. Whenever the codepath branches on `imbalance_method`, the discriminator must be: `None` → nothing; `'auto'` → resolve first; `'class_weight'` → model kwarg, NOT pipeline step; resampler-method-name → pipeline step. The GUI's dropdown deliberately mixes both kinds for UI parity, so every consuming code path must handle the discrimination — `search.py` does, the refined-model thread did not. Grep for `imbalance_method ==` and `imbalance_method !=` to find any future site that's missing the discriminator.
+
+**Regression test:** `tests/test_imbalance.py::TestClassificationResampler::test_class_weight_and_auto_are_no_ops` parametrizes `'class_weight'` / `'auto'` (plus uppercase variants for case-insensitivity) and asserts `fit_resample` returns the input by identity (`X_res is X`). Catches both the "resampler explodes on sentinel" regression and any future "resampler quietly mangles input on sentinel" regression.
+
+---
+
 ## 2026-05-04 stacked-PR merge cascade — GitHub auto-closes stacked PRs the moment their base branch is deleted, and they cannot be reopened
 
 When the 8-PR queue went through squash-merge, the four stacked PRs (#23 → #24 → #28 on top of #22) hit a workflow gotcha that's not obvious from the GitHub docs:
