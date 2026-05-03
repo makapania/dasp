@@ -75,33 +75,60 @@ def test_version_info_txt_strings_match_dasp_version():
     )
 
 
-def test_version_info_txt_tuple_trailing_element_tracks_beta_number():
-    """Windows file-version tuples must be 4 ints. The codebase convention
-    encodes the beta number in the trailing tuple element (so 0.5.0b2 →
-    (0, 5, 0, 2)). Pin that mapping so a string bump that forgets the tuple
-    fails the test."""
+def test_version_info_txt_tuple_structure_and_semver_match():
+    """Always-on contract: ``filevers`` and ``prodvers`` must each be 4-int
+    tuples whose first three elements match major/minor/patch parsed from
+    ``__version__``. Pinning the structural contract independently of the
+    pre-release suffix means the test still does work after the project
+    cuts a non-beta release (a previous version of this test silently
+    no-op'd on non-beta versions — fix-of-fixes from cross-family review)."""
     text = _read("version_info.txt")
 
-    # Extract beta number from __version__ when present (e.g. "0.5.0b2" → 2).
-    m = re.match(r"(\d+)\.(\d+)\.(\d+)b(\d+)$", __version__)
-    if not m:
-        # Non-beta version — no tuple/string drift contract to enforce here.
-        return
-    major, minor, patch, beta = (int(g) for g in m.groups())
-    expected_tuple = f"({major}, {minor}, {patch}, {beta})"
+    sem = re.match(r"(\d+)\.(\d+)\.(\d+)", __version__)
+    assert sem, f"Cannot parse __version__ {__version__!r} as semver"
+    major, minor, patch = (int(g) for g in sem.groups())
 
-    filevers = re.search(r"filevers=\(([^)]+)\)", text)
-    prodvers = re.search(r"prodvers=\(([^)]+)\)", text)
-    assert filevers, "filevers tuple not found in version_info.txt"
-    assert prodvers, "prodvers tuple not found in version_info.txt"
-    assert f"({filevers.group(1)})" == expected_tuple, (
-        f"filevers tuple is ({filevers.group(1)}); expected {expected_tuple} "
-        f"to match __version__ {__version__!r}"
-    )
-    assert f"({prodvers.group(1)})" == expected_tuple, (
-        f"prodvers tuple is ({prodvers.group(1)}); expected {expected_tuple} "
-        f"to match __version__ {__version__!r}"
-    )
+    for name in ("filevers", "prodvers"):
+        m = re.search(rf"{name}=\(([^)]+)\)", text)
+        assert m, f"{name} tuple not found in version_info.txt"
+        parts = [p.strip() for p in m.group(1).split(",")]
+        assert len(parts) == 4, (
+            f"{name} must be a 4-int tuple; got ({m.group(1)})"
+        )
+        for p in parts:
+            assert p.isdigit(), (
+                f"{name} elements must be integers; got {p!r} in "
+                f"({m.group(1)})"
+            )
+        ints = [int(p) for p in parts]
+        assert ints[:3] == [major, minor, patch], (
+            f"{name} first three elements {ints[:3]} must match "
+            f"__version__ major.minor.patch ({major}.{minor}.{patch})"
+        )
+
+
+def test_version_info_txt_tuple_trailing_element_matches_beta_number():
+    """Beta-specific contract: when ``__version__`` carries a ``bN`` suffix,
+    the trailing tuple element in ``filevers``/``prodvers`` must equal N.
+    Pinning the convention so a beta-string bump that forgets the tuple
+    bump fails the test. Skipped (with explicit asserts in
+    test_version_info_txt_tuple_structure_and_semver_match) for non-beta
+    versions — that release will pick its own tuple-trailing convention."""
+    beta_m = re.match(r"\d+\.\d+\.\d+b(\d+)$", __version__)
+    if beta_m is None:
+        import pytest
+        pytest.skip(f"__version__ {__version__!r} is not a beta release")
+
+    beta = int(beta_m.group(1))
+    text = _read("version_info.txt")
+    for name in ("filevers", "prodvers"):
+        m = re.search(rf"{name}=\(([^)]+)\)", text)
+        assert m, f"{name} tuple not found in version_info.txt"
+        parts = [p.strip() for p in m.group(1).split(",")]
+        assert int(parts[3]) == beta, (
+            f"{name} trailing element {parts[3]} must equal beta number "
+            f"{beta} parsed from __version__ {__version__!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +146,29 @@ def test_iss_my_app_version_matches_dasp_version():
     assert m.group(1) == __version__, (
         f"MyAppVersion in .iss is {m.group(1)!r}; must match "
         f"__version__ ({__version__!r}) — installer filename will drift otherwise"
+    )
+
+
+# ---------------------------------------------------------------------------
+# pyproject.toml — wheel metadata version (consumed by setuptools / pip show)
+# ---------------------------------------------------------------------------
+
+
+def test_pyproject_toml_version_matches_dasp_version():
+    """``pyproject.toml`` carries an independent ``[project].version`` that
+    setuptools uses for wheel metadata. ``pip show spectral-predict`` reads
+    from there, not from ``__init__.__version__``. Drift here means an
+    install-from-source surface reports a stale version.
+
+    Both DeepSeek V4 Pro Max and GLM 5.1 flagged this as an unpinned drift
+    site during T-14b review. Closing the pin here prevents the same drift
+    pattern T-14 closed elsewhere."""
+    text = _read("pyproject.toml")
+    m = re.search(r'^version\s*=\s*"([^"]+)"', text, flags=re.MULTILINE)
+    assert m, "version field not found in pyproject.toml [project] section"
+    assert m.group(1) == __version__, (
+        f"pyproject.toml version is {m.group(1)!r}; must match "
+        f"__version__ ({__version__!r})"
     )
 
 
