@@ -14,6 +14,7 @@ from typing import Dict, Any, Optional
 import numpy as np
 import pandas as pd
 
+from . import __version__
 from .code_generator import CodeGenerator, ExportOptions
 from .r_code_generator import RCodeGenerator
 
@@ -222,7 +223,7 @@ Data files are not included in this export. To use the provided scripts:
 2. Update the file paths in the scripts to point to your data files.
 """
 
-        readme += """
+        readme += f"""
 ## Reproducibility
 
 This export package contains everything needed to reproduce the analysis:
@@ -240,7 +241,7 @@ If you use this analysis in a publication, please cite:
 
 ```
 Spectral Predict - Automated NIR/IR Spectroscopy Modeling
-Version: 1.0
+Version: {__version__}
 https://github.com/yourusername/spectral-predict
 ```
 
@@ -251,7 +252,7 @@ Spectral Predict documentation or contact the maintainers.
 
 ---
 
-Generated with Spectral Predict
+Generated with Spectral Predict v{__version__}
 """
 
         return readme
