@@ -4092,24 +4092,32 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             manual_fit_used = True
             # Transform X through all steps except the model
             X_train_transformed = X_train
+            # T-32: track the post-resampling y so the final fit() sees a y
+            # whose length matches X_train_transformed AND sample_weight_train.
+            # Pre-fix, the fit() calls below passed the original y_train, which
+            # mismatches X / sample_weight after a resampler runs. sklearn
+            # raises ValueError on the length mismatch — the user got a hard
+            # crash whenever they combined a resampler (SMOTE, ADASYN, ...)
+            # with a sample_weight-supporting model (Ridge, LogisticRegression).
+            y_train_for_model = y_train
             for step_name, step in pipe_clone.steps[:-1]:
                 if hasattr(step, 'fit_resample'):
                     # For imblearn resamplers, apply fit_resample
-                    X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train)
+                    X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train_for_model)
                     # Recompute sample weights for resampled data
                     sample_weight_train = compute_sample_weight('balanced', y_train_for_model)
                     fitted_steps.append((step_name, step, 'resample'))
                 elif hasattr(step, 'transform'):
-                    step.fit(X_train_transformed, y_train)
+                    step.fit(X_train_transformed, y_train_for_model)
                     X_train_transformed = step.transform(X_train_transformed)
                     fitted_steps.append((step_name, step, 'transform'))
 
             # Fit the final model with sample weights (if supported)
             final_model = pipe_clone.steps[-1][1]
             if _supports_sample_weight(final_model):
-                final_model.fit(X_train_transformed, y_train, sample_weight=sample_weight_train)
+                final_model.fit(X_train_transformed, y_train_for_model, sample_weight=sample_weight_train)
             else:
-                final_model.fit(X_train_transformed, y_train)
+                final_model.fit(X_train_transformed, y_train_for_model)
         else:
             # No pipeline, just the model
             if _supports_sample_weight(pipe_clone):
@@ -4142,14 +4150,24 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                 X_test_transformed = X_test.copy()
 
                 if hasattr(pipe_clone, 'steps'):
+                    # T-32 fix-of-fixes (GLM/DeepSeek MEDIUM): use the same
+                    # y_train_for_model threading pattern as the classification-
+                    # sample-weight branch instead of in-place mutating y_train.
+                    # Pre-fix this branch had the same architectural landmine
+                    # (downstream code seeing silently-resampled y_train) — no
+                    # crash today since boosting models on this path don't
+                    # propagate sample_weight, but a future merge of the two
+                    # branches OR adding a sample_weight-supporting boosting
+                    # model would re-introduce T-32's class of bug.
+                    y_train_for_model = y_train
                     for step_name, step in pipe_clone.steps[:-1]:
                         if hasattr(step, 'fit_resample'):
                             # For imblearn resamplers, apply fit_resample (only to training data)
-                            X_train_transformed, y_train = step.fit_resample(X_train_transformed, y_train)
+                            X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train_for_model)
                             fitted_steps.append((step_name, step, 'resample'))
                             # Note: Don't transform test data - resampling only applies to training
                         elif hasattr(step, 'transform'):
-                            step.fit(X_train_transformed, y_train)
+                            step.fit(X_train_transformed, y_train_for_model)
                             X_train_transformed = step.transform(X_train_transformed)
                             X_test_transformed = step.transform(X_test_transformed)
                             fitted_steps.append((step_name, step, 'transform'))
@@ -4157,11 +4175,12 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                     final_model = final_model_es
                 else:
                     final_model = final_model_es
+                    y_train_for_model = y_train
 
                 # Fit with early stopping
                 _fit_with_early_stopping(
                     final_model,
-                    X_train_transformed, y_train,
+                    X_train_transformed, y_train_for_model,
                     X_test_transformed, y_test,
                     early_stopping_rounds
                 )
