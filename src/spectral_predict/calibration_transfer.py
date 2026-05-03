@@ -13,11 +13,14 @@ Supported methods:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Literal, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"]
@@ -803,9 +806,7 @@ def estimate_ctai(
     n_samples_primary, n_wavelengths = X_primary.shape
     n_samples_satellite = X_satellite.shape[0]
 
-    # Enhanced validation with debug logging
-    print("\n=== CTAI Debug Information ===")
-    print(f"  Input shapes: Primary {X_primary.shape}, Satellite {X_satellite.shape}")
+    logger.debug("CTAI input shapes: Primary %s, Satellite %s", X_primary.shape, X_satellite.shape)
 
     if X_satellite.shape[1] != n_wavelengths:
         raise ValueError(
@@ -832,9 +833,10 @@ def estimate_ctai(
         n_inf = np.sum(np.isinf(X_satellite))
         raise ValueError(f"X_satellite contains {n_inf} infinite values")
 
-    print(f"  Data validation: PASSED (no NaN/inf values)")
-    print(f"  Primary data range: [{np.min(X_primary):.6f}, {np.max(X_primary):.6f}]")
-    print(f"  Satellite data range: [{np.min(X_satellite):.6f}, {np.max(X_satellite):.6f}]")
+    logger.debug(
+        "CTAI data validation passed; primary range [%.6f, %.6f], satellite range [%.6f, %.6f]",
+        np.min(X_primary), np.max(X_primary), np.min(X_satellite), np.max(X_satellite),
+    )
 
     # Step 1: Mean-center both datasets
     primary_mean = np.mean(X_primary, axis=0)
@@ -843,9 +845,10 @@ def estimate_ctai(
     X_primary_centered = X_primary - primary_mean
     X_satellite_centered = X_satellite - satellite_mean
 
-    print(f"  Step 1: Mean centering complete")
-    print(f"    Primary mean range: [{np.min(primary_mean):.6f}, {np.max(primary_mean):.6f}]")
-    print(f"    Satellite mean range: [{np.min(satellite_mean):.6f}, {np.max(satellite_mean):.6f}]")
+    logger.debug(
+        "CTAI mean centering complete; primary mean range [%.6f, %.6f], satellite mean range [%.6f, %.6f]",
+        np.min(primary_mean), np.max(primary_mean), np.min(satellite_mean), np.max(satellite_mean),
+    )
 
     # Step 2: Estimate affine transformation using PCA-regularized regression
     # We want: X_primary ≈ X_satellite @ M + T (in data space, not covariance space!)
@@ -861,16 +864,17 @@ def estimate_ctai(
             f"For unpaired samples, use TSR, DS, or PDS instead."
         )
 
-    print(f"  Detected paired samples ({n_samples_primary} samples on both instruments)")
+    print(f"  CTAI: Detected {n_samples_primary} paired samples on both instruments")
 
-    # Step 2a: Perform SVD on mean-centered satellite data to find principal directions
-    print(f"  Step 2: Computing SVD of satellite data...")
     try:
         U_satellite, S_satellite, Vt_satellite = svd(X_satellite_centered, full_matrices=False)
-        print(f"    SVD successful: U{U_satellite.shape}, S{S_satellite.shape}, Vt{Vt_satellite.shape}")
-        print(f"    Singular values range: [{np.min(S_satellite):.6e}, {np.max(S_satellite):.6e}]")
+        logger.debug(
+            "CTAI SVD: U%s S%s Vt%s; singular values [%.6e, %.6e]",
+            U_satellite.shape, S_satellite.shape, Vt_satellite.shape,
+            np.min(S_satellite), np.max(S_satellite),
+        )
         if S_satellite[-1] > 0:
-            print(f"    Condition number: {S_satellite[0]/S_satellite[-1]:.2e}")
+            logger.debug("CTAI SVD condition number: %.2e", S_satellite[0] / S_satellite[-1])
     except np.linalg.LinAlgError as e:
         raise ValueError(f"SVD failed: {e}. Check if data has sufficient variance.")
 
@@ -880,10 +884,10 @@ def estimate_ctai(
         explained_var_cumsum = np.cumsum(S_satellite**2) / np.sum(S_satellite**2)
         n_components = np.searchsorted(explained_var_cumsum, explained_variance_threshold) + 1
         n_components = min(n_components, min(n_samples_satellite, n_wavelengths))
-        print(f"  Step 3: Auto-selected {n_components} components (threshold={explained_variance_threshold})")
+        print(f"  CTAI: Auto-selected {n_components} components (threshold={explained_variance_threshold})")
     else:
         n_components = min(n_components, len(S_satellite))
-        print(f"  Step 3: Using {n_components} components (user-specified)")
+        print(f"  CTAI: Using {n_components} components (user-specified)")
 
     # Step 2c: Project data onto principal components
     # This is the key: work in reduced-rank space for numerical stability
@@ -894,21 +898,15 @@ def estimate_ctai(
     X_satellite_projected = X_satellite_centered @ V_truncated  # (n_samples, n_components)
     X_primary_projected = X_primary_centered @ V_truncated  # (n_samples, n_components)
 
-    print(f"  Step 4: Computing transformation in {n_components}-D PC space...")
-
-    # Step 2d: Solve for transformation in reduced space
-    # X_primary_proj ≈ X_satellite_proj @ M_reduced
-    # This is well-conditioned because we only use significant components
     M_reduced = np.linalg.lstsq(X_satellite_projected, X_primary_projected, rcond=None)[0]
-    print(f"    M_reduced shape: {M_reduced.shape} (PCA space transformation)")
+    logger.debug("CTAI M_reduced shape: %s (PCA space transformation)", M_reduced.shape)
 
-    # Step 2e: Transform back to full wavelength space
-    # M_full = V @ M_reduced @ V^T
     M = V_truncated @ M_reduced @ V_truncated.T
 
-    print(f"    M shape: {M.shape}")
-    print(f"    M range: [{np.min(M):.6f}, {np.max(M):.6f}]")
-    print(f"    M diagonal mean: {np.mean(np.diag(M)):.6f}")
+    logger.debug(
+        "CTAI M shape %s; M range [%.6f, %.6f]; M diagonal mean %.6f",
+        M.shape, np.min(M), np.max(M), np.mean(np.diag(M)),
+    )
 
     # Check for NaN/inf in transformation matrix
     if np.any(np.isnan(M)):
@@ -920,12 +918,11 @@ def estimate_ctai(
     # T = mean(X_primary) - mean(X_satellite @ M)
     T = primary_mean - satellite_mean @ M
 
-    print(f"    T (translation) range: [{np.min(T):.6f}, {np.max(T):.6f}]")
-    print(f"    T mean: {np.mean(T):.6f}")
+    logger.debug(
+        "CTAI translation T range [%.6f, %.6f]; T mean %.6f",
+        np.min(T), np.max(T), np.mean(T),
+    )
 
-    # Step 3: Validate transformation quality
-    # Apply to satellite data and compare to primary distribution
-    print(f"  Step 5: Validating transformation quality...")
     X_satellite_transformed = X_satellite @ M + T
 
     # Check for NaN/inf in transformed data
@@ -934,7 +931,10 @@ def estimate_ctai(
     if np.any(np.isinf(X_satellite_transformed)):
         raise ValueError(f"Transformed data contains infinite values! Transformation failed.")
 
-    print(f"    Transformed data range: [{np.min(X_satellite_transformed):.6f}, {np.max(X_satellite_transformed):.6f}]")
+    logger.debug(
+        "CTAI transformed data range [%.6f, %.6f]",
+        np.min(X_satellite_transformed), np.max(X_satellite_transformed),
+    )
 
     X_primary_sample = X_primary[:min(n_samples_primary, n_samples_satellite)]
     X_satellite_sample = X_satellite_transformed[:min(n_samples_primary, n_samples_satellite)]
@@ -943,11 +943,11 @@ def estimate_ctai(
 
     explained_variance = np.sum(S_truncated**2) / np.sum(S_satellite**2) if len(S_satellite) > 0 else 1.0
 
-    print(f"\n  === CTAI Results ===")
-    print(f"  Components: {n_components}")
-    print(f"  Explained Variance: {explained_variance:.4f}")
-    print(f"  Reconstruction RMSE: {reconstruction_error:.6f}")
-    print(f"  ==================\n")
+    print(
+        f"  CTAI: components={n_components}, "
+        f"explained_variance={explained_variance:.4f}, "
+        f"reconstruction_RMSE={reconstruction_error:.6f}"
+    )
 
     # Compile results
     params = {
