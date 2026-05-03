@@ -1,10 +1,22 @@
 # Project Status
 
-> **Last updated:** 2026-05-03 (T-19 MERGED via PR #15 at `1d2bf6d`; quick-wins batch — 5 branches REVIEWED + FIX-OF-FIXES applied + GLM-rechecked, all READY_TO_MERGE).
+> **Last updated:** 2026-05-03 (quick-wins batch ALL MERGED via PRs #16-#20 onto main at `1d3eba0`; post-merge regression sweep 327 + 1 skipped, zero failures).
 >
-> ## Quick-wins batch — 5 PRs READY ON ORIGIN (cross-family reviewed, GLM-rechecked, awaiting user PR open)
+> ## Quick-wins batch — 5 PRs MERGED to main (post-merge tip `1d3eba0`)
 >
-> All branched off main (post-PR #15 merge), all bug-fix-class except T-30 (hygiene-class with CAUTION caveat applied). All tested. Test-merge with main: clean for all five. **Cross-family review trail per ticket: DeepSeek V4 Pro Max + GLM 5.1 in parallel via opencode-call → fix-of-fixes commit closing all HIGH + surgical MEDIUM findings → consolidated GLM 5.1 sanity-pass over the 4 fix-of-fixes commits → all 4 returned READY_TO_MERGE with no HIGH or MEDIUM findings.** The user opens PRs.
+> | PR | Ticket | Squash-merge SHA on main |
+> |---|---|---|
+> | #16 | T-50 | `348bdd8` |
+> | #17 | T-14 | `134fabb` |
+> | #18 | T-29 | `d5c6900` |
+> | #19 | T-32 | `34d52fe` |
+> | #20 | T-30 | `1d3eba0` |
+>
+> Post-merge regression sweep: **327 passed + 1 skipped** across the 13-file consolidated sweep (added `test_t32_sample_weight_resampling.py` + `test_scoring.py` to the original 11-file). Zero failures, zero integration issues. Branches deleted from origin + locally.
+>
+> ## Quick-wins batch — pre-merge state (preserved for audit trail)
+>
+> All branched off main (post-PR #15 merge), all bug-fix-class except T-30 (hygiene-class with CAUTION caveat applied). All tested. Test-merge with main: clean for all five. **Cross-family review trail per ticket: DeepSeek V4 Pro Max + GLM 5.1 in parallel via opencode-call → fix-of-fixes commit closing all HIGH + surgical MEDIUM findings → consolidated GLM 5.1 sanity-pass over the 4 fix-of-fixes commits → all 4 returned READY_TO_MERGE with no HIGH or MEDIUM findings.** Then squash-merged via PRs #16-#20.
 >
 > | Ticket | Branch | Tip (post fix-of-fixes) | LOC (cumulative) | Review verdict | Surface |
 > |---|---|---|---|---|---|

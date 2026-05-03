@@ -4,6 +4,29 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-03 (Quick-wins batch — T-50/T-14/T-29/T-32/T-30) — pipe-tail masks pytest exit code; cross-family review caught 1 bug class GLM missed + 1 false positive
+
+**Five tickets shipped in one session via 5 squash-merge PRs (#16-#20)** to main at `1d3eba0`. Cross-family review pattern (DeepSeek + GLM in parallel via opencode-call) per ticket, fix-of-fixes commit per ticket, GLM consolidated sanity-recheck on the 4 fix-of-fixes commits → all `READY_TO_MERGE` with no HIGH/MEDIUM findings. Post-merge regression sweep 327 + 1 skipped, zero failures.
+
+**Three non-obvious lessons earned this session:**
+
+**1. `pytest | tail` silently masks pytest's non-zero exit code.** During T-29's "atomic burst" pattern (`compile && pytest && commit && push`), I piped pytest output through `tail -10` to limit output length. The pipe inherits `tail`'s exit code (always 0), so the chain proceeded to `git commit && git push` despite a failing test (`test_t29_metric_failure_logs_warning` had a wrong premise about modern sklearn's roc_auc behavior). The fix-of-fixes commit `d0df57b` corrected the test, but only because I noticed the failure in scrollback. **Pattern fix:** drop the `| tail` in chain-commit patterns — use `2>&1 | grep -E "passed|failed"` if you need length-limited output (grep returns 0 when matches found, propagating non-failure correctly), or split into separate steps. Memory: this got captured in T-29 commit message rather than as a separate file.
+
+**2. Cross-family review (DeepSeek + GLM in parallel via opencode-call) earned its slot — 5/5 tickets had at least one HIGH/MEDIUM finding I missed, despite confidence the fixes were complete.** Across the batch:
+   - **T-14**: DeepSeek caught 3 HIGH same-class drift sites I missed (`model_io.py`, `templates/header.py`, `export_bundle.py`). Highest blast radius — every exported script claimed "v3" major version.
+   - **T-29**: DeepSeek caught 1 HIGH (`balanced_accuracy_score` was the only metric outside the new try/except — half-fixed asymmetry).
+   - **T-30**: BOTH reviewers independently caught the missed `[PLS-DA DEBUG]` block (DeepSeek HIGH, GLM MEDIUM). Bracket-text variation `[PLS-DA DEBUG]` vs `[DEBUG]` slipped my regex sweep.
+   - **T-32**: GLM caught the early-stopping branch architectural landmine (same bug class, different code path, no crash today but fragile).
+   - **T-50**: GLM caught `.sqlite3-journal` sibling (rollback-journal mode fallback when WAL is rejected) and `is_relative_to` defense-in-depth gap.
+
+**3. DeepSeek had 1 false positive in this batch (T-50).** Claimed `bytes_freed += sibling_size` ran *before* `sibling.unlink()`. Actually ran AFTER (line 813 vs 812 in same try block — OSError correctly skips increment via except). Verified by reading the actual code, not just trusting the verdict. **Reviewers aren't infallible** — verify findings against actual source before applying. Net positive: 1 false positive vs 6+ real catches across the batch.
+
+**Operational lessons (carried over from T-19, reaffirmed):**
+- **Commit before yielding control.** Long pytest runs / agent dispatch / `git push` can collide with parallel sessions or hooks that swap branches and clobber uncommitted working-tree work. T-50 lost ~30 min to this; T-14/T-29/T-32/T-30 followed an "edit → compile → commit IMMEDIATELY → only then run long sweeps" pattern with no further loss. Memory: `feedback_commit_before_yielding_control.md`.
+- **opencode-call agents may end on a different branch than they checked out** (or never check out at all — they often use `git show <sha>:<path>` for read-only review, leaving the worktree on whichever branch was active at dispatch time). Verify branch state after each agent return; don't assume.
+
+---
+
 ## 2026-05-02 (T-19 Auto mode) — scope-correction trap: don't conflate "expose" walkback with Auto deferral
 
 T-19's user-framing memo (`project_t19_user_framing.md`) called for either (a) per-model UI dropdowns or (b) Auto mode. Mid-session the user said: "the issue is correctness and speed. if we dont need to expose and do as good with just 2 then that si fine." I read that as deferring Auto mode AND per-model dropdowns. Wrong. The user clarified shortly after: **"no, that memory is wrong. the automode is the highest priority. another agent is also working but it needs to be done."** The walkback was about (a) per-model UI surgery (separate dropdowns for `is_unbalance` / `scale_pos_weight` / `auto_class_weights`), not (b) Auto mode itself. Auto mode IS the simpler-shape interpretation of "expose or auto-detect" — single dropdown option, automatic.
