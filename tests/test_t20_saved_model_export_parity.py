@@ -73,15 +73,20 @@ def _make_binary_classification_data(
 ):
     rng = np.random.default_rng(seed)
     X_train = rng.standard_normal((n_train, n_features))
+    # Build y_train deterministically by stratification so a future reseed
+    # cannot land a fold with a single class — the codegen uses
+    # StratifiedKFold(n_splits=cv_folds=3) which would fail to split a
+    # degenerate fold and the test would fail-for-the-wrong-reason. With a
+    # deterministic count + shuffle we know cells per class up front.
     if imbalanced:
         # ~80/20 split so class_weight='balanced' has something to do.
-        y_train = (rng.uniform(size=n_train) > 0.8).astype(int)
-        if y_train.sum() == 0:
-            y_train[0] = 1
-        if y_train.sum() == n_train:
-            y_train[0] = 0
+        n_pos = max(n_train // 5, 1)
     else:
-        y_train = (rng.uniform(size=n_train) > 0.5).astype(int)
+        n_pos = n_train // 2
+    y_train = np.concatenate(
+        [np.ones(n_pos, dtype=int), np.zeros(n_train - n_pos, dtype=int)]
+    )
+    rng.shuffle(y_train)
     X_test = rng.standard_normal((n_test, n_features))
     return X_train, y_train, X_test
 
@@ -151,15 +156,16 @@ def _run_parity(
     rtol: float | None = None,
     atol: float | None = None,
     fit_kwargs: dict | None = None,
+    expect_stdout_marker: str | None = None,
 ) -> None:
     """Run save→export→exec→compare parity for one (model, config) row.
 
     For classification, predictions are compared via ``predict_proba`` (full
     probability vectors), not ``predict`` (hard labels). Hard labels mask
-    probability drift up to the nearest class boundary — DeepSeek's T-20
-    review empirically demonstrated 0.296 probability drift with identical
-    hard labels. ``predict_proba`` makes the parity assertion sensitive to
-    the kind of regressions T-19/T-32 actually fixed.
+    probability drift up to the nearest class boundary — empirically a
+    weighting-mechanism mismatch can produce 0.3 probability drift while
+    hard labels remain identical. ``predict_proba`` makes the parity
+    assertion sensitive to the kind of regressions T-19/T-32 actually fixed.
 
     For regression, ``predict`` is the right comparison (continuous output,
     no quantisation).
@@ -167,8 +173,15 @@ def _run_parity(
     ``fit_kwargs`` is forwarded to the in-process ``model.fit(...)`` call.
     For XGBoost + ``class_weight`` (or auto-resolves-to-class_weight), pass
     ``{'sample_weight': compute_sample_weight('balanced', y_train)}`` to
-    match what the codegen emits for the runtime fit (templates/validation
-    + code_generator._render_final_model_with_imbalance:1880-1886).
+    match what the codegen emits in
+    ``code_generator._render_final_model_with_imbalance``.
+
+    ``expect_stdout_marker``: if set, asserts the substring appears in the
+    subprocess's stdout. Use to confirm a code path actually executed —
+    e.g. the auto-resolution branch in
+    ``code_generator._render_imbalance_handling`` prints
+    ``"[Auto imbalance] ratio ..."`` when it fires; without this assertion
+    the test would silently pass even if auto-resolution was disabled.
     """
     n_vars = X_train.shape[1]
 
@@ -210,7 +223,7 @@ def _run_parity(
 
     # 4. Append our own predict-and-dump block. ``model`` is module-level in
     # the generated script (see FINAL_MODEL_TEMPLATE in
-    # spectral_predict/templates/validation.py:226: ``model.fit(X_final, y)``).
+    # spectral_predict/templates/validation.py: ``model.fit(X_final, y)``).
     # Classification compares predict_proba (full probability vectors) so
     # that drift smaller than the class-boundary quantisation is detectable.
     X_test_path = tmp_path / "X_test.npy"
@@ -236,17 +249,33 @@ def _run_parity(
     # 5. Run in subprocess. sys.executable points at .venv312 python under
     # `python -m pytest`, so the subprocess gets the same sklearn / xgboost
     # / lightgbm versions as the test process — avoiding cross-version drift
-    # that would defeat the parity assertion.
+    # that would defeat the parity assertion. UTF-8 encoding is forced both
+    # ways: the codegen emits non-ASCII chars (e.g. `≥` in the auto-mode
+    # comment block); without this a Windows shell's cp1252 default would
+    # raise UnicodeDecodeError on any traceback that quotes the source line,
+    # masking the real failure with a decode error.
+    import os as _os
+    env = {**_os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     result = subprocess.run(
         [sys.executable, str(script_path)],
         capture_output=True,
         text=True,
         timeout=120,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
     )
     assert result.returncode == 0, (
         f"exported script failed (returncode={result.returncode})\n"
         f"--- STDOUT ---\n{result.stdout}\n--- STDERR ---\n{result.stderr}"
     )
+
+    if expect_stdout_marker is not None:
+        assert expect_stdout_marker in result.stdout, (
+            f"expected stdout marker {expect_stdout_marker!r} not found; "
+            f"the code path it gates probably did not execute.\n"
+            f"--- STDOUT ---\n{result.stdout}"
+        )
 
     # 6. Compare loaded saved model's predictions to script's predictions.
     # Use predict_proba for classification (sensitive to drift below class
@@ -280,7 +309,7 @@ def test_pls_regression_parity(tmp_path):
     """PLS is deterministic and is the canonical chemometrics baseline.
 
     ``scale=False`` is mandatory: the exported script's ``DEFAULT_PARAMS``
-    merge injects ``scale=False`` (templates/models.py:280) because the
+    merge injects ``scale=False`` (templates/models.DEFAULT_PARAMS) because the
     chemometrics pipeline assumes SNV/derivative preprocessing has already
     centered/standardised the spectra — letting sklearn auto-scale on top
     would double-process. The whole runtime hardcodes ``scale=False`` on
@@ -309,7 +338,7 @@ def test_random_forest_regression_parity(tmp_path):
     from sklearn.ensemble import RandomForestRegressor
 
     X_train, y_train, X_test = _make_regression_data()
-    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42}
+    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42, "n_jobs": 1}
     _run_parity(
         model=RandomForestRegressor(**params),
         model_name="RandomForest",
@@ -333,7 +362,7 @@ def test_random_forest_binary_classification_parity_no_imbalance(tmp_path):
     from sklearn.ensemble import RandomForestClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data()
-    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42}
+    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42, "n_jobs": 1}
     _run_parity(
         model=RandomForestClassifier(**params),
         model_name="RandomForest",
@@ -359,6 +388,7 @@ def test_random_forest_binary_classification_parity_class_weight(tmp_path):
         "n_estimators": 30,
         "max_depth": 6,
         "random_state": 42,
+        "n_jobs": 1,
         "class_weight": "balanced",
     }
     _run_parity(
@@ -380,7 +410,7 @@ def test_random_forest_multiclass_classification_parity(tmp_path):
     from sklearn.ensemble import RandomForestClassifier
 
     X_train, y_train, X_test = _make_multiclass_classification_data(n_classes=3)
-    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42}
+    params = {"n_estimators": 30, "max_depth": 6, "random_state": 42, "n_jobs": 1}
     _run_parity(
         model=RandomForestClassifier(**params),
         model_name="RandomForest",
@@ -402,7 +432,7 @@ def test_random_forest_multiclass_classification_parity(tmp_path):
 # Common XGBoost params: tree_method='hist' + n_jobs=1 makes both the
 # in-process fit and the subprocess fit deterministic and version-stable.
 # The codegen path injects tree_method='hist' / n_jobs=-1 via setdefault
-# (code_generator.py:962-964, 987-988), so test params explicitly setting
+# (code_generator._render_model setdefault block), so test params explicitly setting
 # both keeps the merged params identical in both paths and removes a
 # latent fragility (multi-threaded determinism depends on XGBoost version
 # and CPU). use_label_encoder is intentionally absent — XGBoost 3.x emits
@@ -443,15 +473,14 @@ def test_xgboost_binary_classification_parity_no_imbalance(tmp_path):
 def test_xgboost_binary_classification_parity_class_weight(tmp_path):
     """T-19 highest-leverage row: XGBoost + class_weight imbalance.
 
-    The codegen path emits ``model.fit(X, y, sample_weight=
+    The codegen emits ``model.fit(X, y, sample_weight=
     compute_sample_weight('balanced', y))`` for XGBoost +
-    imbalance_method='class_weight'
-    (code_generator._render_final_model_with_imbalance:1880-1886). The
+    imbalance_method='class_weight' in
+    ``code_generator._render_final_model_with_imbalance``. The
     in-process model must apply the same sample_weight at fit time;
     using ``scale_pos_weight`` instead would mean the two paths use
     different weighting mechanisms — the test would only pass on
-    datasets where both produce trivially identical predictions
-    (DeepSeek HIGH-2 from T-20 review)."""
+    datasets where both produce trivially identical predictions."""
     pytest.importorskip("xgboost")
     from sklearn.utils.class_weight import compute_sample_weight
     from xgboost import XGBClassifier
@@ -477,15 +506,16 @@ def test_xgboost_binary_classification_parity_auto_no_correction(tmp_path):
     """T-19 Auto-mode runtime resolution — the auto-resolves-to-None path.
 
     With BALANCED data (ratio < 3:1), the script's auto-resolution block
-    (code_generator._render_imbalance_handling:1518-1548) mutates
+    in ``code_generator._render_imbalance_handling`` mutates
     IMBALANCE_METHOD to None. Downstream gates do not fire; the script
     fits without sample_weight. The in-process model must do the same.
 
-    Originally this test used imbalanced data so auto resolved to
-    class_weight, which made the test mechanically identical to
-    ``test_xgboost_binary_classification_parity_class_weight`` (DeepSeek
-    HIGH-3 from T-20 review). Reworked to balanced data so the auto path
-    is now a genuinely distinct code path."""
+    The ``expect_stdout_marker`` assertion below pins the auto-resolution
+    branch actually executed — without it, this test would silently pass
+    even if auto-resolution were broken (since the in-process model also
+    has no sample_weight, the predictions would match for the wrong
+    reason). The marker text is emitted by
+    ``_render_imbalance_handling``'s auto-resolution print."""
     pytest.importorskip("xgboost")
     from xgboost import XGBClassifier
 
@@ -502,6 +532,7 @@ def test_xgboost_binary_classification_parity_auto_no_correction(tmp_path):
         params=params,
         imbalance_method="auto",
         tmp_path=tmp_path,
+        expect_stdout_marker="[Auto imbalance] ratio",
     )
 
 
