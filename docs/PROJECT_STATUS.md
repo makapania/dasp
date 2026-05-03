@@ -1,8 +1,47 @@
 # Project Status
 
-> **Last updated:** 2026-05-03 (quick-wins batch ALL MERGED via PRs #16-#20 onto main at `1d3eba0`; post-merge regression sweep 327 + 1 skipped, zero failures).
+> **Last updated:** 2026-05-04 (T-14b + T-20 + T-20b + codegen-fix + T-29b — 5 PRs in flight off main at `1247389`; not yet merged).
 >
-> ## Quick-wins batch — 5 PRs MERGED to main (post-merge tip `1d3eba0`)
+> ## Session 2026-05-04 — five PRs in flight (NOT MERGED — user opens/merges)
+>
+> | PR | Branch tip | Base | What it ships | Reviews |
+> |---|---|---|---|---|
+> | #21 | `70c55b7..1ef393f` | `main` | T-14b: PyInstaller + GUI version-drift sites closed (`build_installer_py312.py`, `installer/spectral_predict_py312.iss`, `version_info.txt`, GUI title bar at `:2556`/`:4663`); cut `0.5.0b2`. CHANGELOG backfill. 8 regression tests in `tests/test_t14b_pyinstaller_and_gui_version_drift.py`. | DeepSeek + GLM cross-family, 2 convergent MEDIUMs applied as fix-of-fixes. Verdict CLEAN. |
+> | #22 | `94beab1..ec7f8a7` | `main` | T-20: saved-model ↔ exported-script reproducibility test foundation. 9 parity tests in `tests/test_t20_saved_model_export_parity.py` covering PLS / RandomForest / XGBoost × regression/classification × imbalance variants (no-imbalance, class_weight via sample_weight at fit, auto-resolves-to-None on balanced data). | DeepSeek + GLM cross-family + pr-review-toolkit suite (test-analyzer + code-reviewer + comment-analyzer + silent-failure-hunter) + GLM sanity-recheck. 3 HIGH + 6 MEDIUM applied as 2 fix-of-fixes commits. Verdict CLEAN. |
+> | #23 | `2d1e283..a12e843` | `fix/T20-...` | T-20b: extends matrix to LightGBM (4 rows) + CatBoost (4 rows). 1 row was xfail(strict=True) documenting a real codegen bug T-20b surfaced — fixed in PR #24 below; xfail flipped to passing. | DeepSeek + GLM cross-family, 1 convergent MEDIUM applied (misleading `n_jobs=-1` codegen-injection comment). Verdict CLEAN. |
+> | #24 | `464c5ef..685553e` | `fix/T20b-...` | Codegen fix: `templates/validation.py` CV pooling block scalarises predictions via `np.ravel(...)[0]` so `Counter` can hash CatBoost multiclass's `(n, 1)`-shape `predict()` return. T-20b's xfail flipped to passing. | DeepSeek + GLM cross-family. 0 HIGH, 0 MEDIUM, 1 LOW polish applied (comment accuracy — `np.ravel` on 0-d scalar isn't technically "no-op", just behaves correctly). Verdict CLEAN. |
+> | #25 | `3b8b748` | `main` | T-29b: per-run-log visibility for `spectral_predict.*` warnings. `setup_run_logger` now also attaches the per-run `_SafeRotatingFileHandler` to the `spectral_predict` logger (sharing the same instance — no double file-open on Windows). Defense against module-reload double-attach mirrors `setup_app_logger`'s existing pattern. 5 regression tests added. | Cross-family review dispatched in background; findings will be applied as fix-of-fixes by next agent if any. |
+>
+> **Test-count progression** (consolidated 13-file regression sweep + per-PR additions, no regressions at any layer):
+> - Pre-session baseline: 327 passed + 1 skipped.
+> - After T-14b (PR #21): 335 passed (+8).
+> - After T-20 (PR #22): 336 passed + 1 skipped (+9).
+> - After T-20b (PR #23): 343 passed + 1 skipped + 1 xfailed (+7 +1xfail).
+> - After codegen fix (PR #24): 344 passed + 1 skipped (xfail flipped to passing).
+> - After T-29b (PR #25, independent of T-20 chain): consolidated sweep alone is 332 + 1 skipped (5 new T-29b tests + 327 baseline).
+> - Combined when all 5 PRs land + rebase: ~349 passed total.
+>
+> **PR ordering** when reviewers/CI clear: #21, #22, #25 are independent (any order). Then #23 rebases onto post-#22 main. Then #24 rebases onto post-#23 main.
+>
+> **Codegen bug surfaced + fixed in same session:** T-20b's CatBoost multiclass parity test caught a real bug — `CatBoostClassifier.predict()` returns shape `(n, 1)` for multiclass, and `templates/validation.py:163-176`'s `Counter(preds_per_sample[i])` couldn't hash 1-element ndarrays. PR #24 ships the one-line scalarisation fix. **The regression-net loop (T-20 → T-20b → codegen-fix) closed within the same session.** This is exactly the value the user elevated T-20 coverage to highest priority for.
+>
+> **Deferred follow-up tickets (next-session priority):**
+>
+> - **T-30b** (continuation prompt scope): triage `print()` calls in `calibration_transfer.py` (66 prints) + `nsga2_search.py` (42 prints). Per-file user judgment needed (legitimate user-facing progress messages exist). Cross-family review WORTH IT per continuation prompt.
+> - **Ridge classifier export investigation**: `code_generator._resolve_model_ctor_class` returns plain `'Ridge'` (sklearn regressor) for `task_type='classification'` task, not `'RidgeClassifier'`. Likely pre-existing codegen bug. Worth a small ticket: investigate runtime path, fix the resolver, add a parity row to the T-20 matrix.
+> - **PLS-DA parity row**: needs Pipeline-matching scaffolding (PLS scores → StandardScaler → LogisticRegression). Non-trivial in-process construction — separate ticket if user wants T-20 matrix exhaustive.
+> - **MLP parity marker test**: MLP intentionally has no native imbalance support; would benefit from a documenting test that pins "MLP imbalance is no-op" so future codegen changes can't accidentally start applying class_weight.
+> - **Per-fold metric defensive .ravel** (GLM MEDIUM on PR #24): `templates/validation.py:167-168`'s `accuracy_score`/`f1_score` calls pass raw `y_pred_fold` which is `(n, 1)` for CatBoost multiclass. Today sklearn auto-broadcasts; future shape changes could silently produce wrong answers. One-line `.ravel()` on line 160 (mirroring regression template's pattern). Tiny hygiene ticket.
+>
+> **Process lessons captured this session:**
+> 1. **Stacked-PR pattern with chained bases successfully kept review cost linear.** PR #22 → #23 → #24 form a foundation → extension → bug-fix-from-extension chain. Reviewers see only the new content per layer (`git diff base..HEAD`); after each merge, child PRs rebase onto post-merge main and their bases auto-update. Without stacking, T-20b would have to wait for T-20 to merge before being reviewable; same cascade for the codegen fix.
+> 2. **`predict()` vs `predict_proba()` in classification parity tests is load-bearing.** Hard labels via `predict()` are quantised — they hide probability drift up to whichever class boundary is nearest. DeepSeek empirically demonstrated 0.296 probability drift while hard labels remained identical on T-20's class_weight rows. Switched to `predict_proba` with rtol=1e-3, atol=1e-6 for classification (regression keeps `predict` with rtol=1e-5, atol=1e-8).
+> 3. **The DEFAULT_PARAMS merge in `code_generator._render_model` matters for parity tests.** PLS gets `scale=False` injected (chemometrics convention — 24+ runtime sites hardcode this); RandomForest gets `random_state=42`; XGBoost/LightGBM get `n_jobs=-1` via setdefault. In-process test models must mirror the runtime's param assembly or parity assertions fail-for-the-wrong-reason. The fix-of-fixes for T-20 had to thread `fit_kwargs` through `_run_parity` to match the codegen's `sample_weight=compute_sample_weight('balanced', y)` for XGBoost class_weight (XGBoost has no native class_weight kwarg).
+> 4. **`@pytest.mark.xfail(strict=True)` is the right marker when a test catches a real bug that's out of the current PR's scope.** A regular test would block the suite. xfail-non-strict silently ignores XPASS and lets the marker rot. xfail-strict turns the failure into a tracking marker that's actively forced to be removed when the underlying bug is fixed (XPASS triggers test failure). T-20b's CatBoost multiclass row used this pattern; PR #24's codegen fix flipped it.
+>
+> ---
+>
+> ## Earlier session — 2026-05-03 (quick-wins batch — 5 PRs MERGED to main, post-merge tip `1d3eba0`)
 >
 > | PR | Ticket | Squash-merge SHA on main |
 > |---|---|---|
