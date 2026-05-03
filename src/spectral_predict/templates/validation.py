@@ -157,7 +157,11 @@ for train_idx, test_idx in cv.split(X_final, y):
 
     fold_model = clone(model)
     fold_model.fit(X_train, y_train)
-    y_pred_fold = fold_model.predict(X_test)
+    # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
+    # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
+    # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
+    # return.
+    y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(y_pred_fold[local_i])
