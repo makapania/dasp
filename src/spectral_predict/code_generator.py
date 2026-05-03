@@ -1761,9 +1761,12 @@ for train_idx, test_idx in cv.split({x_var}, y):
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
-    # return. Mirrors the plain-path fix in templates/validation.py — the
-    # imbalance-aware classification CV path bypasses templates/validation.py
-    # entirely and needs the same shape coercion.
+    # return. Mirrors the regression template's pattern at
+    # templates/validation.py:103 (and PR #26's same-branch addition for the
+    # plain classification template). The imbalance-aware classification CV
+    # path bypasses templates/validation.py entirely (the dispatcher at
+    # _render_cross_validation routes here whenever imbalance_method is set),
+    # so it needs the same shape coercion at this site.
     y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
