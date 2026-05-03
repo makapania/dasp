@@ -184,6 +184,19 @@ T-01 reframed (~2-3d) is the next real arc. If the morning runs faster than expe
 
 ---
 
+## GLM 5.1 for non-review reasoning (cheap-option calls)
+
+GLM 5.1 (via opencode-call alias `glm` or llm-call to z.ai) bills against your z.ai subscription and is available for **second opinions, scope checks, draft review, and rubber-duck reasoning** — not just code review. The 2026-05-04 session under-used this; specific calls that should have been made:
+
+- **Merge / rebase / git-state decisions** where you're reasoning from first principles (e.g., GitHub auto-closing a stacked PR after base deletion — 30-second GLM consult would have surfaced the recovery pattern faster than trial-and-error).
+- **Scope-expansion checks** when you're tempted to add a test row / fix-of-fixes / extra commit beyond the user-approved ticket. Ask GLM: "is this in scope for the original ask?" — if it says scope creep, file as a separate ticket and confirm with user.
+- **Doc / prompt drafts** when the audience is another autonomous agent. Ask GLM to review the draft for clarity-to-an-agent-with-no-prior-context.
+- **xfail / test-marker resolution** when a rebase exposes a stale marker. Ask GLM: "marker X went XPASS-strict after rebase; should I remove it or keep it scoped to the original fix?"
+
+Cheap to dispatch (one-shot llm-call, no agent dispatch); skip when you're 100% confident or the decision is reversible. Default-ON for non-trivial git operations and scope decisions.
+
+---
+
 ## Review protocol (use the new memory)
 
 Per `feedback_review_method_signal.md`:
