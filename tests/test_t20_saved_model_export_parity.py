@@ -785,3 +785,78 @@ def test_catboost_multiclass_classification_parity(tmp_path):
         imbalance_method=None,
         tmp_path=tmp_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# PLS-DA — Pipeline of PLS scores -> StandardScaler -> LogisticRegression (T-20c)
+# ---------------------------------------------------------------------------
+
+
+def test_pls_da_binary_classification_parity_no_imbalance(tmp_path):
+    """T-20c: PLS-DA pipeline parity (PLS scores -> StandardScaler -> LR).
+
+    PLS-DA is the canonical chemometrics classifier and the export path
+    (``code_generator._render_pls_da_pipeline``) emits a three-step Pipeline:
+
+        Pipeline([
+            ('pls',    PLSTransformer(n_components=N, scale=False)),
+            ('scaler', StandardScaler()),
+            ('lr',     LogisticRegression(C=, solver=, max_iter=, random_state=42))
+        ])
+
+    The runtime builds the same Pipeline at ``search.py:373-387`` using
+    ``spectral_predict.models.PLSTransformer``. The exported script defines
+    its own minimal ``PLSTransformer`` inline (codegen lines 1314-1355) but
+    the fit/transform behavior is equivalent for 1-D y (no ndim>2 branch),
+    so predict_proba parity holds.
+
+    Param-routing contract: the codegen splits prefixed keys via
+    ``_split_pls_da_params`` — ``pls__*`` keys go to PLSTransformer kwargs,
+    ``lr__*`` keys go to LogisticRegression. The in-process test must use
+    the same prefixes in the params dict and instantiate the components
+    with the same effective values.
+
+    ``scale=False`` is mandatory for the PLS step (chemometrics convention,
+    avoids double-scaling SNV-preprocessed spectra; matches the runtime's
+    hardcoded ``PLSTransformer(scale=False)`` at ``search.py:373-387`` and
+    ``models.py:244``). ``n_components=3`` keeps the PLS stage well below
+    the rank ceiling for the synthetic 60-sample/80-feature data.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.models import PLSTransformer
+
+    X_train, y_train, X_test = _make_binary_classification_data()
+
+    # Params mirror what the runtime emits: prefixed keys routed by
+    # _split_pls_da_params. n_components=3 picks a rank well below the
+    # 60-sample / 80-feature regime.
+    params = {
+        "pls__n_components": 3,
+        "lr__C": 1.0,
+        "lr__solver": "lbfgs",
+        "lr__max_iter": 1000,
+    }
+
+    # In-process Pipeline: same shape as what _render_pls_da_pipeline emits.
+    # PLSTransformer defaults to max_iter=500, tol=1e-6, scale=False — the
+    # codegen pops the same defaults from pls_params (code_generator.py:1293-1296).
+    pls = PLSTransformer(n_components=3, max_iter=500, tol=1e-6, scale=False)
+    lr = LogisticRegression(C=1.0, solver="lbfgs", max_iter=1000, random_state=42)
+    model = Pipeline(
+        [("pls", pls), ("scaler", StandardScaler()), ("lr", lr)]
+    )
+
+    _run_parity(
+        model=model,
+        model_name="PLS-DA",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
