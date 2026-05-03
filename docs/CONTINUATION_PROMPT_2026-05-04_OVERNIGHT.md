@@ -70,7 +70,7 @@ Then commit + push back. Don't rebase those branches unless their parent merged 
 | #22 | `fix/T20-saved-model-export-parity-test` | `ec7f8a7` | `main` | DeepSeek + GLM + pr-review-toolkit suite + GLM sanity-recheck | CLEAN, awaiting merge |
 | #23 | `fix/T20b-saved-model-export-parity-additional-models` | `a12e843` | `fix/T20-saved-model-export-parity-test` | DeepSeek + GLM cross-family complete | CLEAN, awaiting merge |
 | #24 | `fix/Tcv-catboost-multiclass-cv-pooling-scalarise` | `685553e` | `fix/T20b-saved-model-export-parity-additional-models` | DeepSeek + GLM cross-family complete | CLEAN, awaiting merge |
-| #25 | `fix/T29b-per-run-log-visibility-spectral-predict-warnings` | `3b8b748` | `main` | DeepSeek + GLM cross-family **dispatched in background at session close** — agent IDs `af4b5eedbde4c5b37` (DeepSeek) and `a4d710be76004ca03` (GLM). They may have completed by the time you wake up; check `~/AppData/Local/Temp/claude/.../tasks/<agentId>.output` for transcripts, or just dispatch fresh reviews. | Awaiting reviews |
+| #25 | `fix/T29b-per-run-log-visibility-spectral-predict-warnings` | `c5b2c66` | `main` | DeepSeek + GLM cross-family complete. GLM CLEAN. DeepSeek caught 2 MEDIUMs (one finding: existing double-attach test exercised the wrong guard) — fix-of-fixes `c5b2c66` added a module-reload test. Final verdict CLEAN. | CLEAN, awaiting merge |
 
 **Working tree at session close:** clean on `main` (after the doc commits below). Untracked artifacts to ignore: `.review-tmp/` and the weirdly-named `C\357\200\272UsersmsponAppDataLocalTempopencodesearch_t30.py` left over from a previous session.
 
@@ -80,21 +80,7 @@ Then commit + push back. Don't rebase those branches unless their parent merged 
 
 ## Priority order
 
-### Priority 1 — finish T-29b review and ship if clean
-
-**Why first:** T-29b (PR #25) was the only PR without completed cross-family review at session close. The reviews were dispatched in background with agent IDs above. By the time you wake up they're either complete (transcripts in `~/AppData/Local/Temp/claude/.../tasks/<agentId>.output`) or ready to be re-dispatched.
-
-**Steps:**
-
-1. Check the dispatched-review transcripts. If clean (no HIGH findings), proceed to step 3.
-2. If HIGH findings exist, apply as a fix-of-fixes commit on `fix/T29b-per-run-log-visibility-spectral-predict-warnings`, push, and re-dispatch a single GLM solo recheck.
-3. Mark the PR ready for the user to merge — do NOT merge yourself unless explicitly instructed.
-
-If reviews never returned (background agents failed), dispatch fresh DeepSeek + GLM cross-family review in parallel via `opencode-call`. The brief from the original session is in `Agent` invocations early in this session's history; you can reconstruct it from the diff and the PR description.
-
-**Estimated:** 30 min - 1 hour.
-
-### Priority 2 — T-30b (calibration_transfer + nsga2_search print() triage)
+### Priority 1 — T-30b (calibration_transfer + nsga2_search print() triage)
 
 **Why second:** Continuation prompt's queued ticket. Hygiene class with caveat — both files have legitimate user-facing print() calls (DS/PDS calibration progress, NSGA-II generation summaries). When in doubt, KEEP. Do NOT delete prints that look like user-facing progress messages.
 
@@ -114,7 +100,7 @@ If reviews never returned (background agents failed), dispatch fresh DeepSeek + 
 
 **Important:** the user explicitly said *"defer engineering polish unless trivial."* T-30b is hygiene-class but **the user has already approved the scope** (it's in the original continuation prompt). Just exercise judgment per print — when in doubt, keep.
 
-### Priority 3 — Ridge classifier export investigation (small ticket)
+### Priority 2 — Ridge classifier export investigation (small ticket)
 
 **Why third:** Pre-existing codegen bug surfaced during T-20b. `code_generator._resolve_model_ctor_class` returns plain `'Ridge'` (sklearn regressor) for `task_type='classification'` task instead of `'RidgeClassifier'`. The runtime in `models.py:472-473` correctly uses `RidgeClassifier`, but the export path falls through. Either Ridge classification has never been exercised through the export surface (likely), or this is an unreported bug.
 
@@ -129,7 +115,7 @@ If reviews never returned (background agents failed), dispatch fresh DeepSeek + 
 
 **Estimated:** 1-3 hours depending on reachability. Cross-family review WORTH IT if you change the codegen.
 
-### Priority 4 — defensive `.ravel()` on per-fold metrics (GLM MEDIUM from PR #24, deferred)
+### Priority 3 — defensive `.ravel()` on per-fold metrics (GLM MEDIUM from PR #24, deferred)
 
 **Why fourth:** GLM raised a hygiene MEDIUM during the codegen-fix review: `templates/validation.py:167-168`'s `accuracy_score`/`f1_score` calls pass raw `y_pred_fold` which is `(n, 1)` for CatBoost multiclass. Today sklearn auto-broadcasts; future shape changes could silently produce wrong answers. Mirror what the regression template already does at line 103 (`fold_model.predict(X_test).ravel()`).
 
@@ -139,7 +125,7 @@ If reviews never returned (background agents failed), dispatch fresh DeepSeek + 
 
 **Estimated:** 30 min including review. Cross-family review optional (one-line hygiene change, low risk).
 
-### Priority 5 (only if all above are done) — PLS-DA parity row for T-20
+### Priority 4 (only if all above are done) — PLS-DA parity row for T-20
 
 **Why last:** T-20b skipped PLS-DA because the codegen path (`_render_pls_da_pipeline`) emits a Pipeline of PLS scores → StandardScaler → LogisticRegression that needs careful in-process construction. Non-trivial scaffolding work.
 
