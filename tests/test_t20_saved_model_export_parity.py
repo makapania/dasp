@@ -936,3 +936,39 @@ def test_mlp_binary_classification_imbalance_is_no_op_marker(tmp_path):
         # misled (they'd think balancing was applied).
         expect_stdout_marker="MLP does not support class_weight",
     )
+
+
+# ---------------------------------------------------------------------------
+# Structural contracts (PR #33 fix-of-fixes): n_jobs must not be re-added to
+# either PIPELINE_PARAMS strip set. n_jobs is a model constructor kwarg, not
+# a sklearn Pipeline kwarg, and the downstream setdefault('n_jobs', -1) at
+# code_generator.py:988 silently overrides user determinism choices when the
+# strip happens. GLM + Codex convergent finding (PR #33 cross-family review).
+# ---------------------------------------------------------------------------
+
+
+def test_codegen_pipeline_params_excludes_n_jobs():
+    """Regression pin: CodeGenerator._PIPELINE_PARAMS must not strip n_jobs."""
+    from spectral_predict.code_generator import CodeGenerator
+    assert "n_jobs" not in CodeGenerator._PIPELINE_PARAMS, (
+        "n_jobs is a model constructor kwarg (XGBoost / LightGBM / "
+        "RandomForest / sklearn) and a determinism choice. Stripping it "
+        "via _PIPELINE_PARAMS combined with the setdefault('n_jobs', -1) at "
+        "code_generator.py:988 silently overrides user-set n_jobs in "
+        "exported scripts."
+    )
+
+
+def test_unified_bayesian_pipeline_params_excludes_n_jobs():
+    """Regression pin: unified_bayesian.PIPELINE_PARAMS must not strip n_jobs.
+
+    Same bug class on the Bayesian sister site: _capture_serializable_params
+    strips listed keys from model.get_params() before writing the captured
+    params to the Optuna trial. Stripping n_jobs there means a Bayesian-
+    trained model exported via the codegen path loses the user's
+    determinism choice."""
+    from spectral_predict.unified_bayesian import PIPELINE_PARAMS
+    assert "n_jobs" not in PIPELINE_PARAMS, (
+        "Sister site of the codegen _PIPELINE_PARAMS bug — same architectural "
+        "smell, same overwrite hazard via the codegen export path."
+    )

@@ -84,8 +84,19 @@ PREPROCESSING_OPTIONS = [
 ]
 
 
-# Pipeline-specific params that should never be passed to model constructors
-PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps', 'n_jobs'}
+# Pipeline-specific params that should never be passed to model constructors.
+# n_jobs is intentionally NOT included: it is a model constructor kwarg for
+# XGBoost / LightGBM / RandomForest / sklearn, not a sklearn Pipeline kwarg.
+# Stripping it would silently drop a user-set determinism choice from the
+# Bayesian-captured params (used by both _capture_serializable_params at
+# trial time and the codegen export path), causing the same runtime-vs-export
+# drift that motivated the matching fix in code_generator._PIPELINE_PARAMS.
+#
+# KNOWN ISSUE (out of scope): verbose has the same architectural smell — it
+# is both a Pipeline kwarg and a model kwarg, and stripping it from captured
+# params can drop a user-set verbose=N for libraries that don't get a
+# downstream re-injection. See the matching note in code_generator.py.
+PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 
 
 # Boosting models that honor `early_stopping_rounds` in the per-trial path.

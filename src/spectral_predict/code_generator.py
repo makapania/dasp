@@ -1027,6 +1027,16 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
     # that the downstream setdefault('n_jobs', -1) would then overwrite with the
     # parallel default — exactly the runtime-vs-export drift T-20 parity tests
     # exist to catch.
+    #
+    # KNOWN ISSUE (out of scope for the n_jobs fix): verbose has the same
+    # architectural smell. It IS a sklearn Pipeline kwarg AND a model kwarg
+    # (RandomForest / SVM / LightGBM all accept verbose). At the codegen
+    # export site, _normalize_model_params receives bare model params, so
+    # stripping plain verbose silently drops a user-set verbose=N. CatBoost
+    # and LightGBM get a verbose=0 re-injection at lines 974-975 that masks
+    # the issue for those two libraries; RandomForest / SVM users would lose
+    # their setting. Fixing requires either context-aware stripping or a
+    # rename pass — file as a separate ticket if it surfaces in real use.
     _PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 
     def _normalize_model_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
