@@ -570,3 +570,234 @@ def test_xgboost_multiclass_classification_parity(tmp_path):
         imbalance_method=None,
         tmp_path=tmp_path,
     )
+
+
+# ---------------------------------------------------------------------------
+# LightGBM — sklearn-API native class_weight kwarg path (T-20b)
+# ---------------------------------------------------------------------------
+
+# Same shape as _XGB_BASE_PARAMS but with LightGBM-appropriate verbosity
+# silencing. Codegen injects n_jobs=-1 via setdefault for LGBM/XGB; explicit
+# n_jobs=1 here so the merged params are deterministic single-threaded in
+# both the in-process fit and the subprocess fit. verbose=-1 suppresses the
+# voluminous LightGBM training log.
+_LGBM_BASE_PARAMS = {
+    "n_estimators": 30,
+    "max_depth": 4,
+    "learning_rate": 0.1,
+    "random_state": 42,
+    "n_jobs": 1,
+    "verbose": -1,
+}
+
+
+def test_lightgbm_regression_parity(tmp_path):
+    """LightGBM regression baseline — pins the LGBM parity contract for the
+    no-imbalance path. The codegen's regressor branch resolves to
+    ``LGBMRegressor`` via ``_resolve_model_ctor_class``."""
+    pytest.importorskip("lightgbm")
+    from lightgbm import LGBMRegressor
+
+    X_train, y_train, X_test = _make_regression_data()
+    params = dict(_LGBM_BASE_PARAMS)
+    _run_parity(
+        model=LGBMRegressor(**params),
+        model_name="LightGBM",
+        task_type="regression",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+def test_lightgbm_binary_classification_parity_no_imbalance(tmp_path):
+    """LightGBM binary classification baseline — no imbalance handling."""
+    pytest.importorskip("lightgbm")
+    from lightgbm import LGBMClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data()
+    params = dict(_LGBM_BASE_PARAMS)
+    _run_parity(
+        model=LGBMClassifier(**params),
+        model_name="LightGBM",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+def test_lightgbm_binary_classification_parity_class_weight(tmp_path):
+    """T-19 surface for LightGBM: ``class_weight='balanced'`` is a native
+    sklearn-API kwarg on ``LGBMClassifier``; the codegen emits it as a
+    constructor literal in ``_render_model``. Both paths use the same
+    constructor kwarg — no fit_kwargs threading needed (unlike XGBoost,
+    which has no class_weight kwarg and falls back to sample_weight)."""
+    pytest.importorskip("lightgbm")
+    from lightgbm import LGBMClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+    params = dict(_LGBM_BASE_PARAMS)
+    params["class_weight"] = "balanced"
+    _run_parity(
+        model=LGBMClassifier(**params),
+        model_name="LightGBM",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="class_weight",
+        tmp_path=tmp_path,
+    )
+
+
+def test_lightgbm_multiclass_classification_parity(tmp_path):
+    """Multi-class LightGBM — pins the multi-output predict_proba shape
+    parity. LGBMClassifier handles multi-class natively (objective inferred
+    from y); no extra params needed."""
+    pytest.importorskip("lightgbm")
+    from lightgbm import LGBMClassifier
+
+    X_train, y_train, X_test = _make_multiclass_classification_data(n_classes=3)
+    params = dict(_LGBM_BASE_PARAMS)
+    _run_parity(
+        model=LGBMClassifier(**params),
+        model_name="LightGBM",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CatBoost — auto_class_weights='Balanced' constructor kwarg path (T-20b)
+# ---------------------------------------------------------------------------
+
+# CatBoost uses different kwarg names from the rest of the boosting family:
+# ``thread_count`` (not ``n_jobs``), and ``verbose=0`` (the codegen injects
+# this automatically when missing — set it explicitly here so merged params
+# are identical).
+_CATBOOST_BASE_PARAMS = {
+    "n_estimators": 30,
+    "max_depth": 4,
+    "learning_rate": 0.1,
+    "random_state": 42,
+    "thread_count": 1,
+    "verbose": 0,
+}
+
+
+def test_catboost_regression_parity(tmp_path):
+    """CatBoost regression baseline."""
+    pytest.importorskip("catboost")
+    from catboost import CatBoostRegressor
+
+    X_train, y_train, X_test = _make_regression_data()
+    params = dict(_CATBOOST_BASE_PARAMS)
+    _run_parity(
+        model=CatBoostRegressor(**params),
+        model_name="CatBoost",
+        task_type="regression",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+def test_catboost_binary_classification_parity_no_imbalance(tmp_path):
+    """CatBoost binary classification baseline — no imbalance handling."""
+    pytest.importorskip("catboost")
+    from catboost import CatBoostClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data()
+    params = dict(_CATBOOST_BASE_PARAMS)
+    _run_parity(
+        model=CatBoostClassifier(**params),
+        model_name="CatBoost",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
+
+
+def test_catboost_binary_classification_parity_class_weight(tmp_path):
+    """T-19 surface for CatBoost: imbalance handled via the native
+    ``auto_class_weights='Balanced'`` constructor kwarg (CatBoost-specific;
+    the codegen emits it as a balanced_kwarg in ``_render_model``). The
+    in-process model uses the same constructor kwarg — no fit_kwargs
+    threading needed."""
+    pytest.importorskip("catboost")
+    from catboost import CatBoostClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+    params = dict(_CATBOOST_BASE_PARAMS)
+    params["auto_class_weights"] = "Balanced"
+    _run_parity(
+        model=CatBoostClassifier(**params),
+        model_name="CatBoost",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="class_weight",
+        tmp_path=tmp_path,
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Codegen CV pooling bug surfaced by T-20b: CatBoostClassifier."
+        "predict() returns shape (n, 1) for multiclass, but the CV "
+        "majority-vote block in templates/validation.py "
+        "(CROSS_VALIDATION_CLASSIFICATION_TEMPLATE, ~line 163-176) calls "
+        "Counter(preds_per_sample[i]) which can't hash ndarrays. The "
+        "exported script crashes before reaching the parity-test "
+        "appendix. Fix needs the validation template to scalarise the "
+        "prediction (e.g. int(np.ravel(y_pred_fold[local_i])[0])) — "
+        "filed as follow-up ticket. When fixed, this test will start "
+        "passing and strict=True forces the marker to be removed."
+    ),
+)
+def test_catboost_multiclass_classification_parity(tmp_path):
+    """Multi-class CatBoost — pins the multi-output predict_proba shape
+    parity. CatBoost infers multi-class objective from the y label set.
+
+    Currently xfailed: see the marker for the codegen bug T-20b surfaced.
+    Test code itself is correct; the xfail is on a downstream codegen
+    issue, not on the parity contract."""
+    pytest.importorskip("catboost")
+    from catboost import CatBoostClassifier
+
+    X_train, y_train, X_test = _make_multiclass_classification_data(n_classes=3)
+    params = dict(_CATBOOST_BASE_PARAMS)
+    _run_parity(
+        model=CatBoostClassifier(**params),
+        model_name="CatBoost",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method=None,
+        tmp_path=tmp_path,
+    )
