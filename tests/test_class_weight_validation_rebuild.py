@@ -12,9 +12,10 @@ without re-applying the imbalance discriminator. Pre-fix:
   ``_rebuild_model_from_row`` reconstructs from that string, losing the
   weighting silently.
 * **PLS-DA** retrained UNWEIGHTED for the validation set. PLS-DA's
-  ``class_weight`` lives in the LR sub-step's constructor at search.py:4488
-  but the LR step's params are NOT serialized into the result-row ``Params``
-  dict — only the PLS step's ``n_components`` ends up there.
+  ``class_weight`` lives in the LR sub-step's constructor inside
+  ``_run_single_config`` (the ``lr_kwargs['class_weight'] = 'balanced'``
+  block) but the LR step's params are NOT serialized into the result-row
+  ``Params`` dict — only the PLS step's ``n_components`` ends up there.
   ``_rebuild_model_from_row`` reconstructs LR without ``class_weight``.
 
 Reached when ``validation_count > 0`` in ``run_search`` (Grid) or
@@ -298,6 +299,34 @@ class TestCallerThreading:
             "The validation-rebuild discriminator helper must be called from "
             "compute_validation_metrics_for_top_models — without it, the rebuild "
             "path silently produces unweighted XGBoost and PLS-DA validation models."
+        )
+
+    def test_fit_site_splats_fit_kwargs(self):
+        """Pin the fit-site that the helper's return value is splatted into
+        ``model.fit``. The helper can return ``{'sample_weight': ...}`` for
+        XGBoost or ``{'model__sample_weight': ...}`` for Pipeline-wrapped
+        estimators — without the ``**fit_kwargs`` splat at the call site,
+        XGBoost validation rebuild silently regresses to UNWEIGHTED training
+        (the original bug shape). Catches a refactor that drops the splat
+        while leaving the helper call in place. Per pr-test-analyzer
+        recommendation on PR #41 (the same silent-failure shape as the
+        original bug)."""
+        import inspect
+        from spectral_predict.search import compute_validation_metrics_for_top_models
+        source = inspect.getsource(compute_validation_metrics_for_top_models)
+        assert "**fit_kwargs" in source, (
+            "Fit site must splat **fit_kwargs from the discriminator's return "
+            "value. Without it, XGBoost (and any other model whose class_weight "
+            "is fit-time sample_weight) silently trains UNWEIGHTED in validation "
+            "rebuild — the exact failure shape this PR fixes."
+        )
+        # Stronger pin: verify the literal fit() call carries the splat.
+        # The fit site immediately follows the helper call.
+        assert "model.fit(X_train_final, y_train, **fit_kwargs)" in source, (
+            "Fit site must invoke `model.fit(X_train_final, y_train, **fit_kwargs)` "
+            "exactly. A refactor that splits the splat into a separate variable "
+            "or moves the kwargs application elsewhere should re-verify the "
+            "splat pattern is preserved."
         )
 
     @pytest.mark.parametrize(

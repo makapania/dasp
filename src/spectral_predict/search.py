@@ -415,9 +415,12 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
 ) -> dict:
     """Apply the class_weight discriminator to a model rebuilt from a result row.
 
-    Mirrors the canonical pattern at search.py:4423-4467 (sister sites in
-    unified_bayesian.py:1238-1241, nsga2_search.py:1401-1405). Used by rebuild
-    paths that reconstruct a model from the result-row Params dict — XGBoost's
+    Mirrors the canonical class_weight discriminator block in
+    ``_run_single_config`` (CatBoost / ``hasattr(class_weight)`` / sample_weight
+    fallback), with sister-site implementations in ``unified_bayesian.objective``,
+    ``nsga2_search.SearchProblem._evaluate``, ``nsga2_search._compute_classification_cv_metrics``,
+    and ``nsga2_search._compute_calibration_metrics``. Used by rebuild paths
+    that reconstruct a model from the result-row Params dict — XGBoost's
     fit-time sample_weight and PLS-DA's LR sub-step class_weight are not in
     Params and would be silently lost (training UNWEIGHTED) without
     re-application here.
@@ -496,7 +499,8 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
         sw = compute_sample_weight('balanced', y_train)
         return {sample_weight_kwarg: sw}
 
-    # 4. No mechanism available — warn (mirrors canonical pattern at search.py:4455-4466).
+    # 4. No mechanism available — warn (mirrors the no-mechanism branch in
+    #    the canonical _run_single_config discriminator).
     import warnings
     if model_name in ('MLP', 'MLPClassifier'):
         warnings.warn(
