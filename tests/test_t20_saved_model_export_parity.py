@@ -692,6 +692,46 @@ def test_lightgbm_binary_classification_parity_class_weight(tmp_path):
     )
 
 
+def test_lightgbm_binary_classification_parity_auto_with_correction(tmp_path):
+    """T-19 Auto-mode runtime resolution — auto-resolves-to-class_weight for
+    LightGBM. Mirror of test_xgboost_binary_classification_parity_auto_with_
+    correction (the symmetric coverage flagged by pr-test-analyzer on PR #32).
+
+    With IMBALANCED data (ratio >= 3:1), the codegen's auto-resolution block
+    in ``_render_imbalance_handling`` mutates IMBALANCE_METHOD to "class_weight".
+    The LightGBM branch then renders ``LGBMClassifier(class_weight='balanced',
+    ...)`` exactly as the explicit imbalance_method='class_weight' row does.
+    Unlike XGBoost (which routes through fit-time sample_weight because there
+    is no class_weight kwarg), LightGBM's class_weight is a native sklearn-API
+    constructor kwarg — so the in-process model mirrors the codegen branch by
+    setting ``params['class_weight'] = 'balanced'`` at construction. No
+    fit_kwargs threading needed.
+
+    The ``expect_stdout_marker="applying class_weight"`` pins the
+    class_weight branch of the auto-resolution print. Without it, a regression
+    that flipped the threshold or short-circuited to None would still pass
+    here (predictions would diverge but the wrong-branch print is the real
+    signal)."""
+    pytest.importorskip("lightgbm")
+    from lightgbm import LGBMClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+    params = dict(_LGBM_BASE_PARAMS)
+    params["class_weight"] = "balanced"
+    _run_parity(
+        model=LGBMClassifier(**params),
+        model_name="LightGBM",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="auto",
+        tmp_path=tmp_path,
+        expect_stdout_marker="applying class_weight",
+    )
+
+
 def test_lightgbm_multiclass_classification_parity(tmp_path):
     """Multi-class LightGBM — pins the multi-output predict_proba shape
     parity. LGBMClassifier handles multi-class natively (objective inferred
@@ -794,6 +834,43 @@ def test_catboost_binary_classification_parity_class_weight(tmp_path):
         params=params,
         imbalance_method="class_weight",
         tmp_path=tmp_path,
+    )
+
+
+def test_catboost_binary_classification_parity_auto_with_correction(tmp_path):
+    """T-19 Auto-mode runtime resolution — auto-resolves-to-class_weight for
+    CatBoost. Mirror of test_xgboost_binary_classification_parity_auto_with_
+    correction (the symmetric coverage flagged by pr-test-analyzer on PR #32).
+
+    With IMBALANCED data (ratio >= 3:1), the codegen's auto-resolution block
+    in ``_render_imbalance_handling`` mutates IMBALANCE_METHOD to "class_weight".
+    The CatBoost branch then renders ``CatBoostClassifier(auto_class_weights=
+    'Balanced', ...)`` — CatBoost-specific kwarg name; the codegen emits it
+    as a balanced_kwarg in ``_render_model``. The in-process model mirrors
+    that by setting ``params['auto_class_weights'] = 'Balanced'`` at
+    construction.
+
+    Same expect_stdout_marker pin as the XGBoost / LightGBM auto-with-
+    correction rows — the auto-resolution print emits "applying class_weight"
+    regardless of which downstream kwarg the model uses, because the
+    auto-resolution decision happens before the per-model dispatch."""
+    pytest.importorskip("catboost")
+    from catboost import CatBoostClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+    params = dict(_CATBOOST_BASE_PARAMS)
+    params["auto_class_weights"] = "Balanced"
+    _run_parity(
+        model=CatBoostClassifier(**params),
+        model_name="CatBoost",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="auto",
+        tmp_path=tmp_path,
+        expect_stdout_marker="applying class_weight",
     )
 
 
