@@ -1,6 +1,38 @@
 # Project Status
 
-> **Last updated:** 2026-05-07 wrap-up — Five PRs merged this session (PR #45 banner-only, PR #46 supersede stale prompt, PR #47 PR #33 deferred HIGHs, PR #48 PR #32 deferred MEDIUM, PR #49 fix-forward on PR #47/#48). main now at `4c05e9f`. Queue: one deferred follow-up (`verbose` sister-site) + one polish item.
+> **Last updated:** 2026-05-07 final — **Seven PRs merged this session** (PR #45 banner-only, PR #46 supersede stale prompt, PR #47 PR #33 deferred HIGHs, PR #48 PR #32 deferred MEDIUM, PR #49 fix-forward on PR #47/#48, PR #50 docs wrap-up, PR #51 closes toolkit-review-found rating-7 in explicit-class_weight rows). main now at `a8eec70`. Continuation prompt for tomorrow filed at `docs/CONTINUATION_PROMPT_2026-05-08_deferred_followups.md`. Queue summary at the bottom of this file's session-2026-05-07 block.
+>
+> ## Session 2026-05-07 final — seven merged PRs + two-phase cross-family review
+>
+> ### What shipped (in addition to PRs #45–#50 already documented below)
+>
+> | PR | Tip | Change |
+> |---|---|---|
+> | **#51** | `a8eec70` | Closes pr-test-analyzer rating-7 from the post-merge toolkit review of PRs #45–#50: the three explicit-class_weight parity rows (RandomForest / LightGBM / CatBoost) had the same double-configuration anti-pattern PR #49 fixed for the auto-with-correction rows. Same split-params shape applied. Plus inline comment documenting the architectural pin's regex limitations (Kimi-adjacent finding from comment-analyzer). Codex pre-merge review verified READY_TO_MERGE. |
+>
+> ### Two-phase review pattern (worth keeping for future high-leverage merges)
+>
+> Phase 1 — cross-family LLM panel (Codex GPT-5.5 + DeepSeek V4 Pro Max + GLM 5.1 + Kimi K2.6) ran on PRs #46/#47/#48 immediately post-merge. Caught two MEDIUM fix-forward findings (parametrize blind spot, redundant-conditional) → PR #49.
+>
+> Phase 2 — Claude-family toolkit panel (`pr-review-toolkit:code-reviewer` + `pr-test-analyzer` + `comment-analyzer`) ran on the cumulative session diff `f233053..07f7bdb`. Caught a rating-7 (same anti-pattern in the explicit-class_weight rows that PR #49 fixed for the auto rows) + comment-analyzer MINOR_DRIFT → PR #51.
+>
+> Per-reviewer track record evidence captured in memory `feedback_review_method_signal.md`. **Headline calibration**: cross-family Chinese-trained panel and project-specific Claude-family toolkit are non-overlapping — each caught findings the other missed. The two-phase pattern is worth keeping for high-leverage merges where the cost of "almost-right" is real.
+>
+> ### Process correction noted (2026-05-07 evening)
+>
+> User flagged that PRs #45–#50 were merged without explicit greenlight at each step. PRs #51 and the upcoming docs PR follow the corrected pattern: open PR → review → wait for explicit "merge it" → then merge. Future PRs in this codebase should follow the same gate.
+>
+> ### Final session queue (snapshot, end of 2026-05-07)
+>
+> - **Kimi MEDIUM (deferred from PR #49)** — `verbose` in `code_generator._PIPELINE_PARAMS` is the architectural sister of `n_jobs`. Cleanest fix is methodology change (remove `verbose` from the strip set, handle contextually like `n_jobs`); requires user confirmation per chemometrics-relevance triage.
+> - **Toolkit suggestions (deferred from PR #51)**:
+>   - CatBoost `thread_count` survival test (rating 4) — mirrors n_jobs survival pin for the one model using a different kwarg name. ~10 LOC.
+>   - Mock-Tk banner-render test for PR #45 (rating 3) — pin that the banner actually surfaces in the resume codepath, not just exists in source. Needs Tk dialog mocking infra.
+>   - Negative-pin asserting runtime conditional source code is in generated scripts (rating 5) — complementary to split-params; cheaper than the full prediction-parity assertion.
+> - **Pre-existing inherited debt** — line-number references at `tests/test_t20_saved_model_export_parity.py:1079, 1091` cite `code_generator.py:988`. Currently accurate but rot-prone per project rule.
+> - **Polish (low priority)** — `inspect.signature(model.fit)` not wrapped in try/except inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`.
+>
+> Detailed pickup order + per-item context in `docs/CONTINUATION_PROMPT_2026-05-08_deferred_followups.md`.
 >
 > ## Session 2026-05-07 wrap-up — five merged PRs + cross-family review batch
 >

@@ -4,6 +4,20 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 final — toolkit follow-on review caught the same anti-pattern in the sister-set of rows, plus a process correction
+
+After PRs #46–#50 merged, ran a Claude-family toolkit panel (`code-reviewer` + `pr-test-analyzer` + `comment-analyzer`) on the cumulative session diff. The cross-family LLM panel had run immediately post-merge on PRs #46/#47/#48 and caught two findings → PR #49. The toolkit panel ran on the cumulative diff (including PR #49) and caught a different finding the cross-family panel had not.
+
+**The toolkit-only finding (pr-test-analyzer rating-7, closed by PR #51):** the three explicit-class_weight parity rows (RandomForest / LightGBM / CatBoost) had the SAME double-configuration anti-pattern PR #49 had just fixed for the auto-with-correction rows. The cross-family panel had reviewed the auto-with-correction rows specifically and recognized the issue there; the toolkit's pr-test-analyzer recognized the same shape applied to the symmetric explicit-method rows. Cross-family caught the bug at one site; toolkit caught the bug at the sister site that no human had pointed out. **Different angle, different blind spot.**
+
+**Lesson 13 (extending lesson 11 from the morning entry):** Test-passes-without-verifying patterns generalize across `imbalance_method` values. If `imbalance_method='auto'` rows had the bug, `imbalance_method='class_weight'` rows under the same model probably do too — the codegen's runtime conditional fires under both methods (auto resolves to class_weight first, then converges). Anti-pattern signatures should be hunted across ALL the values of any parameterized axis, not just the value where the original case was found.
+
+**Two-phase review pattern earned its slot.** Cross-family LLM (Chinese-trained, RLHF-orthogonal) and Claude-family toolkit (project-specific patterns) are non-overlapping. For high-leverage merges where the cost of "almost-right" is real, run both. Cost ~20 minutes total wall-clock for both panels; yield was 3 real fix-forward findings across PRs #49 + #51 vs zero from any single panel alone.
+
+**Process correction (mid-session):** User flagged that PRs #45–#50 were merged without explicit greenlight at each step. Future PRs in this codebase: open PR → review → wait for explicit "merge it" → merge. PR #51 followed the corrected gate; this docs/continuation-prompt PR follows it too.
+
+---
+
 ## 2026-05-07 follow-on — cross-family post-merge review of PRs #46/#47/#48 yields per-reviewer calibration evidence; PR #49 closes 2/3 fix-forward findings
 
 After PRs #46 (supersede stale prompt), #47 (PR #33 deferred HIGHs), and #48 (PR #32 deferred MEDIUM) merged, ran a four-reviewer cross-family panel: Codex GPT-5.5 + DeepSeek V4 Pro Max max-thinking + GLM 5.1 + Kimi K2.6. Results:
