@@ -39122,6 +39122,15 @@ External Validation Performance (n={n_val}):
                     # Imbalance handling (for reproducibility)
                     'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                     'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                    # Early stopping rounds (boosters only) — must be threaded
+                    # so the export reproduces the in-app per-fold CV. Without
+                    # this, exported notebooks for LightGBM/XGBoost/CatBoost
+                    # silently train more trees than the in-app run did and
+                    # can flip predictions on borderline samples.
+                    'early_stopping_rounds': (
+                        self.selected_model_config.get('early_stopping_rounds')
+                        if self.selected_model_config else None
+                    ),
                     # T-36: autoscale flag — exported scripts must apply UV scaling after
                     # SNV/derivatives if it was active during training, else they will not
                     # reproduce the saved model.

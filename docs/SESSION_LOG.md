@@ -4,6 +4,57 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-04 — booster export-CV silently divergent since `af6f4cf`; export had no `early_stopping_rounds` plumbing at all
+
+User-reported symptom: in-app LightGBM 3-class CV reports `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1; the exported Colab notebook (`example/colab_20260504_103912.ipynb`) reports `0.976` with one borderline class-2 sample misclassified. Both run on the same 41×20 embedded data — preprocessing/varsel/sample-count/feature-ordering all matched, ruled out via reproduction.
+
+**Root cause.** `_run_single_fold` in search.py and the GUI refined-model path call `cv_utils._fit_with_early_stopping(model, X_train, y_train, X_test, y_test, early_stopping_rounds=40)` for boosters. For LightGBM that lowers to `model.fit(X_train, y_train, eval_set=[(X_test, y_test)], callbacks=[lgb.early_stopping(40, ...)])` — trees stop growing when held-out fold loss flattens. Export templates (`templates/validation.py` regression+classification CV blocks, `code_generator.py:_render_cross_validation_with_imbalance` regression+classification branches) emit `fold_model.fit(X_train, y_train)` — full `n_estimators=200` trees. `Grep` for `early_stopping_rounds` in `code_generator.py` returns no matches: the value is never threaded into export codegen.
+
+Commit `af6f4cf` (Jan 2026) added in-app early stopping. Export templates were never updated. **All boosting exports have silently diverged from in-app CV since.** User's "these used to line up" matches: before `af6f4cf`, both did plain `.fit()` and matched.
+
+**Reproduction.** Decoded the embedded data from the user's notebook; ran StratifiedKFold(5, shuffle=True, random_state=42) two ways with bit-identical params. Plain `.fit()` gives `[[21,0,0],[0,6,0],[1,0,13]]` (acc 0.976, matches notebook). With `eval_set=(X_test, y_test) + lgb.early_stopping(40)`: `[[21,0,0],[0,6,0],[0,0,14]]` (acc 1.0, matches in-app). Both matrices match the user-reported numbers exactly.
+
+**Fix shape (validated by codex independent review).** Three plumbing changes:
+1. GUI `_export_for_publication`: include `'early_stopping_rounds': self.selected_model_config.get('early_stopping_rounds')` in `model_config`.
+2. `CodeGenerator.__init__`: read it as `self.early_stopping_rounds` (None or 0 = disabled).
+3. New `_render_fit_fold_helper` emits a runtime helper:
+   ```python
+   def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
+       if not _esr or _esr <= 0:
+           _model.fit(_X_tr, _y_tr, **_fit_kwargs); return
+       _cls = type(_model).__name__
+       if _cls in ('LGBMClassifier', 'LGBMRegressor'):
+           import lightgbm as _lgb
+           _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)],
+                      callbacks=[_lgb.early_stopping(_esr, verbose=False),
+                                 _lgb.log_evaluation(period=0)],
+                      **_fit_kwargs)
+       elif _cls in ('XGBClassifier', 'XGBRegressor'):
+           _model.set_params(early_stopping_rounds=_esr)
+           _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)], verbose=False, **_fit_kwargs)
+       elif _cls in ('CatBoostClassifier', 'CatBoostRegressor'):
+           if _cls == 'CatBoostClassifier': _model.set_params(eval_metric='Accuracy')
+           _model.fit(_X_tr, _y_tr, eval_set=(_X_val, _y_val),
+                      early_stopping_rounds=_esr, verbose=0, **_fit_kwargs)
+       else:
+           _model.fit(_X_tr, _y_tr, **_fit_kwargs)
+   ```
+   Helper emitted in both `generate_script` (after model instantiation, before CV) and `generate_notebook` (in the model+CV cell, same scope as the for-loop) — codex flagged this as a HIGH because notebook cells are independent scopes; if the helper only landed in the script header path, notebooks would `NameError`.
+
+CV emission (4 sites) replaces `fold_model.fit(X_train, y_train)` with `_fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)` (passing `**fit_kwargs` for the imbalance-aware paths that thread sample_weight).
+
+**Final-model fit unchanged.** In-app `final_pipe.fit(X_raw, y_array, ...)` at GUI line 38300 uses no early stopping (no eval set after CV completes). Export `_render_final_model` already matches.
+
+**Codex-flagged adjacent drift, deferred.** Regression Y-transform wrapper (`YTransformWrapper`/`TransformedTargetRegressor`) is set up in GUI lines 37860+ and saved in metadata (`y_transform`), but `code_generator.py` has no `y_transform` handling — separate ticket, irrelevant to the LightGBM classification regression user reported.
+
+**Lesson 14:** Parity tests must cover the CV path, not just the final-fit path. T-20 `test_t20_saved_model_export_parity` only asserts saved-model predictions match exported final-model predictions (`tests/test_t20_saved_model_export_parity.py:209-246`); it cannot see CV emission divergence. New `test_export_cv_early_stopping_parity.py` exercises the per-fold path directly: generates the notebook, exec's the model+CV cell in-process, asserts the resulting `all_y_pred_arr` matches `cv_utils._fit_with_early_stopping` applied across the same splits with the same params. **When adding a new in-app CV behavior, add a CV-export parity test.** The bug class is "in-app CV got smarter; export didn't follow."
+
+**Lesson 15:** When a feature is added to the in-app CV path (early stopping, sample weighting, custom scorers, eval-time transforms), its symmetric export-codegen update must ship in the same PR or the parity surface drifts silently. The af6f4cf commit shipped a feature without a parity test that would have caught the export-side gap. Going forward, any PR touching `_run_single_fold` / `cv_utils._fit_with_early_stopping` must list the export-side change in its checklist or explicitly note "export-side: no change required" with rationale.
+
+**Affected models (definitive list):** LightGBM (LGBMClassifier, LGBMRegressor), XGBoost (XGBClassifier, XGBRegressor), CatBoost (CatBoostClassifier, CatBoostRegressor) — these are the three families that go through `_fit_with_early_stopping`. Every other model (PLS, PLS-DA, Ridge, Lasso, ElasticNet, RandomForest, SVM/SVC/SVR, MLP, NeuralBoosted, OneClassSVM, IsolationForest, LOF, EllipticEnvelope, PCA-SIMCA) takes the plain-`.fit()` branch in `_run_single_fold` (search.py:4302-4307) and was never affected.
+
+---
+
 ## 2026-05-07 final — toolkit follow-on review caught the same anti-pattern in the sister-set of rows, plus a process correction
 
 After PRs #46–#50 merged, ran a Claude-family toolkit panel (`code-reviewer` + `pr-test-analyzer` + `comment-analyzer`) on the cumulative session diff. The cross-family LLM panel had run immediately post-merge on PRs #46/#47/#48 and caught two findings → PR #49. The toolkit panel ran on the cumulative diff (including PR #49) and caught a different finding the cross-family panel had not.

@@ -118,6 +118,19 @@ class CodeGenerator:
         self.cv_folds = model_config.get('cv_folds', _training_config.get('folds', 5))
         self.cv_strategy = model_config.get('cv_strategy', _training_config.get('cv_strategy', 'kfold'))
         self.cv_n_repeats = model_config.get('cv_n_repeats', _training_config.get('cv_n_repeats', 5))
+        # Early stopping for boosters — must mirror cv_utils._fit_with_early_stopping
+        # so exported CV reproduces in-app CV. Lives on `model_config` (set by the
+        # GUI export path from the result row) and falls back to training_config
+        # for completeness. None or <=0 means no early stopping.
+        _es_raw = model_config.get(
+            'early_stopping_rounds',
+            _training_config.get('early_stopping_rounds', None),
+        )
+        try:
+            _es_int = int(_es_raw) if _es_raw is not None else None
+        except (TypeError, ValueError):
+            _es_int = None
+        self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
         self.imbalance_method = model_config.get('imbalance_method', None)
         self.inlier_class_label = model_config.get('inlier_class_label', '')
 
@@ -211,6 +224,11 @@ class CodeGenerator:
 
         # 9. Cross-validation
         if self.options.include_cross_validation:
+            # Per-fold fit helper: mirrors cv_utils._fit_with_early_stopping so
+            # the exported CV reproduces the in-app CV bit-for-bit on boosters.
+            # Falls through to plain fit() for non-boosters (no behavior change
+            # for PLS/Ridge/Lasso/RandomForest/SVM/MLP/etc.).
+            sections.append(self._render_fit_fold_helper())
             sections.append(self._render_cross_validation())
             sections.append(self._render_metrics())
 
@@ -342,8 +360,11 @@ class CodeGenerator:
         # Model and cross-validation
         section_num += 1
         cells.append(self._make_markdown_cell(f"## {section_num}. Model Training and Evaluation"))
+        # _fit_fold helper must live in the same cell so the CV loop can call it.
+        # See _render_fit_fold_helper for the in-app parity rationale.
         model_cv_code = (
             self._render_model() + '\n' +
+            self._render_fit_fold_helper() + '\n' +
             self._render_cross_validation() + '\n' +
             self._render_metrics()
         )
@@ -1448,6 +1469,71 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         )
         return code
 
+    def _render_fit_fold_helper(self) -> str:
+        """Render the per-fold fit helper that mirrors cv_utils._fit_with_early_stopping.
+
+        Why this exists
+        ---------------
+        In-app CV calls ``cv_utils._fit_with_early_stopping(model, X_train,
+        y_train, X_test, y_test, early_stopping_rounds)`` for boosting models
+        (LightGBM/XGBoost/CatBoost) at ``search.py:_run_single_fold`` and
+        again from the GUI refined-model path. That fits each fold with
+        ``eval_set=[(X_test, y_test)]`` and an early-stopping callback. Without
+        the same wiring on the export side, the notebook trains the full
+        ``n_estimators`` and produces different per-fold predictions than the
+        in-app run on borderline samples (one-class flips at the boundary).
+
+        For non-boosters this helper falls through to plain ``model.fit(...)``,
+        which is a no-op relative to the previous template behavior.
+
+        Skipped when ``early_stopping_rounds`` is ``None`` or ``<= 0`` —
+        the helper still exists so the CV loop call site is uniform, but its
+        body just calls plain fit. Keeps codegen branching minimal.
+        """
+        esr = self.early_stopping_rounds if self.early_stopping_rounds else 0
+        return f'''
+# =============================================================================
+# PER-FOLD FIT HELPER (mirrors in-app cv_utils._fit_with_early_stopping)
+# =============================================================================
+# Boosting models (LightGBM/XGBoost/CatBoost) early-stop on the held-out fold
+# when EARLY_STOPPING_ROUNDS > 0, matching the in-app CV path. Non-boosters
+# fall through to plain .fit().
+
+EARLY_STOPPING_ROUNDS = {esr}
+
+def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
+    if not _esr or _esr <= 0:
+        _model.fit(_X_tr, _y_tr, **_fit_kwargs)
+        return
+    _cls = type(_model).__name__
+    if _cls in ('LGBMClassifier', 'LGBMRegressor'):
+        import lightgbm as _lgb
+        _model.fit(
+            _X_tr, _y_tr,
+            eval_set=[(_X_val, _y_val)],
+            callbacks=[
+                _lgb.early_stopping(stopping_rounds=_esr, verbose=False),
+                _lgb.log_evaluation(period=0),
+            ],
+            **_fit_kwargs,
+        )
+    elif _cls in ('XGBClassifier', 'XGBRegressor'):
+        _model.set_params(early_stopping_rounds=_esr)
+        _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)], verbose=False, **_fit_kwargs)
+    elif _cls in ('CatBoostClassifier', 'CatBoostRegressor'):
+        if _cls == 'CatBoostClassifier':
+            _model.set_params(eval_metric='Accuracy')
+        _model.fit(
+            _X_tr, _y_tr,
+            eval_set=(_X_val, _y_val),
+            early_stopping_rounds=_esr,
+            verbose=0,
+            **_fit_kwargs,
+        )
+    else:
+        _model.fit(_X_tr, _y_tr, **_fit_kwargs)
+'''
+
     def _render_cross_validation(self) -> str:
         """Render cross-validation code."""
         if self.imbalance_method:
@@ -1775,7 +1861,10 @@ for train_idx, test_idx in cv.split({x_var}, y):
             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
 
     fold_model = clone(model)
-{sample_weight_block_cv}    fold_model.fit(X_train_fold, y_train_fold{cv_fit_kwargs_spread})
+{sample_weight_block_cv}    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
+    # early-stop on the held-out fold; non-boosters fall through to .fit().
+    # XGBoost class_weight=='balanced' threads sample_weight through fit_kwargs.
+    _fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, EARLY_STOPPING_ROUNDS{cv_fit_kwargs_spread})
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
@@ -1862,7 +1951,9 @@ for train_idx, test_idx in cv.split({x_var}):
                 fit_kwargs['sample_weight'] = sample_weight
         else:
             fit_kwargs['sample_weight'] = sample_weight
-    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
+    # early-stop on the held-out fold; non-boosters fall through to .fit().
+    _fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, EARLY_STOPPING_ROUNDS, **fit_kwargs)
     y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):

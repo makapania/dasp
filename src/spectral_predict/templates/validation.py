@@ -99,7 +99,9 @@ for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     y_train, y_test = y[train_idx], y[test_idx]
 
     fold_model = clone(model)
-    fold_model.fit(X_train, y_train)
+    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
+    # early-stop on the held-out fold; non-boosters fall through to .fit().
+    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
     y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
@@ -156,7 +158,9 @@ for train_idx, test_idx in cv.split(X_final, y):
     y_train, y_test = y[train_idx], y[test_idx]
 
     fold_model = clone(model)
-    fold_model.fit(X_train, y_train)
+    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
+    # early-stop on the held-out fold; non-boosters fall through to .fit().
+    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
