@@ -699,13 +699,23 @@ def test_lightgbm_binary_classification_parity_auto_with_correction(tmp_path):
 
     With IMBALANCED data (ratio >= 3:1), the codegen's auto-resolution block
     in ``_render_imbalance_handling`` mutates IMBALANCE_METHOD to "class_weight".
-    The LightGBM branch then renders ``LGBMClassifier(class_weight='balanced',
-    ...)`` exactly as the explicit imbalance_method='class_weight' row does.
-    Unlike XGBoost (which routes through fit-time sample_weight because there
-    is no class_weight kwarg), LightGBM's class_weight is a native sklearn-API
-    constructor kwarg — so the in-process model mirrors the codegen branch by
-    setting ``params['class_weight'] = 'balanced'`` at construction. No
-    fit_kwargs threading needed.
+    The LightGBM branch then injects ``model_params['class_weight'] = 'balanced'``
+    via the runtime conditional at the auto-resolution site. Unlike XGBoost
+    (which routes through fit-time sample_weight because there is no
+    class_weight kwarg), LightGBM's class_weight is a native sklearn-API
+    constructor kwarg.
+
+    Param-split shape (DeepSeek 2026-05-07 review of PR #48): the in-process
+    model is constructed with ``class_weight='balanced'`` added at the
+    constructor call site, BUT the params dict passed through to
+    ``_build_export_config`` and ``_build_metadata`` is the BARE base params
+    (without ``class_weight``). This makes the codegen's runtime conditional
+    the ONLY source of ``class_weight`` in the exported script. If a future
+    refactor deletes the conditional, the script's predictions diverge from
+    the in-process model's, and this test fails. The earlier shape (passing
+    ``class_weight='balanced'`` in BOTH the in-process params and the codegen
+    params) made the conditional dead code — adversarial deletion would have
+    silently passed the test.
 
     The ``expect_stdout_marker="applying class_weight"`` pins the
     class_weight branch of the auto-resolution print. Without it, a regression
@@ -716,16 +726,18 @@ def test_lightgbm_binary_classification_parity_auto_with_correction(tmp_path):
     from lightgbm import LGBMClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    params = dict(_LGBM_BASE_PARAMS)
-    params["class_weight"] = "balanced"
+    base_params = dict(_LGBM_BASE_PARAMS)  # no class_weight — bare for codegen
     _run_parity(
-        model=LGBMClassifier(**params),
+        # In-process model gets class_weight added at construction; codegen
+        # path receives bare params and must add class_weight via runtime
+        # conditional to match.
+        model=LGBMClassifier(**base_params, class_weight="balanced"),
         model_name="LightGBM",
         task_type="classification",
         X_train=X_train,
         y_train=y_train,
         X_test=X_test,
-        params=params,
+        params=base_params,
         imbalance_method="auto",
         tmp_path=tmp_path,
         expect_stdout_marker="applying class_weight",
@@ -844,11 +856,18 @@ def test_catboost_binary_classification_parity_auto_with_correction(tmp_path):
 
     With IMBALANCED data (ratio >= 3:1), the codegen's auto-resolution block
     in ``_render_imbalance_handling`` mutates IMBALANCE_METHOD to "class_weight".
-    The CatBoost branch then renders ``CatBoostClassifier(auto_class_weights=
-    'Balanced', ...)`` — CatBoost-specific kwarg name; the codegen emits it
-    as a balanced_kwarg in ``_render_model``. The in-process model mirrors
-    that by setting ``params['auto_class_weights'] = 'Balanced'`` at
-    construction.
+    The CatBoost branch then injects ``model_params['auto_class_weights'] =
+    'Balanced'`` via the runtime conditional — CatBoost-specific kwarg name;
+    the codegen emits it as a balanced_kwarg in ``_render_model``.
+
+    Param-split shape (DeepSeek 2026-05-07 review of PR #48): the in-process
+    model is constructed with ``auto_class_weights='Balanced'`` added at the
+    constructor call site, BUT the params dict passed through to
+    ``_build_export_config`` and ``_build_metadata`` is the BARE base params
+    (without ``auto_class_weights``). This makes the codegen's runtime
+    conditional the ONLY source of the balanced kwarg in the exported
+    script. If a future refactor deletes the conditional, the script's
+    predictions diverge from the in-process model's and this test fails.
 
     Same expect_stdout_marker pin as the XGBoost / LightGBM auto-with-
     correction rows — the auto-resolution print emits "applying class_weight"
@@ -858,16 +877,15 @@ def test_catboost_binary_classification_parity_auto_with_correction(tmp_path):
     from catboost import CatBoostClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    params = dict(_CATBOOST_BASE_PARAMS)
-    params["auto_class_weights"] = "Balanced"
+    base_params = dict(_CATBOOST_BASE_PARAMS)  # no auto_class_weights — bare
     _run_parity(
-        model=CatBoostClassifier(**params),
+        model=CatBoostClassifier(**base_params, auto_class_weights="Balanced"),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
         y_train=y_train,
         X_test=X_test,
-        params=params,
+        params=base_params,
         imbalance_method="auto",
         tmp_path=tmp_path,
         expect_stdout_marker="applying class_weight",
@@ -1108,22 +1126,46 @@ def test_unified_bayesian_pipeline_params_excludes_n_jobs():
 
 @pytest.mark.parametrize(
     "model_name",
-    ["XGBoost", "RandomForest"],
+    ["XGBoost", "RandomForest", "LightGBM"],
 )
 def test_user_set_n_jobs_survives_codegen(model_name, tmp_path):
     """Behavioral pin (PR #33 deferred HIGH #1): user-set n_jobs=1 must
-    appear literally in the generated script content for both XGBoost and
-    RandomForest. The structural pins above prove n_jobs isn't stripped via
-    the named PIPELINE_PARAMS sets — but a refactor moving the bug to a
-    different mechanism (e.g. an unconditional setdefault or a new strip
-    path) would still pass those pins while silently overwriting the user's
-    determinism choice in the exported script.
+    appear literally in the generated script content for all three of
+    XGBoost, RandomForest, and LightGBM. The structural pins above prove
+    n_jobs isn't stripped via the named PIPELINE_PARAMS sets — but a
+    refactor moving the bug to a different mechanism (e.g. an unconditional
+    setdefault, a new strip path, or a model-specific gate inside
+    `_render_model` like ``if model_class.startswith('LightGBM'):
+    params_full.pop('n_jobs', None)``) would still pass those pins while
+    silently overwriting the user's determinism choice in the exported
+    script.
 
     This test catches the runtime-vs-export drift end-to-end by inspecting
     the script content itself, not just the input params or the prediction
     output (the existing parity matrix passes even when n_jobs is dropped
     because tree determinism doesn't always depend on n_jobs at runtime
-    with random_state fixed)."""
+    with random_state fixed).
+
+    Coverage notes (DeepSeek 2026-05-07 review of PR #47):
+
+    - All three parametrized models hit the ``else`` branch of
+      ``_render_model``. Coverage of that branch's model-specific gates is
+      complete for the n_jobs-accepting model set: each row catches gates
+      targeting that specific model name.
+    - **CatBoost is NOT included** because CatBoost uses ``thread_count``
+      rather than ``n_jobs``. A separate behavioural pin would be needed
+      for ``thread_count`` survival (deferred — file as a follow-up if a
+      thread_count strip ever surfaces).
+    - **One-class branch (IsolationForest, LocalOutlierFactor) is NOT
+      covered** because the parity infrastructure (``_run_parity``,
+      ``_build_export_config``) does not currently support
+      ``task_type='one_class'``. Building that out is out-of-scope for
+      this pin; deferred as infrastructure work.
+    - **StandardScaler-pipeline branch (SVR/SVC/MLP/Ridge/Lasso/
+      ElasticNet) is NOT covered** because none of those models accept
+      ``n_jobs`` — the bug class doesn't apply there.
+    - **PLS-DA branch is NOT covered** for the same reason (PLS doesn't
+      accept ``n_jobs``)."""
     n_vars = 20
     params = {
         "n_estimators": 30,
