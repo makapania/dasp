@@ -380,25 +380,38 @@ def test_random_forest_binary_classification_parity_class_weight(tmp_path):
     """T-19 surface: imbalance_method='class_weight' on a class_weight-aware
     sklearn classifier. The exported script must instantiate
     RandomForestClassifier(class_weight='balanced', ...) the same way the
-    runtime did."""
+    runtime did.
+
+    Param-split shape (pr-test-analyzer 2026-05-07 follow-on review): the
+    in-process model gets ``class_weight='balanced'`` added at the
+    constructor call site, BUT the params dict passed to
+    ``_build_export_config`` and ``_build_metadata`` is the BARE base
+    params (without ``class_weight``). This makes the codegen's runtime
+    conditional the ONLY source of ``class_weight`` in the exported
+    script. Same rationale as the auto-with-correction rows: pre-injecting
+    the kwarg in BOTH paths makes the conditional dead code; adversarial
+    deletion of ``code_generator._render_model``'s ``if IMBALANCE_METHOD ==
+    'class_weight': model_params['class_weight'] = 'balanced'`` block would
+    have silently passed under the previous shape."""
     from sklearn.ensemble import RandomForestClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    params = {
+    base_params = {
         "n_estimators": 30,
         "max_depth": 6,
         "random_state": 42,
         "n_jobs": 1,
-        "class_weight": "balanced",
     }
     _run_parity(
-        model=RandomForestClassifier(**params),
+        # In-process model gets class_weight; codegen receives bare base_params
+        # and must emit class_weight via the runtime conditional to match.
+        model=RandomForestClassifier(**base_params, class_weight="balanced"),
         model_name="RandomForest",
         task_type="classification",
         X_train=X_train,
         y_train=y_train,
         X_test=X_test,
-        params=params,
+        params=base_params,
         imbalance_method="class_weight",
         tmp_path=tmp_path,
     )
@@ -669,24 +682,30 @@ def test_lightgbm_binary_classification_parity_no_imbalance(tmp_path):
 
 def test_lightgbm_binary_classification_parity_class_weight(tmp_path):
     """T-19 surface for LightGBM: ``class_weight='balanced'`` is a native
-    sklearn-API kwarg on ``LGBMClassifier``; the codegen emits it as a
-    constructor literal in ``_render_model``. Both paths use the same
-    constructor kwarg — no fit_kwargs threading needed (unlike XGBoost,
-    which has no class_weight kwarg and falls back to sample_weight)."""
+    sklearn-API kwarg on ``LGBMClassifier``. Unlike XGBoost (which has no
+    class_weight kwarg and falls back to sample_weight at fit time),
+    LightGBM's class_weight is a constructor kwarg — the codegen's runtime
+    conditional in ``_render_model`` injects it into ``model_params``
+    when ``IMBALANCE_METHOD == 'class_weight'``.
+
+    Param-split shape (pr-test-analyzer 2026-05-07 follow-on review): see
+    test_random_forest_binary_classification_parity_class_weight for the
+    full rationale. Bare base_params to codegen + class_weight added only
+    to the in-process model makes the runtime conditional the unique
+    source of class_weight in the exported script."""
     pytest.importorskip("lightgbm")
     from lightgbm import LGBMClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    params = dict(_LGBM_BASE_PARAMS)
-    params["class_weight"] = "balanced"
+    base_params = dict(_LGBM_BASE_PARAMS)  # no class_weight — bare for codegen
     _run_parity(
-        model=LGBMClassifier(**params),
+        model=LGBMClassifier(**base_params, class_weight="balanced"),
         model_name="LightGBM",
         task_type="classification",
         X_train=X_train,
         y_train=y_train,
         X_test=X_test,
-        params=params,
+        params=base_params,
         imbalance_method="class_weight",
         tmp_path=tmp_path,
     )
@@ -827,23 +846,27 @@ def test_catboost_binary_classification_parity_no_imbalance(tmp_path):
 def test_catboost_binary_classification_parity_class_weight(tmp_path):
     """T-19 surface for CatBoost: imbalance handled via the native
     ``auto_class_weights='Balanced'`` constructor kwarg (CatBoost-specific;
-    the codegen emits it as a balanced_kwarg in ``_render_model``). The
-    in-process model uses the same constructor kwarg — no fit_kwargs
-    threading needed."""
+    the codegen emits it as a balanced_kwarg in ``_render_model`` when
+    ``IMBALANCE_METHOD == 'class_weight'``).
+
+    Param-split shape (pr-test-analyzer 2026-05-07 follow-on review): see
+    test_random_forest_binary_classification_parity_class_weight for the
+    full rationale. Bare base_params to codegen + auto_class_weights added
+    only to the in-process model makes the runtime conditional the unique
+    source of the balancing kwarg in the exported script."""
     pytest.importorskip("catboost")
     from catboost import CatBoostClassifier
 
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
-    params = dict(_CATBOOST_BASE_PARAMS)
-    params["auto_class_weights"] = "Balanced"
+    base_params = dict(_CATBOOST_BASE_PARAMS)  # no auto_class_weights — bare
     _run_parity(
-        model=CatBoostClassifier(**params),
+        model=CatBoostClassifier(**base_params, auto_class_weights="Balanced"),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
         y_train=y_train,
         X_test=X_test,
-        params=params,
+        params=base_params,
         imbalance_method="class_weight",
         tmp_path=tmp_path,
     )
@@ -1234,6 +1257,16 @@ def test_no_codebase_pipeline_params_set_contains_n_jobs():
     # Match `[_]PIPELINE_PARAMS = {...}` or `PIPELINE_PARAMS = frozenset({...})`
     # spanning multi-line set literals. The {...} group captures contents
     # for membership inspection.
+    #
+    # Known limitations (worth documenting so a future contributor doesn't
+    # silently bypass via a less-common syntax form):
+    # - Does NOT match `frozenset(["n_jobs", ...])` (list-input form).
+    # - Does NOT match `set(["n_jobs", ...])` or `{*, *}` set unions.
+    # - Does NOT match `dict.fromkeys([...])` or `globals()[...] = ...`.
+    # If a sister PIPELINE_PARAMS-equivalent set ever lands in one of those
+    # forms, the regex misses it and the architectural pin silently passes.
+    # The naming-convention assumption (``*PIPELINE_PARAMS*`` literal) is
+    # the load-bearing piece — extend the pattern if conventions diverge.
     pattern = re.compile(
         r"[A-Za-z_]*PIPELINE_PARAMS\b\s*=\s*"
         r"(?:frozenset\s*\(\s*)?"
