@@ -4411,12 +4411,28 @@ def _run_single_config(
             autoscale=preprocess_cfg.get("autoscale", False),
         )
 
-    # Handle class_weight for imbalanced classification
-    # Only apply if user selected 'class_weight' method AND model supports it
-    # Note: MLP doesn't support class_weight OR sample_weight - users should use SMOTE instead
+    # Handle class_weight for imbalanced classification.
+    # Discrimination order matches the GUI dispatcher (c395317), the codegen
+    # (code_generator.py:943-950 / 1704-1721), unified_bayesian.py:1238, and
+    # nsga2_search.py:1400 / 3106 / 3437. The explicit CatBoost branch is
+    # required for consistency: CatBoost.fit DOES expose sample_weight, but the
+    # codebase-wide convention for CatBoost is auto_class_weights='Balanced'
+    # (constructor mechanism). Without the explicit branch, CatBoost would fall
+    # through to the sample_weight fallback — functionally weighted but mechanism-
+    # divergent from the rest of the dispatchers (Codex MEDIUM on PR #38).
     use_sample_weight_for_classification = False
     if imbalance_method == 'class_weight' and task_type == 'classification':
-        if hasattr(model, 'class_weight'):
+        if model_name == 'CatBoost':
+            try:
+                model.set_params(auto_class_weights='Balanced')
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"CatBoost set_params(auto_class_weights='Balanced') failed: {e}. "
+                    f"Model will train UNWEIGHTED. Consider switching to SMOTE/ADASYN.",
+                    UserWarning
+                )
+        elif hasattr(model, 'class_weight'):
             try:
                 model.set_params(class_weight='balanced')
             except Exception as e:

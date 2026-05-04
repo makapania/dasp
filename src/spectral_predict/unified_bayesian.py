@@ -153,8 +153,9 @@ def _needs_resampling_pipeline(imbalance_method: Optional[str], task_type: str) 
     """
     if imbalance_method is None:
         return False
-    # 'auto' resolves to 'class_weight' or None at run-entry; both short-circuit
-    # here as defense-in-depth so a future refactor that delays resolution can't
+    # 'class_weight' / 'auto' are model-parameter sentinels. 'auto' resolves
+    # to 'class_weight' or None at run-entry; both short-circuit here as
+    # defense-in-depth so a future refactor that delays resolution can't
     # accidentally wrap them in ImbPipeline.
     if imbalance_method in ('class_weight', 'auto'):
         return False
@@ -1237,13 +1238,43 @@ def create_unified_objective(
                 )
                 pipe_steps.append(("imbalance", imbalance_transformer))
 
-            # Step 2: Handle class_weight for classification models that support it
+            # Step 2: Handle class_weight for classification models. Different
+            # families use different kwargs / mechanisms — mirrors search.py:
+            # 4411-4448 and the GUI dispatcher fix from c395317.
+            #   PLS-DA tail LR     -> class_weight='balanced' (set later when LR built)
+            #   CatBoost           -> auto_class_weights='Balanced' (no class_weight kwarg)
+            #   has class_weight   -> set_params(class_weight='balanced')   (RF/SVC/LightGBM/RidgeClassifier-like)
+            #   sample_weight only -> use_sample_weight_for_classification flag, threaded
+            #                         per-fold + on calibration refit (XGBoost / MLPClassifier-like;
+            #                         MLPClassifier.fit DOES expose sample_weight in current sklearn,
+            #                         so it routes here rather than to a no-support warning branch)
+            #
+            # Without this discriminator the prior `hasattr(model, 'class_weight')`-only
+            # path silently no-op'd for CatBoost (no class_weight attr) and XGBoost
+            # (no class_weight attr; only sample_weight at fit time), so trial-time
+            # CV scores AND the calibration metrics at line 1470 reflected an
+            # UNWEIGHTED model — every CatBoost/XGBoost classifier Bayesian search
+            # under imbalance_method='class_weight' (or auto resolving to it) was
+            # silently miscomputed.
+            use_sample_weight_for_classification = False
             if imbalance_method == 'class_weight' and task_type == 'classification':
-                if hasattr(model, 'class_weight'):
+                if model_name == 'PLS-DA':
+                    pass  # Handled at the LR-construction site below (line ~1260)
+                elif model_name == 'CatBoost':
+                    try:
+                        model.set_params(auto_class_weights='Balanced')
+                    except Exception:
+                        pass  # CatBoost without auto_class_weights would be unusual; fall through
+                elif hasattr(model, 'class_weight'):
                     try:
                         model.set_params(class_weight='balanced')
                     except Exception:
                         pass
+                else:
+                    import inspect as _inspect
+                    _model_fit_sig = _inspect.signature(model.fit) if hasattr(model, 'fit') else None
+                    if _model_fit_sig and 'sample_weight' in _model_fit_sig.parameters:
+                        use_sample_weight_for_classification = True
 
             # Step 3: Build model pipeline based on model type
             from sklearn.preprocessing import StandardScaler
@@ -1295,6 +1326,17 @@ def create_unified_objective(
             n_jobs_cv = 1 if use_serial else -1
 
             # 7. Compute metrics
+            # Per-fold balanced sample_weight for sample_weight-only classifiers
+            # (XGBoost-style). The CV helpers slice it per train_idx and recompute
+            # post any in-fold resampler step. Mirrors c395317's GUI plumbing.
+            _balanced_sw = None
+            if use_sample_weight_for_classification:
+                from sklearn.utils.class_weight import compute_sample_weight
+                _balanced_sw = compute_sample_weight('balanced', y)
+            _cv_fit_params = (
+                {'model__sample_weight': _balanced_sw} if _balanced_sw is not None else None
+            )
+
             if task_type == 'regression':
                 # Compute pooled CV predictions once and derive both RMSE and R² from them.
                 # Averaging per-fold R² is mathematically incorrect (different SS_tot per fold),
@@ -1304,10 +1346,14 @@ def create_unified_objective(
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
-                        early_stopping_rounds=early_stopping_rounds
+                        early_stopping_rounds=early_stopping_rounds,
+                        sample_weight=_balanced_sw,
                     )
                 else:
-                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(
+                        model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
+                        fit_params=_cv_fit_params,
+                    )
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
@@ -1352,10 +1398,14 @@ def create_unified_objective(
                 if use_early_stopping:
                     y_pred_cv = cross_val_predict_with_early_stopping(
                         model, X_final, y, cv=cv,
-                        early_stopping_rounds=early_stopping_rounds
+                        early_stopping_rounds=early_stopping_rounds,
+                        sample_weight=_balanced_sw,
                     )
                 else:
-                    y_pred_cv = cross_val_predict_pooled(model, X_final, y, cv=cv, n_jobs=n_jobs_cv)
+                    y_pred_cv = cross_val_predict_pooled(
+                        model, X_final, y, cv=cv, n_jobs=n_jobs_cv,
+                        fit_params=_cv_fit_params,
+                    )
                 accuracy = float(accuracy_score(y, y_pred_cv))
 
                 # Compute ROC_AUC using cross_val_predict for probability estimates
@@ -1364,11 +1414,13 @@ def create_unified_objective(
                         y_proba = cross_val_predict_with_early_stopping(
                             model, X_final, y, cv=cv,
                             early_stopping_rounds=early_stopping_rounds,
-                            method='predict_proba'
+                            method='predict_proba',
+                            sample_weight=_balanced_sw,
                         )
                     else:
                         y_proba = cross_val_predict_pooled(
-                            model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv
+                            model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv,
+                            fit_params=_cv_fit_params,
                         )
                     n_classes = len(np.unique(y))
                     if n_classes == 2:
@@ -1469,8 +1521,17 @@ def create_unified_objective(
             # create_study time so the per-trial finalize doesn't re-emit
             # them on every write.
 
-            # Fit on full training data for calibration metrics
-            model.fit(X_final, y)
+            # Fit on full training data for calibration metrics. For sample_weight-
+            # only classifiers (XGBoost) under class_weight, mirror the per-fold
+            # weighting on the full-data refit so trial.user_attrs['Accuracy'] /
+            # 'F1' / 'AUC' etc. reflect the WEIGHTED model the user requested.
+            # Without this, the calibration metrics displayed in the Bayesian
+            # Results panel describe an unweighted model — silent contract
+            # violation, no crash.
+            _final_fit_kwargs: Dict[str, Any] = {}
+            if _balanced_sw is not None:
+                _final_fit_kwargs['model__sample_weight'] = _balanced_sw
+            model.fit(X_final, y, **_final_fit_kwargs)
             captured_params = _capture_serializable_params(model)
             if captured_params:
                 trial.set_user_attr('model_params', str(captured_params))

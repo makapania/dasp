@@ -35,6 +35,14 @@ artifacts/
 !docs/plans/artifacts/
 data/
 
+# Review-helper scratch — patches, diffs, agent transcripts that
+# accumulate during cross-family review dispatch. Never commit.
+.review-tmp/
+
+# Stray Windows-encoded tempfile names (legacy artifact, see e.g.
+# CUsersmsponAppDataLocalTempopencodesearch_t30.py from earlier sessions).
+C\357\200\272Users*
+
 # IDE
 .vscode/
 .idea/
