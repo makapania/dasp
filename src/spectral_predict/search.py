@@ -4,6 +4,7 @@ import os
 import sys
 import inspect
 import logging
+from typing import Optional
 
 
 def _frozen_needs_threading_fallback() -> bool:
@@ -405,6 +406,114 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     return model
 
 
+def _apply_class_weight_discriminator_for_rebuilt_model(
+    model,
+    model_name: str,
+    task_type: str,
+    y_train: np.ndarray,
+    imbalance_method: Optional[str] = None,
+) -> dict:
+    """Apply the class_weight discriminator to a model rebuilt from a result row.
+
+    Mirrors the canonical pattern at search.py:4423-4467 (sister sites in
+    unified_bayesian.py:1238-1241, nsga2_search.py:1401-1405). Used by rebuild
+    paths that reconstruct a model from the result-row Params dict — XGBoost's
+    fit-time sample_weight and PLS-DA's LR sub-step class_weight are not in
+    Params and would be silently lost (training UNWEIGHTED) without
+    re-application here.
+
+    Returns fit_kwargs ready to splat into ``model.fit(X, y, **fit_kwargs)``.
+    For models whose class_weight is a constructor kwarg, ``set_params`` is
+    applied in place and ``{}`` is returned. For models that need fit-time
+    sample_weight (XGBoost; sklearn estimators without a class_weight kwarg
+    that accept sample_weight in fit), the computed sample_weight is returned
+    keyed appropriately for either bare estimators (``sample_weight``) or
+    Pipeline-wrapped estimators (``model__sample_weight``).
+
+    Normalizes ``'auto'`` → ``'class_weight'`` internally so direct GUI callers
+    that pass the raw user selection don't bypass the discriminator.
+    """
+    if task_type != 'classification' or not imbalance_method:
+        return {}
+    method = imbalance_method.lower() if isinstance(imbalance_method, str) else None
+    if method == 'auto':
+        method = 'class_weight'
+    if method != 'class_weight':
+        return {}
+
+    # 1. class_weight via constructor kwarg — probe deep params in priority
+    #    order. PLS-DA Pipeline exposes `lr__class_weight`; scale-sensitive
+    #    Pipeline (`('scaler', ...), ('model', est)`) exposes
+    #    `model__class_weight`; bare estimators expose `class_weight`.
+    deep_params = model.get_params(deep=True) if hasattr(model, 'get_params') else {}
+    for key in ('lr__class_weight', 'model__class_weight', 'class_weight'):
+        if key in deep_params:
+            try:
+                model.set_params(**{key: 'balanced'})
+                return {}
+            except Exception as e:
+                import warnings
+                warnings.warn(
+                    f"set_params({key}='balanced') failed during rebuild: {e}. "
+                    f"Validation model will train UNWEIGHTED.",
+                    UserWarning,
+                )
+                break
+
+    # 2. CatBoost: class_weight is exposed as `class_weights` (plural) /
+    #    `auto_class_weights`, which the loop above won't catch. Match the
+    #    canonical pattern's CatBoost branch.
+    if model_name == 'CatBoost':
+        try:
+            model.set_params(auto_class_weights='Balanced')
+            return {}
+        except Exception as e:
+            import warnings
+            warnings.warn(
+                f"CatBoost set_params(auto_class_weights='Balanced') failed during "
+                f"rebuild: {e}. Validation model will train UNWEIGHTED.",
+                UserWarning,
+            )
+
+    # 3. sample_weight fallback for estimators whose fit() accepts it (XGBoost,
+    #    RidgeClassifier, etc.). Route via Pipeline kwarg if wrapped.
+    import inspect
+    final_estimator = model
+    sample_weight_kwarg = 'sample_weight'
+    if hasattr(model, 'named_steps'):
+        if 'model' in model.named_steps:
+            final_estimator = model.named_steps['model']
+            sample_weight_kwarg = 'model__sample_weight'
+        else:
+            # Pipeline whose final step isn't named 'model' (e.g., PLS-DA's
+            # 'lr' was already addressed in step 1; if we got here, set_params
+            # failed and there is no clean fallback).
+            return {}
+
+    fit_sig = inspect.signature(final_estimator.fit) if hasattr(final_estimator, 'fit') else None
+    if fit_sig and 'sample_weight' in fit_sig.parameters:
+        from sklearn.utils.class_weight import compute_sample_weight
+        sw = compute_sample_weight('balanced', y_train)
+        return {sample_weight_kwarg: sw}
+
+    # 4. No mechanism available — warn (mirrors canonical pattern at search.py:4455-4466).
+    import warnings
+    if model_name in ('MLP', 'MLPClassifier'):
+        warnings.warn(
+            f"{model_name} does not support class_weight or sample_weight. "
+            f"Validation model trains UNWEIGHTED. For imbalanced classification "
+            f"with MLP, use SMOTE or other resampling methods.",
+            UserWarning,
+        )
+    else:
+        warnings.warn(
+            f"{model_name} does not support class_weight in any supported form. "
+            f"Validation model trains UNWEIGHTED. Consider SMOTE.",
+            UserWarning,
+        )
+    return {}
+
+
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -414,7 +523,8 @@ def compute_validation_metrics_for_top_models(
     task_type: str,
     wavelengths: np.ndarray,
     top_n: int = 100,
-    progress_callback=None
+    progress_callback=None,
+    imbalance_method: Optional[str] = None,
 ) -> pd.DataFrame:
     """Compute validation metrics for top N models.
 
@@ -444,6 +554,13 @@ def compute_validation_metrics_for_top_models(
         Number of top models to compute validation for
     progress_callback : callable, optional
         Progress callback function
+    imbalance_method : str, optional
+        The imbalance method that was active during search. Threaded through
+        so the rebuilt model receives the same class_weight / sample_weight
+        treatment as the search-time model — without it, XGBoost retrains
+        UNWEIGHTED (its class_weight lives only in fit-time sample_weight)
+        and PLS-DA retrains UNWEIGHTED (its LR sub-step's class_weight is
+        not serialized into the result-row Params dict).
 
     Returns
     -------
@@ -743,8 +860,17 @@ def compute_validation_metrics_for_top_models(
                 print(f"  [Warning] Skipping model {i+1}: n_components ({model.n_components}) > n_features ({X_train_final.shape[1]})")
                 continue
 
+            # Apply class_weight discriminator before fit. Without this, XGBoost
+            # rebuilt for validation trains UNWEIGHTED (sample_weight is fit-time,
+            # not in Params) and PLS-DA trains UNWEIGHTED (LR sub-step's
+            # class_weight is not in Params). See helper docstring.
+            model_name = row.get('Model', 'PLS')
+            fit_kwargs = _apply_class_weight_discriminator_for_rebuilt_model(
+                model, model_name, task_type, y_train, imbalance_method=imbalance_method,
+            )
+
             # Fit on training data
-            model.fit(X_train_final, y_train)
+            model.fit(X_train_final, y_train, **fit_kwargs)
 
             # Predict on validation data
             y_pred = model.predict(X_val_final)
@@ -3342,7 +3468,8 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             task_type,
             wavelengths_for_validation,
             top_n=validation_top_n,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            imbalance_method=imbalance_method,
         )
 
     # Return results along with label_encoder (for classification with text labels)
@@ -3983,7 +4110,8 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
             task_type,
             wavelengths_for_validation,
             top_n=validation_top_n,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            imbalance_method=imbalance_method,
         )
 
     return df_ranked, label_encoder

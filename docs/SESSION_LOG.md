@@ -4,6 +4,34 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-05 late evening — validation-rebuild MEDIUM closed; ensemble-rebuild LOW dropped as moot
+
+PR-NEW (`fix/Tclass-weight-validation-rebuild`) closes the validation-rebuild MEDIUM filed in `docs/CONTINUATION_PROMPT_2026-05-06_validation_rebuild.md`. New helper `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+` mirrors the canonical discriminator pattern from PR #38, applied at the rebuild fit site (`compute_validation_metrics_for_top_models:747+`). The helper uses Codex's `get_params(deep=True)` priority-order probe (`lr__class_weight`, `model__class_weight`, `class_weight`) — cleaner than dispatching on `model_name` because it picks up Pipeline step names (PLS-DA's `lr` step, scale-sensitive's `model` step) without hardcoding.
+
+Caller threading: `imbalance_method` parameter added to `compute_validation_metrics_for_top_models`; threaded through 4 call sites:
+- `search.py:3346` (run_search / Grid)
+- `search.py:3987` (run_bayesian_search / Bayesian)
+- `gui:27914` (GUI Bayesian validation panel)
+- `gui:28069` (GUI NSGA-II validation panel)
+
+Codex's design pass (GPT-5.5, full repo access) caught two of the four call sites that the continuation prompt missed — the GUI direct callers at `gui:27904+` and `gui:28058+`. The continuation prompt only flagged the 2 backend callers in `search.py`. **Lesson: when the continuation prompt says "update all callers in run_search and run_bayesian_search," that statement is itself unverified — independent grep is required.**
+
+### Ensemble-rebuild LOW dropped as moot
+
+The continuation prompt's LOW (`_reconstruct_models_from_results` at `gui:23642+` fits unweighted at 4 sites) is **not actually reachable for classification**. Ensemble methods are regression-only:
+- `_update_ensemble_controls_state` at `gui:16651+` greys out the ensemble UI controls when `task_type == 'classification'` (gui:16669-16670). Sets the disabled state on the manual-retrain button.
+- The auto-flow at `gui:28323+` explicitly skips with a "skipped: only supported for regression" log line.
+
+So `_reconstruct_models_from_results` is never reached with `task_type='classification'` in any production flow, which means the class_weight discriminator (a classification-only mechanism) is irrelevant to this path. The continuation prompt's LOW was the exact same **transferred-justification fallacy** documented in the prior session log entry — shape-matched the rebuild bug pattern without checking whether the *failure mode* applies. Per the user's "double-check fixes are really needed" rule, the LOW was dropped, not patched.
+
+### Generalisable lessons
+
+1. **Continuation prompts are themselves subject to the transferred-justification fallacy.** They're written by the agent that just finished a related ticket, often using the same shape-pattern-matching that produced the original bug. Read them critically — specifically, verify (a) reachability and (b) whether the failure mode applies, before implementing.
+2. **Codex's `get_params(deep=True)` priority-order probe is a much cleaner Pipeline-discriminator pattern** than model_name dispatch. The probe finds the right step name (`lr__`, `model__`, bare) automatically without needing the discriminator to know about SCALE_SENSITIVE_MODELS or PLS-DA's structure. Worth adopting in the next PR that adds a discriminator.
+3. **Continuation prompts under-specify caller surface.** The MEDIUM said "update all callers in `run_search` and `run_bayesian_search`," missing the 2 GUI direct callers. Independent grep at design time saved a sister-site bug from being introduced.
+
+---
+
 ## 2026-05-05 evening — transferred-justification fallacy in `class_weight` defense-in-depth (factory + RegressionResampler)
 
 A prior agent attempted a "trivial defense-in-depth fix" for `RegressionResampler.fit_resample` mirroring the `ClassificationResampler.fit:244` no-op for `'class_weight'`/`'auto'` sentinels. That patch (`f6ccfd1`) was committed locally then reset before push. A four-way investigation (silent-failure-hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) unanimously confirmed the no-op is **wrong** — the mirror form was correct but the *safety justification* did not transfer across the classification/regression boundary. Two of three external reviewers voted to fail loud over warn-and-no-op; the dissenting vote (DeepSeek) was on project-coherence grounds, not correctness grounds.

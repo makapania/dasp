@@ -1,6 +1,29 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 evening — PR #39 expanded from pure docs to docs + 3-file correctness fix after a 4-way cross-family investigation (silent-failure-hunter, Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max) identified a transferred-justification fallacy in the `class_weight`/`auto` factory routing. Plus PR #38 still 4-way convergent READY_TO_MERGE and the 6 morning PRs (#32–#37). **8 PRs ready for user merge** (PR #39 needs title update from `docs(session-end)` to reflect the code fix on push).
+> **Last updated:** 2026-05-05 late evening — Validation-rebuild MEDIUM closed (`fix/Tclass-weight-validation-rebuild`); ensemble-rebuild LOW dropped as moot (ensemble methods are regression-only — class_weight discriminator can't reach that path). All other 6 morning/afternoon PRs (#32, #33, #35, #36, #38, #39, #40) merged earlier in this session. PR #34 closed (Codex caught false-premise). PR #37 closed (redundant docs). Queue empty pre-validation-rebuild PR.
+>
+> ## Session 2026-05-05 late evening — validation-rebuild MEDIUM (fix/Tclass-weight-validation-rebuild)
+>
+> ### What shipped
+>
+> | File | Change |
+> |---|---|
+> | `src/spectral_predict/search.py` | New helper `_apply_class_weight_discriminator_for_rebuilt_model` mirrors the canonical PR #38 pattern but uses Codex's `get_params(deep=True)` priority-order probe (`lr__class_weight`, `model__class_weight`, `class_weight`) to handle Pipeline step naming without dispatching on `model_name`. Plus `imbalance_method` parameter added to `compute_validation_metrics_for_top_models`; helper applied at the rebuild fit site. |
+> | `src/spectral_predict/search.py` (callers) | `run_search` line 3346 + `run_bayesian_search` line 3987 — pass `imbalance_method` through. |
+> | `spectral_predict_gui_optimized.py` (callers) | gui:27914 + gui:28069 — pass `imbalance_method` through. The two GUI direct callers were caught by Codex's design pass; the continuation prompt only flagged the 2 backend callers. |
+> | `tests/test_class_weight_validation_rebuild.py` (new) | 12 tests: short-circuit invariants, per-model class_weight application (PLS-DA Pipeline, scale-sensitive Pipeline, sklearn bare), XGBoost sample_weight fallback (the headline behavioral test), CatBoost auto_class_weights branch, caller-threading structural pins. |
+>
+> ### Ensemble-rebuild LOW dropped
+>
+> Continuation prompt's LOW (`_reconstruct_models_from_results` at gui:23642+) is **not reachable for classification** — ensemble methods are regression-only via two gates: `_update_ensemble_controls_state` greys out UI controls (gui:16669-16670) AND auto-flow at gui:28323+ explicitly skips. class_weight discriminator is classification-only → cannot apply to this path → no fix needed. Same transferred-justification fallacy as the previous-session entry. Per "double-check fixes are really needed" rule, dropped not patched.
+>
+> ### Test coverage
+>
+> 190 passed + 1 skipped across `test_class_weight_validation_rebuild` (12 new) + `test_class_weight_sister_sites` + `test_imbalance` + `test_t19_class_weight_per_library` + `test_t32_sample_weight_resampling` + `test_unified_bayesian_baseline` + `test_cv_strategy`. No regressions.
+>
+> ### Lessons
+>
+> Detailed writeup in SESSION_LOG.md — three lessons: continuation prompts are subject to the transferred-justification fallacy; Codex's `get_params(deep=True)` priority-order probe is a cleaner Pipeline-discriminator pattern; continuation prompts under-specify caller surface (the GUI sister sites were missing).
 >
 > ## Session 2026-05-05 evening — factory + needs_resampling_pipeline asymmetry fix (PR #39)
 >
