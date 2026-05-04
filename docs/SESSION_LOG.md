@@ -4,6 +4,33 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-05 wrap-up — PR #41 merged (validation-rebuild MEDIUM); PR #42 framing correction; T-resume-y-variable-persist fully spec'd
+
+PR #41 (`fix/Tclass-weight-validation-rebuild`) merged at commit `44ffefb`. Closes the validation-rebuild MEDIUM. Five reviewer types ran across 7 dispatches: Codex GPT-5.5 (design pass + post-implementation review), GLM 5.1 (z.ai), DeepSeek V4 Pro Max (max-thinking via DeepSeek API), pr-review-toolkit code-reviewer + silent-failure-hunter + comment-analyzer + pr-test-analyzer. **Three saves from the audit pyramid:**
+
+1. Codex's design pass caught 2 GUI direct callers (`gui:27914`, `gui:28069`) the continuation prompt had missed — the prompt only flagged the 2 backend callers in `search.py`. Lesson: continuation prompts under-specify caller surface; independent grep at design time is mandatory.
+2. Codex's post-implementation review caught the per-caller pin gap — original tests verified the function signature accepts `imbalance_method` and the helper is referenced from the body, but did NOT pin that the 4 actual callers actually pass `imbalance_method=imbalance_method`. A refactor that drops the kwarg from one caller would silently regress validation rebuild for that path. **Generalisable lesson: structural pins should be one-per-consumer, not one-per-producer.**
+3. pr-test-analyzer caught the missing fit-site splat pin — same silent-failure shape as the original bug. The headline behavioral test verified the helper RETURNS `sample_weight`, but nothing pinned that the production fit site actually splatted `**fit_kwargs` into `model.fit(...)`. A refactor dropping the splat would regress XGBoost back to UNWEIGHTED training with all tests still passing.
+
+PR #42 (`docs/T-resume-y-variable-correct-framing`) merged at `2db6311`. The T-resume-y-variable ticket originally filed as a "UX bug" was reframed by the user as a state-restoration feature gap: defaulting to first-column-on-load is correct behavior; the actual issue is that Y variable selection is never written to the sidecar, so resume can't recall it. **Generalisable lesson: when a user reports something that "doesn't work right," the surface symptom is often correct behavior interacting with a missing feature, not a bug per se. First instinct is to file as bug; better instinct is to ask "what's the actual contract, and what part isn't being honored?"**
+
+GLM 5.1 review of PR #42 (z.ai subscription, ~2 min wall-clock) confirmed the framing accuracy AND surfaced two valuable additions:
+
+- **Edge case the framing should mention**: if the restored column name doesn't exist in the newly-loaded dataset (renamed column, different file), the Combobox will display a stale string that isn't in its option list. The existing readback check at `run_gui_settings.py:299-309` only verifies `.set()`/`.get()` round-trip — does NOT validate against the current data's columns. Implementation must validate against `_get_available_target_columns()` (`gui:16849`) and fall back to default on mismatch.
+- **Related-state observation**: `dataset_fingerprint` (`run_state.py:138`) already detects dataset swaps on resume. The stale-column scenario would likely co-occur with the existing fingerprint-mismatch warning. The validation-against-current-columns is still required for cases where fingerprint matches but column ordering/naming changed (user added/deleted a column).
+
+Both folded into the deferred-ticket entry in PROJECT_STATUS.md and into the new continuation prompt at `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md`.
+
+### Generalisable lessons (carried forward)
+
+1. **Continuation prompts are themselves subject to the transferred-justification fallacy.** They under-specify caller surface; verify (a) reachability and (b) failure-mode applicability before implementing. (Repeated lesson — second time this session.)
+2. **Codex's `get_params(deep=True)` priority-order probe** is a cleaner Pipeline-discriminator pattern than `model_name` dispatch. Worth adopting in future PRs.
+3. **Multi-reviewer audits are complementary, not redundant.** Cross-family panels catch reachability and design issues; pr-review-toolkit catches comment rot, test gaps, and silent-failure shapes. Each layer caught something the others missed across PR #34 → #41 → #42.
+4. **Line-number references in code comments are write-only documentation.** They decay monotonically as the file evolves. Use stable function-name identifiers — they're refactor-stable and queryable by grep.
+5. **Bug-vs-feature-gap framing matters at ticket-filing time.** "Two correct behaviors composing into a confusing experience" is feature-gap shape (additive fix), not bug shape (corrective fix). Reframing avoids the implementing agent chasing the wrong root cause.
+
+---
+
 ## 2026-05-05 late evening — validation-rebuild MEDIUM closed; ensemble-rebuild LOW dropped as moot
 
 PR-NEW (`fix/Tclass-weight-validation-rebuild`) closes the validation-rebuild MEDIUM filed in `docs/CONTINUATION_PROMPT_2026-05-06_validation_rebuild.md`. New helper `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+` mirrors the canonical discriminator pattern from PR #38, applied at the rebuild fit site (`compute_validation_metrics_for_top_models:747+`). The helper uses Codex's `get_params(deep=True)` priority-order probe (`lr__class_weight`, `model__class_weight`, `class_weight`) — cleaner than dispatching on `model_name` because it picks up Pipeline step names (PLS-DA's `lr` step, scale-sensitive's `model` step) without hardcoding.

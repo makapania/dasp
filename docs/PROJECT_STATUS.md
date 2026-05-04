@@ -62,7 +62,18 @@
 >
 > ### Deferred follow-ups added this session
 >
-> - **T-resume-y-variable-persist (state-restoration gap, user-clarified 2026-05-05 evening)** — Y variable selection is not persisted/restored as part of the run-state sidecar. On data load the first column is always defaulted as Y, so when a user resumes a disrupted run, whatever-was-first-in-the-file shows up as Y rather than the variable the run was actually using. If the run was a classification analysis but the file's first column is a regression variable, resume effectively can't restart against the original target. **Not a bug** — defaulting to first-column on load is correct behavior. Just a missing piece of state that needs to round-trip alongside the other run-state already persisted (preprocessing config, model selection, validation set, etc.). Implementation: persist the active y-variable column name into the `run_state.py` sidecar at run start; have `restore_gui_settings` read it back and programmatically set the y-variable dropdown during the resume dialog flow.
+> - **T-resume-y-variable-persist (state-restoration gap, user-clarified 2026-05-05 evening; GLM 5.1 review 2026-05-05 late evening)** — Y variable selection is not persisted/restored as part of the run-state sidecar. On data load the first column is always defaulted as Y, so when a user resumes a disrupted run, whatever-was-first-in-the-file shows up as Y rather than the variable the run was actually using. If the run was a classification analysis but the file's first column is a regression variable, resume effectively can't restart against the original target. **Not a bug** — defaulting to first-column on load is correct behavior. Just a missing piece of state that needs to round-trip alongside the other run-state already persisted (preprocessing config, model selection, validation set, etc.).
+>
+>   **Implementation specifics (verified by GLM 5.1 against current code):**
+>
+>   - Add `"target_column"` to `CAPTURABLE_SETTINGS` in `src/spectral_predict/run_gui_settings.py` (the whitelist at lines 45-211). The Tk variable to capture is `self.target_column` (a `StringVar` at `spectral_predict_gui_optimized.py:2837`).
+>   - **No change to `run_state.py` needed** — it already stores `gui_settings: dict[str, Any] | None` generically (line 148), populated by `capture_gui_settings`.
+>   - **`restore_gui_settings` works generically** — calls `gui_obj.<key>.set(value)` (line 259), which works for `StringVar`.
+>   - **Edge case (don't skip)**: if the restored column name doesn't exist in the newly-loaded dataset (renamed column, different file), the Combobox will display a stale string that isn't in its option list. The existing readback check at `run_gui_settings.py:299-309` only verifies `.set()`/`.get()` round-trip — it does NOT validate against the current data's columns. Implementation must validate the restored value against `_get_available_target_columns()` (defined at `spectral_predict_gui_optimized.py:16849`) and fall back to default if it doesn't match. Without this, the user sees a "stuck" combobox they can't interact with cleanly.
+>   - **Related-state observation**: `dataset_fingerprint` (`run_state.py:138`) already detects when the user loaded different data on resume. A stale-column-name scenario would likely co-occur with the existing fingerprint-mismatch warning the GUI already shows. The validation-against-current-columns is still required for cases where the fingerprint matches but the column ordering/naming changed (e.g., user added a column, deleted a column, etc.).
+>   - **No schema migration concern**: `gui_settings` is a flat dict and `from_dict` already ignores unknown keys (line 183). Adding `target_column` is forward-compatible.
+>
+>   Detailed continuation prompt at `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md`.
 >
 > ## Session 2026-05-05 afternoon — class_weight sister-site bug class fully closed (PR #38)
 >
