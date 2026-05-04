@@ -1,6 +1,35 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 late evening — Validation-rebuild MEDIUM closed (`fix/Tclass-weight-validation-rebuild`); ensemble-rebuild LOW dropped as moot (ensemble methods are regression-only — class_weight discriminator can't reach that path). All other 6 morning/afternoon PRs (#32, #33, #35, #36, #38, #39, #40) merged earlier in this session. PR #34 closed (Codex caught false-premise). PR #37 closed (redundant docs). Queue empty pre-validation-rebuild PR.
+> **Last updated:** 2026-05-07 — T-resume-y-variable-persist shipped to PR #44 (`fix/Tresume-y-variable-persist`). Awaiting cross-family review (DeepSeek + GLM + Codex per the continuation prompt's recommended panel).
+>
+> ## Session 2026-05-07 — T-resume-y-variable-persist (PR #44)
+>
+> ### What shipped
+>
+> | File | Change |
+> |---|---|
+> | `src/spectral_predict/run_gui_settings.py` | Added `target_column` to `CAPTURABLE_SETTINGS` whitelist (under a new "target column / y variable" section). Added per-key validation hook in `restore_gui_settings`: when restoring `target_column`, look up `_get_available_target_columns()` on `gui_obj` and route a missing-column scenario through `RestoreReport.errors` so the existing GUI banner surfaces "first failure: target_column: captured column 'X' is not in the currently-loaded data; pick a target manually" instead of leaving a stuck Combobox displaying a stale value. Validation is duck-typed on `hasattr` so headless callers / partial-init GUIs without the helper fall through to the standard set/readback path. |
+> | `tests/test_t43_resume_auto_restore.py` | 5 new tests: whitelist pin, round-trip when present, stale-column fallback (the meaningful new behavior — Tk var left untouched, error surfaced), absent-helper duck typing, helper-raises defense in depth. |
+>
+> ### Why a new validation hook
+>
+> `dataset_fingerprint` (`run_state.py:138`) is a coarse data-identity check — it doesn't catch column-level reordering or single-column rename inside the same file. Per-column schema validation closes that residual gap. Routing failures through `errors` (not `skipped_no_var`) is the right semantic bucket: the Tk var DOES exist; what fails is the value's validity in the currently-loaded data. The user needs to know to manually re-pick. The existing banner already inlines `errors[0]`.
+>
+> ### Test coverage
+>
+> 39 passed in `test_t43_resume_auto_restore.py` (up from 34). 111 passed across the consolidated sidecar/resume regression battery: `test_run_state` + `test_t41_bayesian_sqlite_auto_calculator` + `test_t42_write_path_plumbing` + `test_t43_resume_auto_restore`. No regressions.
+>
+> ### Pre-merge cross-family review
+>
+> Not yet dispatched. Continuation prompt recommends a single round (small change, well-spec'd implementation surface). Suggested panel: DeepSeek V4 Pro Max + GLM 5.1 + Codex GPT-5.5.
+>
+> ### Deferred follow-ups still in the queue
+>
+> Carried forward from 2026-05-05; not addressed in this PR per "don't add features beyond what the ticket requires":
+>
+> - **PR #33 deferred HIGHs (~30 LOC)**: behavioral test for `n_jobs` survival through codegen (substring check on generated script content for XGBoost + RandomForest); architectural module-walk test that no module-level `*PIPELINE_PARAMS*` set in the codebase contains `n_jobs`.
+> - **PR #32 deferred MEDIUM (~80 LOC)**: LightGBM and CatBoost imbalanced-auto parity rows mirroring the existing XGBoost row pattern in `test_imbalance.py`.
+> - **Polish (low priority — surface only if relevant)**: `inspect.signature(model.fit)` not wrapped in try/except inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`. Theoretical risk on C-extension fits without proper introspection support; all current sklearn estimators have inspectable signatures, so deferred.
 >
 > ## Session 2026-05-05 late evening — validation-rebuild MEDIUM (fix/Tclass-weight-validation-rebuild)
 >
