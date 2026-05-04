@@ -1,6 +1,50 @@
 # Project Status
 
-> **Last updated:** 2026-05-07 — T-resume-y-variable persistence ticket closed via banner-only PR #45 (`fix/resume-banner-y-variable-instructions`). PR #44's persist-then-restore approach was closed without merge after Codex's cross-family review caught a HIGH-severity timing bug; banner-only chosen as the right cost-benefit per user directive.
+> **Last updated:** 2026-05-07 wrap-up — Five PRs merged this session (PR #45 banner-only, PR #46 supersede stale prompt, PR #47 PR #33 deferred HIGHs, PR #48 PR #32 deferred MEDIUM, PR #49 fix-forward on PR #47/#48). main now at `4c05e9f`. Queue: one deferred follow-up (`verbose` sister-site) + one polish item.
+>
+> ## Session 2026-05-07 wrap-up — five merged PRs + cross-family review batch
+>
+> ### What shipped
+>
+> | PR | Tip | Change |
+> |---|---|---|
+> | **#45** | `82d9363` | Resume banner explicitly tells the user to set the Y variable manually (resume does not restore the Y selection). Replaces the closed-without-merge PR #44, which had attempted persist-then-restore but was demonstrated wrong by Codex's review. |
+> | **#46** | `c88f042` | Replaced the now-stale `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md` with a SUPERSEDED redirect stub. |
+> | **#47** | `4c45c86` | Closed PR #33's deferred HIGHs. Behavioral pin (`test_user_set_n_jobs_survives_codegen`, parametrized) + architectural module-walk pin. |
+> | **#48** | `0f76b4a` | Closed PR #32's deferred MEDIUM. LightGBM + CatBoost auto-with-correction parity rows. |
+> | **#49** | `4c05e9f` | Fix-forward on the cross-family post-merge review of PRs #46–#48. DeepSeek caught two MEDIUM findings (parametrize blind spot in #47, redundant-conditional in #48); both closed. Kimi's `verbose` sister-site finding deferred (methodology change, needs user confirmation). |
+>
+> ### Cross-family post-merge review (PRs #46–#48)
+>
+> Four-reviewer panel: Codex GPT-5.5 + DeepSeek V4 Pro Max max-thinking + GLM 5.1 + Kimi K2.6.
+>
+> | PR | Codex | DeepSeek | GLM | Kimi |
+> |---|---|---|---|---|
+> | #46 | OK | OK | OK (LOW: line numbers) | OK |
+> | #47 | OK | **FIX_FORWARD** (parametrize blind spot) | OK (LOW: pre-existing line refs) | **FIX_FORWARD** (`verbose` sister site) |
+> | #48 | OK | **FIX_FORWARD** (redundant conditional) | OK | OK |
+>
+> **Calibration evidence (memory `feedback_review_method_signal.md` updated):**
+>
+> - **DeepSeek max-thinking** — adversarial-coverage angle was the highest-yield single reviewer this batch. Both findings closed via PR #49.
+> - **Kimi K2.6** — sister-site sweep canonically demonstrated. `verbose` finding is real but a methodology change; deferred.
+> - **GLM 5.1** — twice-validated as in-isolation-only (PR #44 + this batch). Don't put on the panel as load-bearing for non-trivial work; reliable for style/CommonMark/docstring quality.
+> - **Codex** — tightest call-site grounding; verifies "does this catch the named bug?" excellently. Doesn't extend coverage on its own; pair with DeepSeek for the adversarial angle.
+>
+> ### Lessons (full writeup in SESSION_LOG.md 2026-05-07 entry)
+>
+> - **Cross-family panels reveal disagreement single-family panels can't.** Two reviewers approved PR #44, only Codex caught the timing bug. Two reviewers approved PR #47, only DeepSeek + Kimi caught fix-forward issues.
+> - **Continuation prompts inherit single-reviewer blind spots.** PR #44's continuation prompt was pre-verified by GLM 5.1 alone; that reviewer's blind spot (function-in-isolation evaluation) propagated into the broken implementation strategy.
+> - **Tests need three pin shapes for full coverage**: structural (the producer's contract), behavioral (the consumer's content), architectural (the codebase-wide name pattern).
+> - **Parametrize coverage matters even when "all hit the same branch"** — model-specific gates inside a shared render branch are a real adversarial path; the parametrize must include each model name that could be targeted.
+> - **Test-passes-without-verifying** is a real failure mode. Pre-injecting a kwarg into BOTH the in-process model AND the codegen export config makes the codegen's runtime conditional dead code; adversarial deletion silently passes the parity check. Split params so each load-bearing emit point has only one source.
+>
+> ### Deferred items still in the queue
+>
+> - **`verbose` in `code_generator._PIPELINE_PARAMS`** (Kimi MEDIUM, 2026-05-07): same architectural smell as `n_jobs` (model-constructor kwarg silently stripped). Inline comment at `code_generator.py:1031-1039` already acknowledges it. Cleanest fix is methodology change (remove `verbose` from the strip set, handle it contextually like `n_jobs`) — requires user confirmation. Extending the architectural pin to ban `verbose` requires the same removal first.
+> - **Polish (low priority)**: `inspect.signature(model.fit)` not wrapped in try/except inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`. Theoretical risk on C-extension fits; deferred per project polish-defer rule.
+>
+> Otherwise queue is empty.
 >
 > ## Session 2026-05-07 — PR #44 closed, PR #45 opened (banner-only)
 >
