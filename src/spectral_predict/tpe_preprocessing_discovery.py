@@ -1,5 +1,5 @@
 """
-TPE Preprocessing Discovery — Optuna-based quick preprocessing search.
+TPE Preprocessing Discovery — Optuna-based preprocessing search.
 
 Replaces the exhaustive basic-preprocessing-discovery and GA paths with a
 single TPE (Tree-structured Parzen Estimator) search over a richer 5-D
@@ -486,5 +486,26 @@ def run_tpe_preprocessing_discovery(
         else:
             score_str = f"Acc={cfg['score']:.4f}"
         print(f"  {i+1}. {full_name}: {score_str}")
+
+    if progress_callback:
+        progress_callback(n_trials, n_trials, "=== TPE Top Preprocessing Ranking ===")
+        for i, cfg in enumerate(top_configs[:10]):
+            window_str = f"w={cfg['window']}" if cfg['window'] else ""
+            extras = []
+            if cfg['_tpe_baseline_method']:
+                extras.append(cfg['_tpe_baseline_method'])
+            if cfg['_tpe_smoothing']:
+                extras.append('sg0')
+            if cfg['_tpe_autoscale']:
+                extras.append('autoscale')
+            extras_str = '+'.join(extras)
+            full_name = f"{cfg['preprocessing']} {window_str}"
+            if extras_str:
+                full_name += f" [{extras_str}]"
+            if task_type == 'regression':
+                score_str = f"RMSE={cfg['score']:.4f}"
+            else:
+                score_str = f"Acc={cfg['score']:.4f}"
+            progress_callback(n_trials, n_trials, f"  {i+1}. {full_name}: {score_str}")
 
     return top_configs

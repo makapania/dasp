@@ -11847,7 +11847,7 @@ class SpectralPredictApp:
         self.smart_preproc_options_frame.grid_remove()
 
         # ===== TPE PREPROCESSING DISCOVERY (T-37) =====
-        tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Quick Preprocessing Discovery",
+        tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Preprocessing Discovery",
                                                                       subtitle="Optuna TPE search over 5-D space: preproc, window, autoscale, baseline, smoothing")
         tpe_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
