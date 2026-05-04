@@ -1011,3 +1011,147 @@ def test_unified_bayesian_pipeline_params_excludes_n_jobs():
         "Sister site of the codegen _PIPELINE_PARAMS bug — same architectural "
         "smell, same overwrite hazard via the codegen export path."
     )
+
+
+# ---------------------------------------------------------------------------
+# PR #33 deferred HIGHs: behavioral + architectural pins on top of the
+# structural ones above. Structural pins assert "n_jobs not in
+# {_,}PIPELINE_PARAMS"; behavioral pin asserts "user-set n_jobs survives
+# end-to-end into the generated script content"; architectural pin asserts
+# "no third PIPELINE_PARAMS-named set in the codebase contains n_jobs."
+#
+# Why all three layers: a refactor that moves the bug to a different
+# mechanism (e.g. a new strip path or a setdefault tweak that overrides
+# user-set values) would pass the existing structural pins but fail the
+# behavioral pin. A new sister site being silently born (a third
+# *PIPELINE_PARAMS* set elsewhere in the codebase) would pass both
+# existing pins but fail the architectural pin.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    ["XGBoost", "RandomForest"],
+)
+def test_user_set_n_jobs_survives_codegen(model_name, tmp_path):
+    """Behavioral pin (PR #33 deferred HIGH #1): user-set n_jobs=1 must
+    appear literally in the generated script content for both XGBoost and
+    RandomForest. The structural pins above prove n_jobs isn't stripped via
+    the named PIPELINE_PARAMS sets — but a refactor moving the bug to a
+    different mechanism (e.g. an unconditional setdefault or a new strip
+    path) would still pass those pins while silently overwriting the user's
+    determinism choice in the exported script.
+
+    This test catches the runtime-vs-export drift end-to-end by inspecting
+    the script content itself, not just the input params or the prediction
+    output (the existing parity matrix passes even when n_jobs is dropped
+    because tree determinism doesn't always depend on n_jobs at runtime
+    with random_state fixed)."""
+    n_vars = 20
+    params = {
+        "n_estimators": 30,
+        "max_depth": 6,
+        "random_state": 42,
+        "n_jobs": 1,
+    }
+
+    config = _build_export_config(
+        model_name, "regression", n_vars, params, imbalance_method=None
+    )
+    options = ExportOptions(
+        format="script",
+        include_data=False,
+        include_visualization=False,
+        include_prediction_template=False,
+    )
+    script = CodeGenerator(config, options).generate_script()
+
+    # Accept any quoting style that Python may produce when rendering the
+    # params dict (single quotes, double quotes, kwarg form). The bug shape
+    # is "n_jobs gets silently rewritten to -1"; pinning that the literal
+    # "1" appears in proximity to "n_jobs" is sufficient.
+    n_jobs_present = (
+        "'n_jobs': 1" in script
+        or '"n_jobs": 1' in script
+        or "n_jobs=1" in script
+    )
+    assert n_jobs_present, (
+        f"PR #33 regression: user-set n_jobs=1 was lost during codegen for "
+        f"{model_name}. Search the generated script for 'n_jobs' to see what "
+        f"it ended up as. The structural pins above only catch direct strip-"
+        f"set membership; this test catches refactors that move the bug to "
+        f"a different mechanism. Script length: {len(script)} chars."
+    )
+
+    # Negative pin: if a future refactor switches the setdefault default
+    # back to -1 AND drops the user's value, we'd see 'n_jobs': -1 in the
+    # script. The positive pin above catches this implicitly (1 != -1) but
+    # an explicit negative makes the failure mode obvious to readers.
+    assert "'n_jobs': -1" not in script and "n_jobs=-1" not in script, (
+        f"PR #33 regression: generated script contains n_jobs=-1 for "
+        f"{model_name} despite the user passing n_jobs=1. The setdefault-"
+        f"overrides-user-value bug shape is back."
+    )
+
+
+def test_no_codebase_pipeline_params_set_contains_n_jobs():
+    """Architectural pin (PR #33 deferred HIGH #2): walk the entire src/
+    tree and verify no module-level or class-level *PIPELINE_PARAMS* set
+    contains 'n_jobs'. Catches a future third sister site being silently
+    born — the existing two structural pins (CodeGenerator._PIPELINE_PARAMS
+    and unified_bayesian.PIPELINE_PARAMS) only cover the two known sites.
+
+    The bug class is "code that pre-strips kwargs assumed to be Pipeline-
+    only includes a model-constructor kwarg in its strip set." This pattern
+    has surfaced twice in the dasp codebase (both fixed by PR #33) and the
+    name *PIPELINE_PARAMS* is the calling convention; future contributors
+    introducing a third set under the same name should not be able to
+    accidentally re-introduce the n_jobs strip."""
+    import re
+
+    src_dir = Path(__file__).parent.parent / "src" / "spectral_predict"
+    assert src_dir.exists(), f"src dir not found at {src_dir}"
+
+    # Match `[_]PIPELINE_PARAMS = {...}` or `PIPELINE_PARAMS = frozenset({...})`
+    # spanning multi-line set literals. The {...} group captures contents
+    # for membership inspection.
+    pattern = re.compile(
+        r"[A-Za-z_]*PIPELINE_PARAMS\b\s*=\s*"
+        r"(?:frozenset\s*\(\s*)?"
+        r"\{(?P<contents>[^}]*)\}",
+        re.MULTILINE | re.DOTALL,
+    )
+
+    offenders: list[tuple[str, str]] = []
+    found_any = False
+    for py_file in src_dir.rglob("*.py"):
+        text = py_file.read_text(encoding="utf-8")
+        for match in pattern.finditer(text):
+            found_any = True
+            contents = match.group("contents")
+            if "n_jobs" in contents:
+                offenders.append(
+                    (
+                        str(py_file.relative_to(src_dir.parent.parent)),
+                        contents.strip().replace("\n", " "),
+                    )
+                )
+
+    # Sanity: regex must have caught the two known sites — if the count
+    # drops to zero, the regex is wrong (silent test bypass), not the
+    # codebase suddenly free of PIPELINE_PARAMS sets.
+    assert found_any, (
+        "Architectural pin regex matched zero PIPELINE_PARAMS sets in src/. "
+        "Either both known sites (code_generator._PIPELINE_PARAMS, "
+        "unified_bayesian.PIPELINE_PARAMS) were renamed or the regex broke. "
+        "Check the regex pattern and update if the naming convention changed."
+    )
+
+    assert not offenders, (
+        "PR #33 regression: a *PIPELINE_PARAMS* set in the codebase contains "
+        "'n_jobs'. n_jobs is a model constructor kwarg (XGBoost / LightGBM / "
+        "RandomForest / sklearn) and a determinism choice — stripping it "
+        "combined with the downstream setdefault('n_jobs', -1) silently "
+        "overrides user-set values in the exported script. Offenders:\n"
+        + "\n".join(f"  - {f}: {{ {c} }}" for f, c in offenders)
+    )
