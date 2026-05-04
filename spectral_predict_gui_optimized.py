@@ -12367,15 +12367,14 @@ class SpectralPredictApp:
             ).pack(side=tk.LEFT, padx=(0, 10))
         _persist_tooltip = (
             "Auto (default): first 10 trials in-memory; SQLite enabled only "
-            "when median trial fit time > 1s (overhead ~1.2x at threshold). "
-            "Fast models like PLS run 8x slower with SQLite enabled, so auto "
-            "disables it for them.\n"
-            "Always on: SQLite from trial 0 — universal crash-resume at the "
-            "cost of speed (PLS ~8x slower, XGBoost ~1.4x slower). Auto-set "
-            "for the session when you accept the resume banner so the loaded "
-            "SQLite is actually used.\n"
-            "Always off: pure in-memory, zero overhead. Use when interactive "
-            "speed matters and re-run on crash is cheap."
+            "when median trial fit time > 1s. Auto keeps SQLite off for "
+            "fast models (sub-1s trials) where per-trial write cost would "
+            "be the largest fraction of trial time.\n"
+            "Always on: SQLite from trial 0 — universal crash-resume with "
+            "near-zero overhead (all models within ~1.06x of in-memory in "
+            "benchmarks). Auto-set for the session when you accept the "
+            "resume banner so the loaded SQLite is actually used.\n"
+            "Always off: pure in-memory."
         )
         ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
                   style='Caption.TLabel', wraplength=500,
