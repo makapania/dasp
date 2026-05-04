@@ -299,3 +299,92 @@ class TestCallerThreading:
             "compute_validation_metrics_for_top_models — without it, the rebuild "
             "path silently produces unweighted XGBoost and PLS-DA validation models."
         )
+
+    @pytest.mark.parametrize(
+        "func_name",
+        ["run_search", "run_bayesian_search"],
+    )
+    def test_search_callers_pass_imbalance_method(self, func_name):
+        """Per-caller structural pin (Codex finding on this PR). The previous
+        signature-only test would pass even if a refactor dropped
+        ``imbalance_method=imbalance_method`` from one of the callers, silently
+        regressing the validation rebuild for that path. Pin each caller's
+        source individually."""
+        import inspect
+        import spectral_predict.search as search_mod
+        func = getattr(search_mod, func_name)
+        source = inspect.getsource(func)
+        # The caller must invoke compute_validation_metrics_for_top_models AND
+        # pass imbalance_method=imbalance_method (the local variable from the
+        # function's own signature).
+        assert "compute_validation_metrics_for_top_models" in source, (
+            f"{func_name} must call compute_validation_metrics_for_top_models "
+            f"to populate val_* columns when validation_count > 0."
+        )
+        assert "imbalance_method=imbalance_method" in source, (
+            f"{func_name} must pass imbalance_method=imbalance_method to "
+            f"compute_validation_metrics_for_top_models. Without it, the validation "
+            f"rebuild silently produces unweighted XGBoost / PLS-DA models."
+        )
+
+    def test_gui_callers_pass_imbalance_method(self):
+        """Per-caller structural pin for the 2 GUI direct callers at gui:27914
+        and gui:28069. These were caught by Codex's design pass; the
+        continuation prompt only flagged the 2 backend callers in search.py.
+        Source-level grep because the GUI module is too large to import in
+        unit tests."""
+        import os
+        gui_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "spectral_predict_gui_optimized.py",
+        )
+        with open(gui_path, "r", encoding="utf-8") as f:
+            gui_source = f.read()
+
+        # Find each compute_validation_metrics_for_top_models invocation in the
+        # GUI module. Each must immediately precede an
+        # "imbalance_method=imbalance_method" line within the call args.
+        invocations = gui_source.count("compute_validation_metrics_for_top_models(")
+        with_imbalance = gui_source.count("imbalance_method=imbalance_method,")
+        # The GUI also passes imbalance_method=imbalance_method to other backend
+        # calls (unified_bayesian, nsga2_search), so with_imbalance >= invocations
+        # is the floor; the strict check is per-invocation.
+        assert invocations >= 2, (
+            f"Expected at least 2 GUI calls to compute_validation_metrics_for_top_models "
+            f"(Bayesian validation panel + NSGA-II validation panel); found {invocations}."
+        )
+        # Strict check: each compute_validation_metrics_for_top_models call must
+        # be in a context that includes imbalance_method=imbalance_method within
+        # the argument list. Slice each call's arg block and verify.
+        cursor = 0
+        checked = 0
+        while True:
+            idx = gui_source.find("compute_validation_metrics_for_top_models(", cursor)
+            if idx == -1:
+                break
+            # Find the matching close paren for the call (naive: scan forward
+            # tracking depth). For our purposes a 2KB window suffices since the
+            # call args are short.
+            depth = 0
+            i = idx
+            end = idx
+            while i < len(gui_source):
+                c = gui_source[i]
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+                i += 1
+            call_block = gui_source[idx:end + 1]
+            assert "imbalance_method=imbalance_method" in call_block, (
+                f"GUI call to compute_validation_metrics_for_top_models at offset "
+                f"{idx} does not pass imbalance_method=imbalance_method. The "
+                f"validation rebuild for that path will silently produce unweighted "
+                f"XGBoost / PLS-DA validation models."
+            )
+            cursor = end + 1
+            checked += 1
+        assert checked >= 2, f"Expected to check at least 2 call sites, checked {checked}."
