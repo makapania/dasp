@@ -23286,16 +23286,20 @@ class SpectralPredictApp:
 
                 if _override_ok:
                     banner_text = (
-                        "Resuming previous run — load the same data and click "
-                        "Run Analysis. (Persistence auto-set to Always-on for "
-                        f"this session.{restore_summary})"
+                        "Resuming previous run — load the same data, set the "
+                        "Y variable manually (resume does not restore the Y "
+                        "selection), and click Run Analysis. (Persistence "
+                        "auto-set to Always-on for this session."
+                        f"{restore_summary})"
                     )
                 else:
                     banner_text = (
                         "Resume queued, but the persistence radio button could "
-                        "not be auto-set. Set 'Crash-resume persistence' to "
-                        "'Always on' manually before clicking Run Analysis, "
-                        "otherwise the resumed SQLite store will be ignored."
+                        "not be auto-set. Before clicking Run Analysis: "
+                        "(1) set 'Crash-resume persistence' to 'Always on' "
+                        "(otherwise the resumed SQLite store will be ignored), "
+                        "and (2) set the Y variable manually (resume does not "
+                        "restore the Y selection)."
                     )
                     try:
                         messagebox.showwarning(

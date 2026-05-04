@@ -844,3 +844,29 @@ def test_gui_settings_survive_through_full_sidecar_round_trip(fresh_state, popul
     assert revived is not None
     assert revived.gui_settings == captured
     assert revived.bayesian_persistence_mode == "auto"
+
+
+def test_resume_banner_instructs_user_to_set_y_variable():
+    """Source-text regression pin: the resume banner that the GUI shows on
+    crash-resume must explicitly tell the user to set the Y variable
+    manually. Resume does NOT round-trip the y-variable selection — the
+    on-load auto-default at gui:_process_combined_file / _auto_detect_columns
+    overwrites whatever was previously selected with the file's metadata
+    y_col (or the third column for unknown formats). Without this
+    instruction in the banner, a user resuming a classification run whose
+    target wasn't first-in-file will silently restart against the wrong
+    Y. (See the closed-without-merge PR #44 for the persistence approach
+    that didn't pan out — Codex's review caught a timing bug; we
+    chose banner-only as the simpler fix.)"""
+    gui_src = (
+        Path(__file__).parent.parent / "spectral_predict_gui_optimized.py"
+    ).read_text(encoding="utf-8")
+    # Look for the substantive instruction. Avoid pinning exact wording so
+    # copy-edits don't break the test, but require the load-bearing phrase.
+    assert "Y variable manually" in gui_src, (
+        "Resume banner regression: the 'set the Y variable manually' "
+        "instruction has been removed or reworded. If the wording was "
+        "intentionally changed, update this test. If it was deleted, "
+        "restore it — without this instruction, users resuming a run "
+        "silently restart against the wrong target column."
+    )

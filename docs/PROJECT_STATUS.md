@@ -1,6 +1,42 @@
 # Project Status
 
-> **Last updated:** 2026-05-05 late evening — Validation-rebuild MEDIUM closed (`fix/Tclass-weight-validation-rebuild`); ensemble-rebuild LOW dropped as moot (ensemble methods are regression-only — class_weight discriminator can't reach that path). All other 6 morning/afternoon PRs (#32, #33, #35, #36, #38, #39, #40) merged earlier in this session. PR #34 closed (Codex caught false-premise). PR #37 closed (redundant docs). Queue empty pre-validation-rebuild PR.
+> **Last updated:** 2026-05-07 — T-resume-y-variable persistence ticket closed via banner-only PR #45 (`fix/resume-banner-y-variable-instructions`). PR #44's persist-then-restore approach was closed without merge after Codex's cross-family review caught a HIGH-severity timing bug; banner-only chosen as the right cost-benefit per user directive.
+>
+> ## Session 2026-05-07 — PR #44 closed, PR #45 opened (banner-only)
+>
+> ### What happened
+>
+> 1. Implemented the persist-then-restore approach per `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md`. Tests passed (39 in `test_t43_resume_auto_restore.py` + 111 across the consolidated regression battery). PR #44 opened.
+> 2. Cross-family review (DeepSeek V4 Pro Max + GLM 5.1 + Codex GPT-5.5) returned 1-1-1: READY_TO_MERGE / NEEDS_DISCUSSION / NEEDS_CHANGES.
+> 3. Codex's HIGH: `restore_gui_settings` runs at GUI startup BEFORE the user reloads data; `_get_available_target_columns()` returns `[]`; every captured `target_column` fails validation; the feature gap is not actually closed (user gets a banner error blaming them on every resume instead of the auto-restore the PR was meant to deliver).
+> 4. The fix that would actually work — deferred-apply pattern mirroring `_pending_validation_indices` with hooks wired into 3 GUI data-load completion paths — is more invasive than the ticket's intended cost-benefit.
+> 5. **User directive:** banner-only is sufficient. Tell the user explicitly in the resume banner that they need to set Y manually; don't build the deferred-apply machinery.
+> 6. PR #44 closed without merge. PR #45 opened with the banner-text update + a source-text regression pin.
+>
+> ### What shipped in PR #45
+>
+> | File | Change |
+> |---|---|
+> | `spectral_predict_gui_optimized.py` | Two banner branches updated (`_override_ok=True` happy path + `_override_ok=False` messagebox warning path) to add the explicit instruction "set the Y variable manually (resume does not restore the Y selection)". 10 insertions, 6 deletions; only inside the two `banner_text` blocks. |
+> | `tests/test_t43_resume_auto_restore.py` | `test_resume_banner_instructs_user_to_set_y_variable` — source-text regression pin asserting "Y variable manually" appears in the GUI module. Pins the load-bearing phrase without pinning surrounding wording. |
+>
+> ### Test coverage
+>
+> 71 passed across `test_t43_resume_auto_restore.py` + `test_run_state.py`. No regressions.
+>
+> ### Lessons (full writeup in SESSION_LOG.md)
+>
+> - **Cross-family panels reveal disagreement single-family panels can't.** PR #44's review pass had DeepSeek and GLM approve a feature that doesn't work in production; only Codex traced the call site and caught the empty-available-list bug. GLM evaluated the function in isolation; DeepSeek accepted "user picks manually post-load" as the success state without recognizing that's the pre-PR behavior the PR was supposed to fix.
+> - **Continuation prompts inherit single-reviewer blind spots.** The PR #44 continuation prompt was pre-verified by GLM 5.1 alone. The same reviewer's blind spot (function-in-isolation evaluation) made it into the implementation strategy and propagated to the next agent. Continuation prompts that pre-spec implementation should themselves go through a cross-family review pass before pickup.
+> - **Banner-only as a legitimate fallback for hard automation.** Not every UX gap needs persist-then-restore machinery. Telling the user in the banner is often the right cost-benefit when the automation requires deferred-apply hooks across multiple data-load completion paths.
+>
+> ### Deferred follow-ups still in the queue
+>
+> Carried forward from 2026-05-05; not addressed by PR #45 (different scope):
+>
+> - **PR #33 deferred HIGHs (~30 LOC)**: behavioral test for `n_jobs` survival through codegen + architectural module-walk test that no module-level `*PIPELINE_PARAMS*` set in the codebase contains `n_jobs`.
+> - **PR #32 deferred MEDIUM (~80 LOC)**: LightGBM and CatBoost imbalanced-auto parity rows mirroring the existing XGBoost row pattern in `test_imbalance.py`.
+> - **Polish (low priority)**: `inspect.signature(model.fit)` not wrapped in try/except inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`.
 >
 > ## Session 2026-05-05 late evening — validation-rebuild MEDIUM (fix/Tclass-weight-validation-rebuild)
 >
