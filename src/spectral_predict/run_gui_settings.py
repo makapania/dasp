@@ -181,6 +181,13 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "nsga2_selection_method",
     "nsga2_mode",
     "bayesian_persistence_mode",
+    # --- target column / y variable ---
+    # The Y-column selector defaults to the file's first column on data
+    # load. Without persistence, a resumed classification run whose Y
+    # column wasn't first in the file would silently restart against
+    # whatever is first. Restored value is validated against the current
+    # data's columns; mismatches surface as errors so the user can re-pick.
+    "target_column",
     # --- task type / CV ---
     "task_type",
     "folds",
@@ -286,6 +293,31 @@ def restore_gui_settings(
         if var is None or not callable(getattr(var, "set", None)):
             report.skipped_no_var.append(name)
             continue
+
+        # target_column: the Tk var accepts any string, but the Combobox
+        # behind it only renders sensibly when the value is one of the
+        # currently-loaded dataset's columns. fingerprint_mismatch is a
+        # coarse data-identity check, not per-column schema. Without
+        # this guard, a captured column name absent from the now-loaded
+        # data leaves the user staring at a "stuck" combobox.
+        if name == "target_column":
+            available_getter = getattr(
+                gui_obj, "_get_available_target_columns", None
+            )
+            if callable(available_getter):
+                try:
+                    available = available_getter()
+                except Exception as exc:
+                    report.errors.append(
+                        f"{name}: could not enumerate available columns: {exc}"
+                    )
+                    continue
+                if value not in available:
+                    report.errors.append(
+                        f"{name}: captured column {value!r} is not in the "
+                        f"currently-loaded data; pick a target manually"
+                    )
+                    continue
         try:
             var.set(value)
         except Exception as exc:

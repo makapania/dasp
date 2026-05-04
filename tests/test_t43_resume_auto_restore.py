@@ -515,6 +515,103 @@ def test_bayesian_specific_controls_round_trip(fresh_state):
     assert blank.bayes_enable_uve.get() is False
 
 
+def test_target_column_in_whitelist(fresh_state):
+    """T-resume-y-variable-persist: the Y-column selector defaults to the
+    file's first column on load, so a resumed classification run whose Y
+    column wasn't first in the file would silently restart against the
+    wrong target. Capturing target_column closes the gap."""
+    _, _, rgs, _ = fresh_state
+    assert "target_column" in rgs.CAPTURABLE_SETTINGS
+
+
+def test_target_column_round_trips_when_present_in_data(fresh_state):
+    """Capture target_column='ProteinPct' from one fake-GUI; restore onto
+    a fresh fake-GUI whose `_get_available_target_columns` includes that
+    name; assert the value lands."""
+    _, _, rgs, _ = fresh_state
+
+    source = _FakeGUI(target_column="ProteinPct", use_snv=True)
+    captured = rgs.capture_gui_settings(source)
+    assert captured["target_column"] == "ProteinPct"
+
+    class _GUIWithColumns(_FakeGUI):
+        def _get_available_target_columns(self):
+            return ["MoisturePct", "ProteinPct", "FatPct"]
+
+    blank = _GUIWithColumns(target_column="MoisturePct", use_snv=False)
+    report = rgs.restore_gui_settings(blank, captured)
+
+    assert "target_column" in report.restored
+    assert report.errors == []
+    assert blank.target_column.get() == "ProteinPct"
+
+
+def test_target_column_falls_back_when_missing_from_current_data(fresh_state):
+    """Stale-column scenario: the captured column name is no longer in the
+    loaded dataset (renamed, different file, reordered). The Tk var stays
+    untouched and the failure is surfaced via `errors` so the resume
+    banner tells the user to pick the target manually instead of leaving
+    them staring at a stuck combobox."""
+    _, _, rgs, _ = fresh_state
+
+    class _GUIWithColumns(_FakeGUI):
+        def _get_available_target_columns(self):
+            return ["MoisturePct", "FatPct"]  # no ProteinPct
+
+    blank = _GUIWithColumns(target_column="MoisturePct", use_snv=False)
+    report = rgs.restore_gui_settings(
+        blank, {"target_column": "ProteinPct", "use_snv": True}
+    )
+
+    assert "target_column" not in report.restored
+    assert "use_snv" in report.restored  # other settings still applied
+    assert any("target_column" in e and "ProteinPct" in e for e in report.errors)
+    # Tk var not mutated — the on-load default ("MoisturePct") stands so
+    # the Combobox is left in a consistent, user-pickable state.
+    assert blank.target_column.get() == "MoisturePct"
+
+
+def test_target_column_skips_validation_when_helper_absent(fresh_state):
+    """Headless callers (tests, future CLI) and partially-initialized GUIs
+    may not expose `_get_available_target_columns`. The validation hook is
+    duck-typed — when the helper is missing, fall through to the standard
+    set/readback path so the restore still works in those contexts."""
+    _, _, rgs, _ = fresh_state
+
+    blank = _FakeGUI(target_column="", use_snv=False)
+    assert not hasattr(blank, "_get_available_target_columns")
+
+    report = rgs.restore_gui_settings(
+        blank, {"target_column": "AnyColumn", "use_snv": True}
+    )
+
+    assert "target_column" in report.restored
+    assert report.errors == []
+    assert blank.target_column.get() == "AnyColumn"
+
+
+def test_target_column_handles_helper_raising(fresh_state):
+    """Defense-in-depth: the GUI's `_get_available_target_columns` reads
+    `self.combined_metadata_df.columns` / `self.ref.columns`. If those
+    attributes are in an unexpected partial-init state, the helper could
+    raise. Surface as an error rather than letting the resume crash."""
+    _, _, rgs, _ = fresh_state
+
+    class _GUIWithBrokenHelper(_FakeGUI):
+        def _get_available_target_columns(self):
+            raise RuntimeError("ref columns not yet wired up")
+
+    blank = _GUIWithBrokenHelper(target_column="MoisturePct", use_snv=False)
+    report = rgs.restore_gui_settings(
+        blank, {"target_column": "ProteinPct", "use_snv": True}
+    )
+
+    assert "target_column" not in report.restored
+    assert "use_snv" in report.restored
+    assert any("target_column" in e for e in report.errors)
+    assert blank.target_column.get() == "MoisturePct"  # unmutated
+
+
 def test_summarize_models_line_excludes_preprocessing_toggles(fresh_state):
     """The Models line of the resume banner must list only model names.
     Preprocessing toggles (use_snv, use_sg1, etc.) share the `use_*`
