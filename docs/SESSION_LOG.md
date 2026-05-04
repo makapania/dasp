@@ -4,6 +4,42 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 follow-on — cross-family post-merge review of PRs #46/#47/#48 yields per-reviewer calibration evidence; PR #49 closes 2/3 fix-forward findings
+
+After PRs #46 (supersede stale prompt), #47 (PR #33 deferred HIGHs), and #48 (PR #32 deferred MEDIUM) merged, ran a four-reviewer cross-family panel: Codex GPT-5.5 + DeepSeek V4 Pro Max max-thinking + GLM 5.1 + Kimi K2.6. Results:
+
+| PR | Codex | DeepSeek | GLM | Kimi |
+|---|---|---|---|---|
+| #46 | OK | OK | OK (LOW: line numbers in stub) | OK |
+| #47 | OK | FIX_FORWARD (parametrize blind spot — only XGB+RF, model-specific gates in `_render_model` slip through) | OK (LOW: pre-existing line refs) | FIX_FORWARD (`verbose` sister site of `n_jobs` in `_PIPELINE_PARAMS` — unpinned) |
+| #48 | OK | FIX_FORWARD (balancing kwarg pre-injected in BOTH params and runtime conditional → conditional becomes dead code) | OK | OK |
+
+**Two of four reviewers approved PRs #47 and #48 with no findings.** DeepSeek and Kimi each caught a real fix-forward issue the others missed. PR #49 (`fix/post-merge-review-followups-pr47-pr48`) closes both DeepSeek findings; Kimi's `verbose` sister-site is deferred as a methodology change (removing `verbose` from `_PIPELINE_PARAMS` requires user confirmation).
+
+### Per-reviewer calibration evidence (memory `feedback_review_method_signal.md` updated)
+
+**DeepSeek V4 Pro Max max-thinking** — sharpest angle this batch. PR #47 finding traced through `_render_model` to identify branch-specific bugs the parametrize doesn't catch. PR #48 finding sharper: identified the redundant-conditional pattern that makes adversarial deletion silently pass. The prior PR #44 framing failure ("user picks manually" as success state) was a one-off bound to "does this fix close the gap?" questions and has not generalized; on standard "what's the adversarial space?" framing, max-thinking is the highest-yield single reviewer. Use for: feature additions where adversarial coverage matters, tests-only PRs where "tests-that-pass-without-verifying" is a real failure mode.
+
+**Kimi K2.6** — canonical sister-site-sweep use case. Found `verbose` in `code_generator._PIPELINE_PARAMS` as the unpinned architectural sister of `n_jobs`. The codebase's own inline comment at `code_generator.py:1031-1039` acknowledges it; every other reviewer evaluated only the named fix and missed it. PR #47 is itself a fix-forward (closing PR #33's deferred items), making this a textbook fix-of-fixes scenario where Kimi's strength applies. ~9 min wall-clock — slowest of the four.
+
+**GLM 5.1** — twice-validated as in-isolation-only. On PR #44 (verified in isolation, missed timing bug) and now PR #47/#48 (verified in isolation, missed both fix-forward findings + the sister-site issue). Reliable for: CommonMark style consistency, docstring load-bearing-ness, comment-quality verification, line-number-vs-function-name antipattern. **Don't put on the panel as load-bearing for non-trivial work.** Cheapest (~3 min via z.ai flat-rate) and useful as a polish-pass reviewer; not as a substantive correctness reviewer.
+
+**Codex GPT-5.5** — tightest call-site grounding (verified exact line numbers in `code_generator.py` for `_render_model` branches, the `applying class_weight` print site at `code_generator.py:1558-1559`, the auto-resolution mutation at `code_generator.py:1005-1006`). Verified "does this catch the bug PR #X fixed?" excellently for both PRs. Tradeoff: defensive only against the named bug class — doesn't extend coverage on its own. Pair with DeepSeek for the adversarial angle.
+
+### Generalisable lessons (carried forward, batch-level)
+
+8. **The right test for value-per-reviewer is "did this finding get caught by anyone else?"** — not "is the verdict correct?" Codex and GLM both said OK on PRs #47/#48 and were technically correct (the named regression doesn't exist). DeepSeek and Kimi each caught a different kind of issue (adversarial coverage, sister-site naming pattern). Each angle is non-overlapping; the panel value comes from running them all, not from picking the "best" reviewer.
+
+9. **Tests need three pin shapes for full coverage of a fix-of-fixes**: structural (the producer's contract — e.g. `n_jobs not in _PIPELINE_PARAMS`), behavioral (the consumer's content — e.g. generated script contains `'n_jobs': 1`), architectural (the codebase-wide name pattern — e.g. no `*PIPELINE_PARAMS*` set contains `n_jobs`). Three layers, three different refactor failure modes covered. PR #47 had all three; the gap DeepSeek caught was at the behavioral pin's parametrize coverage, not at the pin shape.
+
+10. **Parametrize coverage applies even when "all rows hit the same render branch"** — model-specific gates inside a shared branch are a real adversarial path. `if model_class.startswith('LightGBM'): pop('n_jobs')` inside `_render_model` would hit only LightGBM, not XGBoost or RandomForest. The parametrize must include each model name that could be individually targeted, not just one representative per branch.
+
+11. **Test-passes-without-verifying is a real failure mode for parity tests.** When a kwarg is double-configured (in both the in-process model and the codegen export config), the codegen's runtime conditional becomes dead code — predictions match because the kwarg was already there, not because the conditional fired. Adversarial deletion of the conditional silently passes. Split params so each load-bearing emit point has exactly one source.
+
+12. **Methodology-change findings get deferred from fix-forward PRs.** Kimi's `verbose` finding is real, but the cleanest fix requires removing `verbose` from `code_generator._PIPELINE_PARAMS` — that's a methodology change to runtime codegen behavior, not a tests-only adjustment. Per project rules ("Pipeline methodology change? STOP. Confirm with user."), it doesn't belong in the same PR as test-design fix-forward. Filed as deferred follow-up in PROJECT_STATUS.md.
+
+---
+
 ## 2026-05-07 — T-resume-y-variable-persist: persist-then-restore approach failed cross-family review; pivoted to banner-only (PR #44 closed → PR #45)
 
 The continuation prompt at `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md` (filed 2026-05-05 wrap-up) specified an approach that had been pre-verified by GLM 5.1 against the current code: add `target_column` to the `CAPTURABLE_SETTINGS` whitelist + add validation in `restore_gui_settings` against `_get_available_target_columns()`. Implementation landed in PR #44 (`fix/Tresume-y-variable-persist`, tip `75cc80b`). Three-reviewer cross-family panel: Codex (NEEDS_CHANGES, HIGH), DeepSeek V4 Pro Max (NEEDS_DISCUSSION, MEDIUM), GLM 5.1 (READY_TO_MERGE).
