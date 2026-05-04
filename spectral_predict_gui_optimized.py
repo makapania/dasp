@@ -27910,7 +27910,8 @@ class SpectralPredictApp:
                                 task_type=task_type,
                                 wavelengths=wavelengths,
                                 top_n=self.validation_top_n.get(),
-                                progress_callback=self._progress_callback
+                                progress_callback=self._progress_callback,
+                                imbalance_method=imbalance_method,
                             )
 
                             n_computed = min(self.validation_top_n.get(), len(results_df))
@@ -28064,7 +28065,8 @@ class SpectralPredictApp:
                             task_type=task_type,
                             wavelengths=wavelengths,
                             top_n=self.validation_top_n.get(),
-                            progress_callback=self._progress_callback
+                            progress_callback=self._progress_callback,
+                            imbalance_method=imbalance_method,
                         )
 
                         n_computed = min(self.validation_top_n.get(), len(results_df))
