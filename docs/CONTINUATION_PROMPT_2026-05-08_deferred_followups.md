@@ -22,22 +22,27 @@ Continuation-prompt-specific addendum: any implementation strategy this prompt s
 
 **Status:** Deferred from PR #49 review. **Requires user confirmation before implementing.**
 
-**The finding:** `code_generator._PIPELINE_PARAMS` is `{'memory', 'transform_input', 'verbose', 'steps'}`. The strip set is meant to drop sklearn Pipeline kwargs before the bare model gets constructed. But `verbose` is ALSO a model-constructor kwarg for RandomForest, SVM, LightGBM (and others). The codebase's own inline comment at `code_generator.py:1031-1039` acknowledges this — "the same architectural smell as `n_jobs` had". For LightGBM / RandomForest / SVM users who pass an explicit `verbose=N`, the strip drops it; for CatBoost specifically, a `verbose=0` injection at `code_generator.py:974-975` masks the issue.
+**The finding:** `code_generator._PIPELINE_PARAMS` is `{'memory', 'transform_input', 'verbose', 'steps'}` (verified against `code_generator.py:1040`). The strip set is meant to drop sklearn Pipeline kwargs before the bare model gets constructed. But `verbose` is ALSO a model-constructor kwarg for RandomForest, SVM, LightGBM (and others). The codebase's own inline comment at `code_generator.py:1031-1039` acknowledges this — "the same architectural smell as `n_jobs` had". For LightGBM / RandomForest / SVM users who pass an explicit `verbose=N`, the strip drops it; for CatBoost specifically, a `verbose=0` injection at `code_generator.py:974-975` masks the issue.
+
+**There are TWO known sites containing `verbose`, not one** (Codex post-filing review caught the omission):
+
+- `code_generator._PIPELINE_PARAMS` at `code_generator.py:1040`
+- `unified_bayesian.PIPELINE_PARAMS` at `unified_bayesian.py:99` — same set literal, sister site introduced by the original PR #33 fix-of-fixes for `n_jobs`. Verify this site too in any approach below.
 
 **Why it's queued, not closed:** the cleanest fix is to remove `verbose` from `_PIPELINE_PARAMS` and handle it contextually like `n_jobs` is handled (PR #33). That's a methodology change to runtime codegen behavior. Per project rules ("Pipeline methodology change? STOP. Confirm with user."), it doesn't belong in a fix-forward PR.
 
 **Three viable approaches** (pick one with user):
 
-a. **Remove from strip set, mirror n_jobs pattern.** Take `verbose` out of `_PIPELINE_PARAMS`, audit downstream consumers for any reliance on the strip happening, add a contextual handling site if needed. Architectural pin can then be extended to ban `verbose` (currently can't because the existing site contains it).
+a. **Remove from strip set, mirror n_jobs pattern.** Take `verbose` out of BOTH `_PIPELINE_PARAMS` (`code_generator.py:1040`) AND `PIPELINE_PARAMS` (`unified_bayesian.py:99`). Audit downstream consumers for any reliance on the strip happening, add a contextual handling site if needed. After removal, architectural pin can be extended to ban `verbose` from any future site as well as the existing two.
 
-b. **Pin against future sister sites only.** Keep `verbose` in the existing set but extend the architectural pin's failure message to call out: "any NEW `*PIPELINE_PARAMS*` set introduced in the codebase must not contain `verbose` either." Doesn't fix the existing leak but prevents propagation.
+b. **Pin against future sister sites only via explicit allowlist.** Keep `verbose` in the existing two sets, but extend the architectural pin to ban `verbose` in any NEW `*PIPELINE_PARAMS*` set. Implementation requires explicit allowlist exclusion for the two known-currently-imperfect sites — naive extension of the existing regex would fail on both. Concrete shape: maintain a `KNOWN_VERBOSE_DEBT_SITES = {'src/spectral_predict/code_generator.py', 'src/spectral_predict/unified_bayesian.py'}` set in the test, and only fail when a NEW path matches the regex AND its content contains `verbose`. Doesn't fix the existing leak but prevents propagation. Trade-off: future contributors might not know the allowlist exists; surfaces the issue forever.
 
 c. **Defer indefinitely** if user judges the leak isn't user-visible enough to warrant the methodology change. The CatBoost masking (`verbose=0` injection at line 974-975) plus the inline comment captures the engineering knowledge already.
 
 **Pickup order if approach (a):**
 1. Read `code_generator.py:1031-1039` (the existing inline comment) and `code_generator.py:974-975` (CatBoost verbose injection).
-2. Grep the codegen for all uses of the verbose strip — confirm the strip is only doing meaningful work for sklearn Pipeline objects, not for bare model construction.
-3. Remove `verbose` from `_PIPELINE_PARAMS`, add contextual handling at the bare-model-construction site if a Pipeline-vs-bare detection is needed.
+2. Grep the codegen AND `unified_bayesian.py` for all uses of the verbose strip — confirm the strip is only doing meaningful work for sklearn Pipeline objects, not for bare model construction. Both sites must be audited.
+3. Remove `verbose` from `_PIPELINE_PARAMS` (`code_generator.py:1040`) AND from `PIPELINE_PARAMS` (`unified_bayesian.py:99`). Add contextual handling at the bare-model-construction site if a Pipeline-vs-bare detection is needed.
 4. Extend `test_no_codebase_pipeline_params_set_contains_n_jobs` (or rename to a more general pattern) to also ban `verbose`. Rename to something like `test_no_codebase_pipeline_params_set_contains_model_kwargs` if generalizing.
 5. Add a behavioral pin for `verbose` survival, parametrized on RandomForest + LightGBM + SVM (the models that accept verbose AND were affected by the strip).
 6. Cross-family review at pickup — DeepSeek max-thinking + Kimi for sister-site sweep + Codex for call-site verification.
@@ -54,11 +59,11 @@ c. **Negative-pin asserting runtime conditional source is in generated scripts**
 
 ### 3. Pre-existing inherited debt (NOT introduced this session)
 
-**Line-number references at `tests/test_t20_saved_model_export_parity.py:1079, 1091`** cite `code_generator.py:988`. Currently accurate (line 988 is `params_full.setdefault('n_jobs', -1)`) but rot-prone per project rule. Defer to a dedicated cleanup PR if the rot surfaces (i.e., if a line-number drift causes the citation to point to the wrong code).
+**Line-number references at `tests/test_t20_saved_model_export_parity.py:1102, 1114`** cite `code_generator.py:988`. Currently accurate (line 988 is `params_full.setdefault('n_jobs', -1)`) but rot-prone per project rule. Defer to a dedicated cleanup PR if the rot surfaces (i.e., if a line-number drift causes the citation to point to the wrong code).
 
 ### 4. Polish (lowest priority)
 
-**`inspect.signature(model.fit)` not wrapped in try/except** inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`. Theoretical risk on C-extension fits without proper introspection support; all current sklearn estimators have inspectable signatures. Per project polish-defer rule, defer unless a real failure surfaces.
+**`inspect.signature(final_estimator.fit)` not wrapped in try/except** inside `_apply_class_weight_discriminator_for_rebuilt_model` (function starts at `search.py:409`; the `inspect.signature` call is at `search.py:496`). Theoretical risk on C-extension fits without proper introspection support; all current sklearn estimators have inspectable signatures. Per project polish-defer rule, defer unless a real failure surfaces. Note the codebase has two other `inspect.signature(...fit)` call sites (`search.py:252`, `search.py:4580`) — if a real failure ever surfaces, audit all three together.
 
 ---
 
@@ -70,7 +75,7 @@ c. **Negative-pin asserting runtime conditional source is in generated scripts**
 
 ## Process rules (mandatory, from this session's lessons)
 
-- **Use `.venv312/Scripts/python.exe`.** Project is Python 3.12 only.
+- **Use `.venv312/Scripts/python.exe`.** The user's local environment is Python 3.12 (see memory `project_venv.md`); `pyproject.toml` formally allows `>=3.10` but the user only runs/tests against `.venv312`.
 - **Targeted pytest, not full suite.** Per-fix: matching test file + the relevant regression sweep.
 - **Pre-existing flakes (deselect):** `tests/test_export_code.py::test_python_script_execution` and `test_full_workflow_python` — known environmental.
 - **Commit ASAP after implementation.** Long pytest runs / agent dispatch / `git push` can collide with parallel sessions. See memory `feedback_commit_before_yielding_control.md`.
