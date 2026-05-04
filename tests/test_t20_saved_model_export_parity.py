@@ -536,6 +536,45 @@ def test_xgboost_binary_classification_parity_auto_no_correction(tmp_path):
     )
 
 
+def test_xgboost_binary_classification_parity_auto_with_correction(tmp_path):
+    """T-19 Auto-mode runtime resolution — the auto-resolves-to-class_weight path.
+
+    With IMBALANCED data (ratio ≥ 3:1), the script's auto-resolution block
+    in ``code_generator._render_imbalance_handling`` mutates IMBALANCE_METHOD
+    to "class_weight". The XGBoost branch then emits ``model.fit(X, y,
+    sample_weight=compute_sample_weight('balanced', y))`` exactly as the
+    explicit ``imbalance_method='class_weight'`` row does. The in-process
+    model must mirror that — same sample_weight at fit time.
+
+    The ``expect_stdout_marker="applying class_weight"`` pins the
+    class_weight branch of the auto-resolution print specifically; the
+    other branch emits ``"no correction"`` so the marker is unique to
+    the with-correction path. Without this marker, a regression that
+    flipped the threshold or short-circuited to None would still pass
+    here (predictions would diverge but the wrong-branch print is the
+    real signal)."""
+    pytest.importorskip("xgboost")
+    from sklearn.utils.class_weight import compute_sample_weight
+    from xgboost import XGBClassifier
+
+    X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
+    params = dict(_XGB_BASE_PARAMS)
+    sample_weight = compute_sample_weight("balanced", y_train)
+    _run_parity(
+        model=XGBClassifier(**params),
+        model_name="XGBoost",
+        task_type="classification",
+        X_train=X_train,
+        y_train=y_train,
+        X_test=X_test,
+        params=params,
+        imbalance_method="auto",
+        tmp_path=tmp_path,
+        fit_kwargs={"sample_weight": sample_weight},
+        expect_stdout_marker="applying class_weight",
+    )
+
+
 def test_xgboost_multiclass_classification_parity(tmp_path):
     """Multi-class boosting parity — covers the multi-output path on the
     T-19 surface. softprob/softmax mismatch between runtime and script
