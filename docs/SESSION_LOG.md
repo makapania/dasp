@@ -4,6 +4,37 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 — T-resume-y-variable-persist: persist-then-restore approach failed cross-family review; pivoted to banner-only (PR #44 closed → PR #45)
+
+The continuation prompt at `docs/CONTINUATION_PROMPT_2026-05-07_resume_y_variable_persist.md` (filed 2026-05-05 wrap-up) specified an approach that had been pre-verified by GLM 5.1 against the current code: add `target_column` to the `CAPTURABLE_SETTINGS` whitelist + add validation in `restore_gui_settings` against `_get_available_target_columns()`. Implementation landed in PR #44 (`fix/Tresume-y-variable-persist`, tip `75cc80b`). Three-reviewer cross-family panel: Codex (NEEDS_CHANGES, HIGH), DeepSeek V4 Pro Max (NEEDS_DISCUSSION, MEDIUM), GLM 5.1 (READY_TO_MERGE).
+
+**The HIGH that closed the PR:** Codex traced the call site at `spectral_predict_gui_optimized.py:23219` and recognized that `restore_gui_settings(self, resumed.gui_settings)` runs at GUI startup BEFORE the user reloads data. At that moment, `_get_available_target_columns()` returns `[]` because neither `combined_metadata_df` nor `ref` is populated. The validation hook therefore fails for EVERY captured `target_column`, routes through `RestoreReport.errors`, leaves the StringVar at default, and surfaces a "captured column not in current data" message in the resume banner — the exact opposite of the auto-restore the PR was supposed to deliver. **Two of three reviewers approved a feature that does not work in production.**
+
+**Why the other two missed it:**
+
+- **GLM 5.1** evaluated `restore_gui_settings` in isolation, did not trace the call site, did not consider that `available` could be `[]` when validation runs.
+- **DeepSeek V4 Pro Max** correctly identified the `available == []` case BUT framed it as "correct behavior: the user is told to pick a target manually after re-loading data." This framing is wrong — that's the pre-PR behavior the PR was supposed to fix. Accepting the pre-PR behavior as the success state means a PR that achieves it is a no-op, not a feature.
+
+**Pivot decision (user directive):** rather than build the deferred-apply pattern (mirror `_pending_validation_indices` → 3 hooks wired into data-load completion paths at gui:16156 / gui:16333 / gui:16379 + new method + schema-additive change to `RunMetadata`), do the banner-only fix. PR #44 closed without merge; PR #45 (`fix/resume-banner-y-variable-instructions`) opened with a one-paragraph banner-text update + structural pin.
+
+### Generalisable lessons (carried forward)
+
+1. **Validation-at-restore-time vs deferred-apply.** When a setting depends on dataset state that's not loaded at restore time, validation belongs in a post-data-load apply hook (mirroring the existing `_pending_validation_indices` pattern), not in `restore_gui_settings`. The continuation prompt's recommendation to embed validation in `restore_gui_settings` was wrong because `restore_gui_settings` runs at startup, not at data-load completion. **GLM 5.1's pre-PR verification missed this because it evaluated the function in isolation.** Pre-PR verification by a single reviewer is insufficient for cross-file timing concerns.
+
+2. **Cross-family panels reveal disagreement that single-family panels cannot.** Three reviewers, three verdicts (READY_TO_MERGE / NEEDS_DISCUSSION / NEEDS_CHANGES). Two of them missed the production-blocking bug. Codex earned its slot specifically on cross-file dispatcher work — exactly the angle project memory `feedback_review_method_signal.md` predicts. **Single-reviewer pre-PR verification is not a substitute for the panel.**
+
+3. **DeepSeek's "correct behavior" framing failure.** When a reviewer accepts the pre-fix behavior as the success state, they're not actually verifying the PR's stated purpose. Watch for this pattern: "the user is told to do X manually" is a success state ONLY if "the user does X manually" was the intended outcome. If the PR was supposed to automate X, accepting "user does it manually" as success means rubber-stamping a no-op.
+
+4. **Codex's P2 → HIGH promotion.** Codex marked the call-site bug P2 in its own taxonomy. Promoted to HIGH for this project because nullifying the PR's stated purpose in the documented use case is more severe than P2 implies. Calibrate by impact-on-user-flow, not by the reviewer's label.
+
+5. **Continuation prompts inherit author blind spots.** The continuation prompt was filed after a single-reviewer GLM verification pass. The same reviewer's blind spot (function-in-isolation evaluation) made it into the implementation strategy. **Continuation prompts that pre-spec implementation should themselves go through a cross-family review pass before the next agent picks them up.**
+
+6. **Banner-only as a legitimate fallback for hard automation.** Not every UX gap needs persist-then-restore machinery. Telling the user explicitly in the banner is often the right cost-benefit when the automation requires deferred-apply hooks across multiple data-load completion paths.
+
+7. **PR #44's approved-but-broken state generalizes the validation-only-at-the-producer lesson from PR #41.** PR #41's lesson was "structural pins should be one-per-consumer, not one-per-producer." PR #44's lesson is the same shape one layer up: **review verdicts should consider the consumer (call site), not just the producer (function)**. A reviewer who only reads the function in isolation can't catch a flow bug that depends on caller state. Same anti-pattern, different layer.
+
+---
+
 ## 2026-05-05 wrap-up — PR #41 merged (validation-rebuild MEDIUM); PR #42 framing correction; T-resume-y-variable-persist fully spec'd
 
 PR #41 (`fix/Tclass-weight-validation-rebuild`) merged at commit `44ffefb`. Closes the validation-rebuild MEDIUM. Five reviewer types ran across 7 dispatches: Codex GPT-5.5 (design pass + post-implementation review), GLM 5.1 (z.ai), DeepSeek V4 Pro Max (max-thinking via DeepSeek API), pr-review-toolkit code-reviewer + silent-failure-hunter + comment-analyzer + pr-test-analyzer. **Three saves from the audit pyramid:**
