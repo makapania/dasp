@@ -36,6 +36,16 @@ This is independent of the clamp. TPE doesn't track "have I sampled this exact p
 
 `unified_bayesian.py:457` suggests `n_components ∈ [2, 20]` regardless of feature count. The clamp at `:462` rescues the fit but Optuna's TPE believes it's exploring a wider space than it actually is. Comment at `:455` says fixed range was used "to avoid Optuna's dynamic space error" — DeepSeek confirmed Optuna 4.8.0 (the pinned version, see pyproject.toml) supports dynamic ranges, but `multivariate=True` TPE's joint KDE depends on stable support.
 
+## Which option does what (fast scan)
+
+| Option | Saves compute? | Fixes 3a (clamp dupes) | Fixes 3b (TPE re-suggest dupes) | Slow-fit model benefit (CatBoost / XGBoost / LightGBM) |
+|---|---|---|---|---|
+| **A** pre-fit fingerprint cache + `TrialPruned` | **Yes — proportional to dup rate** | Yes (all models) | Yes (all models) | **Large** — these models cost 10–60s per fit; 25% duplicates = 10–60 min saved per 300-trial run |
+| **B** post-hoc dedup | **No** — duplicates still run | Yes (all models) | Yes (all models) | None — same wall-clock as today, just cleaner leaderboard |
+| **C** data-aware `n_components` suggest range | Tiny — only the few clamp-impossible PLS trials | Yes (PLS only) | **No** — TPE still re-samples valid points | **None** — only PLS has the post-suggest n_components clamp; CatBoost/XGBoost/LightGBM clamp on suggest bounds, never had this bug |
+
+**Headline:** Option A is the only one that saves wall-clock on CatBoost/XGBoost/LightGBM. Option B is the conservative "ship now" leaderboard cleanup. Option C is a PLS-specific methodology improvement; do not pick it expecting non-PLS speedups.
+
 ## Three candidate fixes (per cross-family review 2026-05-08)
 
 ### Option B — Post-hoc dedup *(lowest risk, recommended first)*
@@ -77,10 +87,12 @@ Caveat from Codex review: `terminal_states = (TrialState.COMPLETE, TrialState.PR
 
 Caveat 2: existing `try/except Exception` wrapper at `unified_bayesian.py:~1689` could swallow `TrialPruned` — must explicitly re-raise.
 
-Pros: saves ~25% compute on this run. Compute savings would be much larger for slow-fit models (LightGBM, XGBoost, CatBoost) because per-trial cost dominates.
+Pros: **the only option that saves wall-clock on CatBoost/XGBoost/LightGBM/CatBoost runs.** PLS fits in <1s, so on PLS the savings are real but modest (4-10 min on a 300-trial run). On boosters, each fit costs 10-60s; saving 25% of 300 trials = 10-60 minutes per run, scaling linearly with `n_trials`.
 Cons: fingerprint completeness is load-bearing — miss a dimension and a valid model gets silently skipped.
 
-### Option C — Data-aware `n_components` suggest range *(methodology change)*
+### Option C — Data-aware `n_components` suggest range *(PLS-only methodology change)*
+
+**Scope:** PLS regression and PLS-DA only. CatBoost / XGBoost / LightGBM / RandomForest / Ridge / Lasso / SVM / MLP are unaffected — those models clamp on `suggest_int`/`suggest_float` *bounds* (e.g., `trial.suggest_int('num_leaves', 15, max_valid)`), so TPE never sees an out-of-range value to silently rescue. The post-suggest clamp is unique to PLS `n_components` at `unified_bayesian.py:457-462`.
 
 Replace `unified_bayesian.py:457` with:
 
@@ -92,16 +104,16 @@ n_components = trial.suggest_int('n_components', 2, max_valid)
 
 **Why this is methodology, not a bug fix:** TPE in `multivariate=True` mode (`unified_bayesian.py:~2127`) builds a joint KDE. Fixed range gives stable support; dynamic range makes `n_components` conditional on `subset_size`, changing the KDE shape and TPE's exploration pattern. Convergence rate and reproducibility against fixed-range baselines are not pinned.
 
-Pros: eliminates 3a at the source. With the LVs reporting fix already in, this is the conceptually-honest version of the search space.
-Cons: methodology change → needs user signoff. Possible convergence regression. Old study DB resume would mix fixed-range and dynamic-range histories in the same KDE.
+Pros: eliminates 3a *for PLS only* at the source. With the LVs reporting fix already in, this is the conceptually-honest version of the PLS search space.
+Cons: methodology change → needs user signoff. Possible convergence regression. Old study DB resume would mix fixed-range and dynamic-range histories in the same KDE. **Does nothing for non-PLS model speed** — pick A if compute on CatBoost/XGBoost is the goal.
 
 Optuna 4.8.0 supports dynamic ranges syntactically (the `warn_independent_sampling=False` at `unified_bayesian.py:~2129` already suppresses the related warning).
 
 ## Recommended pickup order
 
-1. **Option B first** — 8 LOC, tautological safety, ships under "bug fix" framing per `feedback_chemometrics_relevance_per_ticket.md`. Defer A and C.
-2. After running B for a few sessions on real data, evaluate whether the compute waste is genuinely painful for LightGBM/XGBoost runs. If yes, Option A becomes worth the fingerprint-completeness work. If no, leave as B.
-3. **Option C only as a methodology paper requirement** — if/when documenting the search procedure for publication, the implicit-clamp design becomes unsightly. Otherwise it's a marginal improvement at high risk.
+1. **Option B first** — 8 LOC, tautological safety, ships under "bug fix" framing per `feedback_chemometrics_relevance_per_ticket.md`. Fixes leaderboard distortion for ALL model families (3b duplicates affect every model — TPE re-suggests across the board). Defer A and C.
+2. **Option A second, only if user runs slow-fit models routinely.** Watch for: 300-trial CatBoost or XGBoost or LightGBM runs taking >30 min where the user has commented on slowness. The fingerprint-completeness work is worthwhile when compute savings are 10-60 min per run, not when they're 4-10 min. PLS-only users can skip A indefinitely; B is sufficient.
+3. **Option C only as a methodology paper requirement** — if/when documenting the search procedure for publication, the implicit-clamp design becomes unsightly. Otherwise it's a marginal PLS-specific improvement at high risk. Do not pick C expecting compute savings on any non-PLS model.
 
 ## Other adjacent items observed but not in scope
 
