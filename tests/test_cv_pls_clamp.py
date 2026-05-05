@@ -12,6 +12,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from spectral_predict.bayesian_utils import _extract_fitted_n_components
 from spectral_predict.cv_utils import compute_min_train_fold_size
 
 
@@ -302,29 +303,6 @@ class TestRunBayesianSearchPLSGridClamping:
         )
 
 
-def _parse_fitted_n_components(params_value) -> int | None:
-    """Pull n_components out of a Params field — bare key or Pipeline-prefixed."""
-    import ast
-    if isinstance(params_value, dict):
-        parsed = params_value
-    elif isinstance(params_value, str) and params_value.strip():
-        try:
-            parsed = ast.literal_eval(params_value)
-        except (ValueError, SyntaxError):
-            return None
-        if not isinstance(parsed, dict):
-            return None
-    else:
-        return None
-    for key in ('n_components', 'model__n_components', 'pls__n_components'):
-        if key in parsed:
-            try:
-                return int(parsed[key])
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
 class TestLVsReportingMatchesFittedValue:
     """Regression: LVs column must equal the actually-fitted n_components.
 
@@ -361,7 +339,7 @@ class TestLVsReportingMatchesFittedValue:
         assert len(df) > 0, "No trials succeeded; can't validate LVs reporting"
         mismatches = []
         for _, row in df.iterrows():
-            fitted = _parse_fitted_n_components(row.get('Params'))
+            fitted = _extract_fitted_n_components(row.get('Params'))
             reported = row.get('LVs')
             if fitted is None or pd.isna(reported):
                 continue
