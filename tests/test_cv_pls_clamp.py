@@ -9,6 +9,7 @@ Covers:
 """
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from spectral_predict.cv_utils import compute_min_train_fold_size
@@ -299,3 +300,110 @@ class TestRunBayesianSearchPLSGridClamping:
             f"Bayesian PLS for N=10 LOO produced n_components={max(n_components_seen)}, "
             f"expected max 9 (n-1). Clamp is broken in run_bayesian_search."
         )
+
+
+def _parse_fitted_n_components(params_value) -> int | None:
+    """Pull n_components out of a Params field — bare key or Pipeline-prefixed."""
+    import ast
+    if isinstance(params_value, dict):
+        parsed = params_value
+    elif isinstance(params_value, str) and params_value.strip():
+        try:
+            parsed = ast.literal_eval(params_value)
+        except (ValueError, SyntaxError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+    else:
+        return None
+    for key in ('n_components', 'model__n_components', 'pls__n_components'):
+        if key in parsed:
+            try:
+                return int(parsed[key])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+class TestLVsReportingMatchesFittedValue:
+    """Regression: LVs column must equal the actually-fitted n_components.
+
+    Pre-fix bug: convert_study_to_dataframe read LVs from trial.params
+    (raw pre-clamp Optuna suggestion). When _suggest_hyperparams clamped
+    n_components down to fit n_features-1, the CSV reported the unclamped
+    value. The Model Development tab then tried to rebuild PLS with the
+    inflated value and sklearn errored.
+
+    Fix: persist int n_components_actual user_attr post-clamp; read it
+    in convert_study_to_dataframe; mirror in bayesian_utils.py.
+    """
+
+    @pytest.fixture
+    def small_features_data(self):
+        """40 samples x 12 features — n_features-1 < 20, so the clamp at
+        unified_bayesian.py:462 fires when Optuna suggests n_components > 11."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        n_samples, n_features = 40, 12
+        X = rng.standard_normal((n_samples, n_features))
+        y = X[:, 0] + 0.5 * X[:, 1] - 0.3 * X[:, 2] + 0.05 * rng.standard_normal(n_samples)
+        wavelengths = np.arange(1.0, n_features + 1.0)
+        return X, y, wavelengths
+
+    def test_unified_bayesian_lvs_matches_fitted_n_components(self, small_features_data):
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        X, y, wl = small_features_data
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS', task_type='regression',
+            n_trials=15, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        assert len(df) > 0, "No trials succeeded; can't validate LVs reporting"
+        mismatches = []
+        for _, row in df.iterrows():
+            fitted = _parse_fitted_n_components(row.get('Params'))
+            reported = row.get('LVs')
+            if fitted is None or pd.isna(reported):
+                continue
+            if int(reported) != int(fitted):
+                mismatches.append((row.get('trial_number'), int(reported), int(fitted)))
+        assert not mismatches, (
+            f"LVs column does not match fitted n_components in {len(mismatches)} rows. "
+            f"First few (trial_number, LVs_reported, fitted_n_components): {mismatches[:5]}"
+        )
+
+    def test_unified_bayesian_lvs_within_sklearn_bound(self, small_features_data):
+        """No LVs value can exceed n_vars (sklearn PLSRegression's hard cap).
+
+        sklearn requires n_components in [1, min(n_samples, n_features)] inclusive.
+        Pre-fix, LVs could be 19 with n_vars=10 — Model Dev rebuild then errored.
+        """
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        X, y, wl = small_features_data
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS', task_type='regression',
+            n_trials=15, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        for _, row in df.iterrows():
+            n_vars = row.get('n_vars')
+            lvs = row.get('LVs')
+            if pd.isna(n_vars) or pd.isna(lvs):
+                continue
+            assert int(lvs) <= int(n_vars), (
+                f"Trial {row.get('trial_number')}: LVs={int(lvs)} exceeds n_vars={int(n_vars)}; "
+                "sklearn PLSRegression would error on rebuild."
+            )
+
+    def test_extract_fitted_n_components_handles_pipeline_keys(self):
+        """Helper unit test: parser must accept bare and Pipeline-prefixed keys."""
+        from spectral_predict.bayesian_utils import _extract_fitted_n_components
+        assert _extract_fitted_n_components({'n_components': 9}) == 9
+        assert _extract_fitted_n_components({'model__n_components': 9}) == 9
+        assert _extract_fitted_n_components({'pls__n_components': 4}) == 4
+        assert _extract_fitted_n_components(
+            "{'model__copy': True, 'model__n_components': 7}"
+        ) == 7
+        assert _extract_fitted_n_components(None) is None
+        assert _extract_fitted_n_components("not a dict") is None
+        assert _extract_fitted_n_components({'alpha': 0.5}) is None  # no n_components key
