@@ -4,6 +4,38 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — `LVs` column showed Optuna's pre-clamp suggestion, not the actually-fitted value; root cause split across two source-of-truth fields
+
+User reported `outputs/results_N_20260505_124946.csv` rank 162 had `n_vars=10` and `LVs=19` — sklearn-impossible. Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features).
+
+**Root cause.** `unified_bayesian.py:457` calls `trial.suggest_int('n_components', 2, 20)` — Optuna records the raw suggestion (e.g., 19) into `trial.params['n_components']`. Line 462 then clamps for the actual fit: `n_components = min(suggestion, n_features-1)`. Line 1529 writes the *clamped* params to `trial.user_attrs['model_params']` as `str(dict)`. The CSV `Params` column reads from user_attrs (correct, shows 9). The CSV `LVs` column reads from `trial.params` (bug, shows 19 — the unclamped value).
+
+22 of 300 PLS rows in that CSV had `LVs > n_vars-1`. All were UVE/importance-subset rows where `n_features-1 < 20` so the clamp fired. Rows with full-feature counts (>20) never showed the bug because `min(suggestion, n_features-1) = suggestion` — clamp was a no-op.
+
+**Fix shape.** Persist the post-clamp `n_components_actual` int as a typed `trial.user_attr` (separate from the `str(dict)` round-trip `model_params` user_attr). Read that scalar for the LVs column. Sister site at `bayesian_utils.py:746` reads via new `_extract_fitted_n_components(params_value)` helper that handles bare `n_components`, `model__n_components` (regression PLS Pipeline-prefixed), and `pls__n_components` (PLS-DA Pipeline-prefixed). Codex pre-merge review caught a third sister site at `nsga2_search.py:3979` calling `.get('n_components')` on `str(params_dict)` — would raise AttributeError; routed through the same helper.
+
+**Why my first attempt was broken.** Initial proposal was `ast.literal_eval(model_params).get('n_components')`. Both Codex and DeepSeek caught: the captured fitted Pipeline params have key `model__n_components` (or `pls__n_components` for PLS-DA), not bare `n_components`. So `.get('n_components')` would have returned None for 100% of Bayesian PLS rows, destroying the LVs column entirely. The dedicated `n_components_actual` user_attr sidesteps this — it's an `int` not a stringified dict, no Pipeline-key ambiguity.
+
+**Backwards compat.** Old study DBs without `n_components_actual` user_attr fall back to `trial.params.get('n_components')` (pre-fix behavior). The legacy `bayesian_utils.convert_optuna_result_to_dasp_format` path reads from `_extract_fitted_n_components(config_result['Params'])` first, then `n_components_actual` user_attr, then `trial.params` — three-tier chain ordered by reliability.
+
+**GUI Model Dev tab.** `spectral_predict_gui_optimized.py:36710-36748` was reading LVs first (with Params as a fallback that only triggered when `n_components == 10`, the default — so an inflated LVs=19 always skipped the fallback). Inverted to read Params first, fall back to LVs. This *also* fixes Model Dev rebuild for already-existing CSVs with bad LVs labels — no need to re-run searches.
+
+**Empirical also-discovered (deferred).** While diagnosing, found that 74/300 PLS rows in the diagnostic CSV are duplicate fits — 4 from clamp-induced collisions (different raw suggestions clamping to the same fitted value), 70 from TPE re-suggesting the same parameter vector. Top-5 leaderboard ranks 1–5 were all the same model fit 5 times. Filed as `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md` per user prioritization (LVs reporting fix > dedup).
+
+**Cross-family review pattern.** Two-phase: design opinion (Codex + DeepSeek + GLM 5.1 on the dedup approach) → implementation review (Codex + GLM 5.1 on the diff). Codex caught the NSGA-II sister site that grep didn't reveal because the offending line called `.get()` on a string variable named `model_params` whose type was opaque without tracing `decode_solution()` at line 2445. GLM 5.1 caught helper duplication between tests and production. Both rated READY_TO_MERGE after fixup.
+
+**A/B verification.** `tools/ab_lv_compare.py` runs the same 25-trial PLS search before and after the edits with `random_state=42`. Confirmed 19 model-fit columns byte-identical (Params, RMSEcv, R2cv, MAEcv, etc.); only LVs column differs, on exactly the rows where the clamp fired. Pure reporting-layer fix, zero behavior change to model selection.
+
+**Files touched (commits `9b86bc9` + `a64004f`).**
+- `src/spectral_predict/unified_bayesian.py` — set `n_components_actual` user_attr; read it for LVs.
+- `src/spectral_predict/bayesian_utils.py` — new `_extract_fitted_n_components` helper; LVs reads via fallback chain.
+- `src/spectral_predict/nsga2_search.py` — `include_best_from_all` row uses helper instead of `.get()` on stringified dict.
+- `spectral_predict_gui_optimized.py` — Model Dev rebuild prefers Params over LVs.
+- `tests/test_cv_pls_clamp.py` — added `TestLVsReportingMatchesFittedValue` (3 tests); collapsed duplicate parser to import production helper.
+- `tools/ab_lv_compare.py` — A/B harness (kept for future regression checks).
+
+---
+
 ## 2026-05-04 — booster export-CV silently divergent since `af6f4cf`; export had no `early_stopping_rounds` plumbing at all
 
 User-reported symptom: in-app LightGBM 3-class CV reports `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1; the exported Colab notebook (`example/colab_20260504_103912.ipynb`) reports `0.976` with one borderline class-2 sample misclassified. Both run on the same 41×20 embedded data — preprocessing/varsel/sample-count/feature-ordering all matched, ruled out via reproduction.
