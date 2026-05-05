@@ -73,9 +73,9 @@ if fingerprint in seen_fingerprints:
 seen_fingerprints[fingerprint] = trial.number
 ```
 
-Caveat from Codex review: `terminal_states = (TrialState.COMPLETE, TrialState.PRUNED)` at `unified_bayesian.py:2510` makes `PRUNED` count as a terminal state for resume. A 300-trial budget could shrink to ~225 unique fits without telling the user. Bumping `n_trials` to compensate is the workaround, but the bump amount depends on duplicate rate which depends on data.
+Caveat from Codex review: `terminal_states = (TrialState.COMPLETE, TrialState.PRUNED)` at `unified_bayesian.py:~2518` makes `PRUNED` count as a terminal state for resume. A 300-trial budget could shrink to ~225 unique fits without telling the user. Bumping `n_trials` to compensate is the workaround, but the bump amount depends on duplicate rate which depends on data.
 
-Caveat 2: existing `try/except Exception` wrapper at `unified_bayesian.py:1681` could swallow `TrialPruned` — must explicitly re-raise.
+Caveat 2: existing `try/except Exception` wrapper at `unified_bayesian.py:~1689` could swallow `TrialPruned` — must explicitly re-raise.
 
 Pros: saves ~25% compute on this run. Compute savings would be much larger for slow-fit models (LightGBM, XGBoost, CatBoost) because per-trial cost dominates.
 Cons: fingerprint completeness is load-bearing — miss a dimension and a valid model gets silently skipped.
@@ -90,12 +90,12 @@ n_components = trial.suggest_int('n_components', 2, max_valid)
 # Clamp at line 462 becomes vestigial; remove it.
 ```
 
-**Why this is methodology, not a bug fix:** TPE in `multivariate=True` mode (`:2119`) builds a joint KDE. Fixed range gives stable support; dynamic range makes `n_components` conditional on `subset_size`, changing the KDE shape and TPE's exploration pattern. Convergence rate and reproducibility against fixed-range baselines are not pinned.
+**Why this is methodology, not a bug fix:** TPE in `multivariate=True` mode (`unified_bayesian.py:~2127`) builds a joint KDE. Fixed range gives stable support; dynamic range makes `n_components` conditional on `subset_size`, changing the KDE shape and TPE's exploration pattern. Convergence rate and reproducibility against fixed-range baselines are not pinned.
 
 Pros: eliminates 3a at the source. With the LVs reporting fix already in, this is the conceptually-honest version of the search space.
 Cons: methodology change → needs user signoff. Possible convergence regression. Old study DB resume would mix fixed-range and dynamic-range histories in the same KDE.
 
-Optuna 4.8.0 supports dynamic ranges syntactically (the `warn_independent_sampling=False` at `:2121` already suppresses the related warning).
+Optuna 4.8.0 supports dynamic ranges syntactically (the `warn_independent_sampling=False` at `unified_bayesian.py:~2129` already suppresses the related warning).
 
 ## Recommended pickup order
 
@@ -108,7 +108,7 @@ Optuna 4.8.0 supports dynamic ranges syntactically (the `warn_independent_sampli
 From Codex review of 9b86bc9:
 
 - **Pre-existing edge case** in `search.py:338`: `n_lvs = row.get('LVs', None)` reads from CSV — a pre-fix CSV with inflated LVs would feed the wrong value, but the next-line `set_params(**model_kwargs)` parsing of `Params` overrides it. Less robust than the GUI's new priority inversion. Not introduced here.
-- **Helper duplication risk** between GUI `spectral_predict_gui_optimized.py:36732` and `bayesian_utils._extract_fitted_n_components`: GUI does its own ast.literal_eval inline (key order: `model__`, `pls__`, bare). Same logic but separate call site. Could canonicalize via the helper if the duplication ever drifts.
+- **Helper duplication risk** between GUI `spectral_predict_gui_optimized.py:~36733` and `bayesian_utils._extract_fitted_n_components`: GUI does its own ast.literal_eval inline (key order: `model__`, `pls__`, bare). Same logic but separate call site. Could canonicalize via the helper if the duplication ever drifts.
 
 From GLM 5.1 review:
 
