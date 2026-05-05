@@ -138,7 +138,7 @@ Claude-family toolkit panel ran on PR #52 cumulative diff (code-reviewer + comme
 
 From Codex review of 9b86bc9:
 
-- **Pre-existing edge case** in `search.py:338`: `n_lvs = row.get('LVs', None)` reads from CSV — a pre-fix CSV with inflated LVs would feed the wrong value, but the next-line `set_params(**model_kwargs)` parsing of `Params` overrides it. Less robust than the GUI's new priority inversion. Not introduced here.
+- **Pre-existing edge case** in `search.py:338`: `n_lvs = row.get('LVs', None)` reads from CSV — a pre-fix CSV with inflated LVs would feed the wrong value. The next-line `set_params(**model_kwargs)` parsing of `Params` overrides it for **regression PLS** (key shape `model__n_components`) and bare-key models, but **not for PLS-DA** because `pls__n_components` was being skipped by the Pipeline-prefix normalizer at `search.py:362-363`. Closed in this PR by stripping `pls__` to bare key alongside `model__`; was less robust than the GUI's new priority inversion. Not introduced by the LVs reporting fix family but adjacent enough to fix in this PR. Pinned by `tests/test_cv_pls_clamp.py:test_rebuild_model_from_row_strips_pls_prefix`.
 - **Helper duplication risk** between GUI `spectral_predict_gui_optimized.py:~36733` and `bayesian_utils._extract_fitted_n_components`: GUI does its own ast.literal_eval inline (key order: `model__`, `pls__`, bare). Same logic but separate call site. Could canonicalize via the helper if the duplication ever drifts.
 
 From GLM 5.1 review:

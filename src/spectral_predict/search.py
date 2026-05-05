@@ -353,14 +353,23 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     model = get_model(model_name, task_type=task_type, n_components=n_components,
                       max_n_components=max(n_components, 20))
 
-    # Strip Pipeline prefixes from stored params (e.g., 'model__n_estimators' → 'n_estimators')
+    # Strip Pipeline prefixes from stored params (e.g., 'model__n_estimators' → 'n_estimators').
+    # PLS-DA captured params carry 'pls__' as the inner-step prefix. At this point
+    # `model` is still the bare estimator (PLSTransformer for PLS-DA, before the
+    # outer Pipeline wrap below), so 'pls__n_components' must be stripped to bare
+    # 'n_components' before set_params, otherwise sklearn raises and the rebuild
+    # falls back to the inflated default n_components from the (potentially stale)
+    # LVs column. Other Pipeline wrappers (scaler__, lr__) are still skipped because
+    # those sub-estimators are constructed fresh during the wrap, not via set_params.
     if model_kwargs:
         normalized = {}
         for key, value in model_kwargs.items():
             if key.startswith('model__'):
                 normalized[key[7:]] = value
+            elif key.startswith('pls__'):
+                normalized[key[5:]] = value
             elif '__' in key:
-                continue  # Skip other Pipeline wrapper params (scaler__, pls__, lr__)
+                continue  # Skip remaining Pipeline wrapper params (scaler__, lr__)
             else:
                 normalized[key] = value
         model_kwargs = normalized

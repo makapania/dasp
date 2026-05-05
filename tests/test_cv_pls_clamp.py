@@ -395,3 +395,67 @@ class TestLVsReportingMatchesFittedValue:
         assert _extract_fitted_n_components(None) is None
         assert _extract_fitted_n_components("not a dict") is None
         assert _extract_fitted_n_components({'alpha': 0.5}) is None  # no n_components key
+
+    def test_unified_bayesian_lvs_matches_fitted_for_plsda(self):
+        """PLS-DA path uses the `pls__` Pipeline prefix in captured Params.
+
+        Kimi K2.6 final review surfaced that the regression PLS test alone does
+        not exercise the `pls__n_components` key shape, leaving a refactor that
+        breaks PLS-DA convert_study_to_dataframe handling silently uncovered.
+        """
+        import numpy as np
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        rng = np.random.default_rng(42)
+        n_samples, n_features = 60, 12
+        X = rng.standard_normal((n_samples, n_features))
+        # Two-class problem, separable on the first feature
+        y = (X[:, 0] > 0).astype(int)
+        wl = np.arange(1.0, n_features + 1.0)
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS-DA', task_type='classification',
+            n_trials=10, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        if len(df) == 0:
+            pytest.skip("PLS-DA trials all failed in synthetic harness; coverage skipped")
+        checked = 0
+        mismatches = []
+        for _, row in df.iterrows():
+            fitted = _extract_fitted_n_components(row.get('Params'))
+            reported = row.get('LVs')
+            if fitted is None or pd.isna(reported):
+                continue
+            checked += 1
+            if int(reported) != int(fitted):
+                mismatches.append((row.get('trial_number'), int(reported), int(fitted)))
+        assert checked > 0, "PLS-DA test was vacuous — no parseable Params rows"
+        assert not mismatches, (
+            f"PLS-DA: LVs column does not match fitted pls__n_components in {len(mismatches)} rows. "
+            f"First few (trial, LVs_reported, fitted): {mismatches[:5]}"
+        )
+
+    def test_rebuild_model_from_row_strips_pls_prefix(self):
+        """`_rebuild_model_from_row` must apply pls__n_components from Params.
+
+        Pre-fix: `pls__n_components` was skipped by the Pipeline-prefix normalizer
+        (search.py:362-363 elif '__' in key: continue), so a pre-fix CSV with bad
+        LVs would crash at fit time because the inflated PLSTransformer
+        n_components was never corrected by set_params. Kimi K2.6 final review.
+        """
+        import pandas as pd
+        from spectral_predict.search import _rebuild_model_from_row
+        # Synthetic pre-fix CSV row: inflated LVs (impossible for the data shape)
+        # but Params correctly captures the post-clamp pls__n_components.
+        row = pd.Series({
+            'Model': 'PLS-DA',
+            'LVs': 19,  # inflated — what pre-fix CSVs would have stored
+            'Params': "{'pls__copy': True, 'pls__max_iter': 500, "
+                      "'pls__n_components': 5, 'pls__scale': False, 'pls__tol': 1e-06}",
+        })
+        pipeline = _rebuild_model_from_row(row, task_type='classification')
+        # PLS-DA returns a sklearn Pipeline with steps [pls, scaler, lr]
+        pls_step = pipeline.named_steps['pls']
+        assert pls_step.n_components == 5, (
+            f"Expected n_components=5 from Params['pls__n_components'], got {pls_step.n_components}. "
+            "The pls__ prefix normalizer at search.py:~362 must strip pls__ to bare key."
+        )
