@@ -338,13 +338,23 @@ class TestLVsReportingMatchesFittedValue:
         )
         assert len(df) > 0, "No trials succeeded; can't validate LVs reporting"
         mismatches = []
+        checked = 0
         for _, row in df.iterrows():
             fitted = _extract_fitted_n_components(row.get('Params'))
             reported = row.get('LVs')
             if fitted is None or pd.isna(reported):
                 continue
+            checked += 1
             if int(reported) != int(fitted):
                 mismatches.append((row.get('trial_number'), int(reported), int(fitted)))
+        # Guard against vacuous pass: if every row got skipped (e.g., the helper
+        # silently regresses for the most common Params shape), the loop would
+        # report zero mismatches without actually checking anything.
+        assert checked > 0, (
+            "Test was vacuous — no rows had both fitted n_components and LVs populated. "
+            "Either the search produced no PLS rows, or _extract_fitted_n_components "
+            "regressed and returns None for the actual Params shape."
+        )
         assert not mismatches, (
             f"LVs column does not match fitted n_components in {len(mismatches)} rows. "
             f"First few (trial_number, LVs_reported, fitted_n_components): {mismatches[:5]}"

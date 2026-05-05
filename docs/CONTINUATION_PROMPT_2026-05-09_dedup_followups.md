@@ -115,6 +115,25 @@ Optuna 4.8.0 supports dynamic ranges syntactically (the `warn_independent_sampli
 2. **Option A second, only if user runs slow-fit models routinely.** Watch for: 300-trial CatBoost or XGBoost or LightGBM runs taking >30 min where the user has commented on slowness. The fingerprint-completeness work is worthwhile when compute savings are 10-60 min per run, not when they're 4-10 min. PLS-only users can skip A indefinitely; B is sufficient.
 3. **Option C only as a methodology paper requirement** — if/when documenting the search procedure for publication, the implicit-clamp design becomes unsightly. Otherwise it's a marginal PLS-specific improvement at high risk. Do not pick C expecting compute savings on any non-PLS model.
 
+## Toolkit-panel review findings deferred from this PR
+
+Claude-family toolkit panel ran on PR #52 cumulative diff (code-reviewer + comment-analyzer + pr-test-analyzer + silent-failure-hunter):
+
+### Deferred (medium priority, file as next-session work)
+
+- **Helper return-value ambiguity** — `_extract_fitted_n_components` collapses three failure modes (parse failure, missing key, non-numeric value) into one `None`. Two of those are now logged at WARNING level (closed in this PR), but callers still cannot programmatically distinguish "non-PLS row, no n_components expected" from "Params corrupted, bug signal." Cleanest fix: small dataclass return type or raise on parse failure. Defer until a caller actually needs the distinction.
+- **NSGA-II `include_best_from_all` LVs=None silent drop** — when the helper returns None for a PLS/PLS-DA row in `nsga2_search.py:3980-3983`, the `'LVs': None` flows into the V1 results DataFrame. Logging at the helper level (added in this PR) covers parse failures; missing-key on a PLS model would still be silent. Add a NSGA-specific log when `model in ('PLS', 'PLS-DA')` AND helper returns None.
+- **`print()` → `logger` migration** — silent-failure-hunter flagged that the GUI rebuild block at `spectral_predict_gui_optimized.py:36710-36800` uses `print(f"DEBUG: ...")` and `print(f"WARNING: ...")` rather than `logger.{debug,warning}`. The new code in this PR matched the pre-existing convention in that file (consistent locally) but violates the project-wide `code-style.md` rule "Log errors with context using logging module." File a sweep ticket for the whole 36710-36800 block.
+- **Comment rot risk** — comment-analyzer flagged two cross-file pins to `unified_bayesian.py:462`: `bayesian_utils.py:794` and `tests/test_cv_pls_clamp.py:322`. Currently accurate but rot-prone; replace with symbolic anchors (function name + clamp expression).
+- **Pre-existing inaccurate line ref** at `bayesian_utils.py:835` cites `search.py:4532` which is unrelated polyorder code; the actual matching scheme is at `search.py:5080-5081`. Not introduced by this PR but worth a one-line cleanup next time `bayesian_utils.py` is touched.
+
+### Test follow-ups (pr-test-analyzer)
+
+- **Legacy `convert_optuna_result_to_dasp_format` end-to-end test** — helper is unit-tested but the full Params→user_attr→trial.params fallback chain isn't exercised end-to-end. ~30 LOC.
+- **NSGA-II `include_best_from_all` LVs test** — pin that the helper migration in `a64004f` works on the actual stringified-dict shape `decode_solution()` produces. ~20 LOC.
+- **Tab7-mocked Model Dev rebuild test** — covers the priority inversion at `spectral_predict_gui_optimized.py:36710-36748` end-to-end. Needs Tk dialog mocking. ~50 LOC.
+- **PLS-DA end-to-end variant** — copy of `test_unified_bayesian_lvs_matches_fitted_n_components` with `model_name='PLS-DA'` to validate `pls__n_components` shape end-to-end. ~30 LOC.
+
 ## Other adjacent items observed but not in scope
 
 From Codex review of 9b86bc9:

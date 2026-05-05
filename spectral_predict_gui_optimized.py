@@ -36746,6 +36746,18 @@ F1 Score:  {f1:.4f}
                 if lvs_value is not None and not pd.isna(lvs_value):
                     n_components = int(lvs_value)
                     print(f"DEBUG: Using n_components={n_components} from LVs (Params unavailable)")
+                else:
+                    # Both sources failed; falling back to default. Surface this so the
+                    # user can correlate unexpected rebuild behavior with bad source data.
+                    raw_params_dbg = (
+                        self.selected_model_config.get('Params')
+                        if self.selected_model_config else None
+                    )
+                    print(
+                        f"WARNING: Neither Params nor LVs yielded a usable n_components for "
+                        f"{model_name}; falling back to default n_components={n_components}. "
+                        f"Params={raw_params_dbg!r}, LVs={lvs_value!r}"
+                    )
 
             # CRITICAL: Use n_components as max to prevent clipping
             # When reproducing a model, we must use the EXACT n_components from training

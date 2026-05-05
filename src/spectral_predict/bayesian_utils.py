@@ -36,14 +36,22 @@ def _extract_fitted_n_components(params_value: Any) -> Optional[int]:
       - bare 'n_components' (pre-fit dict from suggest_model_params)
       - 'model__n_components' (Pipeline-prefixed, regression PLS captured params)
       - 'pls__n_components' (PLS-DA classifier captured params)
-    Returns None if the value cannot be parsed or no key matches.
+
+    Returns None on:
+      - unrecognized input type (None, empty string, non-dict literal)
+      - parse failure (logged at WARNING level — bug signal)
+      - no recognized key in the dict (legitimate non-PLS or missing field)
+      - present-but-non-numeric value (logged at WARNING — bug signal)
     """
     if isinstance(params_value, dict):
         parsed = params_value
     elif isinstance(params_value, str) and params_value.strip():
         try:
             parsed = ast.literal_eval(params_value)
-        except (ValueError, SyntaxError):
+        except (ValueError, SyntaxError) as e:
+            logging.getLogger(__name__).warning(
+                "Failed to parse model_params string %r: %s", params_value[:200], e,
+            )
             return None
         if not isinstance(parsed, dict):
             return None
@@ -54,7 +62,11 @@ def _extract_fitted_n_components(params_value: Any) -> Optional[int]:
         if key in parsed:
             try:
                 return int(parsed[key])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
+                logging.getLogger(__name__).warning(
+                    "Found %s=%r in model_params but cannot coerce to int: %s",
+                    key, parsed[key], e,
+                )
                 return None
     return None
 
