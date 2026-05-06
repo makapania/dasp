@@ -179,7 +179,24 @@ def validate_match(pre_df: pd.DataFrame, pre_study: optuna.Study, post_df: pd.Da
     dedup_subset = [col for col in DEDUP_COLS if col in post_df.columns]
     dup_count = int(post_df.duplicated(subset=dedup_subset).sum()) if dedup_subset else 0
     if dup_count:
-        raise AssertionError(f"post-fix dataframe has {dup_count} duplicate rows under {dedup_subset}")
+        dup_mask = post_df.duplicated(subset=dedup_subset, keep=False)
+        dup_rows = post_df[dup_mask].sort_values(dedup_subset)
+        diag = []
+        for _, row in dup_rows.iterrows():
+            fp = post_fp_by_trial.get(int(row.get("trial_number", -1)), "<no-fp>")
+            diag.append(
+                f"  trial={int(row.get('trial_number', -1))} "
+                f"SubsetTag={row.get('SubsetTag')} n_vars={row.get('n_vars')} "
+                f"Params={row.get('Params')} "
+                f"PreprocessBase={row.get('PreprocessBase')} "
+                f"Deriv={row.get('Deriv')} Window={row.get('Window')} "
+                f"Poly={row.get('Poly')} Autoscale={row.get('Autoscale')} "
+                f"fp_full={fp}"
+            )
+        raise AssertionError(
+            f"post-fix dataframe has {dup_count} duplicate rows under {dedup_subset}:\n"
+            + "\n".join(diag)
+        )
     if len(pre_df) < len(post_df):
         raise AssertionError(f"pre row count {len(pre_df)} < post row count {len(post_df)}")
 
@@ -190,28 +207,56 @@ def validate_match(pre_df: pd.DataFrame, pre_study: optuna.Study, post_df: pd.Da
     }
 
 
-def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
+def run_scenario(scenario: Scenario, n_trials: int, max_features: int, require_dedup: bool = False):
     pre_df, pre_study = run_case(scenario, n_trials=n_trials, disable_dedup=True, max_features=max_features)
+    pre_total = sum(
+        1 for t in pre_study.trials
+        if t.state == optuna.trial.TrialState.COMPLETE
+        and t.value is not None
+        and t.value < 1e9
+    )
     pre_unique = len(set(trial_fingerprint_map(pre_study).values()))
+    dedup_avoided = pre_total - pre_unique
     post_df, post_study = run_case(scenario, n_trials=pre_unique, disable_dedup=False, max_features=max_features)
     result = validate_match(pre_df, pre_study, post_df, post_study, scenario.task_type)
     print(
-        f"{scenario.name}: pre_unique_count={result['pre_unique_count']} "
-        f"post_row_count={result['post_row_count']} match_percent={result['match_percent']:.1f}"
+        f"{scenario.name}: pre_total={pre_total} pre_unique={pre_unique} "
+        f"dedup_avoided={dedup_avoided} post_row_count={result['post_row_count']} "
+        f"match_percent={result['match_percent']:.1f}"
     )
+    if dedup_avoided == 0:
+        msg = (
+            f"  No collisions at n_trials={n_trials}; dedup path not exercised. "
+            f"Bump --n-trials to verify the prune codepath end-to-end."
+        )
+        if require_dedup:
+            raise AssertionError(msg)
+        print(msg)
     return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--scenario", choices=sorted(SCENARIOS), action="append")
-    parser.add_argument("--n-trials", type=int, default=12)
+    parser.add_argument(
+        "--n-trials", type=int, default=50,
+        help="Trials per scenario. Bumped from 12 to 50 so dedup is more likely to fire.",
+    )
     parser.add_argument("--max-features", type=int, default=120)
+    parser.add_argument(
+        "--require-dedup", action="store_true",
+        help="Fail if no collisions occur — proves dedup codepath was exercised.",
+    )
     args = parser.parse_args()
 
     names = args.scenario or list(SCENARIOS)
     for name in names:
-        run_scenario(SCENARIOS[name], n_trials=args.n_trials, max_features=args.max_features)
+        run_scenario(
+            SCENARIOS[name],
+            n_trials=args.n_trials,
+            max_features=args.max_features,
+            require_dedup=args.require_dedup,
+        )
     return 0
 
 
