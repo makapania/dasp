@@ -4000,6 +4000,10 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         global_total=total_trials
                     )
 
+                # Plain n_trials — under value-cache-and-replay dedup,
+                # duplicates short-circuit via cached values rather than
+                # raising TrialPruned. n_trials=N produces N COMPLETE trials
+                # with TPE history bit-identical to pre-dedup behavior.
                 study.optimize(
                     objective_fn,
                     n_trials=n_trials,

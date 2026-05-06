@@ -106,6 +106,15 @@ PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 _EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
 
 
+# Single source of truth for the trial.user_attr key that marks a trial as a
+# value-cache-and-replay duplicate. Setter is _register_or_replay_fingerprint;
+# readers are convert_study_to_dataframe (this module) and
+# bayesian_utils.convert_optuna_result_to_dasp_format. Extracting this as a
+# constant prevents typo-asymmetric silent failures (writer-reader mismatch
+# would make duplicates leak into the leaderboard with no test signal).
+DUPLICATE_OF_TRIAL_ATTR = 'duplicate_of_trial'
+
+
 def _supports_early_stopping(model_name: str) -> bool:
     return model_name in _EARLY_STOPPING_MODELS
 
@@ -139,6 +148,218 @@ def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
             continue
 
     return filtered_params
+
+
+def _freeze_for_fingerprint(value: Any) -> Any:
+    """Convert nested values to a stable, literal-safe representation.
+
+    Special-cases non-finite floats (nan, +inf, -inf) to string sentinels
+    because ``ast.literal_eval(repr(float('nan')))`` raises SyntaxError,
+    breaking resume rehydration of stored fingerprints.
+    """
+    if hasattr(value, 'item'):
+        value = value.item()
+    if isinstance(value, np.ndarray):
+        return tuple(_freeze_for_fingerprint(v) for v in value.tolist())
+    if isinstance(value, dict):
+        return tuple(
+            (str(k), _freeze_for_fingerprint(v))
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_for_fingerprint(v) for v in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_for_fingerprint(v) for v in value))
+    if isinstance(value, float):
+        if np.isnan(value):
+            return '__nan_sentinel__'
+        if np.isinf(value):
+            return '__pos_inf_sentinel__' if value > 0 else '__neg_inf_sentinel__'
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return repr(value)
+
+
+def _selected_indices_fingerprint(top_indices) -> Any:
+    if top_indices is None:
+        return None
+    return tuple(int(i) for i in np.asarray(top_indices).tolist())
+
+
+def _resolved_weighting_fingerprint(model) -> tuple:
+    """Capture resolved class-weight knobs after model/pipeline construction."""
+    try:
+        params = model.get_params(deep=True)
+    except Exception:
+        return ()
+    resolved = []
+    for key, value in params.items():
+        key_lower = key.lower()
+        if key_lower.endswith('class_weight') or key_lower.endswith('auto_class_weights'):
+            resolved.append((key, _freeze_for_fingerprint(value)))
+    return tuple(sorted(resolved))
+
+
+def _build_fit_fingerprint(
+    *,
+    preprocess_config: Dict[str, Any],
+    subset_type: str,
+    subset_tag: str,
+    n_vars: int,
+    top_indices,
+    model_name: str,
+    task_type: str,
+    model_params: Dict[str, Any],
+    imbalance_method: Optional[str],
+    imbalance_params: Optional[Dict[str, Any]],
+    use_sample_weight_for_classification: bool,
+    resolved_class_weight: tuple,
+    tail_lr_random_state: Optional[int],
+    early_stopping_rounds: Optional[int],
+    use_early_stopping: bool,
+    baseline_method: Optional[str],
+    baseline_params: Optional[Dict[str, Any]],
+    smoothing_window: int,
+    smoothing_polyorder: int,
+) -> tuple:
+    """Fingerprint the fully resolved model fit immediately before CV.
+
+    Captures *resolved fit identity*, not user-suggested intent:
+    - ``subset_size`` is excluded — it's the requested cap (e.g. ``'full'``,
+      250, 1000), but the actual fit is determined by ``n_vars`` +
+      ``top_indices`` after clamping to the available feature count.
+      Two region trials suggesting size=250 and size=1000 that both
+      resolve to n_vars=50 with the same ``top_indices`` produce the
+      same fit and must share a fingerprint.
+    - ``subset_type`` is canonicalized to ``'full'`` when
+      ``top_indices is None`` — i.e. when no subsetting happens.
+      A trial with ``subset_type='cars'`` and one with
+      ``subset_type='importance'`` both running on the full feature
+      set produce the same fit; the user-suggested method label
+      doesn't affect the fitted model.
+    """
+    canonical_subset_type = subset_type if top_indices is not None else 'full'
+    return (
+        ('preprocess_name', preprocess_config.get('name', 'raw')),
+        ('deriv', preprocess_config.get('deriv', 0)),
+        ('window', preprocess_config.get('window', 0)),
+        ('polyorder', preprocess_config.get('polyorder', 0)),
+        ('apply_baseline', preprocess_config.get('apply_baseline', False)),
+        ('baseline_method', baseline_method if preprocess_config.get('apply_baseline', False) else None),
+        ('baseline_params', _freeze_for_fingerprint(baseline_params or {}) if preprocess_config.get('apply_baseline', False) else ()),
+        ('apply_smoothing', preprocess_config.get('apply_smoothing', False)),
+        ('smoothing_window', smoothing_window if preprocess_config.get('apply_smoothing', False) else None),
+        ('smoothing_polyorder', smoothing_polyorder if preprocess_config.get('apply_smoothing', False) else None),
+        ('apply_autoscale', preprocess_config.get('apply_autoscale', False)),
+        ('subset_type', canonical_subset_type),
+        ('subset_tag', subset_tag),
+        ('n_vars', int(n_vars)),
+        ('top_indices', _selected_indices_fingerprint(top_indices)),
+        ('model_name', model_name),
+        ('task_type', task_type),
+        ('model_params', _freeze_for_fingerprint(model_params or {})),
+        ('imbalance_method', imbalance_method),
+        ('imbalance_params', _freeze_for_fingerprint(imbalance_params or {})),
+        ('use_sample_weight_for_classification', bool(use_sample_weight_for_classification)),
+        ('resolved_class_weight', _freeze_for_fingerprint(resolved_class_weight)),
+        ('tail_lr_random_state', tail_lr_random_state),
+        ('early_stopping_rounds', early_stopping_rounds),
+        ('use_early_stopping', bool(use_early_stopping)),
+    )
+
+
+def _register_or_replay_fingerprint(
+    trial: Trial,
+    fingerprint: tuple,
+    seen_fingerprints: Dict[tuple, tuple],
+) -> Optional[float]:
+    """Check fingerprint cache; replay prior trial's value if duplicate.
+
+    Returns:
+        ``None`` if this is a novel fingerprint — caller proceeds with the
+        full fit, then calls ``_record_fingerprint_value`` after success.
+        Cached float ``value`` if the fingerprint was already evaluated —
+        caller short-circuits and returns this value as the trial's metric.
+
+    The cache stores ``(prior_trial_number, prior_value)`` tuples. By
+    returning the cached value (not raising ``TrialPruned``), TPE sees the
+    same point evaluated to the same value twice, exactly as it would have
+    if we had re-fit the duplicate. This preserves TPE's KDE history bit-
+    identically to the pre-dedup behavior — same parameter space exploration,
+    just no redundant compute.
+    """
+    cached = seen_fingerprints.get(fingerprint)
+    trial.set_user_attr('fingerprint', repr(fingerprint))
+    if cached is not None:
+        prior_trial_number, prior_value = cached
+        if prior_value is not None:
+            # Real-value cache hit: this trial is a true duplicate; mark it
+            # for CSV-leaderboard filtering and replay the cached metric.
+            trial.set_user_attr(DUPLICATE_OF_TRIAL_ATTR, int(prior_trial_number))
+            return float(prior_value)
+        # None placeholder (sub-fit membership marker) — caller proceeds with
+        # full fit. Do NOT set DUPLICATE_OF_TRIAL_ATTR; this trial is novel
+        # from the leaderboard's perspective and must not be filtered.
+    return None
+
+
+def _record_fingerprint_value(
+    fingerprint: tuple,
+    trial: Trial,
+    value: float,
+    seen_fingerprints: Dict[tuple, tuple],
+) -> None:
+    """Cache (trial_number, value) so future identical fingerprints can replay.
+
+    Sub-fits (legacy bayesian_utils path) store ``(trial_number, None)`` for
+    membership-only tracking. If the same fingerprint were ever to arrive
+    here with a real value (which shouldn't happen — sub-fits and main-fits
+    have structurally distinct fingerprints via subset_type/top_indices),
+    we promote the None placeholder to the real value rather than dropping
+    it. Defense-in-depth per DeepSeek STRONG-2 review.
+    """
+    if value is None:
+        return
+    cached = seen_fingerprints.get(fingerprint)
+    if cached is None or cached[1] is None:
+        # Novel fingerprint OR existing None-placeholder from sub-fit:
+        # record the real value so future duplicates can replay it.
+        seen_fingerprints[fingerprint] = (trial.number, float(value))
+
+
+def _rehydrate_seen_fingerprints(
+    study: optuna.Study,
+    seen_fingerprints: Dict[tuple, tuple],
+) -> int:
+    """Load (trial_number, value) for each COMPLETE trial's fingerprint.
+
+    Pre-fix CSV-style replay needs the value, not just the trial number, so
+    a resume run can return cached values without re-fitting.
+    """
+    from optuna.trial import TrialState
+
+    added = 0
+    for trial in study.trials:
+        if trial.state != TrialState.COMPLETE:
+            continue
+        if trial.value is None:
+            continue
+        fingerprint_repr = trial.user_attrs.get('fingerprint')
+        if not fingerprint_repr:
+            continue
+        try:
+            fingerprint = ast.literal_eval(fingerprint_repr)
+        except (ValueError, SyntaxError):
+            logger.warning(
+                "Could not parse stored Bayesian fingerprint for trial %s; "
+                "resume dedup may miss that prior fit.",
+                trial.number,
+            )
+            continue
+        if fingerprint not in seen_fingerprints:
+            seen_fingerprints[fingerprint] = (trial.number, float(trial.value))
+            added += 1
+    return added
 
 # Subset sizes to explore
 SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
@@ -787,6 +1008,7 @@ def create_unified_objective(
     enable_uve: bool = False,
     inlier_class_label=None,
     y_original: np.ndarray | None = None,
+    seen_fingerprints: Optional[Dict[tuple, tuple]] = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -889,6 +1111,8 @@ def create_unified_objective(
     region_cache = {}
     importance_cache = {}  # Cache importances per (preprocessing_config, method, model_proxy)
     preprocessing_cache = {}  # Cache preprocessed data per config
+    if seen_fingerprints is None:
+        seen_fingerprints = {}
 
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
@@ -1053,6 +1277,39 @@ def create_unified_objective(
                 # --- Suggest one-class model params (after subsetting, feature count may differ) ---
                 oc_params = suggest_one_class_params(trial, model_name)
 
+                # PCA-SIMCA applies its own n_components clamp inside
+                # contamination.py. We fingerprint the suggested oc_params
+                # here and intentionally do not mirror that internal clamp;
+                # missing that rare duplicate is acceptable and avoids
+                # coupling this Optuna objective to PCA-SIMCA internals.
+                oc_fingerprint = _build_fit_fingerprint(
+                    preprocess_config=preprocess_config,
+                    subset_type=subset_type,
+                    subset_tag=subset_tag,
+                    n_vars=X_for_cv.shape[1],
+                    top_indices=top_indices,
+                    model_name=model_name,
+                    task_type=task_type,
+                    model_params=oc_params,
+                    imbalance_method=None,
+                    imbalance_params={},
+                    use_sample_weight_for_classification=False,
+                    resolved_class_weight=(),
+                    tail_lr_random_state=None,
+                    early_stopping_rounds=None,
+                    use_early_stopping=False,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                )
+                _cached_oc = _register_or_replay_fingerprint(trial, oc_fingerprint, seen_fingerprints)
+                if _cached_oc is not None:
+                    # Duplicate fingerprint: replay prior trial's metric so TPE
+                    # sees identical history. The duplicate row is filtered from
+                    # the leaderboard at convert_study_to_dataframe time.
+                    return _cached_oc
+
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
                     n_folds=cv_folds, cv_strategy=cv_strategy,
@@ -1066,6 +1323,12 @@ def create_unified_objective(
                     # (e.g. "Need at least 3 clean samples to fit DD-SIMCA").
                     skip_reason = cv_result.get('skip_reason', 'unknown')
                     trial.set_user_attr('skip_reason', skip_reason)
+                    # Cache the skip sentinel so a future identical OC
+                    # config replays immediately instead of re-running the
+                    # whole CV+skip detection (Kimi BLOCKER closure).
+                    _record_fingerprint_value(
+                        oc_fingerprint, trial, float('inf'), seen_fingerprints
+                    )
                     return float('inf')
 
                 mean_m = cv_result['mean_metrics']
@@ -1118,7 +1381,9 @@ def create_unified_objective(
                         ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
 
                 balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
-                return -balanced_accuracy
+                _oc_metric = -balanced_accuracy
+                _record_fingerprint_value(oc_fingerprint, trial, _oc_metric, seen_fingerprints)
+                return _oc_metric
 
             # 3. Suggest subset type and size
             # IMPORTANT: Always suggest ALL parameters to maintain consistent parameter space
@@ -1216,17 +1481,21 @@ def create_unified_objective(
                 trial, model_name, n_features_final, task_type
             )
 
-            # 5b. Prune invalid PLS trials where n_components > n_features
-            # This can happen when variable subset selection reduces features below the
-            # suggested n_components. Skip these trials rather than silently clamping.
+            # 5b. Skip invalid PLS trials where n_components > n_features.
+            # Return 1e10 (matching pre-dedup behavior) so TPE sees a real
+            # COMPLETE-with-bad-value sample rather than a PRUNED with
+            # different KDE scoring. Under the value-cache-and-replay dedup
+            # mechanism we no longer need TrialPruned anywhere — duplicates
+            # short-circuit via the cached value, and TPE history stays
+            # bit-identical to the original.
             if model_name.lower() in ('pls', 'pls-da'):
                 n_components = model_params.get('n_components', 2)
                 if n_components > n_features_final:
                     logging.debug(
-                        f"Trial {trial.number}: Pruning - n_components ({n_components}) > "
+                        f"Trial {trial.number}: Skipping - n_components ({n_components}) > "
                         f"n_features ({n_features_final})"
                     )
-                    return 1e10  # Return penalty to skip invalid combination
+                    return 1e10  # Return penalty; TPE sees this as a bad config
 
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
@@ -1304,6 +1573,7 @@ def create_unified_objective(
                 if imbalance_method == 'class_weight':
                     lr.set_params(class_weight='balanced')
                 pipe_steps.append(('lr', lr))
+                tail_lr_random_state = random_state
             elif model_name in SCALE_SENSITIVE_MODELS:
                 # Scale-sensitive models: StandardScaler + Model.
                 # T-36: skip the per-model scaler when autoscale is already
@@ -1311,9 +1581,11 @@ def create_unified_objective(
                 if not preprocess_config.get('apply_autoscale', False):
                     pipe_steps.append(('scaler', StandardScaler()))
                 pipe_steps.append(('model', model))
+                tail_lr_random_state = None
             else:
                 # Other models don't need scaling
                 pipe_steps.append(('model', model))
+                tail_lr_random_state = None
 
             # Step 4: Create pipeline with correct class (ImbPipeline for resampling methods)
             needs_resampling = _needs_resampling_pipeline(imbalance_method, task_type)
@@ -1347,6 +1619,36 @@ def create_unified_objective(
             _cv_fit_params = (
                 {'model__sample_weight': _balanced_sw} if _balanced_sw is not None else None
             )
+
+            fingerprint = _build_fit_fingerprint(
+                preprocess_config=preprocess_config,
+                subset_type=subset_type,
+                subset_tag=subset_tag,
+                n_vars=n_vars,
+                top_indices=top_indices,
+                model_name=model_name,
+                task_type=task_type,
+                model_params=model_params,
+                imbalance_method=imbalance_method,
+                imbalance_params=_imbalance_params,
+                use_sample_weight_for_classification=use_sample_weight_for_classification,
+                resolved_class_weight=_resolved_weighting_fingerprint(model),
+                tail_lr_random_state=tail_lr_random_state,
+                early_stopping_rounds=early_stopping_rounds,
+                use_early_stopping=use_early_stopping,
+                baseline_method=baseline_method,
+                baseline_params=baseline_params,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+            )
+            _cached_value = _register_or_replay_fingerprint(trial, fingerprint, seen_fingerprints)
+            if _cached_value is not None:
+                # Duplicate fingerprint: replay prior trial's metric so TPE
+                # sees identical history (same point, same value). The
+                # duplicate row is filtered from the leaderboard at
+                # convert_study_to_dataframe time. No fit, no CV — pure
+                # compute savings; original parameter space preserved.
+                return _cached_value
 
             if task_type == 'regression':
                 # Compute pooled CV predictions once and derive both RMSE and R² from them.
@@ -1684,11 +1986,20 @@ def create_unified_objective(
             # Store edge-masked feature count for full_vars
             trial.set_user_attr('full_vars_masked', len(wavelengths_for_trial))
 
+            _record_fingerprint_value(fingerprint, trial, metric, seen_fingerprints)
             return metric
 
+        except optuna.TrialPruned:
+            # Defense-in-depth: no current code path raises TrialPruned (the
+            # value-cache-and-replay dedup returns cached values instead).
+            # Kept so a future patch that adds intermediate-value reporting
+            # via `trial.report(...) + trial.should_prune()` doesn't get
+            # silently downgraded to a 1e10 penalty by the broad except below.
+            raise
         except Exception as e:
             logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")
-            # Return large penalty
+            # Return large penalty (don't cache failed fits — let retry attempt
+            # them again in case the failure was transient).
             if task_type == 'regression':
                 return 1e10
             else:
@@ -2091,6 +2402,7 @@ def run_unified_bayesian(
     # Create objective function
     # Note: Regional subsets are computed DYNAMICALLY inside the objective
     # on preprocessed data, ensuring regions are relevant to the current preprocessing
+    seen_fingerprints: Dict[tuple, tuple] = {}
     objective = create_unified_objective(
         X_raw=X,
         y=y,
@@ -2117,6 +2429,7 @@ def run_unified_bayesian(
         enable_uve=enable_uve,
         inlier_class_label=inlier_class_label,
         y_original=y,
+        seen_fingerprints=seen_fingerprints,
     )
 
     # Create TPE sampler with good defaults
@@ -2310,6 +2623,13 @@ def run_unified_bayesian(
         else:
             study.set_user_attr(_key, _val)
 
+    _rehydrated = _rehydrate_seen_fingerprints(study, seen_fingerprints)
+    if _rehydrated:
+        logger.info(
+            "Rehydrated %d Bayesian fit fingerprints from COMPLETE trials",
+            _rehydrated,
+        )
+
     # --- auto-decision state ---
     _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
     _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (post-T-42 ratio ~1.0-1.06x)
@@ -2471,9 +2791,14 @@ def run_unified_bayesian(
                 else:
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
-            # Add best model tracking for "Best Model So Far" display
-            if _study_ref[0].best_trial is not None:
+            # Add best model tracking for "Best Model So Far" display.
+            # Optuna raises when no COMPLETE trial exists yet, which can
+            # happen during dedup pruning bursts.
+            try:
                 best = _study_ref[0].best_trial
+            except ValueError:
+                best = None
+            if best is not None:
                 best_model = {
                     'Model': model_name,
                     'Preprocess': _build_display_preprocess_name(
@@ -2515,7 +2840,7 @@ def run_unified_bayesian(
     # toward "completed").
     try:
         from optuna.trial import TrialState
-        terminal_states = (TrialState.COMPLETE, TrialState.PRUNED)
+        terminal_states = (TrialState.COMPLETE,)
         already_finished = sum(
             1 for t in study.trials if t.state in terminal_states
         )
@@ -2532,6 +2857,10 @@ def run_unified_bayesian(
         )
 
     if remaining_trials > 0:
+        # Plain n_trials — no MaxTrialsCallback needed under value-cache-and-
+        # replay dedup. Duplicates short-circuit via the cached value, so
+        # n_trials=N produces N COMPLETE trials with the same TPE history as
+        # the pre-dedup run, just without redundant fits.
         study.optimize(
             objective,
             n_trials=remaining_trials,
@@ -2554,7 +2883,7 @@ def run_unified_bayesian(
             from optuna.trial import TrialState as _TS_post
             already_done_post = sum(
                 1 for t in _study_ref[0].trials
-                if t.state in (_TS_post.COMPLETE, _TS_post.PRUNED)
+                if t.state == _TS_post.COMPLETE
             )
             remaining_post = max(0, n_trials - already_done_post)
             if remaining_post > 0:
@@ -2688,6 +3017,13 @@ def convert_study_to_dataframe(
 
         # Skip failed trials (penalty value)
         if trial.value is not None and trial.value >= 1e9:
+            continue
+
+        # Skip duplicate trials: the value-cache-and-replay dedup mechanism
+        # marks duplicates with DUPLICATE_OF_TRIAL_ATTR so TPE history is
+        # bit-identical to pre-dedup behavior, but the leaderboard CSV stays
+        # clean by emitting only the first occurrence of each fingerprint.
+        if DUPLICATE_OF_TRIAL_ATTR in trial.user_attrs:
             continue
 
         row = {

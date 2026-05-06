@@ -1,6 +1,26 @@
 # Project Status
 
-> **Last updated:** 2026-05-08 — **LVs reporting fix shipped** (commits `9b86bc9` + `a64004f` on branch `docs/2026-05-07-final-wrapup-and-continuation`, not yet PR'd). User reported model rank 162 in `outputs/results_N_20260505_124946.csv` had `LVs=19` with `n_vars=10` — Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features). Root cause: `unified_bayesian.convert_study_to_dataframe` populated `LVs` from `trial.params['n_components']` (Optuna's raw pre-clamp suggestion) instead of the actually-fitted value. 22 of 300 PLS rows in that CSV had impossible LVs labels.
+> **Last updated:** 2026-05-06 evening — **Bayesian dedup landed as value-cache-and-replay** on branch `docs/2026-05-07-final-wrapup-and-continuation` (PR #53). Previous TrialPruned design (commits `b731d68`..`8778c9a`) was implemented, multi-seed bench showed it diverged TPE's KDE from pre-dedup behavior (only 22-35% common fingerprints across 5 seeds at 300 trials; pre's best fingerprint not reached by post in any seed), and was reverted at `ed809f3`.
+>
+> **Shipped mechanism:** the duplicate trial returns the prior trial's cached metric value. TPE sees `(params, value)` twice — exactly as it would have if we re-fit the duplicate. KDE history is **bit-identical** to pre-dedup, so original parameter space is preserved exactly. Duplicates skip the actual fit + CV (compute savings); the leaderboard CSV is deduped at convert time via `DUPLICATE_OF_TRIAL_ATTR` user_attr filter. See `docs/SESSION_LOG.md` 2026-05-06 evening entry for the full writeup including the failed-approach root cause.
+>
+> **Verification on `example/BoneCollagen.csv` PLS regression at n_trials=300:**
+> - Pre-dedup wall=6.2s, 88 unique fingerprints (12% dup rate), best RMSEcv=5.36
+> - Post-dedup wall=5.5s (-10%), 88 unique fingerprints (identical set), best RMSEcv=5.36 (bit-identical), CSV deduped to 88 rows
+> - 100% fingerprint overlap; pre's best fingerprint reached by post and vice versa
+> - LightGBM at 300 trials produced 0 duplicates with TPE (booster space wider than PLS); dedup is a no-op there. Isolated single-run: post 264.7s vs pre 264.4s — zero-overhead when nothing to dedup.
+>
+> **Reviewer audits (all READY_TO_MERGE):** Codex (TPE equivalence verified by reading Optuna 4.8 sources directly), DeepSeek V4 Pro Max max-thinking (3 STRONG fixes applied in `db04f59`), Kimi K2.6 sister-site sweep (BLOCKER on OC `inf`-cache fixed in `db04f59`). 5-agent toolkit follow-up added the `DUPLICATE_OF_TRIAL_ATTR` constant and tightened the placeholder-cache-hit branch as defense-in-depth.
+>
+> **Tests:** `tests/test_bayesian_dedup.py` (6 tests after toolkit fixes — fingerprint fields, value-cache-replay round-trip, resume rehydration of `(trial_number, value)` tuples, forced-duplicate CV count, OC `inf`-cache replay regression, CSV-filter consumer pin). `tests/test_cv_pls_clamp.py` extended with no-duplicate-fits + producer-side filter pin. All 18 dedup-related tests green.
+>
+> **Verification commands:** `pytest tests/test_bayesian_dedup.py tests/test_cv_pls_clamp.py::TestRunBayesianSearchPLSGridClamping tests/test_unified_bayesian_baseline.py -q` (18 passed); `python tools/bench_dedup_real.py --scenario pls_regression --n-trials 300` (10% wall-clock saved, 100% fingerprint overlap, bit-identical best metric).
+>
+> **Status of historical Option A/B/C analysis** (`docs/PLAN_2026-05-09_option_a_dedup.md`, `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`): SUPERSEDED — see banners on those files. Preserved as record of the design exploration that led to value-cache-and-replay.
+>
+> ---
+>
+> ## Previous session — 2026-05-08 — **LVs reporting fix shipped** (commits `9b86bc9` + `a64004f` on branch `docs/2026-05-07-final-wrapup-and-continuation`). User reported model rank 162 in `outputs/results_N_20260505_124946.csv` had `LVs=19` with `n_vars=10` — Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features). Root cause: `unified_bayesian.convert_study_to_dataframe` populated `LVs` from `trial.params['n_components']` (Optuna's raw pre-clamp suggestion) instead of the actually-fitted value. 22 of 300 PLS rows in that CSV had impossible LVs labels.
 >
 > **Fix:** persist post-clamp `n_components_actual` int as a typed `trial.user_attr`; read it for `LVs`. Sister site at `bayesian_utils.convert_optuna_result_to_dasp_format` reads via new `_extract_fitted_n_components` helper (handles bare/`model__`/`pls__` keys). GUI Model Dev rebuild at `spectral_predict_gui_optimized.py:36710-36748` inverts priority to prefer `Params` over `LVs`, unblocking already-existing CSVs. Codex pre-merge review caught a third sister site at `nsga2_search.py:3979` — also routed through the helper.
 >
@@ -10,10 +30,9 @@
 >
 > **Cross-family review:** GLM 5.1 → READY_TO_MERGE; Codex → NEEDS_FIX (NSGA-II sister site + helper duplication). Both findings closed in `a64004f`.
 >
-> **Deferred follow-ups** (in `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`):
-> - **Option B** (post-hoc dedup) — closes "ranks 1-5 are the same model fit 5 times" leaderboard distortion. Cross-family review picked this. ~8 LOC. Reviewer panel: Codex+DeepSeek picked B (safety/simplicity), GLM picked A (pre-fit prune). Per user's safety+simplicity criteria, B wins.
-> - **Option A** (pre-fit fingerprint cache + `optuna.TrialPruned`) — saves ~25% compute on slow-fit models (LightGBM/XGBoost). Higher fingerprint-completeness risk + budget shrinkage UX (`PRUNED` is a terminal state for resume).
-> - **Option C** (data-aware `n_components` suggest range) — methodology change, eliminates clamp-induced duplicates at the source. Optuna 4.8 supports it but `multivariate=True` TPE's joint KDE depends on stable support. Needs user signoff.
+> **Deferred follow-ups** (originally in `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`, now SUPERSEDED by the value-cache-and-replay design that shipped 2026-05-06):
+> - Options A/B/C are historical. The shipped mechanism takes the same fingerprint hash A described but uses cache-and-replay instead of `TrialPruned`, eliminating both the leaderboard duplicates Option B targeted and the budget-shrinkage UX risk Option A had.
+> - Possible future follow-ups (not blocking): booster end-to-end forced-duplicate test (Codex NEEDS_DISCUSSION); narrow `_resolved_weighting_fingerprint` exception scope to `AttributeError` only (silent-failure WEAK); broad `except Exception → 1e10` log-level upgrade in trial body (silent-failure WEAK); Option C (data-aware `n_components` suggest range) remains a separate methodology question.
 >
 > ## Previous session — 2026-05-04 — **Booster export-CV parity restored** (uncommitted; on branch `docs/2026-05-07-final-wrapup-and-continuation`). User reported: in-app LightGBM CV `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1, exported Colab notebook gave `0.976` with one borderline class-2 sample misclassified. Root cause: in-app `_run_single_fold` uses `cv_utils._fit_with_early_stopping` with `eval_set=[(X_test, y_test)]` for boosters; export templates emit plain `fold_model.fit(X_train, y_train)`. Drift introduced by commit `af6f4cf` (Jan 2026, early stopping feature) — export side was never updated.
 >

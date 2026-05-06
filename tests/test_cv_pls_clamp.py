@@ -302,6 +302,44 @@ class TestRunBayesianSearchPLSGridClamping:
             f"expected max 9 (n-1). Clamp is broken in run_bayesian_search."
         )
 
+    def test_n10_loo_bayesian_no_duplicate_fits(self, tiny_regression_data):
+        # Legacy path consumer-side pin only: run_bayesian_search returns
+        # (df, label_encoder) — no study object available here, so a
+        # producer-side count would be dead code. The producer side is
+        # covered separately by tests/test_bayesian_dedup.py:
+        # - TestNoDuplicateFitsTest counts CV invocations across identical
+        #   FixedTrial calls (proves dedup actually fires).
+        # - TestCsvDedupFilterTest exercises the convert_study_to_dataframe
+        #   consumer-side filter independently of any study state.
+        # This test specifically pins the legacy run_bayesian_search path's
+        # downstream contract (no duplicate rows in the rendered CSV).
+        from spectral_predict.search import run_bayesian_search
+        X, y = tiny_regression_data
+        df, _label_encoder = run_bayesian_search(
+            X, y,
+            task_type='regression',
+            folds=5,
+            cv_strategy='loo',
+            n_trials=12,
+            max_n_components=20,
+            models_to_test=['PLS'],
+            preprocessing_methods={'raw': True, 'snv': False, 'sg1': False, 'sg2': False, 'sg3': False, 'sg4': False, 'deriv_snv': False},
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+            variable_selection_methods=['none'],
+        )
+        dedup_cols = [
+            'PreprocessBase', 'Deriv', 'Window', 'Poly', 'Autoscale',
+            'baseline_method', 'smoothing', 'n_vars', 'SubsetTag',
+            'Model', 'Params', 'imbalance_method', 'top_vars', 'all_vars',
+        ]
+        existing = [col for col in dedup_cols if col in df.columns]
+        assert existing, f"No dedup columns found; df cols={list(df.columns)}"
+        duplicate_count = df.duplicated(subset=existing).sum()
+        assert duplicate_count == 0, (
+            f"Bayesian PLS produced {duplicate_count} duplicate fit rows under {existing}"
+        )
+
 
 class TestLVsReportingMatchesFittedValue:
     """Regression: LVs column must equal the actually-fitted n_components.

@@ -289,6 +289,12 @@ def create_objective_function(
     from .models import build_model
     from .model_registry import supports_subset_analysis
     from .models import get_feature_importances
+    from .unified_bayesian import (
+        _build_fit_fingerprint,
+        _register_or_replay_fingerprint,
+        _record_fingerprint_value,
+        _resolved_weighting_fingerprint,
+    )
     from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
     from .wavelength_selection import vcpa_iriv
 
@@ -325,6 +331,7 @@ def create_objective_function(
     # Note: 'cars-aware' is model-dependent but safe to cache here because
     # each model gets its own closure (and thus its own cache instance).
     _varsel_cache: dict[str, np.ndarray] = {}
+    seen_fingerprints: dict[tuple, tuple] = {}
 
     def objective(trial: optuna.Trial) -> float:
         """
@@ -385,9 +392,62 @@ def create_objective_function(
         # Track all results for this trial (full model + subsets)
         trial_results = []
 
+        def _make_fp(sub_model, *, subset_type, subset_tag, n_vars, top_indices):
+            """Construct a fit fingerprint sharing the closure's preprocess/imbalance/etc."""
+            return _build_fit_fingerprint(
+                preprocess_config={
+                    'name': preprocess_cfg.get('method', preprocess_cfg.get('name', 'raw')),
+                    'deriv': preprocess_cfg.get('deriv', preprocess_cfg.get('derivative', 0)),
+                    'window': preprocess_cfg.get('window', 0),
+                    'polyorder': preprocess_cfg.get('polyorder', preprocess_cfg.get('poly', 0)),
+                    'apply_baseline': bool(preprocess_cfg.get('apply_baseline', False)),
+                    'apply_smoothing': bool(preprocess_cfg.get('apply_smoothing', False)),
+                    'apply_autoscale': bool(preprocess_cfg.get('apply_autoscale', False)),
+                },
+                subset_type=subset_type,
+                subset_tag=subset_tag,
+                n_vars=n_vars,
+                top_indices=top_indices,
+                model_name=model_name,
+                task_type=task_type,
+                model_params=params,
+                imbalance_method=filtered_kwargs.get('imbalance_method'),
+                imbalance_params=filtered_kwargs.get('imbalance_params') or {},
+                use_sample_weight_for_classification=bool(
+                    filtered_kwargs.get('use_sample_weight_for_classification', False)
+                ),
+                resolved_class_weight=_resolved_weighting_fingerprint(sub_model),
+                tail_lr_random_state=42 if model_name == "PLS-DA" and task_type == 'classification' else None,
+                early_stopping_rounds=filtered_kwargs.get('early_stopping_rounds'),
+                use_early_stopping=bool(filtered_kwargs.get('early_stopping_rounds')),
+                baseline_method=filtered_kwargs.get('baseline_method'),
+                baseline_params=filtered_kwargs.get('baseline_params') or {},
+                smoothing_window=filtered_kwargs.get('smoothing_window', 17),
+                smoothing_polyorder=filtered_kwargs.get('smoothing_polyorder', 2),
+            )
+
         # Run cross-validation using existing infrastructure
         try:
             # === STEP 1: Test full model (all features) ===
+            # Full-model fingerprint: cache-replay on dup so the entire trial
+            # short-circuits with the prior trial's metric. TPE sees identical
+            # (params, value) — no fit, no CV, no subsets/regions for an
+            # already-fitted config; the duplicate row is filtered from the
+            # leaderboard at convert time.
+            fingerprint = _make_fp(
+                model,
+                subset_type='full',
+                subset_tag='full',
+                n_vars=X.shape[1],
+                top_indices=None,
+            )
+            _cached_full = _register_or_replay_fingerprint(trial, fingerprint, seen_fingerprints)
+            if _cached_full is not None:
+                # Duplicate full-model fingerprint: replay prior value so TPE
+                # sees identical history. The duplicate row is filtered from
+                # the leaderboard at convert time. No fit, no CV.
+                return _cached_full
+
             full_result = run_single_config_fn(
                 X, y, wavelengths,
                 model, model_name, params,
@@ -597,6 +657,26 @@ def create_objective_function(
                                 # Build new model with same hyperparameters
                                 subset_model = build_model(model_name, params, task_type=task_type)
 
+                                # Sub-fit dedup: skip silently (continue). Sub-fit
+                                # metrics aren't returned to TPE — only the full
+                                # model's metric is. So we just need membership
+                                # tracking to avoid re-running identical subset
+                                # fits within this trial; the cached-value-replay
+                                # path doesn't apply.
+                                sub_fp = _make_fp(
+                                    subset_model,
+                                    subset_type=varsel_method,
+                                    subset_tag=f"top{n_top}_{varsel_method}",
+                                    n_vars=int(len(top_indices)),
+                                    top_indices=top_indices,
+                                )
+                                if sub_fp in seen_fingerprints:
+                                    continue
+                                # Sub-fit dedup: store with None value because
+                                # sub-fit metrics are not returned to TPE; we
+                                # only need membership tracking to skip repeats.
+                                seen_fingerprints[sub_fp] = (trial.number, None)
+
                                 # Test subset
                                 subset_result = run_single_config_fn(
                                     X, y, wavelengths,
@@ -638,6 +718,22 @@ def create_objective_function(
 
                     # Build new model with same hyperparameters
                     region_model = build_model(model_name, params, task_type=task_type)
+
+                    # Sub-fit dedup: skip silently (continue). Same rationale
+                    # as the importance-subset path above — region metrics
+                    # aren't returned to TPE; only membership tracking needed.
+                    region_fp = _make_fp(
+                        region_model,
+                        subset_type='region',
+                        subset_tag=region_tag,
+                        n_vars=int(len(region_indices)),
+                        top_indices=region_indices,
+                    )
+                    if region_fp in seen_fingerprints:
+                        continue
+                    # Sub-fit dedup: store with None value because sub-fit
+                    # metrics are not returned to TPE; only membership tracked.
+                    seen_fingerprints[region_fp] = (trial.number, None)
 
                     # Test region
                     region_result = run_single_config_fn(
@@ -694,8 +790,15 @@ def create_objective_function(
             # - For Ridge: which alpha works best for FULL model
             # - For trees: which depth/leaves work best for FULL model
             # The best_subset_metric is stored in trial attributes for final ranking.
+            _record_fingerprint_value(fingerprint, trial, full_model_metric, seen_fingerprints)
             return full_model_metric
 
+        except optuna.TrialPruned:
+            # Defense-in-depth: no current path raises TrialPruned (value-
+            # cache-and-replay returns cached values instead). Kept so a
+            # future patch adding intermediate-value pruning isn't silently
+            # downgraded to a 1e10 penalty by the broad except below.
+            raise
         except Exception as e:
             # If model training fails, return large penalty value
             # This marks the trial as completed but with worst score
@@ -778,10 +881,17 @@ def convert_optuna_result_to_dasp_format(
     # Calculate total optimization time
     optimization_time = sum(t.duration.total_seconds() for t in study.trials if t.duration)
 
+    from .unified_bayesian import DUPLICATE_OF_TRIAL_ATTR
+
     # Loop through all completed trials
     for trial in study.trials:
         # Skip failed/pruned trials
         if trial.state != optuna.trial.TrialState.COMPLETE:
+            continue
+
+        # Skip duplicate trials emitted by value-cache-and-replay dedup —
+        # they share fit identity with their DUPLICATE_OF_TRIAL_ATTR predecessor.
+        if DUPLICATE_OF_TRIAL_ATTR in trial.user_attrs:
             continue
 
         # Get trial parameters
