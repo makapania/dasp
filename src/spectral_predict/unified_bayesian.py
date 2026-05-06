@@ -106,6 +106,15 @@ PIPELINE_PARAMS = {'memory', 'transform_input', 'verbose', 'steps'}
 _EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
 
 
+# Single source of truth for the trial.user_attr key that marks a trial as a
+# value-cache-and-replay duplicate. Setter is _register_or_replay_fingerprint;
+# readers are convert_study_to_dataframe (this module) and
+# bayesian_utils.convert_optuna_result_to_dasp_format. Extracting this as a
+# constant prevents typo-asymmetric silent failures (writer-reader mismatch
+# would make duplicates leak into the leaderboard with no test signal).
+DUPLICATE_OF_TRIAL_ATTR = 'duplicate_of_trial'
+
+
 def _supports_early_stopping(model_name: str) -> bool:
     return model_name in _EARLY_STOPPING_MODELS
 
@@ -283,8 +292,14 @@ def _register_or_replay_fingerprint(
     trial.set_user_attr('fingerprint', repr(fingerprint))
     if cached is not None:
         prior_trial_number, prior_value = cached
-        trial.set_user_attr('duplicate_of_trial', int(prior_trial_number))
-        return float(prior_value) if prior_value is not None else None
+        if prior_value is not None:
+            # Real-value cache hit: this trial is a true duplicate; mark it
+            # for CSV-leaderboard filtering and replay the cached metric.
+            trial.set_user_attr(DUPLICATE_OF_TRIAL_ATTR, int(prior_trial_number))
+            return float(prior_value)
+        # None placeholder (sub-fit membership marker) — caller proceeds with
+        # full fit. Do NOT set DUPLICATE_OF_TRIAL_ATTR; this trial is novel
+        # from the leaderboard's perspective and must not be filtered.
     return None
 
 
@@ -3000,10 +3015,10 @@ def convert_study_to_dataframe(
             continue
 
         # Skip duplicate trials: the value-cache-and-replay dedup mechanism
-        # marks duplicates with `duplicate_of_trial` so TPE history is
+        # marks duplicates with DUPLICATE_OF_TRIAL_ATTR so TPE history is
         # bit-identical to pre-dedup behavior, but the leaderboard CSV stays
         # clean by emitting only the first occurrence of each fingerprint.
-        if 'duplicate_of_trial' in trial.user_attrs:
+        if DUPLICATE_OF_TRIAL_ATTR in trial.user_attrs:
             continue
 
         row = {

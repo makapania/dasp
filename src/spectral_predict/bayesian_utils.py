@@ -429,9 +429,11 @@ def create_objective_function(
         # Run cross-validation using existing infrastructure
         try:
             # === STEP 1: Test full model (all features) ===
-            # Full-model fingerprint: TrialPruned on dup so the entire trial
-            # short-circuits — no point running subsets/regions for an
-            # already-fitted full config.
+            # Full-model fingerprint: cache-replay on dup so the entire trial
+            # short-circuits with the prior trial's metric. TPE sees identical
+            # (params, value) — no fit, no CV, no subsets/regions for an
+            # already-fitted config; the duplicate row is filtered from the
+            # leaderboard at convert time.
             fingerprint = _make_fp(
                 model,
                 subset_type='full',
@@ -655,9 +657,12 @@ def create_objective_function(
                                 # Build new model with same hyperparameters
                                 subset_model = build_model(model_name, params, task_type=task_type)
 
-                                # Sub-fit dedup: skip silently (continue) instead of
-                                # TrialPruned — pruning would abandon the full-model
-                                # result we already accepted at the top of this trial.
+                                # Sub-fit dedup: skip silently (continue). Sub-fit
+                                # metrics aren't returned to TPE — only the full
+                                # model's metric is. So we just need membership
+                                # tracking to avoid re-running identical subset
+                                # fits within this trial; the cached-value-replay
+                                # path doesn't apply.
                                 sub_fp = _make_fp(
                                     subset_model,
                                     subset_type=varsel_method,
@@ -714,9 +719,9 @@ def create_objective_function(
                     # Build new model with same hyperparameters
                     region_model = build_model(model_name, params, task_type=task_type)
 
-                    # Sub-fit dedup: skip silently (continue) instead of
-                    # TrialPruned — pruning would abandon the full-model
-                    # result we already accepted earlier in this trial.
+                    # Sub-fit dedup: skip silently (continue). Same rationale
+                    # as the importance-subset path above — region metrics
+                    # aren't returned to TPE; only membership tracking needed.
                     region_fp = _make_fp(
                         region_model,
                         subset_type='region',
@@ -872,6 +877,8 @@ def convert_optuna_result_to_dasp_format(
     # Calculate total optimization time
     optimization_time = sum(t.duration.total_seconds() for t in study.trials if t.duration)
 
+    from .unified_bayesian import DUPLICATE_OF_TRIAL_ATTR
+
     # Loop through all completed trials
     for trial in study.trials:
         # Skip failed/pruned trials
@@ -879,8 +886,8 @@ def convert_optuna_result_to_dasp_format(
             continue
 
         # Skip duplicate trials emitted by value-cache-and-replay dedup —
-        # they share fit identity with their `duplicate_of_trial` predecessor.
-        if 'duplicate_of_trial' in trial.user_attrs:
+        # they share fit identity with their DUPLICATE_OF_TRIAL_ATTR predecessor.
+        if DUPLICATE_OF_TRIAL_ATTR in trial.user_attrs:
             continue
 
         # Get trial parameters
