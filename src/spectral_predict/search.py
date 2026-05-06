@@ -4000,11 +4000,22 @@ def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_meth
                         global_total=total_trials
                     )
 
+                # Mirror unified_bayesian.py: cap optimize invocations at 5x
+                # n_trials and use MaxTrialsCallback so dedup pruning doesn't
+                # silently shrink the unique-fit budget. Same mechanism as
+                # the production unified path (commit b731d68).
+                from optuna.trial import TrialState as _TS_search
+                _max_complete_cb = optuna.study.MaxTrialsCallback(
+                    n_trials=n_trials,
+                    states=(_TS_search.COMPLETE,),
+                )
+                _callbacks = [optuna_progress_callback] if optuna_progress_callback else []
+                _callbacks.append(_max_complete_cb)
                 study.optimize(
                     objective_fn,
-                    n_trials=n_trials,
+                    n_trials=5 * n_trials,
                     show_progress_bar=False,
-                    callbacks=[optuna_progress_callback] if optuna_progress_callback else None
+                    callbacks=_callbacks,
                 )
 
                 # Update global trial count for next model
