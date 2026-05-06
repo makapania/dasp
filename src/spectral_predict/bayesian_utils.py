@@ -391,10 +391,9 @@ def create_objective_function(
         # Track all results for this trial (full model + subsets)
         trial_results = []
 
-        # Run cross-validation using existing infrastructure
-        try:
-            # === STEP 1: Test full model (all features) ===
-            fingerprint = _build_fit_fingerprint(
+        def _make_fp(sub_model, *, subset_type, subset_tag, n_vars, top_indices):
+            """Construct a fit fingerprint sharing the closure's preprocess/imbalance/etc."""
+            return _build_fit_fingerprint(
                 preprocess_config={
                     'name': preprocess_cfg.get('method', preprocess_cfg.get('name', 'raw')),
                     'deriv': preprocess_cfg.get('deriv', preprocess_cfg.get('derivative', 0)),
@@ -404,11 +403,10 @@ def create_objective_function(
                     'apply_smoothing': bool(preprocess_cfg.get('apply_smoothing', False)),
                     'apply_autoscale': bool(preprocess_cfg.get('apply_autoscale', False)),
                 },
-                subset_type='full',
-                subset_size='full',
-                subset_tag='full',
-                n_vars=X.shape[1],
-                top_indices=None,
+                subset_type=subset_type,
+                subset_tag=subset_tag,
+                n_vars=n_vars,
+                top_indices=top_indices,
                 model_name=model_name,
                 task_type=task_type,
                 model_params=params,
@@ -417,7 +415,7 @@ def create_objective_function(
                 use_sample_weight_for_classification=bool(
                     filtered_kwargs.get('use_sample_weight_for_classification', False)
                 ),
-                resolved_class_weight=_resolved_weighting_fingerprint(model),
+                resolved_class_weight=_resolved_weighting_fingerprint(sub_model),
                 tail_lr_random_state=42 if model_name == "PLS-DA" and task_type == 'classification' else None,
                 early_stopping_rounds=filtered_kwargs.get('early_stopping_rounds'),
                 use_early_stopping=bool(filtered_kwargs.get('early_stopping_rounds')),
@@ -425,6 +423,20 @@ def create_objective_function(
                 baseline_params=filtered_kwargs.get('baseline_params') or {},
                 smoothing_window=filtered_kwargs.get('smoothing_window', 17),
                 smoothing_polyorder=filtered_kwargs.get('smoothing_polyorder', 2),
+            )
+
+        # Run cross-validation using existing infrastructure
+        try:
+            # === STEP 1: Test full model (all features) ===
+            # Full-model fingerprint: TrialPruned on dup so the entire trial
+            # short-circuits — no point running subsets/regions for an
+            # already-fitted full config.
+            fingerprint = _make_fp(
+                model,
+                subset_type='full',
+                subset_tag='full',
+                n_vars=X.shape[1],
+                top_indices=None,
             )
             _register_or_prune_fingerprint(trial, fingerprint, seen_fingerprints)
 
@@ -637,6 +649,20 @@ def create_objective_function(
                                 # Build new model with same hyperparameters
                                 subset_model = build_model(model_name, params, task_type=task_type)
 
+                                # Sub-fit dedup: skip silently (continue) instead of
+                                # TrialPruned — pruning would abandon the full-model
+                                # result we already accepted at the top of this trial.
+                                sub_fp = _make_fp(
+                                    subset_model,
+                                    subset_type=varsel_method,
+                                    subset_tag=f"top{n_top}_{varsel_method}",
+                                    n_vars=int(len(top_indices)),
+                                    top_indices=top_indices,
+                                )
+                                if sub_fp in seen_fingerprints:
+                                    continue
+                                seen_fingerprints[sub_fp] = trial.number
+
                                 # Test subset
                                 subset_result = run_single_config_fn(
                                     X, y, wavelengths,
@@ -678,6 +704,20 @@ def create_objective_function(
 
                     # Build new model with same hyperparameters
                     region_model = build_model(model_name, params, task_type=task_type)
+
+                    # Sub-fit dedup: skip silently (continue) instead of
+                    # TrialPruned — pruning would abandon the full-model
+                    # result we already accepted earlier in this trial.
+                    region_fp = _make_fp(
+                        region_model,
+                        subset_type='region',
+                        subset_tag=region_tag,
+                        n_vars=int(len(region_indices)),
+                        top_indices=region_indices,
+                    )
+                    if region_fp in seen_fingerprints:
+                        continue
+                    seen_fingerprints[region_fp] = trial.number
 
                     # Test region
                     region_result = run_single_config_fn(

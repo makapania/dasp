@@ -142,7 +142,12 @@ def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
 
 
 def _freeze_for_fingerprint(value: Any) -> Any:
-    """Convert nested values to a stable, literal-safe representation."""
+    """Convert nested values to a stable, literal-safe representation.
+
+    Special-cases non-finite floats (nan, +inf, -inf) to string sentinels
+    because ``ast.literal_eval(repr(float('nan')))`` raises SyntaxError,
+    breaking resume rehydration of stored fingerprints.
+    """
     if hasattr(value, 'item'):
         value = value.item()
     if isinstance(value, np.ndarray):
@@ -156,6 +161,11 @@ def _freeze_for_fingerprint(value: Any) -> Any:
         return tuple(_freeze_for_fingerprint(v) for v in value)
     if isinstance(value, set):
         return tuple(sorted(_freeze_for_fingerprint(v) for v in value))
+    if isinstance(value, float):
+        if np.isnan(value):
+            return '__nan_sentinel__'
+        if np.isinf(value):
+            return '__pos_inf_sentinel__' if value > 0 else '__neg_inf_sentinel__'
     if isinstance(value, (str, int, float, bool, type(None))):
         return value
     return repr(value)
@@ -185,7 +195,6 @@ def _build_fit_fingerprint(
     *,
     preprocess_config: Dict[str, Any],
     subset_type: str,
-    subset_size: Any,
     subset_tag: str,
     n_vars: int,
     top_indices,
@@ -204,7 +213,23 @@ def _build_fit_fingerprint(
     smoothing_window: int,
     smoothing_polyorder: int,
 ) -> tuple:
-    """Fingerprint the fully resolved model fit immediately before CV."""
+    """Fingerprint the fully resolved model fit immediately before CV.
+
+    Captures *resolved fit identity*, not user-suggested intent:
+    - ``subset_size`` is excluded — it's the requested cap (e.g. ``'full'``,
+      250, 1000), but the actual fit is determined by ``n_vars`` +
+      ``top_indices`` after clamping to the available feature count.
+      Two region trials suggesting size=250 and size=1000 that both
+      resolve to n_vars=50 with the same ``top_indices`` produce the
+      same fit and must share a fingerprint.
+    - ``subset_type`` is canonicalized to ``'full'`` when
+      ``top_indices is None`` — i.e. when no subsetting happens.
+      A trial with ``subset_type='cars'`` and one with
+      ``subset_type='importance'`` both running on the full feature
+      set produce the same fit; the user-suggested method label
+      doesn't affect the fitted model.
+    """
+    canonical_subset_type = subset_type if top_indices is not None else 'full'
     return (
         ('preprocess_name', preprocess_config.get('name', 'raw')),
         ('deriv', preprocess_config.get('deriv', 0)),
@@ -217,8 +242,7 @@ def _build_fit_fingerprint(
         ('smoothing_window', smoothing_window if preprocess_config.get('apply_smoothing', False) else None),
         ('smoothing_polyorder', smoothing_polyorder if preprocess_config.get('apply_smoothing', False) else None),
         ('apply_autoscale', preprocess_config.get('apply_autoscale', False)),
-        ('subset_type', subset_type),
-        ('subset_size', _freeze_for_fingerprint(subset_size)),
+        ('subset_type', canonical_subset_type),
         ('subset_tag', subset_tag),
         ('n_vars', int(n_vars)),
         ('top_indices', _selected_indices_fingerprint(top_indices)),
@@ -1201,7 +1225,6 @@ def create_unified_objective(
                 oc_fingerprint = _build_fit_fingerprint(
                     preprocess_config=preprocess_config,
                     subset_type=subset_type,
-                    subset_size=subset_size,
                     subset_tag=subset_tag,
                     n_vars=X_for_cv.shape[1],
                     top_indices=top_indices,
@@ -1385,9 +1408,12 @@ def create_unified_objective(
                 trial, model_name, n_features_final, task_type
             )
 
-            # 5b. Prune invalid PLS trials where n_components > n_features
-            # This can happen when variable subset selection reduces features below the
-            # suggested n_components. Skip these trials rather than silently clamping.
+            # 5b. Prune invalid PLS trials where n_components > n_features.
+            # Raise TrialPruned (not return 1e10) so MaxTrialsCallback's
+            # COMPLETE-only budget isn't burned by a configuration that
+            # could never have fit. Without this, a 300-trial budget can
+            # silently produce <300 unique fits when the post-suggest clamp
+            # rescues some trials but a few slip through to here.
             if model_name.lower() in ('pls', 'pls-da'):
                 n_components = model_params.get('n_components', 2)
                 if n_components > n_features_final:
@@ -1395,7 +1421,9 @@ def create_unified_objective(
                         f"Trial {trial.number}: Pruning - n_components ({n_components}) > "
                         f"n_features ({n_features_final})"
                     )
-                    return 1e10  # Return penalty to skip invalid combination
+                    raise optuna.TrialPruned(
+                        f"n_components ({n_components}) > n_features_final ({n_features_final})"
+                    )
 
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
@@ -1523,7 +1551,6 @@ def create_unified_objective(
             fingerprint = _build_fit_fingerprint(
                 preprocess_config=preprocess_config,
                 subset_type=subset_type,
-                subset_size=subset_size,
                 subset_tag=subset_tag,
                 n_vars=n_vars,
                 top_indices=top_indices,
@@ -2755,6 +2782,12 @@ def run_unified_bayesian(
             callbacks=[progress_wrapper, max_complete_callback],
             show_progress_bar=verbose and not progress_callback
         )
+        if len(study.trials) > 2 * n_trials:
+            logger.warning(
+                "Bayesian dedup drew %d total trials to reach %d unique fits "
+                "(target n_trials=%d) — search space may be near exhaustion.",
+                len(study.trials), already_finished + remaining_trials, n_trials,
+            )
     else:
         print(f"  All {n_trials} trials already complete; skipping optimization.")
 
@@ -2790,6 +2823,12 @@ def run_unified_bayesian(
                     callbacks=[progress_wrapper, max_complete_callback_post],
                     show_progress_bar=verbose and not progress_callback,
                 )
+                if len(_study_ref[0].trials) > 2 * n_trials:
+                    logger.warning(
+                        "T-41: Bayesian dedup drew %d total trials post-migration "
+                        "to reach %d unique fits — search space may be near exhaustion.",
+                        len(_study_ref[0].trials), n_trials,
+                    )
 
     # After optimization, resolve the final study object.  If 'auto' migration
     # happened, _study_ref[0] is the SQLite-backed study (now containing all

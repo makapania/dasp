@@ -19,7 +19,6 @@ class TestFingerprintConstructionTest:
                 'apply_autoscale': True,
             },
             subset_type='importance',
-            subset_size=10,
             subset_tag='top10_importance',
             n_vars=10,
             top_indices=np.array([3, 1, 2]),
