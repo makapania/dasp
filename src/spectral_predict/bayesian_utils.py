@@ -794,6 +794,10 @@ def create_objective_function(
             return full_model_metric
 
         except optuna.TrialPruned:
+            # Defense-in-depth: no current path raises TrialPruned (value-
+            # cache-and-replay returns cached values instead). Kept so a
+            # future patch adding intermediate-value pruning isn't silently
+            # downgraded to a 1e10 penalty by the broad except below.
             raise
         except Exception as e:
             # If model training fails, return large penalty value

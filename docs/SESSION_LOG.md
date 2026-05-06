@@ -8,8 +8,10 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Implemented the remaining Option A phases after phase 1 (`MaxTrialsCallback`) was committed by the main thread. The fingerprint must be created at the resolved-state site, immediately before the CV fit, because the trial's effective fit can change after raw Optuna suggestions through `build_model`, imbalance transformer construction, CatBoost `auto_class_weights`, generic `class_weight`, sample-weight routing, PLS-DA tail LogisticRegression `random_state`, and early-stopping gating. The helper now serializes fingerprints as literal-safe tuples so resume rehydration can use `ast.literal_eval`.
 
-Non-obvious gotchas:
-- `TrialPruned` must be re-raised before the objective's broad `except Exception`; otherwise duplicate fits become COMPLETE trials with a `1e10` penalty and still consume the unique-fit budget.
+Non-obvious gotchas (most are now historical — see "2026-05-06 evening"
+follow-up below for the value-cache-and-replay reframing that supersedes
+this approach):
+- `TrialPruned` must be re-raised before the objective's broad `except Exception`; otherwise duplicate fits become COMPLETE trials with a `1e10` penalty and still consume the unique-fit budget. **(Now dead code under value-cache-and-replay; the re-raise is preserved as defense-in-depth for future intermediate-value pruning patches.)**
 - PCA-SIMCA clamps `n_components` inside `contamination.py`; per user decision, the one-class fingerprint documents this as an accepted rare duplicate miss instead of duplicating PCA-SIMCA internals in the Bayesian objective.
 - The A/B harness cannot use production TPE because pruned trials affect TPE history differently than COMPLETE-with-penalty trials. The harness monkeypatches only the module-level sampler factory to `RandomSampler(seed=42)`.
 - On this Windows sandbox, joblib parallel CV can hit temp-directory `PermissionError`; the A/B harness forces the existing threading fallback so CV runs serially. This is harness-only and does not change production behavior.

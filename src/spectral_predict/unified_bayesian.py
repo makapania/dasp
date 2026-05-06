@@ -1990,6 +1990,11 @@ def create_unified_objective(
             return metric
 
         except optuna.TrialPruned:
+            # Defense-in-depth: no current code path raises TrialPruned (the
+            # value-cache-and-replay dedup returns cached values instead).
+            # Kept so a future patch that adds intermediate-value reporting
+            # via `trial.report(...) + trial.should_prune()` doesn't get
+            # silently downgraded to a 1e10 penalty by the broad except below.
             raise
         except Exception as e:
             logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")

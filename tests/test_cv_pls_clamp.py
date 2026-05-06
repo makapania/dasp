@@ -303,12 +303,19 @@ class TestRunBayesianSearchPLSGridClamping:
         )
 
     def test_n10_loo_bayesian_no_duplicate_fits(self, tiny_regression_data):
+        # Legacy path consumer-side pin only: run_bayesian_search returns
+        # (df, label_encoder) — no study object available here, so a
+        # producer-side count would be dead code. The producer side is
+        # covered separately by tests/test_bayesian_dedup.py:
+        # - TestNoDuplicateFitsTest counts CV invocations across identical
+        #   FixedTrial calls (proves dedup actually fires).
+        # - TestCsvDedupFilterTest exercises the convert_study_to_dataframe
+        #   consumer-side filter independently of any study state.
+        # This test specifically pins the legacy run_bayesian_search path's
+        # downstream contract (no duplicate rows in the rendered CSV).
         from spectral_predict.search import run_bayesian_search
-        from spectral_predict.unified_bayesian import DUPLICATE_OF_TRIAL_ATTR
-        import optuna
-
         X, y = tiny_regression_data
-        df, study = run_bayesian_search(
+        df, _label_encoder = run_bayesian_search(
             X, y,
             task_type='regression',
             folds=5,
@@ -321,8 +328,6 @@ class TestRunBayesianSearchPLSGridClamping:
             enable_region_subsets=False,
             variable_selection_methods=['none'],
         )
-
-        # Consumer-side pin: leaderboard CSV has no duplicate rows.
         dedup_cols = [
             'PreprocessBase', 'Deriv', 'Window', 'Poly', 'Autoscale',
             'baseline_method', 'smoothing', 'n_vars', 'SubsetTag',
@@ -334,33 +339,6 @@ class TestRunBayesianSearchPLSGridClamping:
         assert duplicate_count == 0, (
             f"Bayesian PLS produced {duplicate_count} duplicate fit rows under {existing}"
         )
-
-        # Producer-side pin (closes pr-test STRONG: the consumer-side filter
-        # alone would mask broken-dedup cases). When the n10 LOO PLS clamp
-        # fires for `n_components > n_features-1=9` on multiple raw trials,
-        # collapse should produce duplicate fingerprints — verify that the
-        # study HAS such duplicates and they're correctly marked. If both
-        # the consumer pin AND the producer-marker count are nonzero, dedup
-        # actually fired; if both are zero on this scenario, the n_trials
-        # wasn't enough to surface a clamp collision (regenerate with more).
-        study_obj = study if isinstance(study, optuna.Study) else None
-        if study_obj is not None:
-            n_complete = sum(
-                1 for t in study_obj.trials
-                if t.state == optuna.trial.TrialState.COMPLETE
-            )
-            n_dup_marked = sum(
-                1 for t in study_obj.trials
-                if DUPLICATE_OF_TRIAL_ATTR in t.user_attrs
-            )
-            # Soft pin: don't require dups to fire (RandomState may avoid
-            # collisions on small n_trials), but if any DO fire they MUST
-            # be filtered from df. Strong assertion: n_complete - n_dup_marked
-            # equals the leaderboard row count, proving the filter didn't
-            # silently drop non-duplicate trials.
-            assert len(df) <= n_complete, (
-                f"CSV has {len(df)} rows but only {n_complete} COMPLETE trials"
-            )
 
 
 class TestLVsReportingMatchesFittedValue:
