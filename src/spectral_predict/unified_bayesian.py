@@ -1527,6 +1527,14 @@ def create_unified_objective(
             trial.set_user_attr('subset_tag', subset_tag)
             trial.set_user_attr('n_vars', n_vars)
             trial.set_user_attr('model_params', str(model_params))
+            # Persist the post-clamp n_components as a typed scalar so
+            # convert_study_to_dataframe can populate the CSV `LVs` column from
+            # the actually-fitted value rather than `trial.params` (which keeps
+            # the raw, pre-clamp Optuna suggestion and can exceed n_features-1).
+            if 'n_components' in model_params:
+                trial.set_user_attr(
+                    'n_components_actual', int(model_params['n_components']),
+                )
             # early_stopping_rounds + cv_strategy + cv_n_repeats live on the
             # study, not the trial — they're constants per study, hoisted at
             # create_study time so the per-trial finalize doesn't re-emit
@@ -2826,10 +2834,15 @@ def convert_study_to_dataframe(
         row['top_vars'] = trial.user_attrs.get('selected_wavelengths', 'N/A')
         row['all_vars'] = trial.user_attrs.get('all_wavelengths', 'N/A')
 
-        # Extract LVs for PLS (store as int, use None for non-PLS to avoid float conversion)
+        # Extract LVs for PLS (store as int, use None for non-PLS to avoid float conversion).
+        # Prefer the post-clamp 'n_components_actual' user_attr (matches the
+        # actually-fitted model). Fall back to trial.params['n_components'] for
+        # backwards compatibility with study databases written before the
+        # n_components_actual user_attr was added.
         if model_name.lower() in ('pls', 'pls-da'):
-            params = trial.params
-            n_comp = params.get('n_components')
+            n_comp = trial.user_attrs.get('n_components_actual')
+            if n_comp is None:
+                n_comp = trial.params.get('n_components')
             row['LVs'] = int(n_comp) if n_comp is not None else None
         else:
             row['LVs'] = None

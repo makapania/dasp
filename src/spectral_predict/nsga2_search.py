@@ -58,6 +58,7 @@ from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
 from .variable_selection import cars_selection
 from .scoring import compute_specificity, lins_ccc
+from .bayesian_utils import _extract_fitted_n_components
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -3976,7 +3977,10 @@ def convert_nsga2_to_v1_format(
                     'Deriv': deriv_order,
                     'Window': int(window_size) if window_size is not None else None,
                     'Poly': polyorder,
-                    'LVs': knee_sol.get('model_params', {}).get('n_components') if knee_sol.get('model') in ('PLS', 'PLS-DA') else None,
+                    'LVs': (
+                        _extract_fitted_n_components(knee_sol.get('model_params'))
+                        if knee_sol.get('model') in ('PLS', 'PLS-DA') else None
+                    ),
                     'Complexity': knee_sol['objectives'].get('complexity', 0),
                     'Is_Knee': False,
                     'Is_Best_Error': True,  # Mark this as the minimum error solution

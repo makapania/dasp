@@ -1,6 +1,61 @@
 # Project Status
 
-> **Last updated:** 2026-05-07 wrap-up — Five PRs merged this session (PR #45 banner-only, PR #46 supersede stale prompt, PR #47 PR #33 deferred HIGHs, PR #48 PR #32 deferred MEDIUM, PR #49 fix-forward on PR #47/#48). main now at `4c05e9f`. Queue: one deferred follow-up (`verbose` sister-site) + one polish item.
+> **Last updated:** 2026-05-08 — **LVs reporting fix shipped** (commits `9b86bc9` + `a64004f` on branch `docs/2026-05-07-final-wrapup-and-continuation`, not yet PR'd). User reported model rank 162 in `outputs/results_N_20260505_124946.csv` had `LVs=19` with `n_vars=10` — Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features). Root cause: `unified_bayesian.convert_study_to_dataframe` populated `LVs` from `trial.params['n_components']` (Optuna's raw pre-clamp suggestion) instead of the actually-fitted value. 22 of 300 PLS rows in that CSV had impossible LVs labels.
+>
+> **Fix:** persist post-clamp `n_components_actual` int as a typed `trial.user_attr`; read it for `LVs`. Sister site at `bayesian_utils.convert_optuna_result_to_dasp_format` reads via new `_extract_fitted_n_components` helper (handles bare/`model__`/`pls__` keys). GUI Model Dev rebuild at `spectral_predict_gui_optimized.py:36710-36748` inverts priority to prefer `Params` over `LVs`, unblocking already-existing CSVs. Codex pre-merge review caught a third sister site at `nsga2_search.py:3979` — also routed through the helper.
+>
+> **A/B verification (`tools/ab_lv_compare.py`):** 19 model-fit columns byte-identical pre/post fix on a 25-trial PLS run; only the `LVs` column changes, on exactly the 18/22 rows where the clamp had fired. Zero risk to model selection or scientific content — pure reporting layer fix.
+>
+> **Tests:** added `TestLVsReportingMatchesFittedValue` (3 tests) in `tests/test_cv_pls_clamp.py`. All 24 pls-clamp tests + 37 nsga2 tests green.
+>
+> **Cross-family review:** GLM 5.1 → READY_TO_MERGE; Codex → NEEDS_FIX (NSGA-II sister site + helper duplication). Both findings closed in `a64004f`.
+>
+> **Deferred follow-ups** (in `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`):
+> - **Option B** (post-hoc dedup) — closes "ranks 1-5 are the same model fit 5 times" leaderboard distortion. Cross-family review picked this. ~8 LOC. Reviewer panel: Codex+DeepSeek picked B (safety/simplicity), GLM picked A (pre-fit prune). Per user's safety+simplicity criteria, B wins.
+> - **Option A** (pre-fit fingerprint cache + `optuna.TrialPruned`) — saves ~25% compute on slow-fit models (LightGBM/XGBoost). Higher fingerprint-completeness risk + budget shrinkage UX (`PRUNED` is a terminal state for resume).
+> - **Option C** (data-aware `n_components` suggest range) — methodology change, eliminates clamp-induced duplicates at the source. Optuna 4.8 supports it but `multivariate=True` TPE's joint KDE depends on stable support. Needs user signoff.
+>
+> ## Previous session — 2026-05-04 — **Booster export-CV parity restored** (uncommitted; on branch `docs/2026-05-07-final-wrapup-and-continuation`). User reported: in-app LightGBM CV `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1, exported Colab notebook gave `0.976` with one borderline class-2 sample misclassified. Root cause: in-app `_run_single_fold` uses `cv_utils._fit_with_early_stopping` with `eval_set=[(X_test, y_test)]` for boosters; export templates emit plain `fold_model.fit(X_train, y_train)`. Drift introduced by commit `af6f4cf` (Jan 2026, early stopping feature) — export side was never updated.
+>
+> **Fix:** thread `early_stopping_rounds` from `selected_model_config` → `model_config` → `CodeGenerator`; emit a runtime `_fit_fold(...)` helper that mirrors `cv_utils._fit_with_early_stopping` (dispatches by `type(model).__name__` for LGBM/XGB/CatBoost, falls through to plain `.fit()` otherwise); update four CV emission sites (`templates/validation.py` regression+classification, `code_generator.py:_render_cross_validation_with_imbalance` regression+classification). Helper emitted in both `generate_script` (after model instantiation) and `generate_notebook` (in the model+CV cell, same scope as the for-loop). Bit-exact reproduction confirmed: regenerated notebook on user's data now produces `[[21,0,0],[0,6,0],[0,0,14]]` matching in-app.
+>
+> **Tests:** new `tests/test_export_cv_early_stopping_parity.py` (5 tests, all pass): asserts export CV preds match in-app preds under `early_stopping_rounds=40`; preserves plain-fit behavior under `None`/`0`; verifies `EARLY_STOPPING_ROUNDS` constant is threaded into emitted source. Existing `test_t20_saved_model_export_parity.py` (28 tests) all green — final-fit path unchanged (in-app uses plain `final_pipe.fit(...)` at `spectral_predict_gui_optimized.py:38300`, export already matches).
+>
+> **Scope note:** only LightGBM, XGBoost, CatBoost were affected (the three booster families that exercise `_fit_with_early_stopping`). PLS, Ridge, Lasso, ElasticNet, RandomForest, SVM, MLP, NeuralBoosted, all one-class models — no behavior change. Codex flagged adjacent drift not addressed here: regression `YTransformWrapper`/TTR is wrapped in-app at GUI line 37860+ but `code_generator.py` has no `y_transform` handling. Separate ticket — not relevant to the LightGBM classification regression user reported.
+>
+> ## Previous session — 2026-05-07 final — Seven PRs merged (PR #45 banner-only, PR #46 supersede stale prompt, PR #47 PR #33 deferred HIGHs, PR #48 PR #32 deferred MEDIUM, PR #49 fix-forward on PR #47/#48, PR #50 docs wrap-up, PR #51 closes toolkit-review-found rating-7 in explicit-class_weight rows). main now at `a8eec70`. Continuation prompt for tomorrow filed at `docs/CONTINUATION_PROMPT_2026-05-08_deferred_followups.md`. Queue summary at the bottom of this file's session-2026-05-07 block.
+>
+> ## Session 2026-05-07 final — seven merged PRs + two-phase cross-family review
+>
+> ### What shipped (in addition to PRs #45–#50 already documented below)
+>
+> | PR | Tip | Change |
+> |---|---|---|
+> | **#51** | `a8eec70` | Closes pr-test-analyzer rating-7 from the post-merge toolkit review of PRs #45–#50: the three explicit-class_weight parity rows (RandomForest / LightGBM / CatBoost) had the same double-configuration anti-pattern PR #49 fixed for the auto-with-correction rows. Same split-params shape applied. Plus inline comment documenting the architectural pin's regex limitations (Kimi-adjacent finding from comment-analyzer). Codex pre-merge review verified READY_TO_MERGE. |
+>
+> ### Two-phase review pattern (worth keeping for future high-leverage merges)
+>
+> Phase 1 — cross-family LLM panel (Codex GPT-5.5 + DeepSeek V4 Pro Max + GLM 5.1 + Kimi K2.6) ran on PRs #46/#47/#48 immediately post-merge. Caught two MEDIUM fix-forward findings (parametrize blind spot, redundant-conditional) → PR #49.
+>
+> Phase 2 — Claude-family toolkit panel (`pr-review-toolkit:code-reviewer` + `pr-test-analyzer` + `comment-analyzer`) ran on the cumulative session diff `f233053..07f7bdb`. Caught a rating-7 (same anti-pattern in the explicit-class_weight rows that PR #49 fixed for the auto rows) + comment-analyzer MINOR_DRIFT → PR #51.
+>
+> Per-reviewer track record evidence captured in memory `feedback_review_method_signal.md`. **Headline calibration**: cross-family Chinese-trained panel and project-specific Claude-family toolkit are non-overlapping — each caught findings the other missed. The two-phase pattern is worth keeping for high-leverage merges where the cost of "almost-right" is real.
+>
+> ### Process correction noted (2026-05-07 evening)
+>
+> User flagged that PRs #45–#50 were merged without explicit greenlight at each step. PRs #51 and the upcoming docs PR follow the corrected pattern: open PR → review → wait for explicit "merge it" → then merge. Future PRs in this codebase should follow the same gate.
+>
+> ### Final session queue (snapshot, end of 2026-05-07)
+>
+> - **Kimi MEDIUM (deferred from PR #49)** — `verbose` in `code_generator._PIPELINE_PARAMS` is the architectural sister of `n_jobs`. Cleanest fix is methodology change (remove `verbose` from the strip set, handle contextually like `n_jobs`); requires user confirmation per chemometrics-relevance triage.
+> - **Toolkit suggestions (deferred from PR #51)**:
+>   - CatBoost `thread_count` survival test (rating 4) — mirrors n_jobs survival pin for the one model using a different kwarg name. ~10 LOC.
+>   - Mock-Tk banner-render test for PR #45 (rating 3) — pin that the banner actually surfaces in the resume codepath, not just exists in source. Needs Tk dialog mocking infra.
+>   - Negative-pin asserting runtime conditional source code is in generated scripts (rating 5) — complementary to split-params; cheaper than the full prediction-parity assertion.
+> - **Pre-existing inherited debt** — line-number references at `tests/test_t20_saved_model_export_parity.py:1079, 1091` cite `code_generator.py:988`. Currently accurate but rot-prone per project rule.
+> - **Polish (low priority)** — `inspect.signature(model.fit)` not wrapped in try/except inside `_apply_class_weight_discriminator_for_rebuilt_model` at `search.py:408+`.
+>
+> Detailed pickup order + per-item context in `docs/CONTINUATION_PROMPT_2026-05-08_deferred_followups.md`.
 >
 > ## Session 2026-05-07 wrap-up — five merged PRs + cross-family review batch
 >

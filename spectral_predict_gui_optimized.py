@@ -11847,7 +11847,7 @@ class SpectralPredictApp:
         self.smart_preproc_options_frame.grid_remove()
 
         # ===== TPE PREPROCESSING DISCOVERY (T-37) =====
-        tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Quick Preprocessing Discovery",
+        tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Preprocessing Discovery",
                                                                       subtitle="Optuna TPE search over 5-D space: preproc, window, autoscale, baseline, smoothing")
         tpe_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
@@ -36708,29 +36708,56 @@ F1 Score:  {f1:.4f}
                 self.root.after(0, lambda: self.refine_model_type.set('PLS'))
 
             # Extract hyperparameters from loaded model config (if available)
-            # This ensures we reproduce the exact same model that was selected from results
+            # This ensures we reproduce the exact same model that was selected from results.
+            # Priority: Params (the actually-fitted, post-clamp value) > LVs (legacy
+            # display column that can carry the pre-clamp Optuna suggestion on
+            # rows produced before the LVs reporting fix). Reading Params first
+            # guarantees rebuild succeeds on existing CSVs that have inflated LVs.
             n_components = 10  # Default fallback
+            n_components_from_params = None
 
-            # First try LVs from config
-            if self.selected_model_config is not None and 'LVs' in self.selected_model_config:
-                lvs_value = self.selected_model_config.get('LVs')
-                if lvs_value is not None and not pd.isna(lvs_value):
-                    n_components = int(lvs_value)
-                    print(f"DEBUG: Using n_components={n_components} from loaded model config (LVs)")
-
-            # Fallback: try to extract from Params (handles pls__n_components case for PLS-DA)
-            if n_components == 10 and self.selected_model_config is not None:
+            if self.selected_model_config is not None:
                 raw_params = self.selected_model_config.get('Params')
-                if isinstance(raw_params, str) and raw_params.strip():
+                parsed_params = None
+                if isinstance(raw_params, dict):
+                    parsed_params = raw_params
+                elif isinstance(raw_params, str) and raw_params.strip():
                     try:
                         parsed = ast.literal_eval(raw_params)
                         if isinstance(parsed, dict):
-                            n_comp = parsed.get('n_components') or parsed.get('pls__n_components')
-                            if n_comp is not None:
-                                n_components = int(n_comp)
-                                print(f"DEBUG: Using n_components={n_components} from Params (fallback)")
+                            parsed_params = parsed
                     except (ValueError, SyntaxError):
-                        pass
+                        parsed_params = None
+
+                if parsed_params:
+                    for key in ('model__n_components', 'pls__n_components', 'n_components'):
+                        if key in parsed_params:
+                            try:
+                                n_components_from_params = int(parsed_params[key])
+                                break
+                            except (TypeError, ValueError):
+                                continue
+
+            if n_components_from_params is not None:
+                n_components = n_components_from_params
+                print(f"DEBUG: Using n_components={n_components} from Params (fitted value)")
+            elif self.selected_model_config is not None and 'LVs' in self.selected_model_config:
+                lvs_value = self.selected_model_config.get('LVs')
+                if lvs_value is not None and not pd.isna(lvs_value):
+                    n_components = int(lvs_value)
+                    print(f"DEBUG: Using n_components={n_components} from LVs (Params unavailable)")
+                else:
+                    # Both sources failed; falling back to default. Surface this so the
+                    # user can correlate unexpected rebuild behavior with bad source data.
+                    raw_params_dbg = (
+                        self.selected_model_config.get('Params')
+                        if self.selected_model_config else None
+                    )
+                    print(
+                        f"WARNING: Neither Params nor LVs yielded a usable n_components for "
+                        f"{model_name}; falling back to default n_components={n_components}. "
+                        f"Params={raw_params_dbg!r}, LVs={lvs_value!r}"
+                    )
 
             # CRITICAL: Use n_components as max to prevent clipping
             # When reproducing a model, we must use the EXACT n_components from training
@@ -39122,6 +39149,15 @@ External Validation Performance (n={n_val}):
                     # Imbalance handling (for reproducibility)
                     'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
                     'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+                    # Early stopping rounds (boosters only) — must be threaded
+                    # so the export reproduces the in-app per-fold CV. Without
+                    # this, exported notebooks for LightGBM/XGBoost/CatBoost
+                    # silently train more trees than the in-app run did and
+                    # can flip predictions on borderline samples.
+                    'early_stopping_rounds': (
+                        self.selected_model_config.get('early_stopping_rounds')
+                        if self.selected_model_config else None
+                    ),
                     # T-36: autoscale flag — exported scripts must apply UV scaling after
                     # SNV/derivatives if it was active during training, else they will not
                     # reproduce the saved model.

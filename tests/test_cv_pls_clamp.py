@@ -9,8 +9,10 @@ Covers:
 """
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
+from spectral_predict.bayesian_utils import _extract_fitted_n_components
 from spectral_predict.cv_utils import compute_min_train_fold_size
 
 
@@ -298,4 +300,162 @@ class TestRunBayesianSearchPLSGridClamping:
         assert max(n_components_seen) <= 9, (
             f"Bayesian PLS for N=10 LOO produced n_components={max(n_components_seen)}, "
             f"expected max 9 (n-1). Clamp is broken in run_bayesian_search."
+        )
+
+
+class TestLVsReportingMatchesFittedValue:
+    """Regression: LVs column must equal the actually-fitted n_components.
+
+    Pre-fix bug: convert_study_to_dataframe read LVs from trial.params
+    (raw pre-clamp Optuna suggestion). When _suggest_hyperparams clamped
+    n_components down to fit n_features-1, the CSV reported the unclamped
+    value. The Model Development tab then tried to rebuild PLS with the
+    inflated value and sklearn errored.
+
+    Fix: persist int n_components_actual user_attr post-clamp; read it
+    in convert_study_to_dataframe; mirror in bayesian_utils.py.
+    """
+
+    @pytest.fixture
+    def small_features_data(self):
+        """40 samples x 12 features — n_features-1 < 20, so the clamp at
+        unified_bayesian.py:462 fires when Optuna suggests n_components > 11."""
+        import numpy as np
+        rng = np.random.default_rng(42)
+        n_samples, n_features = 40, 12
+        X = rng.standard_normal((n_samples, n_features))
+        y = X[:, 0] + 0.5 * X[:, 1] - 0.3 * X[:, 2] + 0.05 * rng.standard_normal(n_samples)
+        wavelengths = np.arange(1.0, n_features + 1.0)
+        return X, y, wavelengths
+
+    def test_unified_bayesian_lvs_matches_fitted_n_components(self, small_features_data):
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        X, y, wl = small_features_data
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS', task_type='regression',
+            n_trials=15, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        assert len(df) > 0, "No trials succeeded; can't validate LVs reporting"
+        mismatches = []
+        checked = 0
+        for _, row in df.iterrows():
+            fitted = _extract_fitted_n_components(row.get('Params'))
+            reported = row.get('LVs')
+            if fitted is None or pd.isna(reported):
+                continue
+            checked += 1
+            if int(reported) != int(fitted):
+                mismatches.append((row.get('trial_number'), int(reported), int(fitted)))
+        # Guard against vacuous pass: if every row got skipped (e.g., the helper
+        # silently regresses for the most common Params shape), the loop would
+        # report zero mismatches without actually checking anything.
+        assert checked > 0, (
+            "Test was vacuous — no rows had both fitted n_components and LVs populated. "
+            "Either the search produced no PLS rows, or _extract_fitted_n_components "
+            "regressed and returns None for the actual Params shape."
+        )
+        assert not mismatches, (
+            f"LVs column does not match fitted n_components in {len(mismatches)} rows. "
+            f"First few (trial_number, LVs_reported, fitted_n_components): {mismatches[:5]}"
+        )
+
+    def test_unified_bayesian_lvs_within_sklearn_bound(self, small_features_data):
+        """No LVs value can exceed n_vars (sklearn PLSRegression's hard cap).
+
+        sklearn requires n_components in [1, min(n_samples, n_features)] inclusive.
+        Pre-fix, LVs could be 19 with n_vars=10 — Model Dev rebuild then errored.
+        """
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        X, y, wl = small_features_data
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS', task_type='regression',
+            n_trials=15, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        for _, row in df.iterrows():
+            n_vars = row.get('n_vars')
+            lvs = row.get('LVs')
+            if pd.isna(n_vars) or pd.isna(lvs):
+                continue
+            assert int(lvs) <= int(n_vars), (
+                f"Trial {row.get('trial_number')}: LVs={int(lvs)} exceeds n_vars={int(n_vars)}; "
+                "sklearn PLSRegression would error on rebuild."
+            )
+
+    def test_extract_fitted_n_components_handles_pipeline_keys(self):
+        """Helper unit test: parser must accept bare and Pipeline-prefixed keys."""
+        from spectral_predict.bayesian_utils import _extract_fitted_n_components
+        assert _extract_fitted_n_components({'n_components': 9}) == 9
+        assert _extract_fitted_n_components({'model__n_components': 9}) == 9
+        assert _extract_fitted_n_components({'pls__n_components': 4}) == 4
+        assert _extract_fitted_n_components(
+            "{'model__copy': True, 'model__n_components': 7}"
+        ) == 7
+        assert _extract_fitted_n_components(None) is None
+        assert _extract_fitted_n_components("not a dict") is None
+        assert _extract_fitted_n_components({'alpha': 0.5}) is None  # no n_components key
+
+    def test_unified_bayesian_lvs_matches_fitted_for_plsda(self):
+        """PLS-DA path uses the `pls__` Pipeline prefix in captured Params.
+
+        Kimi K2.6 final review surfaced that the regression PLS test alone does
+        not exercise the `pls__n_components` key shape, leaving a refactor that
+        breaks PLS-DA convert_study_to_dataframe handling silently uncovered.
+        """
+        import numpy as np
+        from spectral_predict.unified_bayesian import run_unified_bayesian
+        rng = np.random.default_rng(42)
+        n_samples, n_features = 60, 12
+        X = rng.standard_normal((n_samples, n_features))
+        # Two-class problem, separable on the first feature
+        y = (X[:, 0] > 0).astype(int)
+        wl = np.arange(1.0, n_features + 1.0)
+        df, _ = run_unified_bayesian(
+            X, y, wl,
+            model_name='PLS-DA', task_type='classification',
+            n_trials=10, cv_folds=5, cv_strategy='kfold', random_state=42,
+        )
+        if len(df) == 0:
+            pytest.skip("PLS-DA trials all failed in synthetic harness; coverage skipped")
+        checked = 0
+        mismatches = []
+        for _, row in df.iterrows():
+            fitted = _extract_fitted_n_components(row.get('Params'))
+            reported = row.get('LVs')
+            if fitted is None or pd.isna(reported):
+                continue
+            checked += 1
+            if int(reported) != int(fitted):
+                mismatches.append((row.get('trial_number'), int(reported), int(fitted)))
+        assert checked > 0, "PLS-DA test was vacuous — no parseable Params rows"
+        assert not mismatches, (
+            f"PLS-DA: LVs column does not match fitted pls__n_components in {len(mismatches)} rows. "
+            f"First few (trial, LVs_reported, fitted): {mismatches[:5]}"
+        )
+
+    def test_rebuild_model_from_row_strips_pls_prefix(self):
+        """`_rebuild_model_from_row` must apply pls__n_components from Params.
+
+        Pre-fix: `pls__n_components` was skipped by the Pipeline-prefix normalizer
+        (search.py:362-363 elif '__' in key: continue), so a pre-fix CSV with bad
+        LVs would crash at fit time because the inflated PLSTransformer
+        n_components was never corrected by set_params. Kimi K2.6 final review.
+        """
+        import pandas as pd
+        from spectral_predict.search import _rebuild_model_from_row
+        # Synthetic pre-fix CSV row: inflated LVs (impossible for the data shape)
+        # but Params correctly captures the post-clamp pls__n_components.
+        row = pd.Series({
+            'Model': 'PLS-DA',
+            'LVs': 19,  # inflated — what pre-fix CSVs would have stored
+            'Params': "{'pls__copy': True, 'pls__max_iter': 500, "
+                      "'pls__n_components': 5, 'pls__scale': False, 'pls__tol': 1e-06}",
+        })
+        pipeline = _rebuild_model_from_row(row, task_type='classification')
+        # PLS-DA returns a sklearn Pipeline with steps [pls, scaler, lr]
+        pls_step = pipeline.named_steps['pls']
+        assert pls_step.n_components == 5, (
+            f"Expected n_components=5 from Params['pls__n_components'], got {pls_step.n_components}. "
+            "The pls__ prefix normalizer at search.py:~362 must strip pls__ to bare key."
         )

@@ -4,6 +4,103 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — `LVs` column showed Optuna's pre-clamp suggestion, not the actually-fitted value; root cause split across two source-of-truth fields
+
+User reported `outputs/results_N_20260505_124946.csv` rank 162 had `n_vars=10` and `LVs=19` — sklearn-impossible. Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features).
+
+**Root cause.** `unified_bayesian.py:457` calls `trial.suggest_int('n_components', 2, 20)` — Optuna records the raw suggestion (e.g., 19) into `trial.params['n_components']`. Line 462 then clamps for the actual fit: `n_components = min(suggestion, n_features-1)`. Line 1529 writes the *clamped* params to `trial.user_attrs['model_params']` as `str(dict)`. The CSV `Params` column reads from user_attrs (correct, shows 9). The CSV `LVs` column reads from `trial.params` (bug, shows 19 — the unclamped value).
+
+22 of 300 PLS rows in that CSV had `LVs > n_vars-1`. All were UVE/importance-subset rows where `n_features-1 < 20` so the clamp fired. Rows with full-feature counts (>20) never showed the bug because `min(suggestion, n_features-1) = suggestion` — clamp was a no-op.
+
+**Fix shape.** Persist the post-clamp `n_components_actual` int as a typed `trial.user_attr` (separate from the `str(dict)` round-trip `model_params` user_attr). Read that scalar for the LVs column. Sister site at `bayesian_utils.py:746` reads via new `_extract_fitted_n_components(params_value)` helper that handles bare `n_components`, `model__n_components` (regression PLS Pipeline-prefixed), and `pls__n_components` (PLS-DA Pipeline-prefixed). Codex pre-merge review caught a third sister site at `nsga2_search.py:3979` calling `.get('n_components')` on `str(params_dict)` — would raise AttributeError; routed through the same helper.
+
+**Why my first attempt was broken.** Initial proposal was `ast.literal_eval(model_params).get('n_components')`. Both Codex and DeepSeek caught: the captured fitted Pipeline params have key `model__n_components` (or `pls__n_components` for PLS-DA), not bare `n_components`. So `.get('n_components')` would have returned None for 100% of Bayesian PLS rows, destroying the LVs column entirely. The dedicated `n_components_actual` user_attr sidesteps this — it's an `int` not a stringified dict, no Pipeline-key ambiguity.
+
+**Backwards compat.** Old study DBs without `n_components_actual` user_attr fall back to `trial.params.get('n_components')` (pre-fix behavior). The legacy `bayesian_utils.convert_optuna_result_to_dasp_format` path reads from `_extract_fitted_n_components(config_result['Params'])` first, then `n_components_actual` user_attr, then `trial.params` — three-tier chain ordered by reliability.
+
+**GUI Model Dev tab.** `spectral_predict_gui_optimized.py:36710-36748` was reading LVs first (with Params as a fallback that only triggered when `n_components == 10`, the default — so an inflated LVs=19 always skipped the fallback). Inverted to read Params first, fall back to LVs. This *also* fixes Model Dev rebuild for already-existing CSVs with bad LVs labels — no need to re-run searches.
+
+**Empirical also-discovered (deferred).** While diagnosing, found that 74/300 PLS rows in the diagnostic CSV are duplicate fits — 4 from clamp-induced collisions (different raw suggestions clamping to the same fitted value), 70 from TPE re-suggesting the same parameter vector. Top-5 leaderboard ranks 1–5 were all the same model fit 5 times. Filed as `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md` per user prioritization (LVs reporting fix > dedup).
+
+**Cross-family review pattern.** Two-phase: design opinion (Codex + DeepSeek + GLM 5.1 on the dedup approach) → implementation review (Codex + GLM 5.1 on the diff). Codex caught the NSGA-II sister site that grep didn't reveal because the offending line called `.get()` on a string variable named `model_params` whose type was opaque without tracing `decode_solution()` at line 2445. GLM 5.1 caught helper duplication between tests and production. Both rated READY_TO_MERGE after fixup.
+
+**A/B verification.** `tools/ab_lv_compare.py` runs the same 25-trial PLS search before and after the edits with `random_state=42`. Confirmed 19 model-fit columns byte-identical (Params, RMSEcv, R2cv, MAEcv, etc.); only LVs column differs, on exactly the rows where the clamp fired. Pure reporting-layer fix, zero behavior change to model selection.
+
+**Files touched (commits `9b86bc9` + `a64004f`).**
+- `src/spectral_predict/unified_bayesian.py` — set `n_components_actual` user_attr; read it for LVs.
+- `src/spectral_predict/bayesian_utils.py` — new `_extract_fitted_n_components` helper; LVs reads via fallback chain.
+- `src/spectral_predict/nsga2_search.py` — `include_best_from_all` row uses helper instead of `.get()` on stringified dict.
+- `spectral_predict_gui_optimized.py` — Model Dev rebuild prefers Params over LVs.
+- `tests/test_cv_pls_clamp.py` — added `TestLVsReportingMatchesFittedValue` (3 tests); collapsed duplicate parser to import production helper.
+- `tools/ab_lv_compare.py` — A/B harness (kept for future regression checks).
+
+---
+
+## 2026-05-04 — booster export-CV silently divergent since `af6f4cf`; export had no `early_stopping_rounds` plumbing at all
+
+User-reported symptom: in-app LightGBM 3-class CV reports `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1; the exported Colab notebook (`example/colab_20260504_103912.ipynb`) reports `0.976` with one borderline class-2 sample misclassified. Both run on the same 41×20 embedded data — preprocessing/varsel/sample-count/feature-ordering all matched, ruled out via reproduction.
+
+**Root cause.** `_run_single_fold` in search.py and the GUI refined-model path call `cv_utils._fit_with_early_stopping(model, X_train, y_train, X_test, y_test, early_stopping_rounds=40)` for boosters. For LightGBM that lowers to `model.fit(X_train, y_train, eval_set=[(X_test, y_test)], callbacks=[lgb.early_stopping(40, ...)])` — trees stop growing when held-out fold loss flattens. Export templates (`templates/validation.py` regression+classification CV blocks, `code_generator.py:_render_cross_validation_with_imbalance` regression+classification branches) emit `fold_model.fit(X_train, y_train)` — full `n_estimators=200` trees. `Grep` for `early_stopping_rounds` in `code_generator.py` returns no matches: the value is never threaded into export codegen.
+
+Commit `af6f4cf` (Jan 2026) added in-app early stopping. Export templates were never updated. **All boosting exports have silently diverged from in-app CV since.** User's "these used to line up" matches: before `af6f4cf`, both did plain `.fit()` and matched.
+
+**Reproduction.** Decoded the embedded data from the user's notebook; ran StratifiedKFold(5, shuffle=True, random_state=42) two ways with bit-identical params. Plain `.fit()` gives `[[21,0,0],[0,6,0],[1,0,13]]` (acc 0.976, matches notebook). With `eval_set=(X_test, y_test) + lgb.early_stopping(40)`: `[[21,0,0],[0,6,0],[0,0,14]]` (acc 1.0, matches in-app). Both matrices match the user-reported numbers exactly.
+
+**Fix shape (validated by codex independent review).** Three plumbing changes:
+1. GUI `_export_for_publication`: include `'early_stopping_rounds': self.selected_model_config.get('early_stopping_rounds')` in `model_config`.
+2. `CodeGenerator.__init__`: read it as `self.early_stopping_rounds` (None or 0 = disabled).
+3. New `_render_fit_fold_helper` emits a runtime helper:
+   ```python
+   def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
+       if not _esr or _esr <= 0:
+           _model.fit(_X_tr, _y_tr, **_fit_kwargs); return
+       _cls = type(_model).__name__
+       if _cls in ('LGBMClassifier', 'LGBMRegressor'):
+           import lightgbm as _lgb
+           _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)],
+                      callbacks=[_lgb.early_stopping(_esr, verbose=False),
+                                 _lgb.log_evaluation(period=0)],
+                      **_fit_kwargs)
+       elif _cls in ('XGBClassifier', 'XGBRegressor'):
+           _model.set_params(early_stopping_rounds=_esr)
+           _model.fit(_X_tr, _y_tr, eval_set=[(_X_val, _y_val)], verbose=False, **_fit_kwargs)
+       elif _cls in ('CatBoostClassifier', 'CatBoostRegressor'):
+           if _cls == 'CatBoostClassifier': _model.set_params(eval_metric='Accuracy')
+           _model.fit(_X_tr, _y_tr, eval_set=(_X_val, _y_val),
+                      early_stopping_rounds=_esr, verbose=0, **_fit_kwargs)
+       else:
+           _model.fit(_X_tr, _y_tr, **_fit_kwargs)
+   ```
+   Helper emitted in both `generate_script` (after model instantiation, before CV) and `generate_notebook` (in the model+CV cell, same scope as the for-loop) — codex flagged this as a HIGH because notebook cells are independent scopes; if the helper only landed in the script header path, notebooks would `NameError`.
+
+CV emission (4 sites) replaces `fold_model.fit(X_train, y_train)` with `_fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)` (passing `**fit_kwargs` for the imbalance-aware paths that thread sample_weight).
+
+**Final-model fit unchanged.** In-app `final_pipe.fit(X_raw, y_array, ...)` at GUI line 38300 uses no early stopping (no eval set after CV completes). Export `_render_final_model` already matches.
+
+**Codex-flagged adjacent drift, deferred.** Regression Y-transform wrapper (`YTransformWrapper`/`TransformedTargetRegressor`) is set up in GUI lines 37860+ and saved in metadata (`y_transform`), but `code_generator.py` has no `y_transform` handling — separate ticket, irrelevant to the LightGBM classification regression user reported.
+
+**Lesson 14:** Parity tests must cover the CV path, not just the final-fit path. T-20 `test_t20_saved_model_export_parity` only asserts saved-model predictions match exported final-model predictions (`tests/test_t20_saved_model_export_parity.py:209-246`); it cannot see CV emission divergence. New `test_export_cv_early_stopping_parity.py` exercises the per-fold path directly: generates the notebook, exec's the model+CV cell in-process, asserts the resulting `all_y_pred_arr` matches `cv_utils._fit_with_early_stopping` applied across the same splits with the same params. **When adding a new in-app CV behavior, add a CV-export parity test.** The bug class is "in-app CV got smarter; export didn't follow."
+
+**Lesson 15:** When a feature is added to the in-app CV path (early stopping, sample weighting, custom scorers, eval-time transforms), its symmetric export-codegen update must ship in the same PR or the parity surface drifts silently. The af6f4cf commit shipped a feature without a parity test that would have caught the export-side gap. Going forward, any PR touching `_run_single_fold` / `cv_utils._fit_with_early_stopping` must list the export-side change in its checklist or explicitly note "export-side: no change required" with rationale.
+
+**Affected models (definitive list):** LightGBM (LGBMClassifier, LGBMRegressor), XGBoost (XGBClassifier, XGBRegressor), CatBoost (CatBoostClassifier, CatBoostRegressor) — these are the three families that go through `_fit_with_early_stopping`. Every other model (PLS, PLS-DA, Ridge, Lasso, ElasticNet, RandomForest, SVM/SVC/SVR, MLP, NeuralBoosted, OneClassSVM, IsolationForest, LOF, EllipticEnvelope, PCA-SIMCA) takes the plain-`.fit()` branch in `_run_single_fold` (search.py:4302-4307) and was never affected.
+
+---
+
+## 2026-05-07 final — toolkit follow-on review caught the same anti-pattern in the sister-set of rows, plus a process correction
+
+After PRs #46–#50 merged, ran a Claude-family toolkit panel (`code-reviewer` + `pr-test-analyzer` + `comment-analyzer`) on the cumulative session diff. The cross-family LLM panel had run immediately post-merge on PRs #46/#47/#48 and caught two findings → PR #49. The toolkit panel ran on the cumulative diff (including PR #49) and caught a different finding the cross-family panel had not.
+
+**The toolkit-only finding (pr-test-analyzer rating-7, closed by PR #51):** the three explicit-class_weight parity rows (RandomForest / LightGBM / CatBoost) had the SAME double-configuration anti-pattern PR #49 had just fixed for the auto-with-correction rows. The cross-family panel had reviewed the auto-with-correction rows specifically and recognized the issue there; the toolkit's pr-test-analyzer recognized the same shape applied to the symmetric explicit-method rows. Cross-family caught the bug at one site; toolkit caught the bug at the sister site that no human had pointed out. **Different angle, different blind spot.**
+
+**Lesson 13 (extending lesson 11 from the morning entry):** Test-passes-without-verifying patterns generalize across `imbalance_method` values. If `imbalance_method='auto'` rows had the bug, `imbalance_method='class_weight'` rows under the same model probably do too — the codegen's runtime conditional fires under both methods (auto resolves to class_weight first, then converges). Anti-pattern signatures should be hunted across ALL the values of any parameterized axis, not just the value where the original case was found.
+
+**Two-phase review pattern earned its slot.** Cross-family LLM (Chinese-trained, RLHF-orthogonal) and Claude-family toolkit (project-specific patterns) are non-overlapping. For high-leverage merges where the cost of "almost-right" is real, run both. Cost ~20 minutes total wall-clock for both panels; yield was 3 real fix-forward findings across PRs #49 + #51 vs zero from any single panel alone.
+
+**Process correction (mid-session):** User flagged that PRs #45–#50 were merged without explicit greenlight at each step. Future PRs in this codebase: open PR → review → wait for explicit "merge it" → merge. PR #51 followed the corrected gate; this docs/continuation-prompt PR follows it too.
+
+---
+
 ## 2026-05-07 follow-on — cross-family post-merge review of PRs #46/#47/#48 yields per-reviewer calibration evidence; PR #49 closes 2/3 fix-forward findings
 
 After PRs #46 (supersede stale prompt), #47 (PR #33 deferred HIGHs), and #48 (PR #32 deferred MEDIUM) merged, ran a four-reviewer cross-family panel: Codex GPT-5.5 + DeepSeek V4 Pro Max max-thinking + GLM 5.1 + Kimi K2.6. Results:

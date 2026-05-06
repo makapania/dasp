@@ -18,6 +18,7 @@ Key insight: Different variable subsets need different hyperparameters
 Returning "best of subsets" confuses TPE about which hyperparameters are good.
 """
 
+import ast
 import optuna
 from optuna.samplers import TPESampler, RandomSampler
 from optuna.pruners import MedianPruner, SuccessiveHalvingPruner, PercentilePruner
@@ -26,6 +27,48 @@ from typing import Dict, Any, Optional, Callable
 import logging
 from .constants import RANDOM_STATE
 from .regions import create_region_subsets
+
+
+def _extract_fitted_n_components(params_value: Any) -> Optional[int]:
+    """Pull the post-clamp n_components from a stored model-params value.
+
+    Handles three shapes the codebase emits:
+      - bare 'n_components' (pre-fit dict from suggest_model_params)
+      - 'model__n_components' (Pipeline-prefixed, regression PLS captured params)
+      - 'pls__n_components' (PLS-DA classifier captured params)
+
+    Returns None on:
+      - unrecognized input type (None, empty string, non-dict literal)
+      - parse failure (logged at WARNING level — bug signal)
+      - no recognized key in the dict (legitimate non-PLS or missing field)
+      - present-but-non-numeric value (logged at WARNING — bug signal)
+    """
+    if isinstance(params_value, dict):
+        parsed = params_value
+    elif isinstance(params_value, str) and params_value.strip():
+        try:
+            parsed = ast.literal_eval(params_value)
+        except (ValueError, SyntaxError) as e:
+            logging.getLogger(__name__).warning(
+                "Failed to parse model_params string %r: %s", params_value[:200], e,
+            )
+            return None
+        if not isinstance(parsed, dict):
+            return None
+    else:
+        return None
+
+    for key in ('n_components', 'model__n_components', 'pls__n_components'):
+        if key in parsed:
+            try:
+                return int(parsed[key])
+            except (TypeError, ValueError) as e:
+                logging.getLogger(__name__).warning(
+                    "Found %s=%r in model_params but cannot coerce to int: %s",
+                    key, parsed[key], e,
+                )
+                return None
+    return None
 
 
 # Configure logging for Optuna (suppress verbose output)
@@ -743,7 +786,6 @@ def convert_optuna_result_to_dasp_format(
 
         # Get trial parameters
         trial_params = trial.params
-        lvs = trial_params.get('n_components', np.nan)
 
         # Get all results stored for this trial (full + subsets)
         trial_results = trial.user_attrs.get('all_results', [])
@@ -758,6 +800,19 @@ def convert_optuna_result_to_dasp_format(
             # Extract subset information
             subset_tag = config_result.get('SubsetTag', 'full')
             config_n_vars = config_result.get('n_vars', n_vars)
+
+            # Resolve LVs from the post-clamp fitted Params per config (not
+            # trial.params, which holds the raw pre-clamp Optuna suggestion
+            # and would inflate LVs when the clamp at unified_bayesian.py:462
+            # had to fire). Fall back to the trial's actual-component user_attr
+            # if the per-config Params doesn't carry it, then to trial.params
+            # for backwards compatibility with old study databases.
+            lvs = _extract_fitted_n_components(config_result.get('Params'))
+            if lvs is None:
+                lvs = trial.user_attrs.get('n_components_actual')
+            if lvs is None:
+                raw_nc = trial_params.get('n_components')
+                lvs = int(raw_nc) if raw_nc is not None else np.nan
 
             # Build base result dictionary
             result = {
