@@ -33582,9 +33582,9 @@ Performance (Classification):
 
         # T-36: load autoscale flag from result row so the Refine tab and any
         # subsequent rebuild use the same preprocessing the search winner used.
+        # bayes_enable_autoscale / tpe_enable_autoscale are search-time exploration
+        # flags, not rebuild flags — leave them at the user's deliberate setting.
         self.use_autoscale.set(autoscale_loaded)
-        self.bayes_enable_autoscale.set(autoscale_loaded)
-        self.tpe_enable_autoscale.set(autoscale_loaded)
         if autoscale_loaded:
             print("> Autoscale (UV scaling) loaded from results")
 

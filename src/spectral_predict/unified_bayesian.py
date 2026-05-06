@@ -188,10 +188,7 @@ def _selected_indices_fingerprint(top_indices) -> Any:
 
 def _resolved_weighting_fingerprint(model) -> tuple:
     """Capture resolved class-weight knobs after model/pipeline construction."""
-    try:
-        params = model.get_params(deep=True)
-    except Exception:
-        return ()
+    params = model.get_params(deep=True)
     resolved = []
     for key, value in params.items():
         key_lower = key.lower()
@@ -343,6 +340,11 @@ def _rehydrate_seen_fingerprints(
         if trial.state != TrialState.COMPLETE:
             continue
         if trial.value is None:
+            continue
+        # Don't cache penalty-sentinel values (PLS clamp 1498, OC skip 1331,
+        # broad-except fallthrough 1995). Resume should let the caller retry
+        # transient failures, not replay the 1e10 ghost.
+        if trial.value >= 1e9:
             continue
         fingerprint_repr = trial.user_attrs.get('fingerprint')
         if not fingerprint_repr:

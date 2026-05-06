@@ -95,6 +95,36 @@ class TestResumeRehydrationTest:
         # Value-cache format: {fp: (trial_number, value)}
         assert seen == {fingerprint: (complete.number, 1.0)}
 
+    def test_penalty_value_trials_are_not_cached_on_resume(self):
+        """Trials that completed via the penalty-sentinel path (1e10 from
+        broad-except, PLS clamp, OC skip) MUST NOT rehydrate into the dedup
+        cache — otherwise resume replays the failure ghost forever and the
+        user can never retry transient errors. Pins fix for the silent-failure
+        finding from PR #54 review."""
+        from spectral_predict.unified_bayesian import _rehydrate_seen_fingerprints
+
+        study = optuna.create_study(direction='minimize')
+
+        good = study.ask()
+        good_fp = (('model_name', 'PLS'), ('n_vars', 10))
+        good.set_user_attr('fingerprint', repr(good_fp))
+        study.tell(good, 0.42)
+
+        # Penalty-sentinel trial: COMPLETE with value 1e10, fingerprint stamped
+        # pre-fit. This is what a transient OOM/LinAlgError/etc. produces today.
+        penalty = study.ask()
+        penalty_fp = (('model_name', 'LightGBM'), ('n_vars', 50))
+        penalty.set_user_attr('fingerprint', repr(penalty_fp))
+        study.tell(penalty, 1e10)
+
+        seen = {}
+        added = _rehydrate_seen_fingerprints(study, seen)
+
+        assert added == 1
+        assert good_fp in seen
+        assert penalty_fp not in seen, \
+            "Penalty-sentinel trial leaked into resume dedup cache"
+
 
 class TestNoDuplicateFitsTest:
     def test_forced_identical_trials_execute_cv_once(self, monkeypatch):
