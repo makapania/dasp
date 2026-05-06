@@ -75,23 +75,34 @@ SCENARIOS = {
 
 @contextlib.contextmanager
 def disable_dedup_for_pre_emulation():
-    """Monkeypatch ``_register_or_prune_fingerprint`` to record-only.
+    """Monkeypatch dedup helpers to record-only (no replay).
 
-    Pre-Option-A emulation: every trial completes; TPE sees real
-    COMPLETE values for all suggestions including duplicates.
+    Pre-fix emulation: every trial completes via a full fit; TPE sees
+    real CV values for all suggestions including duplicates. The post-fix
+    behavior (cache + replay) preserves TPE history bit-identically, so
+    the comparison should reveal that pre/post explore the SAME points;
+    post just skips the redundant fits.
     """
-    original_register = ub._register_or_prune_fingerprint
+    original_register = ub._register_or_replay_fingerprint
+    original_record = ub._record_fingerprint_value
 
-    def record_without_pruning(trial, fingerprint, seen_fingerprints):
-        if fingerprint not in seen_fingerprints:
-            seen_fingerprints[fingerprint] = trial.number
+    def record_without_replay(trial, fingerprint, seen_fingerprints):
+        # Always treat as novel: caller proceeds with the real fit.
         trial.set_user_attr("fingerprint", repr(fingerprint))
+        return None
 
-    ub._register_or_prune_fingerprint = record_without_pruning
+    def noop_record(fingerprint, trial, value, seen_fingerprints):
+        # Don't cache values; emulates pre-dedup behavior where every
+        # trial including duplicates runs a fresh fit.
+        pass
+
+    ub._register_or_replay_fingerprint = record_without_replay
+    ub._record_fingerprint_value = noop_record
     try:
         yield
     finally:
-        ub._register_or_prune_fingerprint = original_register
+        ub._register_or_replay_fingerprint = original_register
+        ub._record_fingerprint_value = original_record
 
 
 def load_example_xy(max_features: int = 120):
@@ -117,6 +128,7 @@ def run_phase(
     max_features: int,
     *,
     pre_fix_emulation: bool,
+    seed: int = 42,
 ):
     """Run one phase (pre or post). Returns (df, study, elapsed_sec)."""
     X, wavelengths, joined = load_example_xy(max_features=max_features)
@@ -135,7 +147,7 @@ def run_phase(
             n_trials=n_trials,
             cv_folds=3,
             cv_strategy="kfold",
-            random_state=42,
+            random_state=seed,
             n_top_regions=3,
             enable_sqlite_persistence="never",
             early_stopping_rounds=None,
@@ -194,6 +206,88 @@ def top_n_fingerprints(df: pd.DataFrame, study: optuna.Study, scenario: Scenario
     }
 
 
+def best_fingerprint(df: pd.DataFrame, study: optuna.Study, scenario: Scenario):
+    fp_by_trial = fingerprint_map(study)
+    if scenario.metric_col not in df.columns or "trial_number" not in df.columns:
+        return None
+    asc = not scenario.metric_higher_is_better
+    sorted_df = df.sort_values(scenario.metric_col, ascending=asc)
+    for _, row in sorted_df.iterrows():
+        fp = fp_by_trial.get(int(row["trial_number"]))
+        if fp:
+            return fp
+    return None
+
+
+def metric_distribution(df: pd.DataFrame, scenario: Scenario):
+    if scenario.metric_col not in df.columns:
+        return None
+    s = df[scenario.metric_col].dropna()
+    return {
+        "n": int(len(s)),
+        "min": float(s.min()),
+        "p25": float(s.quantile(0.25)),
+        "median": float(s.median()),
+        "p75": float(s.quantile(0.75)),
+        "max": float(s.max()),
+        "mean": float(s.mean()),
+    }
+
+
+def coverage_comparison(pre_study: optuna.Study, post_study: optuna.Study,
+                        pre_df: pd.DataFrame, post_df: pd.DataFrame, scenario: Scenario):
+    """How much of pre's fingerprint space did post explore (and vice versa)?
+
+    Specifically address the user's "are parts of space closed off" concern:
+    - pre_best in post's set?
+    - post_best in pre's set?
+    - |pre ∩ post| / |pre|: what fraction of pre's exploration did post also reach?
+    - Pre-only fingerprints: configs pre tried that post didn't (potentially
+      "closed off" by dedup steering TPE away)
+    - Post-only fingerprints: configs only post explored (extra coverage from
+      the +N search budget dedup unlocked)
+    """
+    pre_fps = set(fingerprint_map(pre_study).values())
+    post_fps = set(fingerprint_map(post_study).values())
+    common = pre_fps & post_fps
+    pre_only = pre_fps - post_fps
+    post_only = post_fps - pre_fps
+    pre_best_fp = best_fingerprint(pre_df, pre_study, scenario)
+    post_best_fp = best_fingerprint(post_df, post_study, scenario)
+
+    print(f"\n  --- Coverage comparison (full fingerprint sets) ---")
+    print(f"    |pre|={len(pre_fps)}  |post|={len(post_fps)}  |pre AND post|={len(common)}")
+    print(f"    Fraction of pre's space also explored by post: "
+          f"{len(common) / max(1, len(pre_fps)) * 100:.1f}%")
+    print(f"    Fraction of post's space also explored by pre: "
+          f"{len(common) / max(1, len(post_fps)) * 100:.1f}%")
+    print(f"    Pre-only configs (in pre, NOT explored by post): {len(pre_only)}")
+    print(f"    Post-only configs (in post, NOT explored by pre): {len(post_only)}")
+    print(f"    Pre's best fingerprint reached by post: "
+          f"{'YES' if pre_best_fp in post_fps else 'NO'}")
+    print(f"    Post's best fingerprint reached by pre: "
+          f"{'YES' if post_best_fp in pre_fps else 'NO'}")
+
+    pre_dist = metric_distribution(pre_df, scenario)
+    post_dist = metric_distribution(post_df, scenario)
+    print(f"\n  --- Metric distribution across all unique fits ({scenario.metric_col}) ---")
+    print(f"    Pre:  n={pre_dist['n']}  min={pre_dist['min']:.4f}  "
+          f"p25={pre_dist['p25']:.4f}  median={pre_dist['median']:.4f}  "
+          f"p75={pre_dist['p75']:.4f}  max={pre_dist['max']:.4f}")
+    print(f"    Post: n={post_dist['n']}  min={post_dist['min']:.4f}  "
+          f"p25={post_dist['p25']:.4f}  median={post_dist['median']:.4f}  "
+          f"p75={post_dist['p75']:.4f}  max={post_dist['max']:.4f}")
+    return {
+        "common_count": len(common),
+        "pre_only_count": len(pre_only),
+        "post_only_count": len(post_only),
+        "pre_best_in_post": pre_best_fp in post_fps,
+        "post_best_in_pre": post_best_fp in pre_fps,
+        "pre_dist": pre_dist,
+        "post_dist": post_dist,
+    }
+
+
 def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
     print(f"\n=== Scenario: {scenario.name} ===")
     print(f"  Model: {scenario.model_name}, task: {scenario.task_type}, n_trials: {n_trials}")
@@ -234,6 +328,8 @@ def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
     print(f"    Best metric delta ({scenario.metric_col}): post={post_best:.4f} pre={pre_best:.4f} ({post_best - pre_best:+.4f})")
     print(f"    Top-5 fingerprint overlap: {len(overlap)}/5")
 
+    cov = coverage_comparison(pre_study, post_study, pre_df, post_df, scenario)
+
     return {
         "scenario": scenario.name,
         "pre_time": pre_time,
@@ -244,6 +340,7 @@ def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
         "post_best": post_best,
         "top5_overlap": len(overlap),
         "pre_dup_pct": pct_dup_in_pre,
+        "coverage": cov,
     }
 
 

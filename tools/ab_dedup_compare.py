@@ -60,26 +60,31 @@ def random_sampler_and_optional_dedup(disable_dedup: bool):
     from spectral_predict import search as search_mod
 
     original_sampler = ub.TPESampler
-    original_register = ub._register_or_prune_fingerprint
+    original_register = ub._register_or_replay_fingerprint
+    original_record = ub._record_fingerprint_value
     original_threading_fallback = search_mod._frozen_needs_threading_fallback
 
     def random_sampler_factory(*args, **kwargs):
         return optuna.samplers.RandomSampler(seed=kwargs.get("seed", 42))
 
-    def record_without_pruning(trial, fingerprint, seen_fingerprints):
-        if fingerprint not in seen_fingerprints:
-            seen_fingerprints[fingerprint] = trial.number
+    def record_without_replay(trial, fingerprint, seen_fingerprints):
         trial.set_user_attr("fingerprint", repr(fingerprint))
+        return None  # always novel; caller proceeds with full fit
+
+    def noop_record(fingerprint, trial, value, seen_fingerprints):
+        pass
 
     ub.TPESampler = random_sampler_factory
     search_mod._frozen_needs_threading_fallback = lambda: True
     if disable_dedup:
-        ub._register_or_prune_fingerprint = record_without_pruning
+        ub._register_or_replay_fingerprint = record_without_replay
+        ub._record_fingerprint_value = noop_record
     try:
         yield
     finally:
         ub.TPESampler = original_sampler
-        ub._register_or_prune_fingerprint = original_register
+        ub._register_or_replay_fingerprint = original_register
+        ub._record_fingerprint_value = original_record
         search_mod._frozen_needs_threading_fallback = original_threading_fallback
 
 
