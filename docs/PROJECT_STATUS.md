@@ -1,6 +1,21 @@
 # Project Status
 
-> **Last updated:** 2026-05-06 evening — **Bayesian dedup landed as value-cache-and-replay** on branch `docs/2026-05-07-final-wrapup-and-continuation` (PR #53). Previous TrialPruned design (commits `b731d68`..`8778c9a`) was implemented, multi-seed bench showed it diverged TPE's KDE from pre-dedup behavior (only 22-35% common fingerprints across 5 seeds at 300 trials; pre's best fingerprint not reached by post in any seed), and was reverted at `ed809f3`.
+> **Last updated:** 2026-05-06 late evening — **PR #54 merged** (squash `4aef396`). Three themes: T-44 autoscale decoupling (Bayesian and TPE now have dedicated `bayes_enable_autoscale` / `tpe_enable_autoscale` GUI controls, both default ON, independent of grid `use_autoscale`); dedup hardening follow-ups closing review findings on `ee3a70e`; PR-#52 post-merge fixes (LVs/booster-export/NSGA/PLS-DA rebuild/TPE display).
+>
+> **Three review-findings fixes shipped via `ee3a70e`** (after Codex caught a regression in the first attempt at `e906f70`):
+> 1. Resume-rehydrate would cache transient broad-except `1e10` failures as ghosts. Fixed by moving fingerprint user_attr write from pre-fit (`_register_or_replay_fingerprint`) to post-success (`_record_fingerprint_value`). OC-skip's `float('inf')` Kimi-BLOCKER caching is preserved because `:1331` explicitly calls `_record_fingerprint_value(fp, trial, inf, ...)`.
+> 2. Refine-tab loader silently re-coupled the three autoscale flags. Fixed by writing only `use_autoscale` (the rebuild-path flag) on result load; bayes/tpe flags are search-time exploration controls and stay at the user's deliberate setting.
+> 3. `_resolved_weighting_fingerprint` had a dead-code `try/except Exception: return ()` that conflated distinct configs on introspection failure. Deleted per project policy — `BaseEstimator.get_params(deep=True)` cannot raise for any conforming sklearn estimator.
+>
+> **Cross-family review verdict:** Codex re-review of `ee3a70e` → closed. DeepSeek V4 Pro Max independent review → "net state at HEAD is clean — no action needed." Pre-merge 4-agent panel (code-reviewer / pr-test-analyzer / silent-failure-hunter / comment-analyzer) all signed off after these fixes.
+>
+> **Tests:** `tests/test_t44_autoscale_wiring.py` (15 tests pinning bayes/tpe/grid autoscale plumbing) + `tests/test_bayesian_dedup.py` (10 tests, including 4 new producer-side contract tests pinning the rehydrate fix). 25/25 green.
+>
+> **Verification command:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` (25 passed in 2.14s).
+>
+> ---
+>
+> ## Previous session — 2026-05-06 evening — **Bayesian dedup landed as value-cache-and-replay** on branch `docs/2026-05-07-final-wrapup-and-continuation` (PR #53). Previous TrialPruned design (commits `b731d68`..`8778c9a`) was implemented, multi-seed bench showed it diverged TPE's KDE from pre-dedup behavior (only 22-35% common fingerprints across 5 seeds at 300 trials; pre's best fingerprint not reached by post in any seed), and was reverted at `ed809f3`.
 >
 > **Shipped mechanism:** the duplicate trial returns the prior trial's cached metric value. TPE sees `(params, value)` twice — exactly as it would have if we re-fit the duplicate. KDE history is **bit-identical** to pre-dedup, so original parameter space is preserved exactly. Duplicates skip the actual fit + CV (compute savings); the leaderboard CSV is deduped at convert time via `DUPLICATE_OF_TRIAL_ATTR` user_attr filter. See `docs/SESSION_LOG.md` 2026-05-06 evening entry for the full writeup including the failed-approach root cause.
 >
