@@ -3197,6 +3197,7 @@ class SpectralPredictApp:
         self.bayes_region_test_all = tk.BooleanVar(value=False)
         self.bayes_region_test_pairwise = tk.BooleanVar(value=False)
         self.bayes_enable_uve = tk.BooleanVar(value=True)
+        self.bayes_enable_autoscale = tk.BooleanVar(value=True)
         # T-41: crash-resume persistence mode. Default flipped back to 'auto'
         # 2026-05-02 for troubleshooting (was 'never' until resume reliability
         # is confirmed end-to-end). 'auto' = first 10 trials in-memory then
@@ -3225,6 +3226,7 @@ class SpectralPredictApp:
         self.enable_tpe_preprocessing = tk.BooleanVar(value=False)
         self.tpe_preprocess_n_trials = tk.IntVar(value=75)
         self.tpe_preprocess_n_top = tk.IntVar(value=10)
+        self.tpe_enable_autoscale = tk.BooleanVar(value=True)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -11848,7 +11850,7 @@ class SpectralPredictApp:
 
         # ===== TPE PREPROCESSING DISCOVERY (T-37) =====
         tpe_preproc_card_outer, tpe_preproc_card = self._create_card(content_frame, title="TPE Preprocessing Discovery",
-                                                                      subtitle="Optuna TPE search over 5-D space: preproc, window, autoscale, baseline, smoothing")
+                                                                      subtitle="Optuna TPE search: preproc, window, autoscale, baseline, smoothing")
         tpe_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         tpe_preproc_frame = tk.Frame(tpe_preproc_card, bg=self.colors['card_bg'])
@@ -11860,7 +11862,7 @@ class SpectralPredictApp:
         self.tpe_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
         ttk.Label(tpe_preproc_frame,
-                 text="Smart 5-D search (preproc x window x autoscale x baseline x smoothing) via Optuna TPE",
+                 text="TPE search (preproc x window x autoscale x baseline x smoothing) via Optuna TPE",
                  style='Caption.TLabel').grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(0, 10))
 
         self.tpe_preproc_options_frame = ttk.Frame(tpe_preproc_frame)
@@ -11876,8 +11878,12 @@ class SpectralPredictApp:
                                       textvariable=self.tpe_preprocess_n_top, width=8)
         n_top_spinbox2.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
 
+        self._cb_tpe_enable_autoscale = ttk.Checkbutton(self.tpe_preproc_options_frame, text="Explore autoscale (UV scaling)",
+                                                        variable=self.tpe_enable_autoscale)
+        self._cb_tpe_enable_autoscale.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
         ttk.Label(tpe_preproc_frame,
-                 text="5-D search space: 14 preproc x derivative-aware windows x autoscale x 5 baseline x smoothing",
+                 text="Search space: 14 preproc x derivative-aware windows x autoscale x 5 baseline x smoothing",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
         ttk.Label(tpe_preproc_frame,
                  text="Evaluates via LightGBM proxy with CV. Model-agnostic — all enabled models tested against each config.",
@@ -12351,11 +12357,17 @@ class SpectralPredictApp:
         self._cb_bayes_enable_uve.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
         ttk.Label(self.bayes_options_frame, text="(fast ~50-100ms/trial, adds uninformative variable elimination)",
                   style='Caption.TLabel').grid(row=4, column=2, sticky=tk.W, pady=(5, 0))
-        # Row 5: T-41 Crash-resume persistence
+        # Row 5: Autoscale (UV scaling) — TPE explores True/False per trial
+        self._cb_bayes_enable_autoscale = ttk.Checkbutton(self.bayes_options_frame, text="Autoscale (UV scaling)",
+                        variable=self.bayes_enable_autoscale)
+        self._cb_bayes_enable_autoscale.grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        ttk.Label(self.bayes_options_frame, text="(TPE explores on/off per trial \u2014 recommended ON)",
+                  style='Caption.TLabel').grid(row=5, column=2, sticky=tk.W, pady=(5, 0))
+        # Row 6: T-41 Crash-resume persistence
         ttk.Label(self.bayes_options_frame, text="Crash-resume persistence:",
-                  style='Normal.TLabel').grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
+                  style='Normal.TLabel').grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
         _persist_radio_frame = ttk.Frame(self.bayes_options_frame)
-        _persist_radio_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W, pady=(8, 0))
+        _persist_radio_frame.grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(8, 0))
         for _pval, _ptxt in [
             ('auto', 'Auto (recommended)'),
             ('always', 'Always on'),
@@ -12378,7 +12390,7 @@ class SpectralPredictApp:
         )
         ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
                   style='Caption.TLabel', wraplength=500,
-                  ).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+                  ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
 
         # Initially hide if not Bayesian
         if self.optimization_method.get() == "unified":
@@ -27397,7 +27409,7 @@ class SpectralPredictApp:
                                 smoothing=sm_enabled_oc,
                                 smoothing_window=sm_win_oc,
                                 smoothing_polyorder=sm_poly_oc,
-                                enable_autoscale=self.use_autoscale.get(),  # T-36
+                                enable_autoscale=self.bayes_enable_autoscale.get(),  # decoupled from grid Basic Settings
                                 inlier_class_label=inlier_label,
                                 enable_uve=self.bayes_enable_uve.get(),
                                 enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
@@ -27503,13 +27515,14 @@ class SpectralPredictApp:
                         smart_preprocess=self.enable_smart_preprocessing.get(),
                         smart_preprocess_importance=self.smart_preprocess_importance.get(),
                         smart_preprocess_n_top=self.smart_preprocess_n_top.get(),
-                        # T-37: TPE preprocessing discovery
-                        tpe_preprocess=self.enable_tpe_preprocessing.get(),
-                        tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
-                        tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
-                        # T-36: autoscale toggle (UV scaling)
-                        autoscale=self.use_autoscale.get(),
-                    )
+                         # T-37: TPE preprocessing discovery
+                         tpe_preprocess=self.enable_tpe_preprocessing.get(),
+                         tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
+                         tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
+                         tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
+                         # T-36: autoscale toggle (UV scaling) — grid path only
+                         autoscale=self.use_autoscale.get(),
+                     )
 
                 label_encoder = None
                 self.label_encoder = None
@@ -27744,7 +27757,7 @@ class SpectralPredictApp:
                             smoothing=sm_enabled,
                             smoothing_window=sm_win,
                             smoothing_polyorder=sm_poly,
-                            enable_autoscale=self.use_autoscale.get(),  # T-36
+                            enable_autoscale=self.bayes_enable_autoscale.get(),  # decoupled from grid Basic Settings
                             enable_uve=enable_uve,
                             enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
                         )
@@ -28225,6 +28238,7 @@ class SpectralPredictApp:
                 tpe_preprocess=self.enable_tpe_preprocessing.get(),
                 tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
                 tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
+                tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
@@ -33569,6 +33583,8 @@ Performance (Classification):
         # T-36: load autoscale flag from result row so the Refine tab and any
         # subsequent rebuild use the same preprocessing the search winner used.
         self.use_autoscale.set(autoscale_loaded)
+        self.bayes_enable_autoscale.set(autoscale_loaded)
+        self.tpe_enable_autoscale.set(autoscale_loaded)
         if autoscale_loaded:
             print("> Autoscale (UV scaling) loaded from results")
 
