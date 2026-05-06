@@ -4,6 +4,25 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-06 — Option A Bayesian dedup implementation notes
+
+Implemented the remaining Option A phases after phase 1 (`MaxTrialsCallback`) was committed by the main thread. The fingerprint must be created at the resolved-state site, immediately before the CV fit, because the trial's effective fit can change after raw Optuna suggestions through `build_model`, imbalance transformer construction, CatBoost `auto_class_weights`, generic `class_weight`, sample-weight routing, PLS-DA tail LogisticRegression `random_state`, and early-stopping gating. The helper now serializes fingerprints as literal-safe tuples so resume rehydration can use `ast.literal_eval`.
+
+Non-obvious gotchas:
+- `TrialPruned` must be re-raised before the objective's broad `except Exception`; otherwise duplicate fits become COMPLETE trials with a `1e10` penalty and still consume the unique-fit budget.
+- PCA-SIMCA clamps `n_components` inside `contamination.py`; per user decision, the one-class fingerprint documents this as an accepted rare duplicate miss instead of duplicating PCA-SIMCA internals in the Bayesian objective.
+- The A/B harness cannot use production TPE because pruned trials affect TPE history differently than COMPLETE-with-penalty trials. The harness monkeypatches only the module-level sampler factory to `RandomSampler(seed=42)`.
+- On this Windows sandbox, joblib parallel CV can hit temp-directory `PermissionError`; the A/B harness forces the existing threading fallback so CV runs serially. This is harness-only and does not change production behavior.
+- The example metadata uses `File Number` values like `Spectrum 00001`, while `read_asd_dir()` indexes spectra as `Spectrum00001`; the harness normalizes spaces before joining `BoneCollagen.csv` to ASD spectra.
+
+Verification:
+- `tests/test_bayesian_dedup.py`: 4 passed.
+- `tests/test_cv_pls_clamp.py::TestRunBayesianSearchPLSGridClamping`: 2 passed.
+- `tests/test_unified_bayesian_baseline.py`: 10 passed.
+- `tools/ab_dedup_compare.py --n-trials 12 --max-features 120`: PLS regression, LightGBM regression, and LightGBM classification all reported `pre_unique_count=12`, `post_row_count=12`, `match_percent=100.0`.
+
+---
+
 ## 2026-05-08 — `LVs` column showed Optuna's pre-clamp suggestion, not the actually-fitted value; root cause split across two source-of-truth fields
 
 User reported `outputs/results_N_20260505_124946.csv` rank 162 had `n_vars=10` and `LVs=19` — sklearn-impossible. Model Development tab couldn't rebuild it (sklearn errors when n_components > n_features).
