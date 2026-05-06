@@ -1,11 +1,15 @@
 """A/B harness for Bayesian pre-fit deduplication.
 
 Runs dasp's unified Bayesian search twice in one process:
-- pre-fix emulation: fingerprints are stored but never pruned
-- post-fix behavior: duplicate fingerprints raise TrialPruned
+- pre-fix emulation: every duplicate runs a fresh fit (the
+  ``_register_or_replay_fingerprint`` monkeypatch returns None and
+  ``_record_fingerprint_value`` is a no-op)
+- post-fix behavior: duplicate fingerprints short-circuit via the
+  cached prior trial's value (TPE history bit-identical to pre-dedup)
 
 Both runs use RandomSampler(seed=42) by monkeypatching the module-level
-TPESampler symbol. Production code remains TPE-based.
+TPESampler symbol — RandomSampler gives byte-identical determinism for
+the row-by-row comparison. Production code remains TPE-based.
 """
 
 from __future__ import annotations

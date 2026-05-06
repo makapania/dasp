@@ -1,5 +1,14 @@
 # Continuation prompt — 2026-05-09 — Bayesian search dedup follow-ups
 
+> **STATUS: SUPERSEDED 2026-05-06.** Options A/B/C described below are
+> historical. Option A (pre-fit fingerprint cache + `optuna.TrialPruned`)
+> was implemented and reverted; the production mechanism that shipped
+> uses the same fingerprint hash but value-cache-and-replay instead of
+> TrialPruned (so TPE's KDE history stays bit-identical to pre-dedup).
+> See `docs/PLAN_2026-05-09_option_a_dedup.md` SUPERSEDED banner and
+> the 2026-05-06 entry in `docs/SESSION_LOG.md` for context. Preserved
+> as the record of the design exploration.
+
 ## Where we left off (2026-05-08)
 
 Shipped on `docs/2026-05-07-final-wrapup-and-continuation`:

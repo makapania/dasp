@@ -21,6 +21,28 @@ Verification:
 - `tests/test_unified_bayesian_baseline.py`: 10 passed.
 - `tools/ab_dedup_compare.py --n-trials 12 --max-features 120`: PLS regression, LightGBM regression, and LightGBM classification all reported `pre_unique_count=12`, `post_row_count=12`, `match_percent=100.0`.
 
+### 2026-05-06 evening — TrialPruned approach reverted, replaced with value-cache-and-replay
+
+The TrialPruned mechanism failed acceptance criterion #1 (preserve original parameter space). User-driven multi-seed bench (`tools/bench_dedup_real.py`, 5 seeds × 300 trials, RandomSampler-equivalent on `example/BoneCollagen.csv`) showed only 22-35% common fingerprints between pre-fix and post-fix runs; pre's best fingerprint was NOT reached by post in any seed; post had worse median RMSEcv 4 of 5 seeds. Root cause: Optuna 4.8 TPE includes PRUNED trials in its KDE history (`samplers/_tpe/sampler.py:452-468`) but with split-score `(1, 0.0)` (`:795-803`) — different from how it scores a duplicate COMPLETE-with-real-value trial. So pre and post saw different KDE histories → different suggestion streams → different parts of parameter space explored.
+
+Reverted at `ed809f3` and replaced with **value-cache-and-replay**: the same fingerprint hash, but `_register_or_replay_fingerprint` returns the cached prior trial's metric value when a fingerprint hits, and the trial body returns it directly. TPE sees identical (params, value) pairs to a pre-dedup re-fit — KDE history bit-identical. Same parameter space, same final models, just no redundant fits. `convert_study_to_dataframe` filters trials marked with `DUPLICATE_OF_TRIAL_ATTR` so the leaderboard CSV stays clean.
+
+Reverts that fell out of the new mechanism:
+- F5 PLS too-many-components: back to `return 1e10` (matches pre-dedup TPE behavior; no KDE divergence at this site either).
+- `MaxTrialsCallback` removed everywhere — no longer needed (n_trials counts COMPLETE trials, and there are no PRUNED ones now).
+- F9 runaway warning: removed (no PRUNED inflation possible).
+
+Verification on `example/BoneCollagen.csv` PLS regression at n_trials=300:
+- Pre-fix: wall=6.2s, 88 unique fingerprints (12% dup rate), best RMSEcv=5.36, CSV=300 rows
+- Post-fix: wall=5.5s (-10%), 88 unique fingerprints (identical set), best RMSEcv=5.36 (bit-identical), CSV=88 rows (deduped)
+- 100% fingerprint overlap, top-5 identical, every shared fingerprint's metric matches bit-for-bit.
+
+LightGBM at n_trials=300 produced 0 duplicates with TPE on this data (booster space wider than PLS); dedup is a no-op there. Isolated single-run timings (fresh process each): post 264.7s vs pre 264.4s (0.1% noise floor) — the new mechanism adds zero per-trial overhead when no duplicates exist.
+
+Three-reviewer audit: Codex (READY_TO_MERGE — TPE equivalence verified by reading Optuna 4.8 sources), DeepSeek V4 Pro Max max-thinking (READY_TO_MERGE with 3 STRONG fixes applied), Kimi K2.6 sister-site sweep (BLOCKER → READY_TO_MERGE after the OC `inf`-cache fix). Toolkit follow-up (5-agent code/test/comment/silent-failure/type-design panel) added the `DUPLICATE_OF_TRIAL_ATTR` constant + tightened the placeholder-cache-hit branch as defense-in-depth.
+
+**Lesson worth pinning so the next "let's just prune the duplicates" instinct doesn't re-surface:** when a sampler is stateful (TPE's KDE), changing the *state* a trial contributes to history (PRUNED vs COMPLETE-with-real-value) is a methodology change even when the *params* are identical. The dedup primitive that preserves the sampler's view is "return cached value," not "raise prune."
+
 ---
 
 ## 2026-05-08 — `LVs` column showed Optuna's pre-clamp suggestion, not the actually-fitted value; root cause split across two source-of-truth fields

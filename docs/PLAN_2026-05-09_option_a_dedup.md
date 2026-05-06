@@ -1,5 +1,22 @@
 # Implementation Plan — Option A: Pre-Fit Fingerprint Cache + `optuna.TrialPruned`
 
+> **STATUS: SUPERSEDED 2026-05-06.** The TrialPruned design described
+> below was implemented (commits `b73f22c`..`8778c9a`) and benchmarked,
+> then reverted at `ed809f3` because PRUNED trials enter Optuna 4.8
+> TPE's KDE with split-score `(1, 0.0)` — different from a duplicate
+> COMPLETE-with-real-value's update. Multi-seed bench at 300 trials
+> showed only 22-35% fingerprint overlap pre/post; pre's best
+> fingerprint was NOT reached by post in any seed. The shipped design
+> uses the same fingerprint hash but **value-cache-and-replay** instead
+> of TrialPruned: duplicate trials return the prior trial's cached
+> metric value, so TPE sees identical (params, value) pairs to a
+> pre-dedup re-fit. KDE history is bit-identical → same parameter
+> space, same models, just no redundant fits. See
+> `src/spectral_predict/unified_bayesian.py:262-313` for the helpers
+> and the 2026-05-06 entry in `docs/SESSION_LOG.md` for the full writeup.
+> This document is preserved as the historical record of why the
+> straightforward TrialPruned approach was abandoned.
+
 **Branch context:** `docs/2026-05-07-final-wrapup-and-continuation`, builds on commits `9b86bc9 / a64004f / 727077f` (LVs reporting fix).
 
 **User-locked decisions (2026-05-09):**

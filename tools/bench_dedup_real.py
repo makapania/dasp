@@ -1,32 +1,31 @@
-"""Production-realistic benchmark: pre-Option-A vs post-fix on example data.
+"""Production-realistic benchmark: pre-dedup vs post-dedup on example data.
 
-Unlike ``tools/ab_dedup_compare.py`` (which uses RandomSampler for byte-
-identical determinism), this tool uses the production TPE sampler with
-multivariate=True — the actual sampler the user runs in the GUI. TPE
-suggestion streams diverge between pre/post because PRUNED trials enter
-its KDE history differently than COMPLETE-with-real-value trials, so
-the explored configs are not identical. That divergence is the point:
-we want to see whether post-fix delivers comparable wall-clock + best-
-model quality on real data, not strictly identical exploration.
+Uses the production TPE sampler (``multivariate=True``) — the actual
+sampler users run in the GUI. The dedup mechanism under audit is value-
+cache-and-replay: duplicate fingerprints short-circuit by returning the
+prior trial's cached metric, so TPE sees identical (params, value) pairs
+to a pre-dedup re-fit. KDE history is bit-identical → same parameter
+space exploration → same final models. The only difference is whether
+duplicates burned compute or replayed instantly.
 
-Pre/post emulation in one process:
-- Pre = monkeypatch ``_register_or_prune_fingerprint`` to record-only
-        (no TrialPruned). TPE sees every trial as COMPLETE.
-- Post = real prune. TPE sees PRUNED for duplicates.
+Pre/post emulation in one process via monkeypatch:
+- Pre = ``_register_or_replay_fingerprint`` returns None (no replay) and
+        ``_record_fingerprint_value`` is a no-op. Every duplicate runs a
+        full fit, matching pre-dedup behavior exactly.
+- Post = real value-cache-and-replay. Duplicates return the cached value
+        immediately; no fit, no CV.
 
-Both runs reuse the same TPE seed. First ~10 startup trials are
-identical (random sampling); after that TPE adapts on diverging
-history.
+Both phases reach the same set of COMPLETE trials with bit-identical
+TPE history. The difference is wall-clock (post saves on duplicates).
 
 What we report per scenario:
 - Wall-clock time (seconds)
-- Total trial invocations
-- COMPLETE trials (the useful fits)
-- PRUNED trials (post only — the saved redundant work)
-- Unique fingerprints (post should equal COMPLETE; pre should be lower)
+- Total trial invocations (PRUNED column should be 0 in both phases —
+  value-cache-and-replay never raises TrialPruned)
+- Unique fingerprints (should match between phases)
 - Best-row metric (RMSEcv for regression, Accuracycv for classification)
-- Top-5 row identifiers
-- Number of top-5 fingerprints common to both runs
+- Top-5 row identifiers + overlap
+- Coverage comparison: Old's best in New's set? Vice versa? Set diffs?
 
 Run from project root with .venv312 active:
     .venv312/Scripts/python.exe tools/bench_dedup_real.py [--n-trials 100]
@@ -294,7 +293,7 @@ def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
     print(f"  TPE sampler (production), seed=42, cv=3-fold KFold")
     print()
 
-    print(f"  [PRE-fix emulation: dedup off, every duplicate runs]")
+    print(f"  [PRE-fix emulation: replay disabled — every duplicate runs a full fit]")
     pre_df, pre_study, pre_time = run_phase(scenario, n_trials, max_features, pre_fix_emulation=True)
     pre_states = trial_state_counts(pre_study)
     pre_unique_fps = len(set(fingerprint_map(pre_study).values()))
@@ -306,7 +305,7 @@ def run_scenario(scenario: Scenario, n_trials: int, max_features: int):
     print(f"    Best {scenario.metric_col}: {pre_best:.4f}")
     print(f"    CSV rows: {len(pre_df)}")
 
-    print(f"\n  [POST-fix: dedup on, duplicates raise TrialPruned]")
+    print(f"\n  [POST-fix: dedup on, duplicates replay cached value (TPE sees identical history)]")
     post_df, post_study, post_time = run_phase(scenario, n_trials, max_features, pre_fix_emulation=False)
     post_states = trial_state_counts(post_study)
     post_unique_fps = len(set(fingerprint_map(post_study).values()))
