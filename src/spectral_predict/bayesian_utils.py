@@ -291,7 +291,8 @@ def create_objective_function(
     from .models import get_feature_importances
     from .unified_bayesian import (
         _build_fit_fingerprint,
-        _register_or_prune_fingerprint,
+        _register_or_replay_fingerprint,
+        _record_fingerprint_value,
         _resolved_weighting_fingerprint,
     )
     from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
@@ -438,7 +439,12 @@ def create_objective_function(
                 n_vars=X.shape[1],
                 top_indices=None,
             )
-            _register_or_prune_fingerprint(trial, fingerprint, seen_fingerprints)
+            _cached_full = _register_or_replay_fingerprint(trial, fingerprint, seen_fingerprints)
+            if _cached_full is not None:
+                # Duplicate full-model fingerprint: replay prior value so TPE
+                # sees identical history. The duplicate row is filtered from
+                # the leaderboard at convert time. No fit, no CV.
+                return _cached_full
 
             full_result = run_single_config_fn(
                 X, y, wavelengths,
@@ -661,7 +667,10 @@ def create_objective_function(
                                 )
                                 if sub_fp in seen_fingerprints:
                                     continue
-                                seen_fingerprints[sub_fp] = trial.number
+                                # Sub-fit dedup: store with None value because
+                                # sub-fit metrics are not returned to TPE; we
+                                # only need membership tracking to skip repeats.
+                                seen_fingerprints[sub_fp] = (trial.number, None)
 
                                 # Test subset
                                 subset_result = run_single_config_fn(
@@ -717,7 +726,9 @@ def create_objective_function(
                     )
                     if region_fp in seen_fingerprints:
                         continue
-                    seen_fingerprints[region_fp] = trial.number
+                    # Sub-fit dedup: store with None value because sub-fit
+                    # metrics are not returned to TPE; only membership tracked.
+                    seen_fingerprints[region_fp] = (trial.number, None)
 
                     # Test region
                     region_result = run_single_config_fn(
@@ -774,6 +785,7 @@ def create_objective_function(
             # - For Ridge: which alpha works best for FULL model
             # - For trees: which depth/leaves work best for FULL model
             # The best_subset_metric is stored in trial attributes for final ranking.
+            _record_fingerprint_value(fingerprint, trial, full_model_metric, seen_fingerprints)
             return full_model_metric
 
         except optuna.TrialPruned:
@@ -864,6 +876,11 @@ def convert_optuna_result_to_dasp_format(
     for trial in study.trials:
         # Skip failed/pruned trials
         if trial.state != optuna.trial.TrialState.COMPLETE:
+            continue
+
+        # Skip duplicate trials emitted by value-cache-and-replay dedup —
+        # they share fit identity with their `duplicate_of_trial` predecessor.
+        if 'duplicate_of_trial' in trial.user_attrs:
             continue
 
         # Get trial parameters

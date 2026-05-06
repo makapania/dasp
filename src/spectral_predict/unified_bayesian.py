@@ -259,30 +259,62 @@ def _build_fit_fingerprint(
     )
 
 
-def _register_or_prune_fingerprint(
+def _register_or_replay_fingerprint(
     trial: Trial,
     fingerprint: tuple,
-    seen_fingerprints: Dict[tuple, int],
-) -> None:
-    prior_trial = seen_fingerprints.get(fingerprint)
-    if prior_trial is not None:
-        trial.set_user_attr('duplicate_of_trial', prior_trial)
-        trial.set_user_attr('fingerprint', repr(fingerprint))
-        raise optuna.TrialPruned(f"Duplicate fit fingerprint from trial {prior_trial}")
-    seen_fingerprints[fingerprint] = trial.number
+    seen_fingerprints: Dict[tuple, tuple],
+) -> Optional[float]:
+    """Check fingerprint cache; replay prior trial's value if duplicate.
+
+    Returns:
+        ``None`` if this is a novel fingerprint — caller proceeds with the
+        full fit, then calls ``_record_fingerprint_value`` after success.
+        Cached float ``value`` if the fingerprint was already evaluated —
+        caller short-circuits and returns this value as the trial's metric.
+
+    The cache stores ``(prior_trial_number, prior_value)`` tuples. By
+    returning the cached value (not raising ``TrialPruned``), TPE sees the
+    same point evaluated to the same value twice, exactly as it would have
+    if we had re-fit the duplicate. This preserves TPE's KDE history bit-
+    identically to the pre-dedup behavior — same parameter space exploration,
+    just no redundant compute.
+    """
+    cached = seen_fingerprints.get(fingerprint)
     trial.set_user_attr('fingerprint', repr(fingerprint))
+    if cached is not None:
+        prior_trial_number, prior_value = cached
+        trial.set_user_attr('duplicate_of_trial', int(prior_trial_number))
+        return float(prior_value) if prior_value is not None else None
+    return None
+
+
+def _record_fingerprint_value(
+    fingerprint: tuple,
+    trial: Trial,
+    value: float,
+    seen_fingerprints: Dict[tuple, tuple],
+) -> None:
+    """Cache (trial_number, value) so future identical fingerprints can replay."""
+    if fingerprint not in seen_fingerprints and value is not None:
+        seen_fingerprints[fingerprint] = (trial.number, float(value))
 
 
 def _rehydrate_seen_fingerprints(
     study: optuna.Study,
-    seen_fingerprints: Dict[tuple, int],
+    seen_fingerprints: Dict[tuple, tuple],
 ) -> int:
-    """Load COMPLETE-trial fingerprints from an existing Optuna study."""
+    """Load (trial_number, value) for each COMPLETE trial's fingerprint.
+
+    Pre-fix CSV-style replay needs the value, not just the trial number, so
+    a resume run can return cached values without re-fitting.
+    """
     from optuna.trial import TrialState
 
     added = 0
     for trial in study.trials:
         if trial.state != TrialState.COMPLETE:
+            continue
+        if trial.value is None:
             continue
         fingerprint_repr = trial.user_attrs.get('fingerprint')
         if not fingerprint_repr:
@@ -297,7 +329,7 @@ def _rehydrate_seen_fingerprints(
             )
             continue
         if fingerprint not in seen_fingerprints:
-            seen_fingerprints[fingerprint] = trial.number
+            seen_fingerprints[fingerprint] = (trial.number, float(trial.value))
             added += 1
     return added
 
@@ -1243,7 +1275,12 @@ def create_unified_objective(
                     smoothing_window=smoothing_window,
                     smoothing_polyorder=smoothing_polyorder,
                 )
-                _register_or_prune_fingerprint(trial, oc_fingerprint, seen_fingerprints)
+                _cached_oc = _register_or_replay_fingerprint(trial, oc_fingerprint, seen_fingerprints)
+                if _cached_oc is not None:
+                    # Duplicate fingerprint: replay prior trial's metric so TPE
+                    # sees identical history. The duplicate row is filtered from
+                    # the leaderboard at convert_study_to_dataframe time.
+                    return _cached_oc
 
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
@@ -1310,7 +1347,9 @@ def create_unified_objective(
                         ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
 
                 balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
-                return -balanced_accuracy
+                _oc_metric = -balanced_accuracy
+                _record_fingerprint_value(oc_fingerprint, trial, _oc_metric, seen_fingerprints)
+                return _oc_metric
 
             # 3. Suggest subset type and size
             # IMPORTANT: Always suggest ALL parameters to maintain consistent parameter space
@@ -1408,22 +1447,21 @@ def create_unified_objective(
                 trial, model_name, n_features_final, task_type
             )
 
-            # 5b. Prune invalid PLS trials where n_components > n_features.
-            # Raise TrialPruned (not return 1e10) so MaxTrialsCallback's
-            # COMPLETE-only budget isn't burned by a configuration that
-            # could never have fit. Without this, a 300-trial budget can
-            # silently produce <300 unique fits when the post-suggest clamp
-            # rescues some trials but a few slip through to here.
+            # 5b. Skip invalid PLS trials where n_components > n_features.
+            # Return 1e10 (matching pre-dedup behavior) so TPE sees a real
+            # COMPLETE-with-bad-value sample rather than a PRUNED with
+            # different KDE scoring. Under the value-cache-and-replay dedup
+            # mechanism we no longer need TrialPruned anywhere — duplicates
+            # short-circuit via the cached value, and TPE history stays
+            # bit-identical to the original.
             if model_name.lower() in ('pls', 'pls-da'):
                 n_components = model_params.get('n_components', 2)
                 if n_components > n_features_final:
                     logging.debug(
-                        f"Trial {trial.number}: Pruning - n_components ({n_components}) > "
+                        f"Trial {trial.number}: Skipping - n_components ({n_components}) > "
                         f"n_features ({n_features_final})"
                     )
-                    raise optuna.TrialPruned(
-                        f"n_components ({n_components}) > n_features_final ({n_features_final})"
-                    )
+                    return 1e10  # Return penalty; TPE sees this as a bad config
 
             # 6. Build and cross-validate model
             model = build_model(model_name, model_params, task_type=task_type)
@@ -1569,7 +1607,14 @@ def create_unified_objective(
                 smoothing_window=smoothing_window,
                 smoothing_polyorder=smoothing_polyorder,
             )
-            _register_or_prune_fingerprint(trial, fingerprint, seen_fingerprints)
+            _cached_value = _register_or_replay_fingerprint(trial, fingerprint, seen_fingerprints)
+            if _cached_value is not None:
+                # Duplicate fingerprint: replay prior trial's metric so TPE
+                # sees identical history (same point, same value). The
+                # duplicate row is filtered from the leaderboard at
+                # convert_study_to_dataframe time. No fit, no CV — pure
+                # compute savings; original parameter space preserved.
+                return _cached_value
 
             if task_type == 'regression':
                 # Compute pooled CV predictions once and derive both RMSE and R² from them.
@@ -1907,13 +1952,15 @@ def create_unified_objective(
             # Store edge-masked feature count for full_vars
             trial.set_user_attr('full_vars_masked', len(wavelengths_for_trial))
 
+            _record_fingerprint_value(fingerprint, trial, metric, seen_fingerprints)
             return metric
 
         except optuna.TrialPruned:
             raise
         except Exception as e:
             logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")
-            # Return large penalty
+            # Return large penalty (don't cache failed fits — let retry attempt
+            # them again in case the failure was transient).
             if task_type == 'regression':
                 return 1e10
             else:
@@ -2764,30 +2811,23 @@ def run_unified_bayesian(
         already_finished = len(study.trials)
 
     remaining_trials = max(0, n_trials - already_finished)
-    optimize_invocation_cap = max(remaining_trials, 5 * n_trials)
-    max_complete_callback = optuna.study.MaxTrialsCallback(
-        n_trials=n_trials,
-        states=(TrialState.COMPLETE,),
-    )
     if already_finished > 0:
         print(
-            f"  Resume detected: {already_finished} COMPLETE trials already available; "
+            f"  Resume detected: {already_finished} trials already complete; "
             f"requesting {remaining_trials} more (target: {n_trials})."
         )
 
     if remaining_trials > 0:
+        # Plain n_trials — no MaxTrialsCallback needed under value-cache-and-
+        # replay dedup. Duplicates short-circuit via the cached value, so
+        # n_trials=N produces N COMPLETE trials with the same TPE history as
+        # the pre-dedup run, just without redundant fits.
         study.optimize(
             objective,
-            n_trials=optimize_invocation_cap,
-            callbacks=[progress_wrapper, max_complete_callback],
+            n_trials=remaining_trials,
+            callbacks=[progress_wrapper],
             show_progress_bar=verbose and not progress_callback
         )
-        if len(study.trials) > 2 * n_trials:
-            logger.warning(
-                "Bayesian dedup drew %d total trials to reach %d unique fits "
-                "(target n_trials=%d) — search space may be near exhaustion.",
-                len(study.trials), already_finished + remaining_trials, n_trials,
-            )
     else:
         print(f"  All {n_trials} trials already complete; skipping optimization.")
 
@@ -2804,14 +2844,9 @@ def run_unified_bayesian(
             from optuna.trial import TrialState as _TS_post
             already_done_post = sum(
                 1 for t in _study_ref[0].trials
-                if t.state in (_TS_post.COMPLETE,)
+                if t.state == _TS_post.COMPLETE
             )
             remaining_post = max(0, n_trials - already_done_post)
-            optimize_invocation_cap_post = max(remaining_post, 5 * n_trials)
-            max_complete_callback_post = optuna.study.MaxTrialsCallback(
-                n_trials=n_trials,
-                states=(_TS_post.COMPLETE,),
-            )
             if remaining_post > 0:
                 logger.info(
                     "T-41: restarting optimize() on SQLite-backed study for %d remaining trials",
@@ -2819,16 +2854,10 @@ def run_unified_bayesian(
                 )
                 _study_ref[0].optimize(
                     objective,
-                    n_trials=optimize_invocation_cap_post,
-                    callbacks=[progress_wrapper, max_complete_callback_post],
+                    n_trials=remaining_post,
+                    callbacks=[progress_wrapper],
                     show_progress_bar=verbose and not progress_callback,
                 )
-                if len(_study_ref[0].trials) > 2 * n_trials:
-                    logger.warning(
-                        "T-41: Bayesian dedup drew %d total trials post-migration "
-                        "to reach %d unique fits — search space may be near exhaustion.",
-                        len(_study_ref[0].trials), n_trials,
-                    )
 
     # After optimization, resolve the final study object.  If 'auto' migration
     # happened, _study_ref[0] is the SQLite-backed study (now containing all
@@ -2949,6 +2978,13 @@ def convert_study_to_dataframe(
 
         # Skip failed trials (penalty value)
         if trial.value is not None and trial.value >= 1e9:
+            continue
+
+        # Skip duplicate trials: the value-cache-and-replay dedup mechanism
+        # marks duplicates with `duplicate_of_trial` so TPE history is
+        # bit-identical to pre-dedup behavior, but the leaderboard CSV stays
+        # clean by emitting only the first occurrence of each fingerprint.
+        if 'duplicate_of_trial' in trial.user_attrs:
             continue
 
         row = {

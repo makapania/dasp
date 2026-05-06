@@ -50,8 +50,10 @@ class TestFingerprintConstructionTest:
 
 
 class TestDeduplicationHitTest:
-    def test_second_identical_fingerprint_gets_pruned(self):
-        from spectral_predict.unified_bayesian import _register_or_prune_fingerprint
+    def test_second_identical_fingerprint_replays_value(self):
+        from spectral_predict.unified_bayesian import (
+            _register_or_replay_fingerprint, _record_fingerprint_value,
+        )
 
         study = optuna.create_study(direction='minimize')
         first = study.ask()
@@ -59,13 +61,16 @@ class TestDeduplicationHitTest:
         seen = {}
         fingerprint = (('model_name', 'PLS'), ('n_vars', 10))
 
-        _register_or_prune_fingerprint(first, fingerprint, seen)
+        # First trial: novel fingerprint, no cached value yet.
+        cached = _register_or_replay_fingerprint(first, fingerprint, seen)
+        assert cached is None  # caller proceeds with fit
+        _record_fingerprint_value(fingerprint, first, value=0.5, seen_fingerprints=seen)
 
-        with pytest.raises(optuna.TrialPruned):
-            _register_or_prune_fingerprint(second, fingerprint, seen)
-
-        assert seen[fingerprint] == first.number
+        # Second trial: same fingerprint, caller receives cached value.
+        cached2 = _register_or_replay_fingerprint(second, fingerprint, seen)
+        assert cached2 == 0.5
         assert second.user_attrs['duplicate_of_trial'] == first.number
+        assert seen[fingerprint] == (first.number, 0.5)
 
 
 class TestResumeRehydrationTest:
@@ -78,15 +83,17 @@ class TestResumeRehydrationTest:
         complete.set_user_attr('fingerprint', repr(fingerprint))
         study.tell(complete, 1.0)
 
-        pruned = study.ask()
-        pruned.set_user_attr('fingerprint', repr((('model_name', 'PLS'), ('n_vars', 20))))
-        study.tell(pruned, state=TrialState.PRUNED)
+        # FAIL trials should NOT rehydrate (no value to replay)
+        failed = study.ask()
+        failed.set_user_attr('fingerprint', repr((('model_name', 'PLS'), ('n_vars', 20))))
+        study.tell(failed, state=TrialState.FAIL)
 
         seen = {}
         added = _rehydrate_seen_fingerprints(study, seen)
 
         assert added == 1
-        assert seen == {fingerprint: complete.number}
+        # Value-cache format: {fp: (trial_number, value)}
+        assert seen == {fingerprint: (complete.number, 1.0)}
 
 
 class TestNoDuplicateFitsTest:
@@ -124,10 +131,15 @@ class TestNoDuplicateFitsTest:
             'n_components': 2,
         }
 
-        assert np.isfinite(objective(FixedTrial(params)))
-        with pytest.raises(optuna.TrialPruned):
-            objective(FixedTrial(params))
-        with pytest.raises(optuna.TrialPruned):
-            objective(FixedTrial(params))
+        # First call: full fit happens, caches value.
+        first_value = objective(FixedTrial(params))
+        assert np.isfinite(first_value)
 
+        # Subsequent identical calls: value-cache replay, no CV.
+        replay_value = objective(FixedTrial(params))
+        assert replay_value == first_value  # exact replay, no recomputation
+        replay_value_2 = objective(FixedTrial(params))
+        assert replay_value_2 == first_value
+
+        # Critical: CV ran once, replays didn't trigger recomputation.
         assert cv_calls['count'] == 1
