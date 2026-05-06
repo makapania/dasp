@@ -294,8 +294,21 @@ def _record_fingerprint_value(
     value: float,
     seen_fingerprints: Dict[tuple, tuple],
 ) -> None:
-    """Cache (trial_number, value) so future identical fingerprints can replay."""
-    if fingerprint not in seen_fingerprints and value is not None:
+    """Cache (trial_number, value) so future identical fingerprints can replay.
+
+    Sub-fits (legacy bayesian_utils path) store ``(trial_number, None)`` for
+    membership-only tracking. If the same fingerprint were ever to arrive
+    here with a real value (which shouldn't happen — sub-fits and main-fits
+    have structurally distinct fingerprints via subset_type/top_indices),
+    we promote the None placeholder to the real value rather than dropping
+    it. Defense-in-depth per DeepSeek STRONG-2 review.
+    """
+    if value is None:
+        return
+    cached = seen_fingerprints.get(fingerprint)
+    if cached is None or cached[1] is None:
+        # Novel fingerprint OR existing None-placeholder from sub-fit:
+        # record the real value so future duplicates can replay it.
         seen_fingerprints[fingerprint] = (trial.number, float(value))
 
 
@@ -980,7 +993,7 @@ def create_unified_objective(
     enable_uve: bool = False,
     inlier_class_label=None,
     y_original: np.ndarray | None = None,
-    seen_fingerprints: Optional[Dict[tuple, int]] = None,
+    seen_fingerprints: Optional[Dict[tuple, tuple]] = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -1295,6 +1308,12 @@ def create_unified_objective(
                     # (e.g. "Need at least 3 clean samples to fit DD-SIMCA").
                     skip_reason = cv_result.get('skip_reason', 'unknown')
                     trial.set_user_attr('skip_reason', skip_reason)
+                    # Cache the skip sentinel so a future identical OC
+                    # config replays immediately instead of re-running the
+                    # whole CV+skip detection (Kimi BLOCKER closure).
+                    _record_fingerprint_value(
+                        oc_fingerprint, trial, float('inf'), seen_fingerprints
+                    )
                     return float('inf')
 
                 mean_m = cv_result['mean_metrics']
@@ -2363,7 +2382,7 @@ def run_unified_bayesian(
     # Create objective function
     # Note: Regional subsets are computed DYNAMICALLY inside the objective
     # on preprocessed data, ensuring regions are relevant to the current preprocessing
-    seen_fingerprints: Dict[tuple, int] = {}
+    seen_fingerprints: Dict[tuple, tuple] = {}
     objective = create_unified_objective(
         X_raw=X,
         y=y,

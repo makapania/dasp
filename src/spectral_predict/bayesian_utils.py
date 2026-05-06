@@ -331,7 +331,7 @@ def create_objective_function(
     # Note: 'cars-aware' is model-dependent but safe to cache here because
     # each model gets its own closure (and thus its own cache instance).
     _varsel_cache: dict[str, np.ndarray] = {}
-    seen_fingerprints: dict[tuple, int] = {}
+    seen_fingerprints: dict[tuple, tuple] = {}
 
     def objective(trial: optuna.Trial) -> float:
         """
