@@ -2471,9 +2471,14 @@ def run_unified_bayesian(
                 else:
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
-            # Add best model tracking for "Best Model So Far" display
-            if _study_ref[0].best_trial is not None:
+            # Add best model tracking for "Best Model So Far" display.
+            # Optuna raises when no COMPLETE trial exists yet, which can
+            # happen during dedup pruning bursts.
+            try:
                 best = _study_ref[0].best_trial
+            except ValueError:
+                best = None
+            if best is not None:
                 best_model = {
                     'Model': model_name,
                     'Preprocess': _build_display_preprocess_name(
@@ -2515,7 +2520,7 @@ def run_unified_bayesian(
     # toward "completed").
     try:
         from optuna.trial import TrialState
-        terminal_states = (TrialState.COMPLETE, TrialState.PRUNED)
+        terminal_states = (TrialState.COMPLETE,)
         already_finished = sum(
             1 for t in study.trials if t.state in terminal_states
         )
@@ -2525,17 +2530,22 @@ def run_unified_bayesian(
         already_finished = len(study.trials)
 
     remaining_trials = max(0, n_trials - already_finished)
+    optimize_invocation_cap = max(remaining_trials, 5 * n_trials)
+    max_complete_callback = optuna.study.MaxTrialsCallback(
+        n_trials=n_trials,
+        states=(TrialState.COMPLETE,),
+    )
     if already_finished > 0:
         print(
-            f"  Resume detected: {already_finished} trials already complete; "
+            f"  Resume detected: {already_finished} COMPLETE trials already available; "
             f"requesting {remaining_trials} more (target: {n_trials})."
         )
 
     if remaining_trials > 0:
         study.optimize(
             objective,
-            n_trials=remaining_trials,
-            callbacks=[progress_wrapper],
+            n_trials=optimize_invocation_cap,
+            callbacks=[progress_wrapper, max_complete_callback],
             show_progress_bar=verbose and not progress_callback
         )
     else:
@@ -2554,9 +2564,14 @@ def run_unified_bayesian(
             from optuna.trial import TrialState as _TS_post
             already_done_post = sum(
                 1 for t in _study_ref[0].trials
-                if t.state in (_TS_post.COMPLETE, _TS_post.PRUNED)
+                if t.state in (_TS_post.COMPLETE,)
             )
             remaining_post = max(0, n_trials - already_done_post)
+            optimize_invocation_cap_post = max(remaining_post, 5 * n_trials)
+            max_complete_callback_post = optuna.study.MaxTrialsCallback(
+                n_trials=n_trials,
+                states=(_TS_post.COMPLETE,),
+            )
             if remaining_post > 0:
                 logger.info(
                     "T-41: restarting optimize() on SQLite-backed study for %d remaining trials",
@@ -2564,8 +2579,8 @@ def run_unified_bayesian(
                 )
                 _study_ref[0].optimize(
                     objective,
-                    n_trials=remaining_post,
-                    callbacks=[progress_wrapper],
+                    n_trials=optimize_invocation_cap_post,
+                    callbacks=[progress_wrapper, max_complete_callback_post],
                     show_progress_bar=verbose and not progress_callback,
                 )
 
