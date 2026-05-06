@@ -4,6 +4,52 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-06 late evening — Resume-rehydrate cache pollution: producer-side stamp beats consumer-side filter
+
+PR #54 review surfaced a silent failure in `_rehydrate_seen_fingerprints`: trials that completed via the broad-except `1e10` penalty path (transient OOM, `LinAlgError`, GPU contention at `unified_bayesian.py:~2006`) had their `fingerprint` user_attr stamped pre-fit, so resume cached the failure ghost forever — user could never retry transient errors.
+
+**First fix attempt (`e906f70`) was wrong.** Added `if trial.value >= 1e9: continue` to the rehydrate loop. Codex caught the regression: OC-skip path at `unified_bayesian.py:1331-1334` intentionally calls `_record_fingerprint_value(fp, trial, float('inf'), seen)` per the Kimi BLOCKER fix — `inf >= 1e9` is True, so the filter silently dropped the deterministic skip-cache. Value-based filters can't distinguish transient-failure 1e10 from deterministic-PLS-clamp 1e10 from intentional-OC-skip inf.
+
+**Right fix (`ee3a70e`).** Move `trial.set_user_attr('fingerprint', repr(fingerprint))` from `_register_or_replay_fingerprint` (pre-fit) to `_record_fingerprint_value` (post-success). The user_attr presence becomes the source-of-truth for "intentionally cached." Broad-except never reaches `_record_fingerprint_value` and so leaves no fingerprint behind. OC-skip explicitly calls it, so its `inf` survives. PLS-clamp at `:1500` doesn't call it either (was never in cache anyway, no behavior change).
+
+Non-obvious because the pre-fit stamp looked like the right place — every novel-fingerprint trial calls `_register_or_replay_fingerprint` exactly once. But "every novel fingerprint" includes "every fingerprint that's about to fail." The producer/consumer asymmetry is invisible until you trace what the broad-except does to a trial whose user_attr is already set. **Lesson:** when caching has both an "intent" axis (deterministic skip vs transient failure) and a "value" axis (success metric vs penalty sentinel), the cache discriminator must use the intent axis, not the value axis. Move the gate to the producer.
+
+Cross-family review verdict: Codex re-review of `ee3a70e` → closed; DeepSeek V4 Pro Max independent review → "net state at HEAD is clean."
+
+## 2026-05-06 late evening — Refine-tab autoscale loader silently re-coupled the decoupled flags
+
+T-44 introduced three independent autoscale flags (`use_autoscale` for grid, `bayes_enable_autoscale` for Bayesian, `tpe_enable_autoscale` for TPE). Result-row loader at `spectral_predict_gui_optimized.py:33585-33587` was writing the loaded `Autoscale` value into all three Tk vars to keep the Refine tab in sync with the loaded winner. That partially undid the decoupling: loading a grid winner with autoscale=True would clobber the user's deliberate Bayesian autoscale=False.
+
+**Fix.** Only update `use_autoscale` (the rebuild-path flag). bayes/tpe flags are search-time exploration controls, not rebuild controls — they should retain the user's deliberate setting. DeepSeek verified rebuild paths at `:37180`, `:37690`, `:37827` all read `use_autoscale`, so loader doesn't need to touch the others.
+
+**Pattern worth pinning:** when a feature decouples a previously-shared piece of state into N independent flags, audit every place that wrote the old shared flag — propagation patterns that "kept things in sync" become the exact thing the decoupling intended to prevent. Categorize each flag as rebuild-time vs search-time exploration. Loaders touch rebuild-time only.
+
+## 2026-05-06 late evening — `_resolved_weighting_fingerprint` dead-code except conflated configs
+
+`unified_bayesian.py:189-200`: `try: params = model.get_params(deep=True); except Exception: return ()`. Any introspection failure silently collapsed to empty tuple, so two configs with distinct class_weight resolutions whose `get_params` happened to fail would both fingerprint to `()` and falsely cache-hit each other.
+
+**Fix.** Deleted the except per project policy. `BaseEstimator.get_params(deep=True)` uses `inspect.signature` on `__init__` — cannot raise for any conforming sklearn estimator. All dasp models inherit `BaseEstimator` (verified in `models.py:build_model`).
+
+**Lesson:** "no fallbacks for scenarios that can't happen" applies even when the fallback looks defensive. A try/except returning a sentinel is a silent-failure factory if the sentinel can collide with a legitimate value space.
+
+## 2026-05-06 late evening — Squash-vs-individuals divergence is a recurring pattern, not a one-off
+
+PR #54 hit the same merge conflict pattern that `dd4dd1d` resolved back when PR #52 squash-merged into the still-living branch: GitHub's squash creates a new SHA on main with content equivalent to a chain of individuals on the branch. Subsequent merges from main into the branch see "same lines touched from two histories" and conflict, even though the content is identical.
+
+**Symptom.** `gh pr view --json mergeable` returns `CONFLICTING` while `git diff origin/main..HEAD --stat` shows the actual end-state delta. When those disagree, it's structural divergence, not semantic.
+
+**Resolution.** `git checkout --ours <file>` for each conflicted file (branch HEAD already supersedes both sides because it has the squash's content via individuals plus any new work). Stage, commit the merge, push, then squash-merge.
+
+**Lesson for long-running branches.** A feature branch that's been the source of multiple squash-merges accumulates structural debt vs main. Either (a) rebase onto main after each merge to drop the duplicate-content commits, or (b) accept the conflict pattern and keep `git checkout --ours` muscle memory. User has chosen (b) historically — `dd4dd1d` is the precedent.
+
+## 2026-05-06 late evening — Branch audit gotcha: file-stat divergence beats commit messages
+
+When auditing stale branches, commit messages can mislead. Example: `claude/contamination-detection-model-PrntN` had subjects like "Implement UVE prefilter" and "Optimize one-class Bayesian optimization" — sounded like substantial unmerged work. The file-stat told a different story: 273 files / +644K / −106K vs main. The branch was a stale fork pre-dating T-04, T-19, T-20, T-32, T-41–T-44, and the dedup work — its "deletions" relative to main are the codebase's growth, not the branch's removals.
+
+**Lesson.** When a branch's commit subjects describe work that *would* be valuable but the file-stat is dominated by removals of code that was added on main later, you're looking at a fork that pre-dates major work, not a feature branch that was missed. `git diff main..<branch> --stat | tail -3` surfaces this in one line. For one-class work specifically, what shipped on main is T-04 (UVE-on-y_oc disabled per Pomerantsev et al. 2025 LOVE) and T-31 (multi-class SIMCA) — different framings than the stale branch's "UVE prefilter."
+
+---
+
 ## 2026-05-06 — Autoscale wiring gotcha across Bayesian + TPE preprocessing UI
 
 Verified in source (not docs):
