@@ -95,35 +95,86 @@ class TestResumeRehydrationTest:
         # Value-cache format: {fp: (trial_number, value)}
         assert seen == {fingerprint: (complete.number, 1.0)}
 
-    def test_penalty_value_trials_are_not_cached_on_resume(self):
-        """Trials that completed via the penalty-sentinel path (1e10 from
-        broad-except, PLS clamp, OC skip) MUST NOT rehydrate into the dedup
-        cache — otherwise resume replays the failure ghost forever and the
-        user can never retry transient errors. Pins fix for the silent-failure
-        finding from PR #54 review."""
-        from spectral_predict.unified_bayesian import _rehydrate_seen_fingerprints
+    def test_register_or_replay_does_not_stamp_fingerprint_pre_fit(self):
+        """Producer-side contract: _register_or_replay_fingerprint must NOT
+        write the fingerprint user_attr at lookup time. Broad-except transient
+        failures at unified_bayesian.py:~2006 happen AFTER this call and
+        BEFORE _record_fingerprint_value, so any pre-fit user_attr write would
+        leave a ghost on the failed trial that resume would re-cache."""
+        from spectral_predict.unified_bayesian import _register_or_replay_fingerprint
+
+        study = optuna.create_study(direction='minimize')
+        trial = study.ask()
+        seen = {}
+        fingerprint = (('model_name', 'LightGBM'), ('n_vars', 50))
+
+        result = _register_or_replay_fingerprint(trial, fingerprint, seen)
+
+        assert result is None  # novel fingerprint, caller proceeds with fit
+        assert 'fingerprint' not in trial.user_attrs, \
+            "fingerprint user_attr leaked from pre-fit registration"
+
+    def test_record_fingerprint_value_stamps_attr_only_on_intentional_cache(self):
+        """Producer-side contract: _record_fingerprint_value writes the
+        fingerprint user_attr post-success so resume rehydration sees only
+        intentionally-cached fingerprints. OC-skip path at :1331 explicitly
+        calls _record_fingerprint_value(fp, trial, inf, ...) so its sentinel
+        survives resume per the Kimi BLOCKER fix."""
+        from spectral_predict.unified_bayesian import _record_fingerprint_value
 
         study = optuna.create_study(direction='minimize')
 
-        good = study.ask()
-        good_fp = (('model_name', 'PLS'), ('n_vars', 10))
-        good.set_user_attr('fingerprint', repr(good_fp))
-        study.tell(good, 0.42)
+        success_trial = study.ask()
+        success_fp = (('model_name', 'PLS'), ('n_vars', 10))
+        _record_fingerprint_value(success_fp, success_trial, 0.42, {})
 
-        # Penalty-sentinel trial: COMPLETE with value 1e10, fingerprint stamped
-        # pre-fit. This is what a transient OOM/LinAlgError/etc. produces today.
-        penalty = study.ask()
-        penalty_fp = (('model_name', 'LightGBM'), ('n_vars', 50))
-        penalty.set_user_attr('fingerprint', repr(penalty_fp))
-        study.tell(penalty, 1e10)
+        oc_skip_trial = study.ask()
+        oc_skip_fp = (('model_name', 'IsolationForest'), ('n_vars', 50))
+        _record_fingerprint_value(oc_skip_fp, oc_skip_trial, float('inf'), {})
+
+        assert success_trial.user_attrs.get('fingerprint') == repr(success_fp)
+        assert oc_skip_trial.user_attrs.get('fingerprint') == repr(oc_skip_fp), \
+            "OC-skip inf sentinel must stamp the fingerprint user_attr so resume rehydrates it"
+
+    def test_oc_skip_inf_sentinel_rehydrates_on_resume(self):
+        """Pins Codex's regression catch: float('inf') from OC-skip MUST
+        rehydrate. The Kimi BLOCKER fix at unified_bayesian.py:1331 caches
+        inf so future identical OC configs replay immediately. A naive
+        'filter penalty values' approach (e.g. value >= 1e9) would drop
+        inf and break that contract."""
+        from spectral_predict.unified_bayesian import _rehydrate_seen_fingerprints
+
+        study = optuna.create_study(direction='minimize')
+        oc_skip = study.ask()
+        oc_skip_fp = (('model_name', 'IsolationForest'), ('n_vars', 50))
+        oc_skip.set_user_attr('fingerprint', repr(oc_skip_fp))
+        study.tell(oc_skip, float('inf'))
 
         seen = {}
         added = _rehydrate_seen_fingerprints(study, seen)
 
         assert added == 1
-        assert good_fp in seen
-        assert penalty_fp not in seen, \
-            "Penalty-sentinel trial leaked into resume dedup cache"
+        assert oc_skip_fp in seen
+        assert seen[oc_skip_fp][1] == float('inf')
+
+    def test_failed_trial_without_fingerprint_attr_is_not_rehydrated(self):
+        """Broad-except path at unified_bayesian.py:~2006 returns 1e10
+        without calling _record_fingerprint_value, so the failed trial has no
+        fingerprint user_attr and resume rehydration ignores it. Resume can
+        then retry the (potentially transient) failure instead of replaying
+        a 1e10 ghost. Pins the silent-failure finding from PR #54 review."""
+        from spectral_predict.unified_bayesian import _rehydrate_seen_fingerprints
+
+        study = optuna.create_study(direction='minimize')
+        failed = study.ask()
+        # No fingerprint user_attr — this is what broad-except produces.
+        study.tell(failed, 1e10)
+
+        seen = {}
+        added = _rehydrate_seen_fingerprints(study, seen)
+
+        assert added == 0
+        assert seen == {}
 
 
 class TestNoDuplicateFitsTest:

@@ -286,7 +286,6 @@ def _register_or_replay_fingerprint(
     just no redundant compute.
     """
     cached = seen_fingerprints.get(fingerprint)
-    trial.set_user_attr('fingerprint', repr(fingerprint))
     if cached is not None:
         prior_trial_number, prior_value = cached
         if prior_value is not None:
@@ -322,6 +321,11 @@ def _record_fingerprint_value(
         # Novel fingerprint OR existing None-placeholder from sub-fit:
         # record the real value so future duplicates can replay it.
         seen_fingerprints[fingerprint] = (trial.number, float(value))
+        # Stamp the fingerprint user_attr ONLY here (post-success / post-
+        # intentional-skip-cache), not pre-fit. Broad-except transient failures
+        # at :2006 never reach this site and so leave no fingerprint behind to
+        # rehydrate — the user retries the failure without replaying the ghost.
+        trial.set_user_attr('fingerprint', repr(fingerprint))
 
 
 def _rehydrate_seen_fingerprints(
@@ -341,11 +345,12 @@ def _rehydrate_seen_fingerprints(
             continue
         if trial.value is None:
             continue
-        # Don't cache penalty-sentinel values (PLS clamp 1498, OC skip 1331,
-        # broad-except fallthrough 1995). Resume should let the caller retry
-        # transient failures, not replay the 1e10 ghost.
-        if trial.value >= 1e9:
-            continue
+        # The fingerprint user_attr is only written by _record_fingerprint_value
+        # on intentional cache (success path or deterministic skip like OC-skip
+        # at :1331). Broad-except transient failures at :2006 don't reach that
+        # site, so a missing user_attr is the source-of-truth for "don't
+        # rehydrate this." OC-skip's float('inf') sentinel IS rehydrated by
+        # design (Kimi BLOCKER fix).
         fingerprint_repr = trial.user_attrs.get('fingerprint')
         if not fingerprint_repr:
             continue
