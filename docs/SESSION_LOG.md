@@ -4,6 +4,19 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-06 — Autoscale wiring gotcha across Bayesian + TPE preprocessing UI
+
+Verified in source (not docs):
+- Unified Bayesian only explores `apply_autoscale` when `run_unified_bayesian(..., enable_autoscale=True)`.
+- GUI wires that flag from Basic Settings (`self.use_autoscale`, default `False`) at `spectral_predict_gui_optimized.py:27747` and `spectral_predict_gui_optimized.py:27400`.
+- Bayesian Options panel exposes baseline/smoothing/UVE but no autoscale control, so users can reasonably infer Basic Settings do not affect Bayesian.
+- TPE preprocessing discovery (`tpe_preprocessing_discovery.py`) does include an autoscale trial dimension, but `search.py` passes `enable_autoscale=autoscale` from the same Basic Settings checkbox (`search.py:1627`, `search.py:5680`).
+- TPE card copy says "5-D" unconditionally while effective dimensionality collapses when autoscale/baseline/smoothing are disabled.
+
+Implication for follow-up: promote autoscale to explicit Bayesian/TPE controls (or default-on for those paths), decouple from grid-only semantics, and align UI copy with actual enabled dimensions.
+
+---
+
 ## 2026-05-06 — Option A Bayesian dedup implementation notes
 
 Implemented the remaining Option A phases after phase 1 (`MaxTrialsCallback`) was committed by the main thread. The fingerprint must be created at the resolved-state site, immediately before the CV fit, because the trial's effective fit can change after raw Optuna suggestions through `build_model`, imbalance transformer construction, CatBoost `auto_class_weights`, generic `class_weight`, sample-weight routing, PLS-DA tail LogisticRegression `random_state`, and early-stopping gating. The helper now serializes fingerprints as literal-safe tuples so resume rehydration can use `ast.literal_eval`.

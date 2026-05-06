@@ -1099,8 +1099,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 smart_preprocess_n_top=10,
                 # TPE preprocessing discovery parameters (T-37 — supersedes smart + GA)
                 tpe_preprocess=False,
-                tpe_preprocess_n_trials=75,
-                tpe_preprocess_n_top=10,
+                 tpe_preprocess_n_trials=75,
+                 tpe_preprocess_n_top=10,
+                 tpe_enable_autoscale=True,
                # GA variable selection parameters
                ga_population_size=64,
                ga_generations=100,
@@ -1624,11 +1625,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             n_trials=tpe_preprocess_n_trials,
             n_top=tpe_preprocess_n_top,
             cv_folds=folds,
-            enable_autoscale=autoscale,
+            enable_autoscale=tpe_enable_autoscale,
             enable_baseline=(baseline_method is not None),
             enable_smoothing=smoothing,
-            # T-37 fix (post-merge review): pass user smoothing settings so
-            # TPE evaluates the same chain the grid will later rebuild.
             smoothing_window=smoothing_window,
             smoothing_polyorder=smoothing_polyorder,
             progress_callback=tpe_progress,
@@ -5439,6 +5438,7 @@ def run_one_class_search(
     tpe_preprocess=False,
     tpe_preprocess_n_trials=75,
     tpe_preprocess_n_top=10,
+    tpe_enable_autoscale=True,
     # Variable selection
     variable_selection_methods=None,
     variable_counts=None,
@@ -5677,11 +5677,9 @@ def run_one_class_search(
             n_trials=tpe_preprocess_n_trials,
             n_top=tpe_preprocess_n_top,
             cv_folds=folds,
-            enable_autoscale=autoscale,
+            enable_autoscale=tpe_enable_autoscale,
             enable_baseline=(baseline_method is not None),
             enable_smoothing=enable_smoothing,
-            # T-37 fix (post-merge review): pass user smoothing settings so
-            # TPE evaluates the same chain the grid will later rebuild.
             smoothing_window=smoothing_window,
             smoothing_polyorder=smoothing_polyorder,
             progress_callback=tpe_oc_progress,
