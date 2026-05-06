@@ -140,6 +140,143 @@ def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
 
     return filtered_params
 
+
+def _freeze_for_fingerprint(value: Any) -> Any:
+    """Convert nested values to a stable, literal-safe representation."""
+    if hasattr(value, 'item'):
+        value = value.item()
+    if isinstance(value, np.ndarray):
+        return tuple(_freeze_for_fingerprint(v) for v in value.tolist())
+    if isinstance(value, dict):
+        return tuple(
+            (str(k), _freeze_for_fingerprint(v))
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_for_fingerprint(v) for v in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_for_fingerprint(v) for v in value))
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    return repr(value)
+
+
+def _selected_indices_fingerprint(top_indices) -> Any:
+    if top_indices is None:
+        return None
+    return tuple(int(i) for i in np.asarray(top_indices).tolist())
+
+
+def _resolved_weighting_fingerprint(model) -> tuple:
+    """Capture resolved class-weight knobs after model/pipeline construction."""
+    try:
+        params = model.get_params(deep=True)
+    except Exception:
+        return ()
+    resolved = []
+    for key, value in params.items():
+        key_lower = key.lower()
+        if key_lower.endswith('class_weight') or key_lower.endswith('auto_class_weights'):
+            resolved.append((key, _freeze_for_fingerprint(value)))
+    return tuple(sorted(resolved))
+
+
+def _build_fit_fingerprint(
+    *,
+    preprocess_config: Dict[str, Any],
+    subset_type: str,
+    subset_size: Any,
+    subset_tag: str,
+    n_vars: int,
+    top_indices,
+    model_name: str,
+    task_type: str,
+    model_params: Dict[str, Any],
+    imbalance_method: Optional[str],
+    imbalance_params: Optional[Dict[str, Any]],
+    use_sample_weight_for_classification: bool,
+    resolved_class_weight: tuple,
+    tail_lr_random_state: Optional[int],
+    early_stopping_rounds: Optional[int],
+    use_early_stopping: bool,
+    baseline_method: Optional[str],
+    baseline_params: Optional[Dict[str, Any]],
+    smoothing_window: int,
+    smoothing_polyorder: int,
+) -> tuple:
+    """Fingerprint the fully resolved model fit immediately before CV."""
+    return (
+        ('preprocess_name', preprocess_config.get('name', 'raw')),
+        ('deriv', preprocess_config.get('deriv', 0)),
+        ('window', preprocess_config.get('window', 0)),
+        ('polyorder', preprocess_config.get('polyorder', 0)),
+        ('apply_baseline', preprocess_config.get('apply_baseline', False)),
+        ('baseline_method', baseline_method if preprocess_config.get('apply_baseline', False) else None),
+        ('baseline_params', _freeze_for_fingerprint(baseline_params or {}) if preprocess_config.get('apply_baseline', False) else ()),
+        ('apply_smoothing', preprocess_config.get('apply_smoothing', False)),
+        ('smoothing_window', smoothing_window if preprocess_config.get('apply_smoothing', False) else None),
+        ('smoothing_polyorder', smoothing_polyorder if preprocess_config.get('apply_smoothing', False) else None),
+        ('apply_autoscale', preprocess_config.get('apply_autoscale', False)),
+        ('subset_type', subset_type),
+        ('subset_size', _freeze_for_fingerprint(subset_size)),
+        ('subset_tag', subset_tag),
+        ('n_vars', int(n_vars)),
+        ('top_indices', _selected_indices_fingerprint(top_indices)),
+        ('model_name', model_name),
+        ('task_type', task_type),
+        ('model_params', _freeze_for_fingerprint(model_params or {})),
+        ('imbalance_method', imbalance_method),
+        ('imbalance_params', _freeze_for_fingerprint(imbalance_params or {})),
+        ('use_sample_weight_for_classification', bool(use_sample_weight_for_classification)),
+        ('resolved_class_weight', _freeze_for_fingerprint(resolved_class_weight)),
+        ('tail_lr_random_state', tail_lr_random_state),
+        ('early_stopping_rounds', early_stopping_rounds),
+        ('use_early_stopping', bool(use_early_stopping)),
+    )
+
+
+def _register_or_prune_fingerprint(
+    trial: Trial,
+    fingerprint: tuple,
+    seen_fingerprints: Dict[tuple, int],
+) -> None:
+    prior_trial = seen_fingerprints.get(fingerprint)
+    if prior_trial is not None:
+        trial.set_user_attr('duplicate_of_trial', prior_trial)
+        trial.set_user_attr('fingerprint', repr(fingerprint))
+        raise optuna.TrialPruned(f"Duplicate fit fingerprint from trial {prior_trial}")
+    seen_fingerprints[fingerprint] = trial.number
+    trial.set_user_attr('fingerprint', repr(fingerprint))
+
+
+def _rehydrate_seen_fingerprints(
+    study: optuna.Study,
+    seen_fingerprints: Dict[tuple, int],
+) -> int:
+    """Load COMPLETE-trial fingerprints from an existing Optuna study."""
+    from optuna.trial import TrialState
+
+    added = 0
+    for trial in study.trials:
+        if trial.state != TrialState.COMPLETE:
+            continue
+        fingerprint_repr = trial.user_attrs.get('fingerprint')
+        if not fingerprint_repr:
+            continue
+        try:
+            fingerprint = ast.literal_eval(fingerprint_repr)
+        except (ValueError, SyntaxError):
+            logger.warning(
+                "Could not parse stored Bayesian fingerprint for trial %s; "
+                "resume dedup may miss that prior fit.",
+                trial.number,
+            )
+            continue
+        if fingerprint not in seen_fingerprints:
+            seen_fingerprints[fingerprint] = trial.number
+            added += 1
+    return added
+
 # Subset sizes to explore
 SUBSET_SIZES = ['full', 10, 20, 50, 100, 250, 500, 1000]
 
@@ -787,6 +924,7 @@ def create_unified_objective(
     enable_uve: bool = False,
     inlier_class_label=None,
     y_original: np.ndarray | None = None,
+    seen_fingerprints: Optional[Dict[tuple, int]] = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -889,6 +1027,8 @@ def create_unified_objective(
     region_cache = {}
     importance_cache = {}  # Cache importances per (preprocessing_config, method, model_proxy)
     preprocessing_cache = {}  # Cache preprocessed data per config
+    if seen_fingerprints is None:
+        seen_fingerprints = {}
 
     def objective(trial: Trial) -> float:
         """Objective function for a single trial."""
@@ -1052,6 +1192,35 @@ def create_unified_objective(
 
                 # --- Suggest one-class model params (after subsetting, feature count may differ) ---
                 oc_params = suggest_one_class_params(trial, model_name)
+
+                # PCA-SIMCA applies its own n_components clamp inside
+                # contamination.py. We fingerprint the suggested oc_params
+                # here and intentionally do not mirror that internal clamp;
+                # missing that rare duplicate is acceptable and avoids
+                # coupling this Optuna objective to PCA-SIMCA internals.
+                oc_fingerprint = _build_fit_fingerprint(
+                    preprocess_config=preprocess_config,
+                    subset_type=subset_type,
+                    subset_size=subset_size,
+                    subset_tag=subset_tag,
+                    n_vars=X_for_cv.shape[1],
+                    top_indices=top_indices,
+                    model_name=model_name,
+                    task_type=task_type,
+                    model_params=oc_params,
+                    imbalance_method=None,
+                    imbalance_params={},
+                    use_sample_weight_for_classification=False,
+                    resolved_class_weight=(),
+                    tail_lr_random_state=None,
+                    early_stopping_rounds=None,
+                    use_early_stopping=False,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                )
+                _register_or_prune_fingerprint(trial, oc_fingerprint, seen_fingerprints)
 
                 cv_result = run_one_class_cv(
                     X_for_cv, y_oc, model_name, oc_params,
@@ -1304,6 +1473,7 @@ def create_unified_objective(
                 if imbalance_method == 'class_weight':
                     lr.set_params(class_weight='balanced')
                 pipe_steps.append(('lr', lr))
+                tail_lr_random_state = random_state
             elif model_name in SCALE_SENSITIVE_MODELS:
                 # Scale-sensitive models: StandardScaler + Model.
                 # T-36: skip the per-model scaler when autoscale is already
@@ -1311,9 +1481,11 @@ def create_unified_objective(
                 if not preprocess_config.get('apply_autoscale', False):
                     pipe_steps.append(('scaler', StandardScaler()))
                 pipe_steps.append(('model', model))
+                tail_lr_random_state = None
             else:
                 # Other models don't need scaling
                 pipe_steps.append(('model', model))
+                tail_lr_random_state = None
 
             # Step 4: Create pipeline with correct class (ImbPipeline for resampling methods)
             needs_resampling = _needs_resampling_pipeline(imbalance_method, task_type)
@@ -1347,6 +1519,30 @@ def create_unified_objective(
             _cv_fit_params = (
                 {'model__sample_weight': _balanced_sw} if _balanced_sw is not None else None
             )
+
+            fingerprint = _build_fit_fingerprint(
+                preprocess_config=preprocess_config,
+                subset_type=subset_type,
+                subset_size=subset_size,
+                subset_tag=subset_tag,
+                n_vars=n_vars,
+                top_indices=top_indices,
+                model_name=model_name,
+                task_type=task_type,
+                model_params=model_params,
+                imbalance_method=imbalance_method,
+                imbalance_params=_imbalance_params,
+                use_sample_weight_for_classification=use_sample_weight_for_classification,
+                resolved_class_weight=_resolved_weighting_fingerprint(model),
+                tail_lr_random_state=tail_lr_random_state,
+                early_stopping_rounds=early_stopping_rounds,
+                use_early_stopping=use_early_stopping,
+                baseline_method=baseline_method,
+                baseline_params=baseline_params,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+            )
+            _register_or_prune_fingerprint(trial, fingerprint, seen_fingerprints)
 
             if task_type == 'regression':
                 # Compute pooled CV predictions once and derive both RMSE and R² from them.
@@ -1686,6 +1882,8 @@ def create_unified_objective(
 
             return metric
 
+        except optuna.TrialPruned:
+            raise
         except Exception as e:
             logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")
             # Return large penalty
@@ -2091,6 +2289,7 @@ def run_unified_bayesian(
     # Create objective function
     # Note: Regional subsets are computed DYNAMICALLY inside the objective
     # on preprocessed data, ensuring regions are relevant to the current preprocessing
+    seen_fingerprints: Dict[tuple, int] = {}
     objective = create_unified_objective(
         X_raw=X,
         y=y,
@@ -2117,6 +2316,7 @@ def run_unified_bayesian(
         enable_uve=enable_uve,
         inlier_class_label=inlier_class_label,
         y_original=y,
+        seen_fingerprints=seen_fingerprints,
     )
 
     # Create TPE sampler with good defaults
@@ -2309,6 +2509,13 @@ def run_unified_bayesian(
                 )
         else:
             study.set_user_attr(_key, _val)
+
+    _rehydrated = _rehydrate_seen_fingerprints(study, seen_fingerprints)
+    if _rehydrated:
+        logger.info(
+            "Rehydrated %d Bayesian fit fingerprints from COMPLETE trials",
+            _rehydrated,
+        )
 
     # --- auto-decision state ---
     _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides

@@ -289,6 +289,11 @@ def create_objective_function(
     from .models import build_model
     from .model_registry import supports_subset_analysis
     from .models import get_feature_importances
+    from .unified_bayesian import (
+        _build_fit_fingerprint,
+        _register_or_prune_fingerprint,
+        _resolved_weighting_fingerprint,
+    )
     from .variable_selection import spa_selection, uve_selection, uve_spa_selection, ipls_selection, cars_selection
     from .wavelength_selection import vcpa_iriv
 
@@ -325,6 +330,7 @@ def create_objective_function(
     # Note: 'cars-aware' is model-dependent but safe to cache here because
     # each model gets its own closure (and thus its own cache instance).
     _varsel_cache: dict[str, np.ndarray] = {}
+    seen_fingerprints: dict[tuple, int] = {}
 
     def objective(trial: optuna.Trial) -> float:
         """
@@ -388,6 +394,40 @@ def create_objective_function(
         # Run cross-validation using existing infrastructure
         try:
             # === STEP 1: Test full model (all features) ===
+            fingerprint = _build_fit_fingerprint(
+                preprocess_config={
+                    'name': preprocess_cfg.get('method', preprocess_cfg.get('name', 'raw')),
+                    'deriv': preprocess_cfg.get('deriv', preprocess_cfg.get('derivative', 0)),
+                    'window': preprocess_cfg.get('window', 0),
+                    'polyorder': preprocess_cfg.get('polyorder', preprocess_cfg.get('poly', 0)),
+                    'apply_baseline': bool(preprocess_cfg.get('apply_baseline', False)),
+                    'apply_smoothing': bool(preprocess_cfg.get('apply_smoothing', False)),
+                    'apply_autoscale': bool(preprocess_cfg.get('apply_autoscale', False)),
+                },
+                subset_type='full',
+                subset_size='full',
+                subset_tag='full',
+                n_vars=X.shape[1],
+                top_indices=None,
+                model_name=model_name,
+                task_type=task_type,
+                model_params=params,
+                imbalance_method=filtered_kwargs.get('imbalance_method'),
+                imbalance_params=filtered_kwargs.get('imbalance_params') or {},
+                use_sample_weight_for_classification=bool(
+                    filtered_kwargs.get('use_sample_weight_for_classification', False)
+                ),
+                resolved_class_weight=_resolved_weighting_fingerprint(model),
+                tail_lr_random_state=42 if model_name == "PLS-DA" and task_type == 'classification' else None,
+                early_stopping_rounds=filtered_kwargs.get('early_stopping_rounds'),
+                use_early_stopping=bool(filtered_kwargs.get('early_stopping_rounds')),
+                baseline_method=filtered_kwargs.get('baseline_method'),
+                baseline_params=filtered_kwargs.get('baseline_params') or {},
+                smoothing_window=filtered_kwargs.get('smoothing_window', 17),
+                smoothing_polyorder=filtered_kwargs.get('smoothing_polyorder', 2),
+            )
+            _register_or_prune_fingerprint(trial, fingerprint, seen_fingerprints)
+
             full_result = run_single_config_fn(
                 X, y, wavelengths,
                 model, model_name, params,
@@ -696,6 +736,8 @@ def create_objective_function(
             # The best_subset_metric is stored in trial attributes for final ranking.
             return full_model_metric
 
+        except optuna.TrialPruned:
+            raise
         except Exception as e:
             # If model training fails, return large penalty value
             # This marks the trial as completed but with worst score
