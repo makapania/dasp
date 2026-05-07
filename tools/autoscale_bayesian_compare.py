@@ -57,10 +57,16 @@ from spectral_predict.unified_bayesian import run_unified_bayesian
 
 def _parse_params_loose(raw: Any) -> dict:
     """Parse a Params field that may be JSON, Python repr, or empty/NaN."""
-    if raw is None or (isinstance(raw, float) and np.isnan(raw)):
+    # Cover Python float NaN, numpy float scalars (any width), and pandas NA
+    # uniformly. isinstance(x, float) misses np.float32 because float32 isn't
+    # a Python-float subclass; isinstance(x, np.floating) catches all numpy
+    # float widths. pd.isna accepts pd.NA without raising on truth-evaluation.
+    if raw is None:
+        return {}
+    if isinstance(raw, (float, np.floating)) and np.isnan(raw):
         return {}
     s = str(raw).strip()
-    if not s:
+    if not s or s.lower() == "nan":
         return {}
     try:
         return json.loads(s)
@@ -401,6 +407,14 @@ def main() -> int:
     )
     print()
     print(f"Wrote {out_path}")
+    failed_cells = [c for c in cells if not c.get("ok")]
+    if failed_cells:
+        print(
+            f"WARNING: {len(failed_cells)} of {len(cells)} cells failed; "
+            f"returning nonzero exit so CI/automation surfaces the failure.",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
