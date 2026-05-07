@@ -5631,6 +5631,19 @@ def run_one_class_search(
     n_inliers = len(inlier_indices)
     n_outliers = len(outlier_indices)
 
+    # UVE prefilter is a y-driven discrimination filter (CLAUDE.md:66) and
+    # has no place in one-class screening. The GUI clears this checkbox at
+    # spectral_predict_gui_optimized.py:16671, but scripted callers bypass
+    # the GUI. Coerce to False with a warning so backend behavior matches
+    # the documented one-class contract regardless of caller.
+    if apply_uve_prefilter:
+        logger.warning(
+            "apply_uve_prefilter=True is not supported for one-class "
+            "screening (UVE prefilter is a y-driven discrimination method, "
+            "not a one-class method). Forcing apply_uve_prefilter=False."
+        )
+        apply_uve_prefilter = False
+
     logger.info("=" * 70)
     logger.info("ONE-CLASS SCREENING")
     logger.info("=" * 70)
@@ -5904,19 +5917,20 @@ def run_one_class_search(
         oc_hyperparams=oc_hyperparams,
     )
 
-    # Filter and validate variable selection methods for one-class
+    # Filter and validate variable selection methods for one-class.
+    # UVE family is excluded per CLAUDE.md:66 — UVE-on-y_oc is a discrimination
+    # method (Pomerantsev et al. 2025 LOVE / Forina modeling-power vs
+    # discrimination-power), not a one-class method. iPLS family is also
+    # implicitly excluded (not in this whitelist) since it requires PLS
+    # internals not available for one-class models. The GUI mirrors both
+    # exclusions at spectral_predict_gui_optimized.py:16667-16683.
     implemented_oc_varsel = {
         "importance",
         "spa",
-        "uve",
         "cars",
         "cars-tree",
         "ga",
         "vcpa-iriv",
-        "uve_spa",
-        "uve_cars",
-        "uve_cars_tree",
-        "uve_cars_spa",
     }
     selected_varsel_methods = []
     if variable_selection_methods:
