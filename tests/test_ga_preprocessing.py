@@ -24,6 +24,7 @@ try:
         evaluate_fitness,
         optimize_preprocessing,
         get_optimized_preproc_config,
+        _decode_autoscale_gene,
         PREPROC_TYPES,
         WINDOW_SIZES,
         DERIVATIVE_WINDOW_RANGES,
@@ -216,6 +217,138 @@ class TestFitnessEvaluation:
 
 
 # =============================================================================
+# Phase 3: Backward-compat 2-gene / 3-gene chromosome decode
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestChromosomeAutoscaleBackwardCompat:
+    """Pin that the autoscale-gene decode handles both legacy 2-gene and
+    Phase-3 3-gene chromosomes. These tests are load-bearing for saved-CSV
+    rebuild correctness — old result files have 2-gene ga_genes arrays and
+    must continue to decode as autoscale=False after Phase 3 ships.
+    """
+
+    def test_2gene_chromosome_decodes_autoscale_false(self):
+        """Legacy 2-gene array → autoscale=False, no StandardScaler in transform."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)  # arbitrary deriv2, w=15
+
+        assert _decode_autoscale_gene(genes_2gene) is False
+
+        name, transform = chromosome_to_transform(genes_2gene)
+        # Name should NOT include +autoscale
+        assert "+autoscale" not in name
+
+        # Transform output should be valid; standard SG-derivative behavior
+        # (we just check the function runs and produces correct shape)
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform is not None:
+            X_out = transform(X)
+            assert X_out.shape == X.shape
+
+    def test_3gene_chromosome_with_autoscale_true(self):
+        """3-gene array with autoscale=1 → name carries +autoscale and the
+        transform applies StandardScaler."""
+        genes_3gene = np.array([3, 5, 1], dtype=np.int32)
+
+        assert _decode_autoscale_gene(genes_3gene) is True
+
+        name, transform = chromosome_to_transform(genes_3gene)
+        assert "+autoscale" in name
+
+        # After transform, every column should be z-scored (mean ~0, std ~1)
+        X = np.random.RandomState(42).randn(20, 50)
+        X_out = transform(X)
+        assert X_out.shape == X.shape
+        # Per-column means and stds
+        col_means = np.abs(X_out.mean(axis=0))
+        col_stds = X_out.std(axis=0)
+        assert np.all(col_means < 1e-9), f"Expected zero-mean cols, max abs mean={col_means.max()}"
+        assert np.all(np.abs(col_stds - 1.0) < 1e-9), f"Expected unit-std cols, got {col_stds}"
+
+    def test_3gene_chromosome_with_autoscale_false(self):
+        """3-gene array with autoscale=0 → no +autoscale in name; behavior
+        identical to the 2-gene equivalent."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)
+        genes_3gene = np.array([3, 5, 0], dtype=np.int32)
+
+        assert _decode_autoscale_gene(genes_3gene) is False
+
+        name_2gene, transform_2gene = chromosome_to_transform(genes_2gene)
+        name_3gene, transform_3gene = chromosome_to_transform(genes_3gene)
+
+        # Names must match exactly (no +autoscale tag for either)
+        assert name_2gene == name_3gene
+        assert "+autoscale" not in name_2gene
+
+        # Transform outputs must be bit-exact equal
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform_2gene is None:
+            assert transform_3gene is None
+        else:
+            X_2 = transform_2gene(X)
+            X_3 = transform_3gene(X)
+            np.testing.assert_array_equal(X_2, X_3)
+
+    def test_raw_with_autoscale_true(self):
+        """raw + autoscale=True must produce a transform (not None) that
+        applies just StandardScaler. The legacy raw + autoscale=False case
+        still returns transform=None for back-compat with the no-op fast
+        path."""
+        raw_idx = PREPROC_TYPES.index("raw")
+        genes_raw_no_autoscale = np.array([raw_idx, 0], dtype=np.int32)
+        genes_raw_with_autoscale = np.array([raw_idx, 0, 1], dtype=np.int32)
+
+        # raw + autoscale=False → transform=None (fast path)
+        _, t_none = chromosome_to_transform(genes_raw_no_autoscale)
+        assert t_none is None
+
+        # raw + autoscale=True → real transform that just z-scores
+        name, t_autoscale = chromosome_to_transform(genes_raw_with_autoscale)
+        assert "+autoscale" in name
+        assert t_autoscale is not None
+        X = np.random.RandomState(42).randn(20, 50)
+        X_out = t_autoscale(X)
+        assert np.all(np.abs(X_out.mean(axis=0)) < 1e-9)
+        assert np.all(np.abs(X_out.std(axis=0) - 1.0) < 1e-9)
+
+    def test_get_config_description_handles_both_shapes(self):
+        """get_config_description must accept both 2-gene and 3-gene arrays."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)
+        genes_3gene_off = np.array([3, 5, 0], dtype=np.int32)
+        genes_3gene_on = np.array([3, 5, 1], dtype=np.int32)
+
+        desc_2gene = get_config_description(genes_2gene)
+        desc_3gene_off = get_config_description(genes_3gene_off)
+        desc_3gene_on = get_config_description(genes_3gene_on)
+
+        # 2-gene and 3-gene-off should produce the same description
+        assert desc_2gene == desc_3gene_off
+        # 3-gene-on must mention autoscale
+        assert "autoscale" in desc_3gene_on
+        # 2-gene must NOT mention autoscale
+        assert "autoscale" not in desc_2gene
+
+    def test_saved_csv_2gene_rebuild_compatible(self):
+        """Simulate the search.py:797-800 path that re-runs
+        chromosome_to_transform on a 2-gene ga_genes array deserialized
+        from an old result CSV. Must produce a working transform."""
+        # Old CSVs serialize ga_genes via .tolist(); on rebuild it's a list
+        # of 2 ints. search.py converts back to np.ndarray before calling
+        # chromosome_to_transform. Pin that path:
+        gene_list_from_csv = [3, 5]
+        genes = np.array(gene_list_from_csv, dtype=np.int32)
+
+        name, transform = chromosome_to_transform(genes)
+        assert isinstance(name, str)
+
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform is not None:
+            X_out = transform(X)
+            assert X_out.shape == X.shape
+
+
+# =============================================================================
 # Integration Tests - Exhaustive Optimization
 # =============================================================================
 
@@ -343,6 +476,66 @@ class TestExhaustivePreprocessingOptimization:
             optimize_preprocessing(
                 X, y, method="ga", cv_folds=3, random_state=42, verbose=0,
             )
+
+    def test_apply_autoscale_off_emits_2gene_chromosomes(self, synthetic_spectra_small):
+        """Phase 3 backward-compat: apply_autoscale=False (default) must
+        produce 2-gene chromosomes so saved-CSV ga_genes columns match
+        legacy behavior bit-exact."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=False,
+        )
+
+        # All emitted configs should have len(genes) == 2
+        for cfg in result["configs"]:
+            assert cfg["genes"].shape == (2,), (
+                f"Expected 2-gene chromosome, got shape {cfg['genes'].shape}"
+            )
+
+    def test_apply_autoscale_on_emits_3gene_chromosomes(self, synthetic_spectra_small):
+        """Phase 3: apply_autoscale=True produces 3-gene chromosomes."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=True,
+        )
+
+        for cfg in result["configs"]:
+            assert cfg["genes"].shape == (3,), (
+                f"Expected 3-gene chromosome, got shape {cfg['genes'].shape}"
+            )
+
+    def test_apply_autoscale_on_emits_both_flag_values(self, synthetic_spectra_small):
+        """When apply_autoscale=True, exhaustive must explore BOTH
+        autoscale=False and autoscale=True; the diversity selector's
+        (preproc, autoscale) key should let both surface in top-N."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=True,
+            top_n=10,  # bigger top-N so both flag values can fit
+        )
+
+        autoscale_values = {
+            _decode_autoscale_gene(cfg["genes"]) for cfg in result["configs"]
+        }
+        # Both False and True should appear among the diverse top-N
+        assert autoscale_values == {False, True}, (
+            f"Expected both autoscale=False and =True in top-N, got {autoscale_values}"
+        )
 
     def test_with_actual_model_config(self, synthetic_spectra_small):
         """Closes Codex MEDIUM: actual-model exhaustive path is the live

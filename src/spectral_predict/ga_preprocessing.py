@@ -38,6 +38,11 @@ from sklearn.metrics import mean_squared_error, accuracy_score
 # Import V1 preprocessing transformers
 from .preprocess import SNV, SavgolDerivative
 
+# StandardScaler for the optional autoscale gene (Phase 3 — chromosome
+# expanded from 2 genes to 3, with backward-compat decode for legacy
+# 2-gene callers and saved-CSV ga_genes columns).
+from sklearn.preprocessing import StandardScaler
+
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
 
@@ -94,9 +99,28 @@ ROBUSTNESS_SEEDS = [42, 123, 456, 789, 999]
 # Variance penalty coefficient (higher = prefer more stable preprocessing)
 VARIANCE_PENALTY = 0.1
 
-# Total search space: 14 × 17 = 238 combinations
+# Total search space: 14 × 17 = 238 combinations (preproc × window).
+# With Phase 3's autoscale gene (added 2026-05-06) the search space doubles
+# to 476 when the user opts in. Legacy 2-gene chromosomes are still produced
+# by smart_exhaustive_search (which doesn't search autoscale) and by saved
+# result CSVs predating Phase 3; both paths are decoded as autoscale=False
+# via _decode_autoscale_gene.
 N_GENES = 2
 TOTAL_COMBINATIONS = len(PREPROC_TYPES) * len(WINDOW_SIZES)  # 238
+
+
+def _decode_autoscale_gene(genes: np.ndarray) -> bool:
+    """Backward-compatible decode of the optional 3rd autoscale gene.
+
+    Returns ``False`` for legacy 2-gene chromosomes (saved-CSV ga_genes,
+    smart_exhaustive_search seeds). Returns ``bool(genes[2])`` for 3-gene
+    chromosomes. Centralizing this in one helper means every site that
+    reads genes (transform, description, diversity key, search.py rebuild)
+    behaves identically.
+    """
+    if len(genes) >= 3:
+        return bool(genes[2])
+    return False
 
 
 def random_chromosome(rng: np.random.RandomState) -> np.ndarray:
@@ -146,39 +170,49 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     """
     Convert chromosome to (name, transform_func) tuple.
 
-    The returned tuple is compatible with _build_preprocessing_configs() output
-    in search.py, making integration seamless.
+    Handles BOTH legacy 2-gene chromosomes ``[preproc_idx, window_idx]`` and
+    Phase 3's 3-gene chromosomes ``[preproc_idx, window_idx, autoscale]``.
+    Missing autoscale defaults to ``False`` via ``_decode_autoscale_gene``.
+
+    The returned tuple is compatible with ``_build_preprocessing_configs()``
+    output in search.py, making integration seamless.
 
     Parameters
     ----------
     genes : np.ndarray
-        Integer-encoded chromosome [preproc_type, window]
+        Integer-encoded chromosome ``[preproc_type, window]`` or
+        ``[preproc_type, window, autoscale]``.
 
     Returns
     -------
     name : str
         Human-readable name for the preprocessing configuration
     transform_func : callable or None
-        Function that takes X and returns preprocessed X, or None for 'raw'
+        Function that takes X and returns preprocessed X, or None when no
+        transform is needed (``raw`` with ``autoscale=False``).
     """
     preproc_idx = genes[0]
     window_idx = genes[1]
+    autoscale = _decode_autoscale_gene(genes)
 
     preproc_type = PREPROC_TYPES[preproc_idx]
     window = WINDOW_SIZES[window_idx]
 
-    # Build name
+    # Build name (autoscale suffix appended below for the autoscale=True branch)
     if preproc_type in ['raw', 'snv']:
         name = preproc_type
     else:
         name = f"{preproc_type}_w{window}"
+    if autoscale:
+        name = f"{name}+autoscale"
 
-    # Return early for raw (no transform needed)
-    if preproc_type == 'raw':
+    # Special case: raw + autoscale=False is a true no-op, return None
+    if preproc_type == 'raw' and not autoscale:
         return (name, None)
 
-    # Build transform function
-    def transform(X, pt=preproc_type, w=window):
+    # Build transform function. Captures `autoscale` so the closure applies
+    # StandardScaler at the end when the gene is set.
+    def transform(X, pt=preproc_type, w=window, _autoscale=autoscale):
         X_out = np.asarray(X, dtype=np.float64)
 
         if pt == 'snv':
@@ -215,6 +249,10 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'deriv4_snv':
             X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
+        # else (pt == 'raw'): X_out stays as the input (autoscale-only path)
+
+        if _autoscale:
+            X_out = StandardScaler().fit_transform(X_out)
 
         return X_out
 
@@ -222,14 +260,22 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
 
 
 def get_config_description(genes: np.ndarray) -> str:
-    """Get human-readable description of chromosome configuration."""
+    """Get human-readable description of chromosome configuration.
+
+    Handles both 2-gene (legacy) and 3-gene (Phase 3) chromosomes.
+    """
     preproc_type = PREPROC_TYPES[genes[0]]
     window = WINDOW_SIZES[genes[1]]
+    autoscale = _decode_autoscale_gene(genes)
 
     if preproc_type in ['raw', 'snv']:
-        return f"Preproc: {preproc_type}"
+        base = f"Preproc: {preproc_type}"
     else:
-        return f"Preproc: {preproc_type}, Window: {window}"
+        base = f"Preproc: {preproc_type}, Window: {window}"
+
+    if autoscale:
+        base = f"{base}, autoscale=True"
+    return base
 
 
 # =============================================================================
@@ -757,16 +803,22 @@ def select_diverse_exhaustive_configs(
     selected_indices : list of int
         Indices of selected configurations in original order
     """
-    # Create list of (index, genes, fitness, preproc_type)
+    # Create list of (index, genes, fitness, diversity_key)
+    # Diversity key is (preproc_type, autoscale) so a 2-gene exhaustive run
+    # behaves identically to before Phase 3 (autoscale always False), while a
+    # 3-gene run can hold both autoscale-on and autoscale-off variants of the
+    # same preproc type without one crowding the other out of the top-N.
     configs = []
     for i, (genes, fitness) in enumerate(zip(all_genes, all_fitness)):
         if fitness > -np.inf:  # Skip invalid configs
             preproc_type = PREPROC_TYPES[genes[0]]
+            autoscale = _decode_autoscale_gene(genes)
             configs.append({
                 'index': i,
                 'genes': genes,
                 'fitness': fitness,
-                'preproc_type': preproc_type
+                'preproc_type': preproc_type,
+                'diversity_key': (preproc_type, autoscale),
             })
 
     if len(configs) <= n_top:
@@ -775,23 +827,23 @@ def select_diverse_exhaustive_configs(
     # Sort by fitness (descending - higher is better)
     sorted_configs = sorted(configs, key=lambda c: c['fitness'], reverse=True)
 
-    # Select ensuring diversity across preprocessing types
+    # Select ensuring diversity across (preproc_type, autoscale) tuples
     selected = []
-    selected_preprocs = set()
+    selected_keys = set()
 
-    # First pass: select best from each preprocessing TYPE (not window variation)
-    # This ensures we get deriv1, deriv2, snv_deriv1, etc. rather than just
-    # multiple window sizes of the same preprocessing
+    # First pass: select best from each diversity key. This ensures we get
+    # deriv1+autoscale_off, deriv1+autoscale_on, deriv2+autoscale_off, etc.
+    # rather than just multiple window sizes of the same (preproc, autoscale).
     for config in sorted_configs:
-        preproc_type = config['preproc_type']
+        diversity_key = config['diversity_key']
 
         # Skip raw in diversity selection if configured (raw rarely produces best models)
-        if exclude_raw_from_diversity and preproc_type == 'raw':
+        if exclude_raw_from_diversity and config['preproc_type'] == 'raw':
             continue
 
-        if preproc_type not in selected_preprocs:
+        if diversity_key not in selected_keys:
             selected.append(config)
-            selected_preprocs.add(preproc_type)
+            selected_keys.add(diversity_key)
             if len(selected) >= n_top:
                 break
 
@@ -824,13 +876,19 @@ def exhaustive_search(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     top_n: int = 5,
-    model_config: Optional[Dict[str, Any]] = None
+    model_config: Optional[Dict[str, Any]] = None,
+    apply_autoscale: bool = False,
 ) -> Dict[str, Any]:
     """
-    Exhaustively search all 170 preprocessing combinations.
+    Exhaustively search all preprocessing combinations.
 
-    With only 170 combinations (10 preprocessing types × 17 window sizes),
-    exhaustive search is feasible and guarantees finding the optimal solution.
+    Default search space: 14 × 17 = 238 cells (preproc × window). With
+    ``apply_autoscale=True`` the chromosome grows to 3 genes and the space
+    doubles to 14 × 17 × 2 = 476 cells, including configurations both with
+    and without per-feature standardization (StandardScaler) applied AFTER
+    the preprocessing core. The downstream pipeline rebuild reads
+    ``preprocess_cfg["autoscale"]`` (set in search.py from the gene), so
+    no consumer-side change is needed.
 
     Parameters
     ----------
@@ -859,6 +917,11 @@ def exhaustive_search(
     model_config : dict, optional
         Dict with 'name' and 'params' for actual model fitness evaluation
         If None, uses proxy fitness_model instead
+    apply_autoscale : bool
+        When ``True``, expand the chromosome to include an autoscale gene and
+        enumerate both ``autoscale=False`` and ``autoscale=True`` for every
+        (preproc, window) pair. Default ``False`` preserves the legacy 2-gene
+        search space exactly.
 
     Returns
     -------
@@ -869,20 +932,39 @@ def exhaustive_search(
     y = np.asarray(y).ravel()
 
     n_samples, n_features = X.shape
+    autoscale_choices = [0, 1] if apply_autoscale else [0]
+    total_combinations = (
+        len(PREPROC_TYPES) * len(WINDOW_SIZES) * len(autoscale_choices)
+    )
 
     if verbose >= 1:
         print(f"Exhaustive Preprocessing Search")
         print(f"  Data: {n_samples} samples, {n_features} features")
         print(f"  Task: {task_type}")
         print(f"  Fitness model: {fitness_model.upper()}")
-        print(f"  Total combinations: {TOTAL_COMBINATIONS}")
+        print(
+            f"  Total combinations: {total_combinations} "
+            f"(autoscale {'on/off' if apply_autoscale else 'off only'})"
+        )
 
-    # Generate all possible chromosomes
-    all_genes = [
-        np.array([p, w], dtype=np.int32)
-        for p in range(len(PREPROC_TYPES))
-        for w in range(len(WINDOW_SIZES))
-    ]
+    # Generate all possible chromosomes. When apply_autoscale=False we emit
+    # 2-gene chromosomes for bit-exact backward compatibility with pre-Phase-3
+    # callers and saved-CSV ga_genes columns. When apply_autoscale=True we
+    # emit 3-gene chromosomes; chromosome_to_transform / get_config_description
+    # / search.py:2120-2151 all decode either shape via _decode_autoscale_gene.
+    if apply_autoscale:
+        all_genes = [
+            np.array([p, w, a], dtype=np.int32)
+            for p in range(len(PREPROC_TYPES))
+            for w in range(len(WINDOW_SIZES))
+            for a in autoscale_choices
+        ]
+    else:
+        all_genes = [
+            np.array([p, w], dtype=np.int32)
+            for p in range(len(PREPROC_TYPES))
+            for w in range(len(WINDOW_SIZES))
+        ]
 
     # Evaluate all combinations
     if n_jobs != 1:
@@ -1341,7 +1423,8 @@ def optimize_preprocessing(
     fitness_model: str = 'pls',
     n_jobs: int = -1,
     top_n: int = 5,
-    model_config: Optional[Dict[str, Any]] = None
+    model_config: Optional[Dict[str, Any]] = None,
+    apply_autoscale: bool = False,
 ) -> Dict[str, Any]:
     """
     Optimize spectral preprocessing via exhaustive enumeration.
@@ -1405,7 +1488,8 @@ def optimize_preprocessing(
     if method == 'exhaustive':
         return exhaustive_search(
             X, y, cv_folds, n_components, task_type, random_state,
-            fitness_model, n_jobs, verbose, progress_callback, top_n, model_config
+            fitness_model, n_jobs, verbose, progress_callback, top_n,
+            model_config, apply_autoscale=apply_autoscale,
         )
 
     if method == 'smart':

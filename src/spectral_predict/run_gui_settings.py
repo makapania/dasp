@@ -102,6 +102,7 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "tpe_preprocess_n_top",
     "enable_ga_preprocessing",
     "ga_preprocess_cv_folds",
+    "ga_preprocess_autoscale",
     # --- variable-subset toggles ---
     "enable_variable_subsets",
     "enable_region_subsets",

@@ -1258,6 +1258,7 @@ def run_search(
     enable_class_weight=False,
     ga_preprocess=False,
     ga_preprocess_cv_folds=5,
+    ga_preprocess_autoscale=True,  # Phase 3: search both autoscale on/off
     ga_quick_mode=False,
     # Smart preprocessing discovery parameters (NEW - replaces GA)
     smart_preprocess=False,
@@ -2056,6 +2057,7 @@ def run_search(
                 top_n=5,  # Return top 5 preprocessing configs
                 n_jobs=-1,  # Always parallel (was conditional on legacy GA mode)
                 model_config=model_config,  # Use actual model for fitness evaluation
+                apply_autoscale=ga_preprocess_autoscale,  # Phase 3 autoscale gene
             )
 
             ga_results[model_name] = ga_result
@@ -2110,6 +2112,11 @@ def run_search(
             # Add all top-N configs for this model
             for i, cfg in enumerate(configs_list):
                 base_name = cfg.get("name", "unknown")
+                # Strip the optional "+autoscale" tag from the chromosome name
+                # before deriving the pipeline base_name; the autoscale flag
+                # is propagated separately via the dict's "autoscale" key.
+                if base_name.endswith("+autoscale"):
+                    base_name = base_name[: -len("+autoscale")]
                 # Clean display name: strip derivative order
                 if base_name in ("raw", "snv"):
                     clean_name = base_name
@@ -2121,6 +2128,18 @@ def run_search(
                     clean_name = "deriv"
                 else:
                     clean_name = base_name
+
+                # Decode autoscale gene from chromosome (Phase 3, 2026-05-06).
+                # Backward-compat: 2-gene chromosomes from saved CSVs and from
+                # ga_preprocess_autoscale=False runs read as autoscale=False.
+                genes = cfg.get("genes")
+                from .ga_preprocessing import _decode_autoscale_gene
+                autoscale_gene = (
+                    _decode_autoscale_gene(genes)
+                    if genes is not None
+                    else False
+                )
+
                 preprocess_configs.append(
                     {
                         "name": clean_name,
@@ -2134,10 +2153,11 @@ def run_search(
                         "smoothing": smoothing,
                         "smoothing_window": smoothing_window,
                         "smoothing_polyorder": smoothing_polyorder,
+                        "autoscale": autoscale_gene,  # Phase 3 autoscale dimension
                         "ga_transform": cfg.get("transform"),
                         "ga_config": cfg.get("config"),
                         "ga_model_type": model_name,  # Track which model this was optimized for
-                        "ga_genes": cfg.get("genes"),
+                        "ga_genes": genes,
                     }
                 )
 

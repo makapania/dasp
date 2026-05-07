@@ -3213,6 +3213,11 @@ class SpectralPredictApp:
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
+        # Phase 3 (2026-05-06): autoscale dimension. Default ON because
+        # autoscale matters for non-tree models (PLS, Ridge, MLP, SVM); for
+        # tree-only enabled-model runs it doubles compute for no signal
+        # differentiation, but the empirical wall-time impact is small.
+        self.ga_preprocess_autoscale = tk.BooleanVar(value=True)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
         self.enable_smart_preprocessing = tk.BooleanVar(value=False)
@@ -11905,9 +11910,7 @@ class SpectralPredictApp:
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
-        # Options frame (currently empty after legacy GA dropdown/spinboxes were
-        # removed in 2026-05-06; kept for future Phase 2/3 controls — autoscale
-        # checkbox, robust-ranking toggle, etc.)
+        # Options frame: Phase 3 autoscale checkbox lives here.
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
         self.ga_preproc_options_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
 
@@ -11916,7 +11919,15 @@ class SpectralPredictApp:
             text="Tests all 14 preprocessing types x 17 window sizes (238 cells) with "
                  "the actual user-selected model. Parallel; typically 5-30 seconds.",
             wraplength=560,
-        ).grid(row=0, column=0, sticky=tk.W)
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+
+        # Autoscale dimension toggle. ON doubles search space to 476 cells
+        # but explores both with-autoscale and without-autoscale variants.
+        ttk.Checkbutton(
+            self.ga_preproc_options_frame,
+            text="Also test with autoscale (per-feature standardization, ~2x cost)",
+            variable=self.ga_preprocess_autoscale,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
         # Initially hide options
         self.ga_preproc_options_frame.grid_remove()
@@ -28217,6 +28228,7 @@ class SpectralPredictApp:
                 # Exhaustive preprocessing parameters
                 ga_preprocess=self.enable_ga_preprocessing.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
+                ga_preprocess_autoscale=self.ga_preprocess_autoscale.get(),
                 # Smart preprocessing discovery parameters (NEW)
                 smart_preprocess=self.enable_smart_preprocessing.get(),
                 smart_preprocess_importance=self.smart_preprocess_importance.get(),
