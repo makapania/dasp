@@ -305,6 +305,20 @@ def phase2_adaptive_rescore(
         # means we exhausted pool_size_progression. Treat as cap.
         halt_reason = "cap"
 
+    # Build parallel list of (mean, std) for each winner. Allows callers to
+    # update config dicts with the rescored mean instead of the original
+    # single-seed score (closes Codex LOW from post-Phase-4 review). Indexed
+    # by winner position in prev_topN.
+    winner_scores: list[tuple[float, float]] = []
+    for w in prev_topN:
+        wkey = key_fn(w)
+        cached = rescored_cache.get(wkey)
+        if cached is None:
+            winner_scores.append((float("nan"), float("nan")))
+        else:
+            _cand, mean, std = cached
+            winner_scores.append((mean, std))
+
     return (
         prev_topN,
         {
@@ -312,6 +326,7 @@ def phase2_adaptive_rescore(
             "final_pool_size": final_pool_size,
             "expansions": max(0, iterations_done - 1),
             "per_iteration_jaccards": per_iteration_jaccards,
+            "winner_scores": winner_scores,  # parallel to prev_topN: [(mean, std), ...]
             "candidates_evaluated": len(rescored_cache),
         },
     )

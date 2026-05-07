@@ -257,117 +257,136 @@ def evaluate_config_with_seed(
     cv_folds = min(cv_folds, n_samples // 2)
     cv_folds = max(2, cv_folds)
 
+    # Closes DeepSeek MED #1 (post-Phase-4 review): split the try/except so
+    # ImportError (LightGBM not installed) routes to the sklearn fallback for
+    # ALL seeds of a given config, while runtime errors during CV (OOM,
+    # numerical edge) return -inf for THAT SEED only — without falling through
+    # to a different model. Pre-fix, a LightGBM crash mid-run for one seed
+    # would silently switch that seed's evaluation to PLS/LogReg, mixing
+    # objectives in the multi-seed mean and producing misleading scores.
     try:
         from lightgbm import LGBMRegressor, LGBMClassifier
+        _lgbm_available = True
+    except ImportError:
+        _lgbm_available = False
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning)
+    if _lgbm_available:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
 
-            if task_type == 'one_class':
-                n_outliers = int(np.sum(y == -1))
-                if n_outliers < 2:
-                    return 0.0
-                n_splits = min(cv_folds, n_outliers)
-                model = LGBMClassifier(
-                    class_weight='balanced',
-                    n_estimators=50,
-                    max_depth=3,
-                    random_state=random_state,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                cv = StratifiedKFold(
-                    n_splits=n_splits, shuffle=True, random_state=random_state
-                )
-                scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
-                return scores.mean()
-            elif task_type == 'classification':
-                model = LGBMClassifier(
-                    n_estimators=50,
-                    max_depth=4,
-                    random_state=random_state,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                cv = StratifiedKFold(
-                    n_splits=cv_folds, shuffle=True, random_state=random_state
-                )
-                scores = cross_val_score(model, X, y, cv=cv, scoring='accuracy')
-                return scores.mean()
-            else:
-                model = LGBMRegressor(
-                    n_estimators=50,
-                    max_depth=4,
-                    random_state=random_state,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                cv = KFold(
-                    n_splits=cv_folds, shuffle=True, random_state=random_state
-                )
-                scores = cross_val_score(
-                    model, X, y, cv=cv, scoring='neg_root_mean_squared_error'
-                )
-                return scores.mean()
+                if task_type == 'one_class':
+                    n_outliers = int(np.sum(y == -1))
+                    if n_outliers < 2:
+                        return 0.0
+                    n_splits = min(cv_folds, n_outliers)
+                    model = LGBMClassifier(
+                        class_weight='balanced',
+                        n_estimators=50,
+                        max_depth=3,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = StratifiedKFold(
+                        n_splits=n_splits, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+                    return scores.mean()
+                elif task_type == 'classification':
+                    model = LGBMClassifier(
+                        n_estimators=50,
+                        max_depth=4,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = StratifiedKFold(
+                        n_splits=cv_folds, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(model, X, y, cv=cv, scoring='accuracy')
+                    return scores.mean()
+                else:
+                    model = LGBMRegressor(
+                        n_estimators=50,
+                        max_depth=4,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = KFold(
+                        n_splits=cv_folds, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(
+                        model, X, y, cv=cv, scoring='neg_root_mean_squared_error'
+                    )
+                    return scores.mean()
+        except Exception:
+            # LightGBM is installed but the CV run crashed (OOM, numerical
+            # issue, etc.). Return -inf for THIS seed instead of silently
+            # falling through to a different objective. The multi-seed mean
+            # then aggregates over fewer-but-consistent LightGBM scores,
+            # which is more honest than mixing LightGBM and PLS results.
+            return float('-inf')
 
-    except Exception:
-        # PLS / LogisticRegression / IsolationForest fallback — also seeded.
-        if task_type == 'regression':
-            n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
-            n_components = max(2, n_components)
-            pls = PLSRegression(n_components=n_components, scale=False)
-            cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-            scores = cross_val_score(pls, X, y, cv=cv, scoring='neg_root_mean_squared_error')
-            return scores.mean()
-        elif task_type == 'classification':
-            from sklearn.linear_model import LogisticRegression
-            from sklearn.pipeline import make_pipeline
-            clf = make_pipeline(
-                StandardScaler(),
-                LogisticRegression(max_iter=1000, n_jobs=1, random_state=random_state),
+    # LightGBM not installed → use the sklearn-only fallback path. Reached
+    # for every seed in this branch (consistent objective across seeds).
+    if task_type == 'regression':
+        n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
+        n_components = max(2, n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(pls, X, y, cv=cv, scoring='neg_root_mean_squared_error')
+        return scores.mean()
+    elif task_type == 'classification':
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        clf = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1000, n_jobs=1, random_state=random_state),
+        )
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
+        return scores.mean()
+    else:
+        # one_class fallback: IsolationForest on inlier-only training,
+        # score by detection rate on the outlier subset (closes DeepSeek
+        # H1 from the post-Phase-4 review). Without this branch the
+        # one_class multi-seed rescore degraded to a no-op when LightGBM
+        # was unavailable: every config tied at -inf and only diversity
+        # selection ranked them.
+        try:
+            from sklearn.ensemble import IsolationForest
+
+            n_outliers = int(np.sum(y == -1))
+            if n_outliers < 2:
+                return 0.0
+            # IF is itself stochastic: random_state controls per-tree
+            # subsampling, so seeded re-evaluation produces seed-varying
+            # scores even on small datasets.
+            X_inlier = X[y != -1]
+            if len(X_inlier) < 5:
+                return 0.0
+            clf = IsolationForest(
+                contamination='auto',
+                random_state=random_state,
+                n_estimators=50,
+                n_jobs=1,
             )
-            cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-            scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
-            return scores.mean()
-        else:
-            # one_class fallback: IsolationForest on inlier-only training,
-            # score by detection rate on the outlier subset (closes DeepSeek
-            # H1 from the post-Phase-4 review). Without this branch the
-            # one_class multi-seed rescore degraded to a no-op when LightGBM
-            # was unavailable: every config tied at -inf and only diversity
-            # selection ranked them.
-            try:
-                from sklearn.ensemble import IsolationForest
-
-                n_outliers = int(np.sum(y == -1))
-                if n_outliers < 2:
-                    return 0.0
-                # IF is itself stochastic: random_state controls per-tree
-                # subsampling, so seeded re-evaluation produces seed-varying
-                # scores even on small datasets.
-                X_inlier = X[y != -1]
-                if len(X_inlier) < 5:
-                    return 0.0
-                clf = IsolationForest(
-                    contamination='auto',
-                    random_state=random_state,
-                    n_estimators=50,
-                    n_jobs=1,
-                )
-                clf.fit(X_inlier)
-                # Score on full data: predict -1 for outliers, 1 for inliers.
-                # Compare to ground-truth label encoding (y == -1 means outlier).
-                preds = clf.predict(X)
-                # Balanced accuracy = average of inlier-recall and outlier-recall
-                inlier_mask = y != -1
-                outlier_mask = y == -1
-                if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
-                    return 0.0
-                inlier_recall = (preds[inlier_mask] == 1).mean()
-                outlier_recall = (preds[outlier_mask] == -1).mean()
-                return float((inlier_recall + outlier_recall) / 2)
-            except Exception:
-                return -np.inf
+            clf.fit(X_inlier)
+            # Score on full data: predict -1 for outliers, 1 for inliers.
+            # Compare to ground-truth label encoding (y == -1 means outlier).
+            preds = clf.predict(X)
+            # Balanced accuracy = average of inlier-recall and outlier-recall
+            inlier_mask = y != -1
+            outlier_mask = y == -1
+            if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
+                return 0.0
+            inlier_recall = (preds[inlier_mask] == 1).mean()
+            outlier_recall = (preds[outlier_mask] == -1).mean()
+            return float((inlier_recall + outlier_recall) / 2)
+        except Exception:
+            return -np.inf
 
 
 def run_tpe_preprocessing_discovery(
@@ -876,17 +895,33 @@ def run_tpe_multistart_preprocessing_discovery(
     )
 
     halt_reason = halt_metadata['halt_reason']
+    winner_scores = halt_metadata.get('winner_scores', [])
     print(
         f"  Phase 2 rescore halted: {halt_reason} "
         f"(evaluated {halt_metadata['candidates_evaluated']} candidates)"
     )
 
-    # Annotate each returned config with the multistart halt reason for
-    # downstream visibility (search.py surfaces this in result CSV rows).
+    # Annotate each returned config with:
+    # - The rescored multi-seed mean (replaces the original single-seed score
+    #   from per-study TPE; closes Codex LOW from post-Phase-4 review).
+    # - The multistart halt reason for downstream visibility (closes the
+    #   docstring promise; search.py surfaces this in result CSV rows).
     result_configs: list[Dict[str, Any]] = []
-    for cfg in rescored:
+    for i, cfg in enumerate(rescored):
         annotated = dict(cfg)
         annotated['_tpe_multistart_halt_reason'] = halt_reason
+        if i < len(winner_scores):
+            mean_score, std_score = winner_scores[i]
+            # eval_fn returns higher-is-better; convert to user-facing
+            # convention: regression score = +RMSE, classification score
+            # = accuracy. The original cfg['score'] follows the same
+            # convention, so for regression we negate (the helper's mean is
+            # -RMSE since score_direction='maximize').
+            if task_type == 'regression':
+                annotated['score'] = -mean_score
+            else:
+                annotated['score'] = mean_score
+            annotated['_tpe_multistart_rescored_std'] = std_score
         result_configs.append(annotated)
 
     print(f"\n=== TPE Multistart Top {len(result_configs)} Configurations ===")

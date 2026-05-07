@@ -1962,6 +1962,13 @@ def run_search(
                         "smoothing_polyorder": smoothing_polyorder,
                         "autoscale": cfg.get("_tpe_autoscale", False),
                         "tpe_score": cfg.get("score"),
+                        # Phase 4 fix (2026-05-06): propagate multistart halt
+                        # reason through to result rows so users can see
+                        # whether the rescore converged. Single-start TPE
+                        # configs don't carry this key; default to None.
+                        "tpe_multistart_halt_reason": cfg.get(
+                            "_tpe_multistart_halt_reason"
+                        ),
                     }
                 )
 
@@ -5114,6 +5121,11 @@ def _run_single_config(
         "imbalance_method": imbalance_method,
         "imbalance_params": imbalance_params,
         "tpe_score": preprocess_cfg.get("tpe_score"),
+        # Phase 4: multistart halt reason. None for single-start TPE configs
+        # and exhaustive configs; one of {converged, cap, single_iteration}
+        # for multistart configs. Symmetric with phase2_halt_reason for the
+        # exhaustive path (added below for the chromosome-bearing rows).
+        "tpe_multistart_halt_reason": preprocess_cfg.get("tpe_multistart_halt_reason"),
     }
 
     # Add training configuration for tracking data state
@@ -5159,6 +5171,15 @@ def _run_single_config(
         ].tolist()  # Serialize numpy array
         result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
+
+    # Phase 2 halt-reason visibility (closes Codex MED #2 from post-Phase-4
+    # review). Per-row column so users can see which exhaustive-preprocessing
+    # rows came from a 'converged' rescore vs a 'cap'-hit rescore vs the
+    # legacy 'disabled' single-seed path. Per-search value duplicated to
+    # every row from one ga_result, but row-shape is the only way to
+    # surface it without a CSV schema split.
+    if "phase2_halt_reason" in preprocess_cfg:
+        result["phase2_halt_reason"] = preprocess_cfg["phase2_halt_reason"]
 
     # Store Smart preprocessing metadata if present (for validation reconstruction)
     if (
@@ -5805,6 +5826,11 @@ def run_one_class_search(
                         "smoothing_polyorder": smoothing_polyorder,
                         "autoscale": cfg.get("_tpe_autoscale", False),
                         "tpe_score": cfg.get("score"),
+                        # Phase 4: multistart halt-reason propagation
+                        # (one_class call site mirror of regression/cls path)
+                        "tpe_multistart_halt_reason": cfg.get(
+                            "_tpe_multistart_halt_reason"
+                        ),
                     }
                 )
             logger.info("TPE preprocessing discovered %d configs", len(preprocess_configs))
