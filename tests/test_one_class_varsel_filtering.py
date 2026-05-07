@@ -142,6 +142,19 @@ class TestOneClassVarselFiltering:
             "explaining the coercion; caplog: "
             f"{[r.getMessage() for r in caplog.records]}"
         )
+        # GLM 5.1 cycle 4 MEDIUM: pin "fires AT MOST ONCE" so a future
+        # refactor moving the coercion inside a loop body can't silently
+        # re-spam. Today the local-mutation prevents loop-spam, but that's
+        # an implementation detail; the contract is one warning per call.
+        coercion_msgs = [
+            r for r in caplog.records
+            if "uve prefilter" in r.getMessage().lower()
+            and "one-class" in r.getMessage().lower()
+        ]
+        assert len(coercion_msgs) == 1, (
+            "Coercion warning must fire exactly once per call; got "
+            f"{len(coercion_msgs)}: {[r.getMessage() for r in coercion_msgs]}"
+        )
         # And the prefilter must not have actually run — no eliminate-variables
         # info-log should appear.
         info_text = " ".join(

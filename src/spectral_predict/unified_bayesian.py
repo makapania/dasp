@@ -1035,7 +1035,7 @@ def create_unified_objective(
     model_name : str
         Model name
     task_type : str
-        'regression' or 'classification'
+        'regression', 'classification', or 'one_class'
     cv_folds : int
         Number of CV folds
     random_state : int
@@ -1066,7 +1066,10 @@ def create_unified_objective(
     smoothing_polyorder : int
         Smoothing polynomial order
     enable_uve : bool, default=False
-        Include UVE (Uninformative Variable Elimination) as a variable selection method
+        Include UVE (Uninformative Variable Elimination) as a variable
+        selection method. Coerced to False for ``task_type='one_class'``
+        with a warning (UVE on y_oc is a discrimination method, not a
+        one-class method per CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
 
     Returns
     -------
@@ -1096,6 +1099,24 @@ def create_unified_objective(
         n_repeats=cv_n_repeats,
         random_state=random_state,
     )
+
+    # Defense-in-depth: even if a caller bypasses run_unified_bayesian and
+    # constructs the objective directly, one-class must not see UVE.
+    # UVE on y_oc (the +1/-1 binary labels constructed at line 1110-1114
+    # below) is a discrimination method, not a one-class method
+    # (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE / Forina modeling-power
+    # vs discrimination-power). The GUI clears bayes_enable_uve at
+    # spectral_predict_gui_optimized.py:16671, but scripted callers and
+    # internal helpers can still arrive here with enable_uve=True.
+    # run_unified_bayesian also enforces this at its entry point; this
+    # second guard catches any internal direct-instantiation path.
+    if task_type == 'one_class' and enable_uve:
+        logger.warning(
+            "enable_uve=True is not supported for one-class screening "
+            "(UVE is a y-driven discrimination method, not a one-class "
+            "method). Forcing enable_uve=False."
+        )
+        enable_uve = False
 
     # Determine available subset types
     # Regional subsets are computed dynamically on preprocessed data
@@ -2218,7 +2239,7 @@ def run_unified_bayesian(
     model_name : str
         Model name ('PLS', 'Ridge', 'LightGBM', etc.)
     task_type : str
-        'regression' or 'classification'
+        'regression', 'classification', or 'one_class'
     n_trials : int
         Number of Optuna trials (default 300)
     cv_folds : int
@@ -2256,7 +2277,10 @@ def run_unified_bayesian(
     smoothing_polyorder : int
         Smoothing polynomial order (used when smoothing=True)
     enable_uve : bool, default=False
-        Include UVE (Uninformative Variable Elimination) as a variable selection method
+        Include UVE (Uninformative Variable Elimination) as a variable
+        selection method. Coerced to False for ``task_type='one_class'``
+        with a warning (UVE on y_oc is a discrimination method, not a
+        one-class method per CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
     enable_sqlite_persistence : str, default='auto'
         Controls Optuna SQLite crash-resume persistence. T-41 auto-calculator.
         - 'auto'   : (default) first 10 trials in-memory; then decides based on median fit
@@ -2303,6 +2327,20 @@ def run_unified_bayesian(
         'lof': 'LOF',
     }
     model_name = model_name_map.get(model_name.lower(), model_name)
+
+    # UVE family is a y-driven discrimination method, not a one-class method
+    # (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE). Coerce enable_uve=False
+    # for one-class so scripted callers and stale GUI state can't reach the
+    # uve_selection(X, y_oc) path. Mirrors apply_uve_prefilter coercion in
+    # run_one_class_search at search.py:5634-5645. create_unified_objective
+    # has a defense-in-depth guard at the same boundary.
+    if task_type == 'one_class' and enable_uve:
+        logger.warning(
+            "enable_uve=True is not supported for one-class screening "
+            "(UVE is a y-driven discrimination method, not a one-class "
+            "method). Forcing enable_uve=False."
+        )
+        enable_uve = False
 
     # Auto-mode imbalance resolution: see run_search for rationale on
     # run-level (not per-fold) resolution. NaN-dropping happens inside
