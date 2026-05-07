@@ -1,7 +1,7 @@
 """Compare Bayesian search with `enable_autoscale=True` vs `False` on BoneCollagen.
 
 Question: when the Bayesian search adds `apply_autoscale ∈ {True, False}` as a
-per-trial Optuna parameter (the default since T-36 / PR #54), does the best
+per-trial Optuna parameter (the default since T-44 / PR #54), does the best
 trial it picks generalize better or worse on a held-out external set?
 
 Design:
@@ -44,6 +44,16 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT / "src"))
+
+from spectral_predict.io import read_asd_dir
+from spectral_predict.search import compute_validation_metrics_for_top_models
+from spectral_predict.unified_bayesian import run_unified_bayesian
+
 
 def _parse_params_loose(raw: Any) -> dict:
     """Parse a Params field that may be JSON, Python repr, or empty/NaN."""
@@ -61,16 +71,6 @@ def _parse_params_loose(raw: Any) -> dict:
         return out if isinstance(out, dict) else {}
     except (ValueError, SyntaxError):
         return {}
-
-import numpy as np
-import pandas as pd
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from spectral_predict.io import read_asd_dir
-from spectral_predict.search import compute_validation_metrics_for_top_models
-from spectral_predict.unified_bayesian import run_unified_bayesian
 
 
 EXAMPLE_DIR = REPO_ROOT / "example"

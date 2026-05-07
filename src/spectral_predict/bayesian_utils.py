@@ -1,8 +1,11 @@
 """Helper for extracting the actually-fitted ``n_components`` from a PLS
-trial's params dict. Used by the Bayesian and NSGA-II search paths to
-populate the LVs column with the post-clamp value (rather than Optuna's
-raw pre-clamp suggestion). Sole survivor of this module after the legacy
-``run_bayesian_search`` deletion (2026-05-07)."""
+trial's params dict. Used by the NSGA-II search path (``nsga2_search.py``)
+and ``tests/test_cv_pls_clamp.py`` to populate the LVs column with the
+post-clamp value (rather than Optuna's raw pre-clamp suggestion). The
+production Bayesian path (``run_unified_bayesian``) computes the
+equivalent post-clamp value inline and does not import this helper.
+Sole survivor of this module after the legacy ``run_bayesian_search``
+deletion (2026-05-07)."""
 
 import ast
 import logging

@@ -306,12 +306,12 @@ def _record_fingerprint_value(
 ) -> None:
     """Cache (trial_number, value) so future identical fingerprints can replay.
 
-    Sub-fits store ``(trial_number, None)`` for membership-only tracking. If
-    the same fingerprint were ever to arrive here with a real value (which
-    shouldn't happen — sub-fits and main-fits have structurally distinct
-    fingerprints via subset_type/top_indices), we promote the None placeholder
-    to the real value rather than dropping
-    it.
+    Defensive: if a future caller ever stores a None placeholder for the same
+    fingerprint, promote it to the real value on arrival rather than dropping
+    the upgrade. Today no surviving code path does that (the legacy
+    bayesian_utils path that did was deleted in 2026-05-07's T-36 cleanup),
+    but the branch is cheap and prevents a silent regression if a sub-fit
+    membership-only marker is ever reintroduced.
     """
     if value is None:
         return
