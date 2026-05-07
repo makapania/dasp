@@ -1,5 +1,9 @@
 # Continuation prompt — PR #54 follow-ups
 
+> **STATUS — 2026-05-07 late evening:** Items 1-7 are CLOSED. Item 7 (delete legacy Bayesian path) shipped in this session — see `docs/PROJECT_STATUS.md` header and `docs/SESSION_LOG.md` 2026-05-07 late evening entry. **Item 8 (eight methodology / production-behavior changes) is the only remaining queue and needs explicit user approval per item — DO NOT pick up autonomously.**
+
+---
+
 **Filed:** 2026-05-06 late evening, after PR #54 merge (`4aef396`)
 **Pickup:** next session (likely 2026-05-07)
 **Last updated:** 2026-05-07 evening
