@@ -122,15 +122,23 @@ def main():
         from .run_logging import setup_app_logger
         setup_app_logger()
     except Exception:
-        # DeepSeek V4 Pro cycle 4 MEDIUM: surface structural failures
-        # (ImportError, AttributeError from a renamed symbol, etc.) to
-        # dasp.log via debug. The bare ``except Exception: pass`` swallowed
-        # those silently — asymmetric with the T-50 cleanup block below
-        # which already follows this pattern.
-        import logging as _logging
-        _logging.getLogger("spectral_predict").debug(
-            "T-45: setup_app_logger failed (non-fatal)", exc_info=True
+        # DeepSeek V4 Pro cycle 4 MEDIUM (initial fix) + silent-failure-hunter
+        # cycle 4 MUST-FIX (this revision): surface structural failures
+        # (ImportError, AttributeError from a renamed symbol, etc.) so
+        # operators don't see ``--version`` succeed with an empty
+        # ``dasp.log``. The earlier debug-log version dropped because
+        # ``setup_app_logger`` is precisely the function that wires the
+        # ``spectral_predict`` logger's file handler — and it just threw,
+        # so nothing was attached yet. Stderr is the only surface
+        # guaranteed to exist this early.
+        import sys
+        import traceback
+        print(
+            "T-45: setup_app_logger failed (non-fatal); continuing without "
+            "structured logging",
+            file=sys.stderr,
         )
+        traceback.print_exc(file=sys.stderr)
 
     parser = _build_parser()
     args = parser.parse_args()
