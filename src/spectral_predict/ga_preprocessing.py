@@ -379,13 +379,17 @@ def evaluate_fitness(
             return _evaluate_pls(X_preproc, y, cv, n_comp, task_type)
 
     except Exception as exc:
-        # Any error = very poor fitness. Log once per process so a
+        # Any error = very poor fitness. Log at WARNING level so a
         # systematically-broken config (e.g. malformed chromosome a future
-        # refactor introduces) doesn't silently disappear from rankings —
-        # silent-failure-hunter S1 from PR #57 review.
+        # refactor introduces) doesn't silently disappear from rankings.
+        # DeepSeek STRONG follow-up (PR #57 cycle 2): the project's
+        # run_logging.py defaults the spectral_predict logger to WARNING,
+        # so DEBUG/INFO messages are suppressed. WARNING ensures user
+        # visibility when LightGBM/PLS systematically blow up — this is
+        # exactly the symptom the S1 finding was about.
         import logging
-        logging.getLogger(__name__).debug(
-            "evaluate_fitness returning -inf (config %s: %s)",
+        logging.getLogger(__name__).warning(
+            "evaluate_fitness returning -inf for a candidate (%s: %s)",
             getattr(exc, '__class__', type(exc)).__name__,
             exc,
         )
@@ -1136,6 +1140,17 @@ def exhaustive_search(
         winner_rank_by_key: dict[tuple, int] = {
             _phase2_key_fn(g): rank for rank, g in enumerate(rescored_winners)
         }
+        # Codex HIGH from PR #57 review: also build a key->(mean, std) lookup
+        # so the configs builder below can report the rescored mean as
+        # ``fitness`` instead of the stale single-seed score. Without this,
+        # the result CSV's RMSEcv reflects the single-seed lottery, not the
+        # multi-seed mean that drove the ranking.
+        _phase2_winner_scores = halt_metadata.get("winner_scores", [])
+        winner_rescored_score_by_key: dict[tuple, tuple[float, float]] = {
+            _phase2_key_fn(g): _phase2_winner_scores[rank]
+            for rank, g in enumerate(rescored_winners)
+            if rank < len(_phase2_winner_scores)
+        }
         diverse_indices = [
             i for i, g in enumerate(all_genes)
             if _phase2_key_fn(g) in winner_rank_by_key
@@ -1145,6 +1160,7 @@ def exhaustive_search(
             key=lambda i: winner_rank_by_key[_phase2_key_fn(all_genes[i])]
         )
     else:
+        winner_rescored_score_by_key = {}
         # Legacy path (phase2_n_seeds=0): use the diversity selector that
         # operates on single-seed fitness.
         diverse_indices = select_diverse_exhaustive_configs(
@@ -1159,7 +1175,20 @@ def exhaustive_search(
     configs = []
     for idx in diverse_indices:
         genes = all_genes[idx]
-        fitness = results[idx]
+        # Phase 2 Codex HIGH fix (PR #57 review): when phase2_n_seeds > 0,
+        # the diversity ordering came from the multi-seed rescore — so the
+        # reported fitness must come from the rescored mean too, not the
+        # original single-seed score. Otherwise the result CSV's RMSEcv
+        # column shows the seed-lottery value while the ranking reflects
+        # the multi-seed average. Fall back to single-seed score when the
+        # candidate isn't in the rescore lookup (legacy path or rescore
+        # didn't reach this candidate for whatever reason).
+        if winner_rescored_score_by_key:
+            _key_for_lookup = tuple(int(x) for x in genes)
+            _rescored = winner_rescored_score_by_key.get(_key_for_lookup)
+            fitness = _rescored[0] if _rescored is not None else results[idx]
+        else:
+            fitness = results[idx]
         name, transform = chromosome_to_transform(genes)
         config_desc = get_config_description(genes)
 

@@ -687,13 +687,18 @@ class TestExhaustivePreprocessingOptimization:
         )
 
         captured = capsys.readouterr()
-        # When the cap branch fires, we expect the WARNING string. On stable
-        # ranking the function may converge before hitting cap — accept both
-        # outcomes but verify the warning is present iff cap was hit.
+        # Tightened per Codex review (PR #57 cycle 2): assert the exact
+        # prefix and the multiplier-text format, not just the loose
+        # "WARNING in stdout AND cap in stdout" combo (which would
+        # accept unrelated output that happens to contain both words).
         if result["phase2_halt_reason"] == "cap":
-            assert "WARNING" in captured.out and "cap" in captured.out, (
-                "Expected user-visible WARNING when phase2_halt_reason='cap', "
-                f"got stdout: {captured.out[:500]}"
+            assert "WARNING: Phase 2 halted at cap" in captured.out, (
+                "Expected exact 'WARNING: Phase 2 halted at cap' prefix when "
+                f"phase2_halt_reason='cap', got stdout: {captured.out[:500]}"
+            )
+            assert "* top_n" in captured.out, (
+                "Expected multiplier-text marker '* top_n' in cap warning "
+                f"so the user knows how to extend, got stdout: {captured.out[:500]}"
             )
 
     def test_phase2_can_change_top_n_vs_legacy(self, synthetic_spectra_small):
