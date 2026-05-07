@@ -136,24 +136,39 @@ def _load_bone_collagen_classification():
 def _serialize_results(df: pd.DataFrame, study, top_n: int = 5) -> dict:
     """Extract a stable, committable summary of the run.
 
-    Captures three orthogonal signals so any drift surfaces:
-    - DataFrame top-N rows (the leaderboard surface, GUI-visible)
-    - study.best_value + study.best_params (Optuna's internal best)
-    - Sorted fingerprint set (the dedup mechanism's shape — most sensitive
-      to subtle changes in trial-suggest order or param-resolution logic)
+    Captures four orthogonal signals so any drift surfaces:
+    - The full DataFrame in trial order (every leaderboard row, ordered).
+      Sorted-only would mask RNG drift that produces the same row set in
+      a different order — that's a real regression we must catch.
+    - study.best_value + study.best_params (Optuna's internal best).
+    - Per-trial ordered (number, value, params, fingerprint) tuples — most
+      sensitive to import-order or sampler-state drift.
+    - The full DataFrame's top-N after sort (cross-check; backwards-
+      compatible with simpler diff inspection).
     """
+    df_in_trial_order = df.reset_index(drop=True)
     df_sorted = df.sort_values(by=df.columns[0]).reset_index(drop=True)
     top = df_sorted.head(top_n)
-    fingerprints = sorted(
-        str(t.user_attrs.get("fingerprint", ""))
-        for t in study.trials
-        if t.user_attrs.get("fingerprint")
-    )
+    trial_records = [
+        {
+            "number": int(t.number),
+            "state": str(t.state),
+            "value": _coerce_scalar(t.value) if t.value is not None else None,
+            "params": {k: _coerce_scalar(v) for k, v in sorted(t.params.items())},
+            "fingerprint": str(t.user_attrs.get("fingerprint", "")) or None,
+            "duplicate_of": t.user_attrs.get("duplicate_of_trial"),
+        }
+        for t in sorted(study.trials, key=lambda t: t.number)
+    ]
     return {
-        "n_rows": len(df_sorted),
-        "columns": sorted(df_sorted.columns.tolist()),
+        "n_rows": len(df_in_trial_order),
+        "columns": sorted(df_in_trial_order.columns.tolist()),
         "top_n": top_n,
-        "top_rows": [
+        "all_rows_in_trial_order": [
+            {col: _coerce_scalar(row[col]) for col in sorted(df_in_trial_order.columns)}
+            for _, row in df_in_trial_order.iterrows()
+        ],
+        "top_rows_after_sort": [
             {col: _coerce_scalar(row[col]) for col in sorted(df_sorted.columns)}
             for _, row in top.iterrows()
         ],
@@ -161,8 +176,8 @@ def _serialize_results(df: pd.DataFrame, study, top_n: int = 5) -> dict:
         "best_params": {
             k: _coerce_scalar(v) for k, v in sorted(study.best_params.items())
         },
-        "n_fingerprints": len(fingerprints),
-        "sorted_fingerprints": fingerprints,
+        "trial_count": len(trial_records),
+        "trials": trial_records,
     }
 
 
@@ -206,7 +221,7 @@ class TestUnifiedBayesianDeletionSnapshot:
             X=X, y=y, wavelengths=wl,
             model_name="PLS", task_type="regression",
             n_trials=20, random_state=42,
-            cv_strategy="kfold", folds=5,
+            cv_strategy="kfold", cv_folds=5,
         )
         _assert_matches_snapshot(
             _serialize_results(df, study), "unified_bayesian_pls_regression.json"
@@ -218,7 +233,7 @@ class TestUnifiedBayesianDeletionSnapshot:
             X=X, y=y, wavelengths=wl,
             model_name="LightGBM", task_type="regression",
             n_trials=15, random_state=42,
-            cv_strategy="kfold", folds=5,
+            cv_strategy="kfold", cv_folds=5,
         )
         _assert_matches_snapshot(
             _serialize_results(df, study), "unified_bayesian_lgbm_regression.json"
@@ -230,7 +245,7 @@ class TestUnifiedBayesianDeletionSnapshot:
             X=X, y=y, wavelengths=wl,
             model_name="PLS-DA", task_type="classification",
             n_trials=15, random_state=42,
-            cv_strategy="kfold", folds=5,
+            cv_strategy="kfold", cv_folds=5,
         )
         _assert_matches_snapshot(
             _serialize_results(df, study), "unified_bayesian_plsda_classification.json"
@@ -413,11 +428,20 @@ contract is pinned by tests/test_unified_bayesian_baseline.py."
 
 ---
 
-### Task 4: Delete `tests/test_bayesian_utils.py` and `tests/test_golden_standard_performance.py`
+### Task 4: Delete `tests/test_bayesian_utils.py` and surgically remove the one legacy test from `test_golden_standard_performance.py`
+
+**CRITICAL — Codex caught this:** `tests/test_golden_standard_performance.py` is NOT a pure-legacy file. It contains four tests, three of which target the GRID path (`run_search`) with valuable golden R²/RMSE pins:
+
+- `test_pls_golden_standard` (line 61) — exact R²/RMSE pin for PLS via `run_search`. **KEEP.**
+- `test_lightgbm_golden_standard` (line 105) — exact R²/RMSE pin for LightGBM via `run_search`. **KEEP.**
+- `test_variable_selection_spa_correctness` (line 150) — SPA cross-model assertion via `run_search`. **KEEP.**
+- `test_bayesian_varsel_caching` (line 204) — uses `run_bayesian_search`. **DELETE only this one.**
+
+Do NOT `git rm` the whole file. The original plan got this wrong.
 
 **Files:**
-- Delete: `tests/test_bayesian_utils.py`
-- Delete: `tests/test_golden_standard_performance.py` (after verification — see Step 2)
+- Delete: `tests/test_bayesian_utils.py` (entire file — every test imports a doomed symbol)
+- Modify: `tests/test_golden_standard_performance.py` — surgically remove `test_bayesian_varsel_caching` and any imports it uniquely needs
 
 - [ ] **Step 1: Verify `tests/test_bayesian_utils.py` only tests deleted symbols**
 
@@ -426,26 +450,27 @@ Confirm every test class/function is testing one of: `create_optuna_study`, `cre
 
 Expected: all imports from `bayesian_utils` are the three doomed symbols.
 
-- [ ] **Step 2: Verify `tests/test_golden_standard_performance.py` has no unique assertion**
+- [ ] **Step 2: Surgically remove `test_bayesian_varsel_caching` from `test_golden_standard_performance.py`**
 
-Run: `grep "^def test\|assert " tests/test_golden_standard_performance.py | head -40`
+Read the file from line 199 (the section header `# Bayesian variable selection caching benchmark`) to the end of the `test_bayesian_varsel_caching` function (likely ~line 270, verify by reading until the next `# ---` block or EOF).
 
-Then check whether equivalent performance pinning exists in `tests/test_unified_bayesian_baseline.py`:
+Use Edit to delete the entire section: the section comment block + the test function. Also remove the `time` import at the top of the file if `test_bayesian_varsel_caching` was its only consumer (verify with `grep "time\." tests/test_golden_standard_performance.py` after the deletion).
 
-Run: `grep "^def test\|assert " tests/test_unified_bayesian_baseline.py | head -40`
+The three surviving tests (`test_pls_golden_standard`, `test_lightgbm_golden_standard`, `test_variable_selection_spa_correctness`) must remain unchanged.
 
-If `test_golden_standard_performance.py` asserts a metric value (e.g. RMSE ≤ 0.5 on BoneCollagen) that `test_unified_bayesian_baseline.py` does NOT pin, port the assertion to `test_unified_bayesian_baseline.py` first using `run_unified_bayesian`. Then delete the file. If both files pin equivalent contracts, delete outright.
-
-- [ ] **Step 3: Delete the two files**
+- [ ] **Step 3: Delete `tests/test_bayesian_utils.py`**
 
 ```bash
-git rm tests/test_bayesian_utils.py tests/test_golden_standard_performance.py
+git rm tests/test_bayesian_utils.py
 ```
 
-- [ ] **Step 4: Verify the test suite still collects and passes around the deletion**
+- [ ] **Step 4: Verify the test suite still collects and the surviving golden tests still pass**
 
 Run: `.venv312/Scripts/python.exe -m pytest tests/ -v --collect-only 2>&1 | tail -20`
 Expected: collection succeeds; no `ImportError` or `ModuleNotFoundError`.
+
+Run: `.venv312/Scripts/python.exe -m pytest tests/test_golden_standard_performance.py -v`
+Expected: 3 tests collected and PASS (the legacy test is gone). The exact R²/RMSE pins are unchanged.
 
 Run: `.venv312/Scripts/python.exe -m pytest tests/test_legacy_deletion_snapshot.py tests/test_class_weight_validation_rebuild.py tests/test_cv_pls_clamp.py tests/test_unified_bayesian_baseline.py tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v`
 Expected: all PASS.
@@ -453,15 +478,18 @@ Expected: all PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
+git add tests/test_golden_standard_performance.py
+git rm tests/test_bayesian_utils.py
 git commit -m "test: remove tests for deleted legacy Bayesian helpers
 
-test_bayesian_utils.py exclusively tested create_optuna_study,
-create_objective_function, and convert_optuna_result_to_dasp_format —
-all removed in the previous commit.
+- Delete test_bayesian_utils.py entirely: every test imported one of
+  create_optuna_study / create_objective_function /
+  convert_optuna_result_to_dasp_format, all removed in the previous commit.
 
-test_golden_standard_performance.py duplicated coverage already provided
-by test_unified_bayesian_baseline.py [or: ported assertion X to that file
-in this commit]."
+- Surgically remove test_bayesian_varsel_caching from
+  test_golden_standard_performance.py: it used run_bayesian_search.
+  The other three tests (PLS golden R²/RMSE, LightGBM golden R²/RMSE,
+  SPA cross-model correctness) all use run_search and stay."
 ```
 
 ---
@@ -703,13 +731,26 @@ git commit -m "docs(comments): drop stale references to deleted bayesian_utils h
 - Modify: `docs/SESSION_LOG.md` (append entry)
 - Delete (optional): `docs/CONTINUATION_PROMPT_2026-05-07_pr54_followups.md` (Item 7 now closed)
 
-- [ ] **Step 1: Final dependency sweep — confirm no orphan references**
+- [ ] **Step 1: Final dependency sweep — confirm no orphan references in code**
 
 Run: `grep -rn "run_bayesian_search\|create_objective_function\|convert_optuna_result_to_dasp_format\|create_optuna_study\|print_optimization_summary\|get_param_importance\|save_optimization_plots\|handle_failed_trial\|_warn_mixed_regime_once" src/ tests/ spectral_predict_gui_optimized.py 2>&1 | grep -v "\.pyc:"`
 
 Expected: NO MATCHES. The only remaining `ProgressCallback` reference should be the local class in `nsga2_search.py:2022` — that's a different symbol.
 
 If anything else surfaces, fix it before continuing.
+
+- [ ] **Step 1b: Sweep docs for stale references**
+
+Run: `grep -rn "run_bayesian_search\|create_objective_function\|convert_optuna_result_to_dasp_format\|bayesian_utils\." docs/`
+
+Many matches are EXPECTED — historical session-log entries, prior continuation prompts, design-history records — these are durable and should NOT be edited. But active references in current-state docs (PROJECT_STATUS header, follow-up queues, "what works" sections) need updating.
+
+Walk every match and classify:
+- **Historical/dated entry** (e.g. lines under `## Session 2026-04-XX` or `## Previous session —`) → leave alone, that's the record of what was true at that time.
+- **Active state** (header `> **Last updated:**`, "Known Issues", "Follow-Ups", "What Works") → update or delete.
+- **Continuation prompts** (`docs/CONTINUATION_PROMPT_*.md`) → if marked SUPERSEDED, leave; otherwise update or delete.
+
+Report the active-state matches as a punch list in the PR description so reviewers can verify nothing got missed.
 
 - [ ] **Step 2: Run the full targeted regression battery**
 
@@ -773,6 +814,162 @@ except SystemExit:
 Expected: `gui module imports OK` (with or without the SystemExit fallback).
 
 If the GUI module imports cleanly only when `__name__ == '__main__'` is bypassed, that's still sufficient evidence — the deletion didn't break any module-scope reference. If it raises `ImportError`, `AttributeError`, or `NameError` referencing a deleted symbol, STOP and investigate — that's the exact failure mode this step exists to catch.
+
+- [ ] **Step 4b: End-to-end smoke run — actually execute regression + classification searches like a user would**
+
+The snapshot harness pins byte-identical behavior on three configs, but the user's requirement is stronger: prove that BOTH regression and classification searches actually work end-to-end after the deletion. This step runs each path through `run_search` (grid) AND `run_unified_bayesian` (production Bayesian) on real data and asserts non-trivial outputs.
+
+Save this as `tools/_smoke_post_deletion.py` — it's a one-off harness, not a test:
+
+```python
+"""End-to-end smoke run for regression + classification post-deletion.
+
+Not a pytest. Run as a script. Verifies that both code paths execute
+to completion and produce sensible outputs on real data. Removed at
+the end of Task 8 along with the snapshot harness.
+"""
+from __future__ import annotations
+import sys
+import time
+from pathlib import Path
+import numpy as np
+import pandas as pd
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+from spectral_predict.search import run_search
+from spectral_predict.unified_bayesian import run_unified_bayesian
+
+
+def _load_xy_regression():
+    df = pd.read_csv(REPO / "example" / "BoneCollagen.csv")
+    y = df["delta13C"].to_numpy()
+    spectra_cols = [c for c in df.columns if c not in ("Sample", "delta13C", "delta15N")]
+    X = df[spectra_cols].to_numpy()
+    wl = np.array([float(c) for c in spectra_cols])
+    return X, y, wl
+
+
+def _load_xy_classification():
+    X, y_cont, wl = _load_xy_regression()
+    q33, q67 = np.quantile(y_cont, [0.333, 0.667])
+    y = np.where(y_cont < q33, 0, np.where(y_cont < q67, 1, 2))
+    return X, y, wl
+
+
+def _check(label, ok, detail=""):
+    flag = "PASS" if ok else "FAIL"
+    print(f"  [{flag}] {label}{(' — ' + detail) if detail else ''}")
+    if not ok:
+        sys.exit(1)
+
+
+def smoke_regression_grid():
+    print("== Regression / grid (run_search) ==")
+    X, y, wl = _load_xy_regression()
+    t0 = time.perf_counter()
+    df, _ = run_search(
+        X, y,
+        task_type="regression",
+        folds=5,
+        models_to_test=["PLS"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        tier="quick",
+    )
+    dt = time.perf_counter() - t0
+    _check("ran in <120s", dt < 120, f"{dt:.1f}s")
+    _check("produced rows", len(df) > 0, f"{len(df)} rows")
+    _check("has R2 column", "R2" in df.columns)
+    _check("R2 not NaN", not np.isnan(df.iloc[0]["R2"]))
+    _check("R2 finite + sensible", 0 < df.iloc[0]["R2"] < 1.0001, f"R2={df.iloc[0]['R2']:.4f}")
+
+
+def smoke_regression_bayesian():
+    print("== Regression / Bayesian (run_unified_bayesian) ==")
+    X, y, wl = _load_xy_regression()
+    t0 = time.perf_counter()
+    df, study = run_unified_bayesian(
+        X=X, y=y, wavelengths=wl,
+        model_name="PLS", task_type="regression",
+        n_trials=15, random_state=42,
+        cv_strategy="kfold", cv_folds=5,
+    )
+    dt = time.perf_counter() - t0
+    _check("ran in <180s", dt < 180, f"{dt:.1f}s")
+    _check("produced rows", len(df) > 0, f"{len(df)} rows")
+    _check("study has best_value", study.best_value is not None and study.best_value < 1e9)
+    _check("study has trials", len(study.trials) >= 10)
+    _check("at least one COMPLETE trial", any(str(t.state) == "TrialState.COMPLETE" for t in study.trials))
+
+
+def smoke_classification_grid():
+    print("== Classification / grid (run_search) ==")
+    X, y, wl = _load_xy_classification()
+    t0 = time.perf_counter()
+    df, _ = run_search(
+        X, y,
+        task_type="classification",
+        folds=5,
+        models_to_test=["PLS-DA"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        tier="quick",
+    )
+    dt = time.perf_counter() - t0
+    _check("ran in <120s", dt < 120, f"{dt:.1f}s")
+    _check("produced rows", len(df) > 0, f"{len(df)} rows")
+    _check("has Accuracy column", "Accuracy" in df.columns)
+    _check("Accuracy in [0,1]", 0.0 <= df.iloc[0]["Accuracy"] <= 1.0001, f"Acc={df.iloc[0]['Accuracy']:.4f}")
+    _check("Accuracy > random", df.iloc[0]["Accuracy"] > 0.5, "should beat 1/3 ternary baseline")
+
+
+def smoke_classification_bayesian():
+    print("== Classification / Bayesian (run_unified_bayesian) ==")
+    X, y, wl = _load_xy_classification()
+    t0 = time.perf_counter()
+    df, study = run_unified_bayesian(
+        X=X, y=y, wavelengths=wl,
+        model_name="PLS-DA", task_type="classification",
+        n_trials=15, random_state=42,
+        cv_strategy="kfold", cv_folds=5,
+    )
+    dt = time.perf_counter() - t0
+    _check("ran in <180s", dt < 180, f"{dt:.1f}s")
+    _check("produced rows", len(df) > 0, f"{len(df)} rows")
+    _check("study has best_value", study.best_value is not None and study.best_value < 1e9)
+    _check("study has trials", len(study.trials) >= 10)
+
+
+if __name__ == "__main__":
+    print(f"Smoke run starting at {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    smoke_regression_grid()
+    smoke_regression_bayesian()
+    smoke_classification_grid()
+    smoke_classification_bayesian()
+    print("\nAll smoke checks PASSED.")
+```
+
+Run it:
+
+```bash
+.venv312/Scripts/python.exe tools/_smoke_post_deletion.py
+```
+
+Expected output (last line): `All smoke checks PASSED.` Total runtime ~5-10 minutes on this dataset.
+
+If any `[FAIL]` appears, STOP and investigate — the deletion broke an end-to-end path that the unit/snapshot tests didn't catch.
+
+Delete the smoke script after the run:
+
+```bash
+git rm tools/_smoke_post_deletion.py 2>/dev/null || rm tools/_smoke_post_deletion.py
+```
+
+(The script was never committed if you ran it before staging. If it WAS staged for some reason, `git rm` will untrack it.)
 
 - [ ] **Step 5: Delete the snapshot harness + fixtures**
 
