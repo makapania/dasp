@@ -311,7 +311,7 @@ def evaluate_config_with_seed(
                 return scores.mean()
 
     except Exception:
-        # PLS / LogisticRegression fallback — also seeded.
+        # PLS / LogisticRegression / IsolationForest fallback — also seeded.
         if task_type == 'regression':
             n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
             n_components = max(2, n_components)
@@ -330,7 +330,44 @@ def evaluate_config_with_seed(
             scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
             return scores.mean()
         else:
-            return -np.inf
+            # one_class fallback: IsolationForest on inlier-only training,
+            # score by detection rate on the outlier subset (closes DeepSeek
+            # H1 from the post-Phase-4 review). Without this branch the
+            # one_class multi-seed rescore degraded to a no-op when LightGBM
+            # was unavailable: every config tied at -inf and only diversity
+            # selection ranked them.
+            try:
+                from sklearn.ensemble import IsolationForest
+
+                n_outliers = int(np.sum(y == -1))
+                if n_outliers < 2:
+                    return 0.0
+                # IF is itself stochastic: random_state controls per-tree
+                # subsampling, so seeded re-evaluation produces seed-varying
+                # scores even on small datasets.
+                X_inlier = X[y != -1]
+                if len(X_inlier) < 5:
+                    return 0.0
+                clf = IsolationForest(
+                    contamination='auto',
+                    random_state=random_state,
+                    n_estimators=50,
+                    n_jobs=1,
+                )
+                clf.fit(X_inlier)
+                # Score on full data: predict -1 for outliers, 1 for inliers.
+                # Compare to ground-truth label encoding (y == -1 means outlier).
+                preds = clf.predict(X)
+                # Balanced accuracy = average of inlier-recall and outlier-recall
+                inlier_mask = y != -1
+                outlier_mask = y == -1
+                if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
+                    return 0.0
+                inlier_recall = (preds[inlier_mask] == 1).mean()
+                outlier_recall = (preds[outlier_mask] == -1).mean()
+                return float((inlier_recall + outlier_recall) / 2)
+            except Exception:
+                return -np.inf
 
 
 def run_tpe_preprocessing_discovery(

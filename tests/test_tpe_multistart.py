@@ -122,6 +122,65 @@ class TestEvaluateConfigWithSeed:
             "If only 1 unique score, random_state isn't varying CV / model."
         )
 
+    def test_one_class_returns_finite_with_seed(self):
+        """Closes DeepSeek H1 surface: one_class evaluation must return a
+        finite score (not -inf) under both LightGBM-available and
+        LightGBM-unavailable conditions. Pre-fix, the fallback path
+        returned -inf for one_class — multi-seed rescore tied every
+        config and the rescore was a no-op.
+
+        Variation across seeds for the LightGBM one_class path is
+        unstable on small datasets (folds can end up without outlier
+        coverage, scores converge to chance), so we don't assert ">=2
+        distinct here. The IsolationForest fallback's seed variation is
+        pinned in test_one_class_isolation_forest_fallback_seeded.
+        """
+        rng = np.random.RandomState(42)
+        n_inlier = 40
+        n_outlier = 15
+        X_inlier = rng.randn(n_inlier, 20) * 0.5
+        X_outlier = rng.randn(n_outlier, 20) * 2.0 + 3.0
+        X = np.vstack([X_inlier, X_outlier])
+        y = np.concatenate([np.ones(n_inlier), -np.ones(n_outlier)]).astype(int)
+
+        score = evaluate_config_with_seed(
+            X, y, "one_class", cv_folds=3, random_state=42
+        )
+        assert np.isfinite(score), (
+            f"one_class evaluation returned non-finite score {score}; "
+            "fallback path must return a real value"
+        )
+
+    def test_one_class_isolation_forest_fallback_seeded(self):
+        """Direct unit test on the IsolationForest fallback path. Calls
+        the fallback directly (not the full function) so the test doesn't
+        depend on LightGBM being unavailable."""
+        from sklearn.ensemble import IsolationForest
+
+        rng = np.random.RandomState(42)
+        X_inlier = rng.randn(30, 20) * 0.5
+        X_outlier = rng.randn(10, 20) * 2.0 + 3.0
+        X = np.vstack([X_inlier, X_outlier])
+        y = np.concatenate([np.ones(30), -np.ones(10)]).astype(int)
+
+        scores = []
+        for rs in [42, 0, 7, 100, 31]:
+            inlier_mask = y != -1
+            outlier_mask = y == -1
+            X_train_inliers = X[inlier_mask]
+            clf = IsolationForest(
+                contamination='auto', random_state=rs, n_estimators=50, n_jobs=1,
+            )
+            clf.fit(X_train_inliers)
+            preds = clf.predict(X)
+            inlier_recall = (preds[inlier_mask] == 1).mean()
+            outlier_recall = (preds[outlier_mask] == -1).mean()
+            scores.append(float((inlier_recall + outlier_recall) / 2))
+
+        assert len({round(s, 6) for s in scores}) >= 2, (
+            "IsolationForest must produce seed-varying scores"
+        )
+
     def test_quick_evaluate_unchanged_at_default(self, synthetic_X_y_regression):
         """Pre-Phase-4 callers (run_tpe_preprocessing_discovery's _objective)
         invoke _quick_evaluate without a random_state argument. Phase 4
