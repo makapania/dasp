@@ -49,13 +49,15 @@ def test_read_spc_file_handles_missing_or_invalid(tmp_path):
     except (ValueError, NotImplementedError) as e:
         # Pin the parse-error path: the exception must come from SPC parsing
         # (not from some unrelated regression that happens to ValueError).
-        # Known message fragments from spc-io across versions / mock-flag bits:
+        # PR #56 review (Codex MEDIUM #3): the prior `"spc"` substring was too
+        # loose — it matched on path fragments like ``unified.spc`` even when
+        # the wrong reader had been invoked. Restrict to parser-specific
+        # fragments emitted by spc-io's actual parse machinery.
         msg = str(e).lower()
         known_spc_parse_errors = (
             "buffer size too small",   # spc-io low-level header check
             "ftflgs", "trandm",         # spc-io flag-bit unsupported features
             "supproted",                # spc-io misspelling preserved across versions
-            "spc",                       # generic SPC-routed error message
         )
         assert any(s in msg for s in known_spc_parse_errors), (
             f"Unexpected error from SPC parser on mock data: {e!r}"
@@ -114,34 +116,32 @@ def test_read_spc_dir_with_existing_function(tmp_path):
             raise
 
 
-def test_read_spc_via_unified_api(tmp_path):
+def test_read_spc_via_unified_api(tmp_path, monkeypatch):
     """Test that the unified read_spectra(format='auto') routes .spc files
-    through the SPC reader — not e.g. CSV or JCAMP — by inspecting either the
-    success metadata or the failure path's error origin."""
+    through the SPC reader — not e.g. CSV or JCAMP.
+
+    PR #56 review (Codex MEDIUM #3): substring matching against the loose
+    fragment ``"spc"`` could pass even when the wrong reader had been
+    invoked (the path itself contains ``unified.spc``). Stronger contract:
+    monkeypatch ``read_spc_file`` with a sentinel exception and assert the
+    dispatcher reaches the sentinel — that proves routing, not message text.
+    """
     spc_path = tmp_path / "unified.spc"
     create_mock_spc_file(spc_path, [], [])
 
-    try:
-        result, metadata = read_spectra(spc_path, format='auto')
-        # On success, format must be 'spc' — proves auto-detect routed correctly
-        assert metadata['file_format'] == 'spc'
-    except ImportError as e:
-        # spc-io missing — skip rather than fail, but pin the message origin
-        if "spc-io" in str(e):
-            pytest.skip("spc-io not installed")
-        raise
-    except (ValueError, NotImplementedError) as e:
-        # Mock isn't real SPC; parse fails. Verify the exception comes from SPC
-        # parsing (not e.g. a CSV reader misroute) by checking known message
-        # fragments. If the SPC reader regresses such that auto-detect routes
-        # to a different reader, we'd get a foreign error message and fail here.
-        msg = str(e).lower()
-        known_spc_parse_errors = (
-            "buffer size too small", "ftflgs", "trandm", "supproted", "spc",
-        )
-        assert any(s in msg for s in known_spc_parse_errors), (
-            f"format='auto' on .spc file routed to wrong reader: {e!r}"
-        )
+    class _SpcRouted(Exception):
+        """Sentinel: raised iff the SPC reader is the one invoked."""
+
+    def _sentinel_reader(path, **kwargs):
+        raise _SpcRouted(f"spc reader invoked on {path}")
+
+    # Patch in spectral_predict.io — that is the dispatcher's local namespace.
+    monkeypatch.setattr(
+        "spectral_predict.io.read_spc_file", _sentinel_reader
+    )
+
+    with pytest.raises(_SpcRouted):
+        read_spectra(spc_path, format='auto')
 
 
 def test_write_spc_multiple_spectra_warning(tmp_path):
