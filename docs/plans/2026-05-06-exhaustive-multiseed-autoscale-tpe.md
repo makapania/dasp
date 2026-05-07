@@ -1,22 +1,37 @@
-# Plan: Exhaustive multi-seed + autoscale; TPE multi-seed; remove GA
+# Plan: Exhaustive multi-seed + autoscale; TPE multi-start + multi-seed; remove GA
 
 **Date:** 2026-05-06
-**Status:** DRAFT — awaiting Codex review
+**Status:** REVISED v2 — incorporates Codex review of v1 (3 BLOCKERs + 3 WEAKs)
 **Prior work:** Empirical investigation in `tools/exhaustive_seed_compare.py` and `tools/bayesian_topk_stability.py` (committed in `8e03dc0`).
+
+---
+
+## Revisions in v2 (relative to v1, which was filed in `739740e`)
+
+| # | Codex finding | Severity | Resolution in v2 |
+|---|---|---|---|
+| 1 | Fixed K=45 won't generalize across datasets | BLOCKER | Adaptive K with stability-halting loop (Phase 2) |
+| 2 | Chromosome shape change breaks 2-gene callers and saved CSVs | BLOCKER | Backward-compat decode in `chromosome_to_transform` (Phase 3) |
+| 3 | Phase 2 ordering self-contradicts (rescore-then-diversity vs diversity-then-rescore) | BLOCKER | Explicit pipeline: single-seed rank → top-K (adaptive) → multi-seed → diversity → top-N (Phase 2) |
+| 4 | TPE Option B alone doesn't fix early random-startup divergence | WEAK | Multi-start TPE + union + multi-seed rescore replaces Option B (Phase 4) |
+| 5 | Phase 2 tie-breaking unspecified; `evaluate_fitness_robust` is shared | WEAK | Explicit mean → std → stable-key tie-break; phase-2 consumes mean from tuple, not function-level change (Phase 2) |
+| 6 | "Keep Basic" rationale unverified at merger boundary | WEAK | Clarified — no merger added in this plan; Basic stands alone (out of scope section) |
+
+---
 
 ## Summary
 
-Three coordinated changes to dasp's preprocessing-discovery infrastructure:
+Four coordinated changes to dasp's preprocessing-discovery infrastructure:
 
-1. **Remove GA mode** from the GA/Exhaustive section. It's vestigial — same 238-cell space as exhaustive, slower (no parallelism by default), no offsetting feature. The dropdown becomes a single-mode toggle.
-2. **Add multi-seed phase-2 rescore to exhaustive** (n_seeds=5 over single-seed top-K=45) to fix top-N infiltration on small-n / classification tasks. Empirical data shows single-seed top-7 contains 6/7 mean-rank-deep fakes on PLS-DA classification; rescore is the cheapest fix.
-3. **Add an autoscale dimension to exhaustive** with a GUI checkbox (default ON). Mirrors what TPE already does. Doubles search space to 14×17×2 = 476 cells.
-4. **Add multi-seed mechanism to TPE preprocessing discovery** to fix the same fold-randomness issue, with the additional benefit of denoising TPE's adaptive sampling.
+1. **Remove GA mode** from the GA/Exhaustive section.
+2. **Add multi-seed phase-2 rescore to exhaustive** with **adaptive pool size** that grows until top-N identity stabilizes.
+3. **Add an autoscale dimension to exhaustive** with a GUI checkbox (default ON), with **backward-compatible chromosome decoding** so 2-gene callers and saved CSVs keep working.
+4. **Add multi-start + multi-seed mechanism to TPE preprocessing discovery** — run M independent TPE studies with different seeds, union their top candidates, then multi-seed rescore the union. Per-trial multi-seed CV is a complementary option but not the primary fix.
 
 **Out of scope** (deferred):
-- `run_unified_bayesian` (the main Bayesian search) shows the same TPE drift problem in `tools/bayesian_topk_stability.py` — pairwise Jaccard ≈ 0 across top-K of seeded runs. Same fix conceptually applies. Not addressed here; would be a separate ticket.
-- "Basic Preprocessing Discovery" stays as-is. Its LightGBM-on-full-wavelengths proxy + diversity selection are useful when downstream variable-selection methods (UVE/SPA/iPLS/CARS/GA-PLS) will pick a different feature subset from the one used to score preprocessing — preserving preprocessing-type diversity in that case is more useful than picking the single best (preproc, window) per actual model.
-- The dead `smart_selected_wavelengths` metadata column stays metadata (separate methodology question).
+- `run_unified_bayesian` (the main Bayesian search). Same TPE-drift problem; same fix conceptually applies. Separate ticket.
+- "Basic Preprocessing Discovery" stays as-is, **completely separate from the new phase-2 rescore path**. Its LightGBM-on-full-wavelengths proxy + diversity selection are useful for downstream-varsel scenarios. **No multi-path merger is added in this plan** — Basic does not feed into the phase-2 rescore on exhaustive/TPE outputs, and exhaustive/TPE outputs do not feed into Basic. They remain alternative top-level discovery paths chosen by GUI checkbox.
+- The dead `smart_selected_wavelengths` metadata column — separate methodology question.
 
 ## Empirical evidence
 
@@ -31,25 +46,28 @@ From `tools/exhaustive_seed_compare.py` on BoneCollagen (n=49, 2151 wavelengths)
 - Single-seed top-7: worst mean-rank = **65**, 6/7 fakes.
 - Single-seed top-10: 9/10 fakes.
 - Pool size 41 catches all of mean top-10.
-- 3-seed vs 5-seed top-10: Jaccard **0.18** (only 3/10 match). 3-seed pool needed = 51, 5-seed = 41 — 3-seed actually requires a *bigger* pool.
+- 3-seed vs 5-seed top-10: Jaccard **0.18** (only 3/10 match). 3-seed pool needed = 51, 5-seed = 41.
 - Root cause: discrete-tied accuracy values create artificial tie clusters at single seed.
 
-**Conclusion**: 5 seeds is the floor (3 is not a cheap substitute), and pool size **45** has ~10% margin over the empirical 41 floor for both tasks.
+**Conclusion**: 5 seeds is the floor (3 is not a cheap substitute). Pool floor is dataset-specific (41 here, may be higher elsewhere) — hence the v2 shift to **adaptive K** instead of fixed K=45.
 
 From `tools/bayesian_topk_stability.py`:
 - Pairwise Jaccard ≈ 0 across all top-K (5/7/10) for both tasks across 3 seeded Bayesian runs.
 - Of ~99 trials per run, only 5 (regression) or 3 (classification) discrete config-keys are evaluated by ALL 3 seeded runs.
-- Most of run-1's top-K is never sampled in runs 2-3 — TPE drifts to different regions per seed.
+- TPE drifts to different regions per seed — drift starts at the random-startup phase (n_startup_trials=20) where each seed picks different initial categorical configs, and the KDEs diverge from there.
+
+---
 
 ## Phase 1 — Remove GA mode
 
 ### Code changes
 
 `src/spectral_predict/ga_preprocessing.py`:
-- Delete the `if method == 'ga'` branch in `optimize_preprocessing` (function is at `:1390+`, the GA branch starts around `:1500+`).
-- Delete the GA-specific helpers: `random_chromosome` (`:103`), `get_seed_chromosomes` (`:111`), GA mutation/crossover/selection operators in the genetic-operators block (`:725+`), the population/generation loop in `optimize_preprocessing` for `method='ga'`.
-- Keep `evaluate_fitness_robust` (`:647`) — it'll be reused by Phase 2.
-- Keep `smart_exhaustive_search` (`:1092`) for now — it's a separate mode that's not in the GUI dropdown but may have callers.
+- Delete the `if method == 'ga'` branch in `optimize_preprocessing` (function at `:1390+`, GA branch around `:1500+`).
+- Delete GA-specific helpers: GA mutation/crossover/selection operators in the genetic-operators block (`:725+`), the population/generation loop in `optimize_preprocessing` for `method='ga'`.
+- **Keep** `evaluate_fitness_robust` (`:647`) — Phase 2 reuses it (consuming `mean_fitness` from the returned tuple).
+- **Keep** `random_chromosome` (`:103`), `get_seed_chromosomes` (`:111`) for now — these are used by `smart_exhaustive_search` (`:1092+`) which is not in the GUI dropdown but may have programmatic callers. Phase 1 does not touch smart.
+- **Keep** `N_GENES=2` constant (`:99`). The 2-gene chromosome shape is the legacy interface; Phase 3 will introduce 3-gene as a superset, with backward-compat decoding.
 
 `src/spectral_predict/search.py`:
 - `:2052-2068`: drop `population_size` and `n_generations` arguments to `optimize_preprocessing` (they were only used by GA path). Drop the `n_jobs=-1 if ga_preprocess_method == "exhaustive" else 1` conditional — always parallel.
@@ -58,7 +76,6 @@ From `tools/bayesian_topk_stability.py`:
 `spectral_predict_gui_optimized.py`:
 - `:13755-13800`: rename "GA and Exhaustive Preprocessing" section to "Exhaustive Preprocessing Discovery". Replace the `["exhaustive", "ga"]` ttk.Combobox dropdown with a single Enable checkbox.
 - `:3278`: drop `self.ga_preprocess_method` StringVar.
-- Remove all references to the dropdown control and its callbacks.
 
 ### Tests
 
@@ -67,160 +84,229 @@ From `tools/bayesian_topk_stability.py`:
 
 ### Risk
 
-Low. GA was never the recommended path. If any saved-config files reference `ga_preprocess_method='ga'`, they'd fall back to exhaustive — acceptable because the user explicitly approved removal.
+Low. GA was never the recommended path. **Saved-config artifacts** (result CSVs) that store `ga_genes` arrays will remain decodable — Phase 3's backward-compat decode (`chromosome_to_transform` accepts `len(genes) == 2`) preserves rebuild compatibility.
 
 ### Estimated LOC
 
-- Deletions: ~200-300 (most of the GA evolution machinery in `ga_preprocessing.py`)
+- Deletions: ~150-250 (GA evolution machinery)
 - Additions: ~10 (GUI checkbox replacement)
 
 ---
 
-## Phase 2 — Multi-seed phase-2 rescore on exhaustive
+## Phase 2 — Multi-seed phase-2 rescore on exhaustive (with adaptive K)
 
-### Concept
+### Pipeline (explicit, post-Codex revision)
 
-Two-phase ranking:
-1. Phase 1: `exhaustive_search` runs single-seed `evaluate_fitness` over all 238 (or 476 with autoscale, see Phase 3) cells with `n_jobs=-1` parallelism. Same as today.
-2. Phase 2: take top-K (default K=45) by single-seed score. For each, run `evaluate_fitness_robust` with `n_seeds=5`. Re-rank by **mean** (not `mean - 0.1*std` — empirical Q1 finding shows variance penalty does nothing).
-3. Apply diversity selection to the rescored top-K, return final top-N (default 5 per model).
+```
+1. exhaustive_search runs single-seed evaluate_fitness over all 238 (or 476 with autoscale)
+   cells with n_jobs=-1 parallelism. → all_fitness array.
 
-### Why K=45 specifically
+2. ADAPTIVE K LOOP:
+   K = 3 * top_n         # initial pool (e.g., 15 for top_n=5)
+   prev_topN = None
+   while True:
+       candidates = top-K configs by single-seed score (rank=min)
+       rescored = phase2_multiseed_rescore(candidates, n_seeds=5)  # below
+       current_topN = diversity_select(rescored, n=top_n, key=(preproc, autoscale))
+       if prev_topN == current_topN:
+           break  # halt: top-N stable between expansions
+       if K >= min(8 * top_n, len(all_fitness)):
+           break  # halt: pool reached cap
+       prev_topN = current_topN
+       K = next_step(K)   # K progression: 3*top_n → 5*top_n → 8*top_n
 
-Empirical floor is 41 (worst single-seed rank in mean top-10 on BoneCollagen classification); 45 has ~10% margin. Should be revalidated on a second dataset before final commit (see Open Questions).
+3. Return current_topN.
+```
 
-### Why drop the variance penalty
+### `phase2_multiseed_rescore` details
 
-`tools/exhaustive_seed_compare.py` showed `jaccard(mean_top_K, robust_top_K)` ≥ 0.67 for K=10 and = 1.0 for top-1. The `0.1 * std` term shifts scores by ≈0.02 RMSE units while the mean-based ranking already reflects the signal. Variance penalty is theoretical noise, not signal.
+For each candidate config in the pool:
+- Call `evaluate_fitness_robust(genes, X, y, ..., n_seeds=5)` — returns `(robust_fitness, mean_fitness, std_fitness)`.
+- **Consume `mean_fitness` only**. The `0.1 * std` variance penalty inside `robust_fitness` is dropped (empirical Q1 finding: Jaccard(mean, robust) ≥ 0.67 on top-10).
+- **Tie-break**: rank by `mean_fitness` desc, then by `std_fitness` asc (lower variance wins on ties), then by stable config key `(preproc_idx, window_idx, autoscale)` to ensure deterministic output.
+
+### Why adaptive K instead of fixed K=45 (Codex BLOCKER #1)
+
+Empirical pool-size floors are dataset-specific — 41 on BoneCollagen classification, 22-24 on BoneCollagen regression with 3 seeds, unknown on other datasets. A fixed K is brittle. The adaptive loop:
+- Starts cheap (3 × top_n) for fast convergence on stable rankings.
+- Expands only when top-N changes between K-iterations — i.e., the pool was undersized.
+- Caps at `8 × top_n` (or search-space size) to bound worst-case cost.
+- Halts on stability — exact identity match of the rescored top-N set.
+
+**Cost estimate:**
+- Stable rankings (most regression cases): K=15 only, ~75 multi-seed evaluations. Phase-2 wall time ≈ 75 / 238 ≈ 32% of phase-1.
+- Unstable rankings (PLS-DA on small n): K grows to 25 then 40 before halting. ~200 multi-seed evaluations. Phase-2 wall time ≈ 200 / 238 ≈ 84% of phase-1.
+- Worst case (search space cap reached): full multi-seed on 8 × top_n. For top_n=5, ~200 evaluations. Same upper bound as fixed K=45 in v1.
+
+### `evaluate_fitness_robust` is NOT modified globally (Codex WEAK #5)
+
+- GA / smart paths (e.g., `ga_preprocessing.py:1268, 1540`) still consume `robust_fitness` (= mean - 0.1*std) — leave them alone.
+- Phase-2 rescore consumes `mean_fitness` directly from the tuple return. No function signature change to `evaluate_fitness_robust`.
 
 ### Code changes
 
 `src/spectral_predict/ga_preprocessing.py`:
-- Add `phase2_rescore` function that takes top-K configs + raw X/y/cv params + n_seeds, runs `evaluate_fitness_robust` for each, returns reordered list.
-- Modify `exhaustive_search` to call `phase2_rescore` after the diversity selection step, controlled by a new `phase2_n_seeds` parameter (default 5; 0 disables).
-- Diversity selection runs again post-rescore (same `select_diverse_exhaustive_configs`) to ensure the final top-N still has variety after re-ranking.
+- Add `phase2_adaptive_rescore(all_genes, all_fitness, X, y, top_n, n_seeds, max_K_multiplier, ...)` function implementing the loop above.
+- Modify `exhaustive_search` to call the adaptive rescore after the existing single-seed enumeration, controlled by a new `phase2_n_seeds` parameter (default 5; 0 disables = current behavior).
+- Diversity selection inside the loop uses existing `select_diverse_exhaustive_configs`, but with the diversity key updated to include autoscale (Phase 3 dependency — see Phase 3).
 
 `src/spectral_predict/search.py`:
-- Pass through new `phase2_n_seeds` and `phase2_pool_size` parameters from GUI to `optimize_preprocessing`.
+- Pass through new `phase2_n_seeds` parameter from GUI to `optimize_preprocessing`.
 
 `spectral_predict_gui_optimized.py`:
 - Add checkbox "Robust ranking (5-seed phase-2 rescore)" in the Exhaustive Preprocessing section. Default ON.
-- Add a tooltip noting expected ~1.5-1.8× wall-time cost.
-- (Optional, advanced): expose `phase2_n_seeds` (default 5) and `phase2_pool_size` (default 45) in an advanced collapsible.
+- Tooltip: "Re-evaluates top configs with 5 random_state values to detect lottery winners. Recommended for classification on small datasets. Cost: 1.3-1.8x current."
 
 ### Tests
 
 - `tests/test_exhaustive_phase2.py`:
-  - Test that `phase2_rescore` reorders configs when scores differ across seeds.
-  - Test that disabling phase 2 (`phase2_n_seeds=0`) gives identical output to current single-seed exhaustive.
-  - Behavioral test: on a synthetic noisy classification dataset, phase 2 promotes mean-top configs out of the rank-21+ zone of single-seed.
-
-### Estimated cost
-
-- Phase 2 wall time = K × n_seeds / 238 × phase-1 wall time = 45 × 5 / 238 ≈ 95% extra. Total ~1.95× current.
-- Combined with Phase 3 autoscale (Phase 1 doubles to 476 cells): phase-2 wall time stays at K × n_seeds = 225 evaluations regardless of phase-1 size.
+  - `test_phase2_disabled_matches_legacy`: `phase2_n_seeds=0` produces identical output to current single-seed exhaustive. Regression pin.
+  - `test_phase2_reorders_on_unstable_data`: synthetic dataset with high CV-fold variability — assert phase-2 changes the top-N from single-seed top-N.
+  - `test_adaptive_k_halts_on_stability`: synthetic dataset where rankings are stable — assert K stops at `3 * top_n`.
+  - `test_adaptive_k_expands_when_unstable`: synthetic dataset where they're not stable — assert K reaches `8 * top_n` cap.
+  - `test_tie_breaking_deterministic`: configs with identical mean — assert std is the tie-breaker, then config key.
 
 ### Estimated LOC
 
-- ga_preprocessing.py: ~80-120 additions (new function + integration).
+- ga_preprocessing.py: ~120-150 additions (adaptive loop + diversity-after-rescore wiring).
 - search.py: ~15 additions (parameter passthrough).
 - GUI: ~30 additions (checkbox + tooltip).
 
 ---
 
-## Phase 3 — Add autoscale dimension to exhaustive
+## Phase 3 — Add autoscale dimension to exhaustive (backward-compat)
 
 ### Concept
 
-Mirror what TPE already does (`tpe_preprocessing_discovery.py:127-129`): add autoscale (StandardScaler) as a final step after the SNV/derivative core preprocessing. The chromosome grows from 2 genes to 3.
+Mirror what TPE already does (`tpe_preprocessing_discovery.py:127-129`): add autoscale (StandardScaler) as a final step after SNV/derivative core preprocessing. The chromosome grows from 2 genes to 3.
+
+### Backward-compatible chromosome decoding (Codex BLOCKER #2)
+
+`chromosome_to_transform` (`:146-200`) must accept BOTH 2-gene and 3-gene chromosomes:
+```python
+def chromosome_to_transform(genes):
+    preproc_idx = genes[0]
+    window_idx = genes[1]
+    autoscale = bool(genes[2]) if len(genes) >= 3 else False  # backward-compat
+    ...
+```
+
+Surviving 2-gene callers (Phase 1 keeps these alive):
+- `random_chromosome` (`:103`), `get_seed_chromosomes` (`:111`) — used by `smart_exhaustive_search`.
+- `smart_exhaustive_search` (`:1092+`) — its `stage1_genes` arrays at `:1194+` and `:1526+` construct 2-gene chromosomes.
+- `search.py:792-800` — rebuilds saved `ga_genes` from result-CSV rows.
+- Any saved `.dasp` model files containing `ga_genes` arrays.
+
+These all continue to work because the 2-gene chromosomes decode as `autoscale=False`, matching their existing behavior exactly.
 
 ### Code changes
 
 `src/spectral_predict/ga_preprocessing.py`:
-- Expand chromosome encoding: `genes = [preproc_idx, window_idx, autoscale]` where `autoscale ∈ {0, 1}`.
-- `chromosome_to_transform` (`:146`): when `autoscale=1`, append `StandardScaler().fit_transform(X)` to the returned transform closure.
-- `get_config_description` (`:225`): append `+autoscale` to description string when autoscale gene is set.
-- `exhaustive_search`: expand `all_genes` triple-loop: `for p in ... for w in ... for a in [0, 1]`.
-- `select_diverse_exhaustive_configs` (`:787`): key diversity off `(preproc_type, autoscale)` tuple instead of just `preproc_type` to avoid filling top-N with autoscale-on/off siblings of the same preproc.
+- `chromosome_to_transform` (`:146`): backward-compat decode (above). When `autoscale=True`, append `StandardScaler().fit_transform(X)` to the returned transform closure.
+- `get_config_description` (`:225`): backward-compat decode. Append `+autoscale` to description when autoscale=1.
+- `exhaustive_search` (`:874+`): expand `all_genes` triple-loop: `for p in ... for w in ... for a in [0, 1]`. Generates 3-gene chromosomes for the new path.
+- `select_diverse_exhaustive_configs` (`:787`): key diversity off `(preproc_type, autoscale)` tuple. Diversity-key extraction uses backward-compat decode.
 
 `src/spectral_predict/search.py`:
-- `:2120-2151`: in the GA→preprocess_configs conversion loop, read `autoscale = bool(genes[2])` and emit `"autoscale": autoscale` on the config dict. Rebuild path already consumes this field — see `search.py:2628, 4483` (Phase 3 just adds a new producer, no consumer changes).
+- `:2120-2151`: in the GA→preprocess_configs conversion loop, read `autoscale = bool(genes[2]) if len(genes) >= 3 else False` and emit `"autoscale": autoscale` on the config dict. Rebuild path already consumes this field at `search.py:2628, 4483`.
 
 `spectral_predict_gui_optimized.py`:
 - Add checkbox "Test with/without autoscale" in the Exhaustive Preprocessing section. Default ON.
-- When OFF: pass autoscale=False, restrict enumeration to autoscale=0 only (preserves current behavior).
+- When OFF: pass autoscale_choices=[False] to exhaustive_search, restricting enumeration to autoscale=False (preserves legacy 238-cell behavior even with the new 3-gene chromosome shape).
 
-### Tree-model duplication note
+### Tree-model duplication note (deferred polish)
 
-For tree models (LightGBM/XGBoost/CatBoost/RandomForest), autoscale on/off is mathematically equivalent (per PROJECT_STATUS analysis 2026-05-07). When ALL enabled models are tree-based, the autoscale dimension is wasted compute. Optional optimization: `if all(m in TREE_MODELS for m in models_to_test): autoscale_choices = [False]` — saves 50% on the autoscale-relevant runs. ~5 LOC. Defer as polish unless empirical wall-time on tree-heavy runs is a problem.
+For tree models (LightGBM/XGBoost/CatBoost/RandomForest), autoscale on/off is mathematically equivalent (per PROJECT_STATUS analysis 2026-05-07). When ALL enabled models are tree-based, the autoscale dimension wastes 50% compute. Optional optimization: `if all(m in TREE_MODELS for m in models_to_test): autoscale_choices = [False]` — saves 50% on the autoscale-relevant runs. Defer as polish unless empirical wall-time on tree-heavy runs is a problem.
 
 ### Tests
 
 - `tests/test_exhaustive_autoscale.py`:
-  - When checkbox is on, exhaustive emits both `autoscale=True` and `autoscale=False` configs in its top-N output.
-  - When off, all output configs have `autoscale=False`.
-  - End-to-end smoke: exhaustive + autoscale on PLS-DA classification produces meaningfully different top-N than autoscale off.
+  - `test_2gene_chromosome_decodes_no_autoscale`: pass `genes = np.array([3, 5])` to `chromosome_to_transform`, assert no StandardScaler in resulting transform.
+  - `test_3gene_chromosome_with_autoscale_true`: pass `genes = np.array([3, 5, 1])`, assert StandardScaler appears.
+  - `test_3gene_chromosome_with_autoscale_false`: pass `genes = np.array([3, 5, 0])`, assert no StandardScaler.
+  - `test_saved_csv_rebuild_compatible`: simulate loading an old result CSV with 2-gene `ga_genes` — assert `chromosome_to_transform` succeeds and pipeline reconstructs.
+  - `test_exhaustive_with_autoscale_emits_both`: exhaustive run with autoscale dimension on emits both `autoscale=True` and `autoscale=False` configs in top-N.
 
 ### Estimated cost
 
 - 2× current wall time when ON (476 cells vs 238).
-- Combined with Phase 2 multi-seed: 2 × 1.95 ≈ ~3.9× current. Should still complete in single-digit minutes for typical workflows.
+- Combined with Phase 2 multi-seed: 2 × current Phase-1 + adaptive multi-seed rescore. Worst case ~3-3.5× current.
 
 ### Estimated LOC
 
-- ga_preprocessing.py: ~50-80 (chromosome expansion + transform + diversity).
-- search.py: ~10 (config dict population).
+- ga_preprocessing.py: ~50-80 (chromosome backward-compat + transform + diversity key).
+- search.py: ~10 (config dict population with backward-compat decode).
 - GUI: ~30 (checkbox + tooltip).
 
 ---
 
-## Phase 4 — Add multi-seed mechanism to TPE preprocessing discovery
+## Phase 4 — Multi-start + multi-seed for TPE preprocessing discovery
 
-### The choice between two options
+### Why multi-start instead of just multi-seed-per-trial (Codex WEAK #4)
 
-**Option A — Phase-2 rescore on TPE top-K**
-- Take TPE's top-K outputs, rescore each with multi-seed.
-- ~1.5× cost.
-- Doesn't fix TPE drift (the deeper problem from `tools/bayesian_topk_stability.py`); only the per-trial CV noise.
+Empirical finding from `tools/bayesian_topk_stability.py`: TPE seeds produce essentially disjoint top-K sets (Jaccard ≈ 0). Codex's analysis: multi-seed CV per trial denoises objective scores but doesn't fix early-trial random-startup divergence — different `random_state` values see different categorical configs in the n_startup_trials=20 random phase, and the KDEs diverge from there onward.
 
-**Option B — Multi-seed CV inside each TPE trial**
-- Modify `_quick_evaluate` to optionally average over n_seeds CV runs.
-- ~5× cost on TPE wall time (still small in absolute terms — ~30-60s on BoneCollagen at 75 trials).
-- Fixes both problems: trial scores denoised AND TPE's adaptive sampling no longer follows lottery winners.
+**The fix that addresses both failure modes:**
 
-Empirical evidence from `tools/bayesian_topk_stability.py` shows TPE drift is a real failure mode (Jaccard ≈ 0 across seeded runs). Option B addresses it; Option A doesn't.
+1. **Multi-start TPE**: run M independent TPE studies with different `random_state` seeds. Each does its own random-startup + TPE-guided sampling. Different seeds explore different regions.
+2. **Union top-K' candidates** across the M studies. M × K' configs (with possible overlap).
+3. **Phase-2 rescore the union** with multi-seed CV (n_seeds=5) — same mechanism as exhaustive's Phase 2.
+4. **Apply diversity selection + return top-N**.
 
-**Recommendation: Option B**. The 5× cost on TPE is small in absolute wall-time terms compared to Bayesian search overall, and the methodological correctness is meaningful.
+This preserves the per-study TPE adaptive-sampling advantage (don't blindly enumerate) while adding cross-study coverage (multi-start) and per-trial denoising (multi-seed rescore at phase 2).
 
-### Code changes (Option B)
+**Per-trial multi-seed CV** (the original "Option B") is a complementary but lower-priority improvement. It would tighten each study's KDE convergence but doesn't address the cross-study divergence — which is the dominant failure mode per the empirical data. Out of scope for v1 implementation; revisit if multi-start alone proves insufficient.
+
+### Pipeline
+
+```
+1. M = 3 (default, exposed as parameter)
+2. K' = max(top_n, 7)  # per-study candidate pool, default 7
+3. Run M independent run_tpe_preprocessing_discovery calls with seeds [42, 0, 7]
+   (current default n_trials=75 each, single-seed CV per trial — same as today).
+4. Union top-K' candidates across M studies (deduplicate by discrete config key).
+5. Phase-2 rescore the union with n_seeds=5 (re-using exhaustive's phase2 mechanism
+   adapted for the TPE config dict shape).
+6. Re-rank union by mean fitness, tie-break by std then stable key.
+7. Apply select_diverse_configs (existing, in tpe_preprocessing_discovery.py:467).
+8. Return top-N.
+```
+
+### Cost
+
+- M=3 sequential TPE studies: ~3 × current TPE wall time. On BoneCollagen: 3 × 30s ≈ 90s (regression), 3 × 10s ≈ 30s (classification).
+- Phase-2 rescore on |union| candidates (≤ M × K' = 21 if no overlap; typically 12-18): ~|union| × 5 / 75 × current TPE phase-1. Negligible.
+- Total wall-time multiplier: **~3-3.5× current TPE**.
+- In absolute terms on small-n: 30s → 100-110s.
+
+### Code changes
 
 `src/spectral_predict/tpe_preprocessing_discovery.py`:
-- Add `n_seeds` parameter to `_quick_evaluate` (default 1 for backwards compat).
-- When `n_seeds > 1`, run the inner CV loop n_seeds times with seeds `[42, 0, 7, 100, 31][:n_seeds]`, return mean.
-- Add `n_seeds` parameter to `run_tpe_preprocessing_discovery` signature; thread it through to `_objective` → `_quick_evaluate`.
+- Add `run_tpe_multistart_preprocessing_discovery(X, y, ..., n_starts=3, per_start_pool=7, n_seeds=5)`:
+  - Loop M times, each call to existing `run_tpe_preprocessing_discovery` with different `random_state`.
+  - Collect `top_configs[:per_start_pool]` from each.
+  - Union by discrete config key (preproc, window, autoscale, baseline_method, smoothing).
+  - Phase-2 rescore (call into ga_preprocessing.phase2_multiseed_rescore or a duplicated helper — TBD during implementation, prefer shared helper).
+  - Re-rank, apply existing `select_diverse_configs`, return top-N.
 
 `src/spectral_predict/search.py`:
-- `:1854-1880`: pass new `tpe_n_seeds` parameter through to `run_tpe_preprocessing_discovery`.
+- `:1854-1880`: gate on a new `tpe_multistart` flag. When ON, call the multistart wrapper; when OFF, fall through to current single-start behavior.
 
 `spectral_predict_gui_optimized.py`:
-- Add checkbox "Robust ranking (5-seed CV per trial)" in the TPE section. Default OFF (since cost is real and only matters for small-n / classification).
-- Tooltip noting it's recommended for small-n classification (cite the empirical evidence).
+- Add checkbox "Multi-start TPE (3 seeds + rescore)" in the TPE section. Default ON for classification, OFF for regression (or just "OFF default with tooltip" — see Open Questions).
+- Tooltip: "Runs TPE 3 times with different seeds and rescores the union with 5-seed CV. Strongly recommended for classification on small datasets. Cost: ~3x current."
 
 ### Tests
 
-- `tests/test_tpe_multiseed.py`:
-  - When `n_seeds=1`, output is identical to current behavior (regression pin).
-  - When `n_seeds=5`, top-K stability across seeded TPE runs is meaningfully better than `n_seeds=1`.
-
-### Estimated cost
-
-- ~5× TPE wall time when on (75 trials × 5-seed × 5-fold CV ≈ 1875 fits vs current 375).
-- In absolute terms on small-n: 30s → 150s.
+- `tests/test_tpe_multistart.py`:
+  - `test_multistart_disabled_matches_legacy`: `tpe_multistart=False` produces identical output to current single-start. Regression pin.
+  - `test_multistart_enabled_increases_top_K_stability`: run multistart twice with different overall seeds, assert top-K Jaccard is > 0.5 (vs ~0 currently).
+  - `test_union_dedup`: assert configs that appear in multiple per-start pools are deduplicated by discrete key.
 
 ### Estimated LOC
 
-- tpe_preprocessing_discovery.py: ~30-50 (parameter threading + multi-seed loop).
-- search.py: ~10 (parameter passthrough).
+- tpe_preprocessing_discovery.py: ~80-120 (new wrapper + union + rescore plumbing).
+- search.py: ~15 (parameter passthrough + flag-gated branch).
 - GUI: ~30 (checkbox + tooltip).
 
 ---
@@ -228,37 +314,41 @@ Empirical evidence from `tools/bayesian_topk_stability.py` shows TPE drift is a 
 ## Implementation order
 
 1. ✅ Commit empirical investigation tools (done in `8e03dc0`).
-2. **Phase 1**: GA removal (clean baseline, smallest risk).
-3. **Phase 2**: Exhaustive multi-seed rescore (orthogonal to Phase 3; can ship independently).
-4. **Phase 3**: Exhaustive autoscale (depends on chromosome shape changes; safer to ship after Phase 1 GA removal so we don't have to maintain GA-compat shims for the 3-gene chromosome).
-5. **Phase 4**: TPE multi-seed (independent of all above).
+2. ✅ File this revised plan (this document, replacing v1 in `739740e`).
+3. **Phase 1**: GA removal (clean baseline, smallest risk; preserves 2-gene callers).
+4. **Phase 3**: Exhaustive autoscale with backward-compat decode (3-gene chromosome). Ship this BEFORE Phase 2 because Phase 2's diversity-key uses `(preproc, autoscale)` and benefits from the autoscale field already being present.
+5. **Phase 2**: Exhaustive multi-seed adaptive rescore.
+6. **Phase 4**: TPE multi-start + rescore.
 
 Each phase ships as its own commit/PR with tests + a smoke check via GUI on BoneCollagen, both regression and classification.
 
 ## Risks / open questions
 
-1. **K=45 generalization**: validated on BoneCollagen only. Should run `tools/exhaustive_seed_compare.py` on 1-2 more datasets (synthetic NIR or another labeled dataset) before final commit. If the floor is consistently ≤41 across datasets, K=45 is fine. If it's higher (60+) on some datasets, may need K=55 or expose K as a parameter.
+1. **Adaptive K halt criterion**: exact set-equality of top-N. Could be too strict — one config swap between K-iterations forces another expansion. Alternative: Jaccard > 0.9 threshold. Choose during implementation; default to exact match and revisit if stability tests show too many expansions.
 
-2. **Combined Phase 2 + 3 cost**: ~3.9× current. For PLS-heavy workflows that's still 5-30s. For MLP/SVM-heavy: 12-40 min. Acceptable?
+2. **Combined Phase 2 + 3 cost**: ~3× current. For PLS-heavy: 5-30s. For MLP/SVM-heavy: 10-30 min. Acceptable given the user's stated workflow (top-7 to top-10 selection, where infiltration matters)?
 
-3. **GA removal artifacts**: any saved-config files, regression-test fixtures, or documentation that references `method='ga'` need migration paths. Will scan during Phase 1 implementation.
+3. **Phase 4 M=3 vs M=5**: 3 starts may be insufficient for very noisy datasets. Ship with M=3, expose as advanced parameter, revisit if empirical top-K stability across overall seeds is still poor.
 
-4. **TPE multi-seed default-OFF on classification**: classification users have to know to turn it on. Possible alternative: default ON for classification, OFF for regression (auto-detect from `task_type`). More magic, but matches the empirical asymmetry.
+4. **TPE multistart default ON/OFF**: classification users have to know to turn it on. Auto-default-ON-for-classification adds magic but matches the empirical asymmetry. Defer to user preference; ship default OFF with strong tooltip recommendation, document the asymmetry in user docs.
 
-5. **Bayesian (`run_unified_bayesian`) parallel ticket**: same TPE drift problem, same Option B fix. Should this be batched with Phase 4 or filed as a separate follow-up? Architecturally similar but `unified_bayesian.py` is much larger and has more dimensions in scope.
+5. **Bayesian (`run_unified_bayesian`) parallel ticket**: same TPE drift problem; same multi-start fix conceptually applies. Should be a follow-up after Phase 4 ships, since the architectural pattern will be proven.
 
-6. **Phase 4 Option A vs B**: Codex review may have a different recommendation. Will defer final choice to that review.
+6. **Saved CSV ga_genes column**: existing CSVs have 2-gene arrays. Phase 3's backward-compat decode handles rebuild. New CSVs (post-Phase 3) will have 3-gene arrays. Document this in CHANGELOG / docstring on the column. Consider migration helper.
 
 ## Testing plan
 
 - Per-phase pytest as listed in each phase's "Tests" section.
 - After each phase merge: smoke test by running through GUI on BoneCollagen, both regression and classification, verifying:
-  - Top-K configs in results CSV are stable run-to-run (within reasonable variance).
+  - Top-K configs in results CSV are stable run-to-run (within reasonable variance — for Phase 2 onward, top-K should be more stable than legacy single-seed).
   - Wall time matches estimates within ~30%.
-  - GUI controls behave correctly (toggle on/off produces expected behavior).
+  - GUI controls behave correctly.
+- After Phase 3: explicit backward-compat test — open an old `.dasp` file (or simulated equivalent) with 2-gene `ga_genes` and verify model rebuild + prediction works identically.
 - Final cumulative regression: full `pytest tests/` after all 4 phases land.
 - E2E smoke check follows the project's `feedback_e2e_smoke_after_refactor.md` rule — actual classification + regression through `run_search` + `run_unified_bayesian` after each merge.
 
-## Open question for Codex
+## Cross-references
 
-Is Option B (multi-seed inside TPE trials) the right call, or is there a TPE-architectural reason Option A would be preferred? Specifically: does Optuna's TPESampler with `multivariate=True` + multi-seed scoring per trial actually improve KDE convergence, or is that wishful thinking — and if so, what would the right fix be (more startup trials, different sampler, etc.)?
+- Empirical investigation tools: `tools/exhaustive_seed_compare.py`, `tools/bayesian_topk_stability.py` (committed `8e03dc0`).
+- Codex review of v1: see chat transcript leading to this v2 revision. Three BLOCKERs all addressed; three WEAKs all addressed.
+- Project-policy memos consulted: `feedback_chemometrics_relevance_per_ticket.md` (this is methodology change, user has approved); `feedback_e2e_smoke_after_refactor.md` (testing plan complies); `feedback_review_method_signal.md` (Codex correctly used for cross-file dispatcher review).
