@@ -1,5 +1,16 @@
 # Continuation prompt — CI hygiene (T-CI-1)
 
+> **STATUS: CLOSED 2026-05-07 — PR #56 merged at `93fabeb`.** This continuation prompt drove the implementation of PR #56 (`ci/t-ci-1-hygiene-2026-05-08`). Four review cycles ran (Codex GPT-5.5, GLM 5.1, DeepSeek V4 Pro Max, plus 4-agent toolkit). Local diff-failure-set verification (Windows Py3.12, `--ignore=tests/gui`): 14 → 5 failures, **0 new failures introduced**, 9 fixed (jcamp ×5, SPC ×2, PerkinElmer ×1, Optuna callback ×1). The 5 remaining failures are codegen/CLI bugs explicitly out-of-scope here, now tracked as:
+>
+> - **T-CI-2** — identify the deadlocking GUI test from the new informational `gui-linux` job logs, then drop `--ignore=tests/gui` from the main test job and flip `continue-on-error` to `false`.
+> - **T-CI-3 / T-CI-4** — `test_cv_strategy::test_classification_metrics_template_has_no_nameerror`, `test_export_code` ×2, `test_t19_class_weight_per_library` ×2 (codegen template bugs).
+>
+> See `docs/PROJECT_STATUS.md` top section for full closure summary, and `docs/SESSION_LOG.md` 2026-05-07 (late) entries for the cycle 4 lessons (Bayesian sister-site leak with a passing test that asserted the forbidden behavior; T-50 vs T-45 logging asymmetry where structural symmetry hid a runtime no-op).
+>
+> The text below is preserved as the original ticket — useful only for forensic reference; do not pick up the original task list, it is done.
+
+---
+
 **Filed:** 2026-05-07 late evening, after PR #55 merge (`228bbc2`)
 **Pickup:** next session
 
