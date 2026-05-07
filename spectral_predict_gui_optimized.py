@@ -3072,6 +3072,8 @@ class SpectralPredictApp:
         self.ocsvm_degree_custom = tk.StringVar(value="")
         # IsolationForest
         self.if_n_estimators_100 = tk.BooleanVar(value=True)
+        self.if_n_estimators_200 = tk.BooleanVar(value=True)
+        self.if_n_estimators_500 = tk.BooleanVar(value=True)
         self.if_n_estimators_custom = tk.StringVar(value="")
         self.if_contamination_001 = tk.BooleanVar(value=True)
         self.if_contamination_005 = tk.BooleanVar(value=True)
@@ -3080,18 +3082,33 @@ class SpectralPredictApp:
         self.if_max_features_05 = tk.BooleanVar(value=True)
         self.if_max_features_10 = tk.BooleanVar(value=True)
         self.if_max_features_custom = tk.StringVar(value="")
+        self.if_max_samples_auto = tk.BooleanVar(value=True)
+        self.if_max_samples_256 = tk.BooleanVar(value=True)
+        self.if_max_samples_512 = tk.BooleanVar(value=True)
+        self.if_max_samples_custom = tk.StringVar(value="")
         # EllipticEnvelope
         self.ee_contamination_001 = tk.BooleanVar(value=True)
         self.ee_contamination_005 = tk.BooleanVar(value=True)
         self.ee_contamination_01 = tk.BooleanVar(value=True)
         self.ee_contamination_custom = tk.StringVar(value="")
+        self.ee_support_fraction_none = tk.BooleanVar(value=True)
+        self.ee_support_fraction_05 = tk.BooleanVar(value=True)
+        self.ee_support_fraction_075 = tk.BooleanVar(value=True)
+        self.ee_support_fraction_custom = tk.StringVar(value="")
         # LOF
         self.lof_n_neighbors_10 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_20 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_30 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_custom = tk.StringVar(value="")
+        self.lof_contamination_001 = tk.BooleanVar(value=True)
         self.lof_contamination_005 = tk.BooleanVar(value=True)
+        self.lof_contamination_01 = tk.BooleanVar(value=True)
         self.lof_contamination_custom = tk.StringVar(value="")
+        self.lof_metric_euclidean = tk.BooleanVar(value=True)
+        self.lof_metric_manhattan = tk.BooleanVar(value=True)
+        self.lof_metric_minkowski = tk.BooleanVar(value=False)
+        self.lof_metric_cosine = tk.BooleanVar(value=False)
+        self.lof_metric_custom = tk.StringVar(value="")
         # PCA-SIMCA
         self.simca_n_components_3 = tk.BooleanVar(value=True)
         self.simca_n_components_5 = tk.BooleanVar(value=True)
@@ -13914,9 +13931,11 @@ class SpectralPredictApp:
         ne_frame = ttk.Frame(if_inner)
         ne_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
         ttk.Checkbutton(ne_frame, text="100", variable=self.if_n_estimators_100).grid(row=0, column=0, padx=5)
-        ttk.Label(ne_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
-        ttk.Entry(ne_frame, textvariable=self.if_n_estimators_custom, width=10).grid(row=0, column=2, padx=5)
-        ttk.Label(ne_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        ttk.Checkbutton(ne_frame, text="200", variable=self.if_n_estimators_200).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ne_frame, text="500", variable=self.if_n_estimators_500).grid(row=0, column=2, padx=5)
+        ttk.Label(ne_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ne_frame, textvariable=self.if_n_estimators_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ne_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
         r += 1
 
         ttk.Label(if_inner, text="Contamination:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
@@ -13940,6 +13959,18 @@ class SpectralPredictApp:
         ttk.Label(mf_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
         ttk.Entry(mf_frame, textvariable=self.if_max_features_custom, width=10).grid(row=0, column=3, padx=5)
         ttk.Label(mf_frame, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        r += 1
+
+        ttk.Label(if_inner, text="Max Samples (max_samples):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        ms_frame = ttk.Frame(if_inner)
+        ms_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(ms_frame, text="auto", variable=self.if_max_samples_auto).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ms_frame, text="256", variable=self.if_max_samples_256).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ms_frame, text="512", variable=self.if_max_samples_512).grid(row=0, column=2, padx=5)
+        ttk.Label(ms_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ms_frame, textvariable=self.if_max_samples_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ms_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # --- EllipticEnvelope Card ---
         ee_section, ee_content = self._create_collapsible_section(
@@ -13962,6 +13993,18 @@ class SpectralPredictApp:
         ttk.Label(ec_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
         ttk.Entry(ec_frame, textvariable=self.ee_contamination_custom, width=10).grid(row=0, column=4, padx=5)
         ttk.Label(ec_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(ee_inner, text="Support Fraction (support_fraction):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        sf_frame = ttk.Frame(ee_inner)
+        sf_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(sf_frame, text="None (sklearn default)", variable=self.ee_support_fraction_none).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(sf_frame, text="0.5", variable=self.ee_support_fraction_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(sf_frame, text="0.75", variable=self.ee_support_fraction_075).grid(row=0, column=2, padx=5)
+        ttk.Label(sf_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(sf_frame, textvariable=self.ee_support_fraction_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(sf_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # --- LOF Card ---
         lof_section, lof_content = self._create_collapsible_section(
@@ -13990,10 +14033,25 @@ class SpectralPredictApp:
         r += 1
         lc_frame = ttk.Frame(lof_inner)
         lc_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
-        ttk.Checkbutton(lc_frame, text="0.05", variable=self.lof_contamination_005).grid(row=0, column=0, padx=5)
-        ttk.Label(lc_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
-        ttk.Entry(lc_frame, textvariable=self.lof_contamination_custom, width=10).grid(row=0, column=2, padx=5)
-        ttk.Label(lc_frame, text="(default: 0.05)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        ttk.Checkbutton(lc_frame, text="0.01", variable=self.lof_contamination_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lc_frame, text="0.05", variable=self.lof_contamination_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lc_frame, text="0.1", variable=self.lof_contamination_01).grid(row=0, column=2, padx=5)
+        ttk.Label(lc_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lc_frame, textvariable=self.lof_contamination_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lc_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(lof_inner, text="Distance Metric (metric):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        lm_frame = ttk.Frame(lof_inner)
+        lm_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lm_frame, text="euclidean", variable=self.lof_metric_euclidean).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lm_frame, text="manhattan", variable=self.lof_metric_manhattan).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lm_frame, text="minkowski", variable=self.lof_metric_minkowski).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lm_frame, text="cosine", variable=self.lof_metric_cosine).grid(row=0, column=3, padx=5)
+        ttk.Label(lm_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lm_frame, textvariable=self.lof_metric_custom, width=12).grid(row=0, column=5, padx=5)
+        ttk.Label(lm_frame, text="(default: euclidean + manhattan)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         # --- PCA-SIMCA Card ---
         simca_section, simca_content = self._create_collapsible_section(
@@ -24841,20 +24899,29 @@ class SpectralPredictApp:
                 'degree_2': True, 'degree_custom': '',
             },
             'IsolationForest': {
-                'n_estimators_100': True, 'n_estimators_custom': '',
+                'n_estimators_100': True, 'n_estimators_200': True,
+                'n_estimators_500': True, 'n_estimators_custom': '',
                 'contamination_001': True, 'contamination_005': True,
                 'contamination_01': True, 'contamination_custom': '',
                 'max_features_05': True, 'max_features_10': True,
                 'max_features_custom': '',
+                'max_samples_auto': True, 'max_samples_256': True,
+                'max_samples_512': True, 'max_samples_custom': '',
             },
             'EllipticEnvelope': {
                 'contamination_001': True, 'contamination_005': True,
                 'contamination_01': True, 'contamination_custom': '',
+                'support_fraction_none': True, 'support_fraction_05': True,
+                'support_fraction_075': True, 'support_fraction_custom': '',
             },
             'LOF': {
                 'n_neighbors_10': True, 'n_neighbors_20': True,
                 'n_neighbors_30': True, 'n_neighbors_custom': '',
-                'contamination_005': True, 'contamination_custom': '',
+                'contamination_001': True, 'contamination_005': True,
+                'contamination_01': True, 'contamination_custom': '',
+                'metric_euclidean': True, 'metric_manhattan': True,
+                'metric_minkowski': False, 'metric_cosine': False,
+                'metric_custom': '',
             },
             'PCA-SIMCA': {
                 'n_components_3': True, 'n_components_5': True,
@@ -24885,6 +24952,8 @@ class SpectralPredictApp:
             },
             'IsolationForest': {
                 'n_estimators_100': self.if_n_estimators_100,
+                'n_estimators_200': self.if_n_estimators_200,
+                'n_estimators_500': self.if_n_estimators_500,
                 'n_estimators_custom': self.if_n_estimators_custom,
                 'contamination_001': self.if_contamination_001,
                 'contamination_005': self.if_contamination_005,
@@ -24893,20 +24962,35 @@ class SpectralPredictApp:
                 'max_features_05': self.if_max_features_05,
                 'max_features_10': self.if_max_features_10,
                 'max_features_custom': self.if_max_features_custom,
+                'max_samples_auto': self.if_max_samples_auto,
+                'max_samples_256': self.if_max_samples_256,
+                'max_samples_512': self.if_max_samples_512,
+                'max_samples_custom': self.if_max_samples_custom,
             },
             'EllipticEnvelope': {
                 'contamination_001': self.ee_contamination_001,
                 'contamination_005': self.ee_contamination_005,
                 'contamination_01': self.ee_contamination_01,
                 'contamination_custom': self.ee_contamination_custom,
+                'support_fraction_none': self.ee_support_fraction_none,
+                'support_fraction_05': self.ee_support_fraction_05,
+                'support_fraction_075': self.ee_support_fraction_075,
+                'support_fraction_custom': self.ee_support_fraction_custom,
             },
             'LOF': {
                 'n_neighbors_10': self.lof_n_neighbors_10,
                 'n_neighbors_20': self.lof_n_neighbors_20,
                 'n_neighbors_30': self.lof_n_neighbors_30,
                 'n_neighbors_custom': self.lof_n_neighbors_custom,
+                'contamination_001': self.lof_contamination_001,
                 'contamination_005': self.lof_contamination_005,
+                'contamination_01': self.lof_contamination_01,
                 'contamination_custom': self.lof_contamination_custom,
+                'metric_euclidean': self.lof_metric_euclidean,
+                'metric_manhattan': self.lof_metric_manhattan,
+                'metric_minkowski': self.lof_metric_minkowski,
+                'metric_cosine': self.lof_metric_cosine,
+                'metric_custom': self.lof_metric_custom,
             },
             'PCA-SIMCA': {
                 'n_components_3': self.simca_n_components_3,
@@ -25020,6 +25104,10 @@ class SpectralPredictApp:
         n_est = []
         if self.if_n_estimators_100.get():
             n_est.append(100)
+        if self.if_n_estimators_200.get():
+            n_est.append(200)
+        if self.if_n_estimators_500.get():
+            n_est.append(500)
         custom = self.if_n_estimators_custom.get().strip()
         if custom:
             v = self._parse_oc_int(custom, 1)
@@ -25050,14 +25138,38 @@ class SpectralPredictApp:
             if v is not None and v not in max_feat:
                 max_feat.append(v)
 
+        max_samp: list = []
+        if self.if_max_samples_auto.get():
+            max_samp.append('auto')
+        if self.if_max_samples_256.get():
+            max_samp.append(256)
+        if self.if_max_samples_512.get():
+            max_samp.append(512)
+        custom = self.if_max_samples_custom.get().strip()
+        if custom:
+            if custom.lower() == 'auto':
+                if 'auto' not in max_samp:
+                    max_samp.append('auto')
+            else:
+                v = self._parse_oc_int(custom, 1)
+                if v is not None and v not in max_samp:
+                    max_samp.append(v)
+
         if not n_est:
             n_est = sorted(set(p['n_estimators'] for p in defaults))
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
         if not max_feat:
             max_feat = sorted(set(p['max_features'] for p in defaults))
+        if not max_samp:
+            max_samp = ['auto']
 
-        return {'n_estimators': n_est, 'contamination': contam, 'max_features': max_feat}
+        return {
+            'n_estimators': n_est,
+            'contamination': contam,
+            'max_features': max_feat,
+            'max_samples': max_samp,
+        }
 
     def _collect_ee_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25076,10 +25188,25 @@ class SpectralPredictApp:
             if v is not None and v not in contam:
                 contam.append(v)
 
+        support_fracs: list = []
+        if self.ee_support_fraction_none.get():
+            support_fracs.append(None)
+        if self.ee_support_fraction_05.get():
+            support_fracs.append(0.5)
+        if self.ee_support_fraction_075.get():
+            support_fracs.append(0.75)
+        custom = self.ee_support_fraction_custom.get().strip()
+        if custom:
+            v = self._parse_oc_float(custom, 0.0, 1.0)
+            if v is not None and v not in support_fracs:
+                support_fracs.append(v)
+
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
+        if not support_fracs:
+            support_fracs = [None]
 
-        return {'contamination': contam}
+        return {'contamination': contam, 'support_fraction': support_fracs}
 
     def _collect_lof_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25099,20 +25226,39 @@ class SpectralPredictApp:
                 nn.append(v)
 
         contam = []
+        if self.lof_contamination_001.get():
+            contam.append(0.01)
         if self.lof_contamination_005.get():
             contam.append(0.05)
+        if self.lof_contamination_01.get():
+            contam.append(0.1)
         custom = self.lof_contamination_custom.get().strip()
         if custom:
             v = self._parse_oc_float(custom, 0.0, 1.0)
             if v is not None and v not in contam:
                 contam.append(v)
 
+        metrics: list[str] = []
+        if self.lof_metric_euclidean.get():
+            metrics.append('euclidean')
+        if self.lof_metric_manhattan.get():
+            metrics.append('manhattan')
+        if self.lof_metric_minkowski.get():
+            metrics.append('minkowski')
+        if self.lof_metric_cosine.get():
+            metrics.append('cosine')
+        custom = self.lof_metric_custom.get().strip()
+        if custom and custom not in metrics:
+            metrics.append(custom)
+
         if not nn:
             nn = sorted(set(p['n_neighbors'] for p in defaults))
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
+        if not metrics:
+            metrics = ['euclidean']
 
-        return {'n_neighbors': nn, 'contamination': contam}
+        return {'n_neighbors': nn, 'contamination': contam, 'metric': metrics}
 
     def _collect_simca_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
