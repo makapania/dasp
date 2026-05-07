@@ -177,6 +177,66 @@ class TestResumeRehydrationTest:
         assert seen == {}
 
 
+class TestSQLiteResumeRehydrationTest:
+    """Round-trip through SQLite: _freeze_for_fingerprint sentinel strings
+    (__nan_sentinel__, __pos_inf_sentinel__, __neg_inf_sentinel__) must
+    survive repr → SQLite → ast.literal_eval when _rehydrate_seen_fingerprints
+    reloads a resumed study. Without the sentinels, repr(float('nan')) produces
+    'nan' which ast.literal_eval rejects as a SyntaxError, silently dropping
+    that fingerprint from the dedup set on resume."""
+
+    def test_nonfinite_fingerprints_survive_sqlite_roundtrip(self, tmp_path):
+        from spectral_predict.unified_bayesian import (
+            _freeze_for_fingerprint,
+            _rehydrate_seen_fingerprints,
+        )
+
+        storage = "sqlite:///" + str(tmp_path / "resume.db")
+        study = optuna.create_study(
+            direction='minimize',
+            study_name='resume_test',
+            storage=storage,
+        )
+
+        fps = [
+            _freeze_for_fingerprint({
+                'model_name': 'PLS',
+                'imbalance_params': {'k': float('inf')},
+            }),
+            _freeze_for_fingerprint({
+                'model_name': 'PLS',
+                'imbalance_params': {'k': float('-inf')},
+            }),
+            _freeze_for_fingerprint({
+                'model_name': 'PLS',
+                'imbalance_params': {'k': float('nan')},
+            }),
+            _freeze_for_fingerprint({
+                'model_name': 'PLS',
+                'n_components': 3,
+            }),
+        ]
+        values = [0.1, 0.2, 0.3, 0.4]
+
+        for fp, val in zip(fps, values):
+            t = study.ask()
+            t.set_user_attr('fingerprint', repr(fp))
+            study.tell(t, val)
+
+        reloaded = optuna.load_study(
+            study_name='resume_test',
+            storage=storage,
+        )
+
+        seen = {}
+        added = _rehydrate_seen_fingerprints(reloaded, seen)
+
+        assert added == 4, f"Expected 4 rehydrated fingerprints, got {added}"
+        for fp, val in zip(fps, values):
+            assert fp in seen, f"Fingerprint {fp!r} missing after SQLite round-trip"
+            assert seen[fp][1] == val
+
+
 class TestNoDuplicateFitsTest:
     def test_forced_identical_trials_execute_cv_once(self, monkeypatch):
         from spectral_predict import unified_bayesian as ub
