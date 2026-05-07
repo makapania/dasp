@@ -358,18 +358,28 @@ def test_cli_main_calls_setup_app_logger(fresh_logging, monkeypatch):
     Verify cli.main calls setup_app_logger before doing anything else
     that could raise (argparse error, missing file, etc.). Use a sentinel
     sys.argv that triggers --version exit so we don't actually run a
-    full pipeline — just need to confirm the import-and-call happened."""
+    full pipeline — just need to confirm the import-and-call happened.
+
+    PR #56 review (Codex STRONG #2): previously skipped on headless
+    Linux because cli.main forced ``matplotlib.use('TkAgg')`` via an
+    eager top-of-module import of ``interactive_gui``. cli.py was
+    refactored to lazy-import GUI modules; ``--version`` now runs
+    without any Tk/matplotlib import side-effects, so the skip is gone.
+    The monkeypatch now targets ``run_logging.setup_app_logger``
+    directly (the lazy import inside ``main`` resolves to that name)
+    rather than the cli module's own attribute — there isn't one any
+    more after the refactor.
+    """
     rl, _, _ = fresh_logging
 
     called: list[bool] = []
     monkeypatch.setattr(rl, "setup_app_logger", lambda: called.append(True) or None)
 
     # Re-import cli with the patched run_logging in place so cli's
-    # `from .run_logging import setup_app_logger` picks up the monkeypatch.
+    # `from .run_logging import setup_app_logger` (now lazy, inside
+    # main()) picks up the monkeypatch.
     sys.modules.pop("spectral_predict.cli", None)
     cli = importlib.import_module("spectral_predict.cli")
-    monkeypatch.setattr(cli, "setup_app_logger", lambda: called.append(True) or None,
-                        raising=False)
 
     monkeypatch.setattr(sys, "argv", ["spectral-predict", "--version"])
     with pytest.raises(SystemExit):

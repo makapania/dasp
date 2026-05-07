@@ -3666,6 +3666,70 @@ def write_spc_file(
         f.write(spc.to_spc_raw().to_bytes())
 
 
+def _build_jcamp_dx_string(jcamp_dict: Dict[str, Any], linewidth: int = 75) -> str:
+    """Build a JCAMP-DX formatted string from a data dictionary.
+
+    Vendored from jcamp 1.3.0's jcamp_write() so we can keep the pyproject
+    pin at jcamp<1.3 — the 1.3.0 PyPI release declares stdlib modules
+    (re, pdb, datetime) as runtime deps in its setup.py, making the
+    package un-pip-installable. jcamp 1.0–1.2.x are read-only PyPI
+    releases (no write functions). Vendoring this ~60-line helper avoids
+    the upstream packaging bug while keeping us on the read-functional
+    1.2.x line.
+    """
+    if 'x' not in jcamp_dict:
+        raise ValueError('input dictionary must contain "x"')
+    if 'y' not in jcamp_dict:
+        raise ValueError('input dictionary must contain "y"')
+
+    x = np.asarray(jcamp_dict['x'])
+    y = np.asarray(jcamp_dict['y'])
+
+    parts = ['##JCAMP-DX=5.01\n']
+    for key, value in jcamp_dict.items():
+        if key in ('x', 'y', 'xydata', 'end'):
+            continue
+        parts.append(f"##{key.upper()}={value}\n")
+
+    if 'firstx' not in jcamp_dict:
+        parts.append(f"##FIRSTX={x[0]:.6f}\n")
+    if 'lastx' not in jcamp_dict:
+        parts.append(f"##LASTX={x[-1]:.6f}\n")
+    if 'maxx' not in jcamp_dict:
+        parts.append(f"##MAXX={np.amax(x):.6f}\n")
+    if 'minx' not in jcamp_dict:
+        parts.append(f"##MINX={np.amin(x):.6f}\n")
+    if 'firsty' not in jcamp_dict:
+        parts.append(f"##FIRSTY={y[0]:.4f}\n")
+    if 'lasty' not in jcamp_dict:
+        parts.append(f"##LASTY={y[-1]:.4f}\n")
+    if 'maxy' not in jcamp_dict:
+        parts.append(f"##MAXY={np.amax(y):.4f}\n")
+    if 'miny' not in jcamp_dict:
+        parts.append(f"##MINY={np.amin(y):.4f}\n")
+
+    npts = jcamp_dict.get('npts', len(x))
+    parts.append(f"##NPOINTS={npts}\n")
+    parts.append(f"##XFACTOR={jcamp_dict.get('xfactor', 1)}\n")
+    yfactor = jcamp_dict.get('yfactor', 1)
+    parts.append(f"##YFACTOR={yfactor}\n")
+    parts.append("##XYDATA=(X++(Y..Y))\n")
+
+    line = f"{x[0]:.6f} "
+    for j in range(npts):
+        if np.isnan(y[j]):
+            line += '? '
+        else:
+            line += f"{y[j] / yfactor:.4f} "
+        if len(line) >= linewidth or j == npts - 1:
+            parts.append(line + '\n')
+            if j < npts - 1:
+                line = f"{x[j + 1]:.6f} "
+
+    parts.append('##END=\n')
+    return ''.join(parts)
+
+
 def write_jcamp_file(
     data: pd.DataFrame,
     path: Union[str, Path],
@@ -3681,14 +3745,6 @@ def write_jcamp_file(
 
     Note: Only writes single spectrum (first row if multiple)
     """
-    try:
-        import jcamp
-    except ImportError:
-        raise ImportError(
-            "JCAMP-DX export requires jcamp package.\n"
-            "Install with: pip install jcamp"
-        )
-
     path = Path(path)
 
     # Take first spectrum if multiple
@@ -3715,8 +3771,10 @@ def write_jcamp_file(
             if key not in jcamp_dict:
                 jcamp_dict[key] = value
 
-    # Write JCAMP file
-    jcamp.jcamp_write(str(path), jcamp_dict)
+    # Use vendored write helper rather than jcamp.jcamp_writefile — the only
+    # PyPI release with that function (1.3.0) is broken upstream (declares
+    # stdlib re/pdb/datetime as deps).
+    path.write_text(_build_jcamp_dx_string(jcamp_dict))
 
 
 def write_ascii_spectra(

@@ -4,6 +4,33 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — T-CI-1 hygiene PR #56 — five diagnoses corrected mid-execution
+
+5. **xvfb-run hangs on Linux (still-unidentified GUI test).** The plan offered two approaches for category-1 (73 GUI/Tkinter Linux failures): `xvfb-run -a` wrapper OR skip-mark GUI tests when `DISPLAY is None and platform == Linux`. We tried `xvfb-run -a` first (covers more, no test loss). After PR #56's third CI run, all 3 Windows jobs completed in ~58-77min with 4 expected failures each (jcamp fix verified end-to-end), but **all 3 Linux test jobs ran past 5 hours without finishing**, with no log output for many minutes — confirming a deadlock, not just slowness. The pre-fix Linux runs took ~100 min because 73 GUI tests failed at collection (instant). With xvfb, those 73 tests now collect and try to run, but at least one of them deadlocks under Xvfb. Cancelled the run; pivoted to the second alternative: `pytest --ignore=tests/gui` on Linux runners. Windows continues to run GUI tests natively. Coverage gap filed for follow-up: identify the deadlocking GUI test under Xvfb (likely a Tkinter mainloop or modal dialog that never returns under headless display) and re-enable.
+
+   **Lesson:** the original plan offering "either A or B" is not arbitrary — it's a hedge against exactly this. When Plan A turns out to deadlock at scale (manifests only in CI, not local), pivoting to Plan B is correct; don't try to debug a 5-hour hang remotely.
+
+## 2026-05-08 — T-CI-1 hygiene PR #56 — four diagnoses corrected mid-execution
+
+The continuation prompt categorized the 91 failures cleanly. Local execution and CI exposure revealed four places where the actual root cause differed from the diagnosis:
+
+1. **jcamp diagnosis was TRIPLY wrong; final fix vendors the writer**. Original prompt diagnosis: "1.3.0 removed `jcamp_write`; pin `<X.Y.Z`." First correction (commit `ee3389e`): pin `<1.3`, fix `io.py` to call `jcamp_writefile`. CI broke. **Second correction (`ff51737`)**: pin `>=1.3.0` because PyPI 1.0–1.2.2 are read-only releases (no write functions at all); 1.3.0 was the first PyPI release to include the writer. CI broke again — this time at `pip install` because **jcamp 1.3.0's setup.py declares `re`, `pdb`, and `datetime` (all stdlib modules) as `Requires-Dist`**, making the package un-pip-installable: `ERROR: Could not find a version that satisfies the requirement re (from jcamp)`. **Third and final correction**: vendor a ~60-line `_build_jcamp_dx_string` helper inside `io.py` (copied from jcamp 1.3.0's `jcamp_write` source minus a stray debug `print()`), restore pin to `jcamp>=1.2.1,<1.3` for the read path. Result: zero dependency on jcamp 1.3.0; read still uses the package; write path is self-contained.
+
+   **Lessons** (saved to `feedback_verify_pypi_ground_truth.md`):
+   - PyPI version metadata is not the same as PyPI installability. A release can advertise functions in its sdist while having a `setup.py` so broken that pip can't actually install it. Always test `pip install <pkg>==<ver>` in a clean environment, not just `import` after install.
+   - Local `.venv312/Lib/site-packages/jcamp.py` was a non-PyPI patched build masquerading as 1.2.2. The version string lied. Local `hasattr(jcamp, 'jcamp_writefile')` returning True did NOT prove the function exists in any PyPI release.
+   - When a fix has only one PyPI release that satisfies it AND that release is broken, vendor the function rather than fight the upstream packaging bug. ~60 lines is cheap; weeks of CI rot is not.
+
+2. **OPUS/PerkinElmer "missing fixture file" diagnosis was wrong** — the plan said `dummy.0` and `dummy.sp` need to exist for the import-error tests to reach the import-error branch. The actual cause was broken skip-guards: tests checked `sys.modules.get('brukeropusreader')` but production imports `brukeropus`; checked `sys.modules.get('specio')` but production imports `specio_py310`. Worse, `sys.modules.get(NAME)` only sees *already-imported* modules, so the guard was non-functional even with right names. Fix: `importlib.util.find_spec` with corrected names. The dummy fixture files turned out to be irrelevant — production code raises ImportError before reaching the file check on machines without the optional dep.
+
+3. **SPC mock fixture needed two fixes, not one** — enlarging the mock from 102 → 602 bytes cleared the buffer-size guard, but spc-io's parser then encounters the unsupported `ftflgs.TRANDM` flag bit on zero-padded mock data and raises `NotImplementedError`. Test exception handling also needed broadening to catch that on top of `ValueError`.
+
+**Lesson:** the continuation prompt was a faithful description of what `gh run view --log-failed` showed at the surface. Surface symptoms map to diagnosis on a 4-of-7-categories basis; the other 3 needed inspection at the call site. Always verify against actual local test runs before trusting prompt-level diagnosis. Local Windows tests passed for jcamp because `jcamp_write` exists in 1.2.2 — but the call signature was always wrong, the error just hadn't been triggered by the round-trip tests on this machine yet (likely because `pytest tests/test_io_jcamp.py` was rarely run in the targeted-tests local discipline).
+
+PR #56: branch `ci/t-ci-1-hygiene-2026-05-08`, head `ee3389e`. CI matrix in flight at time of this entry. Out-of-scope codegen/CLI bugs (T-CI-2, T-CI-3, T-CI-4) deferred per plan.
+
+---
+
 ## 2026-05-07 late evening — CI on `main` has been red since 2025-10-27 (6 months, undetected)
 
 Discovered during PR #55 merge attempt. `gh pr view 55 --json mergeStateStatus,statusCheckRollup` showed UNSTABLE with 7 of 8 jobs failing (only "Build package" green; CodeRabbit success). Comparison with the most recent `main` CI runs showed the same red state on every run for the last 30+ commits, including the four PRs that the project documentation describes as "triple/quadruple cross-family-reviewed" merges (PR #51, PR #52, PR #53, PR #54). `gh run list --branch main --status success` returns an empty list — there has been **zero** successful CI run on `main` since the workflow was added.

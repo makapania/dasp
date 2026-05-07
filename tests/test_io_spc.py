@@ -20,30 +20,48 @@ def create_mock_spc_file(path, wavelengths, intensities):
     Note: This creates a simple binary file that mimics SPC structure.
     Real SPC files are more complex.
     """
-    # Write a simple binary file with SPC magic bytes
+    # Write SPC magic bytes plus enough padding to clear the 512-byte main-header
+    # buffer that spc-io reads first; the file still won't pass actual SPC parsing,
+    # but it gets us past the buffer-size guard so the parser raises a parse-level
+    # error instead of a buffer error.
     with open(path, 'wb') as f:
-        # SPC magic bytes 'MK' (0x4d4b) - not a real SPC file!
-        # This is just for testing import errors
         f.write(b'MK')
-        f.write(b'\x00' * 100)
+        f.write(b'\x00' * 600)
 
 
-def test_read_spc_file_import_error(tmp_path):
-    """Test that missing spc-io package raises helpful error."""
+def test_read_spc_file_handles_missing_or_invalid(tmp_path):
+    """Verify read_spc_file routes errors honestly: ImportError when spc-io is
+    missing, parser-level errors when fed an invalid file. Pins the contract
+    that every code path either succeeds with a valid result, raises a known
+    error, or surfaces a parser error mentioning a known SPC concept — never
+    silently returns garbage."""
     spc_path = tmp_path / "test.spc"
     create_mock_spc_file(spc_path, [], [])
 
-    # This should raise ImportError if spc-io not installed
-    # or succeed if it is installed
     try:
         result, metadata = read_spc_file(spc_path)
-        # If we get here, spc-io is installed - check result structure
+        # If spc-io accepted our mock somehow, the contract is structural
         assert isinstance(result, pd.DataFrame)
         assert isinstance(metadata, dict)
         assert 'file_format' in metadata
     except ImportError as e:
-        # Expected if spc-io not installed
         assert "spc-io" in str(e)
+    except (ValueError, NotImplementedError) as e:
+        # Pin the parse-error path: the exception must come from SPC parsing
+        # (not from some unrelated regression that happens to ValueError).
+        # PR #56 review (Codex MEDIUM #3): the prior `"spc"` substring was too
+        # loose — it matched on path fragments like ``unified.spc`` even when
+        # the wrong reader had been invoked. Restrict to parser-specific
+        # fragments emitted by spc-io's actual parse machinery.
+        msg = str(e).lower()
+        known_spc_parse_errors = (
+            "buffer size too small",   # spc-io low-level header check
+            "ftflgs", "trandm",         # spc-io flag-bit unsupported features
+            "supproted",                # spc-io misspelling preserved across versions
+        )
+        assert any(s in msg for s in known_spc_parse_errors), (
+            f"Unexpected error from SPC parser on mock data: {e!r}"
+        )
 
 
 def test_write_spc_file_import_error(tmp_path):
@@ -88,26 +106,42 @@ def test_read_spc_dir_with_existing_function(tmp_path):
         assert isinstance(metadata, dict)
     except (ImportError, ValueError) as e:
         # Expected if spc-io not installed or files are invalid
-        if "spc-io" in str(e) or "pyspectra" in str(e):
+        msg = str(e)
+        if "spc-io" in msg or "pyspectra" in msg:
             pytest.skip("spc-io not installed")
-        elif "Failed to read SPC files" in str(e):
-            # Mock files aren't valid SPC files
+        elif "Failed to read SPC files" in msg or "No valid SPC spectra" in msg:
+            # Mock files aren't valid SPC files; real parser rejects them
             pass
         else:
             raise
 
 
-def test_read_spc_via_unified_api(tmp_path):
-    """Test reading SPC through unified API."""
+def test_read_spc_via_unified_api(tmp_path, monkeypatch):
+    """Test that the unified read_spectra(format='auto') routes .spc files
+    through the SPC reader — not e.g. CSV or JCAMP.
+
+    PR #56 review (Codex MEDIUM #3): substring matching against the loose
+    fragment ``"spc"`` could pass even when the wrong reader had been
+    invoked (the path itself contains ``unified.spc``). Stronger contract:
+    monkeypatch ``read_spc_file`` with a sentinel exception and assert the
+    dispatcher reaches the sentinel — that proves routing, not message text.
+    """
     spc_path = tmp_path / "unified.spc"
     create_mock_spc_file(spc_path, [], [])
 
-    try:
-        # Auto-detect
-        result, metadata = read_spectra(spc_path, format='auto')
-        assert metadata['file_format'] == 'spc'
-    except (ImportError, ValueError):
-        pytest.skip("spc-io not installed or mock file invalid")
+    class _SpcRouted(Exception):
+        """Sentinel: raised iff the SPC reader is the one invoked."""
+
+    def _sentinel_reader(path, **kwargs):
+        raise _SpcRouted(f"spc reader invoked on {path}")
+
+    # Patch in spectral_predict.io — that is the dispatcher's local namespace.
+    monkeypatch.setattr(
+        "spectral_predict.io.read_spc_file", _sentinel_reader
+    )
+
+    with pytest.raises(_SpcRouted):
+        read_spectra(spc_path, format='auto')
 
 
 def test_write_spc_multiple_spectra_warning(tmp_path):

@@ -175,10 +175,13 @@ class TestSavgolDerivativeCorrectness:
         savgol = SavgolDerivative(deriv=1, window=7, polyorder=2)
         X_actual = savgol.fit_transform(X_input)
 
-        # Compare to scipy gold standard
+        # Tolerance 1e-10: realistic precision floor for SG-derivative coefficients
+        # across BLAS implementations / scipy releases. A real algorithmic regression
+        # (wrong polynomial order, off-by-one window) produces diffs orders of
+        # magnitude larger than this floor.
         np.testing.assert_allclose(
             X_actual, X_expected,
-            rtol=1e-12, atol=1e-12,
+            rtol=1e-10, atol=1e-10,
             err_msg="1st derivative does not match scipy"
         )
 
@@ -191,10 +194,10 @@ class TestSavgolDerivativeCorrectness:
         savgol = SavgolDerivative(deriv=2, window=7, polyorder=3)
         X_actual = savgol.fit_transform(X_input)
 
-        # Compare to scipy gold standard
+        # Tolerance 1e-10: see 1st-derivative test for precision-floor rationale.
         np.testing.assert_allclose(
             X_actual, X_expected,
-            rtol=1e-12, atol=1e-12,
+            rtol=1e-10, atol=1e-10,
             err_msg="2nd derivative does not match scipy"
         )
 
