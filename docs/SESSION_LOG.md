@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 — PR #54 follow-ups (items 1-6)
+
+Items 1-2 (test additions) and 3-6 (comment polish + black pass) from `docs/CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`.
+
+**Test 1 — SQLite resume-rehydration round-trip** (`TestSQLiteResumeRehydrationTest`): verified that `_freeze_for_fingerprint` sentinel strings (`__nan_sentinel__`, `__pos_inf_sentinel__`, `__neg_inf_sentinel__`) survive `repr → SQLite storage → optuna.load_study → ast.literal_eval` round-trip. Without the sentinels, `ast.literal_eval(repr(float('nan')))` raises SyntaxError, silently dropping that fingerprint from the dedup set on resume. Four fingerprints (inf, -inf, nan, normal) all round-trip correctly.
+
+**Test 2 — End-to-end `run_unified_bayesian(enable_autoscale=True)`** (`TestBayesianEndToEndAutoscale`): T-44's autoscale plumbing had unit-level coverage (`suggest_preprocessing` explored both values) and TPE end-to-end coverage, but the Bayesian end-to-end path was untested — a regression breaking the `bayes_enable_autoscale → apply_autoscale exploration` wiring would slip through. Two tests: `enable_autoscale=True` asserts the `Autoscale` column contains both True and False; `enable_autoscale=False` asserts all values are False.
+
+**Comment polish:** "dedup pruning bursts" comment reworded to describe actual penalty paths; reviewer-pseudonym citations (DeepSeek STRONG-2, Kimi BLOCKER closure) dropped per project rule — kept rationale, lost attribution. Stale `search.py` line-number refs (6 instances across `unified_bayesian.py` and `bayesian_utils.py`) replaced with function-name refs or removed; `c395317` short SHA removed.
+
+**`black` pass:** `search.py` (7.4K lines) and `spectral_predict_gui_optimized.py` (68K lines) had never been fully formatted despite `black` being configured in `pyproject.toml`. First full pass produced ~27K lines of whitespace-only changes. Inert but visually consistent.
+
+**Remaining from the continuation prompt:** Item 7 (delete legacy `run_bayesian_search` + `bayesian_utils` machinery, ~1-2 hrs) and Item 8 (eight methodology/behavior changes needing user approval).
+
+---
+
 ## 2026-05-06 late evening — Resume-rehydrate cache pollution: producer-side stamp beats consumer-side filter
 
 PR #54 review surfaced a silent failure in `_rehydrate_seen_fingerprints`: trials that completed via the broad-except `1e10` penalty path (transient OOM, `LinAlgError`, GPU contention at `unified_bayesian.py:~2006`) had their `fingerprint` user_attr stamped pre-fit, so resume cached the failure ghost forever — user could never retry transient errors.
@@ -816,6 +832,16 @@ T-41 took 8 review passes before merge. Each pass caught real bugs the prior pas
 5. Multi-model Bayesian runs share one SQLite file (one `storage_url` per `start_run`, multiple models per run). File-level cleanup (`Path.unlink`) on a per-model failure can nuke prior models' trials. Use study-scoped operations (`optuna.delete_study`).
 
 **For future ticket reviews:** dispatch the cross-family panel ONCE per significant change (post-implementation, post-fix-of-fixes); don't trust a single family or a single point in time. The pr-review-toolkit parallel-5 fan-out was the highest-yield single review pass.
+
+---
+
+## 2026-05-06 — `compute_validation_metrics_for_top_models` requires int-encoded class labels for PLS-DA
+
+While building `tools/autoscale_bayesian_compare.py` to A/B-test `enable_autoscale=True` vs `False` on BoneCollagen, hit a non-obvious crash: passing raw string `y_train`/`y_val` (`'Low'`/`'Medium'`/`'High'`) into `compute_validation_metrics_for_top_models(task_type='classification')` makes the rebuilt PLS-DA pipeline fail inside `PLS.fit()` with `ValueError: could not convert string to float: 'Medium'`. The exception is **caught and logged inline** as `[Warning] Failed to compute validation for model 1: ...` — leaves `val_Accuracy`, `val_F1` etc. as NaN, easy to miss in a sweep.
+
+The Bayesian search itself encodes labels internally (the per-trial pipeline uses an internal `LabelEncoder`), so `run_unified_bayesian` accepts string labels fine. The validation rebuild path does not. **Fix for analysis scripts:** call `LabelEncoder().fit_transform(y)` once on the full label vector before splitting, so train and external use the same integer encoding.
+
+This is not a bug in the validation rebuild per se — it's a contract mismatch worth knowing for any future tooling that compares Bayesian arms via the canonical rebuild path.
 
 ---
 
