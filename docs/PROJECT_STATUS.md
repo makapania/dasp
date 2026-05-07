@@ -10,7 +10,9 @@
 >
 > Two cross-family review cycles ran on the cumulative diff. Codex (cross-file dispatcher angle) caught: `ga_genes` CSV column collision with the GUI Refine tab's wavelength-index field; `phase2_halt_reason` dying before result CSV; multistart `score`/halt-reason not propagated. DeepSeek V4 Pro Max (architectural correctness angle) caught: one-class rescore degrading silently without LightGBM; per-study diversity exiling configs from the multistart union; broad `except Exception` mixing objectives across seeds. Six fixes shipped + three Codex-verified residuals closed.
 >
-> 133/133 tests passing across `test_ga_preprocessing` (49), `test_phase2_rescore` (37), `test_tpe_multistart` (12), `test_t44_autoscale_wiring`, `test_bayesian_dedup`, `test_cv_pls_clamp`.
+> **Cycle 3 (2026-05-07 evening, post-power-outage)** — third Codex pass on cumulative diff returned NEEDS_FIX with one MEDIUM: backend `run_one_class_search` whitelist still accepted UVE-family varsel (`uve`, `uve_spa`, `uve_cars`, `uve_cars_tree`, `uve_cars_spa`) and `apply_uve_prefilter=True` even though the GUI clears them per CLAUDE.md:66 (UVE on `y_oc` is a discrimination method, not one-class). Fixed in `74aa46b`: dropped UVE family from `implemented_oc_varsel`, added top-of-function coercion for `apply_uve_prefilter`, regression test at `tests/test_one_class_varsel_filtering.py` (3 cases — UVE filter, iPLS filter regression pin, prefilter coercion). All other cumulative-diff dispatcher plumbing verified clean by Codex.
+>
+> 136/136 tests passing across the original `test_ga_preprocessing` (49), `test_phase2_rescore` (37), `test_tpe_multistart` (12), `test_t44_autoscale_wiring`, `test_bayesian_dedup`, `test_cv_pls_clamp`, plus the 3 new `test_one_class_varsel_filtering` cases.
 >
 > ---
 >
