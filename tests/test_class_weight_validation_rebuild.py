@@ -19,7 +19,7 @@ without re-applying the imbalance discriminator. Pre-fix:
   ``_rebuild_model_from_row`` reconstructs LR without ``class_weight``.
 
 Reached when ``validation_count > 0`` in ``run_search`` (Grid) or
-``run_bayesian_search`` (Bayesian) on every classification job with
+``run_unified_bayesian`` (Bayesian) on every classification job with
 ``imbalance_method='class_weight'`` (or ``'auto'`` resolving to it). The user
 sees wrong ``val_*`` columns in the Results panel; the silent shape means
 the user has no warning that the validation model was unweighted.
