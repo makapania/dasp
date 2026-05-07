@@ -359,6 +359,15 @@ def test_cli_main_calls_setup_app_logger(fresh_logging, monkeypatch):
     that could raise (argparse error, missing file, etc.). Use a sentinel
     sys.argv that triggers --version exit so we don't actually run a
     full pipeline — just need to confirm the import-and-call happened."""
+    # cli.main imports interactive_gui which calls matplotlib.use('TkAgg')
+    # at module-import time — fails on headless Linux even with MPLBACKEND=Agg
+    # (which only sets the default backend, not an explicit .use() override).
+    # Skip on headless Linux; Windows runners cover this path.
+    import os
+    import platform
+    if platform.system() == "Linux" and not os.environ.get("DISPLAY"):
+        pytest.skip("cli.main → interactive_gui requires a display for TkAgg")
+
     rl, _, _ = fresh_logging
 
     called: list[bool] = []
