@@ -175,9 +175,10 @@ class TestSavgolDerivativeCorrectness:
         savgol = SavgolDerivative(deriv=1, window=7, polyorder=2)
         X_actual = savgol.fit_transform(X_input)
 
-        # Tolerance 1e-10: SG-derivative coefficients accumulate ~3.86e-12 FP drift
-        # across scipy versions on Linux; 1e-10 keeps a 25× safety margin while
-        # staying above the realistic precision floor for cross-platform CI.
+        # Tolerance 1e-10: realistic precision floor for SG-derivative coefficients
+        # across BLAS implementations / scipy releases. A real algorithmic regression
+        # (wrong polynomial order, off-by-one window) produces diffs orders of
+        # magnitude larger than this floor.
         np.testing.assert_allclose(
             X_actual, X_expected,
             rtol=1e-10, atol=1e-10,
@@ -193,7 +194,7 @@ class TestSavgolDerivativeCorrectness:
         savgol = SavgolDerivative(deriv=2, window=7, polyorder=3)
         X_actual = savgol.fit_transform(X_input)
 
-        # Tolerance 1e-10: see 1st-derivative test for cross-platform scipy drift rationale.
+        # Tolerance 1e-10: see 1st-derivative test for precision-floor rationale.
         np.testing.assert_allclose(
             X_actual, X_expected,
             rtol=1e-10, atol=1e-10,

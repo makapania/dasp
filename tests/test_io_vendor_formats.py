@@ -306,19 +306,19 @@ def test_agilent_file_detection():
 
 
 def test_agilent_not_implemented():
-    """Test that Agilent reader raises NotImplementedError."""
-    # Even if package is installed, reader is not fully implemented
-    agilent_path = Path("test.seq")
+    """Test that Agilent reader raises NotImplementedError when package is
+    available. If the package isn't installed we can't verify the contract,
+    so skip rather than silently passing on ImportError (which would mask a
+    future regression that converts the not-implemented marker into a partial
+    implementation that now raises ImportError from a sub-dependency)."""
+    import importlib.util
 
-    try:
+    if importlib.util.find_spec("agilent_ir_formats") is None:
+        pytest.skip("agilent-ir-formats not installed")
+
+    agilent_path = Path("test.seq")
+    with pytest.raises(NotImplementedError, match="not yet fully implemented"):
         read_agilent_file(agilent_path)
-        pytest.fail("Should raise NotImplementedError")
-    except ImportError:
-        # Package not installed
-        pass
-    except NotImplementedError as e:
-        # Expected - reader not implemented
-        assert "not yet fully implemented" in str(e)
 
 
 # ============================================================================

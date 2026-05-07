@@ -908,9 +908,12 @@ class TestClassifierIntegration:
         assert train_acc > 0.7, f"Train accuracy = {train_acc:.3f}"
 
         # Test set should be close to train (good generalization). Threshold 0.3:
-        # the MLP backbone hits its lbfgs iteration cap on this small dataset, which
-        # leaves train-test gaps in the 0.15-0.25 range across sklearn versions / BLAS
-        # builds. 0.3 still detects egregious overfitting while absorbing platform noise.
+        # the MLP backbone uses solver='lbfgs' with max_iter=100 (see neural_boosted.py).
+        # lbfgs ignores early_stopping (sklearn only honors it for sgd/adam), so the
+        # train-fit runs to the iteration cap and produces a tighter train accuracy
+        # than test. Observed gap on this dataset: ~0.17. Threshold 0.3 still catches
+        # egregious overfitting (>30 percentage points) without false-flagging the
+        # structural train-test asymmetry caused by the lbfgs+small-data combination.
         assert abs(train_acc - test_acc) < 0.3, "Large train-test gap suggests overfitting"
 
     def test_roc_auc_score(self):

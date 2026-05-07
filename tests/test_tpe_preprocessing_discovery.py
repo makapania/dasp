@@ -264,18 +264,27 @@ class TestEdgeCases:
         calls = []
 
         def cb(current, total, message):
-            calls.append((current, total))
+            calls.append((current, total, message))
 
         run_tpe_preprocessing_discovery(
             X, y, task_type='regression',
             n_trials=10, n_startup_trials=5, n_top=3,
             progress_callback=cb,
         )
-        # Contract: callback fires at least once per trial. Production code also
-        # fires for the top-ranking header + each top config (so total > n_trials);
-        # the test only pins the floor and the final-state callback.
-        assert len(calls) >= 10
-        assert calls[-1] == (10, 10)
+        # Contract pins (the per-trial floor must be >= n_trials, and the
+        # per-trial messages MUST be present — a regression that drops the
+        # in-loop callback would still satisfy a count-only floor because of
+        # the header + top-config emissions, which is exactly the bug the
+        # original count-only assert was vulnerable to):
+        n_trials = 10
+        per_trial_calls = [c for c in calls if c[2].startswith("TPE trial")]
+        assert len(per_trial_calls) >= n_trials, (
+            f"per-trial callback fired {len(per_trial_calls)} times; "
+            f"expected at least {n_trials}"
+        )
+        assert len(calls) >= n_trials  # floor still holds
+        # Final callback is the last top-config emission with (n_trials, n_trials)
+        assert calls[-1][:2] == (n_trials, n_trials)
 
 
 # =============================================================================

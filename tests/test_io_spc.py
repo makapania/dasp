@@ -29,28 +29,37 @@ def create_mock_spc_file(path, wavelengths, intensities):
         f.write(b'\x00' * 600)
 
 
-def test_read_spc_file_import_error(tmp_path):
-    """Test that missing spc-io package raises helpful error."""
+def test_read_spc_file_handles_missing_or_invalid(tmp_path):
+    """Verify read_spc_file routes errors honestly: ImportError when spc-io is
+    missing, parser-level errors when fed an invalid file. Pins the contract
+    that every code path either succeeds with a valid result, raises a known
+    error, or surfaces a parser error mentioning a known SPC concept — never
+    silently returns garbage."""
     spc_path = tmp_path / "test.spc"
     create_mock_spc_file(spc_path, [], [])
 
-    # This should raise ImportError if spc-io not installed,
-    # or a parse-level error if installed but fed our non-real mock.
     try:
         result, metadata = read_spc_file(spc_path)
-        # If we get here, spc-io is installed and somehow accepted the mock —
-        # check result structure
+        # If spc-io accepted our mock somehow, the contract is structural
         assert isinstance(result, pd.DataFrame)
         assert isinstance(metadata, dict)
         assert 'file_format' in metadata
     except ImportError as e:
-        # Expected if spc-io not installed
         assert "spc-io" in str(e)
-    except (ValueError, NotImplementedError):
-        # Expected when spc-io is installed: our mock isn't a real SPC file,
-        # so parsing fails (ValueError on header/buffer issues, NotImplementedError
-        # when zero-padding happens to set a parser flag for an unsupported feature).
-        pass
+    except (ValueError, NotImplementedError) as e:
+        # Pin the parse-error path: the exception must come from SPC parsing
+        # (not from some unrelated regression that happens to ValueError).
+        # Known message fragments from spc-io across versions / mock-flag bits:
+        msg = str(e).lower()
+        known_spc_parse_errors = (
+            "buffer size too small",   # spc-io low-level header check
+            "ftflgs", "trandm",         # spc-io flag-bit unsupported features
+            "supproted",                # spc-io misspelling preserved across versions
+            "spc",                       # generic SPC-routed error message
+        )
+        assert any(s in msg for s in known_spc_parse_errors), (
+            f"Unexpected error from SPC parser on mock data: {e!r}"
+        )
 
 
 def test_write_spc_file_import_error(tmp_path):
@@ -106,16 +115,33 @@ def test_read_spc_dir_with_existing_function(tmp_path):
 
 
 def test_read_spc_via_unified_api(tmp_path):
-    """Test reading SPC through unified API."""
+    """Test that the unified read_spectra(format='auto') routes .spc files
+    through the SPC reader — not e.g. CSV or JCAMP — by inspecting either the
+    success metadata or the failure path's error origin."""
     spc_path = tmp_path / "unified.spc"
     create_mock_spc_file(spc_path, [], [])
 
     try:
-        # Auto-detect
         result, metadata = read_spectra(spc_path, format='auto')
+        # On success, format must be 'spc' — proves auto-detect routed correctly
         assert metadata['file_format'] == 'spc'
-    except (ImportError, ValueError, NotImplementedError):
-        pytest.skip("spc-io not installed or mock file invalid")
+    except ImportError as e:
+        # spc-io missing — skip rather than fail, but pin the message origin
+        if "spc-io" in str(e):
+            pytest.skip("spc-io not installed")
+        raise
+    except (ValueError, NotImplementedError) as e:
+        # Mock isn't real SPC; parse fails. Verify the exception comes from SPC
+        # parsing (not e.g. a CSV reader misroute) by checking known message
+        # fragments. If the SPC reader regresses such that auto-detect routes
+        # to a different reader, we'd get a foreign error message and fail here.
+        msg = str(e).lower()
+        known_spc_parse_errors = (
+            "buffer size too small", "ftflgs", "trandm", "supproted", "spc",
+        )
+        assert any(s in msg for s in known_spc_parse_errors), (
+            f"format='auto' on .spc file routed to wrong reader: {e!r}"
+        )
 
 
 def test_write_spc_multiple_spectra_warning(tmp_path):
