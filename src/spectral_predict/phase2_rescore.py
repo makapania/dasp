@@ -98,16 +98,27 @@ def _select_diverse(
     Otherwise: walk the sorted list selecting one candidate per diversity
     key, then fill remaining slots with best-overall candidates not yet
     selected.
+
+    Candidates with non-finite ``mean`` (all evaluation seeds failed —
+    ``_aggregate_scores`` returns the ``(-inf, +inf, 0)`` sentinel) are
+    filtered out BEFORE selection. Without this guard, when a pool has
+    fewer than ``top_n`` valid candidates, the second-pass fill could
+    promote all-failing configs into the winners list with ``mean=-inf``
+    scores — those would then propagate into result CSV rows as if they
+    were legitimate top-N picks. Better to return fewer-than-``top_n``
+    winners than to surface invalid scores.
     """
+    valid_rescored = [r for r in rescored if math.isfinite(r[1])]
+
     if diversity_key_fn is None:
-        return [item[0] for item in rescored[:top_n]]
+        return [item[0] for item in valid_rescored[:top_n]]
 
     selected: list[Any] = []
     selected_dkeys: set = set()
     selected_keys: set = set()  # uniqueness-by-key_fn for second pass
 
     # First pass: one per diversity key
-    for cand, _mean, _std, ckey in rescored:
+    for cand, _mean, _std, ckey in valid_rescored:
         if len(selected) >= top_n:
             break
         dkey = diversity_key_fn(cand)
@@ -118,7 +129,7 @@ def _select_diverse(
 
     # Second pass: fill remaining slots with best-overall not already selected
     if len(selected) < top_n:
-        for cand, _mean, _std, ckey in rescored:
+        for cand, _mean, _std, ckey in valid_rescored:
             if len(selected) >= top_n:
                 break
             if ckey not in selected_keys:
@@ -148,7 +159,6 @@ def phase2_adaptive_rescore(
     key_fn: Callable[[Any], tuple],
     score_direction: Literal["maximize", "minimize"],
     *,
-    initial_pool_size: int,
     pool_size_progression: list[int],
     max_pool_multiplier: int = 8,
     top_n: int,

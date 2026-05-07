@@ -378,8 +378,17 @@ def evaluate_fitness(
             # Default: PLS
             return _evaluate_pls(X_preproc, y, cv, n_comp, task_type)
 
-    except Exception:
-        # Any error = very poor fitness
+    except Exception as exc:
+        # Any error = very poor fitness. Log once per process so a
+        # systematically-broken config (e.g. malformed chromosome a future
+        # refactor introduces) doesn't silently disappear from rankings —
+        # silent-failure-hunter S1 from PR #57 review.
+        import logging
+        logging.getLogger(__name__).debug(
+            "evaluate_fitness returning -inf (config %s: %s)",
+            getattr(exc, '__class__', type(exc)).__name__,
+            exc,
+        )
         return -np.inf
 
 
@@ -972,7 +981,8 @@ def exhaustive_search(
     # 2-gene chromosomes for bit-exact backward compatibility with pre-Phase-3
     # callers and saved-CSV ga_genes columns. When apply_autoscale=True we
     # emit 3-gene chromosomes; chromosome_to_transform / get_config_description
-    # / search.py:2120-2151 all decode either shape via _decode_autoscale_gene.
+    # / search.py's preprocess_configs builder all decode either shape via
+    # _decode_autoscale_gene (centralized in this module).
     if apply_autoscale:
         all_genes = [
             np.array([p, w, a], dtype=np.int32)
@@ -1093,7 +1103,6 @@ def exhaustive_search(
             eval_fn=_phase2_eval_fn,
             key_fn=_phase2_key_fn,
             score_direction="maximize",  # evaluate_fitness returns -RMSE / +acc
-            initial_pool_size=3 * top_n,
             pool_size_progression=progression,
             max_pool_multiplier=phase2_max_pool_multiplier,
             top_n=top_n,

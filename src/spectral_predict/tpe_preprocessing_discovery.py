@@ -896,7 +896,6 @@ def run_tpe_multistart_preprocessing_discovery(
         eval_fn=_eval_fn,
         key_fn=_multistart_config_key,
         score_direction="maximize",
-        initial_pool_size=len(union),
         pool_size_progression=[len(union)],  # degenerate: single iteration
         max_pool_multiplier=999,  # cap effectively disabled in degenerate mode
         top_n=n_top,

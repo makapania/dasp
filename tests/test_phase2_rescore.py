@@ -180,7 +180,6 @@ class TestReturnsTopNWithCorrectMetadata:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=15,
             pool_size_progression=[15],
             top_n=5,
             n_seeds=3,
@@ -207,7 +206,6 @@ class TestHaltOnConverged:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=15,
             pool_size_progression=[15, 25, 40],
             top_n=5,
             n_seeds=3,
@@ -227,7 +225,6 @@ class TestHaltOnConverged:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=15,
             pool_size_progression=[15, 25, 40],
             top_n=5,
             n_seeds=3,
@@ -254,7 +251,6 @@ class TestHaltOnCap:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=5,
             pool_size_progression=[5, 10, 20, 40],
             max_pool_multiplier=8,  # cap = 8 * 5 = 40
             top_n=5,
@@ -279,7 +275,6 @@ class TestHaltOnCap:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=5,
             pool_size_progression=[5, 10, 20, 40],
             max_pool_multiplier=8,
             top_n=5,
@@ -304,7 +299,6 @@ class TestJaccardThresholdRespected:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=15,
             pool_size_progression=[15, 25, 40],
             top_n=5,
             n_seeds=3,
@@ -337,7 +331,6 @@ class TestTieBreakingByStdThenKey:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=2,
             pool_size_progression=[2],
             top_n=2,
             n_seeds=3,
@@ -363,7 +356,6 @@ class TestTieBreakingByStdThenKey:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=2,
             pool_size_progression=[2],
             top_n=2,
             n_seeds=3,
@@ -396,7 +388,6 @@ class TestDiversityAppliedAtEnd:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=5,
             pool_size_progression=[5],
             top_n=3,
             n_seeds=3,
@@ -423,7 +414,6 @@ class TestDegenerateMode:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=10,
             pool_size_progression=[10],
             top_n=3,
             n_seeds=3,
@@ -445,7 +435,6 @@ class TestDegenerateMode:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=10,
             pool_size_progression=[10],
             top_n=3,
             n_seeds=3,
@@ -472,7 +461,6 @@ class TestScoreDirectionMinimize:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="minimize",
-            initial_pool_size=3,
             pool_size_progression=[3],
             top_n=2,
             n_seeds=3,
@@ -480,19 +468,18 @@ class TestScoreDirectionMinimize:
 
         assert [c["id"] for c in result] == [1, 2]
 
-    def test_minimize_all_failing_candidate_ranks_last(self):
-        # Codex STRONG regression pin: when ALL seeds fail for a candidate
-        # under score_direction="minimize", _aggregate_scores returns
-        # (mean=-inf, std=+inf, n_valid=0) regardless of direction. _rank_key
-        # used to sort that as best for minimize (raw mean ascending).
-        # Now non-finite means always rank to bottom.
+    def test_minimize_all_failing_candidate_filtered_out(self):
+        # Closes silent-failure S2 from PR #57 review: candidates whose
+        # every seed crashed used to be ranked last (mean=-inf sentinel
+        # routed via _rank_key to the tail). The fix in `_select_diverse`
+        # filters non-finite-mean candidates BEFORE selection, so the
+        # winners list never includes scores users would interpret as
+        # legitimate. Result: top-N may be shorter than top_n if too many
+        # candidates failed.
         candidates = [{"id": 1}, {"id": 2}, {"id": 3}]
         scores_by_pair = {
-            # id=1: valid scores around 1.0
             (1, 42): 1.0, (1, 0): 1.0, (1, 7): 1.0,
-            # id=2: valid scores around 0.5 (lowest = best for minimize)
             (2, 42): 0.5, (2, 0): 0.5, (2, 7): 0.5,
-            # id=3: all seeds fail (handled below)
         }
 
         def eval_fn(cand, seed):
@@ -505,19 +492,17 @@ class TestScoreDirectionMinimize:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="minimize",
-            initial_pool_size=3,
             pool_size_progression=[3],
             top_n=3,
             n_seeds=3,
+            diversity_key_fn=lambda c: ("group",),
         )
 
-        # Order should be id=2 (best), id=1, id=3 (failed -> last)
-        assert [c["id"] for c in result] == [2, 1, 3]
+        # id=3 (all-failing) filtered. id=2 best by minimize, id=1 second.
+        assert [c["id"] for c in result] == [2, 1]
 
-    def test_maximize_all_failing_candidate_ranks_last(self):
-        # Companion test: same scenario for maximize. Was already correct
-        # before the fix (since -inf negated to +inf), but pinning so a
-        # future refactor doesn't re-introduce direction-asymmetric handling.
+    def test_maximize_all_failing_candidate_filtered_out(self):
+        # Companion test: maximize direction. Same filtering applies.
         candidates = [{"id": 1}, {"id": 2}, {"id": 3}]
 
         def eval_fn(cand, seed):
@@ -530,14 +515,36 @@ class TestScoreDirectionMinimize:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=3,
             pool_size_progression=[3],
             top_n=3,
             n_seeds=3,
+            diversity_key_fn=lambda c: ("group",),
         )
 
-        # Order: id=1 (mean=1.0), id=2 (mean=0.5), id=3 (failed -> last)
-        assert [c["id"] for c in result] == [1, 2, 3]
+        # id=3 filtered. id=1 (mean=1.0), id=2 (mean=0.5).
+        assert [c["id"] for c in result] == [1, 2]
+
+    def test_no_diversity_path_also_filters_failures(self):
+        # The diversity_key_fn=None path also filters non-finite means.
+        candidates = [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        def eval_fn(cand, seed):
+            if cand["id"] == 2:
+                raise RuntimeError("fail")
+            return 1.0 if cand["id"] == 1 else 0.5
+
+        result, _meta = phase2_adaptive_rescore(
+            candidates=candidates,
+            eval_fn=eval_fn,
+            key_fn=_key,
+            score_direction="maximize",
+            pool_size_progression=[3],
+            top_n=3,
+            n_seeds=2,
+        )
+
+        # id=2 (failing) filtered out; id=1 and id=3 survive
+        assert {c["id"] for c in result} == {1, 3}
 
 
 # =============================================================================
@@ -552,7 +559,6 @@ class TestEdgeCases:
             eval_fn=lambda c, s: 0.0,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=10,
             pool_size_progression=[10],
             top_n=3,
             n_seeds=3,
@@ -575,7 +581,6 @@ class TestEdgeCases:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=3,
             pool_size_progression=[3],
             top_n=2,
             n_seeds=3,
@@ -595,8 +600,7 @@ class TestEdgeCases:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=100,           # larger than 5 available
-            pool_size_progression=[100],
+            pool_size_progression=[100],     # larger than 5 candidates available
             top_n=3,
             n_seeds=3,
             max_pool_multiplier=1000,        # don't let cap interfere
@@ -612,7 +616,6 @@ class TestEdgeCases:
                 eval_fn=lambda c, s: 0.0,
                 key_fn=_key,
                 score_direction="bogus",  # type: ignore[arg-type]
-                initial_pool_size=1,
                 pool_size_progression=[1],
                 top_n=1,
                 n_seeds=1,
@@ -625,7 +628,6 @@ class TestEdgeCases:
                 eval_fn=lambda c, s: 0.0,
                 key_fn=_key,
                 score_direction="maximize",
-                initial_pool_size=1,
                 pool_size_progression=[1],
                 top_n=1,
                 n_seeds=99,  # way more than DEFAULT_SEEDS has
@@ -643,7 +645,6 @@ class TestEdgeCases:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=1,
             pool_size_progression=[1],
             top_n=1,
             n_seeds=3,
@@ -664,7 +665,6 @@ class TestEdgeCases:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=3,
             pool_size_progression=[3],
             top_n=2,
             n_seeds=2,
@@ -699,7 +699,6 @@ class TestCaching:
             eval_fn=eval_fn,
             key_fn=_key,
             score_direction="maximize",
-            initial_pool_size=10,
             pool_size_progression=[10, 20, 40],
             top_n=5,
             n_seeds=3,

@@ -1878,11 +1878,11 @@ def run_search(
                     }
                 )
 
-        # Phase 4 (2026-05-06): when tpe_multistart=True, run M independent
-        # TPE studies and rescore the union with multi-seed CV. Closes the
-        # TPE-drift problem documented in tools/bayesian_topk_stability.py.
-        # Both call sites (regression/classification here and one_class at
-        # :5675-5701) gate on the same flag.
+        # When tpe_multistart=True, run M independent TPE studies and rescore
+        # the union with multi-seed CV. Closes the TPE-drift problem documented
+        # in tools/bayesian_topk_stability.py. Both call sites
+        # (regression/classification here and the one_class call site in
+        # run_one_class_search) gate on the same flag.
         if tpe_multistart:
             discovered_configs = run_tpe_multistart_preprocessing_discovery(
                 X.values,
@@ -5160,8 +5160,9 @@ def _run_single_config(
     # that name collides with the GUI Refine tab's wavelength-index field of the
     # same name (which comes from GA-PLS variable selection). Renaming the
     # preprocessing-chromosome column to `preprocess_chromosome` removes the
-    # ambiguity. The reader at search.py:768 falls back to `ga_genes` so old
-    # result CSVs continue to rebuild correctly.
+    # ambiguity. The chromosome-rebuild reader (in
+    # compute_validation_metrics_for_top_models) falls back to `ga_genes` so
+    # old result CSVs continue to rebuild correctly.
     if (
         "preprocess_chromosome" in preprocess_cfg
         and preprocess_cfg["preprocess_chromosome"] is not None
@@ -5763,8 +5764,9 @@ def run_one_class_search(
                     }
                 )
 
-        # Phase 4 (2026-05-06): one_class call site mirrors regression /
-        # classification at :1854. Closes Codex N2 (sister-site coverage).
+        # one_class call site mirrors the regression/classification TPE call
+        # site (search for `tpe_multistart` to find both). Same gating flag,
+        # same wrapper dispatch.
         if tpe_multistart:
             discovered = run_tpe_multistart_preprocessing_discovery(
                 X_np,
@@ -6757,7 +6759,7 @@ def run_one_class_search(
                                 "oc_score_stats": cv_result.get("oc_score_stats"),
                                 "tpe_score": preprocess_cfg.get("tpe_score"),
                                 # Phase 4 propagation — second one_class result
-                                # site (mirror of the first at search.py:6172).
+                                # site (mirror of the first oc-result-dict).
                                 "tpe_multistart_halt_reason": preprocess_cfg.get(
                                     "tpe_multistart_halt_reason"
                                 ),
