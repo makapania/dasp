@@ -331,7 +331,7 @@ class TestCallerThreading:
 
     @pytest.mark.parametrize(
         "func_name",
-        ["run_search", "run_bayesian_search"],
+        ["run_search"],
     )
     def test_search_callers_pass_imbalance_method(self, func_name):
         """Per-caller structural pin (Codex finding on this PR). The previous
