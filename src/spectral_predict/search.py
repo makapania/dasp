@@ -764,8 +764,17 @@ def compute_validation_metrics_for_top_models(
             window = row.get("Window", None)
             poly = row.get("Poly", None)
 
-            # Check for GA preprocessing genes (needs reconstruction)
-            ga_genes_str = row.get("ga_genes", None)
+            # Check for exhaustive-preprocessing chromosome (needs reconstruction).
+            # Column rename 2026-05-06: this used to be `ga_genes`, but the GUI's
+            # Refine tab uses `ga_genes` for GA-PLS / GA-LightGBM wavelength
+            # selection (an entirely different artifact). Reading
+            # preprocessing-chromosome data through the wavelength-index path
+            # produced silent garbage (X[:, [3,5,1]] instead of a transform).
+            # Read `preprocess_chromosome` first; fall back to `ga_genes` for
+            # result CSVs written before the rename.
+            ga_genes_str = row.get("preprocess_chromosome", None)
+            if ga_genes_str is None:
+                ga_genes_str = row.get("ga_genes", None)
             use_ga_transform = False
             ga_transform = None
             ga_genes = None
@@ -2194,7 +2203,12 @@ def run_search(
                         "ga_transform": cfg.get("transform"),
                         "ga_config": cfg.get("config"),
                         "ga_model_type": model_name,  # Track which model this was optimized for
-                        "ga_genes": genes,
+                        # Renamed from "ga_genes" 2026-05-06: collision with the
+                        # GUI Refine tab's wavelength-index field of the same
+                        # name. preprocess_chromosome is the dasp-internal name
+                        # for [preproc_idx, window_idx] (legacy 2-gene) or
+                        # [preproc_idx, window_idx, autoscale] (Phase 3).
+                        "preprocess_chromosome": genes,
                     }
                 )
 
@@ -5129,9 +5143,20 @@ def _run_single_config(
         "random_state": 42,  # CV random state (always 42 in this codebase)
     }
 
-    # Store GA preprocessing genes if present (for Model Development reconstruction)
-    if "ga_genes" in preprocess_cfg and preprocess_cfg["ga_genes"] is not None:
-        result["ga_genes"] = preprocess_cfg["ga_genes"].tolist()  # Serialize numpy array
+    # Store exhaustive-preprocessing chromosome if present (for Model Development
+    # reconstruction). Column renamed 2026-05-06: this used to be `ga_genes`, but
+    # that name collides with the GUI Refine tab's wavelength-index field of the
+    # same name (which comes from GA-PLS variable selection). Renaming the
+    # preprocessing-chromosome column to `preprocess_chromosome` removes the
+    # ambiguity. The reader at search.py:768 falls back to `ga_genes` so old
+    # result CSVs continue to rebuild correctly.
+    if (
+        "preprocess_chromosome" in preprocess_cfg
+        and preprocess_cfg["preprocess_chromosome"] is not None
+    ):
+        result["preprocess_chromosome"] = preprocess_cfg[
+            "preprocess_chromosome"
+        ].tolist()  # Serialize numpy array
         result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
 
