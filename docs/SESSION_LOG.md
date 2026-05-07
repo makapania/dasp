@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 — OC round-2: false-positive BLOCKERs from cross-family review + EE builder None-sort non-issue
+
+**Context.** PR feat/oc-hyperparams-round2 adds LOF metric/contamination, IF max_samples/n_estimators, EE support_fraction to Tab 4C. Cross-family review (Codex + DeepSeek V4 Pro Max + Kimi K2.6) ran on commit 6180749.
+
+**DeepSeek false-positive BLOCKER (Q5 — `_oc_extract_defaults` sort crash).**
+DeepSeek claimed that `sorted(vals, key=lambda x: (isinstance(x, str), x))` would raise `TypeError` when `vals` contains `None` alongside floats. Reasoning: `(False, None) < (False, 0.5)` tries `None < 0.5`. This reasoning is correct *in principle* but the code never hits it: `_oc_extract_defaults` uses a `set()` that only adds values when the key IS present in an entry. EE entries without `support_fraction` key simply don't contribute to the set. `None` is added separately AFTER the sort, via `([None] if has_implicit_none else []) + explicit`. Verified: `_oc_extract_defaults(ee_grid, 'support_fraction')` returns `[0.5, 0.75]` (no None). False positive — no fix needed.
+
+**Kimi false-positive BLOCKER (max_samples crash).**
+Kimi claimed `IsolationForest(max_samples=256)` raises `ValueError` when `n_samples < 256`. Verified: sklearn emits a UserWarning and automatically falls back to `max_samples = n_samples`. Not a crash. The test suite already shows this warning harmlessly on small synthetic datasets. No fix needed.
+
+**Codex: CLEAN.** No BLOCKER or MEDIUM findings. All 7 checklist items verified.
+
+**MEDIUMs all by-design.** DeepSeek Q1 (curated grid expansion IF:5→9, EE:3→5, LOF:3→9), Q2 (IF Cartesian explosion to 54 when override triggered), Q6 (EE 1D→2D: contamination-only change now crosses with support_fraction axis) are all intentional per the task spec. Round-2 explicitly adds new presets to curated grids and new axes to builders.
+
+**Lesson.** When a reviewer claims a crash, always verify with a 1-line Python test before treating it as a BLOCKER. Both false positives here required < 5 lines to disprove. The sort-crash reasoning was especially plausible (correct logic, wrong model of when None enters the sorted set).
+
 ## 2026-05-07 (late) — Cycle 4 sister-site leak: a passing test that asserts the forbidden behavior
 
 **The pattern.** PR #57 cycle 3 closed a Codex MEDIUM by adding UVE-family filtering to `run_one_class_search` (CLAUDE.md:66 — UVE on `y_oc` is a discrimination method, not a one-class method). Cycle 4 cross-family review (Kimi K2.6 + GLM 5.1 + Codex) found the **Bayesian dispatcher in `unified_bayesian.py:1102` still had the leak** for scripted callers passing `task_type='one_class', enable_uve=True`. Codex traced the full call chain: `run_unified_bayesian → create_unified_objective → suggest_categorical('subset_type', available_methods) → compute_importances(X, y_oc, 'uve', …) → uve_selection(X, y_oc, …) → PLSRegression(y_train=y_oc)`.
