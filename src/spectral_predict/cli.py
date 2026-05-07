@@ -122,7 +122,15 @@ def main():
         from .run_logging import setup_app_logger
         setup_app_logger()
     except Exception:
-        pass
+        # DeepSeek V4 Pro cycle 4 MEDIUM: surface structural failures
+        # (ImportError, AttributeError from a renamed symbol, etc.) to
+        # dasp.log via debug. The bare ``except Exception: pass`` swallowed
+        # those silently — asymmetric with the T-50 cleanup block below
+        # which already follows this pattern.
+        import logging as _logging
+        _logging.getLogger("spectral_predict").debug(
+            "T-45: setup_app_logger failed (non-fatal)", exc_info=True
+        )
 
     parser = _build_parser()
     args = parser.parse_args()
