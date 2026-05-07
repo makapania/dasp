@@ -17,8 +17,10 @@ def _frozen_needs_threading_fallback() -> bool:
     1)"), and the parent retries spawning → fork-bomb of GUI windows.
     Falling back to the threading backend avoids the broken spawn entirely.
     """
-    is_frozen = getattr(sys, 'frozen', False) or '__compiled__' in globals()
+    is_frozen = getattr(sys, "frozen", False) or "__compiled__" in globals()
     return is_frozen
+
+
 import numpy as np
 import pandas as pd
 
@@ -54,10 +56,19 @@ def _normalize_mixed_type_labels(labels):
 
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
-    mean_squared_error, r2_score, accuracy_score, roc_auc_score,
-    f1_score, precision_score, recall_score, classification_report,
-    mean_absolute_error, balanced_accuracy_score, cohen_kappa_score,
-    matthews_corrcoef, log_loss
+    mean_squared_error,
+    r2_score,
+    accuracy_score,
+    roc_auc_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    classification_report,
+    mean_absolute_error,
+    balanced_accuracy_score,
+    cohen_kappa_score,
+    matthews_corrcoef,
+    log_loss,
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -71,11 +82,20 @@ from .models import get_model_grids, get_feature_importances
 from .scoring import create_results_dataframe, add_result, compute_specificity, lins_ccc
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
-    spa_selection, uve_selection, uve_spa_selection,
-    ipls_selection, ipls_forward, ipls_backward, cars_selection,
-    get_uve_threshold, uve_cars_selection, uve_cars_spa_selection,
-    fipls_spa_selection, fipls_cars_selection,
-    mc_sipls, mwpls
+    spa_selection,
+    uve_selection,
+    uve_spa_selection,
+    ipls_selection,
+    ipls_forward,
+    ipls_backward,
+    cars_selection,
+    get_uve_threshold,
+    uve_cars_selection,
+    uve_cars_spa_selection,
+    fipls_spa_selection,
+    fipls_cars_selection,
+    mc_sipls,
+    mwpls,
 )
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
@@ -98,26 +118,26 @@ logger = logging.getLogger(__name__)
 # Each group uses a fitness model that best represents its characteristics
 
 # PLS-based models: Linear regression with dimension reduction
-PLS_MODELS = {'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
+PLS_MODELS = {"PLS", "PLS-DA", "Ridge", "Lasso", "ElasticNet"}
 
 # Neural/SVM models: Non-linear, kernel-based or neural network models
-NEURAL_SVM_MODELS = {'MLP', 'SVR', 'SVC'}
+NEURAL_SVM_MODELS = {"MLP", "SVR", "SVC"}
 
 # Tree models: Gradient boosting and ensemble tree methods
-TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
+TREE_MODELS = {"RandomForest", "XGBoost", "LightGBM", "CatBoost"}
 
 # Neural-boosted hybrid model (single specialized model)
-NEURALBOOSTED_MODELS = {'NeuralBoosted'}
+NEURALBOOSTED_MODELS = {"NeuralBoosted"}
 
 # Scale-sensitive models: These use gradient descent or kernel methods
 # that are sensitive to feature scale and benefit from StandardScaler
-SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
+SCALE_SENSITIVE_MODELS = {"SVC", "SVR", "MLP", "NeuralBoosted", "Ridge", "Lasso", "ElasticNet"}
 
 # Models that are slower with parallel CV due to threading conflicts or low overhead
 # SVM: internal multi-threading conflicts with sklearn's CV parallelization
 # PLS/PLS-DA: so fast that joblib overhead dominates (0.08s serial vs 0.29s parallel)
 # Ridge/Lasso/ElasticNet: linear solve is ~5ms, joblib spawn overhead is ~1s on Windows
-MODELS_PREFER_SERIAL_CV = {'SVM', 'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet'}
+MODELS_PREFER_SERIAL_CV = {"SVM", "PLS", "PLS-DA", "Ridge", "Lasso", "ElasticNet"}
 
 # Backward compatibility: LINEAR_MODELS is union of PLS + Neural/SVM
 LINEAR_MODELS = PLS_MODELS | NEURAL_SVM_MODELS
@@ -198,11 +218,7 @@ def _get_edge_zone_size(preprocess_cfg: dict) -> int:
     return window // 2
 
 
-def _apply_edge_mask_to_data(
-    X: np.ndarray,
-    wavelengths: np.ndarray,
-    preprocess_cfg: dict
-) -> tuple:
+def _apply_edge_mask_to_data(X: np.ndarray, wavelengths: np.ndarray, preprocess_cfg: dict) -> tuple:
     """Remove edge wavelengths affected by Savitzky-Golay derivatives.
 
     For derivative preprocessing, the first and last edge_zone wavelengths
@@ -232,7 +248,9 @@ def _apply_edge_mask_to_data(
 
     # Safety check: ensure we keep at least some wavelengths
     if 2 * edge_zone >= X.shape[1]:
-        print(f"  Warning: Edge zone ({edge_zone} per side) would remove all {X.shape[1]} wavelengths. Skipping edge masking.")
+        print(
+            f"  Warning: Edge zone ({edge_zone} per side) would remove all {X.shape[1]} wavelengths. Skipping edge masking."
+        )
         return X, wavelengths, 0
 
     # Remove edge wavelengths from both data and wavelength array
@@ -250,7 +268,7 @@ def _supports_sample_weight(model):
     """
     try:
         sig = inspect.signature(model.fit)
-        return 'sample_weight' in sig.parameters
+        return "sample_weight" in sig.parameters
     except (ValueError, TypeError):
         return False
 
@@ -287,20 +305,26 @@ def _needs_resampling_pipeline(imbalance_method, task_type):
     # sentinels (auto is resolved into class_weight or None at run-entry; both
     # short-circuit here as defense-in-depth so a future refactor that delays
     # resolution can't accidentally wrap them in ImbPipeline).
-    if imbalance_method in ('class_weight', 'auto'):
+    if imbalance_method in ("class_weight", "auto"):
         return False
 
     # Classification resampling methods need imblearn Pipeline
-    if task_type == 'classification':
-        resampling_methods = ['smote', 'adasyn', 'borderline_smote',
-                              'random_undersampler', 'tomek_links',
-                              'smote_tomek', 'smote_enn']
-        return imbalance_method.lower().replace('-', '_') in resampling_methods
+    if task_type == "classification":
+        resampling_methods = [
+            "smote",
+            "adasyn",
+            "borderline_smote",
+            "random_undersampler",
+            "tomek_links",
+            "smote_tomek",
+            "smote_enn",
+        ]
+        return imbalance_method.lower().replace("-", "_") in resampling_methods
 
     # Regression: resampling methods need imblearn Pipeline (fit_resample)
     # 'binning', 'rare_boost', 'balanced' use RegressionSampleWeighter (fit/transform only)
-    if task_type == 'regression':
-        resampling_methods = ['undersample', 'oversample', 'smogn', 'smotetomek']
+    if task_type == "regression":
+        resampling_methods = ["undersample", "oversample", "smogn", "smotetomek"]
         return imbalance_method.lower() in resampling_methods
 
     return False
@@ -333,9 +357,9 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     from .models import get_model
 
     # Get model info
-    model_name = row.get('Model', 'PLS')
-    params_str = row.get('Params', '')
-    n_lvs = row.get('LVs', None)
+    model_name = row.get("Model", "PLS")
+    params_str = row.get("Params", "")
+    n_lvs = row.get("LVs", None)
 
     # Parse params using ast.literal_eval (same as Model Dev tab)
     model_kwargs = {}
@@ -350,8 +374,12 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     # Get model instance with n_components
     n_components = int(n_lvs) if n_lvs and not pd.isna(n_lvs) and n_lvs > 0 else 10
     # Use max_n_components high enough to not clip n_components
-    model = get_model(model_name, task_type=task_type, n_components=n_components,
-                      max_n_components=max(n_components, 20))
+    model = get_model(
+        model_name,
+        task_type=task_type,
+        n_components=n_components,
+        max_n_components=max(n_components, 20),
+    )
 
     # Strip Pipeline prefixes from stored params (e.g., 'model__n_estimators' → 'n_estimators').
     # PLS-DA captured params carry 'pls__' as the inner-step prefix. At this point
@@ -364,11 +392,11 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     if model_kwargs:
         normalized = {}
         for key, value in model_kwargs.items():
-            if key.startswith('model__'):
+            if key.startswith("model__"):
                 normalized[key[7:]] = value
-            elif key.startswith('pls__'):
+            elif key.startswith("pls__"):
                 normalized[key[5:]] = value
-            elif '__' in key:
+            elif "__" in key:
                 continue  # Skip remaining Pipeline wrapper params (scaler__, lr__)
             else:
                 normalized[key] = value
@@ -383,20 +411,27 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
 
     # For PLS-DA classification, wrap PLSTransformer with LogisticRegression
     # This matches how PLS-DA is built during search (search.py:3420-3443)
-    if task_type == 'classification' and model_name == 'PLS-DA':
+    if task_type == "classification" and model_name == "PLS-DA":
         from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
 
         # Extract LogisticRegression parameters from config (prefixed with lr_)
-        lr_C = model_kwargs.get('lr_C', 1.0)
-        lr_solver = model_kwargs.get('lr_solver', 'lbfgs')
-        lr_max_iter = model_kwargs.get('lr_max_iter', 1000)
+        lr_C = model_kwargs.get("lr_C", 1.0)
+        lr_solver = model_kwargs.get("lr_solver", "lbfgs")
+        lr_max_iter = model_kwargs.get("lr_max_iter", 1000)
 
-        pls_lr_pipeline = Pipeline([
-            ('pls', model),
-            ('scaler', StandardScaler()),  # Scale PLS scores for LogisticRegression
-            ('lr', LogisticRegression(C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42))
-        ])
+        pls_lr_pipeline = Pipeline(
+            [
+                ("pls", model),
+                ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
+                (
+                    "lr",
+                    LogisticRegression(
+                        C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42
+                    ),
+                ),
+            ]
+        )
         return pls_lr_pipeline
 
     # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler.
@@ -406,10 +441,8 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     # search produced. Skip the per-model scaler in that case.
     if model_name in SCALE_SENSITIVE_MODELS and not autoscale:
         from sklearn.pipeline import Pipeline
-        scaled_pipeline = Pipeline([
-            ('scaler', StandardScaler()),
-            ('model', model)
-        ])
+
+        scaled_pipeline = Pipeline([("scaler", StandardScaler()), ("model", model)])
         return scaled_pipeline
 
     return model
@@ -445,26 +478,27 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     Normalizes ``'auto'`` → ``'class_weight'`` internally so direct GUI callers
     that pass the raw user selection don't bypass the discriminator.
     """
-    if task_type != 'classification' or not imbalance_method:
+    if task_type != "classification" or not imbalance_method:
         return {}
     method = imbalance_method.lower() if isinstance(imbalance_method, str) else None
-    if method == 'auto':
-        method = 'class_weight'
-    if method != 'class_weight':
+    if method == "auto":
+        method = "class_weight"
+    if method != "class_weight":
         return {}
 
     # 1. class_weight via constructor kwarg — probe deep params in priority
     #    order. PLS-DA Pipeline exposes `lr__class_weight`; scale-sensitive
     #    Pipeline (`('scaler', ...), ('model', est)`) exposes
     #    `model__class_weight`; bare estimators expose `class_weight`.
-    deep_params = model.get_params(deep=True) if hasattr(model, 'get_params') else {}
-    for key in ('lr__class_weight', 'model__class_weight', 'class_weight'):
+    deep_params = model.get_params(deep=True) if hasattr(model, "get_params") else {}
+    for key in ("lr__class_weight", "model__class_weight", "class_weight"):
         if key in deep_params:
             try:
-                model.set_params(**{key: 'balanced'})
+                model.set_params(**{key: "balanced"})
                 return {}
             except Exception as e:
                 import warnings
+
                 warnings.warn(
                     f"set_params({key}='balanced') failed during rebuild: {e}. "
                     f"Validation model will train UNWEIGHTED.",
@@ -475,12 +509,13 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     # 2. CatBoost: class_weight is exposed as `class_weights` (plural) /
     #    `auto_class_weights`, which the loop above won't catch. Match the
     #    canonical pattern's CatBoost branch.
-    if model_name == 'CatBoost':
+    if model_name == "CatBoost":
         try:
-            model.set_params(auto_class_weights='Balanced')
+            model.set_params(auto_class_weights="Balanced")
             return {}
         except Exception as e:
             import warnings
+
             warnings.warn(
                 f"CatBoost set_params(auto_class_weights='Balanced') failed during "
                 f"rebuild: {e}. Validation model will train UNWEIGHTED.",
@@ -490,28 +525,31 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     # 3. sample_weight fallback for estimators whose fit() accepts it (XGBoost,
     #    RidgeClassifier, etc.). Route via Pipeline kwarg if wrapped.
     import inspect
+
     final_estimator = model
-    sample_weight_kwarg = 'sample_weight'
-    if hasattr(model, 'named_steps'):
-        if 'model' in model.named_steps:
-            final_estimator = model.named_steps['model']
-            sample_weight_kwarg = 'model__sample_weight'
+    sample_weight_kwarg = "sample_weight"
+    if hasattr(model, "named_steps"):
+        if "model" in model.named_steps:
+            final_estimator = model.named_steps["model"]
+            sample_weight_kwarg = "model__sample_weight"
         else:
             # Pipeline whose final step isn't named 'model' (e.g., PLS-DA's
             # 'lr' was already addressed in step 1; if we got here, set_params
             # failed and there is no clean fallback).
             return {}
 
-    fit_sig = inspect.signature(final_estimator.fit) if hasattr(final_estimator, 'fit') else None
-    if fit_sig and 'sample_weight' in fit_sig.parameters:
+    fit_sig = inspect.signature(final_estimator.fit) if hasattr(final_estimator, "fit") else None
+    if fit_sig and "sample_weight" in fit_sig.parameters:
         from sklearn.utils.class_weight import compute_sample_weight
-        sw = compute_sample_weight('balanced', y_train)
+
+        sw = compute_sample_weight("balanced", y_train)
         return {sample_weight_kwarg: sw}
 
     # 4. No mechanism available — warn (mirrors the no-mechanism branch in
     #    the canonical _run_single_config discriminator).
     import warnings
-    if model_name in ('MLP', 'MLPClassifier'):
+
+    if model_name in ("MLP", "MLPClassifier"):
         warnings.warn(
             f"{model_name} does not support class_weight or sample_weight. "
             f"Validation model trains UNWEIGHTED. For imbalanced classification "
@@ -596,22 +634,22 @@ def compute_validation_metrics_for_top_models(
         y_val = y_val[~val_nan_mask]
 
     # Initialize columns
-    if task_type == 'regression':
-        df_results['RMSEP'] = np.nan
-        df_results['R2pred'] = np.nan
+    if task_type == "regression":
+        df_results["RMSEP"] = np.nan
+        df_results["R2pred"] = np.nan
     else:
-        df_results['val_Accuracy'] = np.nan
-        df_results['val_ROC_AUC'] = np.nan
-        df_results['val_F1'] = np.nan
-        df_results['val_Precision'] = np.nan
-        df_results['val_Recall'] = np.nan
+        df_results["val_Accuracy"] = np.nan
+        df_results["val_ROC_AUC"] = np.nan
+        df_results["val_F1"] = np.nan
+        df_results["val_Precision"] = np.nan
+        df_results["val_Recall"] = np.nan
 
     # Get top N indices by CompositeScore (lower is better)
     n_to_process = min(top_n, len(df_results))
-    if 'CompositeScore' in df_results.columns:
+    if "CompositeScore" in df_results.columns:
         # Ensure CompositeScore is numeric (may be object dtype from CSV)
-        df_results['CompositeScore'] = pd.to_numeric(df_results['CompositeScore'], errors='coerce')
-        top_indices = df_results.nsmallest(n_to_process, 'CompositeScore').index
+        df_results["CompositeScore"] = pd.to_numeric(df_results["CompositeScore"], errors="coerce")
+        top_indices = df_results.nsmallest(n_to_process, "CompositeScore").index
     else:
         # Fallback to first n rows
         top_indices = df_results.head(n_to_process).index
@@ -619,18 +657,18 @@ def compute_validation_metrics_for_top_models(
     print(f"\n[Validation] Computing validation metrics for top {n_to_process} models...")
 
     # Coerce mixed-type labels to strings for classification / one-class
-    if task_type in ('classification', 'one_class'):
-        if getattr(y_train, 'dtype', None) == object:
+    if task_type in ("classification", "one_class"):
+        if getattr(y_train, "dtype", None) == object:
             _types = {type(v).__name__ for v in y_train}
             if len(_types) > 1:
                 y_train = _normalize_mixed_type_labels(y_train)
-        if getattr(y_val, 'dtype', None) == object:
+        if getattr(y_val, "dtype", None) == object:
             _types = {type(v).__name__ for v in y_val}
             if len(_types) > 1:
                 y_val = _normalize_mixed_type_labels(y_val)
 
     # For classification, check class distribution in validation set and warn if problematic
-    if task_type == 'classification':
+    if task_type == "classification":
         val_class_counts = pd.Series(y_val).value_counts()
         train_class_counts = pd.Series(y_train).value_counts()
         classes_in_train = set(train_class_counts.index)
@@ -638,15 +676,21 @@ def compute_validation_metrics_for_top_models(
         missing_classes = classes_in_train - classes_in_val
 
         if missing_classes:
-            print(f"\n[Validation Warning] {len(missing_classes)} class(es) not represented in validation set: {missing_classes}")
+            print(
+                f"\n[Validation Warning] {len(missing_classes)} class(es) not represented in validation set: {missing_classes}"
+            )
             print(f"  Training class distribution: {dict(train_class_counts)}")
             print(f"  Validation class distribution: {dict(val_class_counts)}")
-            print(f"  Some metrics (ROC AUC) will be NaN. Consider using more validation samples or fewer classes.\n")
+            print(
+                f"  Some metrics (ROC AUC) will be NaN. Consider using more validation samples or fewer classes.\n"
+            )
 
         # Check for critically small class samples in validation
         min_samples_per_class = val_class_counts.min() if len(val_class_counts) > 0 else 0
         if min_samples_per_class < 2:
-            print(f"[Validation Warning] Some classes have <2 samples in validation. Metrics may be unreliable.\n")
+            print(
+                f"[Validation Warning] Some classes have <2 samples in validation. Metrics may be unreliable.\n"
+            )
 
     # Cache preprocessed data by preprocessing config to avoid redundant computation
     preprocess_cache = {}
@@ -657,28 +701,42 @@ def compute_validation_metrics_for_top_models(
         try:
             # === STEP 1: Get preprocessing config ===
             # Use PreprocessBase (clean pipeline name) if available, fall back to Preprocess
-            preprocess_name = row.get('PreprocessBase', row.get('Preprocess', 'raw'))
+            preprocess_name = row.get("PreprocessBase", row.get("Preprocess", "raw"))
 
             # Read explicit metadata columns (stored by Bayesian search paths)
-            baseline_method = row.get('baseline_method', None)
+            baseline_method = row.get("baseline_method", None)
             if isinstance(baseline_method, float) and pd.isna(baseline_method):
                 baseline_method = None
-            smoothing = bool(row.get('smoothing', False))
+            smoothing = bool(row.get("smoothing", False))
             if isinstance(smoothing, float):
                 smoothing = smoothing > 0
-            smoothing_window = int(row.get('smoothing_window', 17)) if not (isinstance(row.get('smoothing_window'), float) and pd.isna(row.get('smoothing_window'))) else 17
-            smoothing_polyorder = int(row.get('smoothing_polyorder', 2)) if not (isinstance(row.get('smoothing_polyorder'), float) and pd.isna(row.get('smoothing_polyorder'))) else 2
+            smoothing_window = (
+                int(row.get("smoothing_window", 17))
+                if not (
+                    isinstance(row.get("smoothing_window"), float)
+                    and pd.isna(row.get("smoothing_window"))
+                )
+                else 17
+            )
+            smoothing_polyorder = (
+                int(row.get("smoothing_polyorder", 2))
+                if not (
+                    isinstance(row.get("smoothing_polyorder"), float)
+                    and pd.isna(row.get("smoothing_polyorder"))
+                )
+                else 2
+            )
             # T-36: autoscale flag must be read so the validation rebuild matches the
             # search pipeline. Old .dasp files without the column default to False.
             # Parse robustly: handles bool, numpy.bool_, NaN-float, int 0/1, and the
             # quoted-string forms ("True"/"False"/"1"/"0") that hand-edited CSVs may
             # contain. Note: bool("False") == True in Python, so a naive bool() cast
             # is wrong on the string path.
-            autoscale_raw = row.get('Autoscale', False)
+            autoscale_raw = row.get("Autoscale", False)
             if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
                 autoscale = False
             elif isinstance(autoscale_raw, str):
-                autoscale = autoscale_raw.strip().lower() in ('true', '1', 'yes')
+                autoscale = autoscale_raw.strip().lower() in ("true", "1", "yes")
             else:
                 autoscale = bool(autoscale_raw)
 
@@ -686,28 +744,28 @@ def compute_validation_metrics_for_top_models(
             # Sets autoscale=True ONLY when the explicit column read above produced False
             # (so an explicit column always wins over a name suffix). The smoothing flag
             # follows the same pattern (sg0 prefix only sets it when not already True).
-            if '+' in str(preprocess_name):
-                parts = str(preprocess_name).split('+')
+            if "+" in str(preprocess_name):
+                parts = str(preprocess_name).split("+")
                 core_parts = []
                 for part in parts:
-                    if part in ('als', 'polynomial', 'rubber_band', 'airpls', 'advanced'):
+                    if part in ("als", "polynomial", "rubber_band", "airpls", "advanced"):
                         if baseline_method is None:
                             baseline_method = part
-                    elif part == 'sg0':
+                    elif part == "sg0":
                         smoothing = True
-                    elif part == 'autoscale':
+                    elif part == "autoscale":
                         if not autoscale:
                             autoscale = True
                     else:
                         core_parts.append(part)
-                preprocess_name = '_'.join(core_parts) if core_parts else 'raw'
+                preprocess_name = "_".join(core_parts) if core_parts else "raw"
 
-            deriv = row.get('Deriv', 0)
-            window = row.get('Window', None)
-            poly = row.get('Poly', None)
+            deriv = row.get("Deriv", 0)
+            window = row.get("Window", None)
+            poly = row.get("Poly", None)
 
             # Check for GA preprocessing genes (needs reconstruction)
-            ga_genes_str = row.get('ga_genes', None)
+            ga_genes_str = row.get("ga_genes", None)
             use_ga_transform = False
             ga_transform = None
             ga_genes = None
@@ -718,7 +776,7 @@ def compute_validation_metrics_for_top_models(
                 if isinstance(ga_genes_str, (list, np.ndarray)):
                     ga_genes_is_valid = len(ga_genes_str) > 0
                 elif isinstance(ga_genes_str, str):
-                    ga_genes_is_valid = ga_genes_str != ''
+                    ga_genes_is_valid = ga_genes_str != ""
                 else:
                     try:
                         ga_genes_is_valid = not pd.isna(ga_genes_str)
@@ -729,6 +787,7 @@ def compute_validation_metrics_for_top_models(
                 try:
                     # Parse genes from string (stored as list representation)
                     import ast
+
                     if isinstance(ga_genes_str, str):
                         ga_genes = np.array(ast.literal_eval(ga_genes_str))
                     else:
@@ -741,7 +800,11 @@ def compute_validation_metrics_for_top_models(
                     _, ga_transform = chromosome_to_transform(ga_genes)
                     use_ga_transform = True
                 except Exception as e:
-                    genes_preview = str(ga_genes_str)[:100] if isinstance(ga_genes_str, str) else str(ga_genes_str)
+                    genes_preview = (
+                        str(ga_genes_str)[:100]
+                        if isinstance(ga_genes_str, str)
+                        else str(ga_genes_str)
+                    )
                     print(f"  [Warning] Could not reconstruct GA transform: {e}")
                     print(f"            GA genes data: {genes_preview}")
                     use_ga_transform = False
@@ -757,7 +820,7 @@ def compute_validation_metrics_for_top_models(
             # classification validation roundtrip rather than silently snapping
             # back to defaults — same shape as the one-class fix in
             # contamination.py:~1141.
-            baseline_params_raw = row.get('baseline_params', None)
+            baseline_params_raw = row.get("baseline_params", None)
             baseline_params = None
             if baseline_params_raw is not None:
                 if isinstance(baseline_params_raw, dict):
@@ -765,6 +828,7 @@ def compute_validation_metrics_for_top_models(
                 elif isinstance(baseline_params_raw, str) and baseline_params_raw.strip():
                     try:
                         import ast as _ast_local
+
                         parsed = _ast_local.literal_eval(baseline_params_raw)
                         if isinstance(parsed, dict):
                             baseline_params = parsed
@@ -774,11 +838,19 @@ def compute_validation_metrics_for_top_models(
             # Create cache key
             if use_ga_transform:
                 # GA preprocessing: cache by genes hash
-                cache_key = ('ga', tuple(ga_genes))
+                cache_key = ("ga", tuple(ga_genes))
             else:
-                cache_key = (preprocess_name, deriv, window, poly, baseline_method,
-                             smoothing, smoothing_window, smoothing_polyorder,
-                             autoscale)  # T-36: must vary key to avoid cache collision
+                cache_key = (
+                    preprocess_name,
+                    deriv,
+                    window,
+                    poly,
+                    baseline_method,
+                    smoothing,
+                    smoothing_window,
+                    smoothing_polyorder,
+                    autoscale,
+                )  # T-36: must vary key to avoid cache collision
 
             # === STEP 2: Preprocess FULL spectrum (matching search.py and Model Dev) ===
             if cache_key in preprocess_cache:
@@ -823,11 +895,13 @@ def compute_validation_metrics_for_top_models(
             col_indices = None
 
             # Check for variable selection wavelengths (all_vars stores wavelength VALUES)
-            all_vars_str = row.get('all_vars', 'N/A')
-            if all_vars_str != 'N/A' and all_vars_str and isinstance(all_vars_str, str):
+            all_vars_str = row.get("all_vars", "N/A")
+            if all_vars_str != "N/A" and all_vars_str and isinstance(all_vars_str, str):
                 # Parse wavelengths from all_vars (e.g., "1520.0, 1540.0, 1560.0, ...")
                 try:
-                    model_wavelengths = [float(w.strip()) for w in all_vars_str.split(',') if w.strip()]
+                    model_wavelengths = [
+                        float(w.strip()) for w in all_vars_str.split(",") if w.strip()
+                    ]
                     # Create mapping from wavelength to column index
                     # CRITICAL: Do NOT sort - preserve the order from all_vars
                     wl_to_idx = {float(wl): idx_wl for idx_wl, wl in enumerate(wavelengths)}
@@ -837,7 +911,9 @@ def compute_validation_metrics_for_top_models(
                         if wl in wl_to_idx:
                             col_indices.append(wl_to_idx[wl])
                     if len(col_indices) != len(model_wavelengths):
-                        print(f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}")
+                        print(
+                            f"  [Warning] Only found {len(col_indices)}/{len(model_wavelengths)} wavelengths for model {i+1}"
+                        )
                     if not col_indices:
                         col_indices = None
                 except Exception as e:
@@ -850,7 +926,9 @@ def compute_validation_metrics_for_top_models(
                 max_idx = X_train_preprocessed.shape[1] - 1
                 valid_indices = [idx for idx in col_indices if 0 <= idx <= max_idx]
                 if len(valid_indices) != len(col_indices):
-                    print(f"  [Warning] {len(col_indices) - len(valid_indices)} indices out of bounds for model {i+1}")
+                    print(
+                        f"  [Warning] {len(col_indices) - len(valid_indices)} indices out of bounds for model {i+1}"
+                    )
                 if not valid_indices:
                     print(f"  [Warning] No valid indices for model {i+1}, skipping")
                     continue
@@ -869,17 +947,23 @@ def compute_validation_metrics_for_top_models(
             model = _rebuild_model_from_row(row, task_type, autoscale=autoscale)
 
             # Safety check: Skip if n_components > n_features (can happen with variable selection)
-            if hasattr(model, 'n_components') and model.n_components > X_train_final.shape[1]:
-                print(f"  [Warning] Skipping model {i+1}: n_components ({model.n_components}) > n_features ({X_train_final.shape[1]})")
+            if hasattr(model, "n_components") and model.n_components > X_train_final.shape[1]:
+                print(
+                    f"  [Warning] Skipping model {i+1}: n_components ({model.n_components}) > n_features ({X_train_final.shape[1]})"
+                )
                 continue
 
             # Apply class_weight discriminator before fit. Without this, XGBoost
             # rebuilt for validation trains UNWEIGHTED (sample_weight is fit-time,
             # not in Params) and PLS-DA trains UNWEIGHTED (LR sub-step's
             # class_weight is not in Params). See helper docstring.
-            model_name = row.get('Model', 'PLS')
+            model_name = row.get("Model", "PLS")
             fit_kwargs = _apply_class_weight_discriminator_for_rebuilt_model(
-                model, model_name, task_type, y_train, imbalance_method=imbalance_method,
+                model,
+                model_name,
+                task_type,
+                y_train,
+                imbalance_method=imbalance_method,
             )
 
             # Fit on training data
@@ -890,52 +974,60 @@ def compute_validation_metrics_for_top_models(
             y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
 
             # === STEP 5: Calculate metrics ===
-            if task_type == 'regression':
+            if task_type == "regression":
                 rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
                 r2pred = r2_score(y_val, y_pred)
-                df_results.loc[idx, 'RMSEP'] = rmsep
-                df_results.loc[idx, 'R2pred'] = r2pred
+                df_results.loc[idx, "RMSEP"] = rmsep
+                df_results.loc[idx, "R2pred"] = r2pred
             else:
                 # Accuracy
                 val_acc = accuracy_score(y_val, y_pred)
-                df_results.loc[idx, 'val_Accuracy'] = val_acc
+                df_results.loc[idx, "val_Accuracy"] = val_acc
 
                 # Determine if binary or multiclass based on training data classes
                 # Use 'macro' for multiclass to treat all classes equally (consistent with CV metrics)
                 n_classes_train = len(np.unique(y_train))
-                average_method = 'binary' if n_classes_train == 2 else 'macro'
+                average_method = "binary" if n_classes_train == 2 else "macro"
 
                 # F1 Score
                 try:
                     val_f1 = f1_score(y_val, y_pred, average=average_method, zero_division=0)
-                    df_results.loc[idx, 'val_F1'] = val_f1
+                    df_results.loc[idx, "val_F1"] = val_f1
                 except Exception as e:
                     # Fallback to weighted if binary fails
                     try:
-                        val_f1 = f1_score(y_val, y_pred, average='weighted', zero_division=0)
-                        df_results.loc[idx, 'val_F1'] = val_f1
+                        val_f1 = f1_score(y_val, y_pred, average="weighted", zero_division=0)
+                        df_results.loc[idx, "val_F1"] = val_f1
                     except Exception as e2:
                         print(f"  [Warning] Could not compute F1 for model {i+1}: {e2}")
 
                 # Precision
                 try:
-                    val_precision = precision_score(y_val, y_pred, average=average_method, zero_division=0)
-                    df_results.loc[idx, 'val_Precision'] = val_precision
+                    val_precision = precision_score(
+                        y_val, y_pred, average=average_method, zero_division=0
+                    )
+                    df_results.loc[idx, "val_Precision"] = val_precision
                 except Exception as e:
                     try:
-                        val_precision = precision_score(y_val, y_pred, average='weighted', zero_division=0)
-                        df_results.loc[idx, 'val_Precision'] = val_precision
+                        val_precision = precision_score(
+                            y_val, y_pred, average="weighted", zero_division=0
+                        )
+                        df_results.loc[idx, "val_Precision"] = val_precision
                     except Exception as e2:
                         print(f"  [Warning] Could not compute Precision for model {i+1}: {e2}")
 
                 # Recall
                 try:
-                    val_recall = recall_score(y_val, y_pred, average=average_method, zero_division=0)
-                    df_results.loc[idx, 'val_Recall'] = val_recall
+                    val_recall = recall_score(
+                        y_val, y_pred, average=average_method, zero_division=0
+                    )
+                    df_results.loc[idx, "val_Recall"] = val_recall
                 except Exception as e:
                     try:
-                        val_recall = recall_score(y_val, y_pred, average='weighted', zero_division=0)
-                        df_results.loc[idx, 'val_Recall'] = val_recall
+                        val_recall = recall_score(
+                            y_val, y_pred, average="weighted", zero_division=0
+                        )
+                        df_results.loc[idx, "val_Recall"] = val_recall
                     except Exception as e2:
                         print(f"  [Warning] Could not compute Recall for model {i+1}: {e2}")
 
@@ -948,10 +1040,14 @@ def compute_validation_metrics_for_top_models(
                         # ROC AUC undefined with only one class
                         # Only log for first model to avoid spam
                         if i == 0:
-                            print(f"  [Info] ROC AUC skipped - validation set has only 1 class (need at least 2)")
-                    elif hasattr(model, 'predict_proba'):
+                            print(
+                                f"  [Info] ROC AUC skipped - validation set has only 1 class (need at least 2)"
+                            )
+                    elif hasattr(model, "predict_proba"):
                         y_proba = model.predict_proba(X_val_final)
-                        model_classes = model.classes_ if hasattr(model, 'classes_') else np.unique(y_train)
+                        model_classes = (
+                            model.classes_ if hasattr(model, "classes_") else np.unique(y_train)
+                        )
 
                         # Always subset to classes present in validation
                         # This handles: binary, multiclass, and class-mismatch cases uniformly
@@ -961,56 +1057,65 @@ def compute_validation_metrics_for_top_models(
                             if len(matches) > 0:
                                 col_indices.append(matches[0])
 
-                        if len(col_indices) == n_classes_val:  # All validation classes found in model
+                        if (
+                            len(col_indices) == n_classes_val
+                        ):  # All validation classes found in model
                             y_proba_subset = y_proba[:, col_indices]
                             # ALWAYS renormalize to sum to 1 (even for binary)
                             # This is needed when validation has fewer classes than training
-                            y_proba_subset = y_proba_subset / y_proba_subset.sum(axis=1, keepdims=True)
+                            y_proba_subset = y_proba_subset / y_proba_subset.sum(
+                                axis=1, keepdims=True
+                            )
 
                             if n_classes_val == 2:
                                 # Binary: use probability of second class (positive)
                                 val_roc_auc = roc_auc_score(y_val, y_proba_subset[:, 1])
                             else:
                                 # Multiclass: compute OvR
-                                val_roc_auc = roc_auc_score(y_val, y_proba_subset, multi_class='ovr', average='macro')
+                                val_roc_auc = roc_auc_score(
+                                    y_val, y_proba_subset, multi_class="ovr", average="macro"
+                                )
 
-                            df_results.loc[idx, 'val_ROC_AUC'] = val_roc_auc
+                            df_results.loc[idx, "val_ROC_AUC"] = val_roc_auc
                 except Exception as e:
                     print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
 
         except Exception as e:
             print(f"  [Warning] Failed to compute validation for model {i+1}: {e}")
             import traceback
+
             traceback.print_exc()
             continue
 
         # Progress update
         if progress_callback and (i + 1) % 10 == 0:
-            progress_callback({
-                'stage': 'validation_metrics',
-                'message': f'Computing validation metrics ({i+1}/{n_to_process})',
-                'current': i + 1,
-                'total': n_to_process
-            })
+            progress_callback(
+                {
+                    "stage": "validation_metrics",
+                    "message": f"Computing validation metrics ({i+1}/{n_to_process})",
+                    "current": i + 1,
+                    "total": n_to_process,
+                }
+            )
 
     print(f"[Validation] Completed validation metrics for {n_to_process} models")
 
     # Reorder columns to place metrics in logical order:
     # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
-    if task_type == 'regression' and 'RMSEP' in cols and 'R2cv' in cols:
+    if task_type == "regression" and "RMSEP" in cols and "R2cv" in cols:
         # Move RMSEP and R2pred after R2cv
-        cols.remove('RMSEP')
-        cols.remove('R2pred')
-        r2cv_idx = cols.index('R2cv')
-        cols.insert(r2cv_idx + 1, 'RMSEP')
-        cols.insert(r2cv_idx + 2, 'R2pred')
+        cols.remove("RMSEP")
+        cols.remove("R2pred")
+        r2cv_idx = cols.index("R2cv")
+        cols.insert(r2cv_idx + 1, "RMSEP")
+        cols.insert(r2cv_idx + 2, "R2pred")
         df_results = df_results[cols]
-    elif task_type == 'classification':
+    elif task_type == "classification":
         # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
         #        val_Accuracy, val_ROC_AUC, val_F1, val_Precision, val_Recall (validation)
-        cal_cols = ['Accuracy', 'ROC_AUC', 'F1', 'Precision', 'Recall']
-        val_cols = ['val_Accuracy', 'val_ROC_AUC', 'val_F1', 'val_Precision', 'val_Recall']
+        cal_cols = ["Accuracy", "ROC_AUC", "F1", "Precision", "Recall"]
+        val_cols = ["val_Accuracy", "val_ROC_AUC", "val_F1", "val_Precision", "val_Recall"]
 
         # Remove all metric columns that exist
         for col in cal_cols + val_cols:
@@ -1018,10 +1123,10 @@ def compute_validation_metrics_for_top_models(
                 cols.remove(col)
 
         # Find insertion point (after Imbalance column, or after common metadata)
-        if 'Imbalance' in cols:
-            insert_idx = cols.index('Imbalance') + 1
-        elif 'SubsetTag' in cols:
-            insert_idx = cols.index('SubsetTag') + 1
+        if "Imbalance" in cols:
+            insert_idx = cols.index("Imbalance") + 1
+        elif "SubsetTag" in cols:
+            insert_idx = cols.index("SubsetTag") + 1
         else:
             insert_idx = 0
 
@@ -1041,88 +1146,153 @@ def compute_validation_metrics_for_top_models(
     return df_results
 
 
-def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
-               excluded_count=0, validation_count=0,
-               total_samples_original=None, variable_penalty=0, gap_penalty=0,
-               max_n_components=10, max_iter=500, models_to_test=None, preprocessing_methods=None,
-               interference_settings=None,
-               window_sizes=None, n_estimators_list=None, learning_rates=None,
-               neuralboosted_hidden_sizes=None, neuralboosted_activations=None,
-               pls_max_iter_list=None, pls_tol_list=None,
-               plsda_lr_C_list=None, plsda_lr_solver_list=None, plsda_lr_max_iter_list=None,
-               rf_n_trees_list=None, rf_max_depth_list=None,
-               rf_min_samples_split_list=None, rf_min_samples_leaf_list=None,
-               rf_max_features_list=None, rf_bootstrap_list=None,
-               rf_max_leaf_nodes_list=None, rf_min_impurity_decrease_list=None,
-               ridge_alphas_list=None, ridge_solver_list=None, ridge_tol_list=None,
-               lasso_alphas_list=None, lasso_selection_list=None, lasso_tol_list=None,
-               xgb_n_estimators_list=None, xgb_learning_rates=None, xgb_max_depths=None,
-               xgb_subsample=None, xgb_colsample_bytree=None, xgb_reg_alpha=None, xgb_reg_lambda=None,
-               xgb_min_child_weight_list=None, xgb_gamma_list=None,
-               elasticnet_alphas_list=None, elasticnet_l1_ratios=None,
-               elasticnet_selection_list=None, elasticnet_tol_list=None,
-               lightgbm_n_estimators_list=None, lightgbm_learning_rates=None, lightgbm_num_leaves_list=None,
-               lightgbm_max_depth_list=None, lightgbm_min_child_samples_list=None,
-               lightgbm_subsample_list=None, lightgbm_colsample_bytree_list=None,
-               lightgbm_reg_alpha_list=None, lightgbm_reg_lambda_list=None,
-               catboost_iterations_list=None, catboost_learning_rates=None, catboost_depths=None,
-               catboost_l2_leaf_reg_list=None, catboost_border_count_list=None,
-               catboost_bagging_temperature_list=None, catboost_random_strength_list=None,
-               svr_kernels=None, svr_C_list=None, svr_gamma_list=None,
-               svr_epsilon_list=None, svr_degree_list=None, svr_coef0_list=None, svr_shrinking_list=None,
-               mlp_hidden_layer_sizes_list=None, mlp_alphas_list=None, mlp_learning_rate_inits=None,
-               mlp_activation_list=None, mlp_solver_list=None, mlp_batch_size_list=None,
-               mlp_learning_rate_schedule_list=None, mlp_momentum_list=None,
-               enable_variable_subsets=True, variable_counts=None,
-               enable_region_subsets=True, n_top_regions=10,
-               region_test_all_individual=False, region_test_pairwise=False,
-               progress_callback=None,
-               variable_selection_methods=None, apply_uve_prefilter=False,
-               uve_cutoff_multiplier=1.0, uve_n_components=None,
-               ipls_n_intervals=20,
-               ipls_max_combine=5, ipls_subset_limit="Top 10",
-               sipls_n_combinations=500,
-               mwpls_window_sizes=None, mwpls_step_size=None,
-               tier='standard', enabled_models=None,
-               analysis_wl_min=None, analysis_wl_max=None,
-               analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
-               imbalance_method=None, imbalance_params=None, enable_class_weight=False,
-               ga_preprocess=False,
-               ga_preprocess_method='exhaustive',
-               ga_preprocess_population=48,
-               ga_preprocess_generations=30,
-               ga_preprocess_cv_folds=5,
-               ga_quick_mode=False,
-                # Smart preprocessing discovery parameters (NEW - replaces GA)
-                smart_preprocess=False,
-                smart_preprocess_importance='model_specific',
-                smart_preprocess_n_top=10,
-                # TPE preprocessing discovery parameters (T-37 — supersedes smart + GA)
-                tpe_preprocess=False,
-                 tpe_preprocess_n_trials=75,
-                 tpe_preprocess_n_top=10,
-                 tpe_enable_autoscale=True,
-               # GA variable selection parameters
-               ga_population_size=64,
-               ga_generations=100,
-               ga_n_runs=5,
-               # Baseline and smoothing parameters
-               baseline_method=None,
-               baseline_params=None,
-               smoothing=False,
-               smoothing_window=17,
-               smoothing_polyorder=2,
-               # Autoscale (UV scaling) toggle — doubles preprocess_configs (T-36)
-               autoscale=False,
-               # Search control (pause/resume/stop)
-               controller=None,
-               # Validation metrics parameters
-               X_validation=None,
-               y_validation=None,
-               compute_validation=False,
-               validation_top_n=100,
-               # Early stopping for boosting models
-               early_stopping_rounds=40):
+def run_search(
+    X,
+    y,
+    task_type,
+    folds=5,
+    cv_strategy="kfold",
+    cv_n_repeats=5,
+    excluded_count=0,
+    validation_count=0,
+    total_samples_original=None,
+    variable_penalty=0,
+    gap_penalty=0,
+    max_n_components=10,
+    max_iter=500,
+    models_to_test=None,
+    preprocessing_methods=None,
+    interference_settings=None,
+    window_sizes=None,
+    n_estimators_list=None,
+    learning_rates=None,
+    neuralboosted_hidden_sizes=None,
+    neuralboosted_activations=None,
+    pls_max_iter_list=None,
+    pls_tol_list=None,
+    plsda_lr_C_list=None,
+    plsda_lr_solver_list=None,
+    plsda_lr_max_iter_list=None,
+    rf_n_trees_list=None,
+    rf_max_depth_list=None,
+    rf_min_samples_split_list=None,
+    rf_min_samples_leaf_list=None,
+    rf_max_features_list=None,
+    rf_bootstrap_list=None,
+    rf_max_leaf_nodes_list=None,
+    rf_min_impurity_decrease_list=None,
+    ridge_alphas_list=None,
+    ridge_solver_list=None,
+    ridge_tol_list=None,
+    lasso_alphas_list=None,
+    lasso_selection_list=None,
+    lasso_tol_list=None,
+    xgb_n_estimators_list=None,
+    xgb_learning_rates=None,
+    xgb_max_depths=None,
+    xgb_subsample=None,
+    xgb_colsample_bytree=None,
+    xgb_reg_alpha=None,
+    xgb_reg_lambda=None,
+    xgb_min_child_weight_list=None,
+    xgb_gamma_list=None,
+    elasticnet_alphas_list=None,
+    elasticnet_l1_ratios=None,
+    elasticnet_selection_list=None,
+    elasticnet_tol_list=None,
+    lightgbm_n_estimators_list=None,
+    lightgbm_learning_rates=None,
+    lightgbm_num_leaves_list=None,
+    lightgbm_max_depth_list=None,
+    lightgbm_min_child_samples_list=None,
+    lightgbm_subsample_list=None,
+    lightgbm_colsample_bytree_list=None,
+    lightgbm_reg_alpha_list=None,
+    lightgbm_reg_lambda_list=None,
+    catboost_iterations_list=None,
+    catboost_learning_rates=None,
+    catboost_depths=None,
+    catboost_l2_leaf_reg_list=None,
+    catboost_border_count_list=None,
+    catboost_bagging_temperature_list=None,
+    catboost_random_strength_list=None,
+    svr_kernels=None,
+    svr_C_list=None,
+    svr_gamma_list=None,
+    svr_epsilon_list=None,
+    svr_degree_list=None,
+    svr_coef0_list=None,
+    svr_shrinking_list=None,
+    mlp_hidden_layer_sizes_list=None,
+    mlp_alphas_list=None,
+    mlp_learning_rate_inits=None,
+    mlp_activation_list=None,
+    mlp_solver_list=None,
+    mlp_batch_size_list=None,
+    mlp_learning_rate_schedule_list=None,
+    mlp_momentum_list=None,
+    enable_variable_subsets=True,
+    variable_counts=None,
+    enable_region_subsets=True,
+    n_top_regions=10,
+    region_test_all_individual=False,
+    region_test_pairwise=False,
+    progress_callback=None,
+    variable_selection_methods=None,
+    apply_uve_prefilter=False,
+    uve_cutoff_multiplier=1.0,
+    uve_n_components=None,
+    ipls_n_intervals=20,
+    ipls_max_combine=5,
+    ipls_subset_limit="Top 10",
+    sipls_n_combinations=500,
+    mwpls_window_sizes=None,
+    mwpls_step_size=None,
+    tier="standard",
+    enabled_models=None,
+    analysis_wl_min=None,
+    analysis_wl_max=None,
+    analysis_wl_regions=None,  # List of (min, max) tuples for multi-region support
+    imbalance_method=None,
+    imbalance_params=None,
+    enable_class_weight=False,
+    ga_preprocess=False,
+    ga_preprocess_method="exhaustive",
+    ga_preprocess_population=48,
+    ga_preprocess_generations=30,
+    ga_preprocess_cv_folds=5,
+    ga_quick_mode=False,
+    # Smart preprocessing discovery parameters (NEW - replaces GA)
+    smart_preprocess=False,
+    smart_preprocess_importance="model_specific",
+    smart_preprocess_n_top=10,
+    # TPE preprocessing discovery parameters (T-37 — supersedes smart + GA)
+    tpe_preprocess=False,
+    tpe_preprocess_n_trials=75,
+    tpe_preprocess_n_top=10,
+    tpe_enable_autoscale=True,
+    # GA variable selection parameters
+    ga_population_size=64,
+    ga_generations=100,
+    ga_n_runs=5,
+    # Baseline and smoothing parameters
+    baseline_method=None,
+    baseline_params=None,
+    smoothing=False,
+    smoothing_window=17,
+    smoothing_polyorder=2,
+    # Autoscale (UV scaling) toggle — doubles preprocess_configs (T-36)
+    autoscale=False,
+    # Search control (pause/resume/stop)
+    controller=None,
+    # Validation metrics parameters
+    X_validation=None,
+    y_validation=None,
+    compute_validation=False,
+    validation_top_n=100,
+    # Early stopping for boosting models
+    early_stopping_rounds=40,
+):
     """
     Run comprehensive model search with preprocessing, CV, and subset selection.
 
@@ -1208,8 +1378,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # tightly enough that per-fold drift rarely flips the decision. Audit
     # message goes through both logger.info (T-45 file handler) and stdout
     # (console runs). NaN-dropping happens inside resolve_auto_imbalance.
-    if imbalance_method == 'auto' and task_type == 'classification':
+    if imbalance_method == "auto" and task_type == "classification":
         from spectral_predict.imbalance import resolve_auto_imbalance, format_auto_imbalance_message
+
         resolved, info = resolve_auto_imbalance(y.values, task_type=task_type)
         message = format_auto_imbalance_message(info)
         logger.info(message)
@@ -1228,11 +1399,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # Check if labels are non-numeric (text labels like "low", "medium", "high")
         if not pd.api.types.is_numeric_dtype(y_np.dtype):
             from sklearn.preprocessing import LabelEncoder
+
             label_encoder = LabelEncoder()
             y_original = y_np.copy()  # Keep original for logging
             y_np = label_encoder.fit_transform(y_np)
             # Log the label mapping
-            label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
+            label_mapping = dict(
+                zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_))
+            )
             print(f"\n{'='*70}")
             print(f"CATEGORICAL LABEL ENCODING")
             print(f"{'='*70}")
@@ -1246,16 +1420,19 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
     # Validate configuration BEFORE starting training to give immediate feedback
     # ═══════════════════════════════════════════════════════════════════════════
-    if task_type == 'classification' and imbalance_method is not None:
+    if task_type == "classification" and imbalance_method is not None:
         from .imbalance import validate_classification_config
+
         try:
             validate_classification_config(
                 y=y_np,
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,
-                n_folds=folds
+                n_folds=folds,
             )
-            print(f"[OK] Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
+            print(
+                f"[OK] Imbalance configuration validated: {imbalance_method} with {folds}-fold CV"
+            )
         except ValueError as e:
             # Re-raise with clear indication this is an upfront validation error
             raise ValueError(f"Configuration Error (detected before training):\n\n{e}") from None
@@ -1264,11 +1441,12 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # imbalance_method — GUI can't be the only layer of defense for scripted
     # callers that bypass the GUI).
     from .cv_utils import validate_cv_strategy_for_task
+
     try:
         validate_cv_strategy_for_task(
             strategy=cv_strategy,
             task_type=task_type,
-            y=y_np if task_type == 'classification' else np.asarray(y),
+            y=y_np if task_type == "classification" else np.asarray(y),
             n_folds=folds,
             n_repeats=cv_n_repeats,
         )
@@ -1280,19 +1458,41 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
     # Handle variable selection methods (support multiple methods)
     if variable_selection_methods is None or not variable_selection_methods:
-        variable_selection_methods = ['importance']
+        variable_selection_methods = ["importance"]
 
     # Filter to only implemented methods
-    implemented_methods = ['importance', 'spa', 'uve', 'uve_spa', 'ipls', 'ipls_forward', 'ipls_backward', 'mc_sipls', 'mwpls', 'cars', 'cars-aware', 'cars-tree', 'vcpa-iriv', 'ga', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa', 'fipls_spa', 'fipls_cars']
+    implemented_methods = [
+        "importance",
+        "spa",
+        "uve",
+        "uve_spa",
+        "ipls",
+        "ipls_forward",
+        "ipls_backward",
+        "mc_sipls",
+        "mwpls",
+        "cars",
+        "cars-aware",
+        "cars-tree",
+        "vcpa-iriv",
+        "ga",
+        "uve_cars",
+        "uve_cars_tree",
+        "uve_cars_spa",
+        "fipls_spa",
+        "fipls_cars",
+    ]
     selected_methods = [m for m in variable_selection_methods if m in implemented_methods]
 
     # If UVE-hybrid variant is selected alongside base method, drop the base (hybrid subsumes it)
-    if 'uve_cars' in selected_methods and 'cars' in selected_methods:
-        selected_methods.remove('cars')
+    if "uve_cars" in selected_methods and "cars" in selected_methods:
+        selected_methods.remove("cars")
         print("Info: Removed 'cars' — 'uve_cars' includes CARS with UVE pre-filtering")
-    if 'uve_cars_tree' in selected_methods and 'cars-tree' in selected_methods:
-        selected_methods.remove('cars-tree')
-        print("Info: Removed 'cars-tree' — 'uve_cars_tree' includes CARS-Tree with UVE pre-filtering")
+    if "uve_cars_tree" in selected_methods and "cars-tree" in selected_methods:
+        selected_methods.remove("cars-tree")
+        print(
+            "Info: Removed 'cars-tree' — 'uve_cars_tree' includes CARS-Tree with UVE pre-filtering"
+        )
 
     # Warn about unimplemented methods
     unimplemented = [m for m in variable_selection_methods if m not in implemented_methods]
@@ -1302,7 +1502,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
     # Ensure at least one method is selected
     if not selected_methods:
-        selected_methods = ['importance']
+        selected_methods = ["importance"]
         print("Info: No implemented methods selected. Defaulting to 'importance'.")
     if ipls_n_intervals != 20:
         print("Info: iPLS interval parameter is noted but not yet applied in the Python backend.")
@@ -1322,6 +1522,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     #                     so we can be less strict (LR can handle more components than samples)
     if n_samples >= 2:
         from .cv_utils import compute_min_train_fold_size
+
         min_train_samples = compute_min_train_fold_size(
             cv_strategy=cv_strategy,
             n_samples=n_samples,
@@ -1340,90 +1541,123 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         safe_max_components = min(max_n_components, n_features)
         # Still warn if components exceed training fold size (not recommended but allowed)
         if max_n_components > min_train_samples:
-            print(f"Note: Using {max_n_components} PLS components with min_train_size~{min_train_samples}. " +
-                  f"This is acceptable for PLS-DA (classification) but may cause instability.")
+            print(
+                f"Note: Using {max_n_components} PLS components with min_train_size~{min_train_samples}. "
+                + f"This is acceptable for PLS-DA (classification) but may cause instability."
+            )
 
     if safe_max_components < max_n_components:
-        print(f"Note: Reducing max components from {max_n_components} to {safe_max_components} " +
-              f"due to dataset constraints (n_samples={n_samples}, n_features={n_features}, " +
-              f"min_train_size~{min_train_samples}, task={task_type})")
+        print(
+            f"Note: Reducing max components from {max_n_components} to {safe_max_components} "
+            + f"due to dataset constraints (n_samples={n_samples}, n_features={n_features}, "
+            + f"min_train_size~{min_train_samples}, task={task_type})"
+        )
 
     # Get model grids (pass n_estimators_list and learning_rates for NeuralBoosted,
     # rf_n_trees_list and rf_max_depth_list for RandomForest,
     # ridge_alphas_list and lasso_alphas_list for Ridge and Lasso,
     # xgb_* for XGBoost, elasticnet_* for ElasticNet, lightgbm_* for LightGBM, etc.,
     # tier for tiered defaults, and enabled_models for custom model selection)
-    model_grids = get_model_grids(task_type, n_features, safe_max_components, max_iter,
-                                   n_estimators_list=n_estimators_list, learning_rates=learning_rates,
-                                   neuralboosted_hidden_sizes=neuralboosted_hidden_sizes,
-                                   neuralboosted_activations=neuralboosted_activations,
-                                   pls_max_iter_list=pls_max_iter_list, pls_tol_list=pls_tol_list,
-                                   plsda_lr_C_list=plsda_lr_C_list, plsda_lr_solver_list=plsda_lr_solver_list,
-                                   plsda_lr_max_iter_list=plsda_lr_max_iter_list,
-                                   rf_n_trees_list=rf_n_trees_list, rf_max_depth_list=rf_max_depth_list,
-                                   rf_min_samples_split_list=rf_min_samples_split_list,
-                                   rf_min_samples_leaf_list=rf_min_samples_leaf_list,
-                                   rf_max_features_list=rf_max_features_list,
-                                   rf_bootstrap_list=rf_bootstrap_list,
-                                   rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
-                                   rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
-                                   ridge_alphas_list=ridge_alphas_list, ridge_solver_list=ridge_solver_list,
-                                   ridge_tol_list=ridge_tol_list,
-                                   lasso_alphas_list=lasso_alphas_list, lasso_selection_list=lasso_selection_list,
-                                   lasso_tol_list=lasso_tol_list,
-                                   xgb_n_estimators_list=xgb_n_estimators_list, xgb_learning_rates=xgb_learning_rates,
-                                   xgb_max_depths=xgb_max_depths, xgb_subsample=xgb_subsample,
-                                   xgb_colsample_bytree=xgb_colsample_bytree, xgb_reg_alpha=xgb_reg_alpha,
-                                   xgb_reg_lambda=xgb_reg_lambda,
-                                   xgb_min_child_weight_list=xgb_min_child_weight_list, xgb_gamma_list=xgb_gamma_list,
-                                   elasticnet_alphas_list=elasticnet_alphas_list, elasticnet_l1_ratios=elasticnet_l1_ratios,
-                                   elasticnet_selection_list=elasticnet_selection_list, elasticnet_tol_list=elasticnet_tol_list,
-                                   lightgbm_n_estimators_list=lightgbm_n_estimators_list,
-                                   lightgbm_learning_rates=lightgbm_learning_rates,
-                                   lightgbm_num_leaves_list=lightgbm_num_leaves_list,
-                                   lightgbm_max_depth_list=lightgbm_max_depth_list,
-                                   lightgbm_min_child_samples_list=lightgbm_min_child_samples_list,
-                                   lightgbm_subsample_list=lightgbm_subsample_list,
-                                   lightgbm_colsample_bytree_list=lightgbm_colsample_bytree_list,
-                                   lightgbm_reg_alpha_list=lightgbm_reg_alpha_list,
-                                   lightgbm_reg_lambda_list=lightgbm_reg_lambda_list,
-                                   catboost_iterations_list=catboost_iterations_list,
-                                   catboost_learning_rates=catboost_learning_rates, catboost_depths=catboost_depths,
-                                   catboost_l2_leaf_reg_list=catboost_l2_leaf_reg_list,
-                                   catboost_border_count_list=catboost_border_count_list,
-                                   catboost_bagging_temperature_list=catboost_bagging_temperature_list,
-                                   catboost_random_strength_list=catboost_random_strength_list,
-                                   svr_kernels=svr_kernels, svr_C_list=svr_C_list, svr_gamma_list=svr_gamma_list,
-                                   svr_epsilon_list=svr_epsilon_list, svr_degree_list=svr_degree_list,
-                                   svr_coef0_list=svr_coef0_list, svr_shrinking_list=svr_shrinking_list,
-                                   mlp_hidden_layer_sizes_list=mlp_hidden_layer_sizes_list,
-                                   mlp_alphas_list=mlp_alphas_list, mlp_learning_rate_inits=mlp_learning_rate_inits,
-                                   mlp_activation_list=mlp_activation_list, mlp_solver_list=mlp_solver_list,
-                                   mlp_batch_size_list=mlp_batch_size_list,
-                                   mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
-                                   mlp_momentum_list=mlp_momentum_list,
-                                   tier=tier, enabled_models=enabled_models, n_jobs=n_jobs_default)
+    model_grids = get_model_grids(
+        task_type,
+        n_features,
+        safe_max_components,
+        max_iter,
+        n_estimators_list=n_estimators_list,
+        learning_rates=learning_rates,
+        neuralboosted_hidden_sizes=neuralboosted_hidden_sizes,
+        neuralboosted_activations=neuralboosted_activations,
+        pls_max_iter_list=pls_max_iter_list,
+        pls_tol_list=pls_tol_list,
+        plsda_lr_C_list=plsda_lr_C_list,
+        plsda_lr_solver_list=plsda_lr_solver_list,
+        plsda_lr_max_iter_list=plsda_lr_max_iter_list,
+        rf_n_trees_list=rf_n_trees_list,
+        rf_max_depth_list=rf_max_depth_list,
+        rf_min_samples_split_list=rf_min_samples_split_list,
+        rf_min_samples_leaf_list=rf_min_samples_leaf_list,
+        rf_max_features_list=rf_max_features_list,
+        rf_bootstrap_list=rf_bootstrap_list,
+        rf_max_leaf_nodes_list=rf_max_leaf_nodes_list,
+        rf_min_impurity_decrease_list=rf_min_impurity_decrease_list,
+        ridge_alphas_list=ridge_alphas_list,
+        ridge_solver_list=ridge_solver_list,
+        ridge_tol_list=ridge_tol_list,
+        lasso_alphas_list=lasso_alphas_list,
+        lasso_selection_list=lasso_selection_list,
+        lasso_tol_list=lasso_tol_list,
+        xgb_n_estimators_list=xgb_n_estimators_list,
+        xgb_learning_rates=xgb_learning_rates,
+        xgb_max_depths=xgb_max_depths,
+        xgb_subsample=xgb_subsample,
+        xgb_colsample_bytree=xgb_colsample_bytree,
+        xgb_reg_alpha=xgb_reg_alpha,
+        xgb_reg_lambda=xgb_reg_lambda,
+        xgb_min_child_weight_list=xgb_min_child_weight_list,
+        xgb_gamma_list=xgb_gamma_list,
+        elasticnet_alphas_list=elasticnet_alphas_list,
+        elasticnet_l1_ratios=elasticnet_l1_ratios,
+        elasticnet_selection_list=elasticnet_selection_list,
+        elasticnet_tol_list=elasticnet_tol_list,
+        lightgbm_n_estimators_list=lightgbm_n_estimators_list,
+        lightgbm_learning_rates=lightgbm_learning_rates,
+        lightgbm_num_leaves_list=lightgbm_num_leaves_list,
+        lightgbm_max_depth_list=lightgbm_max_depth_list,
+        lightgbm_min_child_samples_list=lightgbm_min_child_samples_list,
+        lightgbm_subsample_list=lightgbm_subsample_list,
+        lightgbm_colsample_bytree_list=lightgbm_colsample_bytree_list,
+        lightgbm_reg_alpha_list=lightgbm_reg_alpha_list,
+        lightgbm_reg_lambda_list=lightgbm_reg_lambda_list,
+        catboost_iterations_list=catboost_iterations_list,
+        catboost_learning_rates=catboost_learning_rates,
+        catboost_depths=catboost_depths,
+        catboost_l2_leaf_reg_list=catboost_l2_leaf_reg_list,
+        catboost_border_count_list=catboost_border_count_list,
+        catboost_bagging_temperature_list=catboost_bagging_temperature_list,
+        catboost_random_strength_list=catboost_random_strength_list,
+        svr_kernels=svr_kernels,
+        svr_C_list=svr_C_list,
+        svr_gamma_list=svr_gamma_list,
+        svr_epsilon_list=svr_epsilon_list,
+        svr_degree_list=svr_degree_list,
+        svr_coef0_list=svr_coef0_list,
+        svr_shrinking_list=svr_shrinking_list,
+        mlp_hidden_layer_sizes_list=mlp_hidden_layer_sizes_list,
+        mlp_alphas_list=mlp_alphas_list,
+        mlp_learning_rate_inits=mlp_learning_rate_inits,
+        mlp_activation_list=mlp_activation_list,
+        mlp_solver_list=mlp_solver_list,
+        mlp_batch_size_list=mlp_batch_size_list,
+        mlp_learning_rate_schedule_list=mlp_learning_rate_schedule_list,
+        mlp_momentum_list=mlp_momentum_list,
+        tier=tier,
+        enabled_models=enabled_models,
+        n_jobs=n_jobs_default,
+    )
 
     # Filter models if models_to_test is specified
     if models_to_test is not None:
         # Filter to only requested models
-        model_grids = {name: configs for name, configs in model_grids.items()
-                      if name in models_to_test}
+        model_grids = {
+            name: configs for name, configs in model_grids.items() if name in models_to_test
+        }
 
         if not model_grids:
-            raise ValueError(f"No valid models found. Available: {list(get_model_grids(task_type, n_features, safe_max_components, max_iter).keys())}, Requested: {models_to_test}")
+            raise ValueError(
+                f"No valid models found. Available: {list(get_model_grids(task_type, n_features, safe_max_components, max_iter).keys())}, Requested: {models_to_test}"
+            )
 
     # Define preprocessing configurations based on user selections
     # Use preprocessing_methods dict if provided, otherwise default to all
     if preprocessing_methods is None:
         preprocessing_methods = {
-            'raw': True,
-            'snv': True,
-            'sg1': True,
-            'sg2': True,
-            'sg3': False,  # Higher-order derivatives not default
-            'sg4': False,  # Higher-order derivatives not default
-            'deriv_snv': True
+            "raw": True,
+            "snv": True,
+            "sg1": True,
+            "sg2": True,
+            "sg3": False,  # Higher-order derivatives not default
+            "sg4": False,  # Higher-order derivatives not default
+            "deriv_snv": True,
         }
 
     # Use window_sizes list if provided, otherwise default to [7, 19]
@@ -1437,21 +1671,21 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             return False
 
         # Check basic methods
-        if interference.get('msc', False):
+        if interference.get("msc", False):
             return True
-        if interference.get('wavelength_exclusion', {}).get('enabled', False):
+        if interference.get("wavelength_exclusion", {}).get("enabled", False):
             return True
-        if interference.get('osc', {}).get('enabled', False):
+        if interference.get("osc", {}).get("enabled", False):
             return True
 
         # Check advanced methods
-        advanced = interference.get('advanced', {})
+        advanced = interference.get("advanced", {})
         if isinstance(advanced, dict):
-            if advanced.get('epo', {}).get('enabled', False):
+            if advanced.get("epo", {}).get("enabled", False):
                 return True
-            if advanced.get('dosc', {}).get('enabled', False):
+            if advanced.get("dosc", {}).get("enabled", False):
                 return True
-            if advanced.get('glsw', {}).get('enabled', False):
+            if advanced.get("glsw", {}).get("enabled", False):
                 return True
 
         return False
@@ -1488,12 +1722,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # ═══════════════════════════════════════════════════════════════════════════
     if smart_preprocess and not tpe_preprocess:
         if progress_callback:
-            progress_callback({
-                'stage': 'smart_preprocessing',
-                'message': 'Discovering optimal preprocessing configurations...',
-                'current': 0,
-                'total': 62  # Approximate number of combinations
-            })
+            progress_callback(
+                {
+                    "stage": "smart_preprocessing",
+                    "message": "Discovering optimal preprocessing configurations...",
+                    "current": 0,
+                    "total": 62,  # Approximate number of combinations
+                }
+            )
 
         print(f"\n{'='*70}")
         print("SMART PREPROCESSING DISCOVERY")
@@ -1508,12 +1744,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # Wrap progress callback for discovery
         def discovery_progress(current, total, message):
             if progress_callback:
-                progress_callback({
-                    'stage': 'smart_preprocessing',
-                    'message': message,
-                    'current': current,
-                    'total': total
-                })
+                progress_callback(
+                    {
+                        "stage": "smart_preprocessing",
+                        "message": message,
+                        "current": current,
+                        "total": total,
+                    }
+                )
 
         # Run smart preprocessing discovery
         discovered_configs = discover_preprocessing(
@@ -1524,7 +1762,7 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             importance_method=smart_preprocess_importance,
             n_top=smart_preprocess_n_top,
             cv_folds=folds,
-            progress_callback=discovery_progress
+            progress_callback=discovery_progress,
         )
 
         if not discovered_configs:
@@ -1537,46 +1775,50 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
             for i, cfg in enumerate(discovered_configs):
                 # Build preprocessing name in format expected by build_preprocessing_pipeline
-                base_name = cfg['preprocessing']
-                window = cfg.get('window')
-                deriv = cfg.get('deriv')
+                base_name = cfg["preprocessing"]
+                window = cfg.get("window")
+                deriv = cfg.get("deriv")
 
                 # Determine base name for pipeline builder
-                if base_name in ('raw', 'snv'):
+                if base_name in ("raw", "snv"):
                     pipeline_name = base_name
-                elif base_name.startswith('snv_deriv'):
-                    pipeline_name = 'snv_deriv'
-                elif base_name.endswith('_snv'):
-                    pipeline_name = 'deriv_snv'
-                elif base_name.startswith('deriv'):
-                    pipeline_name = 'deriv'
+                elif base_name.startswith("snv_deriv"):
+                    pipeline_name = "snv_deriv"
+                elif base_name.endswith("_snv"):
+                    pipeline_name = "deriv_snv"
+                elif base_name.startswith("deriv"):
+                    pipeline_name = "deriv"
                 else:
                     pipeline_name = base_name
 
                 display_name = pipeline_name
-                model_name = cfg.get('model_name')
+                model_name = cfg.get("model_name")
 
-                preprocess_configs.append({
-                    "name": display_name,
-                    "base_name": pipeline_name,
-                    "deriv": deriv,
-                    "window": window,
-                    "polyorder": cfg.get('polyorder'),
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder,
-                    # Smart preprocessing specific fields
-                    "smart_selected_wavelengths": cfg.get('selected_wavelengths'),
-                    "smart_n_wavelengths": cfg.get('n_wavelengths'),
-                    "smart_score": cfg.get('score'),
-                    "smart_importance_method": cfg.get('importance_method'),
-                    "smart_model_name": model_name,  # Which model this was optimized for
-                })
+                preprocess_configs.append(
+                    {
+                        "name": display_name,
+                        "base_name": pipeline_name,
+                        "deriv": deriv,
+                        "window": window,
+                        "polyorder": cfg.get("polyorder"),
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                        # Smart preprocessing specific fields
+                        "smart_selected_wavelengths": cfg.get("selected_wavelengths"),
+                        "smart_n_wavelengths": cfg.get("n_wavelengths"),
+                        "smart_score": cfg.get("score"),
+                        "smart_importance_method": cfg.get("importance_method"),
+                        "smart_model_name": model_name,  # Which model this was optimized for
+                    }
+                )
 
-            print(f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search")
+            print(
+                f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search"
+            )
             print(f"{'='*70}\n")
 
             # Skip normal preprocessing config building AND old GA preprocessing
@@ -1591,12 +1833,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # ═══════════════════════════════════════════════════════════════════════════
     if tpe_preprocess and not smart_preprocess:
         if progress_callback:
-            progress_callback({
-                'stage': 'tpe_preprocessing',
-                'message': 'TPE preprocessing discovery...',
-                'current': 0,
-                'total': tpe_preprocess_n_trials,
-            })
+            progress_callback(
+                {
+                    "stage": "tpe_preprocessing",
+                    "message": "TPE preprocessing discovery...",
+                    "current": 0,
+                    "total": tpe_preprocess_n_trials,
+                }
+            )
 
         print(f"\n{'='*70}")
         print("TPE PREPROCESSING DISCOVERY")
@@ -1611,12 +1855,14 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
         def tpe_progress(current, total, message):
             if progress_callback:
-                progress_callback({
-                    'stage': 'tpe_preprocessing',
-                    'message': message,
-                    'current': current,
-                    'total': total,
-                })
+                progress_callback(
+                    {
+                        "stage": "tpe_preprocessing",
+                        "message": message,
+                        "current": current,
+                        "total": total,
+                    }
+                )
 
         discovered_configs = run_tpe_preprocessing_discovery(
             X.values,
@@ -1640,56 +1886,60 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         else:
             preprocess_configs = []
             for cfg in discovered_configs:
-                base_name = cfg['preprocessing']
-                window = cfg.get('window')
-                deriv = cfg.get('deriv')
+                base_name = cfg["preprocessing"]
+                window = cfg.get("window")
+                deriv = cfg.get("deriv")
 
-                if base_name in ('raw', 'snv'):
+                if base_name in ("raw", "snv"):
                     pipeline_name = base_name
-                elif base_name.startswith('snv_deriv'):
-                    pipeline_name = 'snv_deriv'
-                elif base_name.endswith('_snv'):
-                    pipeline_name = 'deriv_snv'
-                elif base_name.startswith('deriv'):
-                    pipeline_name = 'deriv'
+                elif base_name.startswith("snv_deriv"):
+                    pipeline_name = "snv_deriv"
+                elif base_name.endswith("_snv"):
+                    pipeline_name = "deriv_snv"
+                elif base_name.startswith("deriv"):
+                    pipeline_name = "deriv"
                 else:
                     pipeline_name = base_name
 
                 display_name = base_name
                 if window:
-                    display_name += f'_w{window}'
-                if cfg.get('_tpe_baseline_method'):
+                    display_name += f"_w{window}"
+                if cfg.get("_tpe_baseline_method"):
                     display_name = f"{cfg['_tpe_baseline_method']}+{display_name}"
-                if cfg.get('_tpe_smoothing'):
+                if cfg.get("_tpe_smoothing"):
                     display_name = f"sg0+{display_name}"
-                if cfg.get('_tpe_autoscale'):
+                if cfg.get("_tpe_autoscale"):
                     display_name = f"{display_name}+autoscale"
 
-                preprocess_configs.append({
-                    "name": display_name,
-                    "base_name": pipeline_name,
-                    "deriv": deriv,
-                    "window": window,
-                    "polyorder": cfg.get('polyorder'),
-                    "interference": interference_to_add,
-                    "baseline_method": cfg.get('_tpe_baseline_method'),
-                    "baseline_params": cfg.get('_tpe_baseline_params'),
-                    "smoothing": cfg.get('_tpe_smoothing', False),
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder,
-                    "autoscale": cfg.get('_tpe_autoscale', False),
-                    "tpe_score": cfg.get('score'),
-                })
+                preprocess_configs.append(
+                    {
+                        "name": display_name,
+                        "base_name": pipeline_name,
+                        "deriv": deriv,
+                        "window": window,
+                        "polyorder": cfg.get("polyorder"),
+                        "interference": interference_to_add,
+                        "baseline_method": cfg.get("_tpe_baseline_method"),
+                        "baseline_params": cfg.get("_tpe_baseline_params"),
+                        "smoothing": cfg.get("_tpe_smoothing", False),
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                        "autoscale": cfg.get("_tpe_autoscale", False),
+                        "tpe_score": cfg.get("score"),
+                    }
+                )
 
-            print(f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search")
+            print(
+                f"\nCreated {len(preprocess_configs)} preprocessing configurations for grid search"
+            )
             print(f"{'='*70}\n")
 
             skip_normal_preprocessing = True
             ga_preprocess = False
             smart_preprocess = False
-            baseline_method = None   # TPE configs already have per-config baseline
-            autoscale = False        # TPE configs already have per-config autoscale
-            smoothing = False        # TPE configs already have per-config smoothing
+            baseline_method = None  # TPE configs already have per-config baseline
+            autoscale = False  # TPE configs already have per-config autoscale
+            smoothing = False  # TPE configs already have per-config smoothing
 
     # ═══════════════════════════════════════════════════════════════════════════
     # GA PREPROCESSING OPTIMIZATION (LEGACY - kept for backward compatibility)
@@ -1697,19 +1947,21 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # ═══════════════════════════════════════════════════════════════════════════
     if ga_preprocess and not smart_preprocess and not tpe_preprocess:
         if progress_callback:
-            progress_callback({
-                'stage': 'ga_preprocessing',
-                'message': 'Optimizing preprocessing parameters with GA...',
-                'current': 0,
-                'total': ga_preprocess_generations
-            })
+            progress_callback(
+                {
+                    "stage": "ga_preprocessing",
+                    "message": "Optimizing preprocessing parameters with GA...",
+                    "current": 0,
+                    "total": ga_preprocess_generations,
+                }
+            )
 
         print(f"\n{'='*70}")
         print("GA PREPROCESSING OPTIMIZATION")
         print(f"{'='*70}")
         print(f"  Search method: {ga_preprocess_method.upper()}")
         print(f"  Search space: 238 combinations (14 preproc x 17 windows)")
-        if ga_preprocess_method == 'ga':
+        if ga_preprocess_method == "ga":
             print(f"  Population size: {ga_preprocess_population}")
             print(f"  Generations: {ga_preprocess_generations}")
         print(f"  CV folds: {ga_preprocess_cv_folds}")
@@ -1745,7 +1997,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # This ensures each model gets preprocessing optimized for its actual hyperparameters
         # Use model_grids.keys() since it's already filtered by enabled_models or models_to_test
         models_for_ga = list(model_grids.keys())
-        print(f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters...")
+        print(
+            f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters..."
+        )
         print(f"Models selected: {models_for_ga}")
         print(f"")
 
@@ -1759,39 +2013,40 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             # Send progress update to GUI before starting this model
             if progress_callback:
                 model_idx = models_for_ga.index(model_name) + 1
-                progress_callback({
-                    'algorithm': 'preprocessing_optimization',
-                    'current': 0,
-                    'total': len(models_for_ga),
-                    'message': f"Optimizing preprocessing for {model_name} ({model_idx}/{len(models_for_ga)})..."
-                })
+                progress_callback(
+                    {
+                        "algorithm": "preprocessing_optimization",
+                        "current": 0,
+                        "total": len(models_for_ga),
+                        "message": f"Optimizing preprocessing for {model_name} ({model_idx}/{len(models_for_ga)})...",
+                    }
+                )
 
             print(f"Optimizing preprocessing for {model_name}...")
 
             # Determine which proxy fitness model to use as fallback
-            if model_name.lower() in ['pls', 'pls-da', 'ridge', 'lasso', 'elasticnet']:
-                fitness_model = 'pls'
-            elif model_name.lower() in ['lightgbm', 'xgboost', 'catboost', 'randomforest']:
-                fitness_model = 'lightgbm'
-            elif model_name.lower() in ['mlp', 'svr', 'svc']:
-                fitness_model = 'mlp'
-            elif model_name.lower() == 'neuralboosted':
-                fitness_model = 'neuralboosted'
+            if model_name.lower() in ["pls", "pls-da", "ridge", "lasso", "elasticnet"]:
+                fitness_model = "pls"
+            elif model_name.lower() in ["lightgbm", "xgboost", "catboost", "randomforest"]:
+                fitness_model = "lightgbm"
+            elif model_name.lower() in ["mlp", "svr", "svc"]:
+                fitness_model = "mlp"
+            elif model_name.lower() == "neuralboosted":
+                fitness_model = "neuralboosted"
             else:
-                fitness_model = 'pls'  # Default
+                fitness_model = "pls"  # Default
 
             # Get first hyperparameter set for this model (for actual model evaluation)
             # model_grids is dict mapping model_name -> list of (model_instance, params_dict)
             first_params = {}
             if model_name in model_grids and model_grids[model_name]:
                 # Extract params from first config tuple: (model_instance, params_dict)
-                first_params = model_grids[model_name][0][1] if len(model_grids[model_name][0]) > 1 else {}
+                first_params = (
+                    model_grids[model_name][0][1] if len(model_grids[model_name][0]) > 1 else {}
+                )
 
             # Build model_config for actual model evaluation
-            model_config = {
-                'name': model_name,
-                'params': first_params
-            }
+            model_config = {"name": model_name, "params": first_params}
 
             # Run GA/Exhaustive optimization with actual model evaluation
             ga_result = optimize_preprocessing(
@@ -1808,16 +2063,16 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 progress_callback=progress_callback,
                 fitness_model=fitness_model,  # Fallback if model_config fails
                 top_n=5,  # Return top 5 preprocessing configs
-                n_jobs=-1 if ga_preprocess_method == 'exhaustive' else 1,
-                model_config=model_config  # Use actual model for fitness evaluation
+                n_jobs=-1 if ga_preprocess_method == "exhaustive" else 1,
+                model_config=model_config,  # Use actual model for fitness evaluation
             )
 
             ga_results[model_name] = ga_result
             print(f"  {model_name} optimization complete!")
             print(f"  Best config: {ga_result['best_config']}")
-            if task_type == 'classification':
+            if task_type == "classification":
                 # For classification, fitness is accuracy (positive, higher = better)
-                best_fitness = ga_result['configs'][0]['fitness'] if ga_result.get('configs') else 0
+                best_fitness = ga_result["configs"][0]["fitness"] if ga_result.get("configs") else 0
                 print(f"  Best Accuracy: {best_fitness:.4f}")
             else:
                 # For regression, best_rmsecv is already the RMSECV value
@@ -1827,67 +2082,73 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             # Send completion update to GUI after this model finishes
             if progress_callback:
                 model_idx = models_for_ga.index(model_name) + 1
-                best_score = ga_result['configs'][0]['fitness'] if ga_result.get('configs') else 0
-                if task_type == 'classification':
+                best_score = ga_result["configs"][0]["fitness"] if ga_result.get("configs") else 0
+                if task_type == "classification":
                     score_str = f"Best Accuracy: {best_score:.4f}"
                 else:
                     score_str = f"Best RMSECV: {ga_result['best_rmsecv']:.4f}"
-                progress_callback({
-                    'algorithm': 'preprocessing_optimization',
-                    'current': model_idx,
-                    'total': len(models_for_ga),
-                    'message': f"  ✓ {model_name} preprocessing complete - {score_str}"
-                })
+                progress_callback(
+                    {
+                        "algorithm": "preprocessing_optimization",
+                        "current": model_idx,
+                        "total": len(models_for_ga),
+                        "message": f"  ✓ {model_name} preprocessing complete - {score_str}",
+                    }
+                )
 
         # Create preprocessing configs from all GA results
         # Each model contributes its top-N preprocessing configs
         preprocess_configs = []
 
         for model_name, ga_result in ga_results.items():
-            configs_list = ga_result.get('configs', [])
+            configs_list = ga_result.get("configs", [])
             if not configs_list:
                 # Fallback for backward compatibility (shouldn't happen with new code)
-                configs_list = [{
-                    'genes': ga_result['best_genes'],
-                    'name': ga_result['best_name'],
-                    'transform': ga_result['best_transform'],
-                    'config': ga_result['best_config'],
-                    'deriv': None,
-                    'window': None,
-                    'polyorder': None
-                }]
+                configs_list = [
+                    {
+                        "genes": ga_result["best_genes"],
+                        "name": ga_result["best_name"],
+                        "transform": ga_result["best_transform"],
+                        "config": ga_result["best_config"],
+                        "deriv": None,
+                        "window": None,
+                        "polyorder": None,
+                    }
+                ]
 
             # Add all top-N configs for this model
             for i, cfg in enumerate(configs_list):
-                base_name = cfg.get('name', 'unknown')
+                base_name = cfg.get("name", "unknown")
                 # Clean display name: strip derivative order
-                if base_name in ('raw', 'snv'):
+                if base_name in ("raw", "snv"):
                     clean_name = base_name
-                elif base_name.startswith('snv_deriv'):
-                    clean_name = 'snv_deriv'
-                elif base_name.endswith('_snv'):
-                    clean_name = 'deriv_snv'
-                elif base_name.startswith('deriv'):
-                    clean_name = 'deriv'
+                elif base_name.startswith("snv_deriv"):
+                    clean_name = "snv_deriv"
+                elif base_name.endswith("_snv"):
+                    clean_name = "deriv_snv"
+                elif base_name.startswith("deriv"):
+                    clean_name = "deriv"
                 else:
                     clean_name = base_name
-                preprocess_configs.append({
-                    "name": clean_name,
-                    "base_name": base_name,  # Base name for build_preprocessing_pipeline
-                    "deriv": cfg.get('deriv'),
-                    "window": cfg.get('window'),
-                    "polyorder": cfg.get('polyorder'),
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder,
-                    "ga_transform": cfg.get('transform'),
-                    "ga_config": cfg.get('config'),
-                    "ga_model_type": model_name,  # Track which model this was optimized for
-                    "ga_genes": cfg.get('genes'),
-                })
+                preprocess_configs.append(
+                    {
+                        "name": clean_name,
+                        "base_name": base_name,  # Base name for build_preprocessing_pipeline
+                        "deriv": cfg.get("deriv"),
+                        "window": cfg.get("window"),
+                        "polyorder": cfg.get("polyorder"),
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                        "ga_transform": cfg.get("transform"),
+                        "ga_config": cfg.get("config"),
+                        "ga_model_type": model_name,  # Track which model this was optimized for
+                        "ga_genes": cfg.get("genes"),
+                    }
+                )
 
         print(f"Total preprocessing configs: {len(preprocess_configs)}")
         print(f"Breakdown: {len(models_for_ga)} models × up to 5 configs each")
@@ -1903,34 +2164,38 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         preprocess_configs = []
 
         # Add raw if selected
-        if preprocessing_methods.get('raw', False):
-            preprocess_configs.append({
-                "name": "raw",
-                "deriv": None,
-                "window": None,
-                "polyorder": None,
-                "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder
-            })
+        if preprocessing_methods.get("raw", False):
+            preprocess_configs.append(
+                {
+                    "name": "raw",
+                    "deriv": None,
+                    "window": None,
+                    "polyorder": None,
+                    "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                }
+            )
 
         # Add SNV if selected
-        if preprocessing_methods.get('snv', False):
-            preprocess_configs.append({
-                "name": "snv",
-                "deriv": None,
-                "window": None,
-                "polyorder": None,
-                "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder
-            })
+        if preprocessing_methods.get("snv", False):
+            preprocess_configs.append(
+                {
+                    "name": "snv",
+                    "deriv": None,
+                    "window": None,
+                    "polyorder": None,
+                    "interference": interference_to_add,  # Phase 3: Add interference settings only if enabled
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                }
+            )
 
         # Add derivative configs based on user selections
         # For each derivative type, we create:
@@ -1938,27 +2203,12 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # 2. SNV then derivative (snv_deriv) - if SNV is also selected
         # 3. Derivative then SNV (deriv_snv) - if deriv_snv checkbox is selected
 
-        if preprocessing_methods.get('sg1', False):
+        if preprocessing_methods.get("sg1", False):
             # 1st derivative only
             for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "deriv",
-                    "deriv": 1,
-                    "window": window,
-                    "polyorder": 2,
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder
-                })
-
-            # If SNV is also selected, add SNV -> derivative combination
-            if preprocessing_methods.get('snv', False):
-                for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "snv_deriv",
+                preprocess_configs.append(
+                    {
+                        "name": "deriv",
                         "deriv": 1,
                         "window": window,
                         "polyorder": 2,
@@ -1967,46 +2217,52 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                         "baseline_params": baseline_params,
                         "smoothing": smoothing,
                         "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get("snv", False):
+                for window in window_sizes:
+                    preprocess_configs.append(
+                        {
+                            "name": "snv_deriv",
+                            "deriv": 1,
+                            "window": window,
+                            "polyorder": 2,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
 
             # If deriv_snv is selected, add derivative -> SNV combination for 1st deriv
-            if preprocessing_methods.get('deriv_snv', False):
+            if preprocessing_methods.get("deriv_snv", False):
                 for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "deriv_snv",
-                        "deriv": 1,
-                        "window": window,
-                        "polyorder": 2,
-                        "interference": interference_to_add,
-                        "baseline_method": baseline_method,
-                        "baseline_params": baseline_params,
-                        "smoothing": smoothing,
-                        "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
-    
-        if preprocessing_methods.get('sg2', False):
+                    preprocess_configs.append(
+                        {
+                            "name": "deriv_snv",
+                            "deriv": 1,
+                            "window": window,
+                            "polyorder": 2,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+
+        if preprocessing_methods.get("sg2", False):
             # 2nd derivative only
             for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "deriv",
-                    "deriv": 2,
-                    "window": window,
-                    "polyorder": 3,
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder
-                })
-
-            # If SNV is also selected, add SNV -> derivative combination
-            if preprocessing_methods.get('snv', False):
-                for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "snv_deriv",
+                preprocess_configs.append(
+                    {
+                        "name": "deriv",
                         "deriv": 2,
                         "window": window,
                         "polyorder": 3,
@@ -2015,46 +2271,52 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                         "baseline_params": baseline_params,
                         "smoothing": smoothing,
                         "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get("snv", False):
+                for window in window_sizes:
+                    preprocess_configs.append(
+                        {
+                            "name": "snv_deriv",
+                            "deriv": 2,
+                            "window": window,
+                            "polyorder": 3,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
 
             # If deriv_snv is selected, add derivative -> SNV combination for 2nd deriv
-            if preprocessing_methods.get('deriv_snv', False):
+            if preprocessing_methods.get("deriv_snv", False):
                 for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "deriv_snv",
-                        "deriv": 2,
-                        "window": window,
-                        "polyorder": 3,
-                        "interference": interference_to_add,
-                        "baseline_method": baseline_method,
-                        "baseline_params": baseline_params,
-                        "smoothing": smoothing,
-                        "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
-    
-        if preprocessing_methods.get('sg3', False):
+                    preprocess_configs.append(
+                        {
+                            "name": "deriv_snv",
+                            "deriv": 2,
+                            "window": window,
+                            "polyorder": 3,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+
+        if preprocessing_methods.get("sg3", False):
             # 3rd derivative only
             for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "deriv",
-                    "deriv": 3,
-                    "window": window,
-                    "polyorder": 4,
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder
-                })
-
-            # If SNV is also selected, add SNV -> derivative combination
-            if preprocessing_methods.get('snv', False):
-                for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "snv_deriv",
+                preprocess_configs.append(
+                    {
+                        "name": "deriv",
                         "deriv": 3,
                         "window": window,
                         "polyorder": 4,
@@ -2063,88 +2325,117 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                         "baseline_params": baseline_params,
                         "smoothing": smoothing,
                         "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+
+            # If SNV is also selected, add SNV -> derivative combination
+            if preprocessing_methods.get("snv", False):
+                for window in window_sizes:
+                    preprocess_configs.append(
+                        {
+                            "name": "snv_deriv",
+                            "deriv": 3,
+                            "window": window,
+                            "polyorder": 4,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
 
             # If deriv_snv is selected, add derivative -> SNV combination for 3rd deriv
-            if preprocessing_methods.get('deriv_snv', False):
+            if preprocessing_methods.get("deriv_snv", False):
                 for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "deriv_snv",
-                        "deriv": 3,
-                        "window": window,
-                        "polyorder": 4,
-                        "interference": interference_to_add,
-                        "baseline_method": baseline_method,
-                        "baseline_params": baseline_params,
-                        "smoothing": smoothing,
-                        "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
-    
-        if preprocessing_methods.get('sg4', False):
+                    preprocess_configs.append(
+                        {
+                            "name": "deriv_snv",
+                            "deriv": 3,
+                            "window": window,
+                            "polyorder": 4,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+
+        if preprocessing_methods.get("sg4", False):
             # 4th derivative only
             for window in window_sizes:
-                preprocess_configs.append({
-                    "name": "deriv",
-                    "deriv": 4,
-                    "window": window,
-                    "polyorder": 5,
-                    "interference": interference_to_add,
-                    "baseline_method": baseline_method,
-                    "baseline_params": baseline_params,
-                    "smoothing": smoothing,
-                    "smoothing_window": smoothing_window,
-                    "smoothing_polyorder": smoothing_polyorder
-                })
+                preprocess_configs.append(
+                    {
+                        "name": "deriv",
+                        "deriv": 4,
+                        "window": window,
+                        "polyorder": 5,
+                        "interference": interference_to_add,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
 
             # If SNV is also selected, add SNV -> derivative combination
-            if preprocessing_methods.get('snv', False):
+            if preprocessing_methods.get("snv", False):
                 for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "snv_deriv",
-                        "deriv": 4,
-                        "window": window,
-                        "polyorder": 5,
-                        "interference": interference_to_add,
-                        "baseline_method": baseline_method,
-                        "baseline_params": baseline_params,
-                        "smoothing": smoothing,
-                        "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
+                    preprocess_configs.append(
+                        {
+                            "name": "snv_deriv",
+                            "deriv": 4,
+                            "window": window,
+                            "polyorder": 5,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
 
             # If deriv_snv is selected, add derivative -> SNV combination for 4th deriv
-            if preprocessing_methods.get('deriv_snv', False):
+            if preprocessing_methods.get("deriv_snv", False):
                 for window in window_sizes:
-                    preprocess_configs.append({
-                        "name": "deriv_snv",
-                        "deriv": 4,
-                        "window": window,
-                        "polyorder": 5,
-                        "interference": interference_to_add,
-                        "baseline_method": baseline_method,
-                        "baseline_params": baseline_params,
-                        "smoothing": smoothing,
-                        "smoothing_window": smoothing_window,
-                        "smoothing_polyorder": smoothing_polyorder
-                    })
-    
+                    preprocess_configs.append(
+                        {
+                            "name": "deriv_snv",
+                            "deriv": 4,
+                            "window": window,
+                            "polyorder": 5,
+                            "interference": interference_to_add,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+
         # If no preprocessing methods selected, default to raw
         if not preprocess_configs:
             print("Warning: No preprocessing methods selected. Defaulting to raw.")
-            preprocess_configs.append({
-                "name": "raw",
-                "deriv": None,
-                "window": None,
-                "polyorder": None,
-                "interference": interference_to_add,
-                "baseline_method": baseline_method,
-                "baseline_params": baseline_params,
-                "smoothing": smoothing,
-                "smoothing_window": smoothing_window,
-                "smoothing_polyorder": smoothing_polyorder
-            })
+            preprocess_configs.append(
+                {
+                    "name": "raw",
+                    "deriv": None,
+                    "window": None,
+                    "polyorder": None,
+                    "interference": interference_to_add,
+                    "baseline_method": baseline_method,
+                    "baseline_params": baseline_params,
+                    "smoothing": smoothing,
+                    "smoothing_window": smoothing_window,
+                    "smoothing_polyorder": smoothing_polyorder,
+                }
+            )
 
     # --- Baseline toggle: when enabled, test both WITH and WITHOUT baseline ---
     if baseline_method is not None and preprocess_configs:
@@ -2208,13 +2499,15 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         random_state=random_state,
     )
 
-    print(f"Running {task_type} search with {cv_strategy} CV (folds={folds}, repeats={cv_n_repeats})...")
+    print(
+        f"Running {task_type} search with {cv_strategy} CV (folds={folds}, repeats={cv_n_repeats})..."
+    )
     print(f"Models: {list(model_grids.keys())}")
     print(f"Preprocessing configs: {len(preprocess_configs)}")
     print(f"\nPreprocessing breakdown:")
     for cfg in preprocess_configs:
-        cfg_name = cfg['name']
-        if cfg['deriv'] is not None:
+        cfg_name = cfg["name"]
+        if cfg["deriv"] is not None:
             print(f"  - {cfg_name} (deriv={cfg['deriv']}, window={cfg['window']})")
         else:
             print(f"  - {cfg_name}")
@@ -2268,22 +2561,22 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # 'autoscale' is encoded in 'name' too, but is added here defensively (and
         # because Bayesian-path Optuna trials toggle autoscale without renaming).
         prep_parts = (
-            preprocess_cfg.get('name', ''),
-            preprocess_cfg.get('base_name', ''),
-            preprocess_cfg.get('deriv', 0),
-            preprocess_cfg.get('window', 0),
-            preprocess_cfg.get('polyorder', 0),
-            str(preprocess_cfg.get('baseline_method', '')),
-            preprocess_cfg.get('autoscale', False),  # T-36
+            preprocess_cfg.get("name", ""),
+            preprocess_cfg.get("base_name", ""),
+            preprocess_cfg.get("deriv", 0),
+            preprocess_cfg.get("window", 0),
+            preprocess_cfg.get("polyorder", 0),
+            str(preprocess_cfg.get("baseline_method", "")),
+            preprocess_cfg.get("autoscale", False),  # T-36
         )
 
         # Methods that depend on model category (tree vs linear)
-        if varsel_method in ('cars-aware', 'cars-tree', 'uve_cars_tree'):
-            category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
+        if varsel_method in ("cars-aware", "cars-tree", "uve_cars_tree"):
+            category = "tree" if model_name in TREE_MODELS_SET else "linear"
             return (prep_parts, varsel_method, category, uve_prefilter_active)
-        elif varsel_method == 'ga':
+        elif varsel_method == "ga":
             # GA uses ga_pls for linear, ga_lightgbm for tree
-            category = 'tree' if model_name in TREE_MODELS_SET else 'linear'
+            category = "tree" if model_name in TREE_MODELS_SET else "linear"
             return (prep_parts, varsel_method, category, uve_prefilter_active)
         else:
             # Model-independent: uve, spa, ipls, cars, uve_spa, etc.
@@ -2307,12 +2600,12 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
         # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
         # Phase 3: Extract wavelengths for interference removal
-        wavelengths = X.columns.astype(float).values if hasattr(X, 'columns') else None
+        wavelengths = X.columns.astype(float).values if hasattr(X, "columns") else None
 
         # Check if this is a GA-optimized preprocessing config
-        if 'ga_transform' in preprocess_cfg and preprocess_cfg['ga_transform'] is not None:
+        if "ga_transform" in preprocess_cfg and preprocess_cfg["ga_transform"] is not None:
             # Use GA transform directly (it already includes all preprocessing)
-            X_preprocessed = preprocess_cfg['ga_transform'](X_np)
+            X_preprocessed = preprocess_cfg["ga_transform"](X_np)
         else:
             # Use standard preprocessing pipeline
             # Use base_name if available (for GA configs), otherwise use name
@@ -2395,9 +2688,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             wl_mask = np.ones(len(wavelengths), dtype=bool)
 
             if analysis_wl_min is not None:
-                wl_mask &= (wavelengths_float >= analysis_wl_min)
+                wl_mask &= wavelengths_float >= analysis_wl_min
             if analysis_wl_max is not None:
-                wl_mask &= (wavelengths_float <= analysis_wl_max)
+                wl_mask &= wavelengths_float <= analysis_wl_max
 
             # Validate non-empty selection
             n_wavelengths_selected = wl_mask.sum()
@@ -2448,7 +2741,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
         # SKIP when wavelength restriction is active - those are middle wavelengths.
         # ═══════════════════════════════════════════════════════════════════════════
         edge_zone_applied = 0
-        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window") and not wavelength_restriction_active:
+        if (
+            preprocess_cfg.get("deriv")
+            and preprocess_cfg.get("window")
+            and not wavelength_restriction_active
+        ):
             X_for_models, wavelengths_for_models, edge_zone_applied = _apply_edge_mask_to_data(
                 X_for_models, wavelengths_for_models, preprocess_cfg
             )
@@ -2461,7 +2758,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 print(f"  Derivative window: {preprocess_cfg['window']}")
                 print(f"  Edge zone: {edge_zone_applied} wavelengths on each side")
                 print(f"  Wavelengths after masking: {len(wavelengths_for_models)}")
-                print(f"  Range: {wavelengths_for_models[0]:.1f} - {wavelengths_for_models[-1]:.1f} nm")
+                print(
+                    f"  Range: {wavelengths_for_models[0]:.1f} - {wavelengths_for_models[-1]:.1f} nm"
+                )
                 print(f"{'='*70}\n")
 
         # ═══════════════════════════════════════════════════════════════════════════
@@ -2475,18 +2774,20 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 # Use filtered wavelengths for region computation
                 wavelengths_float = wavelengths_for_models.astype(float)
                 region_subsets = create_region_subsets(
-                    X_for_models,              # Use filtered+preprocessed data
+                    X_for_models,  # Use filtered+preprocessed data
                     y_np,
-                    wavelengths_float,         # Use filtered wavelengths
+                    wavelengths_float,  # Use filtered wavelengths
                     n_top_regions=n_top_regions,
                     test_all_individual=region_test_all_individual,
-                    test_pairwise=region_test_pairwise
+                    test_pairwise=region_test_pairwise,
                 )
 
                 if len(region_subsets) > 0:
                     prep_name = str(preprocess_cfg.get("name", "unknown"))
                     deriv_info = f"_d{preprocess_cfg['deriv']}" if preprocess_cfg["deriv"] else ""
-                    print(f"  Region analysis for {prep_name}{deriv_info}: Identified {len(region_subsets)} region-based subsets")
+                    print(
+                        f"  Region analysis for {prep_name}{deriv_info}: Identified {len(region_subsets)} region-based subsets"
+                    )
             except Exception as e:
                 prep_name = str(preprocess_cfg.get("name", "unknown"))
                 print(f"  Warning: Could not compute region subsets for {prep_name}: {e}")
@@ -2507,10 +2808,10 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
             # When GA preprocessing is enabled, only use the config optimized for this specific model
             # Each model gets its own set of top-N preprocessing configs from GA optimization
             # ═══════════════════════════════════════════════════════════════════════════
-            if ga_preprocess and 'ga_model_type' in preprocess_cfg:
+            if ga_preprocess and "ga_model_type" in preprocess_cfg:
                 # Skip if this preprocessing config was optimized for a different model
                 # ga_model_type stores the actual model name (e.g., "LightGBM", "PLS")
-                if preprocess_cfg['ga_model_type'] != model_name:
+                if preprocess_cfg["ga_model_type"] != model_name:
                     continue
 
             for model, params in model_configs:
@@ -2528,7 +2829,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                     prep_name += f"_d{preprocess_cfg['deriv']}"
 
                 # Show parameters being tested (more informative)
-                param_str = ", ".join([f"{k}={v}" for k, v in list(params.items())[:2]])  # Show first 2 params
+                param_str = ", ".join(
+                    [f"{k}={v}" for k, v in list(params.items())[:2]]
+                )  # Show first 2 params
                 if len(params) > 2:
                     param_str += "..."
 
@@ -2545,19 +2848,21 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 print(f"[{current_config}/{total_configs}] {progress_msg}{best_info}")
 
                 if progress_callback:
-                    progress_callback({
-                        'stage': 'model_testing',
-                        'message': progress_msg,
-                        'current': current_config,
-                        'total': total_configs,
-                        'best_model': best_model_so_far
-                    })
+                    progress_callback(
+                        {
+                            "stage": "model_testing",
+                            "message": progress_msg,
+                            "current": current_config,
+                            "total": total_configs,
+                            "best_model": best_model_so_far,
+                        }
+                    )
 
                 # Run full model first (using preprocessed + filtered data)
                 result = _run_single_config(
-                    X_for_models,           # Preprocessed + filtered data
+                    X_for_models,  # Preprocessed + filtered data
                     y_np,
-                    wavelengths_for_models, # Filtered wavelengths
+                    wavelengths_for_models,  # Filtered wavelengths
                     model,
                     model_name,
                     params,
@@ -2590,9 +2895,13 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
                 # Show full model result (CV metrics for consistency)
                 if task_type == "regression":
-                    print(f"     Full model: R²cv={result['R2cv']:.3f}, RMSEcv={result['RMSEcv']:.3f}")
+                    print(
+                        f"     Full model: R²cv={result['R2cv']:.3f}, RMSEcv={result['RMSEcv']:.3f}"
+                    )
                 else:
-                    print(f"     Full model: AUCcv={result.get('ROC_AUCcv', 0):.3f}, Acccv={result.get('Accuracycv', 0):.3f}")
+                    print(
+                        f"     Full model: AUCcv={result.get('ROC_AUCcv', 0):.3f}, Acccv={result.get('Accuracycv', 0):.3f}"
+                    )
 
                 # Update best model tracker (use CV metrics for consistency with ranking)
                 if best_model_so_far is None:
@@ -2610,20 +2919,26 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 # wavelength selection reflects the actual transformed features the model sees
                 if supports_subset_analysis(model_name):
                     if not enable_variable_subsets:
-                        print(f"  -> Skipping subset analysis for {model_name} (variable subsets disabled)")
+                        print(
+                            f"  -> Skipping subset analysis for {model_name} (variable subsets disabled)"
+                        )
                     else:
-                        print(f"  -> Computing feature importances for {model_name} subset analysis...")
+                        print(
+                            f"  -> Computing feature importances for {model_name} subset analysis..."
+                        )
 
                         # Cap n_components for PLS when fitting on filtered data
                         # (model was created with n_components based on original feature count,
                         # but X_for_models may have fewer features after wavelength filtering)
                         n_features_filtered = X_for_models.shape[1]
-                        if hasattr(model, 'n_components') and model.n_components is not None:
+                        if hasattr(model, "n_components") and model.n_components is not None:
                             if model.n_components >= n_features_filtered:
                                 model = clone(model)
                                 capped = max(1, n_features_filtered - 1)
                                 model.set_params(n_components=capped)
-                                print(f"     Note: Capped PLS n_components to {capped} for importance computation (only {n_features_filtered} features)")
+                                print(
+                                    f"     Note: Capped PLS n_components to {capped} for importance computation (only {n_features_filtered} features)"
+                                )
 
                         # Build model-only pipeline (data is already preprocessed and filtered)
                         # clone() prevents the importance-capture fit from mutating the shared
@@ -2643,14 +2958,17 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                         X_transformed_varsel = X_for_models
                         wavelengths_varsel = wavelengths_for_models
                         n_features_varsel = X_for_models.shape[1]
-                        n_features_for_validation = n_features_varsel  # Define early for SPA/UVE-SPA methods
+                        n_features_for_validation = (
+                            n_features_varsel  # Define early for SPA/UVE-SPA methods
+                        )
 
                         # --- UVE Prefilter: eliminate uninformative variables before varsel ---
                         _uve_prefilter_active = False
                         if apply_uve_prefilter and n_features_varsel >= 3:
                             try:
                                 _uve_imp, _uve_thr, _uve_mask = get_uve_threshold(
-                                    X_transformed_varsel, y_np,
+                                    X_transformed_varsel,
+                                    y_np,
                                     cutoff_multiplier=uve_cutoff_multiplier,
                                     n_components=uve_n_components,
                                     cv_folds=folds,
@@ -2664,12 +2982,18 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     n_features_varsel = n_after
                                     n_features_for_validation = n_after
                                     _uve_prefilter_active = True
-                                    print(f"     UVE prefilter: {n_before} -> {n_after} variables "
-                                          f"({n_before - n_after} eliminated, threshold={_uve_thr:.4f})")
+                                    print(
+                                        f"     UVE prefilter: {n_before} -> {n_after} variables "
+                                        f"({n_before - n_after} eliminated, threshold={_uve_thr:.4f})"
+                                    )
                             except Exception as e:
-                                print(f"     UVE prefilter failed ({e}), using all {n_features_varsel} variables")
+                                print(
+                                    f"     UVE prefilter failed ({e}), using all {n_features_varsel} variables"
+                                )
                         elif apply_uve_prefilter and n_features_varsel < 3:
-                            print(f"     UVE prefilter skipped: only {n_features_varsel} features (min 3)")
+                            print(
+                                f"     UVE prefilter skipped: only {n_features_varsel} features (min 3)"
+                            )
 
                         # Loop over each selected variable selection method
                         for varsel_method in selected_methods:
@@ -2678,11 +3002,16 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 break
 
                             # ===== Subset-returning methods (iPLS, MC-siPLS, MWPLS) =====
-                            if varsel_method in ('ipls_forward', 'ipls_backward', 'mc_sipls', 'mwpls'):
+                            if varsel_method in (
+                                "ipls_forward",
+                                "ipls_backward",
+                                "mc_sipls",
+                                "mwpls",
+                            ):
                                 print(f"  -> Running {varsel_method}...")
 
                                 # Call appropriate function
-                                if varsel_method == 'ipls_forward':
+                                if varsel_method == "ipls_forward":
                                     subsets = ipls_forward(
                                         X_transformed_varsel,
                                         y_np,
@@ -2690,18 +3019,18 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         n_intervals=ipls_n_intervals,
                                         max_combine=ipls_max_combine,
                                         cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
-                                elif varsel_method == 'ipls_backward':
+                                elif varsel_method == "ipls_backward":
                                     subsets = ipls_backward(
                                         X_transformed_varsel,
                                         y_np,
                                         wavelengths=wavelengths_varsel,
                                         n_intervals=ipls_n_intervals,
                                         cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
-                                elif varsel_method == 'mc_sipls':
+                                elif varsel_method == "mc_sipls":
                                     subsets = mc_sipls(
                                         X_transformed_varsel,
                                         y_np,
@@ -2710,16 +3039,16 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         n_combinations=sipls_n_combinations,
                                         max_combine=ipls_max_combine,
                                         cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
-                                elif varsel_method == 'mwpls':
+                                elif varsel_method == "mwpls":
                                     subsets = mwpls(
                                         X_transformed_varsel,
                                         y_np,
                                         wavelengths=wavelengths_varsel,
                                         window_sizes=mwpls_window_sizes,
                                         step_size=mwpls_step_size,
-                                        cv_folds=folds
+                                        cv_folds=folds,
                                     )
 
                                 if subsets is None or len(subsets) == 0:
@@ -2727,7 +3056,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     continue
 
                                 # Sort by rmsecv (best first) and apply limit
-                                subsets_sorted = sorted(subsets, key=lambda s: s.get('rmsecv', float('inf')))
+                                subsets_sorted = sorted(
+                                    subsets, key=lambda s: s.get("rmsecv", float("inf"))
+                                )
 
                                 # Apply subset limit from dropdown
                                 if ipls_subset_limit == "Top 5":
@@ -2739,22 +3070,31 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 else:  # "All"
                                     subsets_to_test = subsets_sorted
 
-                                print(f"  -> Testing {len(subsets_to_test)} of {len(subsets)} subsets...")
+                                print(
+                                    f"  -> Testing {len(subsets_to_test)} of {len(subsets)} subsets..."
+                                )
 
                                 # Test each subset
                                 for subset_dict in subsets_to_test:
                                     if controller and not controller.check_and_wait():
                                         break
 
-                                    subset_indices = subset_dict['indices']
-                                    subset_tag = subset_dict['tag']
+                                    subset_indices = subset_dict["indices"]
+                                    subset_tag = subset_dict["tag"]
 
                                     # Use existing _run_single_config (same as top-N path)
                                     if preprocess_cfg["deriv"] is not None:
                                         subset_result = _run_single_config(
-                                            X_transformed_varsel, y_np, wavelengths_varsel,
-                                            model, model_name, params, preprocess_cfg,
-                                            cv_splitter, task_type, is_binary_classification,
+                                            X_transformed_varsel,
+                                            y_np,
+                                            wavelengths_varsel,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
                                             subset_indices=subset_indices,
                                             subset_tag=subset_tag,
                                             top_n_vars=len(subset_indices),
@@ -2769,15 +3109,26 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             cv_strategy=cv_strategy,
                                             cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
                                     else:
                                         subset_result = _run_single_config(
-                                            X_transformed_varsel, y_np, wavelengths_varsel,
-                                            model, model_name, params, preprocess_cfg,
-                                            cv_splitter, task_type, is_binary_classification,
+                                            X_transformed_varsel,
+                                            y_np,
+                                            wavelengths_varsel,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
                                             subset_indices=subset_indices,
                                             subset_tag=subset_tag,
                                             top_n_vars=len(subset_indices),
@@ -2792,7 +3143,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             cv_strategy=cv_strategy,
                                             cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
@@ -2804,7 +3159,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     if task_type == "regression":
                                         print(f"    {subset_tag}: R²={subset_result['R2']:.3f}")
                                     else:
-                                        print(f"    {subset_tag}: AUC={subset_result.get('ROC_AUC', 0):.3f}")
+                                        print(
+                                            f"    {subset_tag}: AUC={subset_result.get('ROC_AUC', 0):.3f}"
+                                        )
 
                                 continue  # Skip to next method (don't fall through to importance path)
 
@@ -2815,13 +3172,15 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                             # --- Variable selection cache lookup ---
                             # 'importance' is NEVER cached (depends on fitted model + hyperparams)
                             _cache_hit = False
-                            if varsel_method != 'importance':
-                                _cache_key = _varsel_cache_key(preprocess_cfg, varsel_method, model_name, _uve_prefilter_active)
+                            if varsel_method != "importance":
+                                _cache_key = _varsel_cache_key(
+                                    preprocess_cfg, varsel_method, model_name, _uve_prefilter_active
+                                )
                                 with _varsel_cache_lock:
                                     if _cache_key in _varsel_cache:
                                         _cached = _varsel_cache[_cache_key]
-                                        importances = _cached['importances']
-                                        uve_selected_mask = _cached.get('uve_selected_mask')
+                                        importances = _cached["importances"]
+                                        uve_selected_mask = _cached.get("uve_selected_mask")
                                         _cache_hit = True
                                         print(f"  -> Using cached {varsel_method} result")
 
@@ -2834,95 +3193,116 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 if _cache_hit:
                                     pass  # Already have importances from cache
 
-                                elif varsel_method == 'importance':
+                                elif varsel_method == "importance":
                                     importances = get_feature_importances(
                                         fitted_model, model_name, X_transformed_varsel, y_np
                                     )
 
-                                elif varsel_method == 'spa':
+                                elif varsel_method == "spa":
                                     # SPA: Successive Projections Algorithm - reduces collinearity
                                     # Select minimally correlated variables
                                     # Use max variable count as default for SPA feature selection
-                                    default_n_select = max(variable_counts) if variable_counts else 100
+                                    default_n_select = (
+                                        max(variable_counts) if variable_counts else 100
+                                    )
                                     n_to_select = min(default_n_select, n_features_for_validation)
                                     importances = spa_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         n_features=n_to_select,
                                         cv_folds=folds,
                                     )
 
-                                elif varsel_method == 'uve':
+                                elif varsel_method == "uve":
                                     # UVE: Uninformative Variable Elimination - filters noise
                                     # Use get_uve_threshold to also capture selected_mask for method-optimal count
-                                    importances, _uve_threshold, uve_selected_mask = get_uve_threshold(
-                                        X_transformed_varsel, y_np,
-                                        cutoff_multiplier=uve_cutoff_multiplier,
-                                        n_components=uve_n_components,
-                                        cv_folds=folds,
-                                        random_state=random_state
+                                    importances, _uve_threshold, uve_selected_mask = (
+                                        get_uve_threshold(
+                                            X_transformed_varsel,
+                                            y_np,
+                                            cutoff_multiplier=uve_cutoff_multiplier,
+                                            n_components=uve_n_components,
+                                            cv_folds=folds,
+                                            random_state=random_state,
+                                        )
                                     )
 
-                                elif varsel_method == 'uve_spa':
+                                elif varsel_method == "uve_spa":
                                     # UVE-SPA: Hybrid method - filters noise then reduces collinearity
                                     # Use max variable count as default for UVE-SPA feature selection
-                                    default_n_select = max(variable_counts) if variable_counts else 100
+                                    default_n_select = (
+                                        max(variable_counts) if variable_counts else 100
+                                    )
                                     n_to_select = min(default_n_select, n_features_for_validation)
-                                    print(f"    -> Running UVE-SPA (target: {n_to_select} features)")
+                                    print(
+                                        f"    -> Running UVE-SPA (target: {n_to_select} features)"
+                                    )
                                     importances = uve_spa_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         n_features=n_to_select,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         uve_n_components=uve_n_components,
                                         uve_cv_folds=folds,
                                         spa_cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
-                                    n_nonzero = np.sum(importances > 0) if importances is not None else 0
-                                    print(f"    -> UVE-SPA completed: {n_nonzero} variables with non-zero importance")
+                                    n_nonzero = (
+                                        np.sum(importances > 0) if importances is not None else 0
+                                    )
+                                    print(
+                                        f"    -> UVE-SPA completed: {n_nonzero} variables with non-zero importance"
+                                    )
 
-                                elif varsel_method == 'ipls':
+                                elif varsel_method == "ipls":
                                     # iPLS: Interval PLS - selects based on spectral regions
                                     importances = ipls_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         n_intervals=ipls_n_intervals,
                                         n_components=uve_n_components,
                                         cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
 
-                                elif varsel_method in ('cars', 'cars-aware', 'cars-tree'):
+                                elif varsel_method in ("cars", "cars-aware", "cars-tree"):
                                     # CARS: Competitive Adaptive Reweighted Sampling
                                     # Monte Carlo-based method with exponential decay
                                     # cars-aware: Use model-appropriate fitness (LightGBM for tree models)
                                     # cars-tree: Hybrid importance (split+gain) for tree models
-                                    if varsel_method == 'cars':
+                                    if varsel_method == "cars":
                                         model_type_for_cars = None
                                         use_hybrid = False
-                                    elif varsel_method == 'cars-aware':
+                                    elif varsel_method == "cars-aware":
                                         model_type_for_cars = model_name
                                         use_hybrid = False
                                         print(f"    -> Running Model-Aware CARS for {model_name}")
                                     else:  # cars-tree
                                         model_type_for_cars = model_name
                                         use_hybrid = True
-                                        print(f"    -> Running CARS-Tree (hybrid importance) for {model_name}")
+                                        print(
+                                            f"    -> Running CARS-Tree (hybrid importance) for {model_name}"
+                                        )
 
                                     importances = cars_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         n_iterations=50,
-                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        pls_components=(
+                                            uve_n_components if uve_n_components is not None else 5
+                                        ),
                                         cv_folds=folds,
                                         monte_carlo_samples=80,
                                         random_state=random_state,
                                         model_type=model_type_for_cars,
                                         use_hybrid_importance=use_hybrid,
                                         hybrid_importance_weight=0.5,
-                                        task_type=task_type
+                                        task_type=task_type,
                                     )
 
-                                elif varsel_method in ('uve_cars', 'uve_cars_tree'):
+                                elif varsel_method in ("uve_cars", "uve_cars_tree"):
                                     # UVE-CARS / UVE-CARS-Tree: Noise filtering + adaptive selection
-                                    if varsel_method == 'uve_cars':
+                                    if varsel_method == "uve_cars":
                                         mt_for_cars = None
                                         uh_for_cars = False
                                         print(f"    -> Running UVE-CARS")
@@ -2932,164 +3312,206 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         print(f"    -> Running UVE-CARS-Tree for {model_name}")
 
                                     importances = uve_cars_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         uve_n_components=uve_n_components,
                                         uve_cv_folds=folds,
                                         n_iterations=50,
-                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        pls_components=(
+                                            uve_n_components if uve_n_components is not None else 5
+                                        ),
                                         cars_cv_folds=folds,
                                         monte_carlo_samples=80,
                                         random_state=random_state,
                                         model_type=mt_for_cars,
                                         use_hybrid_importance=uh_for_cars,
                                         hybrid_importance_weight=0.5,
-                                        task_type=task_type
+                                        task_type=task_type,
                                     )
 
-                                elif varsel_method == 'uve_cars_spa':
+                                elif varsel_method == "uve_cars_spa":
                                     # UVE-CARS-SPA: 3-stage hybrid
                                     print(f"    -> Running UVE-CARS-SPA (3-stage)")
                                     importances = uve_cars_spa_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         cutoff_multiplier=uve_cutoff_multiplier,
                                         uve_n_components=uve_n_components,
                                         uve_cv_folds=folds,
                                         n_iterations=50,
-                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        pls_components=(
+                                            uve_n_components if uve_n_components is not None else 5
+                                        ),
                                         cars_cv_folds=folds,
                                         monte_carlo_samples=80,
                                         spa_n_features=None,
                                         spa_cv_folds=folds,
                                         random_state=random_state,
-                                        task_type=task_type
+                                        task_type=task_type,
                                     )
 
-                                elif varsel_method == 'fipls_spa':
+                                elif varsel_method == "fipls_spa":
                                     # Forward iPLS → SPA: Region selection + collinearity reduction
                                     print(f"    -> Running Forward iPLS-SPA")
                                     importances = fipls_spa_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         wavelengths=wavelengths_varsel,
                                         n_intervals=ipls_n_intervals,
                                         max_combine=5,
                                         ipls_cv_folds=folds,
                                         spa_n_features=None,
                                         spa_cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
 
-                                elif varsel_method == 'fipls_cars':
+                                elif varsel_method == "fipls_cars":
                                     # Forward iPLS → CARS: Region selection + adaptive selection
                                     print(f"    -> Running Forward iPLS-CARS")
                                     importances = fipls_cars_selection(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         wavelengths=wavelengths_varsel,
                                         n_intervals=ipls_n_intervals,
                                         max_combine=5,
                                         ipls_cv_folds=folds,
                                         n_iterations=50,
-                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        pls_components=(
+                                            uve_n_components if uve_n_components is not None else 5
+                                        ),
                                         cars_cv_folds=folds,
                                         monte_carlo_samples=80,
                                         random_state=random_state,
-                                        task_type=task_type
+                                        task_type=task_type,
                                     )
 
-                                elif varsel_method == 'vcpa-iriv':
+                                elif varsel_method == "vcpa-iriv":
                                     # VCPA-IRIV: Variable Combination Population Analysis
                                     # Iterative elimination with binary matrix sampling
                                     print(f"    -> Running VCPA-IRIV (n_outer=10, n_inner=50)")
                                     result = vcpa_iriv(
-                                        X_transformed_varsel, y_np,
+                                        X_transformed_varsel,
+                                        y_np,
                                         n_outer_iterations=10,
                                         n_inner_iterations=50,
-                                        pls_components=uve_n_components if uve_n_components is not None else 5,
+                                        pls_components=(
+                                            uve_n_components if uve_n_components is not None else 5
+                                        ),
                                         cv_folds=folds,
-                                        random_state=random_state
+                                        random_state=random_state,
                                     )
                                     # Extract importance scores from result dict
                                     # Note: vcpa_iriv returns 'importance_scores', not 'importances'
-                                    importances = result.get('importance_scores', result.get('importances', None))
+                                    importances = result.get(
+                                        "importance_scores", result.get("importances", None)
+                                    )
 
                                     # VCPA returns importance_scores for ACTIVE indices only
                                     # We need to create full-length importance array using selected_indices
-                                    selected = result.get('selected_indices', [])
-                                    if importances is not None and len(importances) == len(selected):
+                                    selected = result.get("selected_indices", [])
+                                    if importances is not None and len(importances) == len(
+                                        selected
+                                    ):
                                         # Map importance scores back to full wavelength array
                                         full_importances = np.zeros(X_transformed_varsel.shape[1])
                                         full_importances[selected] = importances
                                         importances = full_importances
-                                        print(f"    -> VCPA-IRIV selected {len(selected)} variables with importance scores")
+                                        print(
+                                            f"    -> VCPA-IRIV selected {len(selected)} variables with importance scores"
+                                        )
                                     elif len(selected) > 0:
                                         # Fallback: create binary mask from selected_indices
                                         importances = np.zeros(X_transformed_varsel.shape[1])
                                         importances[selected] = 1.0
-                                        print(f"    -> VCPA-IRIV selected {len(selected)} variables (binary mask fallback)")
+                                        print(
+                                            f"    -> VCPA-IRIV selected {len(selected)} variables (binary mask fallback)"
+                                        )
                                     else:
                                         # No variables selected - use uniform importances
-                                        print(f"    -> WARNING: VCPA-IRIV selected no variables, using uniform importances")
+                                        print(
+                                            f"    -> WARNING: VCPA-IRIV selected no variables, using uniform importances"
+                                        )
                                         importances = np.ones(X_transformed_varsel.shape[1])
 
-                                elif varsel_method == 'ga':
+                                elif varsel_method == "ga":
                                     # GA Variable Selection: Use model-appropriate fitness
                                     # Linear models use PLS fitness, tree models use LightGBM fitness
 
                                     # Determine GA parameters based on quick mode or user settings
                                     if ga_quick_mode:
                                         ga_pop, ga_gen, ga_runs, ga_early = 32, 50, 2, 10
-                                        print(f"    -> Quick GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
+                                        print(
+                                            f"    -> Quick GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}"
+                                        )
                                     else:
                                         # Use user-specified parameters
                                         ga_pop = ga_population_size
                                         ga_gen = ga_generations
                                         ga_runs = ga_n_runs
                                         ga_early = 20  # Default early stopping
-                                        print(f"    -> GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}")
+                                        print(
+                                            f"    -> GA Mode: pop={ga_pop}, gen={ga_gen}, runs={ga_runs}"
+                                        )
 
                                     if model_name in LINEAR_MODELS:
-                                        print(f"    -> Using GA-PLS for {model_name} (linear model)")
+                                        print(
+                                            f"    -> Using GA-PLS for {model_name} (linear model)"
+                                        )
                                         importances = ga_pls_selection(
-                                            X_transformed_varsel, y_np,
+                                            X_transformed_varsel,
+                                            y_np,
                                             task_type=task_type,
-                                            n_components=uve_n_components if uve_n_components is not None else 10,
+                                            n_components=(
+                                                uve_n_components
+                                                if uve_n_components is not None
+                                                else 10
+                                            ),
                                             cv=folds,
                                             population_size=ga_pop,
                                             n_generations=ga_gen,
                                             n_runs=ga_runs,
                                             early_stopping=ga_early,
                                             random_state=random_state,
-                                            progress_callback=progress_callback
+                                            progress_callback=progress_callback,
                                         )
                                     elif model_name in TREE_MODELS:
-                                        print(f"    -> Using GA-LightGBM for {model_name} (tree model)")
+                                        print(
+                                            f"    -> Using GA-LightGBM for {model_name} (tree model)"
+                                        )
                                         importances = ga_lightgbm_selection(
-                                            X_transformed_varsel, y_np,
+                                            X_transformed_varsel,
+                                            y_np,
                                             task_type=task_type,
                                             cv_folds=folds,
                                             n_estimators=50,
-                                            num_leaves=15 if task_type == 'classification' else 31,
+                                            num_leaves=15 if task_type == "classification" else 31,
                                             population_size=ga_pop,
                                             n_generations=ga_gen,
                                             n_runs=ga_runs,
                                             early_stopping=ga_early,
                                             random_state=random_state,
-                                            progress_callback=progress_callback
+                                            progress_callback=progress_callback,
                                         )
                                     else:
                                         # Default to GA-PLS for unknown model types
                                         print(f"    -> Using GA-PLS for {model_name} (default)")
                                         importances = ga_pls_selection(
-                                            X_transformed_varsel, y_np,
+                                            X_transformed_varsel,
+                                            y_np,
                                             task_type=task_type,
-                                            n_components=uve_n_components if uve_n_components is not None else 10,
+                                            n_components=(
+                                                uve_n_components
+                                                if uve_n_components is not None
+                                                else 10
+                                            ),
                                             cv=folds,
                                             population_size=ga_pop,
                                             n_generations=ga_gen,
                                             n_runs=ga_runs,
                                             early_stopping=ga_early,
                                             random_state=random_state,
-                                            progress_callback=progress_callback
+                                            progress_callback=progress_callback,
                                         )
 
                                 else:
@@ -3098,11 +3520,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                     continue
 
                                 # --- Store result in cache ---
-                                if not _cache_hit and varsel_method != 'importance':
+                                if not _cache_hit and varsel_method != "importance":
                                     with _varsel_cache_lock:
                                         _varsel_cache[_cache_key] = {
-                                            'importances': importances,
-                                            'uve_selected_mask': uve_selected_mask,
+                                            "importances": importances,
+                                            "uve_selected_mask": uve_selected_mask,
                                         }
 
                                 # Track if uniform fallback was used (for debugging/filtering results)
@@ -3110,14 +3532,20 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
                                 # Validate importances array before proceeding
                                 if importances is None:
-                                    print(f"  -> ERROR: {varsel_method} returned None importances, skipping")
+                                    print(
+                                        f"  -> ERROR: {varsel_method} returned None importances, skipping"
+                                    )
                                     continue
                                 if len(importances) != X_transformed_varsel.shape[1]:
-                                    print(f"  -> ERROR: {varsel_method} returned wrong-sized importances "
-                                          f"({len(importances)} vs {X_transformed_varsel.shape[1]}), skipping")
+                                    print(
+                                        f"  -> ERROR: {varsel_method} returned wrong-sized importances "
+                                        f"({len(importances)} vs {X_transformed_varsel.shape[1]}), skipping"
+                                    )
                                     continue
                                 if np.all(importances == 0):
-                                    print(f"  -> WARNING: {varsel_method} returned all-zero importances, using uniform")
+                                    print(
+                                        f"  -> WARNING: {varsel_method} returned all-zero importances, using uniform"
+                                    )
                                     importances = np.ones(X_transformed_varsel.shape[1])
                                     used_uniform_fallback = True
 
@@ -3132,14 +3560,20 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 n_features_for_validation = n_features_varsel
 
                                 # Only test counts that are less than total features
-                                valid_variable_counts = [n for n in user_variable_counts if n < n_features_for_validation]
+                                valid_variable_counts = [
+                                    n for n in user_variable_counts if n < n_features_for_validation
+                                ]
 
                                 print(f"  -> User variable counts: {user_variable_counts}")
-                                print(f"  -> Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}")
+                                print(
+                                    f"  -> Valid variable counts (< {n_features_for_validation} features): {valid_variable_counts}"
+                                )
                                 print(f"  -> Variable selection method: {varsel_method}")
 
                                 if not valid_variable_counts:
-                                    print(f"  WARNING: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)")
+                                    print(
+                                        f"  WARNING: No valid variable counts to test (all selected counts >= {n_features_for_validation} features)"
+                                    )
 
                                 # Apply edge masking for Savitzky-Golay derivatives
                                 # SKIP when wavelength restriction is active - restricted wavelengths
@@ -3152,34 +3586,54 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 method_has_natural_optimal = False
 
                                 if not used_uniform_fallback:
-                                    if varsel_method in ('cars', 'cars-aware', 'cars-tree', 'uve_spa',
-                                                         'uve_cars', 'uve_cars_tree', 'uve_cars_spa',
-                                                         'fipls_spa', 'fipls_cars'):
+                                    if varsel_method in (
+                                        "cars",
+                                        "cars-aware",
+                                        "cars-tree",
+                                        "uve_spa",
+                                        "uve_cars",
+                                        "uve_cars_tree",
+                                        "uve_cars_spa",
+                                        "fipls_spa",
+                                        "fipls_cars",
+                                    ):
                                         n_method_optimal = int(np.count_nonzero(importances))
                                         method_has_natural_optimal = True
-                                    elif varsel_method == 'uve' and uve_selected_mask is not None:
+                                    elif varsel_method == "uve" and uve_selected_mask is not None:
                                         n_method_optimal = int(np.sum(uve_selected_mask))
                                         method_has_natural_optimal = True
-                                    elif varsel_method == 'vcpa-iriv':
+                                    elif varsel_method == "vcpa-iriv":
                                         n_method_optimal = int(np.count_nonzero(importances))
                                         method_has_natural_optimal = True
 
                                 if method_has_natural_optimal:
-                                    if n_method_optimal <= 0 or n_method_optimal >= n_features_for_validation:
+                                    if (
+                                        n_method_optimal <= 0
+                                        or n_method_optimal >= n_features_for_validation
+                                    ):
                                         method_has_natural_optimal = False
                                     elif n_method_optimal in valid_variable_counts:
-                                        print(f"  -> Method-optimal for {varsel_method}: {n_method_optimal} already in counts, skipping")
+                                        print(
+                                            f"  -> Method-optimal for {varsel_method}: {n_method_optimal} already in counts, skipping"
+                                        )
                                         method_has_natural_optimal = False
                                     else:
-                                        print(f"  -> Method-optimal for {varsel_method}: {n_method_optimal} vars (will test)")
+                                        print(
+                                            f"  -> Method-optimal for {varsel_method}: {n_method_optimal} vars (will test)"
+                                        )
 
                                 # Run subsets with user-selected counts
                                 results_added_for_method = 0
                                 for n_top in valid_variable_counts:
-                                    print(f"  -> Testing top-{n_top} vars ({varsel_method})...", end=" ")
+                                    print(
+                                        f"  -> Testing top-{n_top} vars ({varsel_method})...",
+                                        end=" ",
+                                    )
                                     # Select top N most important features based on preprocessed importances
                                     # Use stable sort to ensure deterministic feature ordering when importances are tied
-                                    top_indices = np.argsort(importances, kind='stable')[-n_top:][::-1]
+                                    top_indices = np.argsort(importances, kind="stable")[-n_top:][
+                                        ::-1
+                                    ]
 
                                     # For derivative preprocessing: importances are computed on transformed features
                                     # We must use the TRANSFORMED data and skip reapplying preprocessing
@@ -3212,7 +3666,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             cv_strategy=cv_strategy,
                                             cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
@@ -3244,7 +3702,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
@@ -3261,33 +3723,52 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
                                     # Show result immediately (CV metrics for consistency)
                                     if task_type == "regression":
-                                        print(f"R²cv={subset_result['R2cv']:.3f}, RMSEcv={subset_result['RMSEcv']:.3f}")
+                                        print(
+                                            f"R²cv={subset_result['R2cv']:.3f}, RMSEcv={subset_result['RMSEcv']:.3f}"
+                                        )
                                     else:
-                                        print(f"AUCcv={subset_result.get('ROC_AUCcv', 0):.3f}, Acccv={subset_result.get('Accuracycv', 0):.3f}")
+                                        print(
+                                            f"AUCcv={subset_result.get('ROC_AUCcv', 0):.3f}, Acccv={subset_result.get('Accuracycv', 0):.3f}"
+                                        )
 
                                     # Update best model tracker for subset results (use CV metrics for consistency)
                                     if best_model_so_far is None:
                                         best_model_so_far = subset_result
                                     else:
                                         if task_type == "regression":
-                                            if subset_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
+                                            if (
+                                                subset_result["RMSEcv"]
+                                                < best_model_so_far["RMSEcv"]
+                                            ):
                                                 best_model_so_far = subset_result
                                         else:  # classification
-                                            if subset_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
+                                            if subset_result.get(
+                                                "ROC_AUCcv", 0
+                                            ) > best_model_so_far.get("ROC_AUCcv", 0):
                                                 best_model_so_far = subset_result
 
                                 # Run method-optimal subset if applicable
                                 if method_has_natural_optimal and n_method_optimal > 0:
-                                    print(f"  -> Testing method-optimal {n_method_optimal} vars ({varsel_method})...", end=" ")
-                                    top_indices_opt = np.argsort(importances, kind='stable')[-n_method_optimal:][::-1]
+                                    print(
+                                        f"  -> Testing method-optimal {n_method_optimal} vars ({varsel_method})...",
+                                        end=" ",
+                                    )
+                                    top_indices_opt = np.argsort(importances, kind="stable")[
+                                        -n_method_optimal:
+                                    ][::-1]
 
                                     if preprocess_cfg["deriv"] is not None:
                                         opt_result = _run_single_config(
-                                            X_transformed_varsel, y_np,
+                                            X_transformed_varsel,
+                                            y_np,
                                             wavelengths_varsel,
-                                            model, model_name, params,
-                                            preprocess_cfg, cv_splitter,
-                                            task_type, is_binary_classification,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
                                             subset_indices=top_indices_opt,
                                             subset_tag=f"{varsel_method}",
                                             top_n_vars=30,
@@ -3302,17 +3783,26 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             cv_strategy=cv_strategy,
                                             cv_n_repeats=cv_n_repeats,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
                                     else:
                                         opt_result = _run_single_config(
-                                            X_transformed_varsel, y_np,
+                                            X_transformed_varsel,
+                                            y_np,
                                             wavelengths_varsel,
-                                            model, model_name, params,
-                                            preprocess_cfg, cv_splitter,
-                                            task_type, is_binary_classification,
+                                            model,
+                                            model_name,
+                                            params,
+                                            preprocess_cfg,
+                                            cv_splitter,
+                                            task_type,
+                                            is_binary_classification,
                                             subset_indices=top_indices_opt,
                                             subset_tag=f"{varsel_method}",
                                             top_n_vars=30,
@@ -3327,7 +3817,11 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                             imbalance_method=imbalance_method,
                                             imbalance_params=imbalance_params,
                                             full_vars_original=n_original_wavelengths,
-                                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                                            n_jobs_cv=(
+                                                1
+                                                if model_name in MODELS_PREFER_SERIAL_CV
+                                                else n_jobs_default
+                                            ),
                                             wavelength_restriction_active=wavelength_restriction_active,
                                             early_stopping_rounds=early_stopping_rounds,
                                         )
@@ -3340,26 +3834,40 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                         results_added_for_method += 1
 
                                         if task_type == "regression":
-                                            print(f"R²cv={opt_result['R2cv']:.3f}, RMSEcv={opt_result['RMSEcv']:.3f} (method-optimal)")
+                                            print(
+                                                f"R²cv={opt_result['R2cv']:.3f}, RMSEcv={opt_result['RMSEcv']:.3f} (method-optimal)"
+                                            )
                                         else:
-                                            print(f"AUCcv={opt_result.get('ROC_AUCcv', 0):.3f}, Acccv={opt_result.get('Accuracycv', 0):.3f} (method-optimal)")
+                                            print(
+                                                f"AUCcv={opt_result.get('ROC_AUCcv', 0):.3f}, Acccv={opt_result.get('Accuracycv', 0):.3f} (method-optimal)"
+                                            )
 
                                         if best_model_so_far is None:
                                             best_model_so_far = opt_result
                                         else:
                                             if task_type == "regression":
-                                                if opt_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
+                                                if (
+                                                    opt_result["RMSEcv"]
+                                                    < best_model_so_far["RMSEcv"]
+                                                ):
                                                     best_model_so_far = opt_result
                                             else:
-                                                if opt_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
+                                                if opt_result.get(
+                                                    "ROC_AUCcv", 0
+                                                ) > best_model_so_far.get("ROC_AUCcv", 0):
                                                     best_model_so_far = opt_result
 
                                 # Summary for this variable selection method
-                                print(f"  [SUMMARY] {varsel_method}: Added {results_added_for_method} results to dataframe")
+                                print(
+                                    f"  [SUMMARY] {varsel_method}: Added {results_added_for_method} results to dataframe"
+                                )
 
                             except Exception as e:
                                 import traceback
-                                print(f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}")
+
+                                print(
+                                    f"Warning: Could not compute importances for {model_name} with method '{varsel_method}': {e}"
+                                )
                                 print(f"  Full traceback:\n{traceback.format_exc()}")
 
                 # Run region-based subsets for ALL models (not just PLS/RF/MLP/NeuralBoosted)
@@ -3368,13 +3876,16 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 if enable_region_subsets and len(region_subsets) > 0:
                     print(f"  -> Testing {len(region_subsets)} spectral regions:")
                     for i, region_subset in enumerate(region_subsets, 1):
-                        print(f"     Region {i}/{len(region_subsets)} ({region_subset['tag']})...", end=" ")
+                        print(
+                            f"     Region {i}/{len(region_subsets)} ({region_subset['tag']})...",
+                            end=" ",
+                        )
                         # Use filtered+preprocessed data for ALL preprocessing types
                         # Region indices were computed on filtered data, so this is correct
                         region_result = _run_single_config(
-                            X_for_models,              # Filtered+preprocessed data
+                            X_for_models,  # Filtered+preprocessed data
                             y_np,
-                            wavelengths_for_models,    # Filtered wavelengths
+                            wavelengths_for_models,  # Filtered wavelengths
                             model,
                             model_name,
                             params,
@@ -3382,8 +3893,8 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                             cv_splitter,
                             task_type,
                             is_binary_classification,
-                            subset_indices=region_subset['indices'],
-                            subset_tag=region_subset['tag'],
+                            subset_indices=region_subset["indices"],
+                            subset_tag=region_subset["tag"],
                             top_n_vars=30,
                             skip_preprocessing=False,
                             skip_spectral_preprocessing=True,  # Spectral preprocessing already done
@@ -3396,7 +3907,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                             imbalance_method=imbalance_method,
                             imbalance_params=imbalance_params,
                             full_vars_original=n_original_wavelengths,
-                            n_jobs_cv=1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default,
+                            n_jobs_cv=(
+                                1 if model_name in MODELS_PREFER_SERIAL_CV else n_jobs_default
+                            ),
                             wavelength_restriction_active=wavelength_restriction_active,
                             early_stopping_rounds=early_stopping_rounds,
                         )
@@ -3407,9 +3920,13 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
 
                         # Show result immediately (CV metrics for consistency)
                         if task_type == "regression":
-                            print(f"R²cv={region_result['R2cv']:.3f}, RMSEcv={region_result['RMSEcv']:.3f}")
+                            print(
+                                f"R²cv={region_result['R2cv']:.3f}, RMSEcv={region_result['RMSEcv']:.3f}"
+                            )
                         else:
-                            print(f"AUCcv={region_result.get('ROC_AUCcv', 0):.3f}, Acccv={region_result.get('Accuracycv', 0):.3f}")
+                            print(
+                                f"AUCcv={region_result.get('ROC_AUCcv', 0):.3f}, Acccv={region_result.get('Accuracycv', 0):.3f}"
+                            )
 
                         # Update best model tracker for region subset results (use CV metrics for consistency)
                         if best_model_so_far is None:
@@ -3419,7 +3936,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                                 if region_result["RMSEcv"] < best_model_so_far["RMSEcv"]:
                                     best_model_so_far = region_result
                             else:  # classification
-                                if region_result.get("ROC_AUCcv", 0) > best_model_so_far.get("ROC_AUCcv", 0):
+                                if region_result.get("ROC_AUCcv", 0) > best_model_so_far.get(
+                                    "ROC_AUCcv", 0
+                                ):
                                     best_model_so_far = region_result
 
     # Compute composite scores and rank
@@ -3442,15 +3961,21 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     # =========================================================================
     if compute_validation and X_validation is not None and y_validation is not None:
         # Convert X to numpy if it's a DataFrame
-        X_train_for_val = X.values if hasattr(X, 'values') else X
-        X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
-        y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+        X_train_for_val = X.values if hasattr(X, "values") else X
+        X_val_for_val = (
+            X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
+        )
+        y_val_for_val = (
+            y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
+        )
 
         # Filter NaN from validation targets
         val_nan = pd.isna(y_val_for_val)
         if np.any(val_nan):
             n_val_dropped = int(np.sum(val_nan))
-            print(f"[Validation] Dropping {n_val_dropped} validation sample(s) with NaN target values")
+            print(
+                f"[Validation] Dropping {n_val_dropped} validation sample(s) with NaN target values"
+            )
             X_val_for_val = X_val_for_val[~val_nan]
             y_val_for_val = y_val_for_val[~val_nan]
 
@@ -3469,7 +3994,9 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
                 print(f"          Validation labels may contain classes not seen during training")
 
         # Get wavelengths for subsetting
-        wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
+        wavelengths_for_validation = (
+            X.columns.astype(float).values if hasattr(X, "columns") else np.arange(X.shape[1])
+        )
 
         df_ranked = compute_validation_metrics_for_top_models(
             df_ranked,
@@ -3488,654 +4015,17 @@ def run_search(X, y, task_type, folds=5, cv_strategy='kfold', cv_n_repeats=5,
     return df_ranked, label_encoder
 
 
-def run_bayesian_search(X, y, task_type, models_to_test=None, preprocessing_methods=None,
-                        n_trials=None, folds=5, cv_strategy='kfold', cv_n_repeats=5,
-                        excluded_count=0, validation_count=0,
-                        total_samples_original=None, max_n_components=12, tier='standard',
-                        imbalance_method=None, imbalance_params=None,
-                        progress_callback=None,
-                        enable_variable_subsets=True, variable_counts=None,
-                        enable_region_subsets=False, n_top_regions=5,
-                        variable_selection_methods=None,
-                        # Baseline and smoothing parameters (same as run_grid_search)
-                        baseline_method=None,
-                        baseline_params=None,
-                        smoothing=False,
-                        smoothing_window=17,
-                        smoothing_polyorder=2,
-                        # Validation metrics parameters
-                        X_validation=None,
-                        y_validation=None,
-                        compute_validation=False,
-                        validation_top_n=100):
-    """
-    Run Bayesian hyperparameter optimization using Optuna.
-
-    Uses Tree-structured Parzen Estimator (TPE) to find optimal hyperparameters
-    in 30-50 trials instead of testing 5,832+ grid combinations.
-
-    Parameters
-    ----------
-    X : pd.DataFrame
-        Spectral data (n_samples, n_features)
-    y : pd.Series
-        Target values
-    task_type : str
-        'regression' or 'classification'
-    models_to_test : list of str, optional
-        List of model names to optimize (e.g., ['XGBoost', 'LightGBM', 'MLP'])
-        If None, optimizes all models in tier
-    preprocessing_methods : list of dict, optional
-        Preprocessing configurations to test
-        If None, uses defaults: [{'name': 'snv', 'deriv': 2}, {'name': 'none', 'deriv': 0}]
-    n_trials : int
-        Number of Optuna trials per model (GUI default is 100)
-    folds : int, default=5
-        Number of CV folds
-    excluded_count : int, default=0
-        Number of excluded samples (for tracking)
-    validation_count : int, default=0
-        Number of validation samples (for tracking)
-    total_samples_original : int, optional
-        Original total sample count (for tracking)
-    max_n_components : int, default=10
-        Maximum PLS components (constrained by min(n_samples, n_features))
-    tier : str, default='standard'
-        Model tier: 'quick', 'standard', or 'comprehensive'
-    imbalance_method : str, optional
-        Imbalance handling method ('smote', 'rare_boost', 'class_weight', etc.)
-    imbalance_params : dict, optional
-        Parameters for imbalance method
-    progress_callback : callable, optional
-        Function to call with progress updates
-
-    Returns
-    -------
-    df_ranked : pd.DataFrame
-        Ranked results with best hyperparameters found for each model
-    label_encoder : LabelEncoder or None
-        Label encoder for classification with text labels
-
-    Examples
-    --------
-    >>> # Optimize XGBoost and LightGBM with 30 trials each
-    >>> results, _ = run_bayesian_search(
-    ...     X, y,
-    ...     task_type='regression',
-    ...     models_to_test=['XGBoost', 'LightGBM'],
-    ...     n_trials=30,
-    ...     tier='standard'
-    ... )
-
-    Notes
-    -----
-    - Bayesian optimization finds optimal parameters 100x faster than grid search
-    - Search spaces are continuous (e.g., learning_rate=0.127 instead of [0.05, 0.1, 0.2])
-    - Uses existing DASP infrastructure (_run_single_config, preprocessing, CV)
-    - Results are compatible with grid search results (same DataFrame format)
-    - Does NOT replace grid search - runs as alternative method when selected in GUI
-    """
-    # Use fixed random state (ignore parameter - hardcoded throughout codebase)
-    random_state = RANDOM_STATE
-
-    from .bayesian_utils import create_optuna_study, create_objective_function, convert_optuna_result_to_dasp_format, ProgressCallback
-    from .bayesian_config import get_bayesian_search_space
-    from .models import build_model
-    import optuna
-
-    # Suppress Optuna logging (use DASP progress callback instead)
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-
-    # Validate n_trials - must be provided by caller (GUI controls this)
-    if n_trials is None:
-        raise ValueError("n_trials must be specified (GUI default is 100)")
-
-    # Drop rows where y is NaN (safety net for data with empty rows)
-    nan_mask = y.isna()
-    if nan_mask.any():
-        n_dropped = int(nan_mask.sum())
-        print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before Bayesian optimization.")
-        X = X[~nan_mask]
-        y = y[~nan_mask]
-
-    # Prepare data
-    X_np = X.values
-    y_np = y.values
-    wavelengths = X.columns.values
-    n_features = X_np.shape[1]
-    n_samples = X_np.shape[0]
-
-    # Handle categorical labels for classification
-    label_encoder = None
-    if task_type == "classification":
-        if not pd.api.types.is_numeric_dtype(y_np.dtype):
-            from sklearn.preprocessing import LabelEncoder
-            label_encoder = LabelEncoder()
-            y_original = y_np.copy()
-            y_np = label_encoder.fit_transform(y_np)
-
-            # Log label mapping
-            label_mapping = dict(zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_)))
-            print(f"\n{'='*70}")
-            print(f"BAYESIAN OPTIMIZATION - CATEGORICAL LABEL ENCODING")
-            print(f"{'='*70}")
-            print(f"Detected non-numeric classification labels.")
-            print(f"Encoding mapping:")
-            for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
-                print(f"  '{label}' -> {code}")
-            print(f"{'='*70}\n")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
-    # Validate configuration BEFORE starting Bayesian optimization
-    # ═══════════════════════════════════════════════════════════════════════════
-    if task_type == 'classification' and imbalance_method is not None:
-        from .imbalance import validate_classification_config
-        try:
-            validate_classification_config(
-                y=y_np,
-                imbalance_method=imbalance_method,
-                imbalance_params=imbalance_params,
-                n_folds=folds
-            )
-            print(f"[OK] Imbalance configuration validated: {imbalance_method} with {folds}-fold CV")
-        except ValueError as e:
-            raise ValueError(f"Configuration Error (detected before optimization):\n\n{e}") from None
-
-    # Determine binary classification status
-    is_binary_classification = (task_type == "classification" and len(np.unique(y_np)) == 2)
-
-    # Adjust max_n_components based on data constraints (same logic as run_search).
-    # T-10: cv_strategy-aware. See compute_min_train_fold_size for semantics.
-    if n_samples >= 2:
-        from .cv_utils import compute_min_train_fold_size
-        min_train_samples = compute_min_train_fold_size(
-            cv_strategy=cv_strategy,
-            n_samples=n_samples,
-            n_folds=folds,
-        )
-    else:
-        min_train_samples = 0
-
-    if task_type == "regression":
-        # Strict constraint for PLS regression: n_components <= min(n_samples_train, n_features)
-        safe_max_components = min(max_n_components, min_train_samples, n_features)
-    else:
-        # More relaxed for PLS-DA classification
-        safe_max_components = min(max_n_components, n_features)
-
-    if safe_max_components < max_n_components:
-        print(f"Note: Bayesian search reducing max PLS components from {max_n_components} to {safe_max_components} "
-              f"(n_features={n_features}, min_train_size~{min_train_samples})")
-        max_n_components = safe_max_components
-
-    # Ensure at least 1 component (edge case with very small datasets)
-    max_n_components = max(1, max_n_components)
-
-    # Create results container
-    df_results = create_results_dataframe(task_type)
-
-    # GA preprocessing not currently supported in Bayesian search
-    ga_preprocess = False
-
-    # Default preprocessing methods
-    # polyorder must be deriv + 1: {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
-    if preprocessing_methods is None:
-        preprocessing_methods = [
-            {'name': 'snv', 'deriv': 2, 'window': 15, 'polyorder': 3, 'interference': None},
-            {'name': 'snv', 'deriv': 1, 'window': 15, 'polyorder': 2, 'interference': None},
-            {'name': 'snv', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
-            {'name': 'none', 'deriv': 0, 'window': 0, 'polyorder': 0, 'interference': None},
-        ]
-    elif isinstance(preprocessing_methods, dict):
-        # Convert GUI dictionary format {'raw': True, 'snv': True, ...} to list format
-        # This handles the format passed from the GUI
-        preprocess_configs = []
-
-        # Define window sizes based on derivative order
-        # Lower derivatives can use smaller windows; higher derivatives need larger windows
-        # to avoid noise amplification
-        def get_windows_for_deriv(deriv_order):
-            if deriv_order >= 3:
-                return [15, 23, 31, 41]  # Higher derivatives need larger windows
-            else:
-                return [7, 13, 21, 31]  # 1st/2nd derivatives can use smaller windows
-
-        # Add raw if selected
-        if preprocessing_methods.get('raw', False):
-            preprocess_configs.append({
-                'name': 'raw',
-                'deriv': 0,
-                'window': 0,
-                'polyorder': 0,
-                'interference': None,
-                'baseline_method': baseline_method,
-                'baseline_params': baseline_params,
-                'smoothing': smoothing,
-                'smoothing_window': smoothing_window,
-                'smoothing_polyorder': smoothing_polyorder
-            })
-
-        # Add SNV if selected
-        if preprocessing_methods.get('snv', False):
-            preprocess_configs.append({
-                'name': 'snv',
-                'deriv': 0,
-                'window': 0,
-                'polyorder': 0,
-                'interference': None,
-                'baseline_method': baseline_method,
-                'baseline_params': baseline_params,
-                'smoothing': smoothing,
-                'smoothing_window': smoothing_window,
-                'smoothing_polyorder': smoothing_polyorder
-            })
-
-        # Add SG1 (1st derivative) if selected - test multiple window sizes
-        if preprocessing_methods.get('sg1', False):
-            for window in get_windows_for_deriv(1):
-                preprocess_configs.append({
-                    'name': 'snv',
-                    'deriv': 1,
-                    'window': window,
-                    'polyorder': 2,
-                    'interference': None,
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder
-                })
-
-        # Add SG2 (2nd derivative) if selected - test multiple window sizes
-        if preprocessing_methods.get('sg2', False):
-            for window in get_windows_for_deriv(2):
-                preprocess_configs.append({
-                    'name': 'snv',
-                    'deriv': 2,
-                    'window': window,
-                    'polyorder': 3,  # polyorder = deriv + 1
-                    'interference': None,
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder
-                })
-
-        # Add SG3 (3rd derivative) if selected - test multiple window sizes
-        if preprocessing_methods.get('sg3', False):
-            for window in get_windows_for_deriv(3):
-                preprocess_configs.append({
-                    'name': 'snv',
-                    'deriv': 3,
-                    'window': window,
-                    'polyorder': 4,  # polyorder = deriv + 1
-                    'interference': None,
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder
-                })
-
-        # Add SG4 (4th derivative) if selected - test multiple window sizes
-        if preprocessing_methods.get('sg4', False):
-            for window in get_windows_for_deriv(4):
-                preprocess_configs.append({
-                    'name': 'snv',
-                    'deriv': 4,
-                    'window': window,
-                    'polyorder': 5,  # polyorder = deriv + 1
-                    'interference': None,
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder
-                })
-
-        # Add deriv_snv if selected - test multiple window sizes
-        if preprocessing_methods.get('deriv_snv', False):
-            for window in get_windows_for_deriv(2):
-                preprocess_configs.append({
-                    'name': 'deriv_snv',
-                    'deriv': 2,
-                    'window': window,
-                    'polyorder': 3,  # polyorder = deriv + 1
-                    'interference': None
-                })
-
-        preprocessing_methods = preprocess_configs
-
-    # Default models based on tier
-    if models_to_test is None:
-        # Use tier system to determine which models to test
-        from .model_config import get_tier_models
-        tier_config = get_tier_models(tier, task_type)
-        models_to_test = [m for m, enabled in tier_config.items() if enabled]
-
-    # Create CV splitter via factory (supports kfold/repeated_kfold/loo)
-    cv_splitter = build_cv_splitter(
-        strategy=cv_strategy,
-        n_folds=folds,
-        task_type=task_type,
-        n_repeats=cv_n_repeats,
-        random_state=random_state,
-    )
-
-    # Track progress
-    total_tasks = len(models_to_test) * len(preprocessing_methods)
-    total_trials = total_tasks * n_trials  # For global progress tracking
-    current_task = 0
-    trials_completed = 0  # Track global trial count for elapsed time calculation
-
-    print(f"\n{'='*70}")
-    print(f"BAYESIAN HYPERPARAMETER OPTIMIZATION")
-    print(f"{'='*70}")
-    print(f"Task: {task_type}")
-    print(f"Models: {models_to_test}")
-    print(f"Preprocessing methods: {len(preprocessing_methods)}")
-    print(f"Trials per model×preprocessing: {n_trials}")
-    print(f"  → Total trials per model: {n_trials * len(preprocessing_methods)}")
-    print(f"  → Total trials overall: {total_trials}")
-    print(f"Total optimizations: {total_tasks} (models × preprocessing)")
-    print(f"CV strategy: {cv_strategy} (folds={folds}, repeats={cv_n_repeats})")
-    print(f"Tier: {tier}")
-    print(f"{'='*70}\n")
-
-    # Loop over models and preprocessing methods
-    for model_name in models_to_test:
-        for preprocess_cfg in preprocessing_methods:
-            # ═══════════════════════════════════════════════════════════════════════════
-            # GA PREPROCESSING: Skip incompatible preprocessing configs
-            # When GA preprocessing is enabled, only use the config optimized for this specific model
-            # Each model gets its own set of top-N preprocessing configs from GA optimization
-            # ═══════════════════════════════════════════════════════════════════════════
-            if ga_preprocess and 'ga_model_type' in preprocess_cfg:
-                # Skip if this preprocessing config was optimized for a different model
-                # ga_model_type stores the actual model name (e.g., "LightGBM", "PLS")
-                if preprocess_cfg['ga_model_type'] != model_name:
-                    continue
-
-            current_task += 1
-
-            print(f"\n{'='*70}")
-            print(f"Optimizing {model_name} [{current_task}/{total_tasks}]")
-            print(f"Preprocessing: {preprocess_cfg['name']} (deriv={preprocess_cfg['deriv']})")
-            print(f"{'='*70}")
-
-            # ═══════════════════════════════════════════════════════════════════════════
-            # CRITICAL FIX: Apply preprocessing BEFORE Bayesian optimization
-            # This matches the grid search pattern (lines 689-705)
-            # ═══════════════════════════════════════════════════════════════════════════
-
-            # Check if this is a GA-optimized preprocessing config
-            if 'ga_transform' in preprocess_cfg and preprocess_cfg['ga_transform'] is not None:
-                # Use GA transform directly (it already includes all preprocessing)
-                X_preprocessed = preprocess_cfg['ga_transform'](X_np)
-            else:
-                # Step 1: Build spectral preprocessing pipeline (NO imbalance yet)
-                # Use base_name if available (for GA configs), otherwise use name
-                # NOTE (T-36): run_bayesian_search is test-only — no GUI caller — so
-                # autoscale is not threaded through here. The user-facing Bayesian path
-                # is run_unified_bayesian (unified_bayesian.py), which Tasks 11-14 wire.
-                preprocess_name = preprocess_cfg.get("base_name", preprocess_cfg["name"])
-                prep_pipe_steps = build_preprocessing_pipeline(
-                    preprocess_name,
-                    preprocess_cfg["deriv"],
-                    preprocess_cfg["window"],
-                    preprocess_cfg["polyorder"],
-                    imbalance_method=None,  # Imbalance will be added later inside CV folds
-                    imbalance_params=None,
-                    task_type=task_type,
-                    interference=preprocess_cfg.get("interference"),  # Phase 3: interference removal
-                    wavelengths=wavelengths,  # Phase 3: needed for interference removal
-                    baseline_method=preprocess_cfg.get("baseline_method"),
-                    baseline_params=preprocess_cfg.get("baseline_params"),
-                    smoothing=preprocess_cfg.get("smoothing", False),
-                    smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-                    smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2)
-                )
-
-                # Step 2: Apply preprocessing to full spectrum
-                X_preprocessed = X_np.copy()
-                if prep_pipe_steps:
-                    prep_pipeline = Pipeline(prep_pipe_steps)
-                    X_preprocessed = prep_pipeline.fit_transform(X_preprocessed, y_np)
-
-            # Apply edge masking for SG derivatives (matches grid search at line 1894)
-            # SG derivatives create boundary artifacts at first/last window//2 wavelengths
-            wavelengths_for_model = wavelengths
-            n_features_for_model = n_features
-            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
-                X_preprocessed, wavelengths_for_model, edge_zone_applied = _apply_edge_mask_to_data(
-                    X_preprocessed, wavelengths_for_model, preprocess_cfg
-                )
-                n_features_for_model = X_preprocessed.shape[1]
-                if edge_zone_applied > 0:
-                    prep_name = preprocess_cfg.get("name", "unknown")
-                    deriv_info = f"_d{preprocess_cfg['deriv']}"
-                    print(f"\n{'='*70}")
-                    print(f"BAYESIAN EDGE MASKING (after {prep_name}{deriv_info} preprocessing)")
-                    print(f"{'='*70}")
-                    print(f"  Derivative window: {preprocess_cfg['window']}")
-                    print(f"  Edge zone: {edge_zone_applied} wavelengths on each side")
-                    print(f"  Wavelengths after masking: {len(wavelengths_for_model)}")
-                    print(f"  Range: {wavelengths_for_model[0]:.1f} - {wavelengths_for_model[-1]:.1f} nm")
-                    print(f"{'='*70}\n")
-
-            # Recompute max_n_components with edge-masked feature count
-            config_max_n_components = max_n_components
-            if n_features_for_model < n_features:
-                config_max_n_components = min(max_n_components, n_features_for_model)
-                config_max_n_components = max(1, config_max_n_components)
-
-            # Update progress callback
-            if progress_callback:
-                progress_callback({
-                    'stage': 'bayesian_optimization',
-                    'message': f'Optimizing {model_name} ({preprocess_cfg["name"]}, deriv={preprocess_cfg["deriv"]})',
-                    'current': current_task,
-                    'total': total_tasks,
-                })
-
-            # Create Optuna study
-            direction = 'minimize' if task_type == 'regression' else 'maximize'
-            study = create_optuna_study(
-                direction=direction,
-                sampler='TPE',
-                random_state=random_state,
-                study_name=f"{model_name}_{preprocess_cfg['name']}_deriv{preprocess_cfg['deriv']}"
-            )
-
-            # Create objective function (pass preprocessed + edge-masked data)
-            objective_fn = create_objective_function(
-                model_name=model_name,
-                X=X_preprocessed,  # Preprocessed + edge-masked data
-                y=y_np,
-                wavelengths=wavelengths_for_model,  # Edge-masked wavelengths
-                preprocess_cfg=preprocess_cfg,
-                cv_splitter=cv_splitter,
-                task_type=task_type,
-                is_binary_classification=is_binary_classification,
-                run_single_config_fn=_run_single_config,  # Use existing infrastructure
-                tier=tier,
-                n_features=n_features_for_model,  # Edge-masked feature count
-                max_n_components=config_max_n_components,
-                enable_variable_subsets=enable_variable_subsets,
-                variable_counts=variable_counts,
-                variable_selection_methods=variable_selection_methods,
-                enable_region_subsets=enable_region_subsets,
-                n_top_regions=n_top_regions,
-                excluded_count=excluded_count,
-                validation_count=validation_count,
-                total_samples_original=total_samples_original,
-                folds=folds,
-                cv_strategy=cv_strategy,
-                cv_n_repeats=cv_n_repeats,
-                imbalance_method=imbalance_method,
-                imbalance_params=imbalance_params,
-                progress_callback=progress_callback,
-                n_trials=n_trials
-            )
-
-            # Run optimization
-            try:
-                # Create progress callback for per-trial updates
-                optuna_progress_callback = None
-                if progress_callback:
-                    preprocess_name = preprocess_cfg['name']
-                    if preprocess_cfg['deriv']:
-                        preprocess_name += f"_d{preprocess_cfg['deriv']}"
-
-                    optuna_progress_callback = ProgressCallback(
-                        progress_callback=progress_callback,
-                        model_name=model_name,
-                        preprocess_name=preprocess_name,
-                        n_trials=n_trials,
-                        task_type=task_type,
-                        global_offset=trials_completed,
-                        global_total=total_trials
-                    )
-
-                # Plain n_trials — under value-cache-and-replay dedup,
-                # duplicates short-circuit via cached values rather than
-                # raising TrialPruned. n_trials=N produces N COMPLETE trials
-                # with TPE history bit-identical to pre-dedup behavior.
-                study.optimize(
-                    objective_fn,
-                    n_trials=n_trials,
-                    show_progress_bar=False,
-                    callbacks=[optuna_progress_callback] if optuna_progress_callback else None
-                )
-
-                # Update global trial count for next model
-                trials_completed += len(study.trials)
-
-                # Convert Optuna results to DASP format
-                # CRITICAL: Now returns a LIST of ALL configurations tested (full + subsets)
-                results_list = convert_optuna_result_to_dasp_format(
-                    study=study,
-                    model_name=model_name,
-                    preprocess_cfg=preprocess_cfg,
-                    task_type=task_type,
-                    wavelengths=wavelengths_for_model,  # Edge-masked wavelengths
-                    n_vars=n_features_for_model,  # Edge-masked feature count
-                    excluded_count=excluded_count,
-                    validation_count=validation_count,
-                    total_samples_original=total_samples_original,
-                    folds=folds,
-                    cv_strategy=cv_strategy,
-                    cv_n_repeats=cv_n_repeats,
-                    imbalance_method=imbalance_method,
-                    imbalance_params=imbalance_params
-                )
-
-                # Add ALL results to dataframe (not just one)
-                for result in results_list:
-                    df_results = pd.concat([df_results, pd.DataFrame([result])], ignore_index=True)
-
-                # Print summary (find best overall result)
-                print(f"[OK] Collected {len(results_list)} configurations from {len(study.trials)} trials")
-
-                # Find and print best result
-                best_result = study.best_trial
-                if task_type == 'regression':
-                    best_r2 = best_result.user_attrs.get('R2', np.nan)
-                    print(f"  Best trial #{best_result.number}: RMSE={best_result.value:.4f}, R²={best_r2:.4f}")
-                else:
-                    best_auc = best_result.user_attrs.get('ROC_AUC', np.nan)
-                    print(f"  Best trial #{best_result.number}: Accuracy={-best_result.value:.4f}, ROC_AUC={best_auc:.4f}")
-                print(f"  Parameters: {best_result.params}")
-
-            except Exception as e:
-                print(f"[X] Optimization failed for {model_name}: {type(e).__name__}: {e}")
-                import traceback
-                traceback.print_exc()
-                continue
-
-    # Rank results
-    print(f"\n{'='*70}")
-    print(f"RANKING RESULTS")
-    print(f"{'='*70}")
-
-    from .scoring import compute_composite_score
-    df_ranked = compute_composite_score(
-        df_results,
-        task_type=task_type,
-        variable_penalty=0,  # Bayesian optimization doesn't penalize variables
-        gap_penalty=0  # Bayesian optimization doesn't penalize gap
-    )
-
-    # Rename CompositeScore to Score for consistency with grid search
-    if 'CompositeScore' in df_ranked.columns:
-        df_ranked = df_ranked.rename(columns={'CompositeScore': 'Score'})
-
-    print(f"\n[OK] Bayesian optimization complete!")
-    print(f"  Total models optimized: {len(df_ranked)}")
-    if len(df_ranked) > 0:
-        best_model = df_ranked.iloc[0]
-        if task_type == 'regression':
-            print(f"  Best model: {best_model['Model']} (RMSEcv={best_model['RMSEcv']:.4f}, R²cv={best_model['R2cv']:.4f})")
-        else:
-            print(f"  Best model: {best_model['Model']} (Accuracycv={best_model['Accuracycv']:.4f}, ROC_AUCcv={best_model['ROC_AUCcv']:.4f})")
-
-    print(f"{'='*70}\n")
-
-    # =========================================================================
-    # COMPUTE VALIDATION METRICS FOR TOP MODELS (if validation set provided)
-    # =========================================================================
-    if compute_validation and X_validation is not None and y_validation is not None:
-        # Convert X to numpy if it's a DataFrame
-        X_train_for_val = X.values if hasattr(X, 'values') else X
-        X_val_for_val = X_validation if isinstance(X_validation, np.ndarray) else np.array(X_validation)
-        y_val_for_val = y_validation if isinstance(y_validation, np.ndarray) else np.array(y_validation)
-
-        # Filter NaN from validation targets
-        val_nan = pd.isna(y_val_for_val)
-        if np.any(val_nan):
-            n_val_dropped = int(np.sum(val_nan))
-            print(f"[Validation] Dropping {n_val_dropped} validation sample(s) with NaN target values")
-            X_val_for_val = X_val_for_val[~val_nan]
-            y_val_for_val = y_val_for_val[~val_nan]
-
-        # CRITICAL: Use encoded training labels (y_np) for consistency
-        # y_np was encoded earlier if label_encoder exists, so model training
-        # and validation must use the same encoding
-        y_train_for_val = y_np  # Use the (possibly encoded) training labels
-
-        # CRITICAL: Encode validation labels using the same encoder as training
-        if label_encoder is not None:
-            try:
-                y_val_for_val = label_encoder.transform(y_val_for_val)
-                print(f"[Validation] Encoded validation labels using training label encoder")
-            except ValueError as e:
-                print(f"[Warning] Could not encode validation labels: {e}")
-                print(f"          Validation labels may contain classes not seen during training")
-
-        # Get wavelengths for subsetting
-        wavelengths_for_validation = X.columns.astype(float).values if hasattr(X, 'columns') else np.arange(X.shape[1])
-
-        df_ranked = compute_validation_metrics_for_top_models(
-            df_ranked,
-            X_train_for_val,
-            y_train_for_val,
-            X_val_for_val,
-            y_val_for_val,
-            task_type,
-            wavelengths_for_validation,
-            top_n=validation_top_n,
-            progress_callback=progress_callback,
-            imbalance_method=imbalance_method,
-        )
-
-    return df_ranked, label_encoder
-
-
-def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
-                     use_sample_weight_for_classification=False,
-                     early_stopping_rounds=None):
+def _run_single_fold(
+    pipe,
+    X,
+    y,
+    train_idx,
+    test_idx,
+    task_type,
+    is_binary_classification,
+    use_sample_weight_for_classification=False,
+    early_stopping_rounds=None,
+):
     """
     Run a single CV fold in parallel.
 
@@ -4183,9 +4073,9 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
     # Check if pipeline has sample weighting transformer
     # This handles regression weighting methods (rare_boost, binning, balanced)
     sample_weight_train = None
-    if hasattr(pipe_clone, 'named_steps') and 'imbalance' in pipe_clone.named_steps:
-        imbalance_step = pipe_clone.named_steps['imbalance']
-        if hasattr(imbalance_step, 'sample_weight_'):
+    if hasattr(pipe_clone, "named_steps") and "imbalance" in pipe_clone.named_steps:
+        imbalance_step = pipe_clone.named_steps["imbalance"]
+        if hasattr(imbalance_step, "sample_weight_"):
             # This is a weighting transformer (RegressionSampleWeighter)
             # Fit the pipeline first to compute weights on this fold's training data
             pipe_clone.fit(X_train, y_train)
@@ -4210,12 +4100,17 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
 
     # Handle classification sample weights (for models like Ridge that support sample_weight but not class_weight)
 
-    if sample_weight_train is None and use_sample_weight_for_classification and task_type == 'classification':
+    if (
+        sample_weight_train is None
+        and use_sample_weight_for_classification
+        and task_type == "classification"
+    ):
         from sklearn.utils.class_weight import compute_sample_weight
-        sample_weight_train = compute_sample_weight('balanced', y_train)
+
+        sample_weight_train = compute_sample_weight("balanced", y_train)
 
         # Get final model from pipeline
-        if hasattr(pipe_clone, 'steps'):
+        if hasattr(pipe_clone, "steps"):
             manual_fit_used = True
             # Transform X through all steps except the model
             X_train_transformed = X_train
@@ -4228,21 +4123,25 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             # with a sample_weight-supporting model (Ridge, LogisticRegression).
             y_train_for_model = y_train
             for step_name, step in pipe_clone.steps[:-1]:
-                if hasattr(step, 'fit_resample'):
+                if hasattr(step, "fit_resample"):
                     # For imblearn resamplers, apply fit_resample
-                    X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train_for_model)
+                    X_train_transformed, y_train_for_model = step.fit_resample(
+                        X_train_transformed, y_train_for_model
+                    )
                     # Recompute sample weights for resampled data
-                    sample_weight_train = compute_sample_weight('balanced', y_train_for_model)
-                    fitted_steps.append((step_name, step, 'resample'))
-                elif hasattr(step, 'transform'):
+                    sample_weight_train = compute_sample_weight("balanced", y_train_for_model)
+                    fitted_steps.append((step_name, step, "resample"))
+                elif hasattr(step, "transform"):
                     step.fit(X_train_transformed, y_train_for_model)
                     X_train_transformed = step.transform(X_train_transformed)
-                    fitted_steps.append((step_name, step, 'transform'))
+                    fitted_steps.append((step_name, step, "transform"))
 
             # Fit the final model with sample weights (if supported)
             final_model = pipe_clone.steps[-1][1]
             if _supports_sample_weight(final_model):
-                final_model.fit(X_train_transformed, y_train_for_model, sample_weight=sample_weight_train)
+                final_model.fit(
+                    X_train_transformed, y_train_for_model, sample_weight=sample_weight_train
+                )
             else:
                 final_model.fit(X_train_transformed, y_train_for_model)
         else:
@@ -4251,19 +4150,16 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                 pipe_clone.fit(X_train, y_train, sample_weight=sample_weight_train)
             else:
                 pipe_clone.fit(X_train, y_train)
-        sample_weight_train = 'applied'  # Flag that we've already fit
+        sample_weight_train = "applied"  # Flag that we've already fit
 
     # Standard path: fit if not already done above
     if sample_weight_train is None:
         # Check if we should use early stopping for boosting models
-        use_early_stopping = (
-            early_stopping_rounds is not None and
-            early_stopping_rounds > 0
-        )
+        use_early_stopping = early_stopping_rounds is not None and early_stopping_rounds > 0
 
         if use_early_stopping:
             # Get final model from pipeline
-            if hasattr(pipe_clone, 'steps'):
+            if hasattr(pipe_clone, "steps"):
                 final_model_es = pipe_clone.steps[-1][1]
             else:
                 final_model_es = pipe_clone
@@ -4276,7 +4172,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                 X_train_transformed = X_train.copy()
                 X_test_transformed = X_test.copy()
 
-                if hasattr(pipe_clone, 'steps'):
+                if hasattr(pipe_clone, "steps"):
                     # T-32 fix-of-fixes (GLM/DeepSeek MEDIUM): use the same
                     # y_train_for_model threading pattern as the classification-
                     # sample-weight branch instead of in-place mutating y_train.
@@ -4288,16 +4184,18 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                     # model would re-introduce T-32's class of bug.
                     y_train_for_model = y_train
                     for step_name, step in pipe_clone.steps[:-1]:
-                        if hasattr(step, 'fit_resample'):
+                        if hasattr(step, "fit_resample"):
                             # For imblearn resamplers, apply fit_resample (only to training data)
-                            X_train_transformed, y_train_for_model = step.fit_resample(X_train_transformed, y_train_for_model)
-                            fitted_steps.append((step_name, step, 'resample'))
+                            X_train_transformed, y_train_for_model = step.fit_resample(
+                                X_train_transformed, y_train_for_model
+                            )
+                            fitted_steps.append((step_name, step, "resample"))
                             # Note: Don't transform test data - resampling only applies to training
-                        elif hasattr(step, 'transform'):
+                        elif hasattr(step, "transform"):
                             step.fit(X_train_transformed, y_train_for_model)
                             X_train_transformed = step.transform(X_train_transformed)
                             X_test_transformed = step.transform(X_test_transformed)
-                            fitted_steps.append((step_name, step, 'transform'))
+                            fitted_steps.append((step_name, step, "transform"))
 
                     final_model = final_model_es
                 else:
@@ -4307,9 +4205,11 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
                 # Fit with early stopping
                 _fit_with_early_stopping(
                     final_model,
-                    X_train_transformed, y_train_for_model,
-                    X_test_transformed, y_test,
-                    early_stopping_rounds
+                    X_train_transformed,
+                    y_train_for_model,
+                    X_test_transformed,
+                    y_test,
+                    early_stopping_rounds,
                 )
             else:
                 # Not a boosting model - standard fit
@@ -4323,7 +4223,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         """Transform X through manually fitted steps and predict with final model."""
         X_transformed = X_data
         for step_name, step, step_type in fitted_steps:
-            if step_type == 'transform' and hasattr(step, 'transform'):
+            if step_type == "transform" and hasattr(step, "transform"):
                 X_transformed = step.transform(X_transformed)
             # Skip resample steps for test data - they only apply to training
         return final_model.predict(X_transformed), X_transformed
@@ -4332,7 +4232,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         """Transform X through manually fitted steps and predict_proba with final model."""
         X_transformed = X_data
         for step_name, step, step_type in fitted_steps:
-            if step_type == 'transform' and hasattr(step, 'transform'):
+            if step_type == "transform" and hasattr(step, "transform"):
                 X_transformed = step.transform(X_transformed)
         return final_model.predict_proba(X_transformed)
 
@@ -4360,7 +4260,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
         # Use is_binary_classification flag (determined from full dataset) for consistent averaging
         # This avoids issues where a CV fold might have missing classes
         # Use 'macro' for multiclass to treat all classes equally (consistent with ROC_AUC)
-        average_method = 'binary' if is_binary_classification else 'macro'
+        average_method = "binary" if is_binary_classification else "macro"
 
         # F1, Precision, Recall
         try:
@@ -4386,23 +4286,33 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             try:
                 if manual_fit_used:
                     y_proba = _manual_transform_predict_proba(X_test)
-                    model_classes = final_model.classes_ if hasattr(final_model, 'classes_') else None
+                    model_classes = (
+                        final_model.classes_ if hasattr(final_model, "classes_") else None
+                    )
                 else:
                     y_proba = pipe_clone.predict_proba(X_test)
-                    model_classes = pipe_clone.classes_ if hasattr(pipe_clone, 'classes_') else None
+                    model_classes = pipe_clone.classes_ if hasattr(pipe_clone, "classes_") else None
 
                 if is_binary_classification:
                     auc = roc_auc_score(y_test, y_proba[:, 1])
                 else:
                     # Explicitly tell roc_auc_score the column order matches model's classes_
                     if model_classes is not None:
-                        auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro', labels=model_classes)
+                        auc = roc_auc_score(
+                            y_test,
+                            y_proba,
+                            multi_class="ovr",
+                            average="macro",
+                            labels=model_classes,
+                        )
                     else:
-                        auc = roc_auc_score(y_test, y_proba, multi_class='ovr', average='macro')
+                        auc = roc_auc_score(y_test, y_proba, multi_class="ovr", average="macro")
 
                 # Log Loss (requires predict_proba)
                 try:
-                    logloss = log_loss(y_test, y_proba, labels=model_classes if model_classes is not None else None)
+                    logloss = log_loss(
+                        y_test, y_proba, labels=model_classes if model_classes is not None else None
+                    )
                 except Exception:
                     logloss = np.nan
             except Exception:
@@ -4411,7 +4321,7 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
 
         # Compute additional classification metrics
         try:
-            specificity = compute_specificity(y_test, y_pred, average='macro')
+            specificity = compute_specificity(y_test, y_pred, average="macro")
         except Exception:
             specificity = np.nan
 
@@ -4433,10 +4343,19 @@ def _run_single_fold(pipe, X, y, train_idx, test_idx, task_type, is_binary_class
             ber = np.nan
 
         return {
-            "Accuracy": acc, "ROC_AUC": auc, "F1": f1, "Precision": precision, "Recall": recall,
-            "Specificity": specificity, "Kappa": kappa, "MCC": mcc,
-            "BalancedAcc": balanced_acc, "BER": ber, "LogLoss": logloss,
-            "y_test": y_test, "y_pred": y_pred
+            "Accuracy": acc,
+            "ROC_AUC": auc,
+            "F1": f1,
+            "Precision": precision,
+            "Recall": recall,
+            "Specificity": specificity,
+            "Kappa": kappa,
+            "MCC": mcc,
+            "BalancedAcc": balanced_acc,
+            "BER": ber,
+            "LogLoss": logloss,
+            "y_test": y_test,
+            "y_pred": y_pred,
         }
 
 
@@ -4460,7 +4379,7 @@ def _run_single_config(
     validation_count=0,
     total_samples_original=None,
     folds=5,
-    cv_strategy='kfold',
+    cv_strategy="kfold",
     cv_n_repeats=5,
     imbalance_method=None,
     imbalance_params=None,
@@ -4498,8 +4417,14 @@ def _run_single_config(
 
     # Skip invalid PLS n_components / feature count combinations
     # When n_components >= n_vars, PLS is degenerate or invalid — skip instead of silently clamping
-    if hasattr(model, 'n_components') and model.n_components is not None and model.n_components >= n_vars:
-        print(f"  [SKIP] {model_name} n_components={model.n_components} >= n_vars={n_vars}, invalid combination")
+    if (
+        hasattr(model, "n_components")
+        and model.n_components is not None
+        and model.n_components >= n_vars
+    ):
+        print(
+            f"  [SKIP] {model_name} n_components={model.n_components} >= n_vars={n_vars}, invalid combination"
+        )
         return None
 
     # Use original wavelength count if provided (for wavelength filtering case)
@@ -4515,24 +4440,27 @@ def _run_single_config(
         # This is used when spectral preprocessing (SNV/deriv) was already done globally,
         # but we still need to add imbalance transformers inside CV folds
         pipe_steps = []
-        if imbalance_method is not None and imbalance_method != 'class_weight':
+        if imbalance_method is not None and imbalance_method != "class_weight":
             # Add ONLY imbalance handling (spectral preprocessing already done)
             from spectral_predict.imbalance import build_imbalance_transformer
+
             if imbalance_params is None:
                 imbalance_params = {}
             imbalance_transformer = build_imbalance_transformer(
                 method=imbalance_method,
                 task_type=task_type,
                 random_state=random_state,  # CRITICAL for reproducibility
-                **imbalance_params
+                **imbalance_params,
             )
             pipe_steps.append(("imbalance", imbalance_transformer))
     else:
         # Normal behavior: build full pipeline (spectral + imbalance)
         # Phase 3: Extract wavelengths for interference removal
         # Use wavelengths from parameter if available, otherwise try to extract from DataFrame columns
-        wavelengths_for_interference = wavelengths if wavelengths is not None else (
-            X.columns.astype(float).values if hasattr(X, 'columns') else None
+        wavelengths_for_interference = (
+            wavelengths
+            if wavelengths is not None
+            else (X.columns.astype(float).values if hasattr(X, "columns") else None)
         )
 
         # Use base_name if available (for GA configs), otherwise use name
@@ -4565,48 +4493,52 @@ def _run_single_config(
     # through to the sample_weight fallback — functionally weighted but mechanism-
     # divergent from the rest of the dispatchers (Codex MEDIUM on PR #38).
     use_sample_weight_for_classification = False
-    if imbalance_method == 'class_weight' and task_type == 'classification':
-        if model_name == 'CatBoost':
+    if imbalance_method == "class_weight" and task_type == "classification":
+        if model_name == "CatBoost":
             try:
-                model.set_params(auto_class_weights='Balanced')
+                model.set_params(auto_class_weights="Balanced")
             except Exception as e:
                 import warnings
+
                 warnings.warn(
                     f"CatBoost set_params(auto_class_weights='Balanced') failed: {e}. "
                     f"Model will train UNWEIGHTED. Consider switching to SMOTE/ADASYN.",
-                    UserWarning
+                    UserWarning,
                 )
-        elif hasattr(model, 'class_weight'):
+        elif hasattr(model, "class_weight"):
             try:
-                model.set_params(class_weight='balanced')
+                model.set_params(class_weight="balanced")
             except Exception as e:
                 import warnings
+
                 warnings.warn(
                     f"{model_name} has class_weight attribute but set_params failed: {e}. "
                     f"Consider using SMOTE or other resampling method.",
-                    UserWarning
+                    UserWarning,
                 )
         else:
             # Check if model supports sample_weight in fit() (e.g., RidgeClassifier)
             import inspect
-            model_fit_sig = inspect.signature(model.fit) if hasattr(model, 'fit') else None
-            if model_fit_sig and 'sample_weight' in model_fit_sig.parameters:
+
+            model_fit_sig = inspect.signature(model.fit) if hasattr(model, "fit") else None
+            if model_fit_sig and "sample_weight" in model_fit_sig.parameters:
                 # Model supports sample_weight - we'll compute and apply during _run_single_fold
                 use_sample_weight_for_classification = True
             else:
                 # Model doesn't support class_weight OR sample_weight
                 import warnings
-                if model_name in ['MLP', 'MLPClassifier']:
+
+                if model_name in ["MLP", "MLPClassifier"]:
                     warnings.warn(
                         f"{model_name} does not support class_weight or sample_weight. "
                         f"For imbalanced classification with MLP, use SMOTE or other resampling methods instead.",
-                        UserWarning
+                        UserWarning,
                     )
                 else:
                     warnings.warn(
                         f"{model_name} does not support class_weight. "
                         f"Consider using SMOTE or other resampling methods for imbalanced data.",
-                        UserWarning
+                        UserWarning,
                     )
 
     # For PLS-DA, we need PLS + StandardScaler + LogisticRegression
@@ -4616,21 +4548,21 @@ def _run_single_config(
         pipe_steps.append(("scaler", StandardScaler()))  # Scale PLS scores for LogisticRegression
 
         # Extract LogisticRegression parameters from config (prefixed with lr_)
-        lr_C = params.get('lr_C', 1.0) if params else 1.0
-        lr_solver = params.get('lr_solver', 'lbfgs') if params else 'lbfgs'
-        lr_max_iter = params.get('lr_max_iter', 1000) if params else 1000
+        lr_C = params.get("lr_C", 1.0) if params else 1.0
+        lr_solver = params.get("lr_solver", "lbfgs") if params else "lbfgs"
+        lr_max_iter = params.get("lr_max_iter", 1000) if params else 1000
 
         # Build LogisticRegression with configurable parameters
         lr_kwargs = {
-            'C': lr_C,
-            'solver': lr_solver,
-            'max_iter': lr_max_iter,
-            'random_state': random_state
+            "C": lr_C,
+            "solver": lr_solver,
+            "max_iter": lr_max_iter,
+            "random_state": random_state,
         }
 
         # Apply class_weight to LogisticRegression if requested
-        if imbalance_method == 'class_weight' and task_type == 'classification':
-            lr_kwargs['class_weight'] = 'balanced'
+        if imbalance_method == "class_weight" and task_type == "classification":
+            lr_kwargs["class_weight"] = "balanced"
 
         pipe_steps.append(("lr", LogisticRegression(**lr_kwargs)))
     # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler before model
@@ -4666,9 +4598,15 @@ def _run_single_config(
         # Serial execution for reproducibility (deterministic fold ordering)
         cv_metrics = [
             _run_single_fold(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
+                pipe,
+                X,
+                y,
+                train_idx,
+                test_idx,
+                task_type,
+                is_binary_classification,
                 use_sample_weight_for_classification,
-                early_stopping_rounds=early_stopping_rounds
+                early_stopping_rounds=early_stopping_rounds,
             )
             for train_idx, test_idx in splits
         ]
@@ -4677,19 +4615,25 @@ def _run_single_config(
         # 3.11 frozen builds must use 'threading' — loky's process spawn is
         # broken in PyInstaller 5.x bundles on 3.11. Dev mode and 3.12 frozen
         # builds use 'loky' for real multiprocessing.
-        backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
+        backend = "threading" if _frozen_needs_threading_fallback() else "loky"
         cv_metrics = Parallel(n_jobs=n_jobs_cv, backend=backend)(
             delayed(_run_single_fold)(
-                pipe, X, y, train_idx, test_idx, task_type, is_binary_classification,
+                pipe,
+                X,
+                y,
+                train_idx,
+                test_idx,
+                task_type,
+                is_binary_classification,
                 use_sample_weight_for_classification,
-                early_stopping_rounds=early_stopping_rounds
+                early_stopping_rounds=early_stopping_rounds,
             )
             for train_idx, test_idx in splits
         )
 
     # Print summary if imbalance handling was used
     if imbalance_method is not None:
-        if imbalance_method == 'class_weight':
+        if imbalance_method == "class_weight":
             print(f"  [OK] Imbalance handling: class_weight applied to model")
         else:
             print(f"  [OK] Imbalance handling: {imbalance_method} applied successfully")
@@ -4709,13 +4653,14 @@ def _run_single_config(
     # repeated CV, naive concatenation duplicates rows and computes metrics from
     # correlated observations.
     from spectral_predict.cv_utils import _is_repeated_cv, reduce_repeated_cv_predictions
+
     repeated_cv = _is_repeated_cv(cv_splitter)
 
     # Average metrics
     if task_type == "regression":
         if repeated_cv:
             all_y_test, all_y_pred = reduce_repeated_cv_predictions(
-                cv_metrics, splits, n_samples=len(y), task_type='regression'
+                cv_metrics, splits, n_samples=len(y), task_type="regression"
             )
         else:
             all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
@@ -4756,20 +4701,22 @@ def _run_single_config(
         # Note: Regional R² is not computed because it's mathematically misleading
         # when Y values are restricted to a narrow range (low variance → negative R²)
         regional_rmse = {}
-        for i, (lower, upper) in enumerate([
-            (-np.inf, quartiles[0]),  # Q1
-            (quartiles[0], quartiles[1]),  # Q2
-            (quartiles[1], quartiles[2]),  # Q3
-            (quartiles[2], np.inf)  # Q4
-        ]):
+        for i, (lower, upper) in enumerate(
+            [
+                (-np.inf, quartiles[0]),  # Q1
+                (quartiles[0], quartiles[1]),  # Q2
+                (quartiles[1], quartiles[2]),  # Q3
+                (quartiles[2], np.inf),  # Q4
+            ]
+        ):
             # Use true Y values for mask (auto-ensemble uses stacking, not routing)
             mask = (all_y_test >= lower) & (all_y_test < upper if i < 3 else all_y_test >= lower)
             if mask.sum() > 0:
-                regional_rmse[f'Q{i+1}'] = np.sqrt(mean_squared_error(
-                    all_y_test[mask], all_y_pred[mask]
-                ))
+                regional_rmse[f"Q{i+1}"] = np.sqrt(
+                    mean_squared_error(all_y_test[mask], all_y_pred[mask])
+                )
             else:
-                regional_rmse[f'Q{i+1}'] = np.nan
+                regional_rmse[f"Q{i+1}"] = np.nan
     else:
         # Headline label-based metrics: under repeated CV, derive from
         # majority-vote-pooled predictions per sample (averaging fold metrics
@@ -4777,14 +4724,19 @@ def _run_single_config(
         # require probabilities and stay as mean-of-folds.
         if repeated_cv:
             all_y_test, all_y_pred = reduce_repeated_cv_predictions(
-                cv_metrics, splits, n_samples=len(y), task_type='classification'
+                cv_metrics, splits, n_samples=len(y), task_type="classification"
             )
             from sklearn.metrics import (
-                accuracy_score as _acc, f1_score as _f1, precision_score as _ps,
-                recall_score as _rs, balanced_accuracy_score as _bas,
-                cohen_kappa_score as _kappa, matthews_corrcoef as _mcc,
+                accuracy_score as _acc,
+                f1_score as _f1,
+                precision_score as _ps,
+                recall_score as _rs,
+                balanced_accuracy_score as _bas,
+                cohen_kappa_score as _kappa,
+                matthews_corrcoef as _mcc,
             )
-            avg = 'binary' if is_binary_classification else 'macro'
+
+            avg = "binary" if is_binary_classification else "macro"
             mean_acc = float(_acc(all_y_test, all_y_pred))
             mean_f1 = float(_f1(all_y_test, all_y_pred, average=avg, zero_division=0))
             mean_precision = float(_ps(all_y_test, all_y_pred, average=avg, zero_division=0))
@@ -4799,25 +4751,34 @@ def _run_single_config(
             # degeneracy can make y_pred single-class).
             if is_binary_classification:
                 from sklearn.metrics import confusion_matrix as _cm
+
                 binary_labels = np.unique(y)
                 cm = _cm(all_y_test, all_y_pred, labels=binary_labels)
                 tn, fp, fn, tp = cm.ravel()
-                mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float('nan')
+                mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float("nan")
             else:
                 mean_specificity = float(
-                    np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+                    np.mean(
+                        [m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])]
+                    )
                 )
             # BER = 1 - BalancedAccuracy, label-based, pools alongside BalancedAcc
             mean_ber = 1.0 - mean_balanced_acc
         else:
             mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
             mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
-            mean_precision = np.mean([m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])])
+            mean_precision = np.mean(
+                [m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])]
+            )
             mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
-            mean_specificity = np.mean([m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])])
+            mean_specificity = np.mean(
+                [m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])]
+            )
             mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
             mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
-            mean_balanced_acc = np.mean([m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])])
+            mean_balanced_acc = np.mean(
+                [m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])]
+            )
             mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
 
         # AUC and LogLoss require probabilities — keep as mean-of-folds
@@ -4836,17 +4797,20 @@ def _run_single_config(
         class_labels = None
         try:
             # Get per-class metrics from aggregated CV predictions
-            report = classification_report(all_y_test, all_y_pred, output_dict=True, zero_division=0)
-            class_labels = sorted([k for k in report.keys()
-                                   if k not in ['accuracy', 'macro avg', 'weighted avg']])
+            report = classification_report(
+                all_y_test, all_y_pred, output_dict=True, zero_division=0
+            )
+            class_labels = sorted(
+                [k for k in report.keys() if k not in ["accuracy", "macro avg", "weighted avg"]]
+            )
             for class_label in class_labels:
                 class_key = str(class_label)
                 if class_key in report:
                     per_class_metrics[class_key] = {
-                        'F1': report[class_key]['f1-score'],
-                        'Precision': report[class_key]['precision'],
-                        'Recall': report[class_key]['recall'],
-                        'Support': int(report[class_key]['support'])
+                        "F1": report[class_key]["f1-score"],
+                        "Precision": report[class_key]["precision"],
+                        "Recall": report[class_key]["recall"],
+                        "Support": int(report[class_key]["support"]),
                     }
         except Exception as e:
             print(f"Warning: Could not compute per-class metrics: {e}")
@@ -4909,8 +4873,9 @@ def _run_single_config(
                     if n_classes == 2:
                         cal_auc = roc_auc_score(y, y_pred_proba_cal[:, 1])
                     else:
-                        cal_auc = roc_auc_score(y, y_pred_proba_cal,
-                                               multi_class='ovr', average='macro')
+                        cal_auc = roc_auc_score(
+                            y, y_pred_proba_cal, multi_class="ovr", average="macro"
+                        )
                 else:
                     cal_auc = np.nan
             except Exception as e:
@@ -4919,9 +4884,9 @@ def _run_single_config(
 
             # Compute F1, Precision, Recall
             try:
-                cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
-                cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
-                cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
+                cal_f1 = f1_score(y, y_pred_cal, average="weighted", zero_division=0)
+                cal_precision = precision_score(y, y_pred_cal, average="weighted", zero_division=0)
+                cal_recall = recall_score(y, y_pred_cal, average="weighted", zero_division=0)
             except Exception as e:
                 logger.debug(f"Failed to compute calibration F1/Precision/Recall: {e}")
                 cal_f1 = np.nan
@@ -4930,7 +4895,7 @@ def _run_single_config(
 
             # Compute new classification metrics
             try:
-                cal_specificity = compute_specificity(y, y_pred_cal, average='macro')
+                cal_specificity = compute_specificity(y, y_pred_cal, average="macro")
             except Exception as e:
                 logger.debug(f"Failed to compute calibration Specificity: {e}")
                 cal_specificity = np.nan
@@ -4984,7 +4949,7 @@ def _run_single_config(
             # Pipeline-specific params that shouldn't be saved/restored
             # These are Pipeline meta-parameters, not model parameters
             # verbose must be bool in newer scikit-learn, but get_params() returns int
-            PIPELINE_META_PARAMS = {'verbose', 'memory', 'steps', 'transform_input'}
+            PIPELINE_META_PARAMS = {"verbose", "memory", "steps", "transform_input"}
 
             filtered_params = {}
             for key, value in all_params.items():
@@ -4993,13 +4958,13 @@ def _run_single_config(
                     continue
 
                 # Skip callables and complex objects
-                if callable(value) or hasattr(value, '__dict__'):
+                if callable(value) or hasattr(value, "__dict__"):
                     continue
 
                 # Convert value to Python-native type for reliable serialization
                 try:
                     # Handle numpy scalar types (np.int64, np.float64, etc.)
-                    if hasattr(value, 'item'):
+                    if hasattr(value, "item"):
                         value = value.item()
 
                     # Skip nan values - they can't be serialized with ast.literal_eval
@@ -5010,6 +4975,7 @@ def _run_single_config(
                     # Test if value can be round-tripped through str() -> ast.literal_eval()
                     test_str = str({key: value})
                     import ast
+
                     ast.literal_eval(test_str)
 
                     # Value passed the test, include it
@@ -5043,7 +5009,7 @@ def _run_single_config(
     # Format imbalance handling indicator for display
     if imbalance_method is None:
         imbalance_display = "—"
-    elif imbalance_method == 'class_weight':
+    elif imbalance_method == "class_weight":
         imbalance_display = "class_weight"
     else:
         imbalance_display = imbalance_method
@@ -5078,7 +5044,9 @@ def _run_single_config(
         "SubsetTag": subset_tag,
         "Imbalance": imbalance_display,
         # Track early stopping to allow Model Development to reproduce boosted results
-        "early_stopping_rounds": early_stopping_rounds if model_name in ("XGBoost", "LightGBM", "CatBoost") else None,
+        "early_stopping_rounds": (
+            early_stopping_rounds if model_name in ("XGBoost", "LightGBM", "CatBoost") else None
+        ),
         # Store actual imbalance settings for Model Development tab to use
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,
@@ -5094,7 +5062,7 @@ def _run_single_config(
     # repeated K-fold. Never rely on getattr(cv_splitter, 'n_splits', folds) —
     # LeaveOneOut has no n_splits attribute, so that fallback would return the
     # stale `folds` kwarg (typically 5) which is wrong under LOO.
-    if cv_strategy == 'loo':
+    if cv_strategy == "loo":
         effective_folds = len(X)
     else:
         # 'kfold' and 'repeated_kfold' both carry the same per-fold semantics;
@@ -5114,14 +5082,17 @@ def _run_single_config(
     }
 
     # Store GA preprocessing genes if present (for Model Development reconstruction)
-    if 'ga_genes' in preprocess_cfg and preprocess_cfg['ga_genes'] is not None:
-        result["ga_genes"] = preprocess_cfg['ga_genes'].tolist()  # Serialize numpy array
+    if "ga_genes" in preprocess_cfg and preprocess_cfg["ga_genes"] is not None:
+        result["ga_genes"] = preprocess_cfg["ga_genes"].tolist()  # Serialize numpy array
         result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
 
     # Store Smart preprocessing metadata if present (for validation reconstruction)
-    if 'smart_selected_wavelengths' in preprocess_cfg and preprocess_cfg['smart_selected_wavelengths'] is not None:
-        result["smart_selected_wavelengths"] = preprocess_cfg['smart_selected_wavelengths']
+    if (
+        "smart_selected_wavelengths" in preprocess_cfg
+        and preprocess_cfg["smart_selected_wavelengths"] is not None
+    ):
+        result["smart_selected_wavelengths"] = preprocess_cfg["smart_selected_wavelengths"]
         result["smart_n_wavelengths"] = preprocess_cfg.get("smart_n_wavelengths")
         result["smart_score"] = preprocess_cfg.get("smart_score")
         result["smart_importance_method"] = preprocess_cfg.get("smart_importance_method")
@@ -5146,8 +5117,8 @@ def _run_single_config(
         result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds
         # Add individual quartile columns for display/sorting
         if regional_rmse is not None:
-            for q in ['Q1', 'Q2', 'Q3', 'Q4']:
-                result[f'RMSE_{q}'] = regional_rmse.get(q, np.nan)
+            for q in ["Q1", "Q2", "Q3", "Q4"]:
+                result[f"RMSE_{q}"] = regional_rmse.get(q, np.nan)
     else:
         # Calibration metrics (training data)
         result["Accuracy"] = cal_acc if cal_acc is not None else np.nan
@@ -5179,7 +5150,7 @@ def _run_single_config(
         # Add individual class F1 columns for display/sorting (like RMSE_Q1 for regression)
         if per_class_metrics:
             for class_label, metrics in per_class_metrics.items():
-                result[f'F1_Class{class_label}'] = metrics['F1']
+                result[f"F1_Class{class_label}"] = metrics["F1"]
 
     # Save all_vars for ALL models (including full spectrum)
     # This ensures Model Development can reconstruct the exact wavelengths used
@@ -5188,12 +5159,12 @@ def _run_single_config(
     if subset_tag != "full" and subset_indices is not None:
         # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
-        all_vars_str = ','.join([f"{w:.1f}" for w in subset_wavelengths])
-        result['all_vars'] = all_vars_str
+        all_vars_str = ",".join([f"{w:.1f}" for w in subset_wavelengths])
+        result["all_vars"] = all_vars_str
     else:
         # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
-        all_vars_str = ','.join([f"{w:.1f}" for w in wavelengths])
-        result['all_vars'] = all_vars_str
+        all_vars_str = ",".join([f"{w:.1f}" for w in wavelengths])
+        result["all_vars"] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
     if supports_feature_importance(model_name) and fitted_model_for_importance is not None:
@@ -5215,9 +5186,7 @@ def _run_single_config(
                 X_transformed = X
 
             # Compute importances
-            importances = get_feature_importances(
-                fitted_model, model_name, X_transformed, y
-            )
+            importances = get_feature_importances(fitted_model, model_name, X_transformed, y)
 
             # Apply edge masking for Savitzky-Golay derivatives (consistent with variable selection)
             # SKIP when wavelength restriction is active - restricted wavelengths
@@ -5228,7 +5197,7 @@ def _run_single_config(
             # Get top N features for display purposes (always top 30)
             n_to_select = min(top_n_vars, len(importances))
             # Use stable sort to ensure deterministic feature ordering when importances are tied
-            top_indices = np.argsort(importances, kind='stable')[-n_to_select:][::-1]
+            top_indices = np.argsort(importances, kind="stable")[-n_to_select:][::-1]
 
             # Map back to original wavelengths
             if subset_indices is not None:
@@ -5240,16 +5209,16 @@ def _run_single_config(
                 top_wavelengths = wavelengths[top_indices]
 
             # Format as comma-separated string
-            top_vars_str = ','.join([f"{w:.1f}" for w in top_wavelengths])
-            result['top_vars'] = top_vars_str
+            top_vars_str = ",".join([f"{w:.1f}" for w in top_wavelengths])
+            result["top_vars"] = top_vars_str
 
         except Exception as e:
             # If anything fails, just mark as N/A
-            result['top_vars'] = 'N/A'
+            result["top_vars"] = "N/A"
             # Keep all_vars that we already set above
     else:
         # For models that don't support importance extraction
-        result['top_vars'] = 'N/A'
+        result["top_vars"] = "N/A"
         # Keep all_vars that we already set above
 
     return result
@@ -5258,6 +5227,7 @@ def _run_single_config(
 # ============================================================================
 # ONE-CLASS DETECTION SEARCH
 # ============================================================================
+
 
 def _resolve_one_class_model_grids(
     enabled_models,
@@ -5273,16 +5243,16 @@ def _resolve_one_class_model_grids(
         if oc_hyperparams:
             for model_name, param_list in oc_grids.items():
                 for params in param_list:
-                    if model_name == 'OneClassSVM' and 'nu' in oc_hyperparams:
-                        params['nu'] = oc_hyperparams['nu']
-                    if model_name in ('IsolationForest', 'EllipticEnvelope', 'LOF'):
-                        if 'contamination' in oc_hyperparams:
-                            params['contamination'] = oc_hyperparams['contamination']
-                    if model_name == 'PCA-SIMCA':
-                        if 'alpha' in oc_hyperparams:
-                            params['alpha'] = oc_hyperparams['alpha']
-                        if 'n_components' in oc_hyperparams:
-                            params['n_components'] = oc_hyperparams['n_components']
+                    if model_name == "OneClassSVM" and "nu" in oc_hyperparams:
+                        params["nu"] = oc_hyperparams["nu"]
+                    if model_name in ("IsolationForest", "EllipticEnvelope", "LOF"):
+                        if "contamination" in oc_hyperparams:
+                            params["contamination"] = oc_hyperparams["contamination"]
+                    if model_name == "PCA-SIMCA":
+                        if "alpha" in oc_hyperparams:
+                            params["alpha"] = oc_hyperparams["alpha"]
+                        if "n_components" in oc_hyperparams:
+                            params["n_components"] = oc_hyperparams["n_components"]
         model_grids = {}
         for model_name, param_list in oc_grids.items():
             if model_name in enabled_models:
@@ -5295,25 +5265,30 @@ def _resolve_one_class_model_grids(
             continue
         if model_name in oc_model_param_overrides:
             overrides = oc_model_param_overrides[model_name]
-            if model_name == 'OneClassSVM':
+            if model_name == "OneClassSVM":
                 model_grids[model_name] = _build_ocsvm_custom_grid(
-                    overrides, oc_grids['OneClassSVM'],
+                    overrides,
+                    oc_grids["OneClassSVM"],
                 )
-            elif model_name == 'IsolationForest':
+            elif model_name == "IsolationForest":
                 model_grids[model_name] = _build_if_custom_grid(
-                    overrides, oc_grids['IsolationForest'],
+                    overrides,
+                    oc_grids["IsolationForest"],
                 )
-            elif model_name == 'EllipticEnvelope':
+            elif model_name == "EllipticEnvelope":
                 model_grids[model_name] = _build_ee_custom_grid(
-                    overrides, oc_grids['EllipticEnvelope'],
+                    overrides,
+                    oc_grids["EllipticEnvelope"],
                 )
-            elif model_name == 'LOF':
+            elif model_name == "LOF":
                 model_grids[model_name] = _build_lof_custom_grid(
-                    overrides, oc_grids['LOF'],
+                    overrides,
+                    oc_grids["LOF"],
                 )
-            elif model_name == 'PCA-SIMCA':
+            elif model_name == "PCA-SIMCA":
                 model_grids[model_name] = _build_simca_custom_grid(
-                    overrides, oc_grids['PCA-SIMCA'],
+                    overrides,
+                    oc_grids["PCA-SIMCA"],
                 )
             else:
                 model_grids[model_name] = oc_grids[model_name]
@@ -5334,105 +5309,111 @@ def _oc_extract_defaults(grid, key):
 def _build_ocsvm_custom_grid(overrides, default_grid):
     from itertools import product
 
-    kernels = overrides.get('kernel', [])
+    kernels = overrides.get("kernel", [])
     if not kernels:
-        kernels = _oc_extract_defaults(default_grid, 'kernel')
-    gammas = overrides.get('gamma', [])
+        kernels = _oc_extract_defaults(default_grid, "kernel")
+    gammas = overrides.get("gamma", [])
     if not gammas:
-        gammas = _oc_extract_defaults(default_grid, 'gamma')
-    nus = overrides.get('nu', [])
+        gammas = _oc_extract_defaults(default_grid, "gamma")
+    nus = overrides.get("nu", [])
     if not nus:
-        nus = _oc_extract_defaults(default_grid, 'nu')
-    degrees = overrides.get('degree', [])
+        nus = _oc_extract_defaults(default_grid, "nu")
+    degrees = overrides.get("degree", [])
     if not degrees:
         degrees = [2]
 
     combos = []
     for k, g, nu in product(kernels, gammas, nus):
-        if k == 'poly':
+        if k == "poly":
             for d in degrees:
-                combos.append({'kernel': k, 'gamma': g, 'nu': nu, 'degree': d})
+                combos.append({"kernel": k, "gamma": g, "nu": nu, "degree": d})
         else:
-            combos.append({'kernel': k, 'gamma': g, 'nu': nu})
+            combos.append({"kernel": k, "gamma": g, "nu": nu})
     return combos if combos else default_grid
 
 
 def _build_if_custom_grid(overrides, default_grid):
     from itertools import product
 
-    n_est = overrides.get('n_estimators', [])
+    n_est = overrides.get("n_estimators", [])
     if not n_est:
-        n_est = _oc_extract_defaults(default_grid, 'n_estimators')
-    contam = overrides.get('contamination', [])
+        n_est = _oc_extract_defaults(default_grid, "n_estimators")
+    contam = overrides.get("contamination", [])
     if not contam:
-        contam = _oc_extract_defaults(default_grid, 'contamination')
-    max_feat = overrides.get('max_features', [])
+        contam = _oc_extract_defaults(default_grid, "contamination")
+    max_feat = overrides.get("max_features", [])
     if not max_feat:
-        max_feat = _oc_extract_defaults(default_grid, 'max_features')
+        max_feat = _oc_extract_defaults(default_grid, "max_features")
 
     combos = [
-        {'n_estimators': int(n), 'contamination': c, 'max_features': mf}
+        {"n_estimators": int(n), "contamination": c, "max_features": mf}
         for n, c, mf in product(n_est, contam, max_feat)
     ]
     return combos if combos else default_grid
 
 
 def _build_ee_custom_grid(overrides, default_grid):
-    contam = overrides.get('contamination', [])
+    contam = overrides.get("contamination", [])
     if not contam:
-        contam = _oc_extract_defaults(default_grid, 'contamination')
-    combos = [{'contamination': c} for c in contam]
+        contam = _oc_extract_defaults(default_grid, "contamination")
+    combos = [{"contamination": c} for c in contam]
     return combos if combos else default_grid
 
 
 def _build_lof_custom_grid(overrides, default_grid):
     from itertools import product
 
-    nn = overrides.get('n_neighbors', [])
+    nn = overrides.get("n_neighbors", [])
     if not nn:
-        nn = _oc_extract_defaults(default_grid, 'n_neighbors')
-    contam = overrides.get('contamination', [])
+        nn = _oc_extract_defaults(default_grid, "n_neighbors")
+    contam = overrides.get("contamination", [])
     if not contam:
-        contam = _oc_extract_defaults(default_grid, 'contamination')
+        contam = _oc_extract_defaults(default_grid, "contamination")
 
-    combos = [
-        {'n_neighbors': int(n), 'contamination': c}
-        for n, c in product(nn, contam)
-    ]
+    combos = [{"n_neighbors": int(n), "contamination": c} for n, c in product(nn, contam)]
     return combos if combos else default_grid
 
 
 def _build_simca_custom_grid(overrides, default_grid):
     from itertools import product
 
-    n_comp = overrides.get('n_components', [])
+    n_comp = overrides.get("n_components", [])
     if not n_comp:
-        n_comp = _oc_extract_defaults(default_grid, 'n_components')
-    alphas = overrides.get('alpha', [])
+        n_comp = _oc_extract_defaults(default_grid, "n_components")
+    alphas = overrides.get("alpha", [])
     if not alphas:
-        alphas = _oc_extract_defaults(default_grid, 'alpha')
+        alphas = _oc_extract_defaults(default_grid, "alpha")
 
-    combos = [
-        {'n_components': nc, 'alpha': a}
-        for nc, a in product(n_comp, alphas)
-    ]
+    combos = [{"n_components": nc, "alpha": a} for nc, a in product(n_comp, alphas)]
     return combos if combos else default_grid
 
 
 def run_one_class_search(
-    X, y, inlier_class_label,
-    folds=5, cv_strategy='kfold', cv_n_repeats=5,
-    preprocessing_methods=None, window_sizes=None,
-    tier='standard', enabled_models=None,
-    variable_penalty=0, gap_penalty=0,
-    analysis_wl_min=None, analysis_wl_max=None,
-    progress_callback=None, controller=None,
-    baseline_method=None, baseline_params=None,
-    enable_smoothing=False, smoothing_window=17, smoothing_polyorder=2,
+    X,
+    y,
+    inlier_class_label,
+    folds=5,
+    cv_strategy="kfold",
+    cv_n_repeats=5,
+    preprocessing_methods=None,
+    window_sizes=None,
+    tier="standard",
+    enabled_models=None,
+    variable_penalty=0,
+    gap_penalty=0,
+    analysis_wl_min=None,
+    analysis_wl_max=None,
+    progress_callback=None,
+    controller=None,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing=False,
+    smoothing_window=17,
+    smoothing_polyorder=2,
     oc_hyperparams=None,
     oc_model_param_overrides=None,
     smart_preprocess=False,
-    smart_preprocess_importance='model_specific',
+    smart_preprocess_importance="model_specific",
     smart_preprocess_n_top=10,
     # T-37: TPE preprocessing discovery (supersedes smart + GA)
     tpe_preprocess=False,
@@ -5527,7 +5508,9 @@ def run_one_class_search(
     from sklearn.base import clone
     from sklearn.preprocessing import StandardScaler
     from .contamination import (
-        build_one_class_model, get_one_class_model_grids, one_class_metrics,
+        build_one_class_model,
+        get_one_class_model_grids,
+        one_class_metrics,
         run_one_class_cv,
     )
     from .model_config import get_tier_models
@@ -5536,9 +5519,9 @@ def run_one_class_search(
     random_state = RANDOM_STATE
 
     # Validate inputs
-    X_np = X.values if hasattr(X, 'values') else np.asarray(X)
-    y_np = y.values if hasattr(y, 'values') else np.asarray(y)
-    wavelengths = X.columns.values if hasattr(X, 'columns') else np.arange(X_np.shape[1])
+    X_np = X.values if hasattr(X, "values") else np.asarray(X)
+    y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    wavelengths = X.columns.values if hasattr(X, "columns") else np.arange(X_np.shape[1])
 
     # Convert labels to one-class format: +1 = inlier, -1 = outlier
     # Compare as strings to handle both numeric and text labels consistently
@@ -5568,9 +5551,10 @@ def run_one_class_search(
     # Upfront CV-strategy guard (n_repeats >= 1, one-class inlier counts,
     # LOO min-2 inlier rule). Raises ValueError before any training starts.
     from .cv_utils import validate_cv_strategy_for_task
+
     validate_cv_strategy_for_task(
         strategy=cv_strategy,
-        task_type='one_class',
+        task_type="one_class",
         y=y_oc,
         n_folds=folds,
         n_repeats=cv_n_repeats,
@@ -5594,12 +5578,14 @@ def run_one_class_search(
         masked_wl = wavelengths[wl_mask]
         logger.info(
             "Wavelength range: %.1f - %.1f (%d features)",
-            masked_wl[0], masked_wl[-1], len(masked_wl),
+            masked_wl[0],
+            masked_wl[-1],
+            len(masked_wl),
         )
 
     # Build preprocessing configs
     if preprocessing_methods is None:
-        preprocessing_methods = ['raw', 'snv', 'deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2']
+        preprocessing_methods = ["raw", "snv", "deriv1", "deriv2", "snv_deriv1", "snv_deriv2"]
     if window_sizes is None:
         window_sizes = [7, 19]
 
@@ -5619,15 +5605,19 @@ def run_one_class_search(
         # Wrap progress callback to match discovery's (current, total, msg) signature
         def discovery_progress(current, total, message):
             if progress_callback:
-                progress_callback({
-                    'stage': 'smart_preprocessing',
-                    'message': message,
-                    'current': current,
-                    'total': total
-                })
+                progress_callback(
+                    {
+                        "stage": "smart_preprocessing",
+                        "message": message,
+                        "current": current,
+                        "total": total,
+                    }
+                )
 
         discovered = discover_preprocessing(
-            X_np, y_oc, task_type='one_class',
+            X_np,
+            y_oc,
+            task_type="one_class",
             importance_method=smart_preprocess_importance,
             n_top=smart_preprocess_n_top,
             cv_folds=folds,
@@ -5636,44 +5626,48 @@ def run_one_class_search(
         if discovered:
             # Translate discovery output format to search config format
             for cfg in discovered:
-                disc_name = cfg.get('preprocessing', 'raw')
-                disc_deriv = cfg.get('deriv')
-                disc_window = cfg.get('window')
+                disc_name = cfg.get("preprocessing", "raw")
+                disc_deriv = cfg.get("deriv")
+                disc_window = cfg.get("window")
                 # Derive the pipeline method name from the preprocessing name
                 pipeline_method = disc_name
                 for d in [4, 3, 2, 1]:
-                    pipeline_method = pipeline_method.replace(str(d), '')
-                display_name = disc_name + (f'_w{disc_window}' if disc_window else '')
-                preprocess_configs.append({
-                    'method': pipeline_method,
-                    'name': display_name,
-                    'deriv': disc_deriv,
-                    'window': disc_window,
-                    'polyorder': cfg.get('polyorder'),
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': enable_smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder,
-                })
-            logger.info(
-                "Smart preprocessing discovered %d configs", len(preprocess_configs)
-            )
+                    pipeline_method = pipeline_method.replace(str(d), "")
+                display_name = disc_name + (f"_w{disc_window}" if disc_window else "")
+                preprocess_configs.append(
+                    {
+                        "method": pipeline_method,
+                        "name": display_name,
+                        "deriv": disc_deriv,
+                        "window": disc_window,
+                        "polyorder": cfg.get("polyorder"),
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": enable_smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+            logger.info("Smart preprocessing discovered %d configs", len(preprocess_configs))
 
     if tpe_preprocess and not smart_preprocess:
         from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
 
         def tpe_oc_progress(current, total, message):
             if progress_callback:
-                progress_callback({
-                    'stage': 'tpe_preprocessing',
-                    'message': message,
-                    'current': current,
-                    'total': total,
-                })
+                progress_callback(
+                    {
+                        "stage": "tpe_preprocessing",
+                        "message": message,
+                        "current": current,
+                        "total": total,
+                    }
+                )
 
         discovered = run_tpe_preprocessing_discovery(
-            X_np, y_oc, task_type='one_class',
+            X_np,
+            y_oc,
+            task_type="one_class",
             n_trials=tpe_preprocess_n_trials,
             n_top=tpe_preprocess_n_top,
             cv_folds=folds,
@@ -5687,70 +5681,76 @@ def run_one_class_search(
         if discovered:
             preprocess_configs = []
             for cfg in discovered:
-                disc_name = cfg.get('preprocessing', 'raw')
-                disc_deriv = cfg.get('deriv')
-                disc_window = cfg.get('window')
+                disc_name = cfg.get("preprocessing", "raw")
+                disc_deriv = cfg.get("deriv")
+                disc_window = cfg.get("window")
                 pipeline_method = disc_name
                 for d in [4, 3, 2, 1]:
-                    pipeline_method = pipeline_method.replace(str(d), '')
-                display_name = disc_name + (f'_w{disc_window}' if disc_window else '')
-                if cfg.get('_tpe_baseline_method'):
+                    pipeline_method = pipeline_method.replace(str(d), "")
+                display_name = disc_name + (f"_w{disc_window}" if disc_window else "")
+                if cfg.get("_tpe_baseline_method"):
                     display_name = f"{cfg['_tpe_baseline_method']}+{display_name}"
-                if cfg.get('_tpe_smoothing'):
+                if cfg.get("_tpe_smoothing"):
                     display_name = f"sg0+{display_name}"
-                if cfg.get('_tpe_autoscale'):
+                if cfg.get("_tpe_autoscale"):
                     display_name = f"{display_name}+autoscale"
-                preprocess_configs.append({
-                    'method': pipeline_method,
-                    'name': display_name,
-                    'deriv': disc_deriv,
-                    'window': disc_window,
-                    'polyorder': cfg.get('polyorder'),
-                    'baseline_method': cfg.get('_tpe_baseline_method'),
-                    'baseline_params': cfg.get('_tpe_baseline_params'),
-                    'smoothing': cfg.get('_tpe_smoothing', False),
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder,
-                    'autoscale': cfg.get('_tpe_autoscale', False),
-                    'tpe_score': cfg.get('score'),
-                })
-            logger.info(
-                "TPE preprocessing discovered %d configs", len(preprocess_configs)
-            )
+                preprocess_configs.append(
+                    {
+                        "method": pipeline_method,
+                        "name": display_name,
+                        "deriv": disc_deriv,
+                        "window": disc_window,
+                        "polyorder": cfg.get("polyorder"),
+                        "baseline_method": cfg.get("_tpe_baseline_method"),
+                        "baseline_params": cfg.get("_tpe_baseline_params"),
+                        "smoothing": cfg.get("_tpe_smoothing", False),
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                        "autoscale": cfg.get("_tpe_autoscale", False),
+                        "tpe_score": cfg.get("score"),
+                    }
+                )
+            logger.info("TPE preprocessing discovered %d configs", len(preprocess_configs))
             autoscale = False  # TPE configs already have per-config autoscale
 
     if not preprocess_configs:
         for method in preprocessing_methods:
-            if method in ('deriv1', 'deriv2', 'snv_deriv1', 'snv_deriv2'):
-                deriv_order = 1 if method.endswith('1') else 2
+            if method in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+                deriv_order = 1 if method.endswith("1") else 2
                 # Map display names to build_preprocessing_pipeline names
-                pipeline_method = method.replace('1', '').replace('2', '')  # deriv1->deriv, snv_deriv2->snv_deriv
+                pipeline_method = method.replace("1", "").replace(
+                    "2", ""
+                )  # deriv1->deriv, snv_deriv2->snv_deriv
                 for ws in window_sizes:
-                    preprocess_configs.append({
-                        'method': pipeline_method,  # 2d: base method name for build_preprocessing_pipeline
-                        'name': f'{method}_w{ws}',
-                        'deriv': deriv_order,
-                        'window': ws,
-                        'polyorder': None,  # 2c: let SavgolDerivative auto-detect via polyorder_map
-                        'baseline_method': baseline_method,
-                        'baseline_params': baseline_params,
-                        'smoothing': enable_smoothing,
-                        'smoothing_window': smoothing_window,
-                        'smoothing_polyorder': smoothing_polyorder,
-                    })
+                    preprocess_configs.append(
+                        {
+                            "method": pipeline_method,  # 2d: base method name for build_preprocessing_pipeline
+                            "name": f"{method}_w{ws}",
+                            "deriv": deriv_order,
+                            "window": ws,
+                            "polyorder": None,  # 2c: let SavgolDerivative auto-detect via polyorder_map
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": enable_smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
             else:
-                preprocess_configs.append({
-                    'method': method,  # 2d: base method name for build_preprocessing_pipeline
-                    'name': method,
-                    'deriv': None,
-                    'window': None,
-                    'polyorder': None,  # 2c: consistent with derivative configs
-                    'baseline_method': baseline_method,
-                    'baseline_params': baseline_params,
-                    'smoothing': enable_smoothing,
-                    'smoothing_window': smoothing_window,
-                    'smoothing_polyorder': smoothing_polyorder,
-                })
+                preprocess_configs.append(
+                    {
+                        "method": method,  # 2d: base method name for build_preprocessing_pipeline
+                        "name": method,
+                        "deriv": None,
+                        "window": None,
+                        "polyorder": None,  # 2c: consistent with derivative configs
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": enable_smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
 
     # --- Autoscale (UV scaling) toggle: when enabled, test both WITH and WITHOUT autoscale ---
     # T-36: mirrors run_search's grid-doubling block. One-class configs use 'method'
@@ -5771,7 +5771,7 @@ def run_one_class_search(
 
     # Get model grids
     if enabled_models is None:
-        enabled_models = get_tier_models(tier, task_type='one_class')
+        enabled_models = get_tier_models(tier, task_type="one_class")
 
     model_grids = _resolve_one_class_model_grids(
         enabled_models,
@@ -5781,17 +5781,24 @@ def run_one_class_search(
 
     # Filter and validate variable selection methods for one-class
     implemented_oc_varsel = {
-        'importance', 'spa', 'uve', 'cars', 'cars-tree', 'ga',
-        'vcpa-iriv', 'uve_spa', 'uve_cars', 'uve_cars_tree', 'uve_cars_spa',
+        "importance",
+        "spa",
+        "uve",
+        "cars",
+        "cars-tree",
+        "ga",
+        "vcpa-iriv",
+        "uve_spa",
+        "uve_cars",
+        "uve_cars_tree",
+        "uve_cars_spa",
     }
     selected_varsel_methods = []
     if variable_selection_methods:
         selected_varsel_methods = [
             m for m in variable_selection_methods if m in implemented_oc_varsel
         ]
-        unsupported = [
-            m for m in variable_selection_methods if m not in implemented_oc_varsel
-        ]
+        unsupported = [m for m in variable_selection_methods if m not in implemented_oc_varsel]
         if unsupported:
             logger.warning(
                 "Variable selection methods not supported for one-class, skipping: %s",
@@ -5815,8 +5822,10 @@ def run_one_class_search(
     if selected_varsel_methods:
         n_estimated_counts = len(oc_variable_counts)
         varsel_configs = (
-            len(preprocess_configs) * len(selected_varsel_methods)
-            * n_estimated_counts * n_model_params
+            len(preprocess_configs)
+            * len(selected_varsel_methods)
+            * n_estimated_counts
+            * n_model_params
         )
 
     total_configs = full_spectrum_configs + varsel_configs
@@ -5830,18 +5839,22 @@ def run_one_class_search(
     logger.info("Total configurations: %d", total_configs)
     logger.info(
         "CV strategy: %s (folds=%d, repeats=%d) on inlier data (outliers in test only)",
-        cv_strategy, folds, cv_n_repeats,
+        cv_strategy,
+        folds,
+        cv_n_repeats,
     )
     if progress_callback:
-        progress_callback({
-            'stage': 'info',
-            'message': f"Starting one-class search: {total_configs} configurations",
-            'current': 0,
-            'total': total_configs,
-        })
+        progress_callback(
+            {
+                "stage": "info",
+                "message": f"Starting one-class search: {total_configs} configurations",
+                "current": 0,
+                "total": total_configs,
+            }
+        )
 
     # Create results container
-    df_results = create_results_dataframe('one_class')
+    df_results = create_results_dataframe("one_class")
     best_result = None
     skipped_configs = 0  # 2g: track skipped configurations
 
@@ -5861,7 +5874,7 @@ def run_one_class_search(
             preprocess_cfg["deriv"],
             preprocess_cfg["window"],
             preprocess_cfg["polyorder"],
-            task_type='one_class',
+            task_type="one_class",
             baseline_method=preprocess_cfg.get("baseline_method"),
             baseline_params=preprocess_cfg.get("baseline_params"),
             smoothing=preprocess_cfg.get("smoothing", False),
@@ -5873,13 +5886,14 @@ def run_one_class_search(
         # Apply preprocessing (fit on inlier data, transform all)
         if pipe_steps:
             from sklearn.pipeline import Pipeline as SkPipeline
+
             prep_pipe = SkPipeline(pipe_steps)
             try:  # 2k: narrow to expected error types
                 # Fit on inlier data only (important for some preprocessing methods)
                 prep_pipe.fit(X_np[inlier_indices])
                 X_preprocessed = prep_pipe.transform(X_np)
             except (ValueError, np.linalg.LinAlgError) as e:
-                logger.warning("Preprocessing '%s' failed: %s", preprocess_cfg['name'], e)
+                logger.warning("Preprocessing '%s' failed: %s", preprocess_cfg["name"], e)
                 # 2k: increment current_config for all skipped configs in this preprocessing group
                 n_skipped = sum(len(pl) for pl in model_grids.values())
                 current_config += n_skipped
@@ -5895,13 +5909,21 @@ def run_one_class_search(
             wavelengths_current = wavelengths_full[wl_mask]
 
         # 2b: Apply edge mask for derivative preprocessing when no wavelength restriction
-        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window") and not wavelength_restriction_active:
+        if (
+            preprocess_cfg.get("deriv")
+            and preprocess_cfg.get("window")
+            and not wavelength_restriction_active
+        ):
             X_preprocessed, wavelengths_current, _ = _apply_edge_mask_to_data(
                 X_preprocessed, wavelengths_current, preprocess_cfg
             )
 
         # Cache final preprocessed result for reuse in variable selection loop
-        _cache_key = (preprocess_cfg['name'], preprocess_cfg.get('deriv', 0), preprocess_cfg.get('window', 0))
+        _cache_key = (
+            preprocess_cfg["name"],
+            preprocess_cfg.get("deriv", 0),
+            preprocess_cfg.get("window", 0),
+        )
         _preprocess_result_cache[_cache_key] = (X_preprocessed.copy(), wavelengths_current.copy())
 
         for model_name, param_list in model_grids.items():
@@ -5928,33 +5950,41 @@ def run_one_class_search(
                 logger.info("[%d/%d] %s%s", current_config, total_configs, progress_msg, best_info)
 
                 if progress_callback:
-                    progress_callback({
-                        'stage': 'model_testing',
-                        'message': progress_msg,
-                        'current': current_config,
-                        'total': total_configs,
-                        'best_model': best_result,
-                    })
+                    progress_callback(
+                        {
+                            "stage": "model_testing",
+                            "message": progress_msg,
+                            "current": current_config,
+                            "total": total_configs,
+                            "best_model": best_result,
+                        }
+                    )
 
                 # Run one-class CV
                 cv_result = run_one_class_cv(
-                    X_preprocessed, y_oc, model_name, params,
-                    n_folds=folds, cv_strategy=cv_strategy,
-                    cv_n_repeats=cv_n_repeats, random_state=42,
+                    X_preprocessed,
+                    y_oc,
+                    model_name,
+                    params,
+                    n_folds=folds,
+                    cv_strategy=cv_strategy,
+                    cv_n_repeats=cv_n_repeats,
+                    random_state=42,
                     y_original=y_np,
                 )
 
-                if cv_result.get('skipped', False):
+                if cv_result.get("skipped", False):
                     logger.warning(
                         "[SKIP] Too few successful folds for %s + %s",
-                        model_name, preprocess_cfg['name'],
+                        model_name,
+                        preprocess_cfg["name"],
                     )
                     skipped_configs += 1
                     continue
 
-                mean_m = cv_result['mean_metrics']
-                cal_metrics = cv_result['cal_metrics']
-                bal_acc_cv = mean_m['balanced_accuracy']
+                mean_m = cv_result["mean_metrics"]
+                cal_metrics = cv_result["cal_metrics"]
+                bal_acc_cv = mean_m["balanced_accuracy"]
 
                 # Build result dict
                 n_vars = X_preprocessed.shape[1]
@@ -5984,21 +6014,21 @@ def run_one_class_search(
                     "SubsetTag": "full",
                     "Imbalance": "—",
                     # Calibration metrics
-                    "Sensitivity": cal_metrics.get('sensitivity', np.nan),
-                    "Specificity": cal_metrics.get('specificity', np.nan),
-                    "Precision": cal_metrics.get('precision', np.nan),
-                    "F1": cal_metrics.get('f1', np.nan),
-                    "Accuracy": cal_metrics.get('accuracy', np.nan),
-                    "BalancedAcc": cal_metrics.get('balanced_accuracy', np.nan),
-                    "AUC": cal_metrics.get('auc', np.nan),
+                    "Sensitivity": cal_metrics.get("sensitivity", np.nan),
+                    "Specificity": cal_metrics.get("specificity", np.nan),
+                    "Precision": cal_metrics.get("precision", np.nan),
+                    "F1": cal_metrics.get("f1", np.nan),
+                    "Accuracy": cal_metrics.get("accuracy", np.nan),
+                    "BalancedAcc": cal_metrics.get("balanced_accuracy", np.nan),
+                    "AUC": cal_metrics.get("auc", np.nan),
                     # CV metrics
-                    "Sensitivitycv": mean_m['sensitivity'],
-                    "Specificitycv": mean_m['specificity'],
-                    "Precisioncv": mean_m['precision'],
-                    "F1cv": mean_m['f1'],
-                    "Accuracycv": mean_m['accuracy'],
+                    "Sensitivitycv": mean_m["sensitivity"],
+                    "Specificitycv": mean_m["specificity"],
+                    "Precisioncv": mean_m["precision"],
+                    "F1cv": mean_m["f1"],
+                    "Accuracycv": mean_m["accuracy"],
                     "BalancedAcccv": bal_acc_cv,
-                    "AUCcv": mean_m['auc'],
+                    "AUCcv": mean_m["auc"],
                     # Metadata
                     "n_inliers": n_inliers,
                     "n_outliers": n_outliers,
@@ -6008,21 +6038,19 @@ def run_one_class_search(
                     # Display name (Preprocess) carries the window suffix
                     # ('snv_deriv1_w11') which the pipeline builder rejects.
                     # Mirrors the classification grid path at search.py:4506-4507.
-                    "PreprocessBase": preprocess_cfg.get(
-                        "method", preprocess_cfg["name"]
-                    ),
+                    "PreprocessBase": preprocess_cfg.get("method", preprocess_cfg["name"]),
                     "top_vars": "N/A",
-                    "all_vars": ','.join([f"{float(w):.1f}" for w in wavelengths_current]),
-                    "per_contaminant_sensitivity": cal_metrics.get('per_contaminant', {}),
+                    "all_vars": ",".join([f"{float(w):.1f}" for w in wavelengths_current]),
+                    "per_contaminant_sensitivity": cal_metrics.get("per_contaminant", {}),
                     # Persist scaler/PCA/stats for model save/load
-                    "scaler": cv_result.get('cal_scaler'),
-                    "pca_reducer": cv_result.get('cal_pca_reducer'),
-                    "oc_score_stats": cv_result.get('oc_score_stats'),
+                    "scaler": cv_result.get("cal_scaler"),
+                    "pca_reducer": cv_result.get("cal_pca_reducer"),
+                    "oc_score_stats": cv_result.get("oc_score_stats"),
                     "tpe_score": preprocess_cfg.get("tpe_score"),
                 }
 
                 # Training config for model reproducibility (mirrors regression/classification)
-                _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                _eff_folds = len(X) if cv_strategy == "loo" else folds
                 result["training_config"] = {
                     "cv_strategy": cv_strategy,
                     "cv_n_repeats": cv_n_repeats,
@@ -6032,26 +6060,29 @@ def run_one_class_search(
                 }
 
                 # Add per-contaminant columns for display
-                per_contam = cal_metrics.get('per_contaminant', {})
+                per_contam = cal_metrics.get("per_contaminant", {})
                 for contam_label, contam_sens in per_contam.items():
-                    result[f'Cal_Sens_{contam_label}'] = contam_sens
+                    result[f"Cal_Sens_{contam_label}"] = contam_sens
 
                 df_results = add_result(df_results, result)
 
                 # Show result
-                sens_cv = mean_m['sensitivity']
-                spec_cv = mean_m['specificity']
+                sens_cv = mean_m["sensitivity"]
+                spec_cv = mean_m["specificity"]
                 contam_info = ""
                 if per_contam:
                     contam_parts = [f"{k}={v:.2f}" for k, v in per_contam.items()]
                     contam_info = f", Per-contam: [{', '.join(contam_parts)}]"
                 logger.info(
                     "     Sens=%.3f, Spec=%.3f, BalAcc=%.3f%s",
-                    sens_cv, spec_cv, bal_acc_cv, contam_info,
+                    sens_cv,
+                    spec_cv,
+                    bal_acc_cv,
+                    contam_info,
                 )
 
                 # Update best tracker
-                if best_result is None or bal_acc_cv > best_result.get('BalancedAcccv', 0):
+                if best_result is None or bal_acc_cv > best_result.get("BalancedAcccv", 0):
                     best_result = result
 
     # =========================================================================
@@ -6078,7 +6109,11 @@ def run_one_class_search(
                 break
 
             # Reuse cached preprocessing result from full-spectrum loop
-            _cache_key = (preprocess_cfg['name'], preprocess_cfg.get('deriv', 0), preprocess_cfg.get('window', 0))
+            _cache_key = (
+                preprocess_cfg["name"],
+                preprocess_cfg.get("deriv", 0),
+                preprocess_cfg.get("window", 0),
+            )
             if _cache_key in _preprocess_result_cache:
                 X_preprocessed, wavelengths_current = _preprocess_result_cache[_cache_key]
                 X_preprocessed = X_preprocessed.copy()  # Don't mutate cache
@@ -6090,7 +6125,7 @@ def run_one_class_search(
                     preprocess_cfg["deriv"],
                     preprocess_cfg["window"],
                     preprocess_cfg["polyorder"],
-                    task_type='one_class',
+                    task_type="one_class",
                     baseline_method=preprocess_cfg.get("baseline_method"),
                     baseline_params=preprocess_cfg.get("baseline_params"),
                     smoothing=preprocess_cfg.get("smoothing", False),
@@ -6101,6 +6136,7 @@ def run_one_class_search(
 
                 if pipe_steps:
                     from sklearn.pipeline import Pipeline as SkPipeline
+
                     prep_pipe = SkPipeline(pipe_steps)
                     try:
                         prep_pipe.fit(X_np[inlier_indices])
@@ -6108,11 +6144,11 @@ def run_one_class_search(
                     except (ValueError, np.linalg.LinAlgError) as e:
                         logger.warning(
                             "Preprocessing '%s' failed in varsel: %s",
-                            preprocess_cfg['name'], e,
+                            preprocess_cfg["name"],
+                            e,
                         )
                         n_skip = (
-                            len(selected_varsel_methods)
-                            * len(oc_variable_counts) * n_model_params
+                            len(selected_varsel_methods) * len(oc_variable_counts) * n_model_params
                         )
                         current_config += n_skip
                         skipped_configs += n_skip
@@ -6139,13 +6175,14 @@ def run_one_class_search(
             # --- UVE Prefilter: eliminate uninformative variables before varsel ---
             _uve_prefilter_active = False
             if apply_uve_prefilter and n_features_current >= 3:
-                _uve_pf_key = (preprocess_cfg['name'], '__uve_prefilter__')
+                _uve_pf_key = (preprocess_cfg["name"], "__uve_prefilter__")
                 if _uve_pf_key in _oc_varsel_cache:
                     _uve_mask = _oc_varsel_cache[_uve_pf_key]
                 else:
                     try:
                         _uve_imp, _uve_thr, _uve_mask = get_uve_threshold(
-                            X_preprocessed, y_oc,
+                            X_preprocessed,
+                            y_oc,
                             cutoff_multiplier=uve_cutoff_multiplier,
                             n_components=uve_n_components,
                             cv_folds=folds,
@@ -6153,8 +6190,9 @@ def run_one_class_search(
                         )
                         _oc_varsel_cache[_uve_pf_key] = _uve_mask
                     except Exception as e:
-                        logger.warning("UVE prefilter failed for '%s': %s",
-                                       preprocess_cfg['name'], e)
+                        logger.warning(
+                            "UVE prefilter failed for '%s': %s", preprocess_cfg["name"], e
+                        )
                         _uve_mask = np.ones(n_features_current, dtype=bool)
                         _oc_varsel_cache[_uve_pf_key] = _uve_mask
 
@@ -6165,11 +6203,14 @@ def run_one_class_search(
                     wavelengths_current = wavelengths_current[_uve_mask]
                     n_features_current = n_after
                     _uve_prefilter_active = True
-                    logger.info("  UVE prefilter: %d -> %d variables (%d eliminated)",
-                                 n_before, n_after, n_before - n_after)
+                    logger.info(
+                        "  UVE prefilter: %d -> %d variables (%d eliminated)",
+                        n_before,
+                        n_after,
+                        n_before - n_after,
+                    )
             elif apply_uve_prefilter and n_features_current < 3:
-                logger.info("  UVE prefilter skipped: only %d features (min 3)",
-                            n_features_current)
+                logger.info("  UVE prefilter skipped: only %d features (min 3)", n_features_current)
 
             for varsel_method in selected_varsel_methods:
                 if _user_stopped:
@@ -6180,60 +6221,60 @@ def run_one_class_search(
 
                 logger.info(
                     "Computing %s importances for preprocess '%s'...",
-                    varsel_method, preprocess_cfg['name'],
+                    varsel_method,
+                    preprocess_cfg["name"],
                 )
 
                 # Cache key: (preprocess_name, varsel_method)
-                _cache_key = (preprocess_cfg['name'], varsel_method)
+                _cache_key = (preprocess_cfg["name"], varsel_method)
                 importances = None
                 uve_selected_mask = None
 
                 if _cache_key in _oc_varsel_cache:
-                    importances = _oc_varsel_cache[_cache_key]['importances']
-                    uve_selected_mask = _oc_varsel_cache[_cache_key].get(
-                        'uve_selected_mask'
-                    )
+                    importances = _oc_varsel_cache[_cache_key]["importances"]
+                    uve_selected_mask = _oc_varsel_cache[_cache_key].get("uve_selected_mask")
                     logger.info("  Using cached %s result", varsel_method)
                 else:
                     try:
-                        if varsel_method == 'importance':
+                        if varsel_method == "importance":
                             # Use LightGBM binary classifier on y_oc
                             importances = compute_one_class_importances(
-                                X_preprocessed, y_oc, method='lightgbm',
+                                X_preprocessed,
+                                y_oc,
+                                method="lightgbm",
                                 random_state=random_state,
                             )
 
-                        elif varsel_method == 'spa':
+                        elif varsel_method == "spa":
                             default_n_select = (
-                                max(oc_variable_counts)
-                                if oc_variable_counts else 100
+                                max(oc_variable_counts) if oc_variable_counts else 100
                             )
                             n_to_select = min(default_n_select, n_features_current)
                             importances = spa_selection(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 n_features=n_to_select,
                                 cv_folds=folds,
                             )
 
-                        elif varsel_method == 'uve':
-                            importances, _uve_threshold, uve_selected_mask = (
-                                get_uve_threshold(
-                                    X_preprocessed, y_oc,
-                                    cutoff_multiplier=uve_cutoff_multiplier,
-                                    n_components=uve_n_components,
-                                    cv_folds=folds,
-                                    random_state=random_state,
-                                )
+                        elif varsel_method == "uve":
+                            importances, _uve_threshold, uve_selected_mask = get_uve_threshold(
+                                X_preprocessed,
+                                y_oc,
+                                cutoff_multiplier=uve_cutoff_multiplier,
+                                n_components=uve_n_components,
+                                cv_folds=folds,
+                                random_state=random_state,
                             )
 
-                        elif varsel_method == 'uve_spa':
+                        elif varsel_method == "uve_spa":
                             default_n_select = (
-                                max(oc_variable_counts)
-                                if oc_variable_counts else 100
+                                max(oc_variable_counts) if oc_variable_counts else 100
                             )
                             n_to_select = min(default_n_select, n_features_current)
                             importances = uve_spa_selection(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 n_features=n_to_select,
                                 cutoff_multiplier=uve_cutoff_multiplier,
                                 uve_n_components=uve_n_components,
@@ -6242,16 +6283,16 @@ def run_one_class_search(
                                 random_state=random_state,
                             )
 
-                        elif varsel_method in ('cars', 'cars-tree'):
+                        elif varsel_method in ("cars", "cars-tree"):
                             # For one-class, always use hybrid importance
                             # (LightGBM-based) on binary y_oc
-                            use_hybrid = varsel_method == 'cars-tree'
+                            use_hybrid = varsel_method == "cars-tree"
                             importances = cars_selection(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 n_iterations=50,
                                 pls_components=(
-                                    uve_n_components
-                                    if uve_n_components is not None else 5
+                                    uve_n_components if uve_n_components is not None else 5
                                 ),
                                 cv_folds=folds,
                                 monte_carlo_samples=80,
@@ -6259,20 +6300,20 @@ def run_one_class_search(
                                 model_type=None,
                                 use_hybrid_importance=use_hybrid,
                                 hybrid_importance_weight=0.5,
-                                task_type='classification',
+                                task_type="classification",
                             )
 
-                        elif varsel_method in ('uve_cars', 'uve_cars_tree'):
-                            use_hybrid = varsel_method == 'uve_cars_tree'
+                        elif varsel_method in ("uve_cars", "uve_cars_tree"):
+                            use_hybrid = varsel_method == "uve_cars_tree"
                             importances = uve_cars_selection(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 cutoff_multiplier=uve_cutoff_multiplier,
                                 uve_n_components=uve_n_components,
                                 uve_cv_folds=folds,
                                 n_iterations=50,
                                 pls_components=(
-                                    uve_n_components
-                                    if uve_n_components is not None else 5
+                                    uve_n_components if uve_n_components is not None else 5
                                 ),
                                 cars_cv_folds=folds,
                                 monte_carlo_samples=80,
@@ -6280,49 +6321,46 @@ def run_one_class_search(
                                 model_type=None,
                                 use_hybrid_importance=use_hybrid,
                                 hybrid_importance_weight=0.5,
-                                task_type='classification',
+                                task_type="classification",
                             )
 
-                        elif varsel_method == 'uve_cars_spa':
+                        elif varsel_method == "uve_cars_spa":
                             importances = uve_cars_spa_selection(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 cutoff_multiplier=uve_cutoff_multiplier,
                                 uve_n_components=uve_n_components,
                                 uve_cv_folds=folds,
                                 n_iterations=50,
                                 pls_components=(
-                                    uve_n_components
-                                    if uve_n_components is not None else 5
+                                    uve_n_components if uve_n_components is not None else 5
                                 ),
                                 cars_cv_folds=folds,
                                 monte_carlo_samples=80,
                                 spa_n_features=None,
                                 spa_cv_folds=folds,
                                 random_state=random_state,
-                                task_type='classification',
+                                task_type="classification",
                             )
 
-                        elif varsel_method == 'vcpa-iriv':
+                        elif varsel_method == "vcpa-iriv":
                             result_vcpa = vcpa_iriv(
-                                X_preprocessed, y_oc,
+                                X_preprocessed,
+                                y_oc,
                                 n_outer_iterations=10,
                                 n_inner_iterations=50,
                                 pls_components=(
-                                    uve_n_components
-                                    if uve_n_components is not None else 5
+                                    uve_n_components if uve_n_components is not None else 5
                                 ),
                                 cv_folds=folds,
                                 random_state=random_state,
                             )
                             importances = result_vcpa.get(
-                                'importance_scores',
-                                result_vcpa.get('importances', None),
+                                "importance_scores",
+                                result_vcpa.get("importances", None),
                             )
-                            selected = result_vcpa.get('selected_indices', [])
-                            if (
-                                importances is not None
-                                and len(importances) == len(selected)
-                            ):
+                            selected = result_vcpa.get("selected_indices", [])
+                            if importances is not None and len(importances) == len(selected):
                                 full_importances = np.zeros(n_features_current)
                                 full_importances[selected] = importances
                                 importances = full_importances
@@ -6332,7 +6370,7 @@ def run_one_class_search(
                             else:
                                 importances = np.ones(n_features_current)
 
-                        elif varsel_method == 'ga':
+                        elif varsel_method == "ga":
                             # GA: use LightGBM fitness for one-class
                             # (binary classification on y_oc)
                             ga_pop = ga_population_size
@@ -6340,8 +6378,9 @@ def run_one_class_search(
                             ga_runs_val = ga_n_runs
                             ga_early = 20
                             importances = ga_lightgbm_selection(
-                                X_preprocessed, y_oc,
-                                task_type='classification',
+                                X_preprocessed,
+                                y_oc,
+                                task_type="classification",
                                 cv_folds=folds,
                                 n_estimators=50,
                                 num_leaves=15,
@@ -6366,7 +6405,9 @@ def run_one_class_search(
                     except Exception as e:
                         logger.warning(
                             "Variable selection '%s' failed for preprocess '%s': %s",
-                            varsel_method, preprocess_cfg['name'], e,
+                            varsel_method,
+                            preprocess_cfg["name"],
+                            e,
                         )
                         n_skip = len(oc_variable_counts) * n_model_params
                         current_config += n_skip
@@ -6375,15 +6416,13 @@ def run_one_class_search(
 
                     # Cache the result
                     _oc_varsel_cache[_cache_key] = {
-                        'importances': importances,
-                        'uve_selected_mask': uve_selected_mask,
+                        "importances": importances,
+                        "uve_selected_mask": uve_selected_mask,
                     }
 
                 # Validate importances
                 if importances is None:
-                    logger.warning(
-                        "%s returned None importances, skipping", varsel_method
-                    )
+                    logger.warning("%s returned None importances, skipping", varsel_method)
                     n_skip = len(oc_variable_counts) * n_model_params
                     current_config += n_skip
                     skipped_configs += n_skip
@@ -6392,7 +6431,9 @@ def run_one_class_search(
                 if len(importances) != n_features_current:
                     logger.warning(
                         "%s returned wrong-sized importances (%d vs %d), skipping",
-                        varsel_method, len(importances), n_features_current,
+                        varsel_method,
+                        len(importances),
+                        n_features_current,
                     )
                     n_skip = len(oc_variable_counts) * n_model_params
                     current_config += n_skip
@@ -6412,23 +6453,23 @@ def run_one_class_search(
                     importances = _apply_edge_mask(importances, preprocess_cfg)
 
                 # Filter valid variable counts
-                valid_counts = [
-                    c for c in oc_variable_counts if c < n_features_current
-                ]
+                valid_counts = [c for c in oc_variable_counts if c < n_features_current]
                 if not valid_counts:
                     logger.warning(
                         "No valid variable counts (all >= %d features), skipping %s",
-                        n_features_current, varsel_method,
+                        n_features_current,
+                        varsel_method,
                     )
                     continue
 
                 logger.info(
                     "  Valid variable counts: %s (features: %d)",
-                    valid_counts, n_features_current,
+                    valid_counts,
+                    n_features_current,
                 )
 
                 for n_vars in valid_counts:
-                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                    top_indices = np.argsort(importances, kind="stable")[-n_vars:]
                     X_subset = X_preprocessed[:, top_indices]
                     wavelengths_subset = wavelengths_current[top_indices]
 
@@ -6447,9 +6488,7 @@ def run_one_class_search(
                                 break
 
                             current_config += 1
-                            param_str = ", ".join(
-                                f"{k}={v}" for k, v in list(params.items())[:3]
-                            )
+                            param_str = ", ".join(f"{k}={v}" for k, v in list(params.items())[:3])
                             prep_name = preprocess_cfg["name"]
                             subset_tag = f"{varsel_method}_top{n_vars}"
                             progress_msg = (
@@ -6460,43 +6499,52 @@ def run_one_class_search(
                             best_info = ""
                             if best_result is not None:
                                 best_info = (
-                                    f" | Best: BalAcc="
-                                    f"{best_result.get('BalancedAcccv', 0):.3f}"
+                                    f" | Best: BalAcc=" f"{best_result.get('BalancedAcccv', 0):.3f}"
                                 )
                             logger.info(
                                 "[%d/%d] %s%s",
-                                current_config, total_configs,
-                                progress_msg, best_info,
+                                current_config,
+                                total_configs,
+                                progress_msg,
+                                best_info,
                             )
 
                             if progress_callback:
-                                progress_callback({
-                                    'stage': 'model_testing',
-                                    'message': progress_msg,
-                                    'current': current_config,
-                                    'total': total_configs,
-                                    'best_model': best_result,
-                                })
+                                progress_callback(
+                                    {
+                                        "stage": "model_testing",
+                                        "message": progress_msg,
+                                        "current": current_config,
+                                        "total": total_configs,
+                                        "best_model": best_result,
+                                    }
+                                )
 
                             cv_result = run_one_class_cv(
-                                X_subset, y_oc, model_name, params,
-                                n_folds=folds, cv_strategy=cv_strategy,
-                                cv_n_repeats=cv_n_repeats, random_state=42,
+                                X_subset,
+                                y_oc,
+                                model_name,
+                                params,
+                                n_folds=folds,
+                                cv_strategy=cv_strategy,
+                                cv_n_repeats=cv_n_repeats,
+                                random_state=42,
                                 y_original=y_np,
                             )
 
-                            if cv_result.get('skipped', False):
+                            if cv_result.get("skipped", False):
                                 logger.warning(
-                                    "[SKIP] Too few successful folds for "
-                                    "%s + %s [%s]",
-                                    model_name, prep_name, subset_tag,
+                                    "[SKIP] Too few successful folds for " "%s + %s [%s]",
+                                    model_name,
+                                    prep_name,
+                                    subset_tag,
                                 )
                                 skipped_configs += 1
                                 continue
 
-                            mean_m = cv_result['mean_metrics']
-                            cal_metrics = cv_result['cal_metrics']
-                            bal_acc_cv = mean_m['balanced_accuracy']
+                            mean_m = cv_result["mean_metrics"]
+                            cal_metrics = cv_result["cal_metrics"]
+                            bal_acc_cv = mean_m["balanced_accuracy"]
 
                             # Build result dict with variable selection info
                             result = {
@@ -6525,38 +6573,29 @@ def run_one_class_search(
                                 "smoothing_polyorder": preprocess_cfg.get("smoothing_polyorder", 2),
                                 "LVs": (
                                     params.get("n_components")
-                                    if model_name == "PCA-SIMCA" else None
+                                    if model_name == "PCA-SIMCA"
+                                    else None
                                 ),
                                 "n_vars": n_vars,
                                 "full_vars": n_features_current,
                                 "SubsetTag": subset_tag,
                                 "Imbalance": "—",
                                 # Calibration metrics
-                                "Sensitivity": cal_metrics.get(
-                                    'sensitivity', np.nan
-                                ),
-                                "Specificity": cal_metrics.get(
-                                    'specificity', np.nan
-                                ),
-                                "Precision": cal_metrics.get(
-                                    'precision', np.nan
-                                ),
-                                "F1": cal_metrics.get('f1', np.nan),
-                                "Accuracy": cal_metrics.get(
-                                    'accuracy', np.nan
-                                ),
-                                "BalancedAcc": cal_metrics.get(
-                                    'balanced_accuracy', np.nan
-                                ),
-                                "AUC": cal_metrics.get('auc', np.nan),
+                                "Sensitivity": cal_metrics.get("sensitivity", np.nan),
+                                "Specificity": cal_metrics.get("specificity", np.nan),
+                                "Precision": cal_metrics.get("precision", np.nan),
+                                "F1": cal_metrics.get("f1", np.nan),
+                                "Accuracy": cal_metrics.get("accuracy", np.nan),
+                                "BalancedAcc": cal_metrics.get("balanced_accuracy", np.nan),
+                                "AUC": cal_metrics.get("auc", np.nan),
                                 # CV metrics
-                                "Sensitivitycv": mean_m['sensitivity'],
-                                "Specificitycv": mean_m['specificity'],
-                                "Precisioncv": mean_m['precision'],
-                                "F1cv": mean_m['f1'],
-                                "Accuracycv": mean_m['accuracy'],
+                                "Sensitivitycv": mean_m["sensitivity"],
+                                "Specificitycv": mean_m["specificity"],
+                                "Precisioncv": mean_m["precision"],
+                                "F1cv": mean_m["f1"],
+                                "Accuracycv": mean_m["accuracy"],
                                 "BalancedAcccv": bal_acc_cv,
-                                "AUCcv": mean_m['auc'],
+                                "AUCcv": mean_m["auc"],
                                 # Metadata
                                 "n_inliers": n_inliers,
                                 "n_outliers": n_outliers,
@@ -6574,30 +6613,24 @@ def run_one_class_search(
                                 # full spectrum, producing wrong predictions.
                                 # Mirrors the Bayesian contract at
                                 # unified_bayesian.py:1046-1050.
-                                "top_vars": ','.join(
-                                    [
-                                        f"{float(w):.1f}"
-                                        for w in wavelengths_subset
-                                    ]
+                                "top_vars": ",".join(
+                                    [f"{float(w):.1f}" for w in wavelengths_subset]
                                 ),
-                                "all_vars": ','.join(
-                                    [
-                                        f"{float(w):.1f}"
-                                        for w in wavelengths_subset
-                                    ]
+                                "all_vars": ",".join(
+                                    [f"{float(w):.1f}" for w in wavelengths_subset]
                                 ),
                                 "per_contaminant_sensitivity": cal_metrics.get(
-                                    'per_contaminant', {}
+                                    "per_contaminant", {}
                                 ),
                                 # Persist scaler/PCA/stats for model save/load
-                                "scaler": cv_result.get('cal_scaler'),
-                                "pca_reducer": cv_result.get('cal_pca_reducer'),
-                                "oc_score_stats": cv_result.get('oc_score_stats'),
+                                "scaler": cv_result.get("cal_scaler"),
+                                "pca_reducer": cv_result.get("cal_pca_reducer"),
+                                "oc_score_stats": cv_result.get("oc_score_stats"),
                                 "tpe_score": preprocess_cfg.get("tpe_score"),
                             }
 
                             # Training config for model reproducibility
-                            _eff_folds = len(X) if cv_strategy == 'loo' else folds
+                            _eff_folds = len(X) if cv_strategy == "loo" else folds
                             result["training_config"] = {
                                 "cv_strategy": cv_strategy,
                                 "cv_n_repeats": cv_n_repeats,
@@ -6607,44 +6640,38 @@ def run_one_class_search(
                             }
 
                             # Add per-contaminant columns
-                            per_contam = cal_metrics.get('per_contaminant', {})
+                            per_contam = cal_metrics.get("per_contaminant", {})
                             for contam_label, contam_sens in per_contam.items():
-                                result[f'Cal_Sens_{contam_label}'] = contam_sens
+                                result[f"Cal_Sens_{contam_label}"] = contam_sens
 
                             df_results = add_result(df_results, result)
 
                             # Log result
-                            sens_cv = mean_m['sensitivity']
-                            spec_cv = mean_m['specificity']
+                            sens_cv = mean_m["sensitivity"]
+                            spec_cv = mean_m["specificity"]
                             contam_info = ""
                             if per_contam:
-                                contam_parts = [
-                                    f"{k}={v:.2f}"
-                                    for k, v in per_contam.items()
-                                ]
-                                contam_info = (
-                                    f", Per-contam: "
-                                    f"[{', '.join(contam_parts)}]"
-                                )
+                                contam_parts = [f"{k}={v:.2f}" for k, v in per_contam.items()]
+                                contam_info = f", Per-contam: " f"[{', '.join(contam_parts)}]"
                             logger.info(
                                 "     Sens=%.3f, Spec=%.3f, BalAcc=%.3f%s",
-                                sens_cv, spec_cv, bal_acc_cv, contam_info,
+                                sens_cv,
+                                spec_cv,
+                                bal_acc_cv,
+                                contam_info,
                             )
 
                             # Update best tracker
-                            if (
-                                best_result is None
-                                or bal_acc_cv
-                                > best_result.get('BalancedAcccv', 0)
+                            if best_result is None or bal_acc_cv > best_result.get(
+                                "BalancedAcccv", 0
                             ):
                                 best_result = result
 
     # Rank results using composite score (consistent with regression/classification)
     if len(df_results) > 0:
         from .scoring import compute_composite_score
-        df_results = compute_composite_score(
-            df_results, 'one_class', variable_penalty, gap_penalty
-        )
+
+        df_results = compute_composite_score(df_results, "one_class", variable_penalty, gap_penalty)
 
     logger.info("=" * 70)
     logger.info("ONE-CLASS SEARCH COMPLETE")
@@ -6653,21 +6680,23 @@ def run_one_class_search(
     logger.info("Skipped configurations: %d", skipped_configs)  # 2g
     if len(df_results) > 0:
         best = df_results.iloc[0]
-        logger.info("Best model: %s + %s", best['Model'], best['Preprocess'])
-        logger.info("  Sensitivity (CV): %.3f", best['Sensitivitycv'])
-        logger.info("  Specificity (CV): %.3f", best['Specificitycv'])
-        logger.info("  Balanced Accuracy (CV): %.3f", best['BalancedAcccv'])
-        logger.info("  AUC (CV): %.3f", best['AUCcv'])
+        logger.info("Best model: %s + %s", best["Model"], best["Preprocess"])
+        logger.info("  Sensitivity (CV): %.3f", best["Sensitivitycv"])
+        logger.info("  Specificity (CV): %.3f", best["Specificitycv"])
+        logger.info("  Balanced Accuracy (CV): %.3f", best["BalancedAcccv"])
+        logger.info("  AUC (CV): %.3f", best["AUCcv"])
     logger.info("=" * 70)
     if progress_callback:
-        progress_callback({
-            'stage': 'info',
-            'message': (
-                f"One-class search complete: {len(df_results)} results, "
-                f"{skipped_configs} skipped"
-            ),
-            'current': total_configs,
-            'total': total_configs,
-        })
+        progress_callback(
+            {
+                "stage": "info",
+                "message": (
+                    f"One-class search complete: {len(df_results)} results, "
+                    f"{skipped_configs} skipped"
+                ),
+                "current": total_configs,
+                "total": total_configs,
+            }
+        )
 
     return df_results
