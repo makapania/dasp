@@ -3715,8 +3715,10 @@ def write_jcamp_file(
             if key not in jcamp_dict:
                 jcamp_dict[key] = value
 
-    # Write JCAMP file
-    jcamp.jcamp_write(str(path), jcamp_dict)
+    # Write JCAMP file. jcamp_write() returns a string; jcamp_writefile() is the
+    # function that actually persists to disk. (jcamp 1.3.0 renamed jcamp_writefile→writefile;
+    # pyproject pin keeps us on the <1.3 line for now.)
+    jcamp.jcamp_writefile(str(path), jcamp_dict)
 
 
 def write_ascii_spectra(

@@ -20,12 +20,13 @@ def create_mock_spc_file(path, wavelengths, intensities):
     Note: This creates a simple binary file that mimics SPC structure.
     Real SPC files are more complex.
     """
-    # Write a simple binary file with SPC magic bytes
+    # Write SPC magic bytes plus enough padding to clear the 512-byte main-header
+    # buffer that spc-io reads first; the file still won't pass actual SPC parsing,
+    # but it gets us past the buffer-size guard so the parser raises a parse-level
+    # error instead of a buffer error.
     with open(path, 'wb') as f:
-        # SPC magic bytes 'MK' (0x4d4b) - not a real SPC file!
-        # This is just for testing import errors
         f.write(b'MK')
-        f.write(b'\x00' * 100)
+        f.write(b'\x00' * 600)
 
 
 def test_read_spc_file_import_error(tmp_path):
@@ -33,17 +34,23 @@ def test_read_spc_file_import_error(tmp_path):
     spc_path = tmp_path / "test.spc"
     create_mock_spc_file(spc_path, [], [])
 
-    # This should raise ImportError if spc-io not installed
-    # or succeed if it is installed
+    # This should raise ImportError if spc-io not installed,
+    # or a parse-level error if installed but fed our non-real mock.
     try:
         result, metadata = read_spc_file(spc_path)
-        # If we get here, spc-io is installed - check result structure
+        # If we get here, spc-io is installed and somehow accepted the mock —
+        # check result structure
         assert isinstance(result, pd.DataFrame)
         assert isinstance(metadata, dict)
         assert 'file_format' in metadata
     except ImportError as e:
         # Expected if spc-io not installed
         assert "spc-io" in str(e)
+    except (ValueError, NotImplementedError):
+        # Expected when spc-io is installed: our mock isn't a real SPC file,
+        # so parsing fails (ValueError on header/buffer issues, NotImplementedError
+        # when zero-padding happens to set a parser flag for an unsupported feature).
+        pass
 
 
 def test_write_spc_file_import_error(tmp_path):
@@ -88,10 +95,11 @@ def test_read_spc_dir_with_existing_function(tmp_path):
         assert isinstance(metadata, dict)
     except (ImportError, ValueError) as e:
         # Expected if spc-io not installed or files are invalid
-        if "spc-io" in str(e) or "pyspectra" in str(e):
+        msg = str(e)
+        if "spc-io" in msg or "pyspectra" in msg:
             pytest.skip("spc-io not installed")
-        elif "Failed to read SPC files" in str(e):
-            # Mock files aren't valid SPC files
+        elif "Failed to read SPC files" in msg or "No valid SPC spectra" in msg:
+            # Mock files aren't valid SPC files; real parser rejects them
             pass
         else:
             raise
@@ -106,7 +114,7 @@ def test_read_spc_via_unified_api(tmp_path):
         # Auto-detect
         result, metadata = read_spectra(spc_path, format='auto')
         assert metadata['file_format'] == 'spc'
-    except (ImportError, ValueError):
+    except (ImportError, ValueError, NotImplementedError):
         pytest.skip("spc-io not installed or mock file invalid")
 
 

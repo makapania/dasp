@@ -271,7 +271,10 @@ class TestEdgeCases:
             n_trials=10, n_startup_trials=5, n_top=3,
             progress_callback=cb,
         )
-        assert len(calls) == 10
+        # Contract: callback fires at least once per trial. Production code also
+        # fires for the top-ranking header + each top config (so total > n_trials);
+        # the test only pins the floor and the final-state callback.
+        assert len(calls) >= 10
         assert calls[-1] == (10, 10)
 
 

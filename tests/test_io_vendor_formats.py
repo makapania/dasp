@@ -204,13 +204,14 @@ def test_ascii_custom_delimiter_write(tmp_path):
 
 def test_opus_import_error():
     """Test that missing brukeropus package raises error."""
-    import sys
-    opus_module = sys.modules.get('brukeropusreader')
+    import importlib.util
 
-    if opus_module is not None:
+    # find_spec works even when the module hasn't been imported yet, unlike
+    # sys.modules.get() which only sees already-imported modules.
+    if importlib.util.find_spec("brukeropus") is not None:
         pytest.skip("brukeropus package is installed")
 
-    # Should raise ImportError
+    # Should raise ImportError before reaching the file-existence check
     with pytest.raises(ImportError, match="brukeropus"):
         read_opus_file(Path("dummy.0"))
 
@@ -249,11 +250,11 @@ def test_opus_via_unified_api_if_installed(tmp_path):
 
 def test_perkinelmer_import_error():
     """Test that missing specio package raises error."""
-    import sys
-    specio_module = sys.modules.get('specio')
+    import importlib.util
 
-    if specio_module is not None:
-        pytest.skip("specio package is installed")
+    # Production code uses specio_py310 (not specio); find_spec works pre-import.
+    if importlib.util.find_spec("specio_py310") is not None:
+        pytest.skip("specio_py310 package is installed")
 
     with pytest.raises(ImportError, match="specio"):
         read_perkinelmer_file(Path("dummy.sp"))
@@ -290,10 +291,9 @@ def test_perkinelmer_via_unified_api_if_installed(tmp_path):
 
 def test_agilent_import_error():
     """Test that missing agilent-ir-formats package raises error."""
-    import sys
-    agilent_module = sys.modules.get('agilent_ir_formats')
+    import importlib.util
 
-    if agilent_module is not None:
+    if importlib.util.find_spec("agilent_ir_formats") is not None:
         pytest.skip("agilent-ir-formats package is installed")
 
     with pytest.raises(ImportError, match="agilent-ir-formats"):
