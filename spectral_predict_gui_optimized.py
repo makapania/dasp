@@ -29063,6 +29063,10 @@ For detailed documentation, see the User Guide.
             'imbalance_method', 'imbalance_params',
             'PreprocessBase',
             'ga_genes', 'ga_model_type', 'ga_config',
+            # 2026-05-06 column rename: preprocess_chromosome replaced ga_genes
+            # for the exhaustive-preprocessing path. Hide both from the
+            # results table — chromosome arrays aren't human-readable.
+            'preprocess_chromosome',
             'smart_selected_wavelengths', 'smart_n_wavelengths',
             'smart_score', 'smart_importance_method', 'smart_model_name',
         }

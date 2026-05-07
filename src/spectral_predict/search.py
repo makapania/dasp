@@ -6170,6 +6170,12 @@ def run_one_class_search(
                     "pca_reducer": cv_result.get("cal_pca_reducer"),
                     "oc_score_stats": cv_result.get("oc_score_stats"),
                     "tpe_score": preprocess_cfg.get("tpe_score"),
+                    # Phase 4 propagation (one_class path) — closes Codex
+                    # residual STRONG on Fix #5: regression/cls result rows
+                    # already carried this; one_class did not.
+                    "tpe_multistart_halt_reason": preprocess_cfg.get(
+                        "tpe_multistart_halt_reason"
+                    ),
                 }
 
                 # Training config for model reproducibility (mirrors regression/classification)
@@ -6750,6 +6756,11 @@ def run_one_class_search(
                                 "pca_reducer": cv_result.get("cal_pca_reducer"),
                                 "oc_score_stats": cv_result.get("oc_score_stats"),
                                 "tpe_score": preprocess_cfg.get("tpe_score"),
+                                # Phase 4 propagation — second one_class result
+                                # site (mirror of the first at search.py:6172).
+                                "tpe_multistart_halt_reason": preprocess_cfg.get(
+                                    "tpe_multistart_halt_reason"
+                                ),
                             }
 
                             # Training config for model reproducibility

@@ -323,11 +323,24 @@ def evaluate_config_with_seed(
                     return scores.mean()
         except Exception:
             # LightGBM is installed but the CV run crashed (OOM, numerical
-            # issue, etc.). Return -inf for THIS seed instead of silently
-            # falling through to a different objective. The multi-seed mean
-            # then aggregates over fewer-but-consistent LightGBM scores,
-            # which is more honest than mixing LightGBM and PLS results.
-            return float('-inf')
+            # issue, etc.). Behavior depends on task_type:
+            #
+            # - regression / classification: return -inf for THIS seed
+            #   instead of silently falling through to PLS/LogReg. Mixing
+            #   objectives across seeds is dishonest; missing one seed's
+            #   contribution is fine.
+            #
+            # - one_class: fall through to the IsolationForest fallback
+            #   below. The IF path is the designed alternative for
+            #   one_class (added in Fix #2 / DeepSeek H1) — it's not a
+            #   foreign objective, it's the documented fallback. Without
+            #   this fallthrough, a globally-broken LightGBM (installed
+            #   but failing on one_class data) would produce all-inf
+            #   union members and the rescore would degenerate to
+            #   diversity-only ranking, exactly the H1 failure mode.
+            if task_type != 'one_class':
+                return float('-inf')
+            # else: fall through to the sklearn-only fallback path
 
     # LightGBM not installed → use the sklearn-only fallback path. Reached
     # for every seed in this branch (consistent objective across seeds).
