@@ -65,6 +65,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
+    "pytest-timeout>=2.1.0",  # T-CI-1: per-test timeouts so GUI deadlocks fail fast
     "black>=22.0.0",
     "flake8>=4.0.0",
     "build>=0.7.0",

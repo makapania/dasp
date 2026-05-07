@@ -35,12 +35,16 @@ jobs:
         MPLBACKEND: Agg
       shell: bash
       run: |
-        # GUI tests need real Tkinter + display — skipped on Linux runners.
-        # Initial T-CI-1 attempt used xvfb-run -a but a (still-unidentified)
-        # GUI test deadlocks under Xvfb and runs past the 6-hour job timeout.
-        # Skipping tests/gui/ on Linux gives green CI without the hang;
-        # Windows runners cover GUI tests natively. Coverage gap filed
-        # separately for follow-up: identify the hanging test and re-enable.
+        # T-CI-2 (follow-up to T-CI-1): a still-unidentified test in tests/gui/
+        # deadlocks under Xvfb and runs past the 6-hour job timeout. To keep
+        # main green while the offender is hunted down, the headless Linux
+        # matrix runs without tests/gui/. Windows runners exercise the GUI
+        # suite natively. The dedicated `gui-linux` job below runs the GUI
+        # suite under Xvfb + pytest-timeout in informational mode (does not
+        # block CI) so the next time CI runs, the hanging test surfaces in
+        # the logs instead of hiding behind a 6-hour wall-clock kill.
+        # When T-CI-2 closes, drop the --ignore here and the
+        # continue-on-error flag in gui-linux below.
         if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
           pytest -v --tb=short --ignore=tests/gui
         else
@@ -56,6 +60,48 @@ jobs:
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
       run: |
         flake8 src/ tests/ --max-line-length=100 --ignore=E203,W503
+
+  gui-linux:
+    name: GUI tests (Linux Xvfb, informational)
+    runs-on: ubuntu-latest
+    # T-CI-2: informational-only until the hanging test is identified.
+    # `continue-on-error: true` keeps this from blocking the merge queue
+    # while still surfacing per-test pass/fail/timeout in the run summary.
+    # Once the offender is quarantined with @pytest.mark.skip(reason="T-CI-2"),
+    # flip this to false and remove --ignore=tests/gui from the test job.
+    continue-on-error: true
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Install Xvfb and Tk runtime
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb python3-tk
+
+    - name: Run GUI tests under Xvfb with per-test timeout
+      env:
+        MPLBACKEND: TkAgg
+      run: |
+        # pytest-timeout uses the `thread` method to interrupt blocked tests
+        # without needing SIGALRM. 180s/test is well above legitimate runtime
+        # for the headless Tk smoke + workflow tests (most finish in <30s).
+        # When the hanging test deadlocks, pytest-timeout aborts that test
+        # specifically so the rest of the suite continues — that gives us
+        # the test name we need to close T-CI-2.
+        xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+          pytest tests/gui -v --tb=short \
+            --timeout=180 --timeout-method=thread
 
   test-optional-deps:
     name: Test with optional dependencies
@@ -78,7 +124,7 @@ jobs:
       env:
         MPLBACKEND: Agg
       run: |
-        # GUI tests skipped on Linux — see comment in test job above.
+        # T-CI-2: GUI tests skipped on Linux. See the test job above.
         pytest -v --ignore=tests/gui
 
   build:
