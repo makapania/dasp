@@ -110,27 +110,54 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from sklearn.preprocessing import LabelEncoder
+
+from spectral_predict.io import read_asd_dir
 from spectral_predict.unified_bayesian import run_unified_bayesian
 
 SNAPSHOT_DIR = Path(__file__).parent / "snapshots"
+EXAMPLE_DIR = Path(__file__).parent.parent / "example"
+
+REGRESSION_TARGET = "%Collagen"
+CLASSIFICATION_TARGET = "CollagenCat"
+
+
+def _load_joined_dataframe():
+    """Load and join the standard BoneCollagen dataset.
+
+    Mirrors tools/bench_baseline_compare.py:54-67 — the canonical loader
+    pattern in this repo. Spectra live in example/Spectrum*.asd and are
+    joined to example/BoneCollagen.csv on a normalized File Number key.
+    """
+    spectra, _meta = read_asd_dir(str(EXAMPLE_DIR))
+    ref = pd.read_csv(EXAMPLE_DIR / "BoneCollagen.csv")
+    spectra = spectra.sort_index()
+    ref = ref.copy()
+    ref.index = (
+        ref["File Number"].astype(str)
+        .str.replace(r"\.[A-Za-z0-9]+$", "", regex=True)
+        .str.replace(" ", "", regex=False)
+    )
+    joined = spectra.join(ref, how="inner")
+    feature_cols = list(spectra.columns)
+    X = joined[feature_cols].to_numpy(dtype=float)
+    wl = np.asarray([float(c) for c in feature_cols], dtype=float)
+    return joined, X, wl
 
 
 def _load_bone_collagen_xy():
-    """Load the standard test dataset used by tools/bench_dedup_real.py."""
-    df = pd.read_csv(Path(__file__).parent.parent / "example" / "BoneCollagen.csv")
-    y = df["delta13C"].to_numpy()
-    spectra_cols = [c for c in df.columns if c not in ("Sample", "delta13C", "delta15N")]
-    X = df[spectra_cols].to_numpy()
-    wl = np.array([float(c) for c in spectra_cols])
+    """Regression target — %Collagen continuous."""
+    joined, X, wl = _load_joined_dataframe()
+    y = joined[REGRESSION_TARGET].to_numpy(dtype=float)
     return X, y, wl
 
 
 def _load_bone_collagen_classification():
-    """Synthesize a 3-class label from delta13C tertiles for PLS-DA testing."""
-    X, y_continuous, wl = _load_bone_collagen_xy()
-    q33, q67 = np.quantile(y_continuous, [0.333, 0.667])
-    y_class = np.where(y_continuous < q33, 0, np.where(y_continuous < q67, 1, 2))
-    return X, y_class, wl
+    """Classification target — CollagenCat text labels encoded to ints."""
+    joined, X, wl = _load_joined_dataframe()
+    le = LabelEncoder()
+    y = le.fit_transform(joined[CLASSIFICATION_TARGET].astype(str))
+    return X, y, wl
 
 
 def _serialize_results(df: pd.DataFrame, study, top_n: int = 5) -> dict:
@@ -182,15 +209,30 @@ def _serialize_results(df: pd.DataFrame, study, top_n: int = 5) -> dict:
 
 
 def _coerce_scalar(value):
-    """Coerce numpy/pandas scalars to JSON-serializable types."""
+    """Coerce arbitrary values to JSON-serializable forms with stable rounding.
+
+    Handles scalars, numpy types, and nested containers (tuple/list/dict).
+    Recursive — float precision is preserved at every nesting level so
+    a tuple-valued Optuna param like (0.5000001, 0.5000002) doesn't lose
+    digits via str(). Sentinels emitted for nan/inf to survive JSON.
+    """
+    # Booleans BEFORE numerics — bool is a subclass of int in Python.
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
     if isinstance(value, (np.floating, float)):
         if np.isnan(value):
             return "__nan__"
         if np.isinf(value):
             return "__pos_inf__" if value > 0 else "__neg_inf__"
         return round(float(value), 10)
-    if isinstance(value, (np.integer, int, bool)):
-        return int(value) if not isinstance(value, bool) else bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (tuple, list)):
+        return [_coerce_scalar(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _coerce_scalar(v) for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))}
+    if value is None:
+        return None
     return str(value)
 
 
@@ -639,7 +681,60 @@ with open(src_path, "w", encoding="utf-8") as f:
 print("Done.")
 ```
 
-After running, the file should contain (top-to-bottom): module docstring, imports, `_extract_fitted_n_components`, and nothing else of substance. Module-level constants used only by deleted code (e.g. result-format string templates referenced only inside `convert_optuna_result_to_dasp_format`) should also be deleted — manual pass over the surviving file recommended.
+After running, the file should contain (top-to-bottom): module docstring, imports, `_extract_fitted_n_components`, and nothing else of substance.
+
+- [ ] **Step 2b: Prune now-dead imports and module-level constants**
+
+`_extract_fitted_n_components` only needs `ast`, `logging`, and `Optional` / `Any` from typing. Everything else in the imports block was consumed by deleted code. Verified scope:
+
+| Import | Deletable | Reason |
+|---|---|---|
+| `import optuna` | YES | Only consumed by `create_optuna_study` + `handle_failed_trial`. |
+| `from optuna.samplers import TPESampler, RandomSampler` | YES | `create_optuna_study` only. |
+| `from optuna.pruners import MedianPruner, SuccessiveHalvingPruner, PercentilePruner` | YES | `create_optuna_study` only. |
+| `from .constants import RANDOM_STATE` | YES | Used inside `create_objective_function` only. |
+| `from .regions import create_region_subsets` | YES | Used inside `create_objective_function` only. |
+| `import numpy as np` | VERIFY — grep for `np\.` after Step 2 | Likely deletable. |
+| `import pandas as pd` | VERIFY — grep for `pd\.` after Step 2 | Likely deletable. |
+| Other `from .X import Y` | VERIFY — grep each for surviving usage | Anything not used by `_extract_fitted_n_components`. |
+| `from typing import Dict, List, Optional, Callable, Tuple, Any` | PRUNE to `Optional, Any` | Only those two are used by `_extract_fitted_n_components`. |
+| `import ast` | KEEP | Used by `_extract_fitted_n_components` for `ast.literal_eval`. |
+| `import logging` | KEEP | Used by `_extract_fitted_n_components` for `logger`. |
+
+Module-level constants to verify and likely delete:
+- `_mixed_regime_warned = False` — already deleted in Step 2.
+- Any `_FORMAT_*` / `_CONVERT_*` / `_OPTUNA_*` constants — grep for usage; if only deleted code referenced them, delete.
+- `logger = logging.getLogger(__name__)` — KEEP if `_extract_fitted_n_components` uses it.
+
+Recipe — after Step 2's main deletion, run:
+
+```bash
+.venv312/Scripts/python.exe -c "
+import ast
+src = open('src/spectral_predict/bayesian_utils.py').read()
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        names = [a.name for a in node.names]
+        print(f'  Line {node.lineno}: {ast.unparse(node)}')
+"
+```
+
+For each surviving import, grep the file body (excluding the import line itself) for the imported name. If zero matches, delete the import.
+
+- [ ] **Step 2c: Rewrite the module docstring**
+
+Read the file's first 25 lines to find the existing module docstring. It currently advertises "Creating reproducible Optuna studies", "Converting parameters between formats", "Handling pruning and early stopping", "Error handling and validation" — all describing deleted functions. Lines ~10-18 also reference the 2026-01-02 fix to `create_objective_function`.
+
+Replace with a 5-line minimal docstring describing only `_extract_fitted_n_components`:
+
+```python
+"""Helper for extracting the actually-fitted ``n_components`` from a PLS
+trial's params dict. Used by the Bayesian and NSGA-II search paths to
+populate the LVs column with the post-clamp value (rather than Optuna's
+raw pre-clamp suggestion). Sole survivor of this module after the legacy
+``run_bayesian_search`` deletion (2026-05-07)."""
+```
 
 - [ ] **Step 3: Verify the file compiles**
 
@@ -838,23 +933,45 @@ import pandas as pd
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from sklearn.preprocessing import LabelEncoder
+
+from spectral_predict.io import read_asd_dir
 from spectral_predict.search import run_search
 from spectral_predict.unified_bayesian import run_unified_bayesian
 
+REGRESSION_TARGET = "%Collagen"
+CLASSIFICATION_TARGET = "CollagenCat"
+
+
+def _load_joined_dataframe():
+    """Mirrors tools/bench_baseline_compare.py:54-67. Spectra in .asd files,
+    metadata in BoneCollagen.csv, joined on a normalized File Number key."""
+    spectra, _meta = read_asd_dir(str(REPO / "example"))
+    ref = pd.read_csv(REPO / "example" / "BoneCollagen.csv")
+    spectra = spectra.sort_index()
+    ref = ref.copy()
+    ref.index = (
+        ref["File Number"].astype(str)
+        .str.replace(r"\.[A-Za-z0-9]+$", "", regex=True)
+        .str.replace(" ", "", regex=False)
+    )
+    joined = spectra.join(ref, how="inner")
+    feature_cols = list(spectra.columns)
+    X = joined[feature_cols].to_numpy(dtype=float)
+    wl = np.asarray([float(c) for c in feature_cols], dtype=float)
+    return joined, X, wl
+
 
 def _load_xy_regression():
-    df = pd.read_csv(REPO / "example" / "BoneCollagen.csv")
-    y = df["delta13C"].to_numpy()
-    spectra_cols = [c for c in df.columns if c not in ("Sample", "delta13C", "delta15N")]
-    X = df[spectra_cols].to_numpy()
-    wl = np.array([float(c) for c in spectra_cols])
+    joined, X, wl = _load_joined_dataframe()
+    y = joined[REGRESSION_TARGET].to_numpy(dtype=float)
     return X, y, wl
 
 
 def _load_xy_classification():
-    X, y_cont, wl = _load_xy_regression()
-    q33, q67 = np.quantile(y_cont, [0.333, 0.667])
-    y = np.where(y_cont < q33, 0, np.where(y_cont < q67, 1, 2))
+    joined, X, wl = _load_joined_dataframe()
+    le = LabelEncoder()
+    y = le.fit_transform(joined[CLASSIFICATION_TARGET].astype(str))
     return X, y, wl
 
 
@@ -874,7 +991,7 @@ def smoke_regression_grid():
         task_type="regression",
         folds=5,
         models_to_test=["PLS"],
-        preprocessing_methods={"raw": True},
+        preprocessing_methods=["raw"],
         enable_variable_subsets=False,
         enable_region_subsets=False,
         tier="quick",
@@ -914,7 +1031,7 @@ def smoke_classification_grid():
         task_type="classification",
         folds=5,
         models_to_test=["PLS-DA"],
-        preprocessing_methods={"raw": True},
+        preprocessing_methods=["raw"],
         enable_variable_subsets=False,
         enable_region_subsets=False,
         tier="quick",
