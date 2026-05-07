@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — T-CI-1 hygiene PR #56 — three diagnoses corrected mid-execution
+
+The continuation prompt categorized the 91 failures cleanly. Local execution revealed three places where the actual root cause differed from the diagnosis:
+
+1. **jcamp wasn't just a 1.3.0 API drift** — `src/spectral_predict/io.py:3719` had been calling `jcamp.jcamp_write(path, dict)` for years, but `jcamp_write` returns a string and doesn't take a path; the disk-writer is `jcamp_writefile`. The 1.3.0 rename (`jcamp_write` → `write`, `jcamp_writefile` → `writefile`) just changed the failure mode from `TypeError: string indices must be integers` (1.2.2) to `AttributeError: jcamp_write` (1.3.0). Pinning alone wouldn't have fixed CI; the io.py call needed correction. Confirmed by the existing `test_write_read_jcamp_roundtrip` test, which now actually passes — meaning it had been silently red on every machine since the test was added. The "5 jcamp tests" failure cohort was a 5-year-old latent write-path bug, not a recent dependency drift.
+
+2. **OPUS/PerkinElmer "missing fixture file" diagnosis was wrong** — the plan said `dummy.0` and `dummy.sp` need to exist for the import-error tests to reach the import-error branch. The actual cause was broken skip-guards: tests checked `sys.modules.get('brukeropusreader')` but production imports `brukeropus`; checked `sys.modules.get('specio')` but production imports `specio_py310`. Worse, `sys.modules.get(NAME)` only sees *already-imported* modules, so the guard was non-functional even with right names. Fix: `importlib.util.find_spec` with corrected names. The dummy fixture files turned out to be irrelevant — production code raises ImportError before reaching the file check on machines without the optional dep.
+
+3. **SPC mock fixture needed two fixes, not one** — enlarging the mock from 102 → 602 bytes cleared the buffer-size guard, but spc-io's parser then encounters the unsupported `ftflgs.TRANDM` flag bit on zero-padded mock data and raises `NotImplementedError`. Test exception handling also needed broadening to catch that on top of `ValueError`.
+
+**Lesson:** the continuation prompt was a faithful description of what `gh run view --log-failed` showed at the surface. Surface symptoms map to diagnosis on a 4-of-7-categories basis; the other 3 needed inspection at the call site. Always verify against actual local test runs before trusting prompt-level diagnosis. Local Windows tests passed for jcamp because `jcamp_write` exists in 1.2.2 — but the call signature was always wrong, the error just hadn't been triggered by the round-trip tests on this machine yet (likely because `pytest tests/test_io_jcamp.py` was rarely run in the targeted-tests local discipline).
+
+PR #56: branch `ci/t-ci-1-hygiene-2026-05-08`, head `ee3389e`. CI matrix in flight at time of this entry. Out-of-scope codegen/CLI bugs (T-CI-2, T-CI-3, T-CI-4) deferred per plan.
+
+---
+
 ## 2026-05-07 late evening — CI on `main` has been red since 2025-10-27 (6 months, undetected)
 
 Discovered during PR #55 merge attempt. `gh pr view 55 --json mergeStateStatus,statusCheckRollup` showed UNSTABLE with 7 of 8 jobs failing (only "Build package" green; CodeRabbit success). Comparison with the most recent `main` CI runs showed the same red state on every run for the last 30+ commits, including the four PRs that the project documentation describes as "triple/quadruple cross-family-reviewed" merges (PR #51, PR #52, PR #53, PR #54). `gh run list --branch main --status success` returns an empty list — there has been **zero** successful CI run on `main` since the workflow was added.
