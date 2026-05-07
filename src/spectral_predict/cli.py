@@ -1,51 +1,27 @@
-"""Command-line interface for Spectral Predict."""
+"""Command-line interface for Spectral Predict.
+
+Import-time discipline (PR #56 Codex STRONG #2):
+- ``--version`` and ``--help`` MUST run without importing matplotlib, tkinter,
+  or any GUI module. ``interactive_gui`` calls ``matplotlib.use('TkAgg')``
+  at import time, which fails on headless Linux even with ``MPLBACKEND=Agg``.
+- ``setup_app_logger`` runs first so the console script has the same
+  observability surface as the bundled GUI (T-45).
+- GUI / numerics / search modules are imported lazily inside ``main()`` only
+  when the parsed arguments require them.
+"""
 
 import argparse
 import sys
-from pathlib import Path
-import pandas as pd
 
 from . import __version__
-from .io import read_csv_spectra, read_reference_csv, align_xy
-from .search import run_search
-from .report import write_markdown_report
-from .interactive import run_interactive_loading
-from .interactive_gui import run_interactive_loading_gui
 
 
-def main():
-    """Main CLI entry point."""
-    # T-45: same observability surface the bundled GUI uses. The console
-    # script is a third Tk-launching path (interactive_gui.py creates a Tk
-    # root); without this call, sidecar/WAL/Tk-capture warnings vanish in
-    # the same way they did in the GUI before T-45. Best-effort.
-    try:
-        from .run_logging import setup_app_logger
-        setup_app_logger()
-    except Exception:
-        pass
+def _build_parser() -> argparse.ArgumentParser:
+    """Construct the argparse parser without importing GUI/numerics modules.
 
-    # T-50: same cleanup wiring as the bundled GUI — keeps the slow disk
-    # leak bounded for users who only ever invoke via the console script.
-    try:
-        from .run_state import cleanup_old_sqlite_files
-        deleted, freed = cleanup_old_sqlite_files()
-        if deleted:
-            import logging as _logging
-            _logging.getLogger("spectral_predict").info(
-                "T-50: cleaned up %d stale Optuna SQLite files (%.1f MB freed)",
-                deleted, freed / 1_048_576,
-            )
-    except Exception:
-        # GLM M1 / DeepSeek L2 (T-50 fix-of-fixes): preserve best-effort
-        # contract but surface structural cleanup failures (TypeError etc.
-        # — distinct from per-file warnings the function itself emits) to
-        # dasp.log via debug. Without this they vanish silently.
-        import logging as _logging
-        _logging.getLogger("spectral_predict").debug(
-            "T-50: cleanup failed (non-fatal)", exc_info=True
-        )
-
+    Kept import-light so ``--version`` and ``--help`` do not trigger the
+    matplotlib/tkinter import chain — see Codex STRONG #2 in PR #56.
+    """
     parser = argparse.ArgumentParser(
         description="Spectral Predict - Automated spectral analysis software",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -123,7 +99,67 @@ Examples:
         help="Use text-based interactive mode instead of GUI",
     )
 
+    return parser
+
+
+def main():
+    """Main CLI entry point.
+
+    Order of operations matters here for cross-platform headless support:
+    1. ``setup_app_logger`` (cheap, no GUI imports) — T-45 observability.
+    2. Parse argv via the import-light parser. ``--version`` / ``--help``
+       short-circuit with ``SystemExit`` here without touching matplotlib
+       or tkinter (Codex STRONG #2 in PR #56).
+    3. Cleanup of stale Optuna SQLite files (best-effort, T-50).
+    4. Heavy imports (pandas, search, GUI) — only after we know we are
+       proceeding with a real run.
+    """
+    # T-45: same observability surface the bundled GUI uses. The console
+    # script is a third Tk-launching path; without this call, sidecar/WAL/
+    # Tk-capture warnings vanish in the same way they did in the GUI before
+    # T-45. Best-effort.
+    try:
+        from .run_logging import setup_app_logger
+        setup_app_logger()
+    except Exception:
+        pass
+
+    parser = _build_parser()
     args = parser.parse_args()
+
+    # T-50: same cleanup wiring as the bundled GUI — keeps the slow disk
+    # leak bounded for users who only ever invoke via the console script.
+    # Runs after parse_args so ``--version`` / ``--help`` exit fast without
+    # walking the run-state directory.
+    try:
+        from .run_state import cleanup_old_sqlite_files
+        deleted, freed = cleanup_old_sqlite_files()
+        if deleted:
+            import logging as _logging
+            _logging.getLogger("spectral_predict").info(
+                "T-50: cleaned up %d stale Optuna SQLite files (%.1f MB freed)",
+                deleted, freed / 1_048_576,
+            )
+    except Exception:
+        # GLM M1 / DeepSeek L2 (T-50 fix-of-fixes): preserve best-effort
+        # contract but surface structural cleanup failures (TypeError etc.
+        # — distinct from per-file warnings the function itself emits) to
+        # dasp.log via debug. Without this they vanish silently.
+        import logging as _logging
+        _logging.getLogger("spectral_predict").debug(
+            "T-50: cleanup failed (non-fatal)", exc_info=True
+        )
+
+    # Heavy imports — deferred so ``--version`` / ``--help`` stay free of
+    # matplotlib + tkinter side-effects. interactive_gui in particular
+    # calls ``matplotlib.use('TkAgg')`` at module-import time.
+    from pathlib import Path
+
+    import pandas as pd
+
+    from .io import read_csv_spectra, read_reference_csv, align_xy
+    from .search import run_search
+    from .report import write_markdown_report
 
     # Print banner
     print("=" * 60)
@@ -158,12 +194,15 @@ Examples:
         # Run interactive loading phase
         if not args.no_interactive:
             if not args.no_gui:
-                # Use GUI version (default)
+                # Use GUI version (default). Imported lazily so headless
+                # ``--version`` / ``--help`` paths never touch TkAgg.
+                from .interactive_gui import run_interactive_loading_gui
                 interactive_results = run_interactive_loading_gui(
                     X_aligned, y, args.id_column, args.target
                 )
             else:
                 # Use text-based version
+                from .interactive import run_interactive_loading
                 interactive_results = run_interactive_loading(
                     X_aligned, y, args.id_column, args.target
                 )
