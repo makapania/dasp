@@ -1,6 +1,10 @@
 # Project Status
 
-> **Last updated:** 2026-05-07 — **Preprocessing-discovery refactor complete on `feat/preprocessing-discovery-refactor`.** Four-phase plan (`docs/plans/2026-05-06-exhaustive-multiseed-autoscale-tpe.md`) shipped end-to-end:
+> **Last updated:** 2026-05-07 (late session) — **Both PRs merged, main is clean.** PR #57 squash-merged at `b551421` (preprocessing-discovery refactor + 4 review cycles); PR #56 squash-merged at `93fabeb` (T-CI-1 CI rot fix). Merge gate verified via local diff-failure-set protocol (`feedback_check_ci_before_merge.md`) since cloud CI has been rotten on main since 2025-10-27. PR #56: 14 → 5 failures (9 fixed, **0 new**). PR #57 vs post-merge main: 5 → 5 failures (**0 new**), +63 net passing tests (the new `test_one_class_varsel_filtering`, `test_phase2_rescore`, `test_tpe_multistart`, flipped `test_one_class_with_uve_is_coerced`, and cycle-4 inner-guard test). Open follow-up tickets: **T-CI-2** (identify the deadlocking GUI test from the new informational `gui-linux` job logs, then drop `--ignore=tests/gui` from the main test job and flip `continue-on-error` to `false`), **T-CI-3 / T-CI-4** (the 5 remaining failures: `test_cv_strategy::test_classification_metrics_template_has_no_nameerror`, `test_export_code` ×2, `test_t19_class_weight_per_library` ×2 — all codegen/CLI surface). All cleanup done: feature branches deleted (local + remote), backup branches deleted (`ci-t-ci-1-backup-2026-05-07`, `pr57`, `worktree-agent-a279eb33697cf2063`), stale local plan-v3 commit (`2f953f0`) discarded.
+>
+> ---
+>
+> ## Previous session — 2026-05-07 — **Preprocessing-discovery refactor complete on `feat/preprocessing-discovery-refactor` (now merged at `b551421`).** Four-phase plan (`docs/plans/2026-05-06-exhaustive-multiseed-autoscale-tpe.md`) shipped end-to-end:
 >
 > - **Phase 0**: `src/spectral_predict/phase2_rescore.py` — shared multi-seed adaptive rescore helper with both ADAPTIVE (exhaustive use) and DEGENERATE (TPE multi-start union use) modes. 35 unit tests cover halt criterion, cap-hit, tie-breaking, diversity, score-direction sentinel handling.
 > - **Phase 1**: legacy GA preprocessing-search mode removed (~540 LOC net deletion). `optimize_preprocessing(method='ga', ...)` now raises `ValueError`; `method='exhaustive'` is the new default.

@@ -4,6 +4,38 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 (late) — Cycle 4 sister-site leak: a passing test that asserts the forbidden behavior
+
+**The pattern.** PR #57 cycle 3 closed a Codex MEDIUM by adding UVE-family filtering to `run_one_class_search` (CLAUDE.md:66 — UVE on `y_oc` is a discrimination method, not a one-class method). Cycle 4 cross-family review (Kimi K2.6 + GLM 5.1 + Codex) found the **Bayesian dispatcher in `unified_bayesian.py:1102` still had the leak** for scripted callers passing `task_type='one_class', enable_uve=True`. Codex traced the full call chain: `run_unified_bayesian → create_unified_objective → suggest_categorical('subset_type', available_methods) → compute_importances(X, y_oc, 'uve', …) → uve_selection(X, y_oc, …) → PLSRegression(y_train=y_oc)`.
+
+**Why three Codex passes missed it.** Codex anchored on the symptom site (`run_one_class_search`) in cycles 1-3 and didn't re-enumerate the broader pattern. Kimi K2.6's "find the *other* place this bug lives" prior surfaced it; GLM 5.1 corroborated it at structural level. Two Chinese-trained orthogonal-family models converging on the same surface = high confidence.
+
+**The test that was hiding it.** `tests/test_varsel_caching_correctness.py::test_one_class_with_uve` was *passing*. It explicitly called `run_unified_bayesian(task_type='one_class', enable_uve=True)` and asserted `len(df) > 0`. The test encoded the leaky behavior as the expected behavior. When you flip the production guard, the test turns red — and the temptation is to revert the guard. Lesson: when fixing a sister-site leak, **flip the test in the same commit**, otherwise it acts as a load-bearing assertion of the bug.
+
+**Fix shape (commit `79eb96e`).** Defense-in-depth coercion at *both* `run_unified_bayesian` entry AND `create_unified_objective` entry. The outer guard sets `enable_uve=False` before the inner guard sees it, so the inner guard short-circuits cleanly and exactly **one** warning fires per call. Test pins the invariant: `len(coercion_msgs) == 1` AND `not uve_trials` (no `subset_type='uve'` trial).
+
+**Lesson for future review cycles.** "Find the bug" and "validate the fix" are different lenses. Cross-family review (Codex/DeepSeek/Kimi/GLM) excels at the first; toolkit specialists (silent-failure-hunter, comment-analyzer) excel at the second. Run both for high-leverage merges.
+
+## 2026-05-07 (late) — T-50 vs T-45 logging asymmetry: structural symmetry ≠ runtime symmetry
+
+**The architectural gotcha.** PR #56's cli.py had two `try/except Exception: pass` blocks at lines 124-125 and 142-151, looking structurally similar. DeepSeek V4 Pro's cycle 4 review caught the silent except at 124-125 (T-45 setup_app_logger); the obvious fix was "mirror the T-50 pattern at 142-151" — replace `pass` with `logger.debug(..., exc_info=True)`.
+
+**Why the obvious fix was a no-op.** `setup_app_logger()` is the function that wires the file handler onto the `spectral_predict` logger. Inside its except block, by definition, that function just *failed* — so no handler is attached, and the logger's level is default WARNING. A DEBUG record on a handlerless WARNING-level logger gets discarded immediately. The "mirror T-50" fix was **functionally equivalent to the bare `pass`** it replaced. The commit message claim "failures surface to dasp.log" was false; failures still vanished silently.
+
+**Why T-50's same pattern works.** The T-50 cleanup block at lines 142-151 runs *after* `setup_app_logger` succeeds — so by then a handler IS attached. Same code, different runtime context.
+
+**Final fix (commit `dbdf6e6` → `460fca4`).** `traceback.print_exc(file=sys.stderr)` directly. Stderr is the only output surface guaranteed to exist before `setup_app_logger` runs. CLI users see it immediately; tests can capture it.
+
+**Lesson.** Structural symmetry of code blocks (same shape, same imports, same handler) is not a substitute for runtime-symmetry analysis (does the surrounding state guarantee the symbols you reference are alive?). The silent-failure-hunter agent's specialization — tracing *what gets logged where given the runtime state* — caught what surface-level review (which cleared the change as "no shadowing risk") missed.
+
+## 2026-05-07 (late) — Python 3.12 silently skips deprecated `find_module`/`load_module` finders
+
+**Quiet hazard.** When verifying the cli.py setup_app_logger failure path, my first sanity test used `sys.meta_path.insert(0, BlockSetup())` with the legacy `find_module(name, path)` / `load_module(name)` interface. Python 3.12 does not call this interface anymore (deprecated in favor of `find_spec` / `exec_module`), but it also does not raise — it just silently passes the request to the next finder. So my "simulated import failure" test produced a false-clean: `--version` printed normally with no error trail, suggesting the fix didn't fire.
+
+**The fix actually does fire.** Verified by direct monkeypatch: `import spectral_predict.run_logging as rl; rl.setup_app_logger = lambda: (_ for _ in ()).throw(RuntimeError(...))` then call `cli.main()`. Stderr produces the expected "T-45: setup_app_logger failed (non-fatal)" + traceback.
+
+**Lesson for future tests in this codebase.** "Simulate an import failure" tests should use the modern `MetaPathFinder` API (`find_spec`/`exec_module`) or, simpler, just monkeypatch the function to raise directly. The legacy meta_path finder approach is a footgun on Python 3.12.
+
 ## 2026-05-08 — T-CI-1 hygiene PR #56 — five diagnoses corrected mid-execution
 
 5. **xvfb-run hangs on Linux (still-unidentified GUI test).** The plan offered two approaches for category-1 (73 GUI/Tkinter Linux failures): `xvfb-run -a` wrapper OR skip-mark GUI tests when `DISPLAY is None and platform == Linux`. We tried `xvfb-run -a` first (covers more, no test loss). After PR #56's third CI run, all 3 Windows jobs completed in ~58-77min with 4 expected failures each (jcamp fix verified end-to-end), but **all 3 Linux test jobs ran past 5 hours without finishing**, with no log output for many minutes — confirming a deadlock, not just slowness. The pre-fix Linux runs took ~100 min because 73 GUI tests failed at collection (instant). With xvfb, those 73 tests now collect and try to run, but at least one of them deadlocks under Xvfb. Cancelled the run; pivoted to the second alternative: `pytest --ignore=tests/gui` on Linux runners. Windows continues to run GUI tests natively. Coverage gap filed for follow-up: identify the deadlocking GUI test under Xvfb (likely a Tkinter mainloop or modal dialog that never returns under headless display) and re-enable.
