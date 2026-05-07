@@ -4,6 +4,12 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — T-CI-1 hygiene PR #56 — five diagnoses corrected mid-execution
+
+5. **xvfb-run hangs on Linux (still-unidentified GUI test).** The plan offered two approaches for category-1 (73 GUI/Tkinter Linux failures): `xvfb-run -a` wrapper OR skip-mark GUI tests when `DISPLAY is None and platform == Linux`. We tried `xvfb-run -a` first (covers more, no test loss). After PR #56's third CI run, all 3 Windows jobs completed in ~58-77min with 4 expected failures each (jcamp fix verified end-to-end), but **all 3 Linux test jobs ran past 5 hours without finishing**, with no log output for many minutes — confirming a deadlock, not just slowness. The pre-fix Linux runs took ~100 min because 73 GUI tests failed at collection (instant). With xvfb, those 73 tests now collect and try to run, but at least one of them deadlocks under Xvfb. Cancelled the run; pivoted to the second alternative: `pytest --ignore=tests/gui` on Linux runners. Windows continues to run GUI tests natively. Coverage gap filed for follow-up: identify the deadlocking GUI test under Xvfb (likely a Tkinter mainloop or modal dialog that never returns under headless display) and re-enable.
+
+   **Lesson:** the original plan offering "either A or B" is not arbitrary — it's a hedge against exactly this. When Plan A turns out to deadlock at scale (manifests only in CI, not local), pivoting to Plan B is correct; don't try to debug a 5-hour hang remotely.
+
 ## 2026-05-08 — T-CI-1 hygiene PR #56 — four diagnoses corrected mid-execution
 
 The continuation prompt categorized the 91 failures cleanly. Local execution and CI exposure revealed four places where the actual root cause differed from the diagnosis:
