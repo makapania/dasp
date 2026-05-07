@@ -1,6 +1,27 @@
 # Project Status
 
-> **Last updated:** 2026-05-06 late evening — **PR #54 merged** (squash `4aef396`). Three themes: T-44 autoscale decoupling (Bayesian and TPE now have dedicated `bayes_enable_autoscale` / `tpe_enable_autoscale` GUI controls, both default ON, independent of grid `use_autoscale`); dedup hardening follow-ups closing review findings on `ee3a70e`; PR-#52 post-merge fixes (LVs/booster-export/NSGA/PLS-DA rebuild/TPE display).
+> **Last updated:** 2026-05-07 evening — **Empirical investigation: is `bayes_enable_autoscale` default ON justified by external validation?** New reusable harness `tools/autoscale_bayesian_compare.py` runs `run_unified_bayesian` with `enable_autoscale=False` vs `True` across (task × seeds), scores the best trial on a fixed-partition external set via the canonical `compute_validation_metrics_for_top_models` rebuild path, and logs both arm metrics + the fraction of trials TPE chose `apply_autoscale=True`. BoneCollagen 12-cell sweep (PLS regression + PLS-DA classification × 2 arms × 3 seeds × 100 trials each, n_train=34, n_external=15):
+>
+> | task | arm | CV best | external | TPE picked autoscale |
+> |---|---|---|---|---|
+> | regression (PLS) | off | RMSEcv 0.797±0.054, R²cv 0.987±0.002 | RMSEP 2.146±0.144, R²pred 0.881±0.016 | — |
+> | regression (PLS) | on  | RMSEcv 0.640±0.156, R²cv 0.991±0.004 | RMSEP 2.110±0.237, R²pred 0.885±0.026 | 53–84% of trials, best 2/3 |
+> | classification (PLS-DA) | off | BAcc 0.938±0.048 | Acc 0.644±0.077, F1 0.628±0.102 | — |
+> | classification (PLS-DA) | on  | BAcc 0.927±0.007 | **Acc 0.689±0.038, F1 0.679±0.085** | 30–69% of trials, best 1/3 |
+>
+> **Verdict: leave default ON.** Regression external is statistically indistinguishable between arms but the CV/external optimism gap roughly doubles with autoscale on (CV looks better, external doesn't move) — TPE finds a tighter overfit on the extra dimension. Classification external is mildly better (Acc +4 pp, F1 +5 pp) AND notably less variable (std halved). Asymmetry plausibly tracks CV-headroom: regression CV is at ceiling (R²cv ≈ 0.99) so any extra dimension overfits; classification CV has headroom (~0.93 BAcc) so exploration helps.
+>
+> **Caveat:** n=3 seeds × n=15 external; one dataset; PLS / PLS-DA only. Directional support for the existing default, not statistical proof. Replication on more datasets + Ridge/SVR/MLP would be needed to flip the default.
+>
+> **Tree-model angle (asked by user during analysis):** confirmed Bayesian does NOT model-aware-skip the autoscale toggle for tree models. Per-trial overhead is ~1 ms StandardScaler vs ~200–10000 ms tree fit (sub-0.01% of wall time); predictions are mathematically equivalent under per-feature monotone rescaling for pure tree trials (all four boosters' splits are threshold-comparison-based). Cases where tree+autoscale DOES change predictions: tree+CARS/iPLS/UVE/SPA varsel (PLS-based varsel sees scaled features → picks different vars), tree+SMOTE/ADASYN (distance-based neighbor-finding sees scaled features). Phase 1.5 model-aware skip from T-36 plan is **not worth filing** — it's polish below the noise floor and would optimize away exploration that's actually meaningful in the varsel/SMOTE cases.
+>
+> **Commits:** `9a299a2` (tool + 12-cell sweep results JSON), `2d2ab3a` (SESSION_LOG entry on the PLS-DA validation rebuild contract — `compute_validation_metrics_for_top_models(task_type='classification')` requires int-encoded class labels; raw strings make PLS.fit crash inline as a swallowed warning leaving val_Accuracy as NaN). No source code changes; no new tickets filed.
+>
+> ---
+>
+> ## Previous session — 2026-05-07 — PR #54 follow-ups (items 1-6 from `docs/CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`). Test additions: SQLite resume-rehydration round-trip (`TestSQLiteResumeRehydrationTest`, 1 test) and end-to-end `run_unified_bayesian(enable_autoscale=True)` wiring (`TestBayesianEndToEndAutoscale`, 2 tests). Comment polish: reworded stale "dedup pruning bursts" comment, dropped reviewer-pseudonym citations (DeepSeek/Kimi), removed 6 stale `search.py` line-number refs and the `c395317` short SHA. `black` pass on `search.py` and `spectral_predict_gui_optimized.py` (project-configured formatter, first full pass — ~27K lines of whitespace-only changes). 28/28 dedup+autoscale tests green; 81/81 broader suite green.
+>
+> **Previous:** PR #54 merged (squash `4aef396`). Three themes: T-44 autoscale decoupling (Bayesian and TPE now have dedicated `bayes_enable_autoscale` / `tpe_enable_autoscale` GUI controls, both default ON, independent of grid `use_autoscale`); dedup hardening follow-ups closing review findings on `ee3a70e`; PR-#52 post-merge fixes (LVs/booster-export/NSGA/PLS-DA rebuild/TPE display).
 >
 > **Three review-findings fixes shipped via `ee3a70e`** (after Codex caught a regression in the first attempt at `e906f70`):
 > 1. Resume-rehydrate would cache transient broad-except `1e10` failures as ghosts. Fixed by moving fingerprint user_attr write from pre-fit (`_register_or_replay_fingerprint`) to post-success (`_record_fingerprint_value`). OC-skip's `float('inf')` Kimi-BLOCKER caching is preserved because `:1331` explicitly calls `_record_fingerprint_value(fp, trial, inf, ...)`.
@@ -9,9 +30,9 @@
 >
 > **Cross-family review verdict:** Codex re-review of `ee3a70e` → closed. DeepSeek V4 Pro Max independent review → "net state at HEAD is clean — no action needed." Pre-merge 4-agent panel (code-reviewer / pr-test-analyzer / silent-failure-hunter / comment-analyzer) all signed off after these fixes.
 >
-> **Tests:** `tests/test_t44_autoscale_wiring.py` (15 tests pinning bayes/tpe/grid autoscale plumbing) + `tests/test_bayesian_dedup.py` (10 tests, including 4 new producer-side contract tests pinning the rehydrate fix). 25/25 green.
+> **Tests:** `tests/test_t44_autoscale_wiring.py` (17 tests — 15 plumbing + 2 end-to-end autoscale behavioral) + `tests/test_bayesian_dedup.py` (11 tests — 10 original + 1 SQLite round-trip). 28/28 green.
 >
-> **Verification command:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` (25 passed in 2.14s).
+> **Verification command:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` (28 passed in 3.45s).
 >
 > ---
 >
@@ -47,7 +68,7 @@
 >
 > **Deferred follow-ups** (originally in `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`, now SUPERSEDED by the value-cache-and-replay design that shipped 2026-05-06):
 > - Options A/B/C are historical. The shipped mechanism takes the same fingerprint hash A described but uses cache-and-replay instead of `TrialPruned`, eliminating both the leaderboard duplicates Option B targeted and the budget-shrinkage UX risk Option A had.
-> - Possible future follow-ups (not blocking): booster end-to-end forced-duplicate test (Codex NEEDS_DISCUSSION); narrow `_resolved_weighting_fingerprint` exception scope to `AttributeError` only (silent-failure WEAK); broad `except Exception → 1e10` log-level upgrade in trial body (silent-failure WEAK); Option C (data-aware `n_components` suggest range) remains a separate methodology question.
+> - Possible future follow-ups (not blocking): booster end-to-end forced-duplicate test (Codex NEEDS_DISCUSSION); broad `except Exception → 1e10` log-level upgrade in trial body (silent-failure WEAK); Option C (data-aware `n_components` suggest range) remains a separate methodology question.
 >
 > ## Previous session — 2026-05-04 — **Booster export-CV parity restored** (uncommitted; on branch `docs/2026-05-07-final-wrapup-and-continuation`). User reported: in-app LightGBM CV `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1, exported Colab notebook gave `0.976` with one borderline class-2 sample misclassified. Root cause: in-app `_run_single_fold` uses `cv_utils._fit_with_early_stopping` with `eval_set=[(X_test, y_test)]` for boosters; export templates emit plain `fold_model.fit(X_train, y_train)`. Drift introduced by commit `af6f4cf` (Jan 2026, early stopping feature) — export side was never updated.
 >

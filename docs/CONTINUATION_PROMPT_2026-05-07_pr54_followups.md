@@ -2,6 +2,46 @@
 
 **Filed:** 2026-05-06 late evening, after PR #54 merge (`4aef396`)
 **Pickup:** next session (likely 2026-05-07)
+**Last updated:** 2026-05-07 evening
+
+---
+
+## Current state — READ THIS FIRST (2026-05-07 evening)
+
+**Items 1–6 below are DONE but UNCOMMITTED in the working tree.** A prior session this week implemented them and updated `PROJECT_STATUS.md` to reflect completion, but never committed the work. Verify with `git status` before doing anything — you should see these modified files:
+
+```
+M  tests/test_bayesian_dedup.py            <- item 1 (SQLite resume rehydration)
+M  tests/test_t44_autoscale_wiring.py      <- item 2 (end-to-end Bayesian autoscale)
+M  src/spectral_predict/unified_bayesian.py <- items 3, 4, partial 5 (comment polish)
+M  src/spectral_predict/bayesian_utils.py  <- item 5 (line-number ref cleanup)
+M  src/spectral_predict/search.py          <- item 5 + item 6 (black pass)
+M  spectral_predict_gui_optimized.py       <- item 6 (black pass)
+M  docs/PROJECT_STATUS.md                  <- status writeup
+```
+
+Plus today's empirical-investigation commits already on main: `9a299a2` (autoscale Bayesian comparison tool + BoneCollagen 12-cell sweep) and `2d2ab3a` (SESSION_LOG entry on PLS-DA validation rebuild needing int-encoded labels).
+
+**Step 0 for the next session:** review the items 1–6 working-tree diffs, run the verification commands listed in each item below, and commit them in logical chunks. Suggested split:
+1. `tests(bayesian-dedup): SQLite resume rehydration round-trip` — `tests/test_bayesian_dedup.py` only
+2. `tests(autoscale): end-to-end run_unified_bayesian wiring` — `tests/test_t44_autoscale_wiring.py` only
+3. `chore(unified_bayesian, bayesian_utils): comment polish + stale ref cleanup` — items 3/4/5 source edits
+4. `style: black pass on search.py and gui` — item 6 (huge whitespace-only diff)
+5. `docs(status): PR #54 follow-ups + autoscale empirical investigation` — `docs/PROJECT_STATUS.md`
+
+Splitting matters because item 6 (black pass) is ~27K lines of whitespace and rebasing item 7's deletes against it would be miserable.
+
+**Once 1–6 are landed, the actual remaining queue is:**
+- **Item 7** (delete legacy Bayesian path) — user-approved 2026-05-06; primary work for the session.
+- **Item 8** (user-decision items) — present, await approval, do not act.
+
+**No new tickets from today's session.** The empirical autoscale-default investigation concluded "leave default ON" — no source code change needed. The PLS-DA string-label gotcha logged in SESSION_LOG is a contract observation worth knowing for any future analysis tooling, not a bug to fix. Tree-model autoscale Phase 1.5 is **not worth filing** (per the PROJECT_STATUS analysis at the top of that file): per-trial overhead is sub-0.01% of wall time and "skipping" would defeat tree+CARS / tree+SMOTE exploration that is actually meaningful.
+
+If you want to strengthen the case for flipping the autoscale default OFF (or definitively keeping it ON), `tools/autoscale_bayesian_compare.py` is reusable — pass `--seeds 5 --tasks regression,classification` on additional example datasets (or expand to Ridge / SVR / MLP). Three seeds × one dataset × two model classes is directional, not statistical.
+
+---
+
+## Original queue (filed 2026-05-06 late evening)
 
 PR #54 shipped autoscale decoupling (T-44) + bayesian dedup hardening + PR-#52 follow-ups. Cross-family review (Codex re-review + DeepSeek V4 Pro Max + 4-agent toolkit panel) signed off; main is at `b014831` after the doc updates.
 
