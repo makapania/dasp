@@ -4,6 +4,41 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 late evening — CI on `main` has been red since 2025-10-27 (6 months, undetected)
+
+Discovered during PR #55 merge attempt. `gh pr view 55 --json mergeStateStatus,statusCheckRollup` showed UNSTABLE with 7 of 8 jobs failing (only "Build package" green; CodeRabbit success). Comparison with the most recent `main` CI runs showed the same red state on every run for the last 30+ commits, including the four PRs that the project documentation describes as "triple/quadruple cross-family-reviewed" merges (PR #51, PR #52, PR #53, PR #54). `gh run list --branch main --status success` returns an empty list — there has been **zero** successful CI run on `main` since the workflow was added.
+
+The workflow (`.github/workflows/ci.yml`) was committed 2025-10-27 in `cc83e83` ("your commit message" — likely a Claude Code default). It runs the full pytest suite on Linux + Windows × Python 3.10 / 3.11 / 3.12 plus an optional-deps job. The Linux jobs ERROR-cascade through 72 GUI tests at collection time because Tkinter can't open `$DISPLAY`. None of the workflow has ever had `xvfb-run` or `MPLBACKEND=Agg`.
+
+**Why this went undetected for 6 months:** project memory `feedback_tests.md` codifies "Don't run full test suite for small changes — use targeted tests instead." Every recent local session has run narrowly-scoped pytest commands (e.g. `pytest tests/test_bayesian_dedup.py`) and those pass. `.venv312` on Windows has Tk working fine, so even a manual `pytest tests/gui/` would pass locally if anyone tried. The CI badge has been red and silent in parallel; the user's working memory was that "tests pass" because targeted local tests do.
+
+**Failure classification (PR #55 baseline = origin/main baseline = identical 91-failure set):**
+
+| Cause | Count | Fix |
+|---|---|---|
+| Headless Tkinter on Linux | 73 | `xvfb-run` wrapper in workflow + `MPLBACKEND=Agg` env |
+| `jcamp` library API drift (`jcamp_write` removed) | 5 | Pin `jcamp<X.Y.Z` or rewrite to `jcamp_parse`-only call site |
+| Test fixtures missing/bad (SPC <512 bytes; dummy.0 / dummy.sp don't exist) | 4 | Replace fixtures or use `tmp_path` |
+| SG-derivative numerical drift (3.86e-12 vs 1e-12 atol) | 2 | Relax tolerance to `1e-10` (still 25× safety margin) |
+| Optuna callback-count change (4.8 fires more often than 4.7) | 1 | Change `==10` to `>=10` |
+| Stochastic ML test flake | 1 | Tighter `random_state` threading or `pytest.mark.flaky` |
+| Real codegen / CLI bugs | 4 | OUT OF SCOPE for CI hygiene — separate tickets T-CI-2/3/4 |
+
+87 of 91 resolve through workflow + dependency + assertion edits (no production-code changes). The remaining 4 are real bugs masked by the broader rot:
+
+- `tests/test_cv_strategy.py::TestPostMergeReviewFixes::test_classification_metrics_template_has_no_nameerror` — `NameError: name '_fit_fold' is not defined`. Some codegen-template emission site references `_fit_fold` (the per-fold helper for booster early-stopping) without emitting it. Filed as T-CI-2.
+- `tests/test_t19_class_weight_per_library.py::test_xgboost_threads_sample_weight_via_fit_kwargs` — generated XGBoost script no longer contains `fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)`. Splat dropped somewhere. Filed as T-CI-3.
+- `tests/test_t19_class_weight_per_library.py::test_non_xgboost_classification_does_not_emit_fit_kwargs_plumbing` — CatBoost generated script CONTAINS `fit_kwargs` plumbing in pure `class_weight` mode where it shouldn't. Negative pin failing. Same T-CI-3.
+- `tests/test_cli_help.py::test_cli_help` and `test_cli_version` — CLI exits 1 instead of 0 on `--help`/`--version`. Filed as T-CI-4.
+
+**Lesson — process:** "all 4 cross-family review panels approved this merge" is true and useful, but it doesn't catch CI-environment problems. Reviewers analyze code quality, not GitHub Actions runs. A green-CI gate before merge would have surfaced this within days of the workflow being added. Until T-CI-1 is closed, manually checking `gh pr view <N> --json statusCheckRollup` before merging is the workaround.
+
+**Lesson — design:** the project's locally-targeted-tests discipline is sound for everyday development. The gap is at the merge boundary: the user's mental model of "tests pass" was based on local targeted runs, not CI. A simple CI-status check in the merge ritual would close this gap without changing the local-test discipline.
+
+T-CI-1 ticket filed at `docs/CONTINUATION_PROMPT_2026-05-08_ci_hygiene.md`. Out-of-scope codegen / CLI bugs flagged for follow-up tickets.
+
+---
+
 ## 2026-05-07 late evening — T-36 closed: legacy Bayesian path deleted via triple-reviewed plan
 
 Item 7 of `CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`. Plan filed at `docs/plans/2026-05-07-delete-legacy-bayesian-path.md`, executed in 7 commits.
