@@ -166,5 +166,56 @@ class TestOneClassVarselFiltering:
         )
 
 
+class TestCreateUnifiedObjectiveInnerGuard:
+    """Direct exercise of the defense-in-depth guard inside
+    ``create_unified_objective``. The outer ``run_unified_bayesian`` guard
+    short-circuits ``enable_uve`` before this inner guard is ever reached
+    via the normal path, so without a direct test the inner branch is
+    "dead from a coverage perspective" and a future refactor could remove
+    it with no test failure (pr-test-analyzer cycle 4 IMPORTANT).
+    """
+
+    def test_inner_guard_coerces_when_called_directly(self, caplog):
+        """Calling ``create_unified_objective`` directly with
+        ``task_type='one_class', enable_uve=True`` must coerce to False
+        and exclude ``'uve'`` from the closure's available_methods."""
+        from spectral_predict.unified_bayesian import create_unified_objective
+
+        rng = np.random.RandomState(7)
+        n_samples, n_features = 30, 20
+        X = rng.randn(n_samples, n_features)
+        y_str = np.array(["clean"] * 22 + ["contaminated"] * 8)
+
+        with caplog.at_level(logging.WARNING):
+            objective = create_unified_objective(
+                X_raw=X,
+                y=np.where(y_str == "clean", 1, -1).astype(float),
+                wavelengths=np.linspace(1000, 2500, n_features),
+                model_name="PCA-SIMCA",
+                task_type="one_class",
+                cv_folds=3,
+                random_state=42,
+                enable_uve=True,
+                inlier_class_label="clean",
+                y_original=y_str,
+            )
+
+        assert callable(objective), "Should return a callable objective"
+
+        # The inner guard must have fired exactly once (its warning is
+        # the only one emitted at create-time; the outer guard is not
+        # invoked when calling create_unified_objective directly).
+        coercion_msgs = [
+            r for r in caplog.records
+            if "enable_uve" in r.getMessage()
+            and "one-class" in r.getMessage()
+        ]
+        assert len(coercion_msgs) == 1, (
+            "Inner guard must fire exactly once when create_unified_objective "
+            f"is called directly with enable_uve=True; got {len(coercion_msgs)}: "
+            f"{[r.getMessage() for r in coercion_msgs]}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

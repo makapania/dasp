@@ -5586,9 +5586,10 @@ def run_one_class_search(
         Number of top variables to test. Default: [10, 20, 50, 100, 250, 500, 1000].
     apply_uve_prefilter : bool, default=False
         Whether to apply UVE prefilter before other methods. Coerced to
-        False at the top of this function with a warning (UVE prefilter
-        is a y-driven discrimination method, not a one-class method per
-        CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
+        False early in this function (before any UVE-touching path runs)
+        with a warning — UVE prefilter is a y-driven discrimination
+        method, not a one-class method per CLAUDE.md:66 / Pomerantsev
+        et al. 2025 LOVE.
     uve_cutoff_multiplier : float, default=1.0
         UVE cutoff multiplier for uninformative variable elimination.
     uve_n_components : int, optional

@@ -1102,11 +1102,12 @@ def create_unified_objective(
 
     # Defense-in-depth: even if a caller bypasses run_unified_bayesian and
     # constructs the objective directly, one-class must not see UVE.
-    # UVE on y_oc (the +1/-1 binary labels constructed at line 1110-1114
-    # below) is a discrimination method, not a one-class method
-    # (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE / Forina modeling-power
-    # vs discrimination-power). The GUI clears bayes_enable_uve at
-    # spectral_predict_gui_optimized.py:16671, but scripted callers and
+    # UVE on y_oc (the +1/-1 binary labels constructed a few lines below
+    # in this same function) is a discrimination method, not a one-class
+    # method (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE / Forina modeling-
+    # power vs discrimination-power). The GUI clears bayes_enable_uve in
+    # the disabled_checkboxes/disabled_vars block of the one-class task
+    # setup in spectral_predict_gui_optimized.py, but scripted callers and
     # internal helpers can still arrive here with enable_uve=True.
     # run_unified_bayesian also enforces this at its entry point; this
     # second guard catches any internal direct-instantiation path.
@@ -2331,9 +2332,9 @@ def run_unified_bayesian(
     # UVE family is a y-driven discrimination method, not a one-class method
     # (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE). Coerce enable_uve=False
     # for one-class so scripted callers and stale GUI state can't reach the
-    # uve_selection(X, y_oc) path. Mirrors apply_uve_prefilter coercion in
-    # run_one_class_search at search.py:5634-5645. create_unified_objective
-    # has a defense-in-depth guard at the same boundary.
+    # uve_selection(X, y_oc) path. Mirrors the apply_uve_prefilter coercion
+    # in run_one_class_search (search.py). create_unified_objective has a
+    # defense-in-depth guard at the same boundary.
     if task_type == 'one_class' and enable_uve:
         logger.warning(
             "enable_uve=True is not supported for one-class screening "
