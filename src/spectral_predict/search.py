@@ -1257,9 +1257,6 @@ def run_search(
     imbalance_params=None,
     enable_class_weight=False,
     ga_preprocess=False,
-    ga_preprocess_method="exhaustive",
-    ga_preprocess_population=48,
-    ga_preprocess_generations=30,
     ga_preprocess_cv_folds=5,
     ga_quick_mode=False,
     # Smart preprocessing discovery parameters (NEW - replaces GA)
@@ -1949,21 +1946,17 @@ def run_search(
         if progress_callback:
             progress_callback(
                 {
-                    "stage": "ga_preprocessing",
-                    "message": "Optimizing preprocessing parameters with GA...",
+                    "stage": "exhaustive_preprocessing",
+                    "message": "Optimizing preprocessing parameters (exhaustive search)...",
                     "current": 0,
-                    "total": ga_preprocess_generations,
+                    "total": 238,  # 14 preproc x 17 windows
                 }
             )
 
         print(f"\n{'='*70}")
-        print("GA PREPROCESSING OPTIMIZATION")
+        print("EXHAUSTIVE PREPROCESSING OPTIMIZATION")
         print(f"{'='*70}")
-        print(f"  Search method: {ga_preprocess_method.upper()}")
         print(f"  Search space: 238 combinations (14 preproc x 17 windows)")
-        if ga_preprocess_method == "ga":
-            print(f"  Population size: {ga_preprocess_population}")
-            print(f"  Generations: {ga_preprocess_generations}")
         print(f"  CV folds: {ga_preprocess_cv_folds}")
         print(f"  Task type: {task_type}")
         print(f"  Note: This REPLACES user-selected preprocessing methods")
@@ -1998,7 +1991,7 @@ def run_search(
         # Use model_grids.keys() since it's already filtered by enabled_models or models_to_test
         models_for_ga = list(model_grids.keys())
         print(
-            f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters..."
+            "Running EXHAUSTIVE optimization per-model with actual hyperparameters..."
         )
         print(f"Models selected: {models_for_ga}")
         print(f"")
@@ -2048,13 +2041,11 @@ def run_search(
             # Build model_config for actual model evaluation
             model_config = {"name": model_name, "params": first_params}
 
-            # Run GA/Exhaustive optimization with actual model evaluation
+            # Run exhaustive optimization with actual model evaluation
             ga_result = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
+                method="exhaustive",
                 cv_folds=folds,  # Use same CV folds as main search
                 n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
@@ -2063,7 +2054,7 @@ def run_search(
                 progress_callback=progress_callback,
                 fitness_model=fitness_model,  # Fallback if model_config fails
                 top_n=5,  # Return top 5 preprocessing configs
-                n_jobs=-1 if ga_preprocess_method == "exhaustive" else 1,
+                n_jobs=-1,  # Always parallel (was conditional on legacy GA mode)
                 model_config=model_config,  # Use actual model for fitness evaluation
             )
 

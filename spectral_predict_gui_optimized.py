@@ -3212,9 +3212,6 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_method = tk.StringVar(value="exhaustive")  # 'exhaustive' or 'ga'
-        self.ga_preprocess_population = tk.IntVar(value=48)
-        self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
@@ -11894,41 +11891,34 @@ class SpectralPredictApp:
 
         self.tpe_preproc_options_frame.grid_remove()
 
-        # ===== GA AND EXHAUSTIVE PREPROCESSING =====
-        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Exhaustive Preprocessing",
-                                                                     subtitle="Genetic algorithm or exhaustive search for optimal preprocessing")
+        # ===== EXHAUSTIVE PREPROCESSING =====
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="Exhaustive Preprocessing",
+                                                                     subtitle="Exhaustive search across 238 (preproc, window) combinations")
         ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
         ga_preproc_frame.pack(fill='both', expand=True)
 
-        # Enable GA Preprocessing checkbox
-        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA and Exhaustive Preprocessing",
+        # Enable Exhaustive Preprocessing checkbox
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable Exhaustive Preprocessing",
                                                     variable=self.enable_ga_preprocessing,
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
-        # GA parameters frame (hidden when disabled)
+        # Options frame (currently empty after legacy GA dropdown/spinboxes were
+        # removed in 2026-05-06; kept for future Phase 2/3 controls — autoscale
+        # checkbox, robust-ranking toggle, etc.)
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
         self.ga_preproc_options_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
 
-        # Search method dropdown
-        ttk.Label(self.ga_preproc_options_frame, text="Search Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
-                                     values=["exhaustive", "ga"], state="readonly", width=12)
-        method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(
+            self.ga_preproc_options_frame,
+            text="Tests all 14 preprocessing types x 17 window sizes (238 cells) with "
+                 "the actual user-selected model. Parallel; typically 5-30 seconds.",
+            wraplength=560,
+        ).grid(row=0, column=0, sticky=tk.W)
 
-        ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        ga_pop_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=16, to=128,
-                                      textvariable=self.ga_preprocess_population, width=8)
-        ga_pop_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-
-        ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        ga_gen_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=10, to=200,
-                                      textvariable=self.ga_preprocess_generations, width=8)
-        ga_gen_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
-
-        # Initially hide GA options
+        # Initially hide options
         self.ga_preproc_options_frame.grid_remove()
 
     def _create_tab4b_variable_selection(self):
@@ -28224,11 +28214,8 @@ class SpectralPredictApp:
                 ga_generations=self.ga_generations.get(),
                 ga_n_runs=self.ga_n_runs.get(),
                 ga_quick_mode=self.ga_quick_mode.get(),
-                # GA preprocessing parameters (LEGACY)
+                # Exhaustive preprocessing parameters
                 ga_preprocess=self.enable_ga_preprocessing.get(),
-                ga_preprocess_method=self.ga_preprocess_method.get(),
-                ga_preprocess_population=self.ga_preprocess_population.get(),
-                ga_preprocess_generations=self.ga_preprocess_generations.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
                 # Smart preprocessing discovery parameters (NEW)
                 smart_preprocess=self.enable_smart_preprocessing.get(),

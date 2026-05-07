@@ -1,13 +1,14 @@
 """
-Unit and integration tests for GA-based preprocessing optimization.
+Unit and integration tests for exhaustive preprocessing optimization.
 
-This test suite validates the genetic algorithm for preprocessing parameter
-optimization (ga_preprocessing.py) including:
-- Chromosome encoding and decoding
+Originally written for the GA preprocessing path; the GA evolution loop and
+its operators (tournament_selection, crossover, mutate) were removed in
+2026-05-06 because parallel exhaustive enumeration finished the same
+14 x 17 = 238 cell space in seconds. This module now validates:
+- Chromosome encoding / decoding (still 2-gene; backward-compat with saved CSVs)
 - Fitness evaluation
-- Genetic operators (selection, crossover, mutation)
-- Full optimization workflow
-- Integration with preprocessing pipeline
+- Full exhaustive optimization workflow
+- Convenience wrapper for integration with search.py
 """
 
 from __future__ import annotations
@@ -21,9 +22,6 @@ try:
         chromosome_to_transform,
         get_config_description,
         evaluate_fitness,
-        tournament_selection,
-        crossover,
-        mutate,
         optimize_preprocessing,
         get_optimized_preproc_config,
         PREPROC_TYPES,
@@ -217,118 +215,18 @@ class TestFitnessEvaluation:
 # =============================================================================
 
 
-@pytest.mark.unit
-class TestGeneticOperators:
-    """Test genetic operators."""
-
-    def test_tournament_selection_returns_parent(self):
-        """Tournament selection should return a valid parent."""
-        rng = np.random.RandomState(42)
-
-        # Create population
-        pop_size = 10
-        population = np.array([random_chromosome(rng) for _ in range(pop_size)])
-        fitness = np.random.randn(pop_size)
-
-        # Select parent
-        parent = tournament_selection(population, fitness, tournament_size=3, rng=rng)
-
-        assert parent.shape == (N_GENES,), "Parent should have correct shape"
-        assert parent.dtype == np.int32, "Parent should be integer array"
-
-    def test_tournament_favors_high_fitness(self):
-        """Tournament selection should favor high fitness individuals."""
-        rng = np.random.RandomState(42)
-
-        # Create population with known fitness
-        pop_size = 10
-        population = np.array([random_chromosome(rng) for _ in range(pop_size)])
-        fitness = np.arange(pop_size, dtype=float)  # 0, 1, 2, ..., 9
-
-        # Select many times
-        selections = [
-            tournament_selection(population, fitness, tournament_size=3, rng=rng)
-            for _ in range(100)
-        ]
-
-        # Check that high-fitness individuals are selected more often
-        # (statistical test - may occasionally fail)
-        # Compare bytes to identify which individual was selected
-        best_individual = population[-1]  # Highest fitness
-        best_count = sum(1 for s in selections if np.array_equal(s, best_individual))
-
-        # Best individual should be selected more than random chance (10%)
-        assert best_count > 10, "High fitness individual should be selected frequently"
-
-    def test_crossover_preserves_length(self):
-        """Crossover should preserve chromosome length."""
-        rng = np.random.RandomState(42)
-
-        parent1 = random_chromosome(rng)
-        parent2 = random_chromosome(rng)
-
-        child1, child2 = crossover(parent1, parent2, crossover_rate=0.7, rng=rng)
-
-        assert child1.shape == parent1.shape, "Child1 should have same shape as parent"
-        assert child2.shape == parent2.shape, "Child2 should have same shape as parent"
-
-    def test_crossover_with_zero_rate(self):
-        """Crossover with rate=0 should return copies of parents."""
-        rng = np.random.RandomState(42)
-
-        parent1 = random_chromosome(rng)
-        parent2 = random_chromosome(rng)
-
-        child1, child2 = crossover(parent1, parent2, crossover_rate=0.0, rng=rng)
-
-        assert np.array_equal(child1, parent1), "Child1 should equal parent1 with rate=0"
-        assert np.array_equal(child2, parent2), "Child2 should equal parent2 with rate=0"
-
-    def test_mutation_flips_genes(self):
-        """Mutation should modify genes."""
-        rng = np.random.RandomState(42)
-
-        original = random_chromosome(rng)
-
-        # Use 100% mutation rate to guarantee all genes are re-randomized.
-        # With only 2 genes, lower rates have a significant chance of no change
-        # (both from the rate check and from re-drawing the same value).
-        mutated = mutate(original, mutation_rate=1.0, rng=rng)
-
-        assert mutated.shape == original.shape, "Mutation should preserve shape"
-
-        # Run multiple trials to confirm mutation can produce changes
-        any_changed = False
-        for _ in range(20):
-            m = mutate(original, mutation_rate=1.0, rng=rng)
-            if not np.array_equal(m, original):
-                any_changed = True
-                break
-        assert any_changed, "Mutation should eventually change at least one gene"
-
-    def test_mutation_respects_ranges(self):
-        """Mutated genes should stay in valid ranges."""
-        rng = np.random.RandomState(42)
-
-        original = random_chromosome(rng)
-        mutated = mutate(original, mutation_rate=0.8, rng=rng)
-
-        assert 0 <= mutated[0] < len(PREPROC_TYPES)
-        assert 0 <= mutated[1] < len(WINDOW_SIZES)
-
-
 # =============================================================================
-# Integration Tests - GA Optimization
+# Integration Tests - Exhaustive Optimization
 # =============================================================================
 
 
 @pytest.mark.integration
 @pytest.mark.slow
-class TestGAPreprocessingOptimization:
-    """Test full GA preprocessing optimization."""
+class TestExhaustivePreprocessingOptimization:
+    """Test full exhaustive preprocessing optimization (replaces GA loop)."""
 
     def test_basic_optimization(self, synthetic_spectra_small):
-        """GA should complete and return valid result."""
+        """Exhaustive should complete and return valid result."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -336,12 +234,12 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=5,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,  # Sequential for test determinism
         )
 
         # Check result structure
@@ -351,44 +249,15 @@ class TestGAPreprocessingOptimization:
         assert "best_rmsecv" in result
         assert "best_config" in result
         assert "history" in result
+        assert "configs" in result  # Top-N output
 
-        # Check best_genes
+        # Check best_genes shape (chromosome encoding still 2-gene)
         assert result["best_genes"].shape == (N_GENES,)
         assert isinstance(result["best_name"], str)
         assert result["best_transform"] is None or callable(result["best_transform"])
 
-        # Check history (gen 0 + up to n_generations entries, may be shorter with early stopping)
-        assert len(result["history"]) >= 1, "History should have at least 1 entry"
-        assert len(result["history"]) <= 6, "History should have at most 6 entries (gen 0-5)"
-
-    def test_fitness_improves(self, synthetic_spectra_small):
-        """Later generations should have better or equal fitness."""
-        X, y = synthetic_spectra_small
-        X = X.values
-        y = y.values
-
-        result = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=10,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
-        )
-
-        history = result["history"]
-        best_fitness_values = [gen["best_fitness"] for gen in history]
-
-        # Check that fitness generally improves (monotonically non-decreasing)
-        for i in range(1, len(best_fitness_values)):
-            assert (
-                best_fitness_values[i] >= best_fitness_values[i - 1]
-            ), f"Fitness should not decrease from gen {i-1} to {i}"
-
     def test_best_preprocessing_identified(self, synthetic_spectra_small):
-        """GA should identify a reasonable preprocessing configuration."""
+        """Exhaustive should identify a reasonable preprocessing configuration."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -396,24 +265,21 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=10,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,
         )
 
-        # Apply best preprocessing
         if result["best_transform"] is not None:
             X_preprocessed = result["best_transform"](X)
-
-            # Check output is valid
             assert X_preprocessed.shape == X.shape
             assert np.isfinite(X_preprocessed).all()
 
     def test_respects_search_space(self, synthetic_spectra_small):
-        """GA should only produce valid preprocessing combinations."""
+        """Exhaustive should only produce valid preprocessing combinations."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -421,99 +287,61 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=5,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,
         )
 
-        # Check best genes are in valid ranges
         genes = result["best_genes"]
         assert 0 <= genes[0] < len(PREPROC_TYPES)
         assert 0 <= genes[1] < len(WINDOW_SIZES)
 
     def test_reproducibility_with_seed(self, synthetic_spectra_small):
-        """GA should be reproducible with same random seed."""
+        """Exhaustive should be reproducible with same random seed."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
 
         result1 = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
-
         result2 = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
-        # Should get same best genes
         assert np.array_equal(
             result1["best_genes"], result2["best_genes"]
         ), "Same seed should give same result"
 
     def test_classification_task(self, classification_data):
-        """GA should work for classification tasks."""
+        """Exhaustive should work for classification tasks."""
         X, y = classification_data
         X = X.values
         y = y.values
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            task_type="classification",
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            task_type="classification", random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result
-        assert "best_rmsecv" in result  # Actually 1-accuracy for classification
+        assert "best_rmsecv" in result  # 1 - accuracy for classification
         assert result["task_type"] == "classification"
 
-    def test_elitism_preserves_best(self, synthetic_spectra_small):
-        """Elitism should preserve best solutions across generations."""
+    def test_legacy_ga_method_raises(self, synthetic_spectra_small):
+        """method='ga' was removed in 2026-05-06; passing it must raise."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
 
-        result = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=10,
-            elitism=2,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
-        )
-
-        # With elitism, fitness should never decrease
-        history = result["history"]
-        best_fitness_values = [gen["best_fitness"] for gen in history]
-
-        for i in range(1, len(best_fitness_values)):
-            assert best_fitness_values[i] >= best_fitness_values[i - 1], (
-                "Elitism should preserve best fitness"
+        with pytest.raises(ValueError, match="'ga' mode was removed"):
+            optimize_preprocessing(
+                X, y, method="ga", cv_folds=3, random_state=42, verbose=0,
             )
 
 
@@ -569,37 +397,25 @@ class TestEdgeCases:
     """Test edge cases and error handling."""
 
     def test_small_dataset(self):
-        """GA should handle small datasets."""
+        """Exhaustive should handle small datasets."""
         X = np.random.randn(10, 20)
         y = np.random.randn(10)
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=5,
-            n_generations=3,
-            cv_folds=3,
-            n_components=3,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result
 
     def test_high_dimensional_data(self):
-        """GA should handle high-dimensional data."""
+        """Exhaustive should handle high-dimensional data."""
         X = np.random.randn(50, 1000)
         y = np.random.randn(50)
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=5,
-            n_generations=3,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result

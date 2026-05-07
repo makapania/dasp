@@ -101,9 +101,6 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "tpe_preprocess_n_trials",
     "tpe_preprocess_n_top",
     "enable_ga_preprocessing",
-    "ga_preprocess_method",
-    "ga_preprocess_population",
-    "ga_preprocess_generations",
     "ga_preprocess_cv_folds",
     # --- variable-subset toggles ---
     "enable_variable_subsets",
@@ -394,7 +391,7 @@ def summarize_gui_settings(settings: dict[str, Any] | None) -> str:
     if _bool("enable_smart_preprocessing"):
         extras.append("smart-preprocessing=on")
     if _bool("enable_ga_preprocessing"):
-        extras.append(f"GA-preprocessing={_val('ga_preprocess_method')}")
+        extras.append("exhaustive-preprocessing=on")
     if _bool("enable_imbalance_handling"):
         extras.append(f"imbalance={_val('imbalance_method')}")
     if extras:
