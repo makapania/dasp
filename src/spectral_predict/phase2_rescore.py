@@ -72,7 +72,16 @@ def _rank_key(
     primary term is ``-mean`` so higher mean ranks earlier. ``std`` is always
     ascending (lower variance preferred on ties). ``key`` is the final
     tie-breaker for determinism.
+
+    When ``mean`` is non-finite (no valid scores survived aggregation), the
+    candidate is sent to the bottom of the ranking regardless of
+    ``score_direction``. This prevents the ``_aggregate_scores`` "all-invalid"
+    sentinel ``(-inf, +inf, 0)`` from accidentally ranking first under
+    ``score_direction="minimize"``, where raw ``-inf`` would otherwise sort
+    earliest.
     """
+    if not math.isfinite(mean):
+        return (float("inf"), float("inf"), key)
     primary = -mean if score_direction == "maximize" else mean
     return (primary, std, key)
 

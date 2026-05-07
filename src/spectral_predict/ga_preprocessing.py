@@ -1456,7 +1456,9 @@ def get_optimized_preproc_config(
     y : np.ndarray
         Target values
     quick : bool
-        If True, use quick settings (fewer generations)
+        If True, use 3-fold CV; if False, use 5-fold CV. (Pre-Phase-1 the
+        difference was also in GA population/generations; with GA removed,
+        cv_folds is the only knob this wrapper still tunes.)
     random_state : int
         Random seed
     verbose : int

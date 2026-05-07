@@ -344,6 +344,40 @@ class TestExhaustivePreprocessingOptimization:
                 X, y, method="ga", cv_folds=3, random_state=42, verbose=0,
             )
 
+    def test_with_actual_model_config(self, synthetic_spectra_small):
+        """Closes Codex MEDIUM: actual-model exhaustive path is the live
+        production path used by run_search (search.py:2052), but no test
+        previously exercised it. This pins the model_config branch of
+        evaluate_fitness — exhaustive must succeed and return a result with
+        correct shape when given an explicit model_config dict.
+        """
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X,
+            y,
+            method="exhaustive",
+            cv_folds=3,
+            n_components=3,
+            random_state=42,
+            verbose=0,
+            n_jobs=1,
+            # Live path: actual-model fitness with first hyperparam point
+            model_config={"name": "PLS", "params": {"n_components": 3}},
+        )
+
+        assert "best_genes" in result
+        assert "configs" in result
+        assert len(result["configs"]) > 0
+        assert result["best_genes"].shape == (N_GENES,)
+        # Best transform must be runnable on the data
+        if result["best_transform"] is not None:
+            X_pp = result["best_transform"](X)
+            assert X_pp.shape == X.shape
+            assert np.isfinite(X_pp).all()
+
 
 # =============================================================================
 # Integration Tests - Convenience Function
@@ -385,6 +419,46 @@ class TestConvenienceFunction:
             X_transformed = transform(X)
             assert X_transformed.shape == X.shape
             assert np.isfinite(X_transformed).all()
+
+    def test_quick_vs_full_passes_different_cv_folds(self):
+        """Closes Codex LOW: pre-Phase-1, quick/full differed in
+        population_size/n_generations; post-refactor they only differ in
+        cv_folds (3 vs 5). Pin that the wrapper actually threads cv_folds
+        through to optimize_preprocessing — otherwise the docstring promise
+        is unverified.
+        """
+        from unittest.mock import patch
+
+        return_value = {
+            "best_name": "raw",
+            "best_transform": None,
+            "best_genes": np.array([0, 0], dtype=np.int32),
+            "best_rmsecv": 0.0,
+            "best_config": "raw",
+            "configs": [],
+            "history": [],
+            "task_type": "regression",
+            "method": "exhaustive",
+        }
+
+        X = np.random.randn(20, 50)
+        y = np.random.randn(20)
+
+        with patch(
+            "spectral_predict.ga_preprocessing.optimize_preprocessing",
+            return_value=return_value,
+        ) as spy:
+            get_optimized_preproc_config(X, y, quick=True, random_state=42, verbose=0)
+            get_optimized_preproc_config(X, y, quick=False, random_state=42, verbose=0)
+
+        assert spy.call_count == 2
+        quick_kwargs = spy.call_args_list[0].kwargs
+        full_kwargs = spy.call_args_list[1].kwargs
+        assert quick_kwargs["cv_folds"] == 3
+        assert full_kwargs["cv_folds"] == 5
+        # And both go through method='exhaustive', not the removed 'ga' default
+        assert quick_kwargs["method"] == "exhaustive"
+        assert full_kwargs["method"] == "exhaustive"
 
 
 # =============================================================================

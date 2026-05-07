@@ -480,6 +480,65 @@ class TestScoreDirectionMinimize:
 
         assert [c["id"] for c in result] == [1, 2]
 
+    def test_minimize_all_failing_candidate_ranks_last(self):
+        # Codex STRONG regression pin: when ALL seeds fail for a candidate
+        # under score_direction="minimize", _aggregate_scores returns
+        # (mean=-inf, std=+inf, n_valid=0) regardless of direction. _rank_key
+        # used to sort that as best for minimize (raw mean ascending).
+        # Now non-finite means always rank to bottom.
+        candidates = [{"id": 1}, {"id": 2}, {"id": 3}]
+        scores_by_pair = {
+            # id=1: valid scores around 1.0
+            (1, 42): 1.0, (1, 0): 1.0, (1, 7): 1.0,
+            # id=2: valid scores around 0.5 (lowest = best for minimize)
+            (2, 42): 0.5, (2, 0): 0.5, (2, 7): 0.5,
+            # id=3: all seeds fail (handled below)
+        }
+
+        def eval_fn(cand, seed):
+            if cand["id"] == 3:
+                raise RuntimeError("simulated failure")
+            return scores_by_pair[(cand["id"], seed)]
+
+        result, _meta = phase2_adaptive_rescore(
+            candidates=candidates,
+            eval_fn=eval_fn,
+            key_fn=_key,
+            score_direction="minimize",
+            initial_pool_size=3,
+            pool_size_progression=[3],
+            top_n=3,
+            n_seeds=3,
+        )
+
+        # Order should be id=2 (best), id=1, id=3 (failed -> last)
+        assert [c["id"] for c in result] == [2, 1, 3]
+
+    def test_maximize_all_failing_candidate_ranks_last(self):
+        # Companion test: same scenario for maximize. Was already correct
+        # before the fix (since -inf negated to +inf), but pinning so a
+        # future refactor doesn't re-introduce direction-asymmetric handling.
+        candidates = [{"id": 1}, {"id": 2}, {"id": 3}]
+
+        def eval_fn(cand, seed):
+            if cand["id"] == 3:
+                raise RuntimeError("simulated failure")
+            return 1.0 if cand["id"] == 1 else 0.5
+
+        result, _meta = phase2_adaptive_rescore(
+            candidates=candidates,
+            eval_fn=eval_fn,
+            key_fn=_key,
+            score_direction="maximize",
+            initial_pool_size=3,
+            pool_size_progression=[3],
+            top_n=3,
+            n_seeds=3,
+        )
+
+        # Order: id=1 (mean=1.0), id=2 (mean=0.5), id=3 (failed -> last)
+        assert [c["id"] for c in result] == [1, 2, 3]
+
 
 # =============================================================================
 # Robustness / edge cases
