@@ -1271,6 +1271,8 @@ def run_search(
     tpe_preprocess_n_trials=75,
     tpe_preprocess_n_top=10,
     tpe_enable_autoscale=True,
+    tpe_multistart=False,  # Phase 4 (2026-05-06): multi-start + multi-seed rescore
+    tpe_n_starts=5,
     # GA variable selection parameters
     ga_population_size=64,
     ga_generations=100,
@@ -1851,7 +1853,10 @@ def run_search(
         print(f"  Task type: {task_type}")
         print(f"{'='*70}\n")
 
-        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+        from .tpe_preprocessing_discovery import (
+            run_tpe_preprocessing_discovery,
+            run_tpe_multistart_preprocessing_discovery,
+        )
 
         def tpe_progress(current, total, message):
             if progress_callback:
@@ -1864,20 +1869,42 @@ def run_search(
                     }
                 )
 
-        discovered_configs = run_tpe_preprocessing_discovery(
-            X.values,
-            y.values,
-            task_type=task_type,
-            n_trials=tpe_preprocess_n_trials,
-            n_top=tpe_preprocess_n_top,
-            cv_folds=folds,
-            enable_autoscale=tpe_enable_autoscale,
-            enable_baseline=(baseline_method is not None),
-            enable_smoothing=smoothing,
-            smoothing_window=smoothing_window,
-            smoothing_polyorder=smoothing_polyorder,
-            progress_callback=tpe_progress,
-        )
+        # Phase 4 (2026-05-06): when tpe_multistart=True, run M independent
+        # TPE studies and rescore the union with multi-seed CV. Closes the
+        # TPE-drift problem documented in tools/bayesian_topk_stability.py.
+        # Both call sites (regression/classification here and one_class at
+        # :5675-5701) gate on the same flag.
+        if tpe_multistart:
+            discovered_configs = run_tpe_multistart_preprocessing_discovery(
+                X.values,
+                y.values,
+                task_type=task_type,
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                n_starts=tpe_n_starts,
+                progress_callback=tpe_progress,
+            )
+        else:
+            discovered_configs = run_tpe_preprocessing_discovery(
+                X.values,
+                y.values,
+                task_type=task_type,
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                progress_callback=tpe_progress,
+            )
 
         if not discovered_configs:
             print("WARNING: TPE preprocessing discovery found no valid configs!")
@@ -5441,6 +5468,8 @@ def run_one_class_search(
     tpe_preprocess_n_trials=75,
     tpe_preprocess_n_top=10,
     tpe_enable_autoscale=True,
+    tpe_multistart=False,  # Phase 4 (2026-05-06): multi-start + multi-seed rescore
+    tpe_n_starts=5,
     # Variable selection
     variable_selection_methods=None,
     variable_counts=None,
@@ -5672,7 +5701,10 @@ def run_one_class_search(
             logger.info("Smart preprocessing discovered %d configs", len(preprocess_configs))
 
     if tpe_preprocess and not smart_preprocess:
-        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+        from .tpe_preprocessing_discovery import (
+            run_tpe_preprocessing_discovery,
+            run_tpe_multistart_preprocessing_discovery,
+        )
 
         def tpe_oc_progress(current, total, message):
             if progress_callback:
@@ -5685,20 +5717,39 @@ def run_one_class_search(
                     }
                 )
 
-        discovered = run_tpe_preprocessing_discovery(
-            X_np,
-            y_oc,
-            task_type="one_class",
-            n_trials=tpe_preprocess_n_trials,
-            n_top=tpe_preprocess_n_top,
-            cv_folds=folds,
-            enable_autoscale=tpe_enable_autoscale,
-            enable_baseline=(baseline_method is not None),
-            enable_smoothing=enable_smoothing,
-            smoothing_window=smoothing_window,
-            smoothing_polyorder=smoothing_polyorder,
-            progress_callback=tpe_oc_progress,
-        )
+        # Phase 4 (2026-05-06): one_class call site mirrors regression /
+        # classification at :1854. Closes Codex N2 (sister-site coverage).
+        if tpe_multistart:
+            discovered = run_tpe_multistart_preprocessing_discovery(
+                X_np,
+                y_oc,
+                task_type="one_class",
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=enable_smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                n_starts=tpe_n_starts,
+                progress_callback=tpe_oc_progress,
+            )
+        else:
+            discovered = run_tpe_preprocessing_discovery(
+                X_np,
+                y_oc,
+                task_type="one_class",
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=enable_smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                progress_callback=tpe_oc_progress,
+            )
         if discovered:
             preprocess_configs = []
             for cfg in discovered:

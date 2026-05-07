@@ -100,6 +100,8 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "enable_tpe_preprocessing",
     "tpe_preprocess_n_trials",
     "tpe_preprocess_n_top",
+    "tpe_multistart",
+    "tpe_n_starts",
     "enable_ga_preprocessing",
     "ga_preprocess_cv_folds",
     "ga_preprocess_autoscale",

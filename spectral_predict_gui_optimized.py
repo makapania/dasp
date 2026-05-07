@@ -3235,6 +3235,12 @@ class SpectralPredictApp:
         self.tpe_preprocess_n_trials = tk.IntVar(value=75)
         self.tpe_preprocess_n_top = tk.IntVar(value=10)
         self.tpe_enable_autoscale = tk.BooleanVar(value=True)
+        # Phase 4 (2026-05-06): TPE multi-start + multi-seed rescore.
+        # Default OFF because cost is significant (~5x current TPE wall time);
+        # turn ON for classification on small-n datasets where TPE drift is
+        # documented (tools/bayesian_topk_stability.py).
+        self.tpe_multistart = tk.BooleanVar(value=False)
+        self.tpe_n_starts = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -11889,6 +11895,25 @@ class SpectralPredictApp:
         self._cb_tpe_enable_autoscale = ttk.Checkbutton(self.tpe_preproc_options_frame, text="Explore autoscale (UV scaling)",
                                                         variable=self.tpe_enable_autoscale)
         self._cb_tpe_enable_autoscale.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # Phase 4 (2026-05-06): multi-start + multi-seed rescore. Default OFF
+        # because ~5x cost; recommended for classification on small-n.
+        ttk.Checkbutton(
+            self.tpe_preproc_options_frame,
+            text="Multi-start TPE (rescore union with 5-seed CV, ~5x cost)",
+            variable=self.tpe_multistart,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        ttk.Label(self.tpe_preproc_options_frame, text="N starts (advanced):").grid(
+            row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
+        )
+        ttk.Combobox(
+            self.tpe_preproc_options_frame,
+            textvariable=self.tpe_n_starts,
+            values=[3, 5, 7],
+            state="readonly",
+            width=6,
+        ).grid(row=4, column=1, sticky=tk.W, padx=5, pady=(5, 0))
 
         ttk.Label(tpe_preproc_frame,
                  text="Search space: 14 preproc x derivative-aware windows x autoscale x 5 baseline x smoothing",
@@ -27548,6 +27573,8 @@ class SpectralPredictApp:
                          tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
                          tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                          tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
+                         tpe_multistart=self.tpe_multistart.get(),
+                         tpe_n_starts=self.tpe_n_starts.get(),
                          # T-36: autoscale toggle (UV scaling) — grid path only
                          autoscale=self.use_autoscale.get(),
                      )
@@ -28271,6 +28298,8 @@ class SpectralPredictApp:
                 tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
                 tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                 tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
+                tpe_multistart=self.tpe_multistart.get(),
+                tpe_n_starts=self.tpe_n_starts.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
