@@ -305,20 +305,28 @@ def test_agilent_file_detection():
     assert detect_format(Path("spectrum.seq")) == 'agilent'
 
 
-def test_agilent_not_implemented():
-    """Test that Agilent reader raises NotImplementedError when package is
-    available. If the package isn't installed we can't verify the contract,
-    so skip rather than silently passing on ImportError (which would mask a
-    future regression that converts the not-implemented marker into a partial
-    implementation that now raises ImportError from a sub-dependency)."""
+def test_agilent_invalid_file_raises_value_error(tmp_path):
+    """Agilent reader is implemented around AgilentIRFile (see
+    src/spectral_predict/readers/agilent_reader.py). On a deliberately
+    invalid .seq file we expect a parser-level ValueError, not silent
+    success or an unrelated exception type.
+
+    PR #56 review (Codex MEDIUM #4): the previous ``test_agilent_not_implemented``
+    asserted a stale not-implemented contract that only passed because
+    ``agilent_ir_formats`` happens to be absent in CI. The moment that
+    optional dep lands, the test would fail for the wrong reason. Replaced
+    with a real parse-error contract.
+    """
     import importlib.util
 
     if importlib.util.find_spec("agilent_ir_formats") is None:
         pytest.skip("agilent-ir-formats not installed")
 
-    agilent_path = Path("test.seq")
-    with pytest.raises(NotImplementedError, match="not yet fully implemented"):
-        read_agilent_file(agilent_path)
+    bogus = tmp_path / "bogus.seq"
+    bogus.write_bytes(b"NOT A REAL SEQ FILE\x00" * 16)
+
+    with pytest.raises(ValueError):
+        read_agilent_file(bogus)
 
 
 # ============================================================================
