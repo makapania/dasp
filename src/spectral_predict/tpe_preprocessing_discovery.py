@@ -28,7 +28,7 @@ from typing import List, Dict, Callable, Optional, Any
 
 import optuna
 from optuna.samplers import TPESampler
-from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.preprocessing import StandardScaler
 
@@ -218,6 +218,190 @@ def _quick_evaluate(
             return -np.inf
 
 
+def evaluate_config_with_seed(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str,
+    cv_folds: int,
+    random_state: int,
+) -> float:
+    """Single-seed CV evaluation that ACTUALLY varies with ``random_state``.
+
+    Differs from ``_quick_evaluate`` in two load-bearing ways (closes
+    DeepSeek STRONG D1 from plan-review v3):
+
+    1. The model constructor receives the supplied ``random_state``
+       (LightGBM is stochastic via per-feature subsampling, so this
+       changes per-seed model fits).
+    2. The CV splitter is constructed with ``shuffle=True`` and the
+       supplied ``random_state`` (so the train/test partitions vary per
+       seed). ``_quick_evaluate`` uses ``cv=cv_folds`` (int), which
+       sklearn resolves to non-shuffled KFold for classification and
+       regression — deterministic regardless of any passed seed.
+
+    Used ONLY by the multi-seed rescore in the multistart wrapper
+    (``run_tpe_multistart_preprocessing_discovery``). The existing
+    single-start TPE path continues to call ``_quick_evaluate`` so its
+    behavior is bit-exact preserved (no regression in
+    ``test_t44_autoscale_wiring`` etc.).
+
+    Returns
+    -------
+    float
+        For regression: negative RMSE (higher is better).
+        For classification / one-class: balanced accuracy (higher is better).
+    """
+    import warnings
+
+    n_samples = X.shape[0]
+    cv_folds = min(cv_folds, n_samples // 2)
+    cv_folds = max(2, cv_folds)
+
+    # Closes DeepSeek MED #1 (post-Phase-4 review): split the try/except so
+    # ImportError (LightGBM not installed) routes to the sklearn fallback for
+    # ALL seeds of a given config, while runtime errors during CV (OOM,
+    # numerical edge) return -inf for THAT SEED only — without falling through
+    # to a different model. Pre-fix, a LightGBM crash mid-run for one seed
+    # would silently switch that seed's evaluation to PLS/LogReg, mixing
+    # objectives in the multi-seed mean and producing misleading scores.
+    try:
+        from lightgbm import LGBMRegressor, LGBMClassifier
+        _lgbm_available = True
+    except ImportError:
+        _lgbm_available = False
+
+    if _lgbm_available:
+        try:
+            with warnings.catch_warnings():
+                warnings.filterwarnings('ignore', category=UserWarning)
+
+                if task_type == 'one_class':
+                    n_outliers = int(np.sum(y == -1))
+                    if n_outliers < 2:
+                        return 0.0
+                    n_splits = min(cv_folds, n_outliers)
+                    model = LGBMClassifier(
+                        class_weight='balanced',
+                        n_estimators=50,
+                        max_depth=3,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = StratifiedKFold(
+                        n_splits=n_splits, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+                    return scores.mean()
+                elif task_type == 'classification':
+                    model = LGBMClassifier(
+                        n_estimators=50,
+                        max_depth=4,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = StratifiedKFold(
+                        n_splits=cv_folds, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(model, X, y, cv=cv, scoring='accuracy')
+                    return scores.mean()
+                else:
+                    model = LGBMRegressor(
+                        n_estimators=50,
+                        max_depth=4,
+                        random_state=random_state,
+                        verbose=-1,
+                        n_jobs=1,
+                    )
+                    cv = KFold(
+                        n_splits=cv_folds, shuffle=True, random_state=random_state
+                    )
+                    scores = cross_val_score(
+                        model, X, y, cv=cv, scoring='neg_root_mean_squared_error'
+                    )
+                    return scores.mean()
+        except Exception:
+            # LightGBM is installed but the CV run crashed (OOM, numerical
+            # issue, etc.). Behavior depends on task_type:
+            #
+            # - regression / classification: return -inf for THIS seed
+            #   instead of silently falling through to PLS/LogReg. Mixing
+            #   objectives across seeds is dishonest; missing one seed's
+            #   contribution is fine.
+            #
+            # - one_class: fall through to the IsolationForest fallback
+            #   below. The IF path is the designed alternative for
+            #   one_class (added in Fix #2 / DeepSeek H1) — it's not a
+            #   foreign objective, it's the documented fallback. Without
+            #   this fallthrough, a globally-broken LightGBM (installed
+            #   but failing on one_class data) would produce all-inf
+            #   union members and the rescore would degenerate to
+            #   diversity-only ranking, exactly the H1 failure mode.
+            if task_type != 'one_class':
+                return float('-inf')
+            # else: fall through to the sklearn-only fallback path
+
+    # LightGBM not installed → use the sklearn-only fallback path. Reached
+    # for every seed in this branch (consistent objective across seeds).
+    if task_type == 'regression':
+        n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
+        n_components = max(2, n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(pls, X, y, cv=cv, scoring='neg_root_mean_squared_error')
+        return scores.mean()
+    elif task_type == 'classification':
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        clf = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1000, n_jobs=1, random_state=random_state),
+        )
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
+        return scores.mean()
+    else:
+        # one_class fallback: IsolationForest on inlier-only training,
+        # score by detection rate on the outlier subset (closes DeepSeek
+        # H1 from the post-Phase-4 review). Without this branch the
+        # one_class multi-seed rescore degraded to a no-op when LightGBM
+        # was unavailable: every config tied at -inf and only diversity
+        # selection ranked them.
+        try:
+            from sklearn.ensemble import IsolationForest
+
+            n_outliers = int(np.sum(y == -1))
+            if n_outliers < 2:
+                return 0.0
+            # IF is itself stochastic: random_state controls per-tree
+            # subsampling, so seeded re-evaluation produces seed-varying
+            # scores even on small datasets.
+            X_inlier = X[y != -1]
+            if len(X_inlier) < 5:
+                return 0.0
+            clf = IsolationForest(
+                contamination='auto',
+                random_state=random_state,
+                n_estimators=50,
+                n_jobs=1,
+            )
+            clf.fit(X_inlier)
+            # Score on full data: predict -1 for outliers, 1 for inliers.
+            # Compare to ground-truth label encoding (y == -1 means outlier).
+            preds = clf.predict(X)
+            # Balanced accuracy = average of inlier-recall and outlier-recall
+            inlier_mask = y != -1
+            outlier_mask = y == -1
+            if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
+                return 0.0
+            inlier_recall = (preds[inlier_mask] == 1).mean()
+            outlier_recall = (preds[outlier_mask] == -1).mean()
+            return float((inlier_recall + outlier_recall) / 2)
+        except Exception:
+            return -np.inf
+
+
 def run_tpe_preprocessing_discovery(
     X: np.ndarray,
     y: np.ndarray,
@@ -233,6 +417,7 @@ def run_tpe_preprocessing_discovery(
     smoothing_polyorder: int = 2,
     progress_callback: Optional[Callable] = None,
     random_state: int = RANDOM_STATE,
+    skip_diversity: bool = False,
 ) -> List[Dict[str, Any]]:
     """TPE-based preprocessing discovery.
 
@@ -463,8 +648,24 @@ def run_tpe_preprocessing_discovery(
             seen.add(key)
             unique_configs.append(cfg)
 
-    # Select diverse top-N (port from preprocessing_discovery.select_diverse_configs)
-    top_configs = select_diverse_configs(unique_configs, n_top, task_type)
+    # Select top-N. By default applies select_diverse_configs to spread across
+    # preprocessing types. When called from the multistart wrapper with
+    # skip_diversity=True, returns the raw top-N by score so the
+    # cross-study union doesn't lose configs that would have been exiled
+    # by a per-study diversity slot. The multistart wrapper applies its
+    # own diversity (keyed on (preproc, autoscale)) at the post-rescore
+    # stage. Closes DeepSeek H2 from the post-Phase-4 review.
+    if skip_diversity:
+        # Sort by score (desc for classification/one_class, asc for regression)
+        if task_type == 'regression':
+            ranked = sorted(unique_configs, key=lambda c: c.get('score', float('inf')))
+        else:
+            ranked = sorted(
+                unique_configs, key=lambda c: c.get('score', float('-inf')), reverse=True
+            )
+        top_configs = ranked[:n_top]
+    else:
+        top_configs = select_diverse_configs(unique_configs, n_top, task_type)
 
     # Print summary
     print(f"\n=== TPE Top {len(top_configs)} Configurations ===")
@@ -509,3 +710,246 @@ def run_tpe_preprocessing_discovery(
             progress_callback(n_trials, n_trials, f"  {i+1}. {full_name}: {score_str}")
 
     return top_configs
+
+
+# =============================================================================
+# Phase 4: Multi-start TPE + multi-seed phase-2 rescore (2026-05-06)
+# =============================================================================
+
+# Available start seeds for the multistart wrapper. n_starts in {3, 5, 7}
+# selects a prefix of this list. Stable across runs so different invocations
+# explore the same regions when n_starts is the same.
+_MULTISTART_SEEDS = [42, 0, 7, 100, 31, 17, 88]
+
+
+def _multistart_config_key(cfg: Dict[str, Any]) -> tuple:
+    """Discrete fingerprint of a TPE config for cross-study deduplication.
+
+    Excludes ``n_components`` / continuous params on purpose: the downstream
+    grid search reads its own model hyperparameters and would discard those
+    anyway. Including them would create false-distinctness across seeds and
+    defeat the union-dedup. (DeepSeek plan-review v3 confirmed this is the
+    right granularity.)
+    """
+    return (
+        cfg.get('preprocessing'),
+        cfg.get('window'),
+        cfg.get('_tpe_autoscale', False),
+        cfg.get('_tpe_baseline_method'),
+        cfg.get('_tpe_smoothing', False),
+    )
+
+
+def run_tpe_multistart_preprocessing_discovery(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str = 'regression',
+    n_trials: int = 75,
+    n_top: int = 10,
+    cv_folds: int = 5,
+    enable_autoscale: bool = True,
+    enable_baseline: bool = True,
+    enable_smoothing: bool = True,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    n_starts: int = 5,
+    per_start_pool: int = 7,
+    n_seeds: int = 5,
+    progress_callback: Optional[Callable] = None,
+) -> List[Dict[str, Any]]:
+    """Multi-start TPE + phase-2 multi-seed rescore.
+
+    Closes the TPE drift problem documented in
+    ``tools/bayesian_topk_stability.py``: pairwise top-K Jaccard ≈ 0
+    across 3 seeded ``run_unified_bayesian`` runs because TPE's
+    ``n_startup_trials=20`` random phase sees different categorical
+    configs per seed and the GMM/KDE models diverge from there. Multi-
+    start runs M independent TPE studies with different random_states,
+    unions their per-study top candidates, then rescores the union with
+    multi-seed CV via ``phase2_adaptive_rescore``.
+
+    Parameters
+    ----------
+    X, y : np.ndarray
+        Spectra and target.
+    task_type : str
+        ``"regression"``, ``"classification"``, or ``"one_class"``.
+    n_trials : int
+        Trials per individual TPE study (default 75 — same as
+        single-start ``run_tpe_preprocessing_discovery``).
+    n_top : int
+        Final top-N to return after multi-seed rescore.
+    n_starts : int
+        Number of independent TPE studies (default 5; recommended floor
+        per the empirical exhaustive-seed comparison). Options [3, 5, 7]
+        in the GUI.
+    per_start_pool : int
+        Top-K' per study to feed into the union (default 7).
+    n_seeds : int
+        Multi-seed rescore breadth (default 5; helper's ``DEFAULT_SEEDS``
+        prefix).
+    progress_callback : callable, optional
+        ``progress_callback(current, total, message)`` style.
+
+    Returns
+    -------
+    List[Dict[str, Any]]
+        Top-N configs in the same shape as
+        ``run_tpe_preprocessing_discovery`` output, with rescored mean
+        in the ``score`` field. Each dict additionally carries
+        ``_tpe_multistart_halt_reason`` for downstream visibility.
+    """
+    from .phase2_rescore import phase2_adaptive_rescore
+
+    if n_starts > len(_MULTISTART_SEEDS):
+        raise ValueError(
+            f"n_starts={n_starts} exceeds available start seeds "
+            f"({len(_MULTISTART_SEEDS)})"
+        )
+    seeds_for_starts = _MULTISTART_SEEDS[:n_starts]
+
+    print(f"\n{'='*70}")
+    print("TPE MULTI-START PREPROCESSING DISCOVERY")
+    print(f"{'='*70}")
+    print(f"  n_starts={n_starts} (seeds={seeds_for_starts})")
+    print(f"  n_trials per start={n_trials}")
+    print(f"  per-start pool={per_start_pool}")
+    print(f"  rescore n_seeds={n_seeds}")
+    print(f"  task_type={task_type}, n_top={n_top}")
+    print(f"{'='*70}\n")
+
+    # Phase 1: run M independent TPE studies and collect per-study top-K'.
+    union: list[Dict[str, Any]] = []
+    seen_keys: set[tuple] = set()
+    for i, seed in enumerate(seeds_for_starts):
+        if progress_callback:
+            progress_callback(
+                i, n_starts, f"TPE start {i + 1}/{n_starts} (seed={seed})"
+            )
+        per_start_top = run_tpe_preprocessing_discovery(
+            X, y,
+            task_type=task_type,
+            n_trials=n_trials,
+            n_top=per_start_pool,
+            cv_folds=cv_folds,
+            enable_autoscale=enable_autoscale,
+            enable_baseline=enable_baseline,
+            enable_smoothing=enable_smoothing,
+            smoothing_window=smoothing_window,
+            smoothing_polyorder=smoothing_polyorder,
+            random_state=seed,
+            progress_callback=None,  # outer multistart owns the progress reporting
+            # Phase 4 fix (DeepSeek H2): skip per-study diversity. The
+            # multistart union applies its own diversity (preproc,
+            # autoscale) at the post-rescore stage; per-study diversity
+            # would exile configs that lose a slot in one study but
+            # would survive cross-study rescore.
+            skip_diversity=True,
+        )
+        for cfg in per_start_top:
+            key = _multistart_config_key(cfg)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                union.append(cfg)
+
+    print(
+        f"  Union of {n_starts} studies: {len(union)} unique discrete configs "
+        f"(out of {n_starts * per_start_pool} per-study top-K' candidates)"
+    )
+
+    if not union:
+        print("WARNING: TPE multistart produced empty union")
+        return []
+
+    # Phase 2: rescore the union via the shared helper in DEGENERATE mode
+    # (single iteration over the entire union — multi-start did the
+    # exploration, helper just denoises scoring).
+    def _eval_fn(cfg: Dict[str, Any], rs: int) -> float:
+        # Apply the full preprocessing chain that produced the original
+        # TPE score, then evaluate with the supplied random_state.
+        try:
+            X_prep = _apply_full_preprocessing(
+                X,
+                cfg['preprocessing'],
+                cfg.get('window'),
+                cfg.get('_tpe_autoscale', False),
+                cfg.get('_tpe_baseline_method'),
+                cfg.get('_tpe_smoothing', False),
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+            )
+            if not np.isfinite(X_prep).all():
+                return -np.inf
+            edge_zone = get_edge_zone(cfg['preprocessing'], cfg.get('window'))
+            if edge_zone > 0 and X_prep.shape[1] > 2 * edge_zone:
+                X_eval = X_prep[:, edge_zone:-edge_zone]
+            else:
+                X_eval = X_prep
+            return evaluate_config_with_seed(
+                X_eval, y, task_type, cv_folds, rs
+            )
+        except Exception:
+            return -np.inf
+
+    rescored, halt_metadata = phase2_adaptive_rescore(
+        candidates=union,
+        eval_fn=_eval_fn,
+        key_fn=_multistart_config_key,
+        score_direction="maximize",
+        pool_size_progression=[len(union)],  # degenerate: single iteration
+        max_pool_multiplier=999,  # cap effectively disabled in degenerate mode
+        top_n=n_top,
+        n_seeds=n_seeds,
+        diversity_key_fn=lambda c: (
+            c.get('preprocessing'),
+            c.get('_tpe_autoscale', False),
+        ),
+    )
+
+    halt_reason = halt_metadata['halt_reason']
+    winner_scores = halt_metadata.get('winner_scores', [])
+    print(
+        f"  Phase 2 rescore halted: {halt_reason} "
+        f"(evaluated {halt_metadata['candidates_evaluated']} candidates)"
+    )
+
+    # Annotate each returned config with:
+    # - The rescored multi-seed mean (replaces the original single-seed score
+    #   from per-study TPE; closes Codex LOW from post-Phase-4 review).
+    # - The multistart halt reason for downstream visibility (closes the
+    #   docstring promise; search.py surfaces this in result CSV rows).
+    result_configs: list[Dict[str, Any]] = []
+    for i, cfg in enumerate(rescored):
+        annotated = dict(cfg)
+        annotated['_tpe_multistart_halt_reason'] = halt_reason
+        if i < len(winner_scores):
+            mean_score, std_score = winner_scores[i]
+            # eval_fn returns higher-is-better; convert to user-facing
+            # convention: regression score = +RMSE, classification score
+            # = accuracy. The original cfg['score'] follows the same
+            # convention, so for regression we negate (the helper's mean is
+            # -RMSE since score_direction='maximize').
+            if task_type == 'regression':
+                annotated['score'] = -mean_score
+            else:
+                annotated['score'] = mean_score
+            annotated['_tpe_multistart_rescored_std'] = std_score
+        result_configs.append(annotated)
+
+    print(f"\n=== TPE Multistart Top {len(result_configs)} Configurations ===")
+    for i, cfg in enumerate(result_configs):
+        window_str = f"w={cfg['window']}" if cfg.get('window') else ""
+        extras = []
+        if cfg.get('_tpe_baseline_method'):
+            extras.append(cfg['_tpe_baseline_method'])
+        if cfg.get('_tpe_smoothing'):
+            extras.append('sg0')
+        if cfg.get('_tpe_autoscale'):
+            extras.append('autoscale')
+        extras_str = '+'.join(extras)
+        full_name = f"{cfg['preprocessing']} {window_str}"
+        if extras_str:
+            full_name += f" [{extras_str}]"
+        print(f"  {i + 1}. {full_name}")
+
+    return result_configs

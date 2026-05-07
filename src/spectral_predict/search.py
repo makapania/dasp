@@ -764,8 +764,17 @@ def compute_validation_metrics_for_top_models(
             window = row.get("Window", None)
             poly = row.get("Poly", None)
 
-            # Check for GA preprocessing genes (needs reconstruction)
-            ga_genes_str = row.get("ga_genes", None)
+            # Check for exhaustive-preprocessing chromosome (needs reconstruction).
+            # Column rename 2026-05-06: this used to be `ga_genes`, but the GUI's
+            # Refine tab uses `ga_genes` for GA-PLS / GA-LightGBM wavelength
+            # selection (an entirely different artifact). Reading
+            # preprocessing-chromosome data through the wavelength-index path
+            # produced silent garbage (X[:, [3,5,1]] instead of a transform).
+            # Read `preprocess_chromosome` first; fall back to `ga_genes` for
+            # result CSVs written before the rename.
+            ga_genes_str = row.get("preprocess_chromosome", None)
+            if ga_genes_str is None:
+                ga_genes_str = row.get("ga_genes", None)
             use_ga_transform = False
             ga_transform = None
             ga_genes = None
@@ -1257,10 +1266,10 @@ def run_search(
     imbalance_params=None,
     enable_class_weight=False,
     ga_preprocess=False,
-    ga_preprocess_method="exhaustive",
-    ga_preprocess_population=48,
-    ga_preprocess_generations=30,
     ga_preprocess_cv_folds=5,
+    ga_preprocess_autoscale=True,  # Phase 3: search both autoscale on/off
+    ga_preprocess_phase2_n_seeds=5,  # Phase 2: 0 disables, 5 default
+    ga_preprocess_phase2_max_pool_multiplier=8,
     ga_quick_mode=False,
     # Smart preprocessing discovery parameters (NEW - replaces GA)
     smart_preprocess=False,
@@ -1271,6 +1280,8 @@ def run_search(
     tpe_preprocess_n_trials=75,
     tpe_preprocess_n_top=10,
     tpe_enable_autoscale=True,
+    tpe_multistart=False,  # Phase 4 (2026-05-06): multi-start + multi-seed rescore
+    tpe_n_starts=5,
     # GA variable selection parameters
     ga_population_size=64,
     ga_generations=100,
@@ -1851,7 +1862,10 @@ def run_search(
         print(f"  Task type: {task_type}")
         print(f"{'='*70}\n")
 
-        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+        from .tpe_preprocessing_discovery import (
+            run_tpe_preprocessing_discovery,
+            run_tpe_multistart_preprocessing_discovery,
+        )
 
         def tpe_progress(current, total, message):
             if progress_callback:
@@ -1864,20 +1878,42 @@ def run_search(
                     }
                 )
 
-        discovered_configs = run_tpe_preprocessing_discovery(
-            X.values,
-            y.values,
-            task_type=task_type,
-            n_trials=tpe_preprocess_n_trials,
-            n_top=tpe_preprocess_n_top,
-            cv_folds=folds,
-            enable_autoscale=tpe_enable_autoscale,
-            enable_baseline=(baseline_method is not None),
-            enable_smoothing=smoothing,
-            smoothing_window=smoothing_window,
-            smoothing_polyorder=smoothing_polyorder,
-            progress_callback=tpe_progress,
-        )
+        # When tpe_multistart=True, run M independent TPE studies and rescore
+        # the union with multi-seed CV. Closes the TPE-drift problem documented
+        # in tools/bayesian_topk_stability.py. Both call sites
+        # (regression/classification here and the one_class call site in
+        # run_one_class_search) gate on the same flag.
+        if tpe_multistart:
+            discovered_configs = run_tpe_multistart_preprocessing_discovery(
+                X.values,
+                y.values,
+                task_type=task_type,
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                n_starts=tpe_n_starts,
+                progress_callback=tpe_progress,
+            )
+        else:
+            discovered_configs = run_tpe_preprocessing_discovery(
+                X.values,
+                y.values,
+                task_type=task_type,
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                progress_callback=tpe_progress,
+            )
 
         if not discovered_configs:
             print("WARNING: TPE preprocessing discovery found no valid configs!")
@@ -1926,6 +1962,13 @@ def run_search(
                         "smoothing_polyorder": smoothing_polyorder,
                         "autoscale": cfg.get("_tpe_autoscale", False),
                         "tpe_score": cfg.get("score"),
+                        # Phase 4 fix (2026-05-06): propagate multistart halt
+                        # reason through to result rows so users can see
+                        # whether the rescore converged. Single-start TPE
+                        # configs don't carry this key; default to None.
+                        "tpe_multistart_halt_reason": cfg.get(
+                            "_tpe_multistart_halt_reason"
+                        ),
                     }
                 )
 
@@ -1949,21 +1992,17 @@ def run_search(
         if progress_callback:
             progress_callback(
                 {
-                    "stage": "ga_preprocessing",
-                    "message": "Optimizing preprocessing parameters with GA...",
+                    "stage": "exhaustive_preprocessing",
+                    "message": "Optimizing preprocessing parameters (exhaustive search)...",
                     "current": 0,
-                    "total": ga_preprocess_generations,
+                    "total": 238,  # 14 preproc x 17 windows
                 }
             )
 
         print(f"\n{'='*70}")
-        print("GA PREPROCESSING OPTIMIZATION")
+        print("EXHAUSTIVE PREPROCESSING OPTIMIZATION")
         print(f"{'='*70}")
-        print(f"  Search method: {ga_preprocess_method.upper()}")
         print(f"  Search space: 238 combinations (14 preproc x 17 windows)")
-        if ga_preprocess_method == "ga":
-            print(f"  Population size: {ga_preprocess_population}")
-            print(f"  Generations: {ga_preprocess_generations}")
         print(f"  CV folds: {ga_preprocess_cv_folds}")
         print(f"  Task type: {task_type}")
         print(f"  Note: This REPLACES user-selected preprocessing methods")
@@ -1998,7 +2037,7 @@ def run_search(
         # Use model_grids.keys() since it's already filtered by enabled_models or models_to_test
         models_for_ga = list(model_grids.keys())
         print(
-            f"Running {ga_preprocess_method.upper()} optimization per-model with actual hyperparameters..."
+            "Running EXHAUSTIVE optimization per-model with actual hyperparameters..."
         )
         print(f"Models selected: {models_for_ga}")
         print(f"")
@@ -2048,13 +2087,11 @@ def run_search(
             # Build model_config for actual model evaluation
             model_config = {"name": model_name, "params": first_params}
 
-            # Run GA/Exhaustive optimization with actual model evaluation
+            # Run exhaustive optimization with actual model evaluation
             ga_result = optimize_preprocessing(
                 X.values,  # Convert DataFrame to numpy
                 y.values,  # Convert Series to numpy
-                method=ga_preprocess_method,
-                population_size=ga_preprocess_population,
-                n_generations=ga_preprocess_generations,
+                method="exhaustive",
                 cv_folds=folds,  # Use same CV folds as main search
                 n_components=safe_max_components,  # Match grid search components
                 task_type=task_type,
@@ -2063,8 +2100,11 @@ def run_search(
                 progress_callback=progress_callback,
                 fitness_model=fitness_model,  # Fallback if model_config fails
                 top_n=5,  # Return top 5 preprocessing configs
-                n_jobs=-1 if ga_preprocess_method == "exhaustive" else 1,
+                n_jobs=-1,  # Always parallel (was conditional on legacy GA mode)
                 model_config=model_config,  # Use actual model for fitness evaluation
+                apply_autoscale=ga_preprocess_autoscale,  # Phase 3 autoscale gene
+                phase2_n_seeds=ga_preprocess_phase2_n_seeds,  # Phase 2 multi-seed rescore
+                phase2_max_pool_multiplier=ga_preprocess_phase2_max_pool_multiplier,
             )
 
             ga_results[model_name] = ga_result
@@ -2119,6 +2159,11 @@ def run_search(
             # Add all top-N configs for this model
             for i, cfg in enumerate(configs_list):
                 base_name = cfg.get("name", "unknown")
+                # Strip the optional "+autoscale" tag from the chromosome name
+                # before deriving the pipeline base_name; the autoscale flag
+                # is propagated separately via the dict's "autoscale" key.
+                if base_name.endswith("+autoscale"):
+                    base_name = base_name[: -len("+autoscale")]
                 # Clean display name: strip derivative order
                 if base_name in ("raw", "snv"):
                     clean_name = base_name
@@ -2130,6 +2175,18 @@ def run_search(
                     clean_name = "deriv"
                 else:
                     clean_name = base_name
+
+                # Decode autoscale gene from chromosome (Phase 3, 2026-05-06).
+                # Backward-compat: 2-gene chromosomes from saved CSVs and from
+                # ga_preprocess_autoscale=False runs read as autoscale=False.
+                genes = cfg.get("genes")
+                from .ga_preprocessing import _decode_autoscale_gene
+                autoscale_gene = (
+                    _decode_autoscale_gene(genes)
+                    if genes is not None
+                    else False
+                )
+
                 preprocess_configs.append(
                     {
                         "name": clean_name,
@@ -2143,10 +2200,22 @@ def run_search(
                         "smoothing": smoothing,
                         "smoothing_window": smoothing_window,
                         "smoothing_polyorder": smoothing_polyorder,
+                        "autoscale": autoscale_gene,  # Phase 3 autoscale dimension
+                        # Phase 2 (2026-05-06): which path produced this config?
+                        # 'converged' / 'cap' / 'single_iteration' / 'disabled'.
+                        # Per-config because results CSV is row-shaped, but the
+                        # value is per-search (all configs from one ga_result
+                        # share the same halt_reason).
+                        "phase2_halt_reason": ga_result.get("phase2_halt_reason", "disabled"),
                         "ga_transform": cfg.get("transform"),
                         "ga_config": cfg.get("config"),
                         "ga_model_type": model_name,  # Track which model this was optimized for
-                        "ga_genes": cfg.get("genes"),
+                        # Renamed from "ga_genes" 2026-05-06: collision with the
+                        # GUI Refine tab's wavelength-index field of the same
+                        # name. preprocess_chromosome is the dasp-internal name
+                        # for [preproc_idx, window_idx] (legacy 2-gene) or
+                        # [preproc_idx, window_idx, autoscale] (Phase 3).
+                        "preprocess_chromosome": genes,
                     }
                 )
 
@@ -5052,6 +5121,11 @@ def _run_single_config(
         "imbalance_method": imbalance_method,
         "imbalance_params": imbalance_params,
         "tpe_score": preprocess_cfg.get("tpe_score"),
+        # Phase 4: multistart halt reason. None for single-start TPE configs
+        # and exhaustive configs; one of {converged, cap, single_iteration}
+        # for multistart configs. Symmetric with phase2_halt_reason for the
+        # exhaustive path (added below for the chromosome-bearing rows).
+        "tpe_multistart_halt_reason": preprocess_cfg.get("tpe_multistart_halt_reason"),
     }
 
     # Add training configuration for tracking data state
@@ -5081,11 +5155,32 @@ def _run_single_config(
         "random_state": 42,  # CV random state (always 42 in this codebase)
     }
 
-    # Store GA preprocessing genes if present (for Model Development reconstruction)
-    if "ga_genes" in preprocess_cfg and preprocess_cfg["ga_genes"] is not None:
-        result["ga_genes"] = preprocess_cfg["ga_genes"].tolist()  # Serialize numpy array
+    # Store exhaustive-preprocessing chromosome if present (for Model Development
+    # reconstruction). Column renamed 2026-05-06: this used to be `ga_genes`, but
+    # that name collides with the GUI Refine tab's wavelength-index field of the
+    # same name (which comes from GA-PLS variable selection). Renaming the
+    # preprocessing-chromosome column to `preprocess_chromosome` removes the
+    # ambiguity. The chromosome-rebuild reader (in
+    # compute_validation_metrics_for_top_models) falls back to `ga_genes` so
+    # old result CSVs continue to rebuild correctly.
+    if (
+        "preprocess_chromosome" in preprocess_cfg
+        and preprocess_cfg["preprocess_chromosome"] is not None
+    ):
+        result["preprocess_chromosome"] = preprocess_cfg[
+            "preprocess_chromosome"
+        ].tolist()  # Serialize numpy array
         result["ga_model_type"] = preprocess_cfg.get("ga_model_type", "linear")
         result["ga_config"] = preprocess_cfg.get("ga_config", "")
+
+    # Phase 2 halt-reason visibility (closes Codex MED #2 from post-Phase-4
+    # review). Per-row column so users can see which exhaustive-preprocessing
+    # rows came from a 'converged' rescore vs a 'cap'-hit rescore vs the
+    # legacy 'disabled' single-seed path. Per-search value duplicated to
+    # every row from one ga_result, but row-shape is the only way to
+    # surface it without a CSV schema split.
+    if "phase2_halt_reason" in preprocess_cfg:
+        result["phase2_halt_reason"] = preprocess_cfg["phase2_halt_reason"]
 
     # Store Smart preprocessing metadata if present (for validation reconstruction)
     if (
@@ -5420,6 +5515,8 @@ def run_one_class_search(
     tpe_preprocess_n_trials=75,
     tpe_preprocess_n_top=10,
     tpe_enable_autoscale=True,
+    tpe_multistart=False,  # Phase 4 (2026-05-06): multi-start + multi-seed rescore
+    tpe_n_starts=5,
     # Variable selection
     variable_selection_methods=None,
     variable_counts=None,
@@ -5488,7 +5585,11 @@ def run_one_class_search(
     variable_counts : list of int, optional
         Number of top variables to test. Default: [10, 20, 50, 100, 250, 500, 1000].
     apply_uve_prefilter : bool, default=False
-        Whether to apply UVE prefilter before other methods.
+        Whether to apply UVE prefilter before other methods. Coerced to
+        False early in this function (before any UVE-touching path runs)
+        with a warning — UVE prefilter is a y-driven discrimination
+        method, not a one-class method per CLAUDE.md:66 / Pomerantsev
+        et al. 2025 LOVE.
     uve_cutoff_multiplier : float, default=1.0
         UVE cutoff multiplier for uninformative variable elimination.
     uve_n_components : int, optional
@@ -5533,6 +5634,19 @@ def run_one_class_search(
     outlier_indices = np.where(outlier_mask)[0]
     n_inliers = len(inlier_indices)
     n_outliers = len(outlier_indices)
+
+    # UVE prefilter is a y-driven discrimination filter (CLAUDE.md:66) and
+    # has no place in one-class screening. The GUI clears this checkbox at
+    # spectral_predict_gui_optimized.py:16671, but scripted callers bypass
+    # the GUI. Coerce to False with a warning so backend behavior matches
+    # the documented one-class contract regardless of caller.
+    if apply_uve_prefilter:
+        logger.warning(
+            "apply_uve_prefilter=True is not supported for one-class "
+            "screening (UVE prefilter is a y-driven discrimination method, "
+            "not a one-class method). Forcing apply_uve_prefilter=False."
+        )
+        apply_uve_prefilter = False
 
     logger.info("=" * 70)
     logger.info("ONE-CLASS SCREENING")
@@ -5651,7 +5765,10 @@ def run_one_class_search(
             logger.info("Smart preprocessing discovered %d configs", len(preprocess_configs))
 
     if tpe_preprocess and not smart_preprocess:
-        from .tpe_preprocessing_discovery import run_tpe_preprocessing_discovery
+        from .tpe_preprocessing_discovery import (
+            run_tpe_preprocessing_discovery,
+            run_tpe_multistart_preprocessing_discovery,
+        )
 
         def tpe_oc_progress(current, total, message):
             if progress_callback:
@@ -5664,20 +5781,40 @@ def run_one_class_search(
                     }
                 )
 
-        discovered = run_tpe_preprocessing_discovery(
-            X_np,
-            y_oc,
-            task_type="one_class",
-            n_trials=tpe_preprocess_n_trials,
-            n_top=tpe_preprocess_n_top,
-            cv_folds=folds,
-            enable_autoscale=tpe_enable_autoscale,
-            enable_baseline=(baseline_method is not None),
-            enable_smoothing=enable_smoothing,
-            smoothing_window=smoothing_window,
-            smoothing_polyorder=smoothing_polyorder,
-            progress_callback=tpe_oc_progress,
-        )
+        # one_class call site mirrors the regression/classification TPE call
+        # site (search for `tpe_multistart` to find both). Same gating flag,
+        # same wrapper dispatch.
+        if tpe_multistart:
+            discovered = run_tpe_multistart_preprocessing_discovery(
+                X_np,
+                y_oc,
+                task_type="one_class",
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=enable_smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                n_starts=tpe_n_starts,
+                progress_callback=tpe_oc_progress,
+            )
+        else:
+            discovered = run_tpe_preprocessing_discovery(
+                X_np,
+                y_oc,
+                task_type="one_class",
+                n_trials=tpe_preprocess_n_trials,
+                n_top=tpe_preprocess_n_top,
+                cv_folds=folds,
+                enable_autoscale=tpe_enable_autoscale,
+                enable_baseline=(baseline_method is not None),
+                enable_smoothing=enable_smoothing,
+                smoothing_window=smoothing_window,
+                smoothing_polyorder=smoothing_polyorder,
+                progress_callback=tpe_oc_progress,
+            )
         if discovered:
             preprocess_configs = []
             for cfg in discovered:
@@ -5708,6 +5845,11 @@ def run_one_class_search(
                         "smoothing_polyorder": smoothing_polyorder,
                         "autoscale": cfg.get("_tpe_autoscale", False),
                         "tpe_score": cfg.get("score"),
+                        # Phase 4: multistart halt-reason propagation
+                        # (one_class call site mirror of regression/cls path)
+                        "tpe_multistart_halt_reason": cfg.get(
+                            "_tpe_multistart_halt_reason"
+                        ),
                     }
                 )
             logger.info("TPE preprocessing discovered %d configs", len(preprocess_configs))
@@ -5779,19 +5921,20 @@ def run_one_class_search(
         oc_hyperparams=oc_hyperparams,
     )
 
-    # Filter and validate variable selection methods for one-class
+    # Filter and validate variable selection methods for one-class.
+    # UVE family is excluded per CLAUDE.md:66 — UVE-on-y_oc is a discrimination
+    # method (Pomerantsev et al. 2025 LOVE / Forina modeling-power vs
+    # discrimination-power), not a one-class method. iPLS family is also
+    # implicitly excluded (not in this whitelist) since it requires PLS
+    # internals not available for one-class models. The GUI mirrors both
+    # exclusions at spectral_predict_gui_optimized.py:16667-16683.
     implemented_oc_varsel = {
         "importance",
         "spa",
-        "uve",
         "cars",
         "cars-tree",
         "ga",
         "vcpa-iriv",
-        "uve_spa",
-        "uve_cars",
-        "uve_cars_tree",
-        "uve_cars_spa",
     }
     selected_varsel_methods = []
     if variable_selection_methods:
@@ -6047,6 +6190,12 @@ def run_one_class_search(
                     "pca_reducer": cv_result.get("cal_pca_reducer"),
                     "oc_score_stats": cv_result.get("oc_score_stats"),
                     "tpe_score": preprocess_cfg.get("tpe_score"),
+                    # Phase 4 propagation (one_class path) — closes Codex
+                    # residual STRONG on Fix #5: regression/cls result rows
+                    # already carried this; one_class did not.
+                    "tpe_multistart_halt_reason": preprocess_cfg.get(
+                        "tpe_multistart_halt_reason"
+                    ),
                 }
 
                 # Training config for model reproducibility (mirrors regression/classification)
@@ -6627,6 +6776,11 @@ def run_one_class_search(
                                 "pca_reducer": cv_result.get("cal_pca_reducer"),
                                 "oc_score_stats": cv_result.get("oc_score_stats"),
                                 "tpe_score": preprocess_cfg.get("tpe_score"),
+                                # Phase 4 propagation — second one_class result
+                                # site (mirror of the first oc-result-dict).
+                                "tpe_multistart_halt_reason": preprocess_cfg.get(
+                                    "tpe_multistart_halt_reason"
+                                ),
                             }
 
                             # Training config for model reproducibility

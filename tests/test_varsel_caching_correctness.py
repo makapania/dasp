@@ -155,23 +155,62 @@ class TestVarselSubsetsInUnifiedBayesian:
             assert len(df) > 0
             print(f"  {model_name} one-class: {len(df)} results")
 
-    def test_one_class_with_uve(self, spectral_data):
-        """Run one-class with UVE enabled — exercises UVE variable selection path."""
+    def test_one_class_with_uve_is_coerced(self, spectral_data, caplog):
+        """One-class + ``enable_uve=True`` must be coerced to ``enable_uve=False``
+        with a warning, and no Optuna trial may have ``subset_type='uve'``.
+
+        UVE on y_oc (the +1/-1 binary labels constructed inside
+        ``create_unified_objective``) is a discrimination method, not a
+        one-class method (CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
+        Backend coercion lives at ``unified_bayesian.run_unified_bayesian``
+        entry plus a defense-in-depth guard in ``create_unified_objective``.
+
+        Cycle 4 sister-site fix — closes Kimi K2.6 STRONG / Codex cycle 4
+        STRONG #1 (corroborated by GLM 5.1 NEEDS_DISCUSSION). Replaces an
+        earlier ``test_one_class_with_uve`` that asserted the leaky path
+        succeeded.
+        """
+        import logging
         X, _, _, y_oc_str, wavelengths = spectral_data
 
-        df, study = run_unified_bayesian(
-            X=X, y=y_oc_str, wavelengths=wavelengths,
-            model_name='PCA-SIMCA',
-            task_type='one_class',
-            n_trials=10,
-            cv_folds=3,
-            random_state=42,
-            verbose=False,
-            inlier_class_label='High',
-            enable_uve=True,
+        with caplog.at_level(logging.WARNING):
+            df, study = run_unified_bayesian(
+                X=X, y=y_oc_str, wavelengths=wavelengths,
+                model_name='PCA-SIMCA',
+                task_type='one_class',
+                n_trials=10,
+                cv_folds=3,
+                random_state=42,
+                verbose=False,
+                inlier_class_label='High',
+                enable_uve=True,
+            )
+
+        assert len(df) > 0, "Coerced run should still produce results"
+
+        # Coercion warning must fire exactly once (run_unified_bayesian's
+        # entry guard short-circuits enable_uve before create_unified_objective
+        # sees it, so the inner defense-in-depth guard does not double-fire).
+        coercion_msgs = [
+            r for r in caplog.records
+            if "enable_uve" in r.getMessage()
+            and "one-class" in r.getMessage()
+        ]
+        assert len(coercion_msgs) == 1, (
+            "Coercion warning must fire exactly once; got "
+            f"{len(coercion_msgs)}: {[r.getMessage() for r in coercion_msgs]}"
         )
-        assert len(df) > 0
-        print(f"  PCA-SIMCA one-class with UVE: {len(df)} results")
+
+        # No trial may have selected UVE — confirms the coercion reached
+        # the available_methods list before Optuna sampled subset_type.
+        uve_trials = [
+            t for t in study.trials
+            if t.params.get('subset_type') == 'uve'
+        ]
+        assert not uve_trials, (
+            f"No trial may run UVE for one-class; got {len(uve_trials)} "
+            f"uve trial(s): {[t.number for t in uve_trials]}"
+        )
 
 
 class TestCachingDoesNotChangeResults:

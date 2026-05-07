@@ -1,13 +1,14 @@
 """
-Unit and integration tests for GA-based preprocessing optimization.
+Unit and integration tests for exhaustive preprocessing optimization.
 
-This test suite validates the genetic algorithm for preprocessing parameter
-optimization (ga_preprocessing.py) including:
-- Chromosome encoding and decoding
+Originally written for the GA preprocessing path; the GA evolution loop and
+its operators (tournament_selection, crossover, mutate) were removed in
+2026-05-06 because parallel exhaustive enumeration finished the same
+14 x 17 = 238 cell space in seconds. This module now validates:
+- Chromosome encoding / decoding (still 2-gene; backward-compat with saved CSVs)
 - Fitness evaluation
-- Genetic operators (selection, crossover, mutation)
-- Full optimization workflow
-- Integration with preprocessing pipeline
+- Full exhaustive optimization workflow
+- Convenience wrapper for integration with search.py
 """
 
 from __future__ import annotations
@@ -21,11 +22,9 @@ try:
         chromosome_to_transform,
         get_config_description,
         evaluate_fitness,
-        tournament_selection,
-        crossover,
-        mutate,
         optimize_preprocessing,
         get_optimized_preproc_config,
+        _decode_autoscale_gene,
         PREPROC_TYPES,
         WINDOW_SIZES,
         DERIVATIVE_WINDOW_RANGES,
@@ -217,118 +216,240 @@ class TestFitnessEvaluation:
 # =============================================================================
 
 
+# =============================================================================
+# Phase 3: Backward-compat 2-gene / 3-gene chromosome decode
+# =============================================================================
+
+
 @pytest.mark.unit
-class TestGeneticOperators:
-    """Test genetic operators."""
+class TestChromosomeAutoscaleBackwardCompat:
+    """Pin that the autoscale-gene decode handles both legacy 2-gene and
+    Phase-3 3-gene chromosomes. These tests are load-bearing for saved-CSV
+    rebuild correctness — old result files have 2-gene ga_genes arrays and
+    must continue to decode as autoscale=False after Phase 3 ships.
+    """
 
-    def test_tournament_selection_returns_parent(self):
-        """Tournament selection should return a valid parent."""
-        rng = np.random.RandomState(42)
+    def test_2gene_chromosome_decodes_autoscale_false(self):
+        """Legacy 2-gene array → autoscale=False, no StandardScaler in transform."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)  # arbitrary deriv2, w=15
 
-        # Create population
-        pop_size = 10
-        population = np.array([random_chromosome(rng) for _ in range(pop_size)])
-        fitness = np.random.randn(pop_size)
+        assert _decode_autoscale_gene(genes_2gene) is False
 
-        # Select parent
-        parent = tournament_selection(population, fitness, tournament_size=3, rng=rng)
+        name, transform = chromosome_to_transform(genes_2gene)
+        # Name should NOT include +autoscale
+        assert "+autoscale" not in name
 
-        assert parent.shape == (N_GENES,), "Parent should have correct shape"
-        assert parent.dtype == np.int32, "Parent should be integer array"
+        # Transform output should be valid; standard SG-derivative behavior
+        # (we just check the function runs and produces correct shape)
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform is not None:
+            X_out = transform(X)
+            assert X_out.shape == X.shape
 
-    def test_tournament_favors_high_fitness(self):
-        """Tournament selection should favor high fitness individuals."""
-        rng = np.random.RandomState(42)
+    def test_3gene_chromosome_with_autoscale_true(self):
+        """3-gene array with autoscale=1 → name carries +autoscale and the
+        transform applies StandardScaler."""
+        genes_3gene = np.array([3, 5, 1], dtype=np.int32)
 
-        # Create population with known fitness
-        pop_size = 10
-        population = np.array([random_chromosome(rng) for _ in range(pop_size)])
-        fitness = np.arange(pop_size, dtype=float)  # 0, 1, 2, ..., 9
+        assert _decode_autoscale_gene(genes_3gene) is True
 
-        # Select many times
-        selections = [
-            tournament_selection(population, fitness, tournament_size=3, rng=rng)
-            for _ in range(100)
-        ]
+        name, transform = chromosome_to_transform(genes_3gene)
+        assert "+autoscale" in name
 
-        # Check that high-fitness individuals are selected more often
-        # (statistical test - may occasionally fail)
-        # Compare bytes to identify which individual was selected
-        best_individual = population[-1]  # Highest fitness
-        best_count = sum(1 for s in selections if np.array_equal(s, best_individual))
+        # After transform, every column should be z-scored (mean ~0, std ~1)
+        X = np.random.RandomState(42).randn(20, 50)
+        X_out = transform(X)
+        assert X_out.shape == X.shape
+        # Per-column means and stds
+        col_means = np.abs(X_out.mean(axis=0))
+        col_stds = X_out.std(axis=0)
+        assert np.all(col_means < 1e-9), f"Expected zero-mean cols, max abs mean={col_means.max()}"
+        assert np.all(np.abs(col_stds - 1.0) < 1e-9), f"Expected unit-std cols, got {col_stds}"
 
-        # Best individual should be selected more than random chance (10%)
-        assert best_count > 10, "High fitness individual should be selected frequently"
+    def test_3gene_chromosome_with_autoscale_false(self):
+        """3-gene array with autoscale=0 → no +autoscale in name; behavior
+        identical to the 2-gene equivalent."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)
+        genes_3gene = np.array([3, 5, 0], dtype=np.int32)
 
-    def test_crossover_preserves_length(self):
-        """Crossover should preserve chromosome length."""
-        rng = np.random.RandomState(42)
+        assert _decode_autoscale_gene(genes_3gene) is False
 
-        parent1 = random_chromosome(rng)
-        parent2 = random_chromosome(rng)
+        name_2gene, transform_2gene = chromosome_to_transform(genes_2gene)
+        name_3gene, transform_3gene = chromosome_to_transform(genes_3gene)
 
-        child1, child2 = crossover(parent1, parent2, crossover_rate=0.7, rng=rng)
+        # Names must match exactly (no +autoscale tag for either)
+        assert name_2gene == name_3gene
+        assert "+autoscale" not in name_2gene
 
-        assert child1.shape == parent1.shape, "Child1 should have same shape as parent"
-        assert child2.shape == parent2.shape, "Child2 should have same shape as parent"
+        # Transform outputs must be bit-exact equal
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform_2gene is None:
+            assert transform_3gene is None
+        else:
+            X_2 = transform_2gene(X)
+            X_3 = transform_3gene(X)
+            np.testing.assert_array_equal(X_2, X_3)
 
-    def test_crossover_with_zero_rate(self):
-        """Crossover with rate=0 should return copies of parents."""
-        rng = np.random.RandomState(42)
+    def test_raw_with_autoscale_true(self):
+        """raw + autoscale=True must produce a transform (not None) that
+        applies just StandardScaler. The legacy raw + autoscale=False case
+        still returns transform=None for back-compat with the no-op fast
+        path."""
+        raw_idx = PREPROC_TYPES.index("raw")
+        genes_raw_no_autoscale = np.array([raw_idx, 0], dtype=np.int32)
+        genes_raw_with_autoscale = np.array([raw_idx, 0, 1], dtype=np.int32)
 
-        parent1 = random_chromosome(rng)
-        parent2 = random_chromosome(rng)
+        # raw + autoscale=False → transform=None (fast path)
+        _, t_none = chromosome_to_transform(genes_raw_no_autoscale)
+        assert t_none is None
 
-        child1, child2 = crossover(parent1, parent2, crossover_rate=0.0, rng=rng)
+        # raw + autoscale=True → real transform that just z-scores
+        name, t_autoscale = chromosome_to_transform(genes_raw_with_autoscale)
+        assert "+autoscale" in name
+        assert t_autoscale is not None
+        X = np.random.RandomState(42).randn(20, 50)
+        X_out = t_autoscale(X)
+        assert np.all(np.abs(X_out.mean(axis=0)) < 1e-9)
+        assert np.all(np.abs(X_out.std(axis=0) - 1.0) < 1e-9)
 
-        assert np.array_equal(child1, parent1), "Child1 should equal parent1 with rate=0"
-        assert np.array_equal(child2, parent2), "Child2 should equal parent2 with rate=0"
+    def test_get_config_description_handles_both_shapes(self):
+        """get_config_description must accept both 2-gene and 3-gene arrays."""
+        genes_2gene = np.array([3, 5], dtype=np.int32)
+        genes_3gene_off = np.array([3, 5, 0], dtype=np.int32)
+        genes_3gene_on = np.array([3, 5, 1], dtype=np.int32)
 
-    def test_mutation_flips_genes(self):
-        """Mutation should modify genes."""
-        rng = np.random.RandomState(42)
+        desc_2gene = get_config_description(genes_2gene)
+        desc_3gene_off = get_config_description(genes_3gene_off)
+        desc_3gene_on = get_config_description(genes_3gene_on)
 
-        original = random_chromosome(rng)
+        # 2-gene and 3-gene-off should produce the same description
+        assert desc_2gene == desc_3gene_off
+        # 3-gene-on must mention autoscale
+        assert "autoscale" in desc_3gene_on
+        # 2-gene must NOT mention autoscale
+        assert "autoscale" not in desc_2gene
 
-        # Use 100% mutation rate to guarantee all genes are re-randomized.
-        # With only 2 genes, lower rates have a significant chance of no change
-        # (both from the rate check and from re-drawing the same value).
-        mutated = mutate(original, mutation_rate=1.0, rng=rng)
+    def test_saved_csv_2gene_rebuild_compatible(self):
+        """Simulate the rebuild path that re-runs chromosome_to_transform
+        on a 2-gene ga_genes array deserialized from an old result CSV.
+        Must produce a working transform."""
+        # Old CSVs serialize ga_genes via .tolist(); on rebuild it's a list
+        # of 2 ints. search.py converts back to np.ndarray before calling
+        # chromosome_to_transform. Pin that path:
+        gene_list_from_csv = [3, 5]
+        genes = np.array(gene_list_from_csv, dtype=np.int32)
 
-        assert mutated.shape == original.shape, "Mutation should preserve shape"
+        name, transform = chromosome_to_transform(genes)
+        assert isinstance(name, str)
 
-        # Run multiple trials to confirm mutation can produce changes
-        any_changed = False
-        for _ in range(20):
-            m = mutate(original, mutation_rate=1.0, rng=rng)
-            if not np.array_equal(m, original):
-                any_changed = True
-                break
-        assert any_changed, "Mutation should eventually change at least one gene"
+        X = np.random.RandomState(42).randn(10, 50)
+        if transform is not None:
+            X_out = transform(X)
+            assert X_out.shape == X.shape
 
-    def test_mutation_respects_ranges(self):
-        """Mutated genes should stay in valid ranges."""
-        rng = np.random.RandomState(42)
+    def test_csv_roundtrip_preprocess_chromosome_via_pandas(self, tmp_path):
+        """Closes pr-test-analyzer rating-9 finding: the renamed
+        `preprocess_chromosome` column must round-trip through pandas
+        (write → ast.literal_eval read → np.ndarray) and produce a working
+        transform via chromosome_to_transform.
 
-        original = random_chromosome(rng)
-        mutated = mutate(original, mutation_rate=0.8, rng=rng)
+        The contract: a result-row column named `preprocess_chromosome`
+        contains a string repr of a Python list (e.g. "[3, 5, 1]") that
+        ast.literal_eval converts back to a list, then np.array converts
+        to ndarray, and chromosome_to_transform consumes either shape
+        (2-gene legacy or 3-gene Phase-3).
+        """
+        import ast
+        import pandas as pd
 
-        assert 0 <= mutated[0] < len(PREPROC_TYPES)
-        assert 0 <= mutated[1] < len(WINDOW_SIZES)
+        # 3-gene chromosome (Phase 3): [snv_deriv2_idx=7, w=11_idx=4, autoscale=1]
+        chromosome = np.array([7, 4, 1], dtype=np.int32)
+        # search.py serializes via .tolist() before writing to CSV:
+        serialized = chromosome.tolist()
+
+        # Round-trip through pandas (matches the actual save/load path)
+        df = pd.DataFrame([{"preprocess_chromosome": str(serialized)}])
+        csv_path = tmp_path / "result.csv"
+        df.to_csv(csv_path, index=False)
+        df_loaded = pd.read_csv(csv_path)
+
+        # Mimic search.py's reader logic
+        loaded_str = df_loaded.iloc[0]["preprocess_chromosome"]
+        assert isinstance(loaded_str, str), "CSV writes lists as strings"
+        loaded_list = ast.literal_eval(loaded_str)
+        loaded_genes = np.array(loaded_list, dtype=np.int32)
+
+        # Verify the rebuild path produces an equivalent transform
+        name_orig, transform_orig = chromosome_to_transform(chromosome)
+        name_loaded, transform_loaded = chromosome_to_transform(loaded_genes)
+        assert name_orig == name_loaded
+        assert "+autoscale" in name_loaded  # Phase 3 marker preserved
+
+        if transform_orig is not None and transform_loaded is not None:
+            X = np.random.RandomState(42).randn(20, 100)
+            X_orig = transform_orig(X)
+            X_loaded = transform_loaded(X)
+            np.testing.assert_array_almost_equal(X_orig, X_loaded)
+
+    def test_csv_legacy_ga_genes_column_still_rebuilds(self, tmp_path):
+        """Pin the backward-compat fallback: an OLD result CSV with
+        `ga_genes` (and no `preprocess_chromosome` column) must still
+        rebuild via the search.py reader's fallback chain. This test
+        exercises the reader logic directly.
+
+        Without this pin, a future refactor could drop the fallback
+        without any test catching it — every old saved-result file would
+        silently fail to rebuild and the GUI Tab 7 would produce wrong
+        predictions.
+        """
+        import ast
+        import pandas as pd
+
+        # Legacy CSV: only `ga_genes` column populated, no `preprocess_chromosome`
+        chromosome_2gene = [3, 5]  # 2-gene legacy shape
+        df = pd.DataFrame([{"ga_genes": str(chromosome_2gene)}])
+        csv_path = tmp_path / "legacy_result.csv"
+        df.to_csv(csv_path, index=False)
+        df_loaded = pd.read_csv(csv_path)
+
+        row = df_loaded.iloc[0].to_dict()
+
+        # Mirror search.py:768-794 reader logic exactly (without invoking
+        # the full validation rebuild which needs much more setup)
+        chromosome_str = row.get("preprocess_chromosome", None)
+        if chromosome_str is None or (
+            isinstance(chromosome_str, float) and np.isnan(chromosome_str)
+        ):
+            chromosome_str = row.get("ga_genes", None)
+
+        assert chromosome_str is not None, "Reader must find legacy ga_genes"
+        assert isinstance(chromosome_str, str)
+        loaded_list = ast.literal_eval(chromosome_str)
+        loaded_genes = np.array(loaded_list, dtype=np.int32)
+
+        # The legacy 2-gene array must decode as autoscale=False
+        assert loaded_genes.shape == (2,)
+        from spectral_predict.ga_preprocessing import _decode_autoscale_gene
+        assert _decode_autoscale_gene(loaded_genes) is False
+
+        # And produce a working transform
+        name, transform = chromosome_to_transform(loaded_genes)
+        assert isinstance(name, str)
+        assert "+autoscale" not in name  # legacy chromosomes never have autoscale
 
 
 # =============================================================================
-# Integration Tests - GA Optimization
+# Integration Tests - Exhaustive Optimization
 # =============================================================================
 
 
 @pytest.mark.integration
 @pytest.mark.slow
-class TestGAPreprocessingOptimization:
-    """Test full GA preprocessing optimization."""
+class TestExhaustivePreprocessingOptimization:
+    """Test full exhaustive preprocessing optimization (replaces GA loop)."""
 
     def test_basic_optimization(self, synthetic_spectra_small):
-        """GA should complete and return valid result."""
+        """Exhaustive should complete and return valid result."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -336,12 +457,12 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=5,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,  # Sequential for test determinism
         )
 
         # Check result structure
@@ -351,44 +472,15 @@ class TestGAPreprocessingOptimization:
         assert "best_rmsecv" in result
         assert "best_config" in result
         assert "history" in result
+        assert "configs" in result  # Top-N output
 
-        # Check best_genes
+        # Check best_genes shape (chromosome encoding still 2-gene)
         assert result["best_genes"].shape == (N_GENES,)
         assert isinstance(result["best_name"], str)
         assert result["best_transform"] is None or callable(result["best_transform"])
 
-        # Check history (gen 0 + up to n_generations entries, may be shorter with early stopping)
-        assert len(result["history"]) >= 1, "History should have at least 1 entry"
-        assert len(result["history"]) <= 6, "History should have at most 6 entries (gen 0-5)"
-
-    def test_fitness_improves(self, synthetic_spectra_small):
-        """Later generations should have better or equal fitness."""
-        X, y = synthetic_spectra_small
-        X = X.values
-        y = y.values
-
-        result = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=10,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
-        )
-
-        history = result["history"]
-        best_fitness_values = [gen["best_fitness"] for gen in history]
-
-        # Check that fitness generally improves (monotonically non-decreasing)
-        for i in range(1, len(best_fitness_values)):
-            assert (
-                best_fitness_values[i] >= best_fitness_values[i - 1]
-            ), f"Fitness should not decrease from gen {i-1} to {i}"
-
     def test_best_preprocessing_identified(self, synthetic_spectra_small):
-        """GA should identify a reasonable preprocessing configuration."""
+        """Exhaustive should identify a reasonable preprocessing configuration."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -396,24 +488,21 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=10,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,
         )
 
-        # Apply best preprocessing
         if result["best_transform"] is not None:
             X_preprocessed = result["best_transform"](X)
-
-            # Check output is valid
             assert X_preprocessed.shape == X.shape
             assert np.isfinite(X_preprocessed).all()
 
     def test_respects_search_space(self, synthetic_spectra_small):
-        """GA should only produce valid preprocessing combinations."""
+        """Exhaustive should only produce valid preprocessing combinations."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -421,76 +510,235 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=5,
+            method="exhaustive",
             cv_folds=3,
             n_components=5,
             random_state=42,
             verbose=0,
+            n_jobs=1,
         )
 
-        # Check best genes are in valid ranges
         genes = result["best_genes"]
         assert 0 <= genes[0] < len(PREPROC_TYPES)
         assert 0 <= genes[1] < len(WINDOW_SIZES)
 
     def test_reproducibility_with_seed(self, synthetic_spectra_small):
-        """GA should be reproducible with same random seed."""
+        """Exhaustive should be reproducible with same random seed."""
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
 
         result1 = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
-
         result2 = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
-        # Should get same best genes
         assert np.array_equal(
             result1["best_genes"], result2["best_genes"]
         ), "Same seed should give same result"
 
     def test_classification_task(self, classification_data):
-        """GA should work for classification tasks."""
+        """Exhaustive should work for classification tasks."""
         X, y = classification_data
         X = X.values
         y = y.values
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=10,
-            n_generations=5,
-            cv_folds=3,
-            n_components=5,
-            task_type="classification",
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            task_type="classification", random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result
-        assert "best_rmsecv" in result  # Actually 1-accuracy for classification
+        assert "best_rmsecv" in result  # 1 - accuracy for classification
         assert result["task_type"] == "classification"
 
-    def test_elitism_preserves_best(self, synthetic_spectra_small):
-        """Elitism should preserve best solutions across generations."""
+    def test_legacy_ga_method_raises(self, synthetic_spectra_small):
+        """method='ga' was removed in 2026-05-06; passing it must raise."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        with pytest.raises(ValueError, match="'ga' mode was removed"):
+            optimize_preprocessing(
+                X, y, method="ga", cv_folds=3, random_state=42, verbose=0,
+            )
+
+    def test_apply_autoscale_off_emits_2gene_chromosomes(self, synthetic_spectra_small):
+        """Phase 3 backward-compat: apply_autoscale=False (default) must
+        produce 2-gene chromosomes so saved-CSV ga_genes columns match
+        legacy behavior bit-exact."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=False,
+        )
+
+        # All emitted configs should have len(genes) == 2
+        for cfg in result["configs"]:
+            assert cfg["genes"].shape == (2,), (
+                f"Expected 2-gene chromosome, got shape {cfg['genes'].shape}"
+            )
+
+    def test_apply_autoscale_on_emits_3gene_chromosomes(self, synthetic_spectra_small):
+        """Phase 3: apply_autoscale=True produces 3-gene chromosomes."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=True,
+        )
+
+        for cfg in result["configs"]:
+            assert cfg["genes"].shape == (3,), (
+                f"Expected 3-gene chromosome, got shape {cfg['genes'].shape}"
+            )
+
+    def test_apply_autoscale_on_emits_both_flag_values(self, synthetic_spectra_small):
+        """When apply_autoscale=True, exhaustive must explore BOTH
+        autoscale=False and autoscale=True; the diversity selector's
+        (preproc, autoscale) key should let both surface in top-N."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            apply_autoscale=True,
+            top_n=10,  # bigger top-N so both flag values can fit
+        )
+
+        autoscale_values = {
+            _decode_autoscale_gene(cfg["genes"]) for cfg in result["configs"]
+        }
+        # Both False and True should appear among the diverse top-N
+        assert autoscale_values == {False, True}, (
+            f"Expected both autoscale=False and =True in top-N, got {autoscale_values}"
+        )
+
+    def test_phase2_disabled_matches_legacy_shape(self, synthetic_spectra_small):
+        """Phase 2 regression pin: phase2_n_seeds=0 must produce the same
+        output shape as pre-Phase-2 exhaustive (legacy single-seed
+        diversity-selected top-N). The returned dict's phase2_halt_reason
+        is 'disabled' in this case."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=0,  # disable Phase 2
+        )
+
+        assert result["phase2_halt_reason"] == "disabled"
+        # Configs should still be the same shape
+        assert "configs" in result and len(result["configs"]) > 0
+        assert "best_genes" in result
+
+    def test_phase2_enabled_logs_halt_reason(self, synthetic_spectra_small):
+        """Phase 2 with default settings (n_seeds=5) must populate
+        halt_reason with one of the live values: 'converged', 'cap', or
+        'single_iteration'. 'disabled' is reserved for n_seeds=0."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=5,
+        )
+
+        assert result["phase2_halt_reason"] in {"converged", "cap", "single_iteration"}
+
+    def test_phase2_cap_hit_emits_user_warning(self, synthetic_spectra_small, capsys):
+        """Closes pr-test-analyzer rating-8 finding: the cap-hit branch
+        prints a user-visible WARNING. Force a cap-hit by setting
+        max_pool_multiplier=1 (cap = 1*top_n = 5) on a synthetic dataset
+        small enough to enumerate, then capture stdout via capsys.
+
+        This is the only behavioral coverage of the user-visible warning
+        that the cap branch is supposed to produce. A regression that
+        drops the print() (or routes it to logger.debug) silently
+        degrades the user-visible signal documented in the commit.
+        """
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=1, n_jobs=1,
+            phase2_n_seeds=3,
+            phase2_max_pool_multiplier=1,  # forces immediate cap
+            top_n=5,  # cap = 1 * 5 = 5
+        )
+
+        captured = capsys.readouterr()
+        # Tightened per Codex review (PR #57 cycle 2): assert the exact
+        # prefix and the multiplier-text format, not just the loose
+        # "WARNING in stdout AND cap in stdout" combo (which would
+        # accept unrelated output that happens to contain both words).
+        if result["phase2_halt_reason"] == "cap":
+            assert "WARNING: Phase 2 halted at cap" in captured.out, (
+                "Expected exact 'WARNING: Phase 2 halted at cap' prefix when "
+                f"phase2_halt_reason='cap', got stdout: {captured.out[:500]}"
+            )
+            assert "* top_n" in captured.out, (
+                "Expected multiplier-text marker '* top_n' in cap warning "
+                f"so the user knows how to extend, got stdout: {captured.out[:500]}"
+            )
+
+    def test_phase2_can_change_top_n_vs_legacy(self, synthetic_spectra_small):
+        """Phase 2 should produce a top-N that's potentially different from
+        single-seed legacy. We don't assert "must differ" because on small
+        synthetic data the top-N may genuinely converge across both paths;
+        instead assert that BOTH paths run and return valid top-N of the
+        same size, so a future regression that breaks the multi-seed
+        helper integration doesn't go silent."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        legacy = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=0,
+            top_n=5,
+        )
+        rescored = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=5,
+            top_n=5,
+        )
+
+        # Both runs should produce a valid top-N
+        assert len(legacy["configs"]) == 5
+        assert len(rescored["configs"]) == 5
+        # halt_reason should differentiate the two paths
+        assert legacy["phase2_halt_reason"] == "disabled"
+        assert rescored["phase2_halt_reason"] != "disabled"
+
+    def test_with_actual_model_config(self, synthetic_spectra_small):
+        """Closes Codex MEDIUM: actual-model exhaustive path is the live
+        production path used by run_search (search.py:2052), but no test
+        previously exercised it. This pins the model_config branch of
+        evaluate_fitness — exhaustive must succeed and return a result with
+        correct shape when given an explicit model_config dict.
+        """
         X, y = synthetic_spectra_small
         X = X.values
         y = y.values
@@ -498,23 +746,25 @@ class TestGAPreprocessingOptimization:
         result = optimize_preprocessing(
             X,
             y,
-            population_size=10,
-            n_generations=10,
-            elitism=2,
+            method="exhaustive",
             cv_folds=3,
-            n_components=5,
+            n_components=3,
             random_state=42,
             verbose=0,
+            n_jobs=1,
+            # Live path: actual-model fitness with first hyperparam point
+            model_config={"name": "PLS", "params": {"n_components": 3}},
         )
 
-        # With elitism, fitness should never decrease
-        history = result["history"]
-        best_fitness_values = [gen["best_fitness"] for gen in history]
-
-        for i in range(1, len(best_fitness_values)):
-            assert best_fitness_values[i] >= best_fitness_values[i - 1], (
-                "Elitism should preserve best fitness"
-            )
+        assert "best_genes" in result
+        assert "configs" in result
+        assert len(result["configs"]) > 0
+        assert result["best_genes"].shape == (N_GENES,)
+        # Best transform must be runnable on the data
+        if result["best_transform"] is not None:
+            X_pp = result["best_transform"](X)
+            assert X_pp.shape == X.shape
+            assert np.isfinite(X_pp).all()
 
 
 # =============================================================================
@@ -558,6 +808,46 @@ class TestConvenienceFunction:
             assert X_transformed.shape == X.shape
             assert np.isfinite(X_transformed).all()
 
+    def test_quick_vs_full_passes_different_cv_folds(self):
+        """Closes Codex LOW: pre-Phase-1, quick/full differed in
+        population_size/n_generations; post-refactor they only differ in
+        cv_folds (3 vs 5). Pin that the wrapper actually threads cv_folds
+        through to optimize_preprocessing — otherwise the docstring promise
+        is unverified.
+        """
+        from unittest.mock import patch
+
+        return_value = {
+            "best_name": "raw",
+            "best_transform": None,
+            "best_genes": np.array([0, 0], dtype=np.int32),
+            "best_rmsecv": 0.0,
+            "best_config": "raw",
+            "configs": [],
+            "history": [],
+            "task_type": "regression",
+            "method": "exhaustive",
+        }
+
+        X = np.random.randn(20, 50)
+        y = np.random.randn(20)
+
+        with patch(
+            "spectral_predict.ga_preprocessing.optimize_preprocessing",
+            return_value=return_value,
+        ) as spy:
+            get_optimized_preproc_config(X, y, quick=True, random_state=42, verbose=0)
+            get_optimized_preproc_config(X, y, quick=False, random_state=42, verbose=0)
+
+        assert spy.call_count == 2
+        quick_kwargs = spy.call_args_list[0].kwargs
+        full_kwargs = spy.call_args_list[1].kwargs
+        assert quick_kwargs["cv_folds"] == 3
+        assert full_kwargs["cv_folds"] == 5
+        # And both go through method='exhaustive', not the removed 'ga' default
+        assert quick_kwargs["method"] == "exhaustive"
+        assert full_kwargs["method"] == "exhaustive"
+
 
 # =============================================================================
 # Edge Cases
@@ -569,37 +859,25 @@ class TestEdgeCases:
     """Test edge cases and error handling."""
 
     def test_small_dataset(self):
-        """GA should handle small datasets."""
+        """Exhaustive should handle small datasets."""
         X = np.random.randn(10, 20)
         y = np.random.randn(10)
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=5,
-            n_generations=3,
-            cv_folds=3,
-            n_components=3,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result
 
     def test_high_dimensional_data(self):
-        """GA should handle high-dimensional data."""
+        """Exhaustive should handle high-dimensional data."""
         X = np.random.randn(50, 1000)
         y = np.random.randn(50)
 
         result = optimize_preprocessing(
-            X,
-            y,
-            population_size=5,
-            n_generations=3,
-            cv_folds=3,
-            n_components=5,
-            random_state=42,
-            verbose=0,
+            X, y, method="exhaustive", cv_folds=3, n_components=5,
+            random_state=42, verbose=0, n_jobs=1,
         )
 
         assert "best_genes" in result

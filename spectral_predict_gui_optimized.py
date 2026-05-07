@@ -3212,10 +3212,18 @@ class SpectralPredictApp:
 
         # GA Preprocessing Optimization (Phase 4)
         self.enable_ga_preprocessing = tk.BooleanVar(value=False)
-        self.ga_preprocess_method = tk.StringVar(value="exhaustive")  # 'exhaustive' or 'ga'
-        self.ga_preprocess_population = tk.IntVar(value=48)
-        self.ga_preprocess_generations = tk.IntVar(value=30)
         self.ga_preprocess_cv_folds = tk.IntVar(value=5)
+        # Phase 3 (2026-05-06): autoscale dimension. Default ON because
+        # autoscale matters for non-tree models (PLS, Ridge, MLP, SVM); for
+        # tree-only enabled-model runs it doubles compute for no signal
+        # differentiation, but the empirical wall-time impact is small.
+        self.ga_preprocess_autoscale = tk.BooleanVar(value=True)
+        # Phase 2 (2026-05-06): multi-seed phase-2 rescore. The checkbox
+        # toggles between n_seeds=5 (ON, default) and n_seeds=0 (OFF, legacy).
+        # Closes the top-N infiltration problem on small-n / classification
+        # tasks documented in tools/exhaustive_seed_compare.py.
+        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=True)
+        self.ga_preprocess_phase2_max_pool_multiplier = tk.IntVar(value=8)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
         self.enable_smart_preprocessing = tk.BooleanVar(value=False)
@@ -3227,6 +3235,12 @@ class SpectralPredictApp:
         self.tpe_preprocess_n_trials = tk.IntVar(value=75)
         self.tpe_preprocess_n_top = tk.IntVar(value=10)
         self.tpe_enable_autoscale = tk.BooleanVar(value=True)
+        # Phase 4 (2026-05-06): TPE multi-start + multi-seed rescore.
+        # Default OFF because cost is significant (~5x current TPE wall time);
+        # turn ON for classification on small-n datasets where TPE drift is
+        # documented (tools/bayesian_topk_stability.py).
+        self.tpe_multistart = tk.BooleanVar(value=False)
+        self.tpe_n_starts = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
         self.n_estimators_50 = tk.BooleanVar(value=False)
@@ -11882,6 +11896,25 @@ class SpectralPredictApp:
                                                         variable=self.tpe_enable_autoscale)
         self._cb_tpe_enable_autoscale.grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
+        # Phase 4 (2026-05-06): multi-start + multi-seed rescore. Default OFF
+        # because ~5x cost; recommended for classification on small-n.
+        ttk.Checkbutton(
+            self.tpe_preproc_options_frame,
+            text="Multi-start TPE (rescore union with 5-seed CV, ~5x cost)",
+            variable=self.tpe_multistart,
+        ).grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        ttk.Label(self.tpe_preproc_options_frame, text="N starts (advanced):").grid(
+            row=4, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0)
+        )
+        ttk.Combobox(
+            self.tpe_preproc_options_frame,
+            textvariable=self.tpe_n_starts,
+            values=[3, 5, 7],
+            state="readonly",
+            width=6,
+        ).grid(row=4, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+
         ttk.Label(tpe_preproc_frame,
                  text="Search space: 14 preproc x derivative-aware windows x autoscale x 5 baseline x smoothing",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
@@ -11894,41 +11927,61 @@ class SpectralPredictApp:
 
         self.tpe_preproc_options_frame.grid_remove()
 
-        # ===== GA AND EXHAUSTIVE PREPROCESSING =====
-        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="GA and Exhaustive Preprocessing",
-                                                                     subtitle="Genetic algorithm or exhaustive search for optimal preprocessing")
+        # ===== EXHAUSTIVE PREPROCESSING =====
+        ga_preproc_card_outer, ga_preproc_card = self._create_card(content_frame, title="Exhaustive Preprocessing",
+                                                                     subtitle="Exhaustive search across 238 (preproc, window) combinations")
         ga_preproc_card_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
         row += 1
         ga_preproc_frame = tk.Frame(ga_preproc_card, bg=self.colors['card_bg'])
         ga_preproc_frame.pack(fill='both', expand=True)
 
-        # Enable GA Preprocessing checkbox
-        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable GA and Exhaustive Preprocessing",
+        # Enable Exhaustive Preprocessing checkbox
+        self.ga_preproc_checkbox = ttk.Checkbutton(ga_preproc_frame, text="Enable Exhaustive Preprocessing",
                                                     variable=self.enable_ga_preprocessing,
                                                     command=self._toggle_ga_preprocessing_options)
         self.ga_preproc_checkbox.grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(0, 5))
 
-        # GA parameters frame (hidden when disabled)
+        # Options frame: Phase 3 autoscale checkbox lives here.
         self.ga_preproc_options_frame = ttk.Frame(ga_preproc_frame)
         self.ga_preproc_options_frame.grid(row=1, column=0, columnspan=3, sticky=tk.W, padx=(20, 0), pady=5)
 
-        # Search method dropdown
-        ttk.Label(self.ga_preproc_options_frame, text="Search Method:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        method_combo = ttk.Combobox(self.ga_preproc_options_frame, textvariable=self.ga_preprocess_method,
-                                     values=["exhaustive", "ga"], state="readonly", width=12)
-        method_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        ttk.Label(
+            self.ga_preproc_options_frame,
+            text="Tests all 14 preprocessing types x 17 window sizes (238 cells) with "
+                 "the actual user-selected model. Parallel; typically 5-30 seconds.",
+            wraplength=560,
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
 
-        ttk.Label(self.ga_preproc_options_frame, text="Population Size:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        ga_pop_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=16, to=128,
-                                      textvariable=self.ga_preprocess_population, width=8)
-        ga_pop_spinbox.grid(row=1, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        # Autoscale dimension toggle. ON doubles search space to 476 cells
+        # but explores both with-autoscale and without-autoscale variants.
+        ttk.Checkbutton(
+            self.ga_preproc_options_frame,
+            text="Also test with autoscale (per-feature standardization, ~2x cost)",
+            variable=self.ga_preprocess_autoscale,
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
-        ttk.Label(self.ga_preproc_options_frame, text="Generations:").grid(row=2, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        ga_gen_spinbox = ttk.Spinbox(self.ga_preproc_options_frame, from_=10, to=200,
-                                      textvariable=self.ga_preprocess_generations, width=8)
-        ga_gen_spinbox.grid(row=2, column=1, sticky=tk.W, padx=5, pady=(5, 0))
+        # Phase 2 multi-seed rescore toggle. Re-evaluates top-K candidates
+        # with 5 random_state values to detect lottery winners.
+        ttk.Checkbutton(
+            self.ga_preproc_options_frame,
+            text="Robust ranking (5-seed phase-2 rescore on top-K, ~1.5x cost)",
+            variable=self.ga_preprocess_phase2_rescore,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
-        # Initially hide GA options
+        # Advanced: max pool multiplier (rarely needs adjustment; expose so
+        # users hitting the cap can extend without code change).
+        ttk.Label(
+            self.ga_preproc_options_frame,
+            text="Phase 2 pool multiplier (advanced):",
+        ).grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ttk.Spinbox(
+            self.ga_preproc_options_frame,
+            from_=4, to=20,
+            textvariable=self.ga_preprocess_phase2_max_pool_multiplier,
+            width=5,
+        ).grid(row=3, column=1, sticky=tk.W, pady=(5, 0))
+
+        # Initially hide options
         self.ga_preproc_options_frame.grid_remove()
 
     def _create_tab4b_variable_selection(self):
@@ -27520,6 +27573,8 @@ class SpectralPredictApp:
                          tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
                          tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                          tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
+                         tpe_multistart=self.tpe_multistart.get(),
+                         tpe_n_starts=self.tpe_n_starts.get(),
                          # T-36: autoscale toggle (UV scaling) — grid path only
                          autoscale=self.use_autoscale.get(),
                      )
@@ -28224,12 +28279,16 @@ class SpectralPredictApp:
                 ga_generations=self.ga_generations.get(),
                 ga_n_runs=self.ga_n_runs.get(),
                 ga_quick_mode=self.ga_quick_mode.get(),
-                # GA preprocessing parameters (LEGACY)
+                # Exhaustive preprocessing parameters
                 ga_preprocess=self.enable_ga_preprocessing.get(),
-                ga_preprocess_method=self.ga_preprocess_method.get(),
-                ga_preprocess_population=self.ga_preprocess_population.get(),
-                ga_preprocess_generations=self.ga_preprocess_generations.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
+                ga_preprocess_autoscale=self.ga_preprocess_autoscale.get(),
+                ga_preprocess_phase2_n_seeds=(
+                    5 if self.ga_preprocess_phase2_rescore.get() else 0
+                ),
+                ga_preprocess_phase2_max_pool_multiplier=(
+                    self.ga_preprocess_phase2_max_pool_multiplier.get()
+                ),
                 # Smart preprocessing discovery parameters (NEW)
                 smart_preprocess=self.enable_smart_preprocessing.get(),
                 smart_preprocess_importance=self.smart_preprocess_importance.get(),
@@ -28239,6 +28298,8 @@ class SpectralPredictApp:
                 tpe_preprocess_n_trials=self.tpe_preprocess_n_trials.get(),
                 tpe_preprocess_n_top=self.tpe_preprocess_n_top.get(),
                 tpe_enable_autoscale=self.tpe_enable_autoscale.get(),
+                tpe_multistart=self.tpe_multistart.get(),
+                tpe_n_starts=self.tpe_n_starts.get(),
                 # Tier system (NEW - Phase 3 implementation)
                 tier=tier,
                 enabled_models=selected_models,  # User's manual selection overrides tier defaults
@@ -29002,6 +29063,10 @@ For detailed documentation, see the User Guide.
             'imbalance_method', 'imbalance_params',
             'PreprocessBase',
             'ga_genes', 'ga_model_type', 'ga_config',
+            # 2026-05-06 column rename: preprocess_chromosome replaced ga_genes
+            # for the exhaustive-preprocessing path. Hide both from the
+            # results table — chromosome arrays aren't human-readable.
+            'preprocess_chromosome',
             'smart_selected_wavelengths', 'smart_n_wavelengths',
             'smart_score', 'smart_importance_method', 'smart_model_name',
         }

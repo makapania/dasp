@@ -1,30 +1,29 @@
 """
-Genetic Algorithm for Preprocessing Optimization (V1).
+Exhaustive preprocessing optimization (V1).
 
-This module implements a genetic algorithm to optimize spectral preprocessing
-parameters. The search space is simplified to just 2 genes:
-- Preprocessing type (raw, SNV, derivatives, combinations)
-- Savitzky-Golay window size
+This module implements two preprocessing-search strategies:
 
-Baseline correction and smoothing are removed as they are redundant when using
-derivatives (SG derivatives already smooth, and derivatives remove baselines).
+* ``exhaustive_search``: enumerates all 14 × 17 = 238 (preproc, window)
+  combinations with parallel fitness evaluation.
+* ``smart_exhaustive_search``: derivative-aware two-stage exhaustive
+  search with multi-seed robust fitness; smaller candidate set (~80 cells)
+  covering only legal (preproc, window) pairings.
 
-Total search space: 14 preprocessing types × 17 window sizes = 238 combinations
-
-The GA evaluates preprocessing configurations using cross-validated RMSECV
-with either PLS or LightGBM models for fitness evaluation.
+Both share the same chromosome encoding (2 genes — preproc index, window
+index) and fitness evaluator. The legacy genetic-algorithm path was
+removed in 2026-05-06: with parallel exhaustive completing 238 fits in
+seconds on a multi-core machine, GA evolution offered no coverage
+advantage over enumeration. Helpers ``random_chromosome``,
+``get_seed_chromosomes``, ``evaluate_fitness_robust`` are retained — they
+are used by ``smart_exhaustive_search`` and by the planned phase-2
+multi-seed rescore in ``phase2_rescore.py``.
 
 Fitness Models
 --------------
 - 'pls': Uses PLS regression (default, always available)
 - 'mlp': Uses Multi-Layer Perceptron neural network (for Neural/SVM models)
 - 'lightgbm': Uses LightGBM (better for tree-based models, requires LightGBM)
-- 'neuralboosted': Uses NeuralBoosted hybrid (requires NeuralBoosted module, falls back to PLS)
-
-References
-----------
-- Stefansson, A., et al. (2020). "Fast method for GA-PLS."
-  Journal of Chemometrics.
+- 'neuralboosted': Uses NeuralBoosted hybrid (falls back to PLS if absent)
 """
 
 from __future__ import annotations
@@ -38,6 +37,11 @@ from sklearn.metrics import mean_squared_error, accuracy_score
 
 # Import V1 preprocessing transformers
 from .preprocess import SNV, SavgolDerivative
+
+# StandardScaler for the optional autoscale gene (Phase 3 — chromosome
+# expanded from 2 genes to 3, with backward-compat decode for legacy
+# 2-gene callers and saved-CSV ga_genes columns).
+from sklearn.preprocessing import StandardScaler
 
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
@@ -95,9 +99,28 @@ ROBUSTNESS_SEEDS = [42, 123, 456, 789, 999]
 # Variance penalty coefficient (higher = prefer more stable preprocessing)
 VARIANCE_PENALTY = 0.1
 
-# Total search space: 14 × 17 = 238 combinations
+# Total search space: 14 × 17 = 238 combinations (preproc × window).
+# With Phase 3's autoscale gene (added 2026-05-06) the search space doubles
+# to 476 when the user opts in. Legacy 2-gene chromosomes are still produced
+# by smart_exhaustive_search (which doesn't search autoscale) and by saved
+# result CSVs predating Phase 3; both paths are decoded as autoscale=False
+# via _decode_autoscale_gene.
 N_GENES = 2
 TOTAL_COMBINATIONS = len(PREPROC_TYPES) * len(WINDOW_SIZES)  # 238
+
+
+def _decode_autoscale_gene(genes: np.ndarray) -> bool:
+    """Backward-compatible decode of the optional 3rd autoscale gene.
+
+    Returns ``False`` for legacy 2-gene chromosomes (saved-CSV ga_genes,
+    smart_exhaustive_search seeds). Returns ``bool(genes[2])`` for 3-gene
+    chromosomes. Centralizing this in one helper means every site that
+    reads genes (transform, description, diversity key, search.py rebuild)
+    behaves identically.
+    """
+    if len(genes) >= 3:
+        return bool(genes[2])
+    return False
 
 
 def random_chromosome(rng: np.random.RandomState) -> np.ndarray:
@@ -147,39 +170,49 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     """
     Convert chromosome to (name, transform_func) tuple.
 
-    The returned tuple is compatible with _build_preprocessing_configs() output
-    in search.py, making integration seamless.
+    Handles BOTH legacy 2-gene chromosomes ``[preproc_idx, window_idx]`` and
+    Phase 3's 3-gene chromosomes ``[preproc_idx, window_idx, autoscale]``.
+    Missing autoscale defaults to ``False`` via ``_decode_autoscale_gene``.
+
+    The returned tuple is compatible with ``_build_preprocessing_configs()``
+    output in search.py, making integration seamless.
 
     Parameters
     ----------
     genes : np.ndarray
-        Integer-encoded chromosome [preproc_type, window]
+        Integer-encoded chromosome ``[preproc_type, window]`` or
+        ``[preproc_type, window, autoscale]``.
 
     Returns
     -------
     name : str
         Human-readable name for the preprocessing configuration
     transform_func : callable or None
-        Function that takes X and returns preprocessed X, or None for 'raw'
+        Function that takes X and returns preprocessed X, or None when no
+        transform is needed (``raw`` with ``autoscale=False``).
     """
     preproc_idx = genes[0]
     window_idx = genes[1]
+    autoscale = _decode_autoscale_gene(genes)
 
     preproc_type = PREPROC_TYPES[preproc_idx]
     window = WINDOW_SIZES[window_idx]
 
-    # Build name
+    # Build name (autoscale suffix appended below for the autoscale=True branch)
     if preproc_type in ['raw', 'snv']:
         name = preproc_type
     else:
         name = f"{preproc_type}_w{window}"
+    if autoscale:
+        name = f"{name}+autoscale"
 
-    # Return early for raw (no transform needed)
-    if preproc_type == 'raw':
+    # Special case: raw + autoscale=False is a true no-op, return None
+    if preproc_type == 'raw' and not autoscale:
         return (name, None)
 
-    # Build transform function
-    def transform(X, pt=preproc_type, w=window):
+    # Build transform function. Captures `autoscale` so the closure applies
+    # StandardScaler at the end when the gene is set.
+    def transform(X, pt=preproc_type, w=window, _autoscale=autoscale):
         X_out = np.asarray(X, dtype=np.float64)
 
         if pt == 'snv':
@@ -216,6 +249,10 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'deriv4_snv':
             X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
+        # else (pt == 'raw'): X_out stays as the input (autoscale-only path)
+
+        if _autoscale:
+            X_out = StandardScaler().fit_transform(X_out)
 
         return X_out
 
@@ -223,14 +260,22 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
 
 
 def get_config_description(genes: np.ndarray) -> str:
-    """Get human-readable description of chromosome configuration."""
+    """Get human-readable description of chromosome configuration.
+
+    Handles both 2-gene (legacy) and 3-gene (Phase 3) chromosomes.
+    """
     preproc_type = PREPROC_TYPES[genes[0]]
     window = WINDOW_SIZES[genes[1]]
+    autoscale = _decode_autoscale_gene(genes)
 
     if preproc_type in ['raw', 'snv']:
-        return f"Preproc: {preproc_type}"
+        base = f"Preproc: {preproc_type}"
     else:
-        return f"Preproc: {preproc_type}, Window: {window}"
+        base = f"Preproc: {preproc_type}, Window: {window}"
+
+    if autoscale:
+        base = f"{base}, autoscale=True"
+    return base
 
 
 # =============================================================================
@@ -333,8 +378,21 @@ def evaluate_fitness(
             # Default: PLS
             return _evaluate_pls(X_preproc, y, cv, n_comp, task_type)
 
-    except Exception:
-        # Any error = very poor fitness
+    except Exception as exc:
+        # Any error = very poor fitness. Log at WARNING level so a
+        # systematically-broken config (e.g. malformed chromosome a future
+        # refactor introduces) doesn't silently disappear from rankings.
+        # DeepSeek STRONG follow-up (PR #57 cycle 2): the project's
+        # run_logging.py defaults the spectral_predict logger to WARNING,
+        # so DEBUG/INFO messages are suppressed. WARNING ensures user
+        # visibility when LightGBM/PLS systematically blow up — this is
+        # exactly the symptom the S1 finding was about.
+        import logging
+        logging.getLogger(__name__).warning(
+            "evaluate_fitness returning -inf for a candidate (%s: %s)",
+            getattr(exc, '__class__', type(exc)).__name__,
+            exc,
+        )
         return -np.inf
 
 
@@ -723,64 +781,6 @@ def evaluate_fitness_robust(
 
 
 # =============================================================================
-# GENETIC OPERATORS
-# =============================================================================
-
-def tournament_selection(
-    population: np.ndarray,
-    fitness: np.ndarray,
-    tournament_size: int,
-    rng: np.random.RandomState
-) -> np.ndarray:
-    """Select parent using tournament selection."""
-    indices = rng.choice(len(population), size=tournament_size, replace=False)
-    tournament_fitness = fitness[indices]
-    winner_idx = indices[np.argmax(tournament_fitness)]
-    return population[winner_idx].copy()
-
-
-def crossover(
-    parent1: np.ndarray,
-    parent2: np.ndarray,
-    crossover_rate: float,
-    rng: np.random.RandomState
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Uniform crossover."""
-    if rng.random() > crossover_rate:
-        return parent1.copy(), parent2.copy()
-
-    child1 = parent1.copy()
-    child2 = parent2.copy()
-
-    # Uniform crossover - swap each gene independently
-    for i in range(len(parent1)):
-        if rng.random() < 0.5:
-            child1[i], child2[i] = child2[i], child1[i]
-
-    return child1, child2
-
-
-def mutate(
-    chromosome: np.ndarray,
-    mutation_rate: float,
-    rng: np.random.RandomState
-) -> np.ndarray:
-    """Mutate chromosome with given mutation rate per gene."""
-    mutated = chromosome.copy()
-
-    gene_ranges = [
-        len(PREPROC_TYPES),
-        len(WINDOW_SIZES),
-    ]
-
-    for i in range(len(mutated)):
-        if rng.random() < mutation_rate:
-            mutated[i] = rng.randint(0, gene_ranges[i])
-
-    return mutated
-
-
-# =============================================================================
 # DIVERSITY SELECTION FOR EXHAUSTIVE SEARCH
 # =============================================================================
 
@@ -816,16 +816,22 @@ def select_diverse_exhaustive_configs(
     selected_indices : list of int
         Indices of selected configurations in original order
     """
-    # Create list of (index, genes, fitness, preproc_type)
+    # Create list of (index, genes, fitness, diversity_key)
+    # Diversity key is (preproc_type, autoscale) so a 2-gene exhaustive run
+    # behaves identically to before Phase 3 (autoscale always False), while a
+    # 3-gene run can hold both autoscale-on and autoscale-off variants of the
+    # same preproc type without one crowding the other out of the top-N.
     configs = []
     for i, (genes, fitness) in enumerate(zip(all_genes, all_fitness)):
         if fitness > -np.inf:  # Skip invalid configs
             preproc_type = PREPROC_TYPES[genes[0]]
+            autoscale = _decode_autoscale_gene(genes)
             configs.append({
                 'index': i,
                 'genes': genes,
                 'fitness': fitness,
-                'preproc_type': preproc_type
+                'preproc_type': preproc_type,
+                'diversity_key': (preproc_type, autoscale),
             })
 
     if len(configs) <= n_top:
@@ -834,23 +840,23 @@ def select_diverse_exhaustive_configs(
     # Sort by fitness (descending - higher is better)
     sorted_configs = sorted(configs, key=lambda c: c['fitness'], reverse=True)
 
-    # Select ensuring diversity across preprocessing types
+    # Select ensuring diversity across (preproc_type, autoscale) tuples
     selected = []
-    selected_preprocs = set()
+    selected_keys = set()
 
-    # First pass: select best from each preprocessing TYPE (not window variation)
-    # This ensures we get deriv1, deriv2, snv_deriv1, etc. rather than just
-    # multiple window sizes of the same preprocessing
+    # First pass: select best from each diversity key. This ensures we get
+    # deriv1+autoscale_off, deriv1+autoscale_on, deriv2+autoscale_off, etc.
+    # rather than just multiple window sizes of the same (preproc, autoscale).
     for config in sorted_configs:
-        preproc_type = config['preproc_type']
+        diversity_key = config['diversity_key']
 
         # Skip raw in diversity selection if configured (raw rarely produces best models)
-        if exclude_raw_from_diversity and preproc_type == 'raw':
+        if exclude_raw_from_diversity and config['preproc_type'] == 'raw':
             continue
 
-        if preproc_type not in selected_preprocs:
+        if diversity_key not in selected_keys:
             selected.append(config)
-            selected_preprocs.add(preproc_type)
+            selected_keys.add(diversity_key)
             if len(selected) >= n_top:
                 break
 
@@ -883,13 +889,21 @@ def exhaustive_search(
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     top_n: int = 5,
-    model_config: Optional[Dict[str, Any]] = None
+    model_config: Optional[Dict[str, Any]] = None,
+    apply_autoscale: bool = False,
+    phase2_n_seeds: int = 5,
+    phase2_max_pool_multiplier: int = 8,
 ) -> Dict[str, Any]:
     """
-    Exhaustively search all 170 preprocessing combinations.
+    Exhaustively search all preprocessing combinations.
 
-    With only 170 combinations (10 preprocessing types × 17 window sizes),
-    exhaustive search is feasible and guarantees finding the optimal solution.
+    Default search space: 14 × 17 = 238 cells (preproc × window). With
+    ``apply_autoscale=True`` the chromosome grows to 3 genes and the space
+    doubles to 14 × 17 × 2 = 476 cells, including configurations both with
+    and without per-feature standardization (StandardScaler) applied AFTER
+    the preprocessing core. The downstream pipeline rebuild reads
+    ``preprocess_cfg["autoscale"]`` (set in search.py from the gene), so
+    no consumer-side change is needed.
 
     Parameters
     ----------
@@ -918,30 +932,74 @@ def exhaustive_search(
     model_config : dict, optional
         Dict with 'name' and 'params' for actual model fitness evaluation
         If None, uses proxy fitness_model instead
+    apply_autoscale : bool
+        When ``True``, expand the chromosome to include an autoscale gene and
+        enumerate both ``autoscale=False`` and ``autoscale=True`` for every
+        (preproc, window) pair. Default ``False`` preserves the legacy 2-gene
+        search space exactly.
+    phase2_n_seeds : int
+        Multi-seed phase-2 rescore (Phase 2 of the preprocessing plan, 2026-05-06).
+        After single-seed enumeration, the top-K candidates by single-seed
+        fitness are re-evaluated with ``n_seeds`` random_state values; final
+        top-N is then chosen from rescored mean rather than from the
+        single-seed lottery. Default 5; set to 0 to disable (legacy behavior).
+        Mitigates the top-N infiltration problem documented in
+        ``tools/exhaustive_seed_compare.py`` (single-seed top-7 contained
+        6/7 mean-rank>20 fakes on PLS-DA classification of BoneCollagen).
+    phase2_max_pool_multiplier : int
+        Hard cap on the phase-2 pool size, expressed as a multiple of
+        ``top_n``. Helper grows the pool through ``[3*top_n, 5*top_n,
+        max_pool_multiplier*top_n]``, halting at the cap if convergence
+        isn't reached. Default 8 (so K=40 for top_n=5). When the cap is
+        hit, the result dict's ``phase2_halt_reason`` will be ``"cap"``;
+        increase this if cap-hits are observed in practice.
 
     Returns
     -------
     result : dict
-        Same format as optimize_preprocessing()
+        Same format as optimize_preprocessing(), with an additional
+        ``phase2_halt_reason`` field set to ``"converged"``, ``"cap"``,
+        ``"single_iteration"``, or ``"disabled"`` (the last when
+        ``phase2_n_seeds == 0``).
     """
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y).ravel()
 
     n_samples, n_features = X.shape
+    autoscale_choices = [0, 1] if apply_autoscale else [0]
+    total_combinations = (
+        len(PREPROC_TYPES) * len(WINDOW_SIZES) * len(autoscale_choices)
+    )
 
     if verbose >= 1:
         print(f"Exhaustive Preprocessing Search")
         print(f"  Data: {n_samples} samples, {n_features} features")
         print(f"  Task: {task_type}")
         print(f"  Fitness model: {fitness_model.upper()}")
-        print(f"  Total combinations: {TOTAL_COMBINATIONS}")
+        print(
+            f"  Total combinations: {total_combinations} "
+            f"(autoscale {'on/off' if apply_autoscale else 'off only'})"
+        )
 
-    # Generate all possible chromosomes
-    all_genes = [
-        np.array([p, w], dtype=np.int32)
-        for p in range(len(PREPROC_TYPES))
-        for w in range(len(WINDOW_SIZES))
-    ]
+    # Generate all possible chromosomes. When apply_autoscale=False we emit
+    # 2-gene chromosomes for bit-exact backward compatibility with pre-Phase-3
+    # callers and saved-CSV ga_genes columns. When apply_autoscale=True we
+    # emit 3-gene chromosomes; chromosome_to_transform / get_config_description
+    # / search.py's preprocess_configs builder all decode either shape via
+    # _decode_autoscale_gene (centralized in this module).
+    if apply_autoscale:
+        all_genes = [
+            np.array([p, w, a], dtype=np.int32)
+            for p in range(len(PREPROC_TYPES))
+            for w in range(len(WINDOW_SIZES))
+            for a in autoscale_choices
+        ]
+    else:
+        all_genes = [
+            np.array([p, w], dtype=np.int32)
+            for p in range(len(PREPROC_TYPES))
+            for w in range(len(WINDOW_SIZES))
+        ]
 
     # Evaluate all combinations
     if n_jobs != 1:
@@ -1001,21 +1059,136 @@ def exhaustive_search(
                     'message': f"Tested {i+1}/{len(all_genes)} combinations"
                 })
 
-    # Use diversity selection to ensure variety across preprocessing types
-    # This prevents selecting 5 similar configs (e.g., all deriv2 with different windows)
-    diverse_indices = select_diverse_exhaustive_configs(
-        all_genes, results, n_top=top_n,
-        exclude_raw_from_diversity=True  # Raw rarely produces best models
-    )
+    # PHASE 2 (2026-05-06): if phase2_n_seeds > 0, re-evaluate the top-K
+    # single-seed survivors across multiple random_state values and re-rank
+    # by mean. Closes the top-N infiltration problem on small-n / classification
+    # tasks where single-seed CV fold randomness produces artificial tie
+    # clusters. See tools/exhaustive_seed_compare.py for the empirical case.
+    phase2_halt_reason: str = "disabled"
+    if phase2_n_seeds > 0:
+        from .phase2_rescore import phase2_adaptive_rescore
 
-    if verbose >= 1:
-        print(f"  Diversity selection: ensuring variety across preprocessing types")
+        # Sort all_genes by single-seed fitness DESCENDING so the helper's
+        # candidates[:K] slice corresponds to the top-K by single-seed.
+        order = sorted(range(len(all_genes)), key=lambda i: results[i], reverse=True)
+        sorted_genes = [all_genes[i] for i in order]
+
+        # Closures for the helper. eval_fn invokes evaluate_fitness with the
+        # supplied random_state; key_fn produces a hashable identity tuple
+        # from a chromosome (works for both 2-gene and 3-gene shapes);
+        # diversity_key_fn reuses the (preproc_type, autoscale) key from
+        # select_diverse_exhaustive_configs to keep ranking semantics aligned.
+        def _phase2_eval_fn(genes, rs):
+            return evaluate_fitness(
+                genes, X, y, cv_folds, n_components, task_type,
+                rs, fitness_model, model_config,
+            )
+
+        def _phase2_key_fn(genes):
+            return tuple(int(x) for x in genes)
+
+        def _phase2_diversity_key_fn(genes):
+            return (PREPROC_TYPES[int(genes[0])], _decode_autoscale_gene(genes))
+
+        # Adaptive K progression: 3*top_n → 5*top_n → cap. Helper halts on
+        # Jaccard ≥ 0.8 OR (top_n - 1) overlap stable for two consecutive
+        # iterations. Cap is min(max_pool_multiplier * top_n, len(candidates)).
+        cap = phase2_max_pool_multiplier * top_n
+        progression = [3 * top_n, 5 * top_n, cap]
+
+        if verbose >= 1:
+            print(
+                f"  Phase 2 multi-seed rescore: n_seeds={phase2_n_seeds}, "
+                f"K progression={progression}, cap={cap}"
+            )
+
+        rescored_winners, halt_metadata = phase2_adaptive_rescore(
+            candidates=sorted_genes,
+            eval_fn=_phase2_eval_fn,
+            key_fn=_phase2_key_fn,
+            score_direction="maximize",  # evaluate_fitness returns -RMSE / +acc
+            pool_size_progression=progression,
+            max_pool_multiplier=phase2_max_pool_multiplier,
+            top_n=top_n,
+            n_seeds=phase2_n_seeds,
+            diversity_key_fn=_phase2_diversity_key_fn,
+        )
+        phase2_halt_reason = halt_metadata["halt_reason"]
+
+        if verbose >= 1:
+            print(
+                f"  Phase 2 halted: {phase2_halt_reason} "
+                f"(pool={halt_metadata['final_pool_size']}, "
+                f"expansions={halt_metadata['expansions']})"
+            )
+
+        if phase2_halt_reason == "cap":
+            # Cap-hit visibility (closes Codex B1 RESIDUAL): user should
+            # know top-N may not be stable and how to extend the cap.
+            print(
+                f"  WARNING: Phase 2 halted at cap ({cap} = "
+                f"{phase2_max_pool_multiplier} * top_n). Top-N may not be "
+                f"stable across seeded reruns. Consider increasing "
+                f"phase2_max_pool_multiplier."
+            )
+
+        # Map the helper's chromosome winners back to original indices in
+        # all_genes so the rest of this function (configs builder) is
+        # unchanged. We can't use ``rescored_winners.index(arr)`` because
+        # numpy arrays compare element-wise, which Python's list.index
+        # treats as ambiguous. Build a key->rank dict instead.
+        winner_rank_by_key: dict[tuple, int] = {
+            _phase2_key_fn(g): rank for rank, g in enumerate(rescored_winners)
+        }
+        # Codex HIGH from PR #57 review: also build a key->(mean, std) lookup
+        # so the configs builder below can report the rescored mean as
+        # ``fitness`` instead of the stale single-seed score. Without this,
+        # the result CSV's RMSEcv reflects the single-seed lottery, not the
+        # multi-seed mean that drove the ranking.
+        _phase2_winner_scores = halt_metadata.get("winner_scores", [])
+        winner_rescored_score_by_key: dict[tuple, tuple[float, float]] = {
+            _phase2_key_fn(g): _phase2_winner_scores[rank]
+            for rank, g in enumerate(rescored_winners)
+            if rank < len(_phase2_winner_scores)
+        }
+        diverse_indices = [
+            i for i, g in enumerate(all_genes)
+            if _phase2_key_fn(g) in winner_rank_by_key
+        ]
+        # Preserve the helper's ranking order
+        diverse_indices.sort(
+            key=lambda i: winner_rank_by_key[_phase2_key_fn(all_genes[i])]
+        )
+    else:
+        winner_rescored_score_by_key = {}
+        # Legacy path (phase2_n_seeds=0): use the diversity selector that
+        # operates on single-seed fitness.
+        diverse_indices = select_diverse_exhaustive_configs(
+            all_genes, results, n_top=top_n,
+            exclude_raw_from_diversity=True,
+        )
+
+        if verbose >= 1:
+            print("  Diversity selection: ensuring variety across preprocessing types")
 
     # Build top-N configs list using diversity-selected indices
     configs = []
     for idx in diverse_indices:
         genes = all_genes[idx]
-        fitness = results[idx]
+        # Phase 2 Codex HIGH fix (PR #57 review): when phase2_n_seeds > 0,
+        # the diversity ordering came from the multi-seed rescore — so the
+        # reported fitness must come from the rescored mean too, not the
+        # original single-seed score. Otherwise the result CSV's RMSEcv
+        # column shows the seed-lottery value while the ranking reflects
+        # the multi-seed average. Fall back to single-seed score when the
+        # candidate isn't in the rescore lookup (legacy path or rescore
+        # didn't reach this candidate for whatever reason).
+        if winner_rescored_score_by_key:
+            _key_for_lookup = tuple(int(x) for x in genes)
+            _rescored = winner_rescored_score_by_key.get(_key_for_lookup)
+            fitness = _rescored[0] if _rescored is not None else results[idx]
+        else:
+            fitness = results[idx]
         name, transform = chromosome_to_transform(genes)
         config_desc = get_config_description(genes)
 
@@ -1081,7 +1254,8 @@ def exhaustive_search(
         'best_config': best_config,
         'history': [{'combination': i, 'fitness': f} for i, f in enumerate(results)],
         'task_type': task_type,
-        'method': 'exhaustive'
+        'method': 'exhaustive',
+        'phase2_halt_reason': phase2_halt_reason,  # Phase 2: 'converged'/'cap'/'disabled'
     }
 
 
@@ -1390,26 +1564,23 @@ def smart_exhaustive_search(
 def optimize_preprocessing(
     X: np.ndarray,
     y: np.ndarray,
-    method: str = 'ga',
-    population_size: int = 48,
-    n_generations: int = 30,
-    crossover_rate: float = 0.7,
-    mutation_rate: float = 0.15,
-    tournament_size: int = 3,
+    method: str = 'exhaustive',
     cv_folds: int = 5,
     n_components: int = 10,
-    elitism: int = 2,
     task_type: str = 'regression',
     random_state: int = 42,
     verbose: int = 1,
     progress_callback: Optional[Callable] = None,
     fitness_model: str = 'pls',
-    n_jobs: int = 1,
+    n_jobs: int = -1,
     top_n: int = 5,
-    model_config: Optional[Dict[str, Any]] = None
+    model_config: Optional[Dict[str, Any]] = None,
+    apply_autoscale: bool = False,
+    phase2_n_seeds: int = 5,
+    phase2_max_pool_multiplier: int = 8,
 ) -> Dict[str, Any]:
     """
-    Optimize spectral preprocessing using genetic algorithm or exhaustive search.
+    Optimize spectral preprocessing via exhaustive enumeration.
 
     Parameters
     ----------
@@ -1418,27 +1589,20 @@ def optimize_preprocessing(
     y : np.ndarray
         Target values
     method : str
-        Optimization method: 'ga', 'exhaustive', or 'smart'
-        - 'ga': Genetic algorithm (default)
-        - 'exhaustive': Tests all 238 combinations
-        - 'smart': Two-stage search with derivative-specific windows,
-                   multi-seed robustness, and variance penalty (RECOMMENDED)
-    population_size : int
-        Number of individuals in population (GA only)
-    n_generations : int
-        Number of generations to evolve (GA only)
-    crossover_rate : float
-        Probability of crossover (0-1, GA only)
-    mutation_rate : float
-        Probability of mutation per gene (0-1, GA only)
-    tournament_size : int
-        Number of individuals in tournament selection (GA only)
+        Optimization method:
+
+        * ``"exhaustive"`` (default): tests all 238 (preproc, window) cells.
+        * ``"smart"``: derivative-aware two-stage exhaustive with multi-seed
+          robust fitness on the survivors. Returns the same result shape as
+          ``"exhaustive"``.
+
+        The legacy ``"ga"`` (genetic algorithm) mode was removed in 2026-05-06.
+        With ``n_jobs=-1`` parallelism completing 238 cells in seconds, GA
+        evolution had no coverage or speed advantage over enumeration.
     cv_folds : int
         Number of CV folds for fitness evaluation
     n_components : int
         Max PLS components for evaluation
-    elitism : int
-        Number of best individuals to preserve each generation (GA only)
     task_type : str
         'regression' or 'classification'
     random_state : int
@@ -1448,43 +1612,49 @@ def optimize_preprocessing(
     progress_callback : callable, optional
         Function called with progress dict
     fitness_model : str
-        Model to use for fitness evaluation: 'pls', 'lightgbm', 'mlp', 'neuralboosted'
+        Proxy model for fitness evaluation: 'pls', 'lightgbm', 'mlp',
+        or 'neuralboosted'. Ignored when ``model_config`` is provided.
     n_jobs : int
-        Number of parallel jobs for exhaustive search (-1 for all cores)
+        Number of parallel jobs for exhaustive search (default ``-1``,
+        i.e. all cores)
     top_n : int
         Number of top preprocessing configs to return (default=5)
     model_config : dict, optional
-        Dict with 'name' and 'params' for actual model fitness evaluation
-        If None, uses proxy fitness_model instead
+        Dict with 'name' and 'params' for actual model fitness evaluation.
+        When provided, exhaustive uses the actual model with ``params`` instead
+        of the ``fitness_model`` proxy.
 
     Returns
     -------
     result : dict
         Dictionary containing:
-        - 'configs': list - Top-N preprocessing configs (NEW)
-        - 'best_genes': np.ndarray - Best chromosome (backward compat)
-        - 'best_name': str - Name of best preprocessing
-        - 'best_transform': callable - Transform function
-        - 'best_rmsecv': float - Best RMSECV (regression) or 1-accuracy (classification)
-        - 'best_config': str - Human-readable configuration
-        - 'history': list - Fitness history
-        - 'method': str - Method used ('ga', 'exhaustive', or 'smart')
+
+        * ``"configs"``: list of top-N preprocessing configs (each a dict with
+          ``genes``, ``name``, ``transform``, ``rmsecv``, ``config``, etc.)
+        * ``"best_genes"``: np.ndarray — best chromosome (backward compat)
+        * ``"best_name"``: str
+        * ``"best_transform"``: callable
+        * ``"best_rmsecv"``: float
+        * ``"best_config"``: str — human-readable configuration
+        * ``"method"``: str — ``"exhaustive"`` or ``"smart"``
     """
     if method == 'exhaustive':
         return exhaustive_search(
             X, y, cv_folds, n_components, task_type, random_state,
-            fitness_model, n_jobs, verbose, progress_callback, top_n, model_config
+            fitness_model, n_jobs, verbose, progress_callback, top_n,
+            model_config, apply_autoscale=apply_autoscale,
+            phase2_n_seeds=phase2_n_seeds,
+            phase2_max_pool_multiplier=phase2_max_pool_multiplier,
         )
 
     if method == 'smart':
-        # Extract target model from model_config if available
         target_model = model_config.get('name') if model_config else None
         return smart_exhaustive_search(
             X, y,
             cv_folds=cv_folds,
             n_components=n_components,
             task_type=task_type,
-            fitness_model='auto',  # Auto-select based on target model
+            fitness_model='auto',
             target_model=target_model,
             n_jobs=n_jobs,
             verbose=verbose,
@@ -1492,265 +1662,13 @@ def optimize_preprocessing(
             top_n=top_n,
             model_config=model_config,
             stage1_top_k=20,
-            robust_validation=True
+            robust_validation=True,
         )
 
-    # Genetic Algorithm
-    rng = np.random.RandomState(random_state)
-
-    X = np.asarray(X, dtype=np.float64)
-    y = np.asarray(y).ravel()
-
-    n_samples, n_features = X.shape
-
-    if verbose >= 1:
-        print(f"GA Preprocessing Optimization")
-        print(f"  Data: {n_samples} samples, {n_features} features")
-        print(f"  Task: {task_type}")
-        print(f"  Fitness model: {fitness_model.upper()}")
-        print(f"  Search space: {TOTAL_COMBINATIONS} combinations")
-        print(f"  Population: {population_size}, Generations: {n_generations}")
-        print(f"  CV folds: {cv_folds}, PLS components: {n_components}")
-
-    # Initialize population with smart combinations (derivative-aware windows)
-    # This ensures GA starts with sensible configurations
-    smart_combos = get_smart_combinations()
-    n_smart = min(len(smart_combos), population_size * 2 // 3)  # Up to 66% from smart
-
-    population_list = []
-
-    # Add smart combinations first (shuffled to avoid bias toward first entries)
-    smart_indices = rng.permutation(len(smart_combos))[:n_smart]
-    for idx in smart_indices:
-        p_idx, w_idx = smart_combos[idx]
-        population_list.append(np.array([p_idx, w_idx], dtype=np.int32))
-
-    # Fill rest with random chromosomes for diversity
-    for _ in range(population_size - n_smart):
-        population_list.append(random_chromosome(rng))
-
-    population = np.array(population_list)
-
-    if verbose >= 1:
-        print(f"  Smart init: {n_smart} (66% smart combos, rest random)")
-
-    # Evaluate initial fitness with multi-seed robustness
-    # Returns (robust_fitness, mean_fitness, std_fitness) for each individual
-    fitness_results = [
-        evaluate_fitness_robust(ind, X, y, cv_folds, n_components, task_type, fitness_model, model_config)
-        for ind in population
-    ]
-    fitness = np.array([r[0] for r in fitness_results])  # robust_fitness for selection
-
-    # Track top-N individuals across all generations
-    # Store as list of (genes, robust_fitness, mean_fitness, std_fitness) tuples
-    all_individuals = [
-        (population[i].copy(), fitness_results[i][0], fitness_results[i][1], fitness_results[i][2])
-        for i in range(len(population))
-    ]
-
-    # Track best
-    best_idx = np.argmax(fitness)
-    best_genes = population[best_idx].copy()
-    best_fitness = fitness[best_idx]
-
-    valid_fitness = fitness[fitness > -np.inf]
-    mean_fit = np.mean(valid_fitness) if len(valid_fitness) > 0 else -np.inf
-    history = [{'generation': 0, 'best_fitness': best_fitness, 'mean_fitness': mean_fit}]
-
-    if verbose >= 1:
-        if task_type == 'classification':
-            print(f"  Gen 0: Best Accuracy = {best_fitness:.4f}")
-        else:
-            print(f"  Gen 0: Best RMSECV = {-best_fitness:.4f}")
-
-    # Early stopping: stop if no improvement for N generations
-    generations_without_improvement = 0
-    early_stop_patience = 10
-
-    # Evolution loop
-    for gen in range(1, n_generations + 1):
-        # Create new population
-        new_population = []
-
-        # Elitism - keep best individuals
-        elite_indices = np.argsort(fitness)[-elitism:]
-        for idx in elite_indices:
-            new_population.append(population[idx].copy())
-
-        # Fill rest with offspring
-        while len(new_population) < population_size:
-            # Selection
-            parent1 = tournament_selection(population, fitness, tournament_size, rng)
-            parent2 = tournament_selection(population, fitness, tournament_size, rng)
-
-            # Crossover
-            child1, child2 = crossover(parent1, parent2, crossover_rate, rng)
-
-            # Mutation
-            child1 = mutate(child1, mutation_rate, rng)
-            child2 = mutate(child2, mutation_rate, rng)
-
-            new_population.append(child1)
-            if len(new_population) < population_size:
-                new_population.append(child2)
-
-        population = np.array(new_population[:population_size])
-
-        # Evaluate fitness with multi-seed robustness
-        fitness_results = [
-            evaluate_fitness_robust(ind, X, y, cv_folds, n_components, task_type, fitness_model, model_config)
-            for ind in population
-        ]
-        fitness = np.array([r[0] for r in fitness_results])  # robust_fitness for selection
-
-        # Add new individuals to tracking list (with full stats)
-        for i in range(len(population)):
-            all_individuals.append((
-                population[i].copy(),
-                fitness_results[i][0],  # robust_fitness
-                fitness_results[i][1],  # mean_fitness
-                fitness_results[i][2]   # std_fitness
-            ))
-
-        # Update best and check for improvement
-        gen_best_idx = np.argmax(fitness)
-        if fitness[gen_best_idx] > best_fitness:
-            best_genes = population[gen_best_idx].copy()
-            best_fitness = fitness[gen_best_idx]
-            generations_without_improvement = 0  # Reset counter
-        else:
-            generations_without_improvement += 1
-
-        # Early stopping check
-        if generations_without_improvement >= early_stop_patience:
-            if verbose >= 1:
-                print(f"  Early stopping at gen {gen} (no improvement for {early_stop_patience} generations)")
-            break
-
-        valid_fitness = fitness[fitness > -np.inf]
-        mean_fit = np.mean(valid_fitness) if len(valid_fitness) > 0 else -np.inf
-        history.append({
-            'generation': gen,
-            'best_fitness': best_fitness,
-            'mean_fitness': mean_fit
-        })
-
-        if verbose >= 1 and gen % 5 == 0:
-            if task_type == 'classification':
-                print(f"  Gen {gen}: Best Accuracy = {best_fitness:.4f}")
-            else:
-                print(f"  Gen {gen}: Best RMSECV = {-best_fitness:.4f}")
-
-        if progress_callback:
-            if task_type == 'classification':
-                score_str = f"Accuracy={best_fitness:.4f}"
-            else:
-                score_str = f"RMSECV={-best_fitness:.4f}"
-            progress_callback({
-                'algorithm': 'ga_preprocessing',
-                'generation': gen,
-                'total_generations': n_generations,
-                'best_fitness': best_fitness,
-                'message': f"Gen {gen}/{n_generations}: {score_str} ({get_config_description(best_genes)})"
-            })
-
-    # Extract top-N unique individuals from all_individuals
-    # Sort by robust_fitness (descending), remove duplicates based on gene content
-    # all_individuals format: (genes, robust_fitness, mean_fitness, std_fitness)
-    all_individuals_sorted = sorted(all_individuals, key=lambda x: x[1], reverse=True)
-
-    unique_configs = []
-    seen_genes = []
-    for genes, robust_fitness, mean_fitness, std_fitness in all_individuals_sorted:
-        # Check if we've seen this gene configuration before
-        is_duplicate = False
-        for seen in seen_genes:
-            if np.array_equal(genes, seen):
-                is_duplicate = True
-                break
-
-        if not is_duplicate and len(unique_configs) < top_n:
-            seen_genes.append(genes.copy())
-            name, transform = chromosome_to_transform(genes)
-            config_desc = get_config_description(genes)
-
-            # Extract deriv and window from genes for search.py integration
-            preproc_type = PREPROC_TYPES[genes[0]]
-            window = WINDOW_SIZES[genes[1]]
-
-            # Determine derivative order from preprocessing type name
-            deriv_order = None
-            if 'deriv1' in preproc_type:
-                deriv_order = 1
-            elif 'deriv2' in preproc_type:
-                deriv_order = 2
-            elif 'deriv3' in preproc_type:
-                deriv_order = 3
-            elif 'deriv4' in preproc_type:
-                deriv_order = 4
-
-            # Polyorder for Savitzky-Golay = deriv_order - 1 (minimum 0)
-            polyorder = max(deriv_order - 1, 0) if deriv_order else None
-
-            # Convert mean_fitness to RMSECV/error score format
-            if task_type == 'classification':
-                score = 1.0 - mean_fitness  # Convert accuracy to error rate
-            else:
-                score = -mean_fitness  # Convert negative RMSECV to positive RMSECV
-
-            # Stability score: higher = more stable (less variance)
-            stability = 1.0 / (1.0 + std_fitness)
-
-            unique_configs.append({
-                'genes': genes,
-                'name': name,
-                'transform': transform,
-                'rmsecv': score,
-                'config': config_desc,
-                'fitness': robust_fitness,  # Robust fitness (mean - penalty*std)
-                'mean_fitness': mean_fitness,  # Mean across seeds
-                'std_fitness': std_fitness,  # Std across seeds
-                'stability': stability,  # Stability score (higher = more stable)
-                'deriv': deriv_order,
-                'window': window,
-                'polyorder': polyorder
-            })
-
-        if len(unique_configs) >= top_n:
-            break
-
-    # Best is first in list
-    best_genes = unique_configs[0]['genes']
-    best_name = unique_configs[0]['name']
-    best_transform = unique_configs[0]['transform']
-    best_score = unique_configs[0]['rmsecv']
-    best_config = unique_configs[0]['config']
-    best_fitness_final = unique_configs[0]['fitness']
-    best_stability = unique_configs[0]['stability']
-    best_std = unique_configs[0]['std_fitness']
-
-    if verbose >= 1:
-        print(f"\nOptimization complete!")
-        if task_type == 'classification':
-            print(f"  Best Accuracy: {unique_configs[0]['mean_fitness']:.4f} ± {best_std:.4f}")
-        else:
-            print(f"  Best RMSECV: {best_score:.4f} ± {best_std:.4f}")
-        print(f"  Best config: {best_config}")
-        print(f"  Stability: {best_stability:.3f}")
-        print(f"  Returning top {len(unique_configs)} unique configs")
-
-    return {
-        'configs': unique_configs,  # List of top-N configs with stability
-        'best_genes': best_genes,  # Backward compatibility
-        'best_name': best_name,
-        'best_transform': best_transform,
-        'best_rmsecv': best_score,
-        'best_config': best_config,
-        'history': history,
-        'task_type': task_type,
-        'method': 'ga'
-    }
+    raise ValueError(
+        f"method must be 'exhaustive' or 'smart', got {method!r}. "
+        "Legacy 'ga' mode was removed in 2026-05-06."
+    )
 
 
 # =============================================================================
@@ -1777,7 +1695,9 @@ def get_optimized_preproc_config(
     y : np.ndarray
         Target values
     quick : bool
-        If True, use quick settings (fewer generations)
+        If True, use 3-fold CV; if False, use 5-fold CV. (Pre-Phase-1 the
+        difference was also in GA population/generations; with GA removed,
+        cv_folds is the only knob this wrapper still tunes.)
     random_state : int
         Random seed
     verbose : int
@@ -1790,25 +1710,12 @@ def get_optimized_preproc_config(
     transform_func : callable or None
         Transform function, or None for 'raw'
     """
-    if quick:
-        result = optimize_preprocessing(
-            X, y,
-            method='ga',
-            population_size=32,
-            n_generations=20,
-            cv_folds=3,
-            random_state=random_state,
-            verbose=verbose
-        )
-    else:
-        result = optimize_preprocessing(
-            X, y,
-            method='ga',
-            population_size=48,
-            n_generations=30,
-            cv_folds=5,
-            random_state=random_state,
-            verbose=verbose
-        )
+    result = optimize_preprocessing(
+        X, y,
+        method='exhaustive',
+        cv_folds=3 if quick else 5,
+        random_state=random_state,
+        verbose=verbose,
+    )
 
     return (result['best_name'], result['best_transform'])
