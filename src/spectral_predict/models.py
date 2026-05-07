@@ -584,7 +584,7 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
         the smallest training-fold size (use ``cv_utils.compute_min_train_fold_size``).
         ``models.py`` does NOT independently clamp by ``n_samples`` — that is the
         caller's responsibility, because the CV strategy lives at the call site.
-        See ``run_search`` / ``run_bayesian_search`` for the canonical pattern.
+        See ``run_search`` / ``run_unified_bayesian`` for the canonical pattern.
     max_iter : int, default=500
         Maximum iterations for MLP
     n_estimators_list : list of int, optional

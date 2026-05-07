@@ -108,10 +108,9 @@ _EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
 
 # Single source of truth for the trial.user_attr key that marks a trial as a
 # value-cache-and-replay duplicate. Setter is _register_or_replay_fingerprint;
-# readers are convert_study_to_dataframe (this module) and
-# bayesian_utils.convert_optuna_result_to_dasp_format. Extracting this as a
-# constant prevents typo-asymmetric silent failures (writer-reader mismatch
-# would make duplicates leak into the leaderboard with no test signal).
+# reader is convert_study_to_dataframe. Extracting this as a constant prevents
+# typo-asymmetric silent failures (writer-reader mismatch would make duplicates
+# leak into the leaderboard with no test signal).
 DUPLICATE_OF_TRIAL_ATTR = 'duplicate_of_trial'
 
 
@@ -307,12 +306,12 @@ def _record_fingerprint_value(
 ) -> None:
     """Cache (trial_number, value) so future identical fingerprints can replay.
 
-    Sub-fits (legacy bayesian_utils path) store ``(trial_number, None)`` for
-    membership-only tracking. If the same fingerprint were ever to arrive
-    here with a real value (which shouldn't happen — sub-fits and main-fits
-    have structurally distinct fingerprints via subset_type/top_indices),
-    we promote the None placeholder to the real value rather than dropping
-    it. Defense-in-depth per DeepSeek STRONG-2 review.
+    Sub-fits store ``(trial_number, None)`` for membership-only tracking. If
+    the same fingerprint were ever to arrive here with a real value (which
+    shouldn't happen — sub-fits and main-fits have structurally distinct
+    fingerprints via subset_type/top_indices), we promote the None placeholder
+    to the real value rather than dropping
+    it.
     """
     if value is None:
         return
@@ -1332,7 +1331,7 @@ def create_unified_objective(
                     trial.set_user_attr('skip_reason', skip_reason)
                     # Cache the skip sentinel so a future identical OC
                     # config replays immediately instead of re-running the
-                    # whole CV+skip detection (Kimi BLOCKER closure).
+                    # whole CV+skip detection.
                     _record_fingerprint_value(
                         oc_fingerprint, trial, float('inf'), seen_fingerprints
                     )
@@ -1508,8 +1507,8 @@ def create_unified_objective(
             model = build_model(model_name, model_params, task_type=task_type)
 
             # Scale-sensitive models need StandardScaler (matches search.py behavior)
-            # For PLS-DA: PLS + StandardScaler + LogisticRegression (search.py lines 3417-3424)
-            # For scale-sensitive models: StandardScaler + Model (search.py lines 3427-3429)
+            # For PLS-DA: PLS + StandardScaler + LogisticRegression
+            # For scale-sensitive models: StandardScaler + Model
             SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
             # Build pipeline steps with imbalance handling support
@@ -1526,8 +1525,8 @@ def create_unified_objective(
                 pipe_steps.append(("imbalance", imbalance_transformer))
 
             # Step 2: Handle class_weight for classification models. Different
-            # families use different kwargs / mechanisms — mirrors search.py:
-            # 4411-4448 and the GUI dispatcher fix from c395317.
+            # families use different kwargs / mechanisms — mirrors
+            # _apply_class_weight_discriminator_for_rebuilt_model in search.py.
             #   PLS-DA tail LR     -> class_weight='balanced' (set later when LR built)
             #   CatBoost           -> auto_class_weights='Balanced' (no class_weight kwarg)
             #   has class_weight   -> set_params(class_weight='balanced')   (RF/SVC/LightGBM/RidgeClassifier-like)
@@ -1539,7 +1538,7 @@ def create_unified_objective(
             # Without this discriminator the prior `hasattr(model, 'class_weight')`-only
             # path silently no-op'd for CatBoost (no class_weight attr) and XGBoost
             # (no class_weight attr; only sample_weight at fit time), so trial-time
-            # CV scores AND the calibration metrics at line 1470 reflected an
+            # CV scores AND the calibration metrics reflected an
             # UNWEIGHTED model — every CatBoost/XGBoost classifier Bayesian search
             # under imbalance_method='class_weight' (or auto resolving to it) was
             # silently miscomputed.
@@ -2799,8 +2798,9 @@ def run_unified_bayesian(
                     progress_info['message'] += f" - Acccv: {-trial.value:.4f}"
 
             # Add best model tracking for "Best Model So Far" display.
-            # Optuna raises when no COMPLETE trial exists yet, which can
-            # happen during dedup pruning bursts.
+            # best_trial raises ValueError when no COMPLETE trial has a finite-better-than-1e10
+            # value yet — possible early in a run if the first trials all hit penalty paths
+            # (PLS clamp, OC skip, generic exception fallthrough).
             try:
                 best = _study_ref[0].best_trial
             except ValueError:
