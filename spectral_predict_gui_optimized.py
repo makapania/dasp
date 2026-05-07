@@ -3218,6 +3218,12 @@ class SpectralPredictApp:
         # tree-only enabled-model runs it doubles compute for no signal
         # differentiation, but the empirical wall-time impact is small.
         self.ga_preprocess_autoscale = tk.BooleanVar(value=True)
+        # Phase 2 (2026-05-06): multi-seed phase-2 rescore. The checkbox
+        # toggles between n_seeds=5 (ON, default) and n_seeds=0 (OFF, legacy).
+        # Closes the top-N infiltration problem on small-n / classification
+        # tasks documented in tools/exhaustive_seed_compare.py.
+        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=True)
+        self.ga_preprocess_phase2_max_pool_multiplier = tk.IntVar(value=8)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
         self.enable_smart_preprocessing = tk.BooleanVar(value=False)
@@ -11928,6 +11934,27 @@ class SpectralPredictApp:
             text="Also test with autoscale (per-feature standardization, ~2x cost)",
             variable=self.ga_preprocess_autoscale,
         ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # Phase 2 multi-seed rescore toggle. Re-evaluates top-K candidates
+        # with 5 random_state values to detect lottery winners.
+        ttk.Checkbutton(
+            self.ga_preproc_options_frame,
+            text="Robust ranking (5-seed phase-2 rescore on top-K, ~1.5x cost)",
+            variable=self.ga_preprocess_phase2_rescore,
+        ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        # Advanced: max pool multiplier (rarely needs adjustment; expose so
+        # users hitting the cap can extend without code change).
+        ttk.Label(
+            self.ga_preproc_options_frame,
+            text="Phase 2 pool multiplier (advanced):",
+        ).grid(row=3, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        ttk.Spinbox(
+            self.ga_preproc_options_frame,
+            from_=4, to=20,
+            textvariable=self.ga_preprocess_phase2_max_pool_multiplier,
+            width=5,
+        ).grid(row=3, column=1, sticky=tk.W, pady=(5, 0))
 
         # Initially hide options
         self.ga_preproc_options_frame.grid_remove()
@@ -28229,6 +28256,12 @@ class SpectralPredictApp:
                 ga_preprocess=self.enable_ga_preprocessing.get(),
                 ga_preprocess_cv_folds=self.ga_preprocess_cv_folds.get(),
                 ga_preprocess_autoscale=self.ga_preprocess_autoscale.get(),
+                ga_preprocess_phase2_n_seeds=(
+                    5 if self.ga_preprocess_phase2_rescore.get() else 0
+                ),
+                ga_preprocess_phase2_max_pool_multiplier=(
+                    self.ga_preprocess_phase2_max_pool_multiplier.get()
+                ),
                 # Smart preprocessing discovery parameters (NEW)
                 smart_preprocess=self.enable_smart_preprocessing.get(),
                 smart_preprocess_importance=self.smart_preprocess_importance.get(),

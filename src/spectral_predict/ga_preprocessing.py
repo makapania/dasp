@@ -878,6 +878,8 @@ def exhaustive_search(
     top_n: int = 5,
     model_config: Optional[Dict[str, Any]] = None,
     apply_autoscale: bool = False,
+    phase2_n_seeds: int = 5,
+    phase2_max_pool_multiplier: int = 8,
 ) -> Dict[str, Any]:
     """
     Exhaustively search all preprocessing combinations.
@@ -922,11 +924,30 @@ def exhaustive_search(
         enumerate both ``autoscale=False`` and ``autoscale=True`` for every
         (preproc, window) pair. Default ``False`` preserves the legacy 2-gene
         search space exactly.
+    phase2_n_seeds : int
+        Multi-seed phase-2 rescore (Phase 2 of the preprocessing plan, 2026-05-06).
+        After single-seed enumeration, the top-K candidates by single-seed
+        fitness are re-evaluated with ``n_seeds`` random_state values; final
+        top-N is then chosen from rescored mean rather than from the
+        single-seed lottery. Default 5; set to 0 to disable (legacy behavior).
+        Mitigates the top-N infiltration problem documented in
+        ``tools/exhaustive_seed_compare.py`` (single-seed top-7 contained
+        6/7 mean-rank>20 fakes on PLS-DA classification of BoneCollagen).
+    phase2_max_pool_multiplier : int
+        Hard cap on the phase-2 pool size, expressed as a multiple of
+        ``top_n``. Helper grows the pool through ``[3*top_n, 5*top_n,
+        max_pool_multiplier*top_n]``, halting at the cap if convergence
+        isn't reached. Default 8 (so K=40 for top_n=5). When the cap is
+        hit, the result dict's ``phase2_halt_reason`` will be ``"cap"``;
+        increase this if cap-hits are observed in practice.
 
     Returns
     -------
     result : dict
-        Same format as optimize_preprocessing()
+        Same format as optimize_preprocessing(), with an additional
+        ``phase2_halt_reason`` field set to ``"converged"``, ``"cap"``,
+        ``"single_iteration"``, or ``"disabled"`` (the last when
+        ``phase2_n_seeds == 0``).
     """
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y).ravel()
@@ -1024,15 +1045,106 @@ def exhaustive_search(
                     'message': f"Tested {i+1}/{len(all_genes)} combinations"
                 })
 
-    # Use diversity selection to ensure variety across preprocessing types
-    # This prevents selecting 5 similar configs (e.g., all deriv2 with different windows)
-    diverse_indices = select_diverse_exhaustive_configs(
-        all_genes, results, n_top=top_n,
-        exclude_raw_from_diversity=True  # Raw rarely produces best models
-    )
+    # PHASE 2 (2026-05-06): if phase2_n_seeds > 0, re-evaluate the top-K
+    # single-seed survivors across multiple random_state values and re-rank
+    # by mean. Closes the top-N infiltration problem on small-n / classification
+    # tasks where single-seed CV fold randomness produces artificial tie
+    # clusters. See tools/exhaustive_seed_compare.py for the empirical case.
+    phase2_halt_reason: str = "disabled"
+    if phase2_n_seeds > 0:
+        from .phase2_rescore import phase2_adaptive_rescore
 
-    if verbose >= 1:
-        print(f"  Diversity selection: ensuring variety across preprocessing types")
+        # Sort all_genes by single-seed fitness DESCENDING so the helper's
+        # candidates[:K] slice corresponds to the top-K by single-seed.
+        order = sorted(range(len(all_genes)), key=lambda i: results[i], reverse=True)
+        sorted_genes = [all_genes[i] for i in order]
+
+        # Closures for the helper. eval_fn invokes evaluate_fitness with the
+        # supplied random_state; key_fn produces a hashable identity tuple
+        # from a chromosome (works for both 2-gene and 3-gene shapes);
+        # diversity_key_fn reuses the (preproc_type, autoscale) key from
+        # select_diverse_exhaustive_configs to keep ranking semantics aligned.
+        def _phase2_eval_fn(genes, rs):
+            return evaluate_fitness(
+                genes, X, y, cv_folds, n_components, task_type,
+                rs, fitness_model, model_config,
+            )
+
+        def _phase2_key_fn(genes):
+            return tuple(int(x) for x in genes)
+
+        def _phase2_diversity_key_fn(genes):
+            return (PREPROC_TYPES[int(genes[0])], _decode_autoscale_gene(genes))
+
+        # Adaptive K progression: 3*top_n → 5*top_n → cap. Helper halts on
+        # Jaccard ≥ 0.8 OR (top_n - 1) overlap stable for two consecutive
+        # iterations. Cap is min(max_pool_multiplier * top_n, len(candidates)).
+        cap = phase2_max_pool_multiplier * top_n
+        progression = [3 * top_n, 5 * top_n, cap]
+
+        if verbose >= 1:
+            print(
+                f"  Phase 2 multi-seed rescore: n_seeds={phase2_n_seeds}, "
+                f"K progression={progression}, cap={cap}"
+            )
+
+        rescored_winners, halt_metadata = phase2_adaptive_rescore(
+            candidates=sorted_genes,
+            eval_fn=_phase2_eval_fn,
+            key_fn=_phase2_key_fn,
+            score_direction="maximize",  # evaluate_fitness returns -RMSE / +acc
+            initial_pool_size=3 * top_n,
+            pool_size_progression=progression,
+            max_pool_multiplier=phase2_max_pool_multiplier,
+            top_n=top_n,
+            n_seeds=phase2_n_seeds,
+            diversity_key_fn=_phase2_diversity_key_fn,
+        )
+        phase2_halt_reason = halt_metadata["halt_reason"]
+
+        if verbose >= 1:
+            print(
+                f"  Phase 2 halted: {phase2_halt_reason} "
+                f"(pool={halt_metadata['final_pool_size']}, "
+                f"expansions={halt_metadata['expansions']})"
+            )
+
+        if phase2_halt_reason == "cap":
+            # Cap-hit visibility (closes Codex B1 RESIDUAL): user should
+            # know top-N may not be stable and how to extend the cap.
+            print(
+                f"  WARNING: Phase 2 halted at cap ({cap} = "
+                f"{phase2_max_pool_multiplier} * top_n). Top-N may not be "
+                f"stable across seeded reruns. Consider increasing "
+                f"phase2_max_pool_multiplier."
+            )
+
+        # Map the helper's chromosome winners back to original indices in
+        # all_genes so the rest of this function (configs builder) is
+        # unchanged. We can't use ``rescored_winners.index(arr)`` because
+        # numpy arrays compare element-wise, which Python's list.index
+        # treats as ambiguous. Build a key->rank dict instead.
+        winner_rank_by_key: dict[tuple, int] = {
+            _phase2_key_fn(g): rank for rank, g in enumerate(rescored_winners)
+        }
+        diverse_indices = [
+            i for i, g in enumerate(all_genes)
+            if _phase2_key_fn(g) in winner_rank_by_key
+        ]
+        # Preserve the helper's ranking order
+        diverse_indices.sort(
+            key=lambda i: winner_rank_by_key[_phase2_key_fn(all_genes[i])]
+        )
+    else:
+        # Legacy path (phase2_n_seeds=0): use the diversity selector that
+        # operates on single-seed fitness.
+        diverse_indices = select_diverse_exhaustive_configs(
+            all_genes, results, n_top=top_n,
+            exclude_raw_from_diversity=True,
+        )
+
+        if verbose >= 1:
+            print("  Diversity selection: ensuring variety across preprocessing types")
 
     # Build top-N configs list using diversity-selected indices
     configs = []
@@ -1104,7 +1216,8 @@ def exhaustive_search(
         'best_config': best_config,
         'history': [{'combination': i, 'fitness': f} for i, f in enumerate(results)],
         'task_type': task_type,
-        'method': 'exhaustive'
+        'method': 'exhaustive',
+        'phase2_halt_reason': phase2_halt_reason,  # Phase 2: 'converged'/'cap'/'disabled'
     }
 
 
@@ -1425,6 +1538,8 @@ def optimize_preprocessing(
     top_n: int = 5,
     model_config: Optional[Dict[str, Any]] = None,
     apply_autoscale: bool = False,
+    phase2_n_seeds: int = 5,
+    phase2_max_pool_multiplier: int = 8,
 ) -> Dict[str, Any]:
     """
     Optimize spectral preprocessing via exhaustive enumeration.
@@ -1490,6 +1605,8 @@ def optimize_preprocessing(
             X, y, cv_folds, n_components, task_type, random_state,
             fitness_model, n_jobs, verbose, progress_callback, top_n,
             model_config, apply_autoscale=apply_autoscale,
+            phase2_n_seeds=phase2_n_seeds,
+            phase2_max_pool_multiplier=phase2_max_pool_multiplier,
         )
 
     if method == 'smart':

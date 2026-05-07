@@ -537,6 +537,73 @@ class TestExhaustivePreprocessingOptimization:
             f"Expected both autoscale=False and =True in top-N, got {autoscale_values}"
         )
 
+    def test_phase2_disabled_matches_legacy_shape(self, synthetic_spectra_small):
+        """Phase 2 regression pin: phase2_n_seeds=0 must produce the same
+        output shape as pre-Phase-2 exhaustive (legacy single-seed
+        diversity-selected top-N). The returned dict's phase2_halt_reason
+        is 'disabled' in this case."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=0,  # disable Phase 2
+        )
+
+        assert result["phase2_halt_reason"] == "disabled"
+        # Configs should still be the same shape
+        assert "configs" in result and len(result["configs"]) > 0
+        assert "best_genes" in result
+
+    def test_phase2_enabled_logs_halt_reason(self, synthetic_spectra_small):
+        """Phase 2 with default settings (n_seeds=5) must populate
+        halt_reason with one of the live values: 'converged', 'cap', or
+        'single_iteration'. 'disabled' is reserved for n_seeds=0."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        result = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=5,
+        )
+
+        assert result["phase2_halt_reason"] in {"converged", "cap", "single_iteration"}
+
+    def test_phase2_can_change_top_n_vs_legacy(self, synthetic_spectra_small):
+        """Phase 2 should produce a top-N that's potentially different from
+        single-seed legacy. We don't assert "must differ" because on small
+        synthetic data the top-N may genuinely converge across both paths;
+        instead assert that BOTH paths run and return valid top-N of the
+        same size, so a future regression that breaks the multi-seed
+        helper integration doesn't go silent."""
+        X, y = synthetic_spectra_small
+        X = X.values
+        y = y.values
+
+        legacy = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=0,
+            top_n=5,
+        )
+        rescored = optimize_preprocessing(
+            X, y, method="exhaustive", cv_folds=3, n_components=3,
+            random_state=42, verbose=0, n_jobs=1,
+            phase2_n_seeds=5,
+            top_n=5,
+        )
+
+        # Both runs should produce a valid top-N
+        assert len(legacy["configs"]) == 5
+        assert len(rescored["configs"]) == 5
+        # halt_reason should differentiate the two paths
+        assert legacy["phase2_halt_reason"] == "disabled"
+        assert rescored["phase2_halt_reason"] != "disabled"
+
     def test_with_actual_model_config(self, synthetic_spectra_small):
         """Closes Codex MEDIUM: actual-model exhaustive path is the live
         production path used by run_search (search.py:2052), but no test

@@ -1259,6 +1259,8 @@ def run_search(
     ga_preprocess=False,
     ga_preprocess_cv_folds=5,
     ga_preprocess_autoscale=True,  # Phase 3: search both autoscale on/off
+    ga_preprocess_phase2_n_seeds=5,  # Phase 2: 0 disables, 5 default
+    ga_preprocess_phase2_max_pool_multiplier=8,
     ga_quick_mode=False,
     # Smart preprocessing discovery parameters (NEW - replaces GA)
     smart_preprocess=False,
@@ -2058,6 +2060,8 @@ def run_search(
                 n_jobs=-1,  # Always parallel (was conditional on legacy GA mode)
                 model_config=model_config,  # Use actual model for fitness evaluation
                 apply_autoscale=ga_preprocess_autoscale,  # Phase 3 autoscale gene
+                phase2_n_seeds=ga_preprocess_phase2_n_seeds,  # Phase 2 multi-seed rescore
+                phase2_max_pool_multiplier=ga_preprocess_phase2_max_pool_multiplier,
             )
 
             ga_results[model_name] = ga_result
@@ -2154,6 +2158,12 @@ def run_search(
                         "smoothing_window": smoothing_window,
                         "smoothing_polyorder": smoothing_polyorder,
                         "autoscale": autoscale_gene,  # Phase 3 autoscale dimension
+                        # Phase 2 (2026-05-06): which path produced this config?
+                        # 'converged' / 'cap' / 'single_iteration' / 'disabled'.
+                        # Per-config because results CSV is row-shaped, but the
+                        # value is per-search (all configs from one ga_result
+                        # share the same halt_reason).
+                        "phase2_halt_reason": ga_result.get("phase2_halt_reason", "disabled"),
                         "ga_transform": cfg.get("transform"),
                         "ga_config": cfg.get("config"),
                         "ga_model_type": model_name,  # Track which model this was optimized for
