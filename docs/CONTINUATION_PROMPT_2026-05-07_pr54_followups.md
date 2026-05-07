@@ -1,7 +1,120 @@
 # Continuation prompt — PR #54 follow-ups
 
+> **STATUS — 2026-05-07 late evening:** Items 1-7 are CLOSED. Item 7 (delete legacy Bayesian path) shipped in this session — see `docs/PROJECT_STATUS.md` header and `docs/SESSION_LOG.md` 2026-05-07 late evening entry. **Item 8 (eight methodology / production-behavior changes) is the only remaining queue and needs explicit user approval per item — DO NOT pick up autonomously.**
+
+---
+
 **Filed:** 2026-05-06 late evening, after PR #54 merge (`4aef396`)
 **Pickup:** next session (likely 2026-05-07)
+**Last updated:** 2026-05-07 evening
+
+---
+
+## Current state — READ THIS FIRST (2026-05-07 evening)
+
+**Item 7 (delete legacy Bayesian path) is being handled in a separate parallel session — DO NOT pick it up.** A plan was filed at `docs/plans/2026-05-07-delete-legacy-bayesian-path.md` (commit `43607be`) and another worker is executing it. Stay out of `src/spectral_predict/search.py` (the `run_bayesian_search` function and surroundings), `src/spectral_predict/bayesian_utils.py` (`create_objective_function`, `convert_optuna_result_to_dasp_format`), and the three legacy-path test files (`test_class_weight_validation_rebuild.py`, `test_cv_pls_clamp.py` legacy sections, `test_golden_standard_performance.py`) until that session lands.
+
+**Items 1–6 below are DONE but UNCOMMITTED in the working tree.** A prior session this week implemented them and updated `PROJECT_STATUS.md` to reflect completion, but never committed the work. Verify with `git status` before doing anything — you should see these modified files:
+
+```
+M  tests/test_bayesian_dedup.py            <- item 1 (SQLite resume rehydration)
+M  tests/test_t44_autoscale_wiring.py      <- item 2 (end-to-end Bayesian autoscale)
+M  src/spectral_predict/unified_bayesian.py <- items 3, 4, partial 5 (comment polish)
+M  src/spectral_predict/bayesian_utils.py  <- item 5 (line-number ref cleanup)
+M  src/spectral_predict/search.py          <- item 5 + item 6 (black pass)
+M  spectral_predict_gui_optimized.py       <- item 6 (black pass)
+```
+
+Plus already-landed commits: `9a299a2` (autoscale Bayesian comparison tool + BoneCollagen 12-cell sweep), `2d2ab3a` (SESSION_LOG entry on PLS-DA validation rebuild needing int-encoded labels), `43607be` (legacy-deletion plan), `98de4bd` (PROJECT_STATUS autoscale entry + this prompt update).
+
+---
+
+## Your session: PRIMARY WORK
+
+### Step 0 — commit items 1–6 in five logical chunks (MANDATORY, do this first)
+
+This is now safety-critical, not just polish. Item 7's parallel session will eventually merge changes that touch some of the same files (especially `search.py` and `bayesian_utils.py`). If items 1–6 stay uncommitted, a rebase/merge collision is guaranteed. Land them in this order so each commit is reviewable independently and the `black` pass is isolated from the source-edit commits:
+
+1. `tests(bayesian-dedup): SQLite resume rehydration round-trip` — `tests/test_bayesian_dedup.py` only
+2. `tests(autoscale): end-to-end run_unified_bayesian wiring` — `tests/test_t44_autoscale_wiring.py` only
+3. `chore(unified_bayesian, bayesian_utils): comment polish + stale search.py ref cleanup` — `src/spectral_predict/unified_bayesian.py` + `src/spectral_predict/bayesian_utils.py` (items 3/4/5)
+4. `style: black pass on search.py and gui` — `src/spectral_predict/search.py` + `spectral_predict_gui_optimized.py` (item 6 — ~27K whitespace-only lines, MUST be its own commit)
+5. (Skip — `PROJECT_STATUS.md` already committed today as `98de4bd`.)
+
+**Verification before each commit:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` for the test commits; `python -m py_compile src/spectral_predict/{search,unified_bayesian,bayesian_utils}.py spectral_predict_gui_optimized.py` for the source/style commits. Targeted, not full suite — per project rule "don't run full test suite for small changes."
+
+**After Step 0, choose ONE of the two primary work items below.** Both are independent of item 7 and won't collide.
+
+---
+
+### Option A — harden `compute_validation_metrics_for_top_models` against string-typed classification labels (RECOMMENDED, ~30 LOC)
+
+**The bug.** Today's session (commit `2d2ab3a` SESSION_LOG entry) discovered that `compute_validation_metrics_for_top_models(task_type='classification')` at `src/spectral_predict/search.py:568` silently fails when given raw string class labels (`'Low'`/`'Medium'`/`'High'`). PLS.fit chokes trying to convert `'Medium'` to float; the rebuild loop catches the ValueError, logs `[Warning] Failed to compute validation for model 1: could not convert string to float: 'Medium'` to stdout, and leaves `val_Accuracy`/`val_F1`/`val_ROC_AUC` as NaN for every model. A user reading the Validation tab sees blank metrics with no on-screen explanation.
+
+**Why the GUI doesn't currently hit this:** the GUI wraps a `LabelEncoder` around classification targets before passing them to the search machinery, so `y_train`/`y_val` reaching the rebuild are already integer-encoded. Anyone scripting against this function directly (or any future tool like `tools/autoscale_bayesian_compare.py`) hits it.
+
+**The fix.** At the top of `compute_validation_metrics_for_top_models` (around line 660 where `_normalize_mixed_type_labels` is already called for mixed-type object arrays), add a sibling branch that handles pure-string label arrays:
+
+```python
+# Coerce string-typed labels to int for classification rebuild — PLS.fit
+# can't ingest object/string arrays, and the existing mixed-type normalizer
+# only fires when len({type(v).__name__ for v in y}) > 1.
+if task_type in ("classification", "one_class"):
+    if (
+        getattr(y_train, "dtype", None) == object
+        and all(isinstance(v, str) for v in y_train)
+    ):
+        from sklearn.preprocessing import LabelEncoder
+        le = LabelEncoder().fit(np.concatenate([y_train, y_val]))
+        y_train = le.transform(y_train)
+        y_val = le.transform(y_val)
+```
+
+Slot this immediately AFTER the existing `_normalize_mixed_type_labels` block (search.py:660-668) so mixed-type arrays still take the existing path; the new branch only catches the pure-string case the existing check skips.
+
+**Tests.** Add to `tests/test_class_weight_validation_rebuild.py` (or a new `tests/test_validation_rebuild_label_encoding.py` if the existing file is being touched by item 7's parallel session — verify with `git log --oneline -- tests/test_class_weight_validation_rebuild.py` before deciding):
+
+1. `test_string_labels_get_encoded` — pass `y_train=np.array(['A','B','A','C'])` etc., assert no warning, assert val_Accuracy is finite.
+2. `test_mixed_type_labels_still_normalized` — regression pin that the existing `_normalize_mixed_type_labels` path still fires for mixed `[1, 'B', 1, 'C']`.
+3. `test_int_encoded_labels_unchanged` — assert that already-int `y_train`/`y_val` pass through with no transformation (use `id()` or array equality).
+
+**Verification.** `pytest tests/test_class_weight_validation_rebuild.py -v` (or whichever test file you used).
+
+**Risk profile.** Low — purely additive, only fires on a code path the GUI never reaches today. No production behavior change for any GUI user. Only effect on scripted use is "you now get real metrics instead of silent NaNs."
+
+**Why this is bug-fix-grade and not polish:** the current behavior is a silent failure (fits the recurring "silent failure hunter" theme of the last several reviews). The user-facing symptom (blank Validation tab) is indistinguishable from "model genuinely failed" without scrolling stdout for the Warning line.
+
+---
+
+### Option B — CatBoost `thread_count` survival test (~10 LOC, item 8 backup)
+
+If Option A is already in flight elsewhere or you'd rather do something smaller after Step 0:
+
+**The pin.** Mirror the existing `n_jobs` survival test pattern for the one model that uses a different kwarg name. CatBoost's parallelism control is `thread_count`, not `n_jobs`; if the dedup/rebuild paths drop it during model rebuild, CatBoost trains single-threaded and gets ~10× slower with no warning.
+
+**Where.** Add `test_catboost_thread_count_survives_rebuild` to whichever test file currently exercises CatBoost survival (likely `tests/test_unified_bayesian_baseline.py` — grep for `n_jobs` in the test directory to find the canonical pattern).
+
+**Test sketch.**
+```python
+def test_catboost_thread_count_survives_rebuild():
+    # mirror the n_jobs pattern but assert thread_count=2 propagates through
+    # the rebuild Path → final fit kwargs.
+    # ...10 LOC...
+```
+
+**Risk profile.** Zero — pure test addition, pins existing behavior, no production changes.
+
+---
+
+## What's NOT for this session
+
+- **Item 7** (delete legacy Bayesian path) — parallel session, hands off.
+- **Item 8** items other than CatBoost test — all need explicit user approval before any agent acts. If you finish Step 0 + Option A early and want more work, surface the item 8 list to the user and ask which they want unblocked. Do not act autonomously on any of: `verbose`-strip-set change, broad-except log-level upgrade, Option C n_components range, code_generator y_transform, K-Fold one-class repeated-CV pooling parity, mock-Tk banner-render test for PR #45.
+- **Today's autoscale-default investigation** — concluded "leave default ON, don't change anything." `tools/autoscale_bayesian_compare.py` is reusable if you ever want to replicate on more datasets/models, but no source change is currently warranted. Don't re-run the BoneCollagen sweep — it's in `tools/_autoscale_bayes_compare_full.json` and PROJECT_STATUS top entry.
+
+---
+
+## Original queue (filed 2026-05-06 late evening)
 
 PR #54 shipped autoscale decoupling (T-44) + bayesian dedup hardening + PR-#52 follow-ups. Cross-family review (Codex re-review + DeepSeek V4 Pro Max + 4-agent toolkit panel) signed off; main is at `b014831` after the doc updates.
 

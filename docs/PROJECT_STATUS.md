@@ -1,6 +1,42 @@
 # Project Status
 
-> **Last updated:** 2026-05-06 late evening — **PR #54 merged** (squash `4aef396`). Three themes: T-44 autoscale decoupling (Bayesian and TPE now have dedicated `bayes_enable_autoscale` / `tpe_enable_autoscale` GUI controls, both default ON, independent of grid `use_autoscale`); dedup hardening follow-ups closing review findings on `ee3a70e`; PR-#52 post-merge fixes (LVs/booster-export/NSGA/PLS-DA rebuild/TPE display).
+> **Last updated:** 2026-05-07 late evening — **T-36 / Item 7 closed: legacy Bayesian path deleted.** `run_bayesian_search` (~720 lines, test-only — `NOTE (T-36)` already marked it as having no GUI caller) removed from `search.py`; nine helpers in `bayesian_utils.py` deleted (`create_optuna_study`, `create_objective_function`, `convert_optuna_result_to_dasp_format`, `print_optimization_summary`, `get_param_importance`, `save_optimization_plots`, `ProgressCallback`, `handle_failed_trial`, `_warn_mixed_regime_once` + the `_mixed_regime_warned` global + the `__main__` example block). `bayesian_utils.py` shrunk 1282 → 51 lines, sole survivor is `_extract_fitted_n_components` (used by `nsga2_search.py` + `tests/test_cv_pls_clamp.py`). Test migration: `test_bayesian_utils.py` deleted entirely; `test_bayesian_varsel_caching` surgically removed from `test_golden_standard_performance.py` (the three grid-path golden R²/RMSE pins for PLS, LightGBM, SPA were preserved — Codex caught that the file was not pure-legacy); `TestRunBayesianSearchPLSGridClamping` class deleted from `test_cv_pls_clamp.py`; one parametrize entry dropped from `test_class_weight_validation_rebuild.py`. Stale comment refs cleaned in `unified_bayesian.py:112, 310` and `models.py:587`.
+>
+> **Safety verification:** Plan `docs/plans/2026-05-07-delete-legacy-bayesian-path.md` triple-reviewed by GLM 5.1 + Codex GPT-5.5 + DeepSeek V4 Pro Max before execution. Each caught issues the others missed (GLM: snapshot payload depth; Codex: BLOCKER `cv_folds` vs `folds` signature mismatch + `test_golden_standard_performance.py` is not pure-legacy + ordered fingerprint capture; DeepSeek: BLOCKER fabricated CSV schema — actual columns are `File Number / %Collagen / CollagenCat`, not `delta13C/delta15N`). All findings folded in before code changes.
+>
+> **Verification battery (all green):**
+> - **Snapshot harness** (temporary, removed): captured `run_unified_bayesian` byte-identical outputs on PLS regression, LightGBM regression, PLS-DA classification across the deletion. 3/3 PASS at every commit through the 7-commit deletion sequence.
+> - **End-to-end smoke** (temporary, removed): ran regression (PLS) + classification (PLS-DA) end-to-end through both `run_search` (grid) and `run_unified_bayesian` (Bayesian) on the real BoneCollagen dataset. All four PASS with non-trivial outputs (R² > 0, Accuracy > random baseline, study completed with non-penalty best).
+> - **Targeted regression battery:** 81/81 PASS across `test_legacy_deletion_snapshot`, `test_bayesian_dedup`, `test_t44_autoscale_wiring`, `test_cv_pls_clamp`, `test_class_weight_validation_rebuild`, `test_unified_bayesian_baseline`.
+> - **Production module imports:** `search`, `bayesian_utils`, `unified_bayesian`, `nsga2_search`, `models` all import cleanly. GUI module (`spectral_predict_gui_optimized.py`) imports cleanly.
+> - **Final dependency sweep:** zero remaining references to any deleted symbol in `src/`, `tests/`, or `spectral_predict_gui_optimized.py` (only the historical record in `bayesian_utils.py:5` docstring).
+>
+> **Out of scope (flagged):** `src/spectral_predict/nsga2_search.py.backup` (1546-line pre-existing repo cruft) — separate cleanup needed. Item 8 of the continuation prompt (eight methodology/behavior changes) — needs explicit user approval, not autonomous.
+>
+> ---
+>
+> ## Previous session — 2026-05-07 evening — **Empirical investigation: is `bayes_enable_autoscale` default ON justified by external validation?** New reusable harness `tools/autoscale_bayesian_compare.py` runs `run_unified_bayesian` with `enable_autoscale=False` vs `True` across (task × seeds), scores the best trial on a fixed-partition external set via the canonical `compute_validation_metrics_for_top_models` rebuild path, and logs both arm metrics + the fraction of trials TPE chose `apply_autoscale=True`. BoneCollagen 12-cell sweep (PLS regression + PLS-DA classification × 2 arms × 3 seeds × 100 trials each, n_train=34, n_external=15):
+>
+> | task | arm | CV best | external | TPE picked autoscale |
+> |---|---|---|---|---|
+> | regression (PLS) | off | RMSEcv 0.797±0.054, R²cv 0.987±0.002 | RMSEP 2.146±0.144, R²pred 0.881±0.016 | — |
+> | regression (PLS) | on  | RMSEcv 0.640±0.156, R²cv 0.991±0.004 | RMSEP 2.110±0.237, R²pred 0.885±0.026 | 53–84% of trials, best 2/3 |
+> | classification (PLS-DA) | off | BAcc 0.938±0.048 | Acc 0.644±0.077, F1 0.628±0.102 | — |
+> | classification (PLS-DA) | on  | BAcc 0.927±0.007 | **Acc 0.689±0.038, F1 0.679±0.085** | 30–69% of trials, best 1/3 |
+>
+> **Verdict: leave default ON.** Regression external is statistically indistinguishable between arms but the CV/external optimism gap roughly doubles with autoscale on (CV looks better, external doesn't move) — TPE finds a tighter overfit on the extra dimension. Classification external is mildly better (Acc +4 pp, F1 +5 pp) AND notably less variable (std halved). Asymmetry plausibly tracks CV-headroom: regression CV is at ceiling (R²cv ≈ 0.99) so any extra dimension overfits; classification CV has headroom (~0.93 BAcc) so exploration helps.
+>
+> **Caveat:** n=3 seeds × n=15 external; one dataset; PLS / PLS-DA only. Directional support for the existing default, not statistical proof. Replication on more datasets + Ridge/SVR/MLP would be needed to flip the default.
+>
+> **Tree-model angle (asked by user during analysis):** confirmed Bayesian does NOT model-aware-skip the autoscale toggle for tree models. Per-trial overhead is ~1 ms StandardScaler vs ~200–10000 ms tree fit (sub-0.01% of wall time); predictions are mathematically equivalent under per-feature monotone rescaling for pure tree trials (all four boosters' splits are threshold-comparison-based). Cases where tree+autoscale DOES change predictions: tree+CARS/iPLS/UVE/SPA varsel (PLS-based varsel sees scaled features → picks different vars), tree+SMOTE/ADASYN (distance-based neighbor-finding sees scaled features). Phase 1.5 model-aware skip from T-36 plan is **not worth filing** — it's polish below the noise floor and would optimize away exploration that's actually meaningful in the varsel/SMOTE cases.
+>
+> **Commits:** `9a299a2` (tool + 12-cell sweep results JSON), `2d2ab3a` (SESSION_LOG entry on the PLS-DA validation rebuild contract — `compute_validation_metrics_for_top_models(task_type='classification')` requires int-encoded class labels; raw strings make PLS.fit crash inline as a swallowed warning leaving val_Accuracy as NaN). No source code changes; no new tickets filed.
+>
+> ---
+>
+> ## Previous session — 2026-05-07 — PR #54 follow-ups (items 1-6 from `docs/CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`). Test additions: SQLite resume-rehydration round-trip (`TestSQLiteResumeRehydrationTest`, 1 test) and end-to-end `run_unified_bayesian(enable_autoscale=True)` wiring (`TestBayesianEndToEndAutoscale`, 2 tests). Comment polish: reworded stale "dedup pruning bursts" comment, dropped reviewer-pseudonym citations (DeepSeek/Kimi), removed 6 stale `search.py` line-number refs and the `c395317` short SHA. `black` pass on `search.py` and `spectral_predict_gui_optimized.py` (project-configured formatter, first full pass — ~27K lines of whitespace-only changes). 28/28 dedup+autoscale tests green; 81/81 broader suite green.
+>
+> **Previous:** PR #54 merged (squash `4aef396`). Three themes: T-44 autoscale decoupling (Bayesian and TPE now have dedicated `bayes_enable_autoscale` / `tpe_enable_autoscale` GUI controls, both default ON, independent of grid `use_autoscale`); dedup hardening follow-ups closing review findings on `ee3a70e`; PR-#52 post-merge fixes (LVs/booster-export/NSGA/PLS-DA rebuild/TPE display).
 >
 > **Three review-findings fixes shipped via `ee3a70e`** (after Codex caught a regression in the first attempt at `e906f70`):
 > 1. Resume-rehydrate would cache transient broad-except `1e10` failures as ghosts. Fixed by moving fingerprint user_attr write from pre-fit (`_register_or_replay_fingerprint`) to post-success (`_record_fingerprint_value`). OC-skip's `float('inf')` Kimi-BLOCKER caching is preserved because `:1331` explicitly calls `_record_fingerprint_value(fp, trial, inf, ...)`.
@@ -9,9 +45,9 @@
 >
 > **Cross-family review verdict:** Codex re-review of `ee3a70e` → closed. DeepSeek V4 Pro Max independent review → "net state at HEAD is clean — no action needed." Pre-merge 4-agent panel (code-reviewer / pr-test-analyzer / silent-failure-hunter / comment-analyzer) all signed off after these fixes.
 >
-> **Tests:** `tests/test_t44_autoscale_wiring.py` (15 tests pinning bayes/tpe/grid autoscale plumbing) + `tests/test_bayesian_dedup.py` (10 tests, including 4 new producer-side contract tests pinning the rehydrate fix). 25/25 green.
+> **Tests:** `tests/test_t44_autoscale_wiring.py` (17 tests — 15 plumbing + 2 end-to-end autoscale behavioral) + `tests/test_bayesian_dedup.py` (11 tests — 10 original + 1 SQLite round-trip). 28/28 green.
 >
-> **Verification command:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` (25 passed in 2.14s).
+> **Verification command:** `pytest tests/test_bayesian_dedup.py tests/test_t44_autoscale_wiring.py -v` (28 passed in 3.45s).
 >
 > ---
 >
@@ -47,7 +83,7 @@
 >
 > **Deferred follow-ups** (originally in `docs/CONTINUATION_PROMPT_2026-05-09_dedup_followups.md`, now SUPERSEDED by the value-cache-and-replay design that shipped 2026-05-06):
 > - Options A/B/C are historical. The shipped mechanism takes the same fingerprint hash A described but uses cache-and-replay instead of `TrialPruned`, eliminating both the leaderboard duplicates Option B targeted and the budget-shrinkage UX risk Option A had.
-> - Possible future follow-ups (not blocking): booster end-to-end forced-duplicate test (Codex NEEDS_DISCUSSION); narrow `_resolved_weighting_fingerprint` exception scope to `AttributeError` only (silent-failure WEAK); broad `except Exception → 1e10` log-level upgrade in trial body (silent-failure WEAK); Option C (data-aware `n_components` suggest range) remains a separate methodology question.
+> - Possible future follow-ups (not blocking): booster end-to-end forced-duplicate test (Codex NEEDS_DISCUSSION); broad `except Exception → 1e10` log-level upgrade in trial body (silent-failure WEAK); Option C (data-aware `n_components` suggest range) remains a separate methodology question.
 >
 > ## Previous session — 2026-05-04 — **Booster export-CV parity restored** (uncommitted; on branch `docs/2026-05-07-final-wrapup-and-continuation`). User reported: in-app LightGBM CV `Accuracycv=1.0` on `outputs/results_CollagenCat_20260504_103145.csv` row 1, exported Colab notebook gave `0.976` with one borderline class-2 sample misclassified. Root cause: in-app `_run_single_fold` uses `cv_utils._fit_with_early_stopping` with `eval_set=[(X_test, y_test)]` for boosters; export templates emit plain `fold_model.fit(X_train, y_train)`. Drift introduced by commit `af6f4cf` (Jan 2026, early stopping feature) — export side was never updated.
 >
@@ -1088,7 +1124,7 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 
 ## Known follow-ups (deferred from PR #4 reviews, non-blocking)
 
-- **`run_bayesian_search()` does not call `validate_cv_strategy_for_task()` upfront.** Located in `src/spectral_predict/search.py:3096`. Unlike `run_search()` and `run_unified_bayesian()` which validate the CV-strategy / task-type / class-count combination before any trials run, `run_bayesian_search()` accepts `cv_strategy` / `cv_n_repeats` and proceeds directly. Result: a bad CV config (e.g. LOO requested with task='classification' and a class with <2 samples) would only fail mid-trial inside the Bayesian objective rather than producing a clean preflight error. Codex flagged this as non-blocking in the PR #4 review. Fix is a one-liner: add `validate_cv_strategy_for_task(...)` at the top of the function, mirroring the other two entry points.
+- ~~**`run_bayesian_search()` does not call `validate_cv_strategy_for_task()` upfront.**~~ — CLOSED 2026-05-07 by T-36 / Item 7 deletion. The function no longer exists; `run_search()` and `run_unified_bayesian()` (the two surviving entry points) both call `validate_cv_strategy_for_task()` upfront, so the gap is moot.
 - **Style nits in CV code**: `cv_utils.py` duplicates the `RepeatedKFold` import (module-level + inside `build_cv_splitter`); `templates/validation.py` prints `({cv_folds}-fold)` even for `loo`/`repeated_kfold` (misleading once strategy-specific exports are working); `_majority_vote` should default to NaN in the empty-votes else-branch for safety; LOO `splits = list(...)` materialization at `search.py:~4228` is O(n²) memory for very large datasets (fine for n<5000 spectral data but worth a comment).
 - **Suppress sklearn 1.7.2 `"X does not have valid feature names"` UserWarning flood** on `.venv312` — cosmetic noise, ~12MB stderr per grid run, unrelated to any bug. Consider `warnings.filterwarnings(...)` in the GUI entry point.
 

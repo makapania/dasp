@@ -4,6 +4,71 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 late evening — T-36 closed: legacy Bayesian path deleted via triple-reviewed plan
+
+Item 7 of `CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`. Plan filed at `docs/plans/2026-05-07-delete-legacy-bayesian-path.md`, executed in 7 commits.
+
+### Plan-review lessons
+
+The cross-family review pattern (GLM 5.1 → Codex GPT-5.5 → DeepSeek V4 Pro Max) was load-bearing here. Each reviewer caught issues the others missed. **The two BLOCKERs (Codex's `cv_folds` vs `folds` signature mismatch, DeepSeek's fabricated CSV schema) would each have caused the harness to crash on first invocation.** Without DeepSeek the schema bug would have surfaced at runtime; without Codex the kwarg bug would have blocked snapshot generation.
+
+| Reviewer | Tier-1 catches |
+|---|---|
+| GLM 5.1 | Snapshot payload depth (sorted fingerprints could mask order drift); regex deletion fragility against comment text matching the lookahead. Also a string of hallucinations (claimed `_run_single_fold` would be orphaned, claimed conftest.py side effects, claimed GUI dynamic dispatch) — all rejected after grep verification. **In-isolation reliability holds: GLM is OK on plan-shape but unreliable on caller-graph claims because it has no repo access.** |
+| Codex GPT-5.5 | BLOCKER on `folds=5` kwarg (real signature is `cv_folds`); MAJOR that `test_golden_standard_performance.py` is not pure-legacy (3 of 4 tests are grid-path golden R²/RMSE pins on `run_search`); MAJOR on snapshot needing per-trial ordered records (sorting fingerprints masks RNG drift). Repo access let Codex verify GLM's hallucinations were false. |
+| DeepSeek V4 Pro Max | BLOCKER on fabricated CSV schema — actual `BoneCollagen.csv` has `File Number / Sample no. / %Collagen / CollagenCat`, NOT `delta13C/delta15N`. Spectra live in `example/Spectrum*.asd` and need `read_asd_dir` + metadata join (the canonical pattern in `tools/bench_baseline_compare.py:54-67`). Plus MAJOR on `_coerce_scalar` falling through to `str()` for non-scalar Optuna params, losing float precision in nested tuples — fixed by making `_coerce_scalar` recursive. |
+
+### Deletion scope was bigger than the continuation prompt anticipated
+
+Continuation prompt named 3 helpers in `bayesian_utils.py` to delete (`create_objective_function`, `convert_optuna_result_to_dasp_format`, plus implicitly `create_optuna_study`). Static grep audit revealed 9 helpers had zero callers outside the legacy path: also `_warn_mixed_regime_once` (and its `_mixed_regime_warned` global), `print_optimization_summary`, `get_param_importance`, `save_optimization_plots`, `ProgressCallback`, `handle_failed_trial`. Plus the `if __name__ == '__main__':` example block that called the deleted helpers. **Lesson: continuation prompts under-specify helper-cluster scope; independent grep audit always required.**
+
+The `_extract_fitted_n_components` helper survives — used by `nsga2_search.py:61, 3981` and `tests/test_cv_pls_clamp.py:15, 426`.
+
+### Snapshot-harness pattern: captured signals matter as much as count
+
+The harness pinned `run_unified_bayesian` outputs on three configs (PLS regression, LightGBM regression, PLS-DA classification) at seed=42. Each fixture captured: per-trial ordered records (number, value, params, fingerprint, duplicate_of), all-rows-in-trial-order DataFrame, top-5 sorted, `study.best_value`, `study.best_params`. **Key insight: sorted fingerprints alone (the original design) would have masked RNG order drift — same set, different order would still pass.** Codex's "ordered per-trial records" upgrade made the oracle strict enough that any RNG/import-order drift downstream of the deletion would surface.
+
+Determinism verified by running the harness twice in the same session — 16s second run, byte-identical match. Same machine, same Python (3.12.10), same Optuna (4.8 with `multivariate=True`).
+
+### End-to-end smoke addresses what snapshots don't
+
+User explicitly asked for "after the change for regression and classification to make sure it works." Snapshot tests prove byte-identical OUTPUT on configs that were already running; they don't prove production paths still TERMINATE on a fresh invocation through `run_search` (grid path, separate from `run_unified_bayesian`). The smoke harness ran regression + classification through BOTH `run_search` and `run_unified_bayesian` on real `BoneCollagen.csv`, asserting non-trivial outputs (R² > 0, Accuracy > random baseline, study completed with non-penalty best).
+
+`run_search` requires DataFrame X with string-wavelength column names + `pd.Series` y; `run_unified_bayesian` takes numpy arrays. Smoke harness has separate loaders for each — DeepSeek's MINOR #5 about `preprocessing_methods=["raw"]` (list form) was incorrect — `run_search` calls `.get("raw", False)` requiring dict form. Reverted.
+
+### Pre-existing cruft surfaced
+
+`src/spectral_predict/nsga2_search.py.backup` (1546 lines) is in the repo but uncommitted-style. Out of scope for this PR; flag for separate cleanup.
+
+### Verification battery (final state)
+
+- 7 commits in the deletion sequence (plan, snapshot harness, search.py deletion, parametrize drop, test deletions, cv_pls_clamp class drop, helpers deletion, comment cleanup, docs update).
+- Snapshot harness was green at every commit through the deletion.
+- 81/81 targeted regression battery green post-deletion.
+- 4/4 end-to-end smoke checks green post-deletion.
+- All 5 production modules import cleanly; GUI module imports cleanly.
+- Snapshot harness + smoke script removed in final commit (their assertion was load-bearing only across the deletion).
+
+`bayesian_utils.py` reduced from 1282 → 51 lines.
+
+---
+
+## 2026-05-07 — PR #54 follow-ups (items 1-6)
+
+Items 1-2 (test additions) and 3-6 (comment polish + black pass) from `docs/CONTINUATION_PROMPT_2026-05-07_pr54_followups.md`.
+
+**Test 1 — SQLite resume-rehydration round-trip** (`TestSQLiteResumeRehydrationTest`): verified that `_freeze_for_fingerprint` sentinel strings (`__nan_sentinel__`, `__pos_inf_sentinel__`, `__neg_inf_sentinel__`) survive `repr → SQLite storage → optuna.load_study → ast.literal_eval` round-trip. Without the sentinels, `ast.literal_eval(repr(float('nan')))` raises SyntaxError, silently dropping that fingerprint from the dedup set on resume. Four fingerprints (inf, -inf, nan, normal) all round-trip correctly.
+
+**Test 2 — End-to-end `run_unified_bayesian(enable_autoscale=True)`** (`TestBayesianEndToEndAutoscale`): T-44's autoscale plumbing had unit-level coverage (`suggest_preprocessing` explored both values) and TPE end-to-end coverage, but the Bayesian end-to-end path was untested — a regression breaking the `bayes_enable_autoscale → apply_autoscale exploration` wiring would slip through. Two tests: `enable_autoscale=True` asserts the `Autoscale` column contains both True and False; `enable_autoscale=False` asserts all values are False.
+
+**Comment polish:** "dedup pruning bursts" comment reworded to describe actual penalty paths; reviewer-pseudonym citations (DeepSeek STRONG-2, Kimi BLOCKER closure) dropped per project rule — kept rationale, lost attribution. Stale `search.py` line-number refs (6 instances across `unified_bayesian.py` and `bayesian_utils.py`) replaced with function-name refs or removed; `c395317` short SHA removed.
+
+**`black` pass:** `search.py` (7.4K lines) and `spectral_predict_gui_optimized.py` (68K lines) had never been fully formatted despite `black` being configured in `pyproject.toml`. First full pass produced ~27K lines of whitespace-only changes. Inert but visually consistent.
+
+**Remaining from the continuation prompt:** Item 7 (delete legacy `run_bayesian_search` + `bayesian_utils` machinery, ~1-2 hrs) and Item 8 (eight methodology/behavior changes needing user approval).
+
+---
+
 ## 2026-05-06 late evening — Resume-rehydrate cache pollution: producer-side stamp beats consumer-side filter
 
 PR #54 review surfaced a silent failure in `_rehydrate_seen_fingerprints`: trials that completed via the broad-except `1e10` penalty path (transient OOM, `LinAlgError`, GPU contention at `unified_bayesian.py:~2006`) had their `fingerprint` user_attr stamped pre-fit, so resume cached the failure ghost forever — user could never retry transient errors.
@@ -816,6 +881,16 @@ T-41 took 8 review passes before merge. Each pass caught real bugs the prior pas
 5. Multi-model Bayesian runs share one SQLite file (one `storage_url` per `start_run`, multiple models per run). File-level cleanup (`Path.unlink`) on a per-model failure can nuke prior models' trials. Use study-scoped operations (`optuna.delete_study`).
 
 **For future ticket reviews:** dispatch the cross-family panel ONCE per significant change (post-implementation, post-fix-of-fixes); don't trust a single family or a single point in time. The pr-review-toolkit parallel-5 fan-out was the highest-yield single review pass.
+
+---
+
+## 2026-05-06 — `compute_validation_metrics_for_top_models` requires int-encoded class labels for PLS-DA
+
+While building `tools/autoscale_bayesian_compare.py` to A/B-test `enable_autoscale=True` vs `False` on BoneCollagen, hit a non-obvious crash: passing raw string `y_train`/`y_val` (`'Low'`/`'Medium'`/`'High'`) into `compute_validation_metrics_for_top_models(task_type='classification')` makes the rebuilt PLS-DA pipeline fail inside `PLS.fit()` with `ValueError: could not convert string to float: 'Medium'`. The exception is **caught and logged inline** as `[Warning] Failed to compute validation for model 1: ...` — leaves `val_Accuracy`, `val_F1` etc. as NaN, easy to miss in a sweep.
+
+The Bayesian search itself encodes labels internally (the per-trial pipeline uses an internal `LabelEncoder`), so `run_unified_bayesian` accepts string labels fine. The validation rebuild path does not. **Fix for analysis scripts:** call `LabelEncoder().fit_transform(y)` once on the full label vector before splitting, so train and external use the same integer encoding.
+
+This is not a bug in the validation rebuild per se — it's a contract mismatch worth knowing for any future tooling that compares Bayesian arms via the canonical rebuild path.
 
 ---
 
