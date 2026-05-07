@@ -385,6 +385,7 @@ def run_tpe_preprocessing_discovery(
     smoothing_polyorder: int = 2,
     progress_callback: Optional[Callable] = None,
     random_state: int = RANDOM_STATE,
+    skip_diversity: bool = False,
 ) -> List[Dict[str, Any]]:
     """TPE-based preprocessing discovery.
 
@@ -615,8 +616,24 @@ def run_tpe_preprocessing_discovery(
             seen.add(key)
             unique_configs.append(cfg)
 
-    # Select diverse top-N (port from preprocessing_discovery.select_diverse_configs)
-    top_configs = select_diverse_configs(unique_configs, n_top, task_type)
+    # Select top-N. By default applies select_diverse_configs to spread across
+    # preprocessing types. When called from the multistart wrapper with
+    # skip_diversity=True, returns the raw top-N by score so the
+    # cross-study union doesn't lose configs that would have been exiled
+    # by a per-study diversity slot. The multistart wrapper applies its
+    # own diversity (keyed on (preproc, autoscale)) at the post-rescore
+    # stage. Closes DeepSeek H2 from the post-Phase-4 review.
+    if skip_diversity:
+        # Sort by score (desc for classification/one_class, asc for regression)
+        if task_type == 'regression':
+            ranked = sorted(unique_configs, key=lambda c: c.get('score', float('inf')))
+        else:
+            ranked = sorted(
+                unique_configs, key=lambda c: c.get('score', float('-inf')), reverse=True
+            )
+        top_configs = ranked[:n_top]
+    else:
+        top_configs = select_diverse_configs(unique_configs, n_top, task_type)
 
     # Print summary
     print(f"\n=== TPE Top {len(top_configs)} Configurations ===")
@@ -790,6 +807,12 @@ def run_tpe_multistart_preprocessing_discovery(
             smoothing_polyorder=smoothing_polyorder,
             random_state=seed,
             progress_callback=None,  # outer multistart owns the progress reporting
+            # Phase 4 fix (DeepSeek H2): skip per-study diversity. The
+            # multistart union applies its own diversity (preproc,
+            # autoscale) at the post-rescore stage; per-study diversity
+            # would exile configs that lose a slot in one study but
+            # would survive cross-study rescore.
+            skip_diversity=True,
         )
         for cfg in per_start_top:
             key = _multistart_config_key(cfg)

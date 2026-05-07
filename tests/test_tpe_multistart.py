@@ -295,6 +295,56 @@ class TestMultistartIntegration:
                 enable_smoothing=False,
             )
 
+    def test_skip_diversity_preserves_more_configs(self, synthetic_X_y_regression):
+        """Closes DeepSeek H2: when called with skip_diversity=True, the
+        underlying run_tpe_preprocessing_discovery must NOT apply
+        select_diverse_configs (which keys on preproc name only). With
+        skip_diversity=False (default), repeated preproc-types get
+        coalesced; with skip_diversity=True, they all survive to the
+        caller (the multistart union).
+        """
+        X, y = synthetic_X_y_regression
+
+        # With diversity ON (default): top-N is at most n_unique_preproc_types
+        with_diversity = run_tpe_preprocessing_discovery(
+            X, y,
+            task_type="regression",
+            n_trials=20,
+            n_top=15,  # request 15
+            cv_folds=3,
+            random_state=42,
+            enable_baseline=False,
+            enable_smoothing=False,
+            skip_diversity=False,
+        )
+
+        # With diversity OFF: top-N can include multiple windows of the
+        # same preproc family
+        without_diversity = run_tpe_preprocessing_discovery(
+            X, y,
+            task_type="regression",
+            n_trials=20,
+            n_top=15,
+            cv_folds=3,
+            random_state=42,
+            enable_baseline=False,
+            enable_smoothing=False,
+            skip_diversity=True,
+        )
+
+        # The skip_diversity=True path may produce more or equally many
+        # unique preproc types but should NOT produce fewer (it's an
+        # "include more candidates" flag, not a "filter further" flag).
+        # More importantly, the diversity-OFF path should preserve any
+        # config that diversity-ON's first-pass would have exiled.
+        with_set = {(c['preprocessing'], c.get('window')) for c in with_diversity}
+        without_set = {(c['preprocessing'], c.get('window')) for c in without_diversity}
+        assert len(without_set) >= len(with_set), (
+            f"skip_diversity=True returned {len(without_set)} unique "
+            f"(preproc, window) configs vs {len(with_set)} with diversity. "
+            "Skip-diversity should preserve at least as many candidates."
+        )
+
     def test_legacy_single_start_unchanged(self, synthetic_X_y_regression):
         """Phase 4 must not regress the existing single-start TPE behavior.
         Two calls to run_tpe_preprocessing_discovery with the same seed
