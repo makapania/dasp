@@ -27555,15 +27555,59 @@ class SpectralPredictApp:
                         break
 
                 if has_gaps:
-                    result = messagebox.askyesno(
-                        "iPLS with Discontinuous Regions",
-                        "You have selected iPLS methods with discontinuous wavelength regions.\n\n"
-                        "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
-                        "regions, each region will be analyzed separately.\n\n"
-                        "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
-                        "Continue with iPLS methods enabled?",
-                        icon='warning'
-                    )
+                    # CRITICAL: this runs on the analysis worker thread, but
+                    # messagebox.askyesno is a blocking modal that pumps
+                    # Tk's event loop. Calling it from a worker thread can
+                    # deadlock on Windows (worker blocks waiting for the
+                    # dialog, main thread can't dispatch the dialog because
+                    # Tcl operations from the worker aren't always thread-
+                    # safe). Pattern: schedule the dialog on the main
+                    # thread via root.after, block the worker on a
+                    # threading-safe queue.Queue, main thread puts the
+                    # boolean answer when the user clicks.
+                    import queue as _queue
+                    _ipls_q: "_queue.Queue[bool]" = _queue.Queue()
+
+                    def _ask_ipls_continue():
+                        try:
+                            ans = messagebox.askyesno(
+                                "iPLS with Discontinuous Regions",
+                                "You have selected iPLS methods with discontinuous wavelength regions.\n\n"
+                                "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
+                                "regions, each region will be analyzed separately.\n\n"
+                                "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
+                                "Continue with iPLS methods enabled?",
+                                icon='warning',
+                            )
+                        except Exception:
+                            # If Tk is mid-shutdown or otherwise unhappy,
+                            # default to the safe choice: remove iPLS.
+                            ans = False
+                        _ipls_q.put(bool(ans))
+
+                    # Schedule the dialog. If root.after itself raises (Tk
+                    # mid-shutdown), the inner _ask_ipls_continue never runs
+                    # so nothing puts to the queue and the worker would block
+                    # forever on .get(). Catch + put a safe-default answer.
+                    try:
+                        self.root.after(0, _ask_ipls_continue)
+                    except Exception:
+                        _ipls_q.put(False)
+
+                    # Belt: bound the worker's wait. 5 minutes is long enough
+                    # for any reasonable user response, short enough that an
+                    # orphaned dialog (unmapped window, racing teardown)
+                    # doesn't strand the worker indefinitely. Timeout falls
+                    # back to the safe choice (remove iPLS).
+                    try:
+                        result = _ipls_q.get(timeout=300)
+                    except _queue.Empty:
+                        self._log_progress(
+                            "[!] iPLS dialog timed out after 5 min; "
+                            "defaulting to remove iPLS methods"
+                        )
+                        result = False
+
                     if not result:
                         # User chose not to continue - remove all iPLS methods
                         selected_varsel_methods = [m for m in selected_varsel_methods if m not in ['ipls', 'ipls_forward', 'ipls_backward']]
@@ -37941,10 +37985,23 @@ F1 Score:  {f1:.4f}
                     print(f"GA preprocessing module imported successfully")
                 except ImportError as e:
                     print(f"ERROR: GA preprocessing module not available: {e}")
-                    self.refine_status.config(text="ERROR: GA module not found")
-                    messagebox.showerror("GA Module Missing",
-                        "GA preprocessing module (ga_pls.py) is not available.\n"
-                        "Please ensure the module is installed or select a different preprocessing method.")
+                    # Worker-thread Tk ops must go through root.after on
+                    # Windows or the main loop can die mid-call. Same shape
+                    # as the analysis-thread hardening on the OC path.
+                    self.root.after(
+                        0,
+                        lambda: self.refine_status.config(
+                            text="ERROR: GA module not found"
+                        ),
+                    )
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "GA Module Missing",
+                            "GA preprocessing module (ga_pls.py) is not available.\n"
+                            "Please ensure the module is installed or select a different preprocessing method.",
+                        ),
+                    )
                     return
 
                 # Check if we're loading from a saved GA model or running new GA optimization
@@ -38015,10 +38072,24 @@ F1 Score:  {f1:.4f}
                         print(f"ERROR during GA optimization: {e}")
                         import traceback
                         traceback.print_exc()
-                        self.refine_status.config(text="ERROR: GA optimization failed")
-                        messagebox.showerror("GA Optimization Failed",
-                            f"GA preprocessing optimization failed:\n{str(e)}\n\n"
-                            "Please check console for details or try a different preprocessing method.")
+                        # Worker-thread Tk ops must go through root.after on
+                        # Windows. Capture the exception text for the lambda
+                        # so it doesn't reference the now-out-of-scope `e`.
+                        err_str = str(e)
+                        self.root.after(
+                            0,
+                            lambda: self.refine_status.config(
+                                text="ERROR: GA optimization failed"
+                            ),
+                        )
+                        self.root.after(
+                            0,
+                            lambda msg=err_str: messagebox.showerror(
+                                "GA Optimization Failed",
+                                f"GA preprocessing optimization failed:\n{msg}\n\n"
+                                "Please check console for details or try a different preprocessing method.",
+                            ),
+                        )
                         return
 
                 # Build pipeline with ONLY the model (GA preprocessing already applied)
@@ -41242,9 +41313,15 @@ External Validation Performance (n={n_val}):
                 # Do NOT encode - this ensures actual and predicted are in the same format
                 results['Actual'] = actual_values
 
-            # Clear and initialize model map and uncertainty storage
+            # Clear and initialize per-run prediction state. All of these MUST
+            # be reset on every Run Predictions click so a previous run's stale
+            # entries don't leak into the new run's UI surfaces (e.g. the
+            # "Uncertainty extraction failed" warning showing a previous run's
+            # error against a now-fixed model).
             self.predictions_model_map = {}
-            self.predictions_uncertainty = {}  # Store uncertainty data for each model
+            self.predictions_uncertainty = {}
+            self.predictions_decision_errors = {}
+            self.predictions_applicability = {}
 
             # Setup progress bar
             self.pred_progress['maximum'] = len(self.loaded_models)
@@ -41288,6 +41365,12 @@ External Validation Performance (n={n_val}):
                     has_uncertainty = pred_result['has_uncertainty']
                     applicability_domain = pred_result.get('applicability_domain', {})
                     has_applicability_domain = pred_result.get('has_applicability_domain', False)
+                    # OC decision-score extraction failure is surfaced by
+                    # predict_with_uncertainty as a structured flag; capture it
+                    # so the GUI can tell the user "predictions worked but
+                    # uncertainty/AD broke" instead of silently returning empty
+                    # uncertainty payloads.
+                    decision_score_error = pred_result.get('decision_score_error')
 
                     # Check for data type mismatch warning
                     if pred_result.get('data_type_warning'):
@@ -41340,9 +41423,13 @@ External Validation Performance (n={n_val}):
 
                     # Store applicability domain data if available
                     if has_applicability_domain:
-                        if not hasattr(self, 'predictions_applicability'):
-                            self.predictions_applicability = {}
                         self.predictions_applicability[col_name] = applicability_domain
+
+                    # Surface OC decision-score extraction failures so the
+                    # user sees that uncertainty / AD silently no-op'd rather
+                    # than assuming the empty placeholder means "no error."
+                    if decision_score_error:
+                        self.predictions_decision_errors[col_name] = decision_score_error
 
                     successful_models += 1
 
@@ -41366,6 +41453,20 @@ External Validation Performance (n={n_val}):
             self._display_predictions()
             self._display_consensus_info()
             self._display_uncertainty()
+
+            # Without this notice, an empty Uncertainty tab paired with successful
+            # predictions in the Results tab gives the user no signal of failure.
+            decision_errors = self.predictions_decision_errors
+            if decision_errors:
+                detail_lines = [f"  • {col}: {msg}" for col, msg in decision_errors.items()]
+                messagebox.showwarning(
+                    "Uncertainty extraction failed",
+                    "Predictions completed, but decision-score extraction failed for "
+                    f"{len(decision_errors)} model(s). The Uncertainty tab will be "
+                    "empty for these:\n\n"
+                    + "\n".join(detail_lines)
+                    + "\n\nCheck the run log for the full traceback.",
+                )
 
             # Update status
             if successful_models == len(self.loaded_models):

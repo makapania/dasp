@@ -6,6 +6,14 @@ from scipy.signal import savgol_filter
 from sklearn.base import BaseEstimator, TransformerMixin
 
 
+# Default polyorder per derivative order, used by SavgolDerivative when the
+# user does not supply ``polyorder`` explicitly. Exported as a module
+# constant so downstream callers (e.g. validation helpers that need to
+# reproduce the *exact* polyorder training used) can reference it without
+# duplicating the dict and risking drift.
+SAVGOL_POLYORDER_DEFAULTS = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
+
+
 class SNV(BaseEstimator, TransformerMixin):
     """
     Standard Normal Variate (SNV) transformation.
@@ -96,8 +104,7 @@ class SavgolDerivative(BaseEstimator, TransformerMixin):
         # Default polyorder: deriv + 1 for higher derivatives
         polyorder = self.polyorder
         if polyorder is None:
-            polyorder_map = {0: 1, 1: 2, 2: 3, 3: 4, 4: 5}
-            polyorder = polyorder_map.get(self.deriv, self.deriv + 1)
+            polyorder = SAVGOL_POLYORDER_DEFAULTS.get(self.deriv, self.deriv + 1)
 
         # Auto-adjust window if too large for feature count
         n_features = X.shape[1]
