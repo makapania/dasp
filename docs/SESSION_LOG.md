@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 — Phase 2 multi-seed wall-time was conflated with TPE multistart's 5x cost; empirical retest exonerates Phase 2
+
+**Context.** User pushed back on framing Phase 2 multi-seed rescore as "neutral but costs 5-6x compute." The pushback was methodologically right ("neutral" without including wall-clock is an incomplete verdict; codified as `feedback_neutral_means_user_facing.md`) but the *premise* — that Phase 2 specifically costs 5-6x — was a conflation. The 5-6x figure lives at `gui:11932` ("~5x cost") on the **TPE multistart** checkbox (the one that's also harmful: -0.041 F1 on classification per the 2026-05-07 BoneCollagen postmortem). The Phase 2 checkbox at `gui:11996` says "~1.5x cost" and the BoneCollagen verdict was "regression bit-identical, classification F1 tied."
+
+**Empirical retest on a second dataset.** Wrote `tools/preprocessing_refactor_ab_2025models.py` to re-run the legacy-vs-refactor exhaustive A/B on `C:\Users\mspon\Desktop\2025 Model Samples` (140 ASD spectra, 139 successfully joined to "Collagen Yield" labels, quantile-stratified split n_train=97 / n_external=42, score_cap=300, gap_thresh=0.10). Two runs:
+- Run 1: off=15s on=14s (ratio 0.94x). Best R²pred off=0.9063 on=0.9060 (Δ=-0.0003).
+- Run 2: off=31s on=14s (ratio 0.45x — legacy arm got hit by joblib JIT first-touch, rescore arm was already warm). Same quality result.
+
+Both runs: passing-set 297 vs 297; 148 shared, 17 unique-to-OFF, 16 unique-to-ON. **The arm-composition difference is more interesting than the metric:** OFF top spots dominated by plain `deriv`, ON top spots dominated by `snv_deriv`. Both are scientifically reasonable diffuse-reflectance NIR preprocessing. The rescore re-orders within a peak-tied set, it doesn't change the peak.
+
+**Lesson 1: identify which checkbox the cost claim attaches to before recommending action.** I echoed the user's "6 times" number as a Phase 2 critique without checking that the 5-6x figure is on the TPE multistart UI line, not the Phase 2 UI line. The right way to answer "is this neutral" was to first separate the two features by name and then check each one's cost label and its empirical cost.
+
+**Lesson 2: wall-time on small CV searches is dominated by JIT/cache noise, not by the rescore overhead.** A factor-of-2 wall-time swing across two back-to-back runs of the SAME arm means single-trajectory wall-time deltas under ~2x are not signal. Future cost-A/Bs on this scale should run ≥3 trajectories per arm or use repeat-measure timing on a warm process.
+
+**Lesson 3: the methodology rule still pays even when it exonerates.** `feedback_neutral_means_user_facing.md` survived the test — applying it forced an empirical wall-time measurement that confirmed Phase 2 is genuinely two-axis-neutral. The rule is intended to *catch* tied-but-slower features and recommend rip-out; in this case it cleared one. Both outcomes are useful — the rule does the right thing in both directions.
+
+**Action.** GUI runtime labels (`~3-4 min`, `~1-3 min for 75 trials`, `typically 5-30 seconds`) replaced with non-quantitative warnings about pre-pass timing and absent progress feedback. Phase 2 plumbing left in place (genuinely neutral on both axes). TPE multistart remains the rip-out candidate — harmful AND 5x slower per its own GUI label.
+
+---
+
 ## 2026-05-08 (early) — PR #58 + #59 merge batch: 4 non-obvious lessons from the cross-family + Claude-family review trail
 
 **Context.** PR #58 (OC hyperparameter round 2 + parser hardening + Tk hardening + multi-seed multistart UX) and PR #59 (3 fix-of-fixes from post-#58 triage). Both merged at `46226ca` and `15dd011`. Multiple Codex / DeepSeek V4 Pro / Kimi K2.6 / pr-review-toolkit rounds. Four lessons worth recording so future agents don't re-discover them.

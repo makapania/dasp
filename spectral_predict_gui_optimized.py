@@ -11885,8 +11885,8 @@ class SpectralPredictApp:
                  text="Evaluates using all wavelengths with 3-fold CV to rank preprocessing configs",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(smart_preproc_frame,
-                 text="Runtime: ~3-4 minutes. Returns top N diverse preprocessing configs for grid search.",
-                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+                 text="Runs as a pre-pass before the main search; wall time scales with dataset size and enabled models. Returns top N diverse preprocessing configs for grid search.",
+                 style='Caption.TLabel', foreground=self.colors['warning'], wraplength=720).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         # Initially hide options
         self.smart_preproc_options_frame.grid_remove()
@@ -11951,8 +11951,8 @@ class SpectralPredictApp:
                  text="Evaluates via LightGBM proxy with CV. Model-agnostic — all enabled models tested against each config.",
                  style='Caption.TLabel', foreground=self.colors['accent']).grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(tpe_preproc_frame,
-                 text="Runtime: ~1-3 min for 75 trials. Returns top N diverse preprocessing configs for grid search.",
-                 style='Caption.TLabel', foreground=self.colors['warning']).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+                 text="Runs as a pre-pass before the main search; wall time scales with trials, dataset size, and enabled models. Returns top N diverse preprocessing configs for grid search.",
+                 style='Caption.TLabel', foreground=self.colors['warning'], wraplength=720).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
 
         self.tpe_preproc_options_frame.grid_remove()
 
@@ -11977,8 +11977,11 @@ class SpectralPredictApp:
         ttk.Label(
             self.ga_preproc_options_frame,
             text="Tests all 14 preprocessing types x 17 window sizes (238 cells) with "
-                 "the actual user-selected model. Parallel; typically 5-30 seconds.",
-            wraplength=560,
+                 "the actual user-selected model. Runs as a pre-pass before the main "
+                 "search — there is no per-cell progress feedback during this phase, "
+                 "so wait times can feel long under multi-model + autoscale + multi-seed "
+                 "combinations even though work is progressing.",
+            wraplength=720,
         ).grid(row=0, column=0, columnspan=2, sticky=tk.W)
 
         # Autoscale dimension toggle. ON doubles search space to 476 cells
