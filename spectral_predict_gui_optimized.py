@@ -40960,9 +40960,15 @@ External Validation Performance (n={n_val}):
                 # Do NOT encode - this ensures actual and predicted are in the same format
                 results['Actual'] = actual_values
 
-            # Clear and initialize model map and uncertainty storage
+            # Clear and initialize per-run prediction state. All of these MUST
+            # be reset on every Run Predictions click so a previous run's stale
+            # entries don't leak into the new run's UI surfaces (e.g. the
+            # "Uncertainty extraction failed" warning showing a previous run's
+            # error against a now-fixed model).
             self.predictions_model_map = {}
-            self.predictions_uncertainty = {}  # Store uncertainty data for each model
+            self.predictions_uncertainty = {}
+            self.predictions_decision_errors = {}
+            self.predictions_applicability = {}
 
             # Setup progress bar
             self.pred_progress['maximum'] = len(self.loaded_models)
@@ -41064,16 +41070,12 @@ External Validation Performance (n={n_val}):
 
                     # Store applicability domain data if available
                     if has_applicability_domain:
-                        if not hasattr(self, 'predictions_applicability'):
-                            self.predictions_applicability = {}
                         self.predictions_applicability[col_name] = applicability_domain
 
                     # Surface OC decision-score extraction failures so the
                     # user sees that uncertainty / AD silently no-op'd rather
                     # than assuming the empty placeholder means "no error."
                     if decision_score_error:
-                        if not hasattr(self, 'predictions_decision_errors'):
-                            self.predictions_decision_errors = {}
                         self.predictions_decision_errors[col_name] = decision_score_error
 
                     successful_models += 1
@@ -41099,12 +41101,9 @@ External Validation Performance (n={n_val}):
             self._display_consensus_info()
             self._display_uncertainty()
 
-            # Surface OC decision-score extraction failures. predict_with_uncertainty
-            # populates result['decision_score_error'] when score extraction raises
-            # but predictions still succeed. Without this notice the user would see
-            # predictions in the Results tab and an empty Uncertainty tab with no
-            # signal that uncertainty/AD silently no-op'd.
-            decision_errors = getattr(self, 'predictions_decision_errors', {})
+            # Without this notice, an empty Uncertainty tab paired with successful
+            # predictions in the Results tab gives the user no signal of failure.
+            decision_errors = self.predictions_decision_errors
             if decision_errors:
                 detail_lines = [f"  • {col}: {msg}" for col, msg in decision_errors.items()]
                 messagebox.showwarning(
