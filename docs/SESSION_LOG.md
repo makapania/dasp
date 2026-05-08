@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 (TPE proxy ship) — Single-commit shape beat the plan's 5-6 commit split
+
+**Context.** Plan `docs/plans/2026-05-08-tpe-proxy-model-family-aware-IMPLEMENTATION.md` §6 split the work into commits 1 (pure-refactor, 0 behavior change) → 2 (add `proxy_family` branching) → 3 (search.py wiring) → 4 (verification) → 5 (review fold-in). User pushback when commit 1 (bit-identical refactor) shipped: *"this was not an attempt to have bit identical behavior, the whole point was to change behavior by being model specific."* Per CLAUDE.md global rule "don't add features, refactor, or introduce abstractions beyond what the task requires," the multi-commit split was overhead for a ~470-LOC change in two functions. Collapsed into single behavior-change commit `a33d956`.
+
+**Lesson.** The N-commit refactor-then-feature pattern fits PR-sized work (PR #57's preprocessing-discovery refactor used it well at ~540 LOC net). It's overhead at single-function scope. Heuristic: if commits 1+2 produce the same end-state code as a combined commit AND the surface area is small enough that one reviewer can hold both in their head, default to the combined commit.
+
+**Three preprocessing paths in the GUI.** While reviewing the plan, discovered the GUI exposes "Basic" / "TPE" / "Exhaustive" — and "Basic" is `smart_preprocess` in the backend (the GUI labels it differently from the internal name). All three paths were potentially affected by the proxy/downstream-mismatch bug:
+
+| GUI label | Backend symbol | Proxy state |
+|---|---|---|
+| Basic Preprocessing Discovery | `preprocessing_discovery.py:669` `_quick_evaluate` | Hardcoded LightGBM (same bug, NOT fixed in `a33d956`) |
+| TPE Preprocessing Discovery | `tpe_preprocessing_discovery.py:_quick_evaluate` | Now family-aware (`a33d956`) |
+| Exhaustive Preprocessing | `ga_preprocessing.py:289` `evaluate_fitness` | Already exposed `fitness_model='pls'` default + `_evaluate_with_actual_model` opt-in path |
+
+Exhaustive's `_evaluate_with_actual_model` docstring (line 425-428): *"This ensures preprocessing is optimized for the ACTUAL model the user wants to test, not a proxy model with hardcoded hyperparameters."* This is prior art that solved the same problem in a different module — corroborates the linear-default decision (Q1) and provides a fallback path for users hitting the Basic bug. User explicitly scoped Basic OUT of `a33d956`.
+
+**Commit-1 SAFE_TO_PROCEED reviews not wasted.** Codex's edge-case sweep of the bit-identical refactor (cv_folds clamping placement, warnings.catch_warnings scope, H1/MED-1 preservation paths, one_class asymmetry pre-/post-refactor) and DeepSeek V4 Pro's lifecycle review (forward-compat with commit-2 design, no-inversion-needed, test-count reconciliation 33+13+15=61 baseline) both reusable as design verification of the helper structure that the combined commit kept. The "this fits cleanly on top" finding from DeepSeek directly informed not reverting `33b30d7` and instead building atop it.
+
+---
+
 ## 2026-05-08 (laptop layout) — Tk pack-order anti-pattern clipped Peak Calculator + 6 sister sites on small screens
 
 **Symptom (user-reported on 16" laptop).** Explore tab → load spectra → Peak Calculator button does not appear at the bottom of the plot's info bar; no scrollbar to recover it. Works fine on desktop monitors.
