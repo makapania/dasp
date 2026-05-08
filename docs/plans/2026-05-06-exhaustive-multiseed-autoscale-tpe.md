@@ -1,5 +1,9 @@
 # Plan: Exhaustive multi-seed + autoscale; TPE multi-start + multi-seed; remove GA
 
+> **STATUS: SUPERSEDED — Phase 2 (exhaustive multi-seed rescore) and Phase 4 (TPE multi-start) defaults reverted to OFF on 2026-05-07 evening (commit `039cfb9`) after empirical postmortem showed both were neutral-to-harmful at the user's chemometrics quality gate. See `docs/SESSION_LOG.md` 2026-05-07 (evening) entry, the postmortem memory `feedback_preprocessing_refactor_postmortem.md`, and the verification harness `tools/preprocessing_refactor_ab.py`. Phase 1 (delete legacy GA-as-search-mode) and Phase 3 (autoscale dimension) are NOT reverted — Phase 1 is code cleanup, Phase 3 has its own modest external validation in the autoscale battery. The plan was justified entirely on ML-internal metrics (top-K stability, TPE drift, Jaccard ≈ 0) and never validated against external R² with CV-vs-pred parity. Going-forward rule per `feedback_chemometrics_conventions.md` §3 + the postmortem memo: no search-machinery refactor ships without a gap-filtered passing-set comparison on external data.**
+
+---
+
 **Date:** 2026-05-06
 **Status:** REVISED v2 — incorporates Codex review of v1 (3 BLOCKERs + 3 WEAKs)
 **Prior work:** Empirical investigation in `tools/exhaustive_seed_compare.py` and `tools/bayesian_topk_stability.py` (committed in `8e03dc0`).
