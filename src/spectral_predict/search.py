@@ -1898,6 +1898,7 @@ def run_search(
         from .tpe_preprocessing_discovery import (
             run_tpe_preprocessing_discovery,
             run_tpe_multistart_preprocessing_discovery,
+            resolve_tpe_proxy_family,
         )
 
         def tpe_progress(current, total, message):
@@ -1910,6 +1911,13 @@ def run_search(
                         "total": total,
                     }
                 )
+
+        # Pick proxy family from the user's enabled-models list. Tree-only
+        # downstream → tree proxy (LightGBM with adaptive min_child_samples);
+        # anything else → linear proxy (PLS / LogReg). See resolve_tpe_proxy_family
+        # docstring for the mixed/unknown rule.
+        tpe_proxy_family = resolve_tpe_proxy_family(models_to_test)
+        print(f"  TPE proxy family: {tpe_proxy_family} (resolved from models_to_test={models_to_test})")
 
         # When tpe_multistart=True, run M independent TPE studies and rescore
         # the union with multi-seed CV. Closes the TPE-drift problem documented
@@ -1932,6 +1940,7 @@ def run_search(
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_progress,
                 controller=controller,
+                proxy_family=tpe_proxy_family,
             )
         else:
             discovered_configs = run_tpe_preprocessing_discovery(
@@ -1947,6 +1956,7 @@ def run_search(
                 smoothing_window=smoothing_window,
                 smoothing_polyorder=smoothing_polyorder,
                 progress_callback=tpe_progress,
+                proxy_family=tpe_proxy_family,
             )
 
         if not discovered_configs:
@@ -2003,6 +2013,12 @@ def run_search(
                         "tpe_multistart_halt_reason": cfg.get(
                             "_tpe_multistart_halt_reason"
                         ),
+                        # 2026-05-08: model-family-aware proxy audit trail.
+                        # Records which family/model the TPE proxy used so
+                        # the result CSV captures whether ranking came from
+                        # a tree (LightGBM) or linear (PLS/LogReg) proxy.
+                        "tpe_proxy_family": cfg.get("_tpe_proxy_family"),
+                        "tpe_proxy_model_name": cfg.get("_tpe_proxy_model_name"),
                     }
                 )
 
@@ -5167,6 +5183,9 @@ def _run_single_config(
         # for multistart configs. Symmetric with phase2_halt_reason for the
         # exhaustive path (added below for the chromosome-bearing rows).
         "tpe_multistart_halt_reason": preprocess_cfg.get("tpe_multistart_halt_reason"),
+        # 2026-05-08: model-family-aware proxy audit (None for non-TPE rows).
+        "tpe_proxy_family": preprocess_cfg.get("tpe_proxy_family"),
+        "tpe_proxy_model_name": preprocess_cfg.get("tpe_proxy_model_name"),
     }
 
     # Add training configuration for tracking data state
@@ -5837,6 +5856,7 @@ def run_one_class_search(
         from .tpe_preprocessing_discovery import (
             run_tpe_preprocessing_discovery,
             run_tpe_multistart_preprocessing_discovery,
+            resolve_tpe_proxy_family,
         )
 
         def tpe_oc_progress(current, total, message):
@@ -5853,6 +5873,11 @@ def run_one_class_search(
         # one_class call site mirrors the regression/classification TPE call
         # site (search for `tpe_multistart` to find both). Same gating flag,
         # same wrapper dispatch.
+        # Family routing is functionally a no-op for one_class (proxy is
+        # always LGBM-supervised-on-y_oc with IF fallback regardless of
+        # family), but we plumb the resolved value for audit-trail
+        # consistency (`_tpe_proxy_family` column).
+        tpe_proxy_family_oc = resolve_tpe_proxy_family(enabled_models)
         if tpe_multistart:
             discovered = run_tpe_multistart_preprocessing_discovery(
                 X_np,
@@ -5869,6 +5894,7 @@ def run_one_class_search(
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_oc_progress,
                 controller=controller,
+                proxy_family=tpe_proxy_family_oc,
             )
         else:
             discovered = run_tpe_preprocessing_discovery(
@@ -5884,6 +5910,7 @@ def run_one_class_search(
                 smoothing_window=smoothing_window,
                 smoothing_polyorder=smoothing_polyorder,
                 progress_callback=tpe_oc_progress,
+                proxy_family=tpe_proxy_family_oc,
             )
         if discovered:
             preprocess_configs = []
@@ -5920,6 +5947,12 @@ def run_one_class_search(
                         "tpe_multistart_halt_reason": cfg.get(
                             "_tpe_multistart_halt_reason"
                         ),
+                        # 2026-05-08: model-family-aware proxy audit trail
+                        # (one_class is family-independent — proxy is always
+                        # LGBM-supervised + IF fallback regardless — but we
+                        # plumb the field for audit-trail consistency).
+                        "tpe_proxy_family": cfg.get("_tpe_proxy_family"),
+                        "tpe_proxy_model_name": cfg.get("_tpe_proxy_model_name"),
                     }
                 )
             logger.info("TPE preprocessing discovered %d configs", len(preprocess_configs))
@@ -6266,6 +6299,9 @@ def run_one_class_search(
                     "tpe_multistart_halt_reason": preprocess_cfg.get(
                         "tpe_multistart_halt_reason"
                     ),
+                    # 2026-05-08: model-family-aware proxy audit (one_class).
+                    "tpe_proxy_family": preprocess_cfg.get("tpe_proxy_family"),
+                    "tpe_proxy_model_name": preprocess_cfg.get("tpe_proxy_model_name"),
                 }
 
                 # Training config for model reproducibility (mirrors regression/classification)
@@ -6851,6 +6887,10 @@ def run_one_class_search(
                                 "tpe_multistart_halt_reason": preprocess_cfg.get(
                                     "tpe_multistart_halt_reason"
                                 ),
+                                # 2026-05-08: model-family-aware proxy audit
+                                # (one_class variable-subset row mirror).
+                                "tpe_proxy_family": preprocess_cfg.get("tpe_proxy_family"),
+                                "tpe_proxy_model_name": preprocess_cfg.get("tpe_proxy_model_name"),
                             }
 
                             # Training config for model reproducibility

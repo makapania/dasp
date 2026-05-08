@@ -59,6 +59,55 @@ _BASELINE_DEFAULT_PARAMS = {
 }
 
 
+# =============================================================================
+# Model-family-aware proxy routing (2026-05-08)
+# =============================================================================
+#
+# The TPE proxy used to be hardcoded LightGBM. On the user's NIR chemometrics
+# workflow at n≈49 with PLS downstream, that produced two distinct failure
+# modes (PROJECT_STATUS.md 2026-05-08): (1) min_child_samples=20 default
+# blocked every split → mean-prediction RMSE for all configs; (2) when the
+# proxy was informative, it ranked tree-family preprocessings that PLS
+# downstream didn't want (SPXY 20% A/B: R²pred 0.9722 → 0.9405).
+#
+# Fix: pick the proxy family from the user's enabled-models list. Tree-family
+# downstream gets a tree-family proxy with adaptive min_child_samples; linear/
+# PLS-family downstream gets a PLS proxy. Mixed → linear (chemometrics-canonical;
+# the diversity selector spreads preprocessings across types so the main grid
+# still evaluates every type with the user's actual model).
+
+TREE_FAMILY_MODELS = frozenset({
+    'LightGBM', 'XGBoost', 'CatBoost', 'RandomForest',
+})
+LINEAR_FAMILY_MODELS = frozenset({
+    'PLS', 'PLS-DA', 'Ridge', 'Lasso', 'ElasticNet',
+})
+# SVM/SVR/MLP/NeuralBoosted are intentionally uncategorized — they're slow as
+# proxies and fall under the resolver's mixed/unknown rule below (→ 'linear').
+
+VALID_PROXY_FAMILIES = frozenset({'tree', 'linear'})
+
+
+def resolve_tpe_proxy_family(models_to_test) -> str:
+    """Pick the TPE proxy family from the user's enabled-models list.
+
+    Returns 'tree' iff the only enabled models are in TREE_FAMILY_MODELS;
+    otherwise returns 'linear' (the chemometrics-canonical PLS / LogReg path).
+
+    Unknown model names are silently routed to 'linear' for forward
+    compatibility — a typo or future-model in a saved-CSV reload path
+    shouldn't crash TPE.
+    Empty/None inputs route to 'linear' (no information → safe default).
+    """
+    if not models_to_test:
+        return 'linear'
+    has_tree = any(m in TREE_FAMILY_MODELS for m in models_to_test)
+    has_linear = any(m in LINEAR_FAMILY_MODELS for m in models_to_test)
+    if has_tree and not has_linear:
+        return 'tree'
+    return 'linear'
+
+
 # RESERVED — per-trial window filtering would break Optuna's ask/tell contract.
 # See SESSION_LOG.md 2026-05-01 GLM 5.1 review for details.
 # The current "suggest from union, return -inf on invalid" approach is correct.
@@ -141,8 +190,18 @@ def _quick_evaluate_tree(
     """Tree-family LightGBM proxy (non-seeded CV).
 
     Caller passes in LGBM classes after confirming the import succeeded.
+
+    Uses adaptive ``min_child_samples = max(2, n_train_per_fold // 5)`` so
+    splits are legal at chemometrics-sized n. Default LGBM ``min_child_samples=20``
+    blocks every split when n_train_per_fold < 40 → mean-prediction collapse;
+    the adaptive formula scales with fold size and was validated on the user's
+    BoneCollagen + LightGBM workflow at SPXY 20% (PROJECT_STATUS.md 2026-05-08).
     """
     import warnings
+    n_samples = X.shape[0]
+    n_train_per_fold = n_samples - (n_samples // cv_folds)
+    adaptive_mcs = max(2, n_train_per_fold // 5)
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -155,6 +214,7 @@ def _quick_evaluate_tree(
                 class_weight='balanced',
                 n_estimators=50,
                 max_depth=3,
+                min_child_samples=adaptive_mcs,
                 random_state=RANDOM_STATE,
                 verbose=-1,
                 n_jobs=1,
@@ -166,6 +226,7 @@ def _quick_evaluate_tree(
             model = LGBMClassifier(
                 n_estimators=50,
                 max_depth=4,
+                min_child_samples=adaptive_mcs,
                 random_state=RANDOM_STATE,
                 verbose=-1,
                 n_jobs=1,
@@ -176,6 +237,7 @@ def _quick_evaluate_tree(
             model = LGBMRegressor(
                 n_estimators=50,
                 max_depth=4,
+                min_child_samples=adaptive_mcs,
                 random_state=RANDOM_STATE,
                 verbose=-1,
                 n_jobs=1,
@@ -184,16 +246,54 @@ def _quick_evaluate_tree(
             return scores.mean()
 
 
+def _quick_evaluate_oneclass_iforest(
+    X: np.ndarray,
+    y: np.ndarray,
+) -> float:
+    """IsolationForest one-class fallback (non-seeded).
+
+    Mirrors ``_evaluate_with_seed_oneclass_iforest`` but uses the global
+    ``RANDOM_STATE`` instead of a caller-supplied seed. Used when LightGBM is
+    unavailable or crashes on one_class data.
+    """
+    try:
+        from sklearn.ensemble import IsolationForest
+
+        n_outliers = int(np.sum(y == -1))
+        if n_outliers < 2:
+            return 0.0
+        X_inlier = X[y != -1]
+        if len(X_inlier) < 5:
+            return 0.0
+        clf = IsolationForest(
+            contamination='auto',
+            random_state=RANDOM_STATE,
+            n_estimators=50,
+            n_jobs=1,
+        )
+        clf.fit(X_inlier)
+        preds = clf.predict(X)
+        inlier_mask = y != -1
+        outlier_mask = y == -1
+        if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
+            return 0.0
+        inlier_recall = (preds[inlier_mask] == 1).mean()
+        outlier_recall = (preds[outlier_mask] == -1).mean()
+        return float((inlier_recall + outlier_recall) / 2)
+    except Exception:
+        return -np.inf
+
+
 def _quick_evaluate_linear(
     X: np.ndarray,
     y: np.ndarray,
     task_type: str,
     cv_folds: int,
 ) -> float:
-    """Linear-family fallback (PLS / LogReg+StandardScaler) — non-seeded CV.
+    """Linear-family proxy (PLS regression / LogReg+StandardScaler classification).
 
-    Handles regression and classification only. The current `_quick_evaluate`
-    fallback path returns ``-inf`` for one_class without invoking this helper.
+    Handles regression and classification only. Caller routes one_class
+    separately (to ``_quick_evaluate_oneclass_iforest``).
     """
     if task_type == 'regression':
         n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
@@ -222,37 +322,78 @@ def _quick_evaluate(
     y: np.ndarray,
     task_type: str,
     cv_folds: int,
+    *,
+    proxy_family: str = 'linear',
 ) -> float:
-    """Cross-validated evaluation using LightGBM proxy (PLS fallback).
+    """Cross-validated proxy evaluation, model-family-aware (2026-05-08).
+
+    The proxy model family is picked by the caller via ``proxy_family``:
+
+    - ``'linear'`` (default): PLS regression / LogReg+StandardScaler
+      classification. Chemometrics-canonical, fast, and aligned with PLS-family
+      downstream models. Default because mixed/unknown enabled-models lists
+      should pick the field-canonical proxy, not the ML-canonical one.
+    - ``'tree'``: LightGBM with adaptive ``min_child_samples = max(2, n_train_per_fold // 5)``.
+      Used only when ``resolve_tpe_proxy_family`` resolves to tree (i.e. the
+      user enabled tree-family models exclusively). The adaptive ``mcs``
+      formula scales with fold size so trees can grow on n<50 chemometrics
+      datasets.
+
+    One-class is family-independent: routes to LGBM-supervised-on-y_oc when
+    LGBM is available, falls back to IsolationForest otherwise. Q3 of the
+    plan: there is no PLS one-class variant and tree-family one-class is
+    well-served by IF.
 
     Returns
     -------
     score : float
         For regression: negative RMSE (higher is better — Optuna maximises).
         For classification/one-class: balanced accuracy (higher is better).
-
-    Notes
-    -----
-    Body delegates to ``_quick_evaluate_tree`` (LGBM available) or
-    ``_quick_evaluate_linear`` (LGBM ImportError + regression/classification
-    fallback). One-class returns ``-inf`` when the LGBM path raises, matching
-    pre-refactor behavior. The T-37 PLS-with-accuracy NaN bug remains closed
-    because the classification fallback still routes via LogReg+StandardScaler.
     """
-    try:
-        from lightgbm import LGBMRegressor, LGBMClassifier
+    if proxy_family not in VALID_PROXY_FAMILIES:
+        raise ValueError(
+            f"unknown proxy_family={proxy_family!r}; "
+            f"expected one of {sorted(VALID_PROXY_FAMILIES)}"
+        )
 
-        n_samples = X.shape[0]
-        cv_folds = min(cv_folds, n_samples // 2)
-        cv_folds = max(2, cv_folds)
+    n_samples = X.shape[0]
+    cv_folds = min(cv_folds, n_samples // 2)
+    cv_folds = max(2, cv_folds)
 
-        return _quick_evaluate_tree(X, y, task_type, cv_folds, LGBMRegressor, LGBMClassifier)
+    if task_type == 'one_class':
+        # Family-independent: LGBM-supervised-on-y_oc when available, IF otherwise.
+        try:
+            from lightgbm import LGBMRegressor, LGBMClassifier
+        except ImportError:
+            return _quick_evaluate_oneclass_iforest(X, y)
+        try:
+            return _quick_evaluate_tree(
+                X, y, 'one_class', cv_folds, LGBMRegressor, LGBMClassifier
+            )
+        except Exception:
+            # LGBM installed but crashed (OOM, numerical, etc.) — fall back to IF
+            # so the proxy still produces an informative score for one_class
+            # configs (closes the H1 failure mode for the single-start path too).
+            return _quick_evaluate_oneclass_iforest(X, y)
 
-    except Exception:
-        if task_type == 'regression' or task_type == 'classification':
+    if proxy_family == 'tree':
+        try:
+            from lightgbm import LGBMRegressor, LGBMClassifier
+        except ImportError:
+            # Tree requested but LGBM not installed — fall back to linear so
+            # the proxy still produces an informative score. Logged once.
             return _quick_evaluate_linear(X, y, task_type, cv_folds)
-        else:  # one_class — failed trial, don't pollute TPE with garbage
-            return -np.inf
+        try:
+            return _quick_evaluate_tree(
+                X, y, task_type, cv_folds, LGBMRegressor, LGBMClassifier
+            )
+        except Exception:
+            # LGBM installed but CV crashed — return -inf for THIS trial rather
+            # than silently switching to a different family. Mixing objectives
+            # is dishonest; missing one trial is fine (TPE handles it).
+            return float('-inf')
+
+    return _quick_evaluate_linear(X, y, task_type, cv_folds)
 
 
 def _evaluate_with_seed_tree(
@@ -270,8 +411,16 @@ def _evaluate_with_seed_tree(
     All CV splitters are constructed with ``shuffle=True`` and the supplied
     ``random_state`` so per-seed evaluation actually varies (closes
     DeepSeek STRONG D1).
+
+    Uses adaptive ``min_child_samples = max(2, n_train_per_fold // 5)`` to
+    keep splits legal at chemometrics-sized n. Same formula as the
+    non-seeded ``_quick_evaluate_tree``.
     """
     import warnings
+    n_samples = X.shape[0]
+    n_train_per_fold = n_samples - (n_samples // cv_folds)
+    adaptive_mcs = max(2, n_train_per_fold // 5)
+
     with warnings.catch_warnings():
         warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -284,6 +433,7 @@ def _evaluate_with_seed_tree(
                 class_weight='balanced',
                 n_estimators=50,
                 max_depth=3,
+                min_child_samples=adaptive_mcs,
                 random_state=random_state,
                 verbose=-1,
                 n_jobs=1,
@@ -297,6 +447,7 @@ def _evaluate_with_seed_tree(
             model = LGBMClassifier(
                 n_estimators=50,
                 max_depth=4,
+                min_child_samples=adaptive_mcs,
                 random_state=random_state,
                 verbose=-1,
                 n_jobs=1,
@@ -310,6 +461,7 @@ def _evaluate_with_seed_tree(
             model = LGBMRegressor(
                 n_estimators=50,
                 max_depth=4,
+                min_child_samples=adaptive_mcs,
                 random_state=random_state,
                 verbose=-1,
                 n_jobs=1,
@@ -410,93 +562,79 @@ def evaluate_config_with_seed(
     task_type: str,
     cv_folds: int,
     random_state: int,
+    *,
+    proxy_family: str = 'linear',
 ) -> float:
-    """Single-seed CV evaluation that ACTUALLY varies with ``random_state``.
+    """Single-seed CV evaluation, model-family-aware (2026-05-08).
 
-    Differs from ``_quick_evaluate`` in two load-bearing ways (closes
-    DeepSeek STRONG D1 from plan-review v3):
-
-    1. The model constructor receives the supplied ``random_state``
-       (LightGBM is stochastic via per-feature subsampling, so this
-       changes per-seed model fits).
-    2. The CV splitter is constructed with ``shuffle=True`` and the
-       supplied ``random_state`` (so the train/test partitions vary per
-       seed). ``_quick_evaluate`` uses ``cv=cv_folds`` (int), which
-       sklearn resolves to non-shuffled KFold for classification and
-       regression — deterministic regardless of any passed seed.
+    Differs from ``_quick_evaluate`` in that the supplied ``random_state``
+    flows into both the model constructor AND a shuffled CV splitter so
+    per-seed evaluation actually varies (closes DeepSeek STRONG D1).
 
     Used ONLY by the multi-seed rescore in the multistart wrapper
-    (``run_tpe_multistart_preprocessing_discovery``). The existing
-    single-start TPE path continues to call ``_quick_evaluate`` so its
-    behavior is bit-exact preserved (no regression in
-    ``test_t44_autoscale_wiring`` etc.).
+    (``run_tpe_multistart_preprocessing_discovery``). The single-start TPE
+    path uses ``_quick_evaluate``.
+
+    See ``_quick_evaluate`` for ``proxy_family`` semantics. One-class is
+    family-independent (LGBM-supervised when available, IF otherwise).
 
     Returns
     -------
     float
         For regression: negative RMSE (higher is better).
         For classification / one-class: balanced accuracy (higher is better).
-
-    Notes
-    -----
-    Body delegates to ``_evaluate_with_seed_tree`` (LGBM available),
-    ``_evaluate_with_seed_linear`` (LGBM ImportError, regression/classification),
-    or ``_evaluate_with_seed_oneclass_iforest`` (LGBM ImportError or one_class
-    runtime crash). The split try/except behavior is preserved bit-identically:
-    ImportError routes to the sklearn fallback for ALL seeds; runtime errors
-    during CV return -inf per-seed for regression/classification but fall
-    through to IsolationForest for one_class (DeepSeek H1).
     """
+    if proxy_family not in VALID_PROXY_FAMILIES:
+        raise ValueError(
+            f"unknown proxy_family={proxy_family!r}; "
+            f"expected one of {sorted(VALID_PROXY_FAMILIES)}"
+        )
+
     n_samples = X.shape[0]
     cv_folds = min(cv_folds, n_samples // 2)
     cv_folds = max(2, cv_folds)
 
-    # Closes DeepSeek MED #1 (post-Phase-4 review): split the try/except so
-    # ImportError (LightGBM not installed) routes to the sklearn fallback for
-    # ALL seeds of a given config, while runtime errors during CV (OOM,
-    # numerical edge) return -inf for THAT SEED only — without falling through
-    # to a different model. Pre-fix, a LightGBM crash mid-run for one seed
-    # would silently switch that seed's evaluation to PLS/LogReg, mixing
-    # objectives in the multi-seed mean and producing misleading scores.
-    try:
-        from lightgbm import LGBMRegressor, LGBMClassifier
-        _lgbm_available = True
-    except ImportError:
-        _lgbm_available = False
+    if task_type == 'one_class':
+        # Family-independent: LGBM-supervised when available, IF otherwise.
+        # Preserves DeepSeek H1 (one_class IF fallback) and DeepSeek MED-1
+        # (split ImportError / runtime-crash handling).
+        try:
+            from lightgbm import LGBMRegressor, LGBMClassifier
+            _lgbm_available = True
+        except ImportError:
+            _lgbm_available = False
 
-    if _lgbm_available:
+        if _lgbm_available:
+            try:
+                return _evaluate_with_seed_tree(
+                    X, y, 'one_class', cv_folds, random_state,
+                    LGBMRegressor, LGBMClassifier,
+                )
+            except Exception:
+                # LGBM installed but crashed on one_class data — fall through to IF
+                # (DeepSeek H1: keeps the multi-seed rescore informative instead
+                # of degenerating to all-inf).
+                pass
+        return _evaluate_with_seed_oneclass_iforest(X, y, random_state)
+
+    if proxy_family == 'tree':
+        try:
+            from lightgbm import LGBMRegressor, LGBMClassifier
+        except ImportError:
+            # Tree requested but LGBM not installed — fall back to linear.
+            return _evaluate_with_seed_linear(X, y, task_type, cv_folds, random_state)
         try:
             return _evaluate_with_seed_tree(
                 X, y, task_type, cv_folds, random_state,
                 LGBMRegressor, LGBMClassifier,
             )
         except Exception:
-            # LightGBM is installed but the CV run crashed (OOM, numerical
-            # issue, etc.). Behavior depends on task_type:
-            #
-            # - regression / classification: return -inf for THIS seed
-            #   instead of silently falling through to PLS/LogReg. Mixing
-            #   objectives across seeds is dishonest; missing one seed's
-            #   contribution is fine.
-            #
-            # - one_class: fall through to the IsolationForest fallback
-            #   below. The IF path is the designed alternative for
-            #   one_class (added in Fix #2 / DeepSeek H1) — it's not a
-            #   foreign objective, it's the documented fallback. Without
-            #   this fallthrough, a globally-broken LightGBM (installed
-            #   but failing on one_class data) would produce all-inf
-            #   union members and the rescore would degenerate to
-            #   diversity-only ranking, exactly the H1 failure mode.
-            if task_type != 'one_class':
-                return float('-inf')
-            # else: fall through to the sklearn-only fallback path
+            # LGBM installed but THIS seed's CV crashed — return -inf for the
+            # seed rather than silently switching to a different family
+            # (DeepSeek MED-1: mixing objectives across seeds is dishonest).
+            return float('-inf')
 
-    # LightGBM not installed → use the sklearn-only fallback path. Reached
-    # for every seed in this branch (consistent objective across seeds).
-    if task_type == 'regression' or task_type == 'classification':
-        return _evaluate_with_seed_linear(X, y, task_type, cv_folds, random_state)
-    else:
-        return _evaluate_with_seed_oneclass_iforest(X, y, random_state)
+    return _evaluate_with_seed_linear(X, y, task_type, cv_folds, random_state)
 
 
 def run_tpe_preprocessing_discovery(
@@ -515,6 +653,8 @@ def run_tpe_preprocessing_discovery(
     progress_callback: Optional[Callable] = None,
     random_state: int = RANDOM_STATE,
     skip_diversity: bool = False,
+    *,
+    proxy_family: str = 'linear',
 ) -> List[Dict[str, Any]]:
     """TPE-based preprocessing discovery.
 
@@ -565,6 +705,7 @@ def run_tpe_preprocessing_discovery(
     print("TPE PREPROCESSING DISCOVERY")
     print(f"{'='*70}")
     print(f"  Task type: {task_type}")
+    print(f"  Proxy family: {proxy_family}")
     print(f"  Data shape: {X.shape}")
     print(f"  Trials: {n_trials} (startup: {n_startup_trials})")
     print(f"  Dimensions: preproc(14) × window × autoscale({enable_autoscale}) × baseline({enable_baseline}) × smoothing({enable_smoothing})")
@@ -639,7 +780,7 @@ def run_tpe_preprocessing_discovery(
             if np.any(np.std(X_eval, axis=0) < 1e-10):
                 return -np.inf
 
-            score = _quick_evaluate(X_eval, y, task_type, cv_folds)
+            score = _quick_evaluate(X_eval, y, task_type, cv_folds, proxy_family=proxy_family)
             return score
         except Exception:
             return -np.inf
@@ -714,6 +855,17 @@ def run_tpe_preprocessing_discovery(
         if autoscale:
             display_name = f"{display_name}+autoscale"
 
+        # Audit-trail proxy_model_name reflects what _quick_evaluate actually
+        # used (one_class is family-independent — always 'lightgbm' or
+        # 'isolation_forest' depending on availability; here we report the
+        # nominal family pick).
+        if task_type == 'one_class':
+            proxy_model_name = 'lightgbm'  # one_class default; IF only fires on LGBM failure
+        elif proxy_family == 'tree':
+            proxy_model_name = 'lightgbm'
+        else:
+            proxy_model_name = 'pls' if task_type == 'regression' else 'logreg'
+
         all_configs.append({
             'preprocessing': preproc_name,
             'window': int(window) if window is not None else None,
@@ -721,13 +873,15 @@ def run_tpe_preprocessing_discovery(
             'polyorder': deriv_order + 1 if deriv_order else None,
             'score': -t.value if task_type == 'regression' else t.value,
             'n_wavelengths': X.shape[1],
-            'importance_method': 'lightgbm',
+            'importance_method': proxy_model_name,
             'model_name': None,
             '_tpe_trial_number': t.number,
             '_tpe_autoscale': autoscale,
             '_tpe_baseline_method': baseline_method,
             '_tpe_baseline_params': _BASELINE_DEFAULT_PARAMS.get(baseline_method, {}) if baseline_method else None,
             '_tpe_smoothing': smooth,
+            '_tpe_proxy_family': proxy_family,
+            '_tpe_proxy_model_name': proxy_model_name,
         })
 
     # Deduplicate by (preproc, window, autoscale, baseline, smoothing) tuple
@@ -779,11 +933,23 @@ def run_tpe_preprocessing_discovery(
 
     print(f"\n=== TPE Top {len(top_configs)} Configurations ===")
     if proxy_uninformative:
+        # Banner is family-aware: tree path collapse usually means
+        # n_train_per_fold is too small even for the adaptive
+        # min_child_samples; linear path collapse is unusual (PLS doesn't
+        # have the mean-prediction failure mode) and usually indicates
+        # near-constant X across configs or a numerical edge.
+        if proxy_family == 'tree':
+            collapse_diagnosis = (
+                "tree proxy (LightGBM) returned identical scores — even with adaptive\n"
+                "  min_child_samples, n_train_per_fold may be too small for splits to grow"
+            )
+        else:
+            collapse_diagnosis = (
+                "linear proxy (PLS / LogReg) returned identical scores — unusual,\n"
+                "  may indicate near-constant X across configs or a numerical edge"
+            )
         msg_lines = [
-            "  NOTE: LightGBM proxy returned identical scores for all "
-            f"{len(_completed_values)} trials — this happens when n_train_per_fold",
-            "  is too small for the proxy to grow trees (default LGBM "
-            "min_child_samples=20).",
+            f"  NOTE: {collapse_diagnosis}.",
             "  At this data size, TPE provides no optimization signal; the "
             "configs below were",
             "  selected by random+diverse sampling across preprocessing types. "
@@ -819,10 +985,16 @@ def run_tpe_preprocessing_discovery(
         if proxy_uninformative:
             progress_callback(n_trials, n_trials,
                               "=== TPE Preprocessing Discovery (proxy uninformative) ===")
-            progress_callback(n_trials, n_trials,
-                              f"  LightGBM proxy returned identical scores for all {len(_completed_values)} trials")
-            progress_callback(n_trials, n_trials,
-                              "  (n_train_per_fold too small for tree splits — see PROJECT_STATUS.md).")
+            if proxy_family == 'tree':
+                progress_callback(n_trials, n_trials,
+                                  f"  Tree proxy (LightGBM) returned identical scores for all {len(_completed_values)} trials")
+                progress_callback(n_trials, n_trials,
+                                  "  (n_train_per_fold too small for splits even with adaptive min_child_samples).")
+            else:
+                progress_callback(n_trials, n_trials,
+                                  f"  Linear proxy (PLS/LogReg) returned identical scores for all {len(_completed_values)} trials")
+                progress_callback(n_trials, n_trials,
+                                  "  (unusual — may indicate near-constant X across configs).")
             progress_callback(n_trials, n_trials,
                               "  Configs below selected by random+diverse sampling, not by RMSE ranking;")
             progress_callback(n_trials, n_trials,
@@ -899,6 +1071,8 @@ def run_tpe_multistart_preprocessing_discovery(
     n_seeds: int = 5,
     progress_callback: Optional[Callable] = None,
     controller=None,
+    *,
+    proxy_family: str = 'linear',
 ) -> List[Dict[str, Any]]:
     """Multi-start TPE + phase-2 multi-seed rescore.
 
@@ -988,6 +1162,7 @@ def run_tpe_multistart_preprocessing_discovery(
             # would exile configs that lose a slot in one study but
             # would survive cross-study rescore.
             skip_diversity=True,
+            proxy_family=proxy_family,
         )
         for cfg in per_start_top:
             key = _multistart_config_key(cfg)
@@ -1029,7 +1204,8 @@ def run_tpe_multistart_preprocessing_discovery(
             else:
                 X_eval = X_prep
             return evaluate_config_with_seed(
-                X_eval, y, task_type, cv_folds, rs
+                X_eval, y, task_type, cv_folds, rs,
+                proxy_family=proxy_family,
             )
         except Exception:
             return -np.inf

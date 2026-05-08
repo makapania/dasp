@@ -26,6 +26,11 @@ from spectral_predict.tpe_preprocessing_discovery import (
     BASELINE_METHODS,
     _apply_full_preprocessing,
     _quick_evaluate,
+    evaluate_config_with_seed,
+    resolve_tpe_proxy_family,
+    TREE_FAMILY_MODELS,
+    LINEAR_FAMILY_MODELS,
+    VALID_PROXY_FAMILIES,
 )
 
 from spectral_predict.preprocessing_discovery import (
@@ -554,3 +559,154 @@ class TestPipelineRoundtrip:
 
         assert direct.shape == piped.shape
         np.testing.assert_allclose(direct, piped, rtol=1e-5, atol=1e-6)
+
+
+# =============================================================================
+# Model-family-aware proxy routing (2026-05-08)
+# =============================================================================
+
+
+class TestProxyFamilyResolver:
+    """resolve_tpe_proxy_family pins the model→family taxonomy."""
+
+    def test_none_returns_linear(self):
+        assert resolve_tpe_proxy_family(None) == 'linear'
+
+    def test_empty_list_returns_linear(self):
+        assert resolve_tpe_proxy_family([]) == 'linear'
+
+    def test_pure_tree_returns_tree(self):
+        assert resolve_tpe_proxy_family(['LightGBM']) == 'tree'
+        assert resolve_tpe_proxy_family(['XGBoost', 'CatBoost', 'RandomForest']) == 'tree'
+
+    def test_pure_linear_returns_linear(self):
+        assert resolve_tpe_proxy_family(['PLS']) == 'linear'
+        assert resolve_tpe_proxy_family(['Ridge', 'Lasso', 'ElasticNet', 'PLS-DA']) == 'linear'
+
+    def test_mixed_returns_linear(self):
+        assert resolve_tpe_proxy_family(['LightGBM', 'PLS']) == 'linear'
+
+    def test_unknown_returns_linear(self):
+        assert resolve_tpe_proxy_family(['SomeFutureModel']) == 'linear'
+
+    def test_unknown_plus_tree_returns_tree(self):
+        assert resolve_tpe_proxy_family(['SomeFutureModel', 'LightGBM']) == 'tree'
+
+    def test_uncategorized_models_route_to_linear(self):
+        for name in ['SVR', 'SVM', 'MLP', 'NeuralBoosted']:
+            assert resolve_tpe_proxy_family([name]) == 'linear'
+
+    def test_taxonomy_families_disjoint(self):
+        assert TREE_FAMILY_MODELS.isdisjoint(LINEAR_FAMILY_MODELS)
+
+    def test_valid_families_constants(self):
+        assert VALID_PROXY_FAMILIES == frozenset({'tree', 'linear'})
+
+
+class TestQuickEvaluateFamilyRouting:
+    """_quick_evaluate branches on proxy_family keyword."""
+
+    def test_linear_default_regression_returns_finite(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        score = _quick_evaluate(X, y, task_type='regression', cv_folds=3)
+        assert np.isfinite(score)
+
+    def test_linear_explicit_regression_matches_default(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        s_default = _quick_evaluate(X, y, 'regression', 3)
+        s_linear = _quick_evaluate(X, y, 'regression', 3, proxy_family='linear')
+        assert s_default == s_linear  # default is linear
+
+    def test_tree_family_regression_returns_finite(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        score = _quick_evaluate(X, y, 'regression', 3, proxy_family='tree')
+        assert np.isfinite(score)
+
+    def test_tree_family_classification_returns_finite(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = np.array([0] * 20 + [1] * 20)
+        score = _quick_evaluate(X, y, 'classification', 3, proxy_family='tree')
+        assert np.isfinite(score)
+
+    def test_invalid_family_raises(self):
+        np.random.seed(42)
+        X = np.random.randn(20, 30).astype(np.float64)
+        y = np.random.randn(20)
+        with pytest.raises(ValueError, match='proxy_family'):
+            _quick_evaluate(X, y, 'regression', 3, proxy_family='quantum')
+
+    def test_tree_family_distinct_scores_at_small_n(self):
+        """Adaptive min_child_samples must let trees grow at n < 50.
+
+        With default mcs=20 and 5-fold CV on n=49, no split is legal and
+        every X variant collapses to mean-prediction RMSE. The adaptive
+        formula keeps mcs proportional to fold size so distinct X yields
+        distinct scores.
+        """
+        np.random.seed(42)
+        n = 49
+        X1 = np.random.randn(n, 60).astype(np.float64)
+        X2 = X1 + np.random.randn(n, 60) * 0.5
+        y = 2.0 * X1[:, 10] + np.random.randn(n) * 0.2
+        s1 = _quick_evaluate(X1, y, 'regression', 5, proxy_family='tree')
+        s2 = _quick_evaluate(X2, y, 'regression', 5, proxy_family='tree')
+        assert s1 != s2
+
+    def test_one_class_family_independent(self):
+        """proxy_family is a no-op for one_class — same score from both."""
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = np.array([1] * 28 + [-1] * 12)
+        s_linear = _quick_evaluate(X, y, 'one_class', 3, proxy_family='linear')
+        s_tree = _quick_evaluate(X, y, 'one_class', 3, proxy_family='tree')
+        assert np.isfinite(s_linear) and np.isfinite(s_tree)
+        assert s_linear == s_tree
+
+
+class TestEvaluateConfigWithSeedFamilyRouting:
+    """evaluate_config_with_seed branches on proxy_family keyword."""
+
+    def test_linear_default_regression_returns_finite(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        score = evaluate_config_with_seed(X, y, 'regression', 3, random_state=42)
+        assert np.isfinite(score)
+
+    def test_tree_family_regression_returns_finite(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        score = evaluate_config_with_seed(
+            X, y, 'regression', 3, random_state=42, proxy_family='tree'
+        )
+        assert np.isfinite(score)
+
+    def test_invalid_family_raises(self):
+        np.random.seed(42)
+        X = np.random.randn(20, 30).astype(np.float64)
+        y = np.random.randn(20)
+        with pytest.raises(ValueError, match='proxy_family'):
+            evaluate_config_with_seed(
+                X, y, 'regression', 3, random_state=42, proxy_family='quantum'
+            )
+
+    def test_seed_actually_varies_score(self):
+        np.random.seed(42)
+        X = np.random.randn(40, 60).astype(np.float64)
+        y = 3.0 * X[:, 5] - 2.0 * X[:, 30] + np.random.randn(40) * 0.3
+        s1 = evaluate_config_with_seed(
+            X, y, 'regression', 3, random_state=42, proxy_family='tree'
+        )
+        s2 = evaluate_config_with_seed(
+            X, y, 'regression', 3, random_state=7, proxy_family='tree'
+        )
+        # Tree path uses shuffled CV per random_state, so scores should differ
+        assert s1 != s2
