@@ -667,8 +667,35 @@ def run_tpe_preprocessing_discovery(
     else:
         top_configs = select_diverse_configs(unique_configs, n_top, task_type)
 
-    # Print summary
+    # Detect proxy collapse: when n_train_per_fold < ~40, LightGBM's default
+    # min_child_samples=20 blocks every split and the proxy returns mean-
+    # prediction RMSE for every preprocessing — independent of X. Showing the
+    # per-config "RMSE=X.XXXX" line in this regime is actively misleading
+    # because all values are identical and reflect y-distribution noise, not
+    # preprocessing quality. Detect and replace with an honest banner. See
+    # PROJECT_STATUS.md 2026-05-08 (latest) entry for full diagnosis.
+    _completed_values = np.array([float(t.value) for t in completed_trials])
+    proxy_uninformative = bool(
+        len(_completed_values) >= 2
+        and float(np.std(_completed_values)) < 1e-9
+    )
+
     print(f"\n=== TPE Top {len(top_configs)} Configurations ===")
+    if proxy_uninformative:
+        msg_lines = [
+            "  NOTE: LightGBM proxy returned identical scores for all "
+            f"{len(_completed_values)} trials — this happens when n_train_per_fold",
+            "  is too small for the proxy to grow trees (default LGBM "
+            "min_child_samples=20).",
+            "  At this data size, TPE provides no optimization signal; the "
+            "configs below were",
+            "  selected by random+diverse sampling across preprocessing types. "
+            "They will be",
+            "  evaluated by your actual model in the main grid search with "
+            "proper CV.",
+        ]
+        for line in msg_lines:
+            print(line)
     for i, cfg in enumerate(top_configs):
         window_str = f"w={cfg['window']}" if cfg['window'] else ""
         extras = []
@@ -682,14 +709,29 @@ def run_tpe_preprocessing_discovery(
         full_name = f"{cfg['preprocessing']} {window_str}"
         if extras_str:
             full_name += f" [{extras_str}]"
-        if task_type == 'regression':
-            score_str = f"RMSE={cfg['score']:.4f}"
+        if proxy_uninformative:
+            print(f"  {i+1}. {full_name}")
         else:
-            score_str = f"Acc={cfg['score']:.4f}"
-        print(f"  {i+1}. {full_name}: {score_str}")
+            if task_type == 'regression':
+                score_str = f"RMSE={cfg['score']:.4f}"
+            else:
+                score_str = f"Acc={cfg['score']:.4f}"
+            print(f"  {i+1}. {full_name}: {score_str}")
 
     if progress_callback:
-        progress_callback(n_trials, n_trials, "=== TPE Top Preprocessing Ranking ===")
+        if proxy_uninformative:
+            progress_callback(n_trials, n_trials,
+                              "=== TPE Preprocessing Discovery (proxy uninformative) ===")
+            progress_callback(n_trials, n_trials,
+                              f"  LightGBM proxy returned identical scores for all {len(_completed_values)} trials")
+            progress_callback(n_trials, n_trials,
+                              "  (n_train_per_fold too small for tree splits — see PROJECT_STATUS.md).")
+            progress_callback(n_trials, n_trials,
+                              "  Configs below selected by random+diverse sampling, not by RMSE ranking;")
+            progress_callback(n_trials, n_trials,
+                              "  your actual model will evaluate each one in the main grid search.")
+        else:
+            progress_callback(n_trials, n_trials, "=== TPE Top Preprocessing Ranking ===")
         for i, cfg in enumerate(top_configs[:10]):
             window_str = f"w={cfg['window']}" if cfg['window'] else ""
             extras = []
@@ -703,11 +745,14 @@ def run_tpe_preprocessing_discovery(
             full_name = f"{cfg['preprocessing']} {window_str}"
             if extras_str:
                 full_name += f" [{extras_str}]"
-            if task_type == 'regression':
-                score_str = f"RMSE={cfg['score']:.4f}"
+            if proxy_uninformative:
+                progress_callback(n_trials, n_trials, f"  {i+1}. {full_name}")
             else:
-                score_str = f"Acc={cfg['score']:.4f}"
-            progress_callback(n_trials, n_trials, f"  {i+1}. {full_name}: {score_str}")
+                if task_type == 'regression':
+                    score_str = f"RMSE={cfg['score']:.4f}"
+                else:
+                    score_str = f"Acc={cfg['score']:.4f}"
+                progress_callback(n_trials, n_trials, f"  {i+1}. {full_name}: {score_str}")
 
     return top_configs
 
