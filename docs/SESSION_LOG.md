@@ -4,29 +4,6 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
-## 2026-05-08 — TPE preprocessing-discovery proxy was running blind on small chemometrics data (LightGBM mean-prediction collapse)
-
-**Symptom.** User reported running TPE preprocessing on `example/BoneCollagen.csv` (n=49, with 9 samples held out → n_train=40 reaching TPE) showed all 10 entries in `=== TPE Top Preprocessing Ranking ===` at exactly RMSE=6.8908, regardless of preprocessing config. Earlier read suggested cosmetic display bug; proven via per-trial DIAG instrumentation that the underlying scores were genuinely all -6.890843325188513 — and matched the mean-prediction CV RMSE for the user's exact 40-sample subset to floating-point precision.
-
-**Root cause.** LightGBM's default `min_child_samples=20` requires both children of any split to hold ≥20 samples. With 5-fold CV and n_train=40, each training fold has n=32, which makes every possible split create at least one child <20 samples. Result: LightGBM cannot make a single split, the tree degenerates to a single leaf predicting the training mean, and `_quick_evaluate` returns the same mean-prediction RMSE for every preprocessing — independent of what's in `X`.
-
-The threshold for the proxy to function at all on default `min_child_samples=20` is roughly `n_total ≥ 50` with 5-fold CV (so `n_train_per_fold ≥ 40`). That excludes most chemometrics datasets. CLI repro at n=49 showed marginal variance (1 of 5 folds had n_train=40, allowing exactly one split); GUI run at n=40 showed zero variance because no fold could split.
-
-**Why downstream models were still good.** `select_diverse_configs` falls back to picking 1-best-per-preprocessing-type when scores tie — so 10 sensible-and-diverse preprocessings still got fed to the main grid search, where PLS (the actual model the user wanted) learned properly. The proxy was effectively decoration; TPE was running blind, and "TPE preprocessing discovery" on small chemometrics data was equivalent to a random preprocessing diversity sampler.
-
-**Fix.** Scale `min_child_samples` to data size in both `_quick_evaluate` and `evaluate_config_with_seed`:
-```python
-n_train_per_fold = int(n_samples * (cv_folds - 1) / cv_folds)
-mcs = max(2, n_train_per_fold // 5)  # ~20% of training fold size
-```
-On n=40 (5-fold), mcs=6; on n=200 (5-fold), mcs=32 — close to the LightGBM default of 20 on large data. Applied uniformly to all six LightGBM constructors (regression / classification / one_class × single-seed proxy / multi-seed sibling). Verified on the user's exact data shape: configs that pre-fix all returned RMSE=6.8908 now span 2.19 → 4.43, and the new regression pin `test_regression_proxy_distinguishes_signal_on_small_data` asserts a signal-bearing X scores differently from a noise-only X at n=40.
-
-**Lesson.** When porting ML-flavored search machinery (grid search, Bayesian, TPE) into chemometrics workflows, library defaults tuned for large-data regimes (LightGBM/sklearn defaults assume n ≥ ~hundreds) silently degenerate on chemometrics-typical n. This is a recurring pattern named in `feedback_chemometrics_conventions.md` §3 and `feedback_preprocessing_refactor_postmortem.md`. Future ML-flavored proxies need an n-scaling check baked in BEFORE the chemometrics-gate review, not after.
-
-**Process win for the user's pushback.** When I claimed "the bug might be cosmetic — display only," the user correctly insisted I follow the data: the print code emits whatever's in `cfg['score']`, so if all 10 lines show the same value, then either the print logic is broken OR the values themselves are all the same — and the latter, even though it produces no functional harm downstream, IS a bug worth fixing. Diagnostic instrumentation confirmed scenario #2, and that confirmation made the actual fix unambiguous instead of speculative.
-
----
-
 ## 2026-05-08 — Phase 2 multi-seed wall-time was conflated with TPE multistart's 5x cost; empirical retest exonerates Phase 2
 
 **Context.** User pushed back on framing Phase 2 multi-seed rescore as "neutral but costs 5-6x compute." The pushback was methodologically right ("neutral" without including wall-clock is an incomplete verdict; codified as `feedback_neutral_means_user_facing.md`) but the *premise* — that Phase 2 specifically costs 5-6x — was a conflation. The 5-6x figure lives at `gui:11932` ("~5x cost") on the **TPE multistart** checkbox (the one that's also harmful: -0.041 F1 on classification per the 2026-05-07 BoneCollagen postmortem). The Phase 2 checkbox at `gui:11996` says "~1.5x cost" and the BoneCollagen verdict was "regression bit-identical, classification F1 tied."

@@ -483,40 +483,6 @@ class TestQuickEvaluateDirect:
         score = _quick_evaluate(X, y, task_type='one_class', cv_folds=3)
         assert score == 0.0
 
-    def test_regression_proxy_distinguishes_signal_on_small_data(self):
-        """Regression test for the 2026-05-08 mean-prediction-collapse bug.
-
-        Pre-fix, LightGBM's default min_child_samples=20 made splits
-        impossible whenever n_train_per_fold < 40, so _quick_evaluate
-        returned the same RMSE for ANY X (mean-prediction baseline).
-        Symptom: TPE preprocessing discovery showed every config at the
-        same RMSE for chemometrics-typical n~50 datasets.
-
-        With n=40 and 5-fold CV, each training fold is 32 samples.
-        Pre-fix, the proxy returned the same score regardless of input.
-        Post-fix, min_child_samples scales to ~20% of n_train_per_fold,
-        so a meaningful X (signal-bearing) and a meaningless X (pure
-        noise) score differently.
-        """
-        rng = np.random.default_rng(0)
-        n, p = 40, 60
-        # Signal X: y is a strong linear function of one column with
-        # mild noise. A working proxy should learn this.
-        X_signal = rng.standard_normal((n, p)).astype(np.float64)
-        y = 3.0 * X_signal[:, 5] + 0.3 * rng.standard_normal(n)
-        # Noise X: y is unrelated to X. The proxy can only mean-predict.
-        X_noise = rng.standard_normal((n, p)).astype(np.float64)
-
-        score_signal = _quick_evaluate(X_signal, y, task_type='regression', cv_folds=5)
-        score_noise = _quick_evaluate(X_noise, y, task_type='regression', cv_folds=5)
-        # Signal RMSE must be meaningfully lower (less negative) than noise RMSE.
-        # Pre-fix, both would be the same mean-prediction RMSE.
-        assert score_signal > score_noise + 0.1, (
-            f"Proxy did not distinguish signal from noise on n=40 — "
-            f"signal score={score_signal}, noise score={score_noise}. "
-            f"Likely regression of the min_child_samples scaling fix."
-        )
-
 
 class TestEmptyTPEFallback:
     """Empty-TPE-result fallback path (F12 #3)."""

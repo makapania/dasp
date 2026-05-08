@@ -152,17 +152,6 @@ def _quick_evaluate(
         cv_folds = min(cv_folds, n_samples // 2)
         cv_folds = max(2, cv_folds)
 
-        # 2026-05-08: scale min_child_samples to data size. LightGBM's default
-        # (20) requires both children of any split to hold >=20 samples, which
-        # blocks ALL splits when n_train_per_fold < 40 — turning the proxy
-        # into a constant mean-predictor and giving every preprocessing config
-        # the same RMSE / accuracy. Common chemometrics datasets (n_total ~50)
-        # hit this regime. Scaling to ~20% of n_train_per_fold keeps the
-        # constraint meaningful on large data while letting the tree split on
-        # small data.
-        n_train_per_fold = int(n_samples * (cv_folds - 1) / cv_folds)
-        mcs = max(2, n_train_per_fold // 5)
-
         with warnings.catch_warnings():
             warnings.filterwarnings('ignore', category=UserWarning)
 
@@ -175,7 +164,6 @@ def _quick_evaluate(
                     class_weight='balanced',
                     n_estimators=50,
                     max_depth=3,
-                    min_child_samples=mcs,
                     random_state=RANDOM_STATE,
                     verbose=-1,
                     n_jobs=1,
@@ -187,7 +175,6 @@ def _quick_evaluate(
                 model = LGBMClassifier(
                     n_estimators=50,
                     max_depth=4,
-                    min_child_samples=mcs,
                     random_state=RANDOM_STATE,
                     verbose=-1,
                     n_jobs=1,
@@ -198,7 +185,6 @@ def _quick_evaluate(
                 model = LGBMRegressor(
                     n_estimators=50,
                     max_depth=4,
-                    min_child_samples=mcs,
                     random_state=RANDOM_STATE,
                     verbose=-1,
                     n_jobs=1,
@@ -271,12 +257,6 @@ def evaluate_config_with_seed(
     cv_folds = min(cv_folds, n_samples // 2)
     cv_folds = max(2, cv_folds)
 
-    # 2026-05-08: scale min_child_samples to data size — see _quick_evaluate
-    # for the full rationale. Same fix shape so the multi-seed sibling agrees
-    # with the single-seed proxy on small data.
-    n_train_per_fold = int(n_samples * (cv_folds - 1) / cv_folds)
-    mcs = max(2, n_train_per_fold // 5)
-
     # Closes DeepSeek MED #1 (post-Phase-4 review): split the try/except so
     # ImportError (LightGBM not installed) routes to the sklearn fallback for
     # ALL seeds of a given config, while runtime errors during CV (OOM,
@@ -304,7 +284,6 @@ def evaluate_config_with_seed(
                         class_weight='balanced',
                         n_estimators=50,
                         max_depth=3,
-                        min_child_samples=mcs,
                         random_state=random_state,
                         verbose=-1,
                         n_jobs=1,
@@ -318,7 +297,6 @@ def evaluate_config_with_seed(
                     model = LGBMClassifier(
                         n_estimators=50,
                         max_depth=4,
-                        min_child_samples=mcs,
                         random_state=random_state,
                         verbose=-1,
                         n_jobs=1,
@@ -332,7 +310,6 @@ def evaluate_config_with_seed(
                     model = LGBMRegressor(
                         n_estimators=50,
                         max_depth=4,
-                        min_child_samples=mcs,
                         random_state=random_state,
                         verbose=-1,
                         n_jobs=1,
