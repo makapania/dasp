@@ -27291,8 +27291,28 @@ class SpectralPredictApp:
                             ans = False
                         _ipls_q.put(bool(ans))
 
-                    self.root.after(0, _ask_ipls_continue)
-                    result = _ipls_q.get()  # Blocks worker on Python queue, NOT Tk loop.
+                    # Schedule the dialog. If root.after itself raises (Tk
+                    # mid-shutdown), the inner _ask_ipls_continue never runs
+                    # so nothing puts to the queue and the worker would block
+                    # forever on .get(). Catch + put a safe-default answer.
+                    try:
+                        self.root.after(0, _ask_ipls_continue)
+                    except Exception:
+                        _ipls_q.put(False)
+
+                    # Belt: bound the worker's wait. 5 minutes is long enough
+                    # for any reasonable user response, short enough that an
+                    # orphaned dialog (unmapped window, racing teardown)
+                    # doesn't strand the worker indefinitely. Timeout falls
+                    # back to the safe choice (remove iPLS).
+                    try:
+                        result = _ipls_q.get(timeout=300)
+                    except _queue.Empty:
+                        self._log_progress(
+                            "[!] iPLS dialog timed out after 5 min; "
+                            "defaulting to remove iPLS methods"
+                        )
+                        result = False
 
                     if not result:
                         # User chose not to continue - remove all iPLS methods
