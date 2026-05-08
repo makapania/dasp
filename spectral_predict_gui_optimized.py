@@ -7426,14 +7426,16 @@ class SpectralPredictApp:
             ax.grid(True, alpha=0.3)
             fig.tight_layout()
 
-            # Embed in tkinter
+            # Pack toolbar FIRST at side='bottom' so it isn't clipped on
+            # small laptop screens (canvas expand=True would otherwise eat all
+            # the parent cavity).
+            toolbar_frame = ttk.Frame(self.explore_target_dist_frame)
+            toolbar_frame.pack(side='bottom', fill='x')
+
             canvas = FigureCanvasTkAgg(fig, master=self.explore_target_dist_frame)
             canvas.draw()
             canvas.get_tk_widget().pack(fill='both', expand=True)
 
-            # Add toolbar
-            toolbar_frame = ttk.Frame(self.explore_target_dist_frame)
-            toolbar_frame.pack(fill='x')
             toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
             toolbar.update()
 
@@ -8532,6 +8534,11 @@ class SpectralPredictApp:
 
         self._mbl_fig.tight_layout()
 
+        # Pack toolbar FIRST at side='bottom' so it stays visible on small
+        # laptop screens (canvas would otherwise consume the cavity).
+        tb_frame = ttk.Frame(self._mbl_plot_frame)
+        tb_frame.pack(side='bottom', fill='x')
+
         self._mbl_canvas = FigureCanvasTkAgg(self._mbl_fig, master=self._mbl_plot_frame)
         self._mbl_canvas.draw()
         self._mbl_canvas.get_tk_widget().pack(fill='both', expand=True)
@@ -8539,9 +8546,6 @@ class SpectralPredictApp:
         # Connect click event
         self._mbl_cid = self._mbl_canvas.mpl_connect('button_press_event', self._on_mbl_click)
 
-        # Toolbar
-        tb_frame = ttk.Frame(self._mbl_plot_frame)
-        tb_frame.pack(fill='x')
         toolbar = NavigationToolbar2Tk(self._mbl_canvas, tb_frame)
         toolbar.update()
         self._mbl_toolbar = toolbar
@@ -8832,20 +8836,23 @@ class SpectralPredictApp:
         else:
             fig.tight_layout()
 
-        # Embed in tkinter
+        # Pack bottom controls FIRST (side='bottom') so they reserve space on
+        # small laptop screens. Otherwise the canvas's expand=True consumes the
+        # parent cavity and the info bar (with the Peak Calculator button) clips
+        # off the bottom with no scrollbar to recover it.
+        info_frame = ttk.Frame(frame)
+        info_frame.pack(side='bottom', fill='x', padx=10, pady=(2, 5))
+
+        toolbar_frame = ttk.Frame(frame)
+        toolbar_frame.pack(side='bottom', fill='x')
+
+        # Embed in tkinter — canvas packs LAST and absorbs whatever space remains
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        # Add toolbar
-        toolbar_frame = ttk.Frame(frame)
-        toolbar_frame.pack(fill='x')
         toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
-
-        # Add info bar below toolbar
-        info_frame = ttk.Frame(frame)
-        info_frame.pack(fill='x', padx=10, pady=(2, 5))
 
         info_label = ttk.Label(info_frame, text="Click a spectrum to see details",
                                style='Caption.TLabel')
@@ -10764,14 +10771,15 @@ class SpectralPredictApp:
 
         fig.tight_layout()
 
-        # Embed plot
+        # Pack toolbar FIRST at side='bottom' so it stays visible on small
+        # laptop screens (canvas expand=True would otherwise eat the cavity).
+        toolbar_frame = ttk.Frame(plot_frame)
+        toolbar_frame.pack(side='bottom', fill='x')
+
         canvas = FigureCanvasTkAgg(fig, master=plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        # Add toolbar
-        toolbar_frame = ttk.Frame(plot_frame)
-        toolbar_frame.pack(fill='x')
         toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
 
@@ -34860,14 +34868,15 @@ F1 Score:  {f1:.4f}
 
             fig.canvas.mpl_connect('button_press_event', on_importance_click)
 
-            # Embed in tkinter
+            # Pack toolbar FIRST at side='bottom' so it stays visible on small
+            # laptop screens (canvas expand=True would otherwise eat the cavity).
+            toolbar_frame = ttk.Frame(self.wavelength_importance_plot_frame)
+            toolbar_frame.pack(side='bottom', fill='x')
+
             canvas = FigureCanvasTkAgg(fig, master=self.wavelength_importance_plot_frame)
             canvas.draw()
             canvas.get_tk_widget().pack(fill='both', expand=True)
 
-            # Add toolbar
-            toolbar_frame = ttk.Frame(self.wavelength_importance_plot_frame)
-            toolbar_frame.pack(fill='x')
             toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
             toolbar.update()
 
@@ -47863,13 +47872,16 @@ External Validation Performance (n={n_val}):
 
         fig.tight_layout()
 
-        # Embed in tkinter
+        # Pack toolbar holder FIRST at side='bottom' so it stays visible on
+        # small laptop screens (canvas expand=True would otherwise eat the cavity).
+        toolbar_frame = ttk.Frame(self.ct_predictions_plot_frame)
+        toolbar_frame.pack(side='bottom', fill='x')
+
         canvas = FigureCanvasTkAgg(fig, master=self.ct_predictions_plot_frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
 
-        # Add toolbar
-        toolbar = NavigationToolbar2Tk(canvas, self.ct_predictions_plot_frame)
+        toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
 
     def _export_ct_workflow_predictions(self):
@@ -56263,7 +56275,17 @@ External Validation Performance (n={n_val}):
             old_frame.destroy()
 
         toolbar_frame = ttk.Frame(parent_frame)
-        toolbar_frame.pack(fill='x')
+        # Reorder this frame BEFORE the canvas in pack order, and anchor it to
+        # the bottom of the cavity. This guarantees it stays visible on small
+        # laptop screens — otherwise the canvas's expand=True consumes the
+        # whole cavity and the toolbar clips off the bottom.
+        canvas_widget = canvas.get_tk_widget()
+        try:
+            toolbar_frame.pack(side='bottom', fill='x', before=canvas_widget)
+        except tk.TclError:
+            # Fallback if canvas isn't packed yet (defensive — shouldn't happen
+            # given current call sites, but avoids a crash if ordering changes).
+            toolbar_frame.pack(side='bottom', fill='x')
         toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
         setattr(self, attr_name, toolbar_frame)
