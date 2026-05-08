@@ -27261,15 +27261,39 @@ class SpectralPredictApp:
                         break
 
                 if has_gaps:
-                    result = messagebox.askyesno(
-                        "iPLS with Discontinuous Regions",
-                        "You have selected iPLS methods with discontinuous wavelength regions.\n\n"
-                        "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
-                        "regions, each region will be analyzed separately.\n\n"
-                        "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
-                        "Continue with iPLS methods enabled?",
-                        icon='warning'
-                    )
+                    # CRITICAL: this runs on the analysis worker thread, but
+                    # messagebox.askyesno is a blocking modal that pumps
+                    # Tk's event loop. Calling it from a worker thread can
+                    # deadlock on Windows (worker blocks waiting for the
+                    # dialog, main thread can't dispatch the dialog because
+                    # Tcl operations from the worker aren't always thread-
+                    # safe). Pattern: schedule the dialog on the main
+                    # thread via root.after, block the worker on a
+                    # threading-safe queue.Queue, main thread puts the
+                    # boolean answer when the user clicks.
+                    import queue as _queue
+                    _ipls_q: "_queue.Queue[bool]" = _queue.Queue()
+
+                    def _ask_ipls_continue():
+                        try:
+                            ans = messagebox.askyesno(
+                                "iPLS with Discontinuous Regions",
+                                "You have selected iPLS methods with discontinuous wavelength regions.\n\n"
+                                "iPLS normally divides the spectrum into contiguous intervals. With discontinuous "
+                                "regions, each region will be analyzed separately.\n\n"
+                                "This may reduce iPLS effectiveness as it cannot find intervals spanning multiple regions.\n\n"
+                                "Continue with iPLS methods enabled?",
+                                icon='warning',
+                            )
+                        except Exception:
+                            # If Tk is mid-shutdown or otherwise unhappy,
+                            # default to the safe choice: remove iPLS.
+                            ans = False
+                        _ipls_q.put(bool(ans))
+
+                    self.root.after(0, _ask_ipls_continue)
+                    result = _ipls_q.get()  # Blocks worker on Python queue, NOT Tk loop.
+
                     if not result:
                         # User chose not to continue - remove all iPLS methods
                         selected_varsel_methods = [m for m in selected_varsel_methods if m not in ['ipls', 'ipls_forward', 'ipls_backward']]
@@ -40982,6 +41006,12 @@ External Validation Performance (n={n_val}):
                     has_uncertainty = pred_result['has_uncertainty']
                     applicability_domain = pred_result.get('applicability_domain', {})
                     has_applicability_domain = pred_result.get('has_applicability_domain', False)
+                    # OC decision-score extraction failure is surfaced by
+                    # predict_with_uncertainty as a structured flag; capture it
+                    # so the GUI can tell the user "predictions worked but
+                    # uncertainty/AD broke" instead of silently returning empty
+                    # uncertainty payloads.
+                    decision_score_error = pred_result.get('decision_score_error')
 
                     # Check for data type mismatch warning
                     if pred_result.get('data_type_warning'):
@@ -41038,6 +41068,14 @@ External Validation Performance (n={n_val}):
                             self.predictions_applicability = {}
                         self.predictions_applicability[col_name] = applicability_domain
 
+                    # Surface OC decision-score extraction failures so the
+                    # user sees that uncertainty / AD silently no-op'd rather
+                    # than assuming the empty placeholder means "no error."
+                    if decision_score_error:
+                        if not hasattr(self, 'predictions_decision_errors'):
+                            self.predictions_decision_errors = {}
+                        self.predictions_decision_errors[col_name] = decision_score_error
+
                     successful_models += 1
 
                 except Exception as e:
@@ -41060,6 +41098,23 @@ External Validation Performance (n={n_val}):
             self._display_predictions()
             self._display_consensus_info()
             self._display_uncertainty()
+
+            # Surface OC decision-score extraction failures. predict_with_uncertainty
+            # populates result['decision_score_error'] when score extraction raises
+            # but predictions still succeed. Without this notice the user would see
+            # predictions in the Results tab and an empty Uncertainty tab with no
+            # signal that uncertainty/AD silently no-op'd.
+            decision_errors = getattr(self, 'predictions_decision_errors', {})
+            if decision_errors:
+                detail_lines = [f"  • {col}: {msg}" for col, msg in decision_errors.items()]
+                messagebox.showwarning(
+                    "Uncertainty extraction failed",
+                    "Predictions completed, but decision-score extraction failed for "
+                    f"{len(decision_errors)} model(s). The Uncertainty tab will be "
+                    "empty for these:\n\n"
+                    + "\n".join(detail_lines)
+                    + "\n\nCheck the run log for the full traceback.",
+                )
 
             # Update status
             if successful_models == len(self.loaded_models):
