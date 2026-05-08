@@ -475,3 +475,210 @@ class TestEndToEndSmoke:
         )
         assert result_df is not None
         assert len(result_df) > 0
+
+
+# ---------------------------------------------------------------------------
+# Layer 8 — Custom-field token parsers (post-PR-58-review hardening)
+#
+# These tests pin the comma-tolerant list parsers added after the silent-
+# failure-hunter found that "256, 512" in a Custom: field was silently
+# dropped (int(float("256, 512")) raises). The fix replaces the scalar
+# _parse_oc_int / _parse_oc_float with list-returning siblings that
+# tokenise on comma/semicolon, deduplicate, and accumulate per-token
+# error messages instead of swallowing them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def app_class():
+    from spectral_predict_gui_optimized import SpectralPredictApp
+    return SpectralPredictApp
+
+
+class TestSplitOcTokens:
+    """Tokeniser for comma/semicolon-separated Custom: field input."""
+
+    def test_empty_string_yields_no_tokens(self, app_class):
+        assert app_class._split_oc_tokens("") == []
+
+    def test_whitespace_only_yields_no_tokens(self, app_class):
+        assert app_class._split_oc_tokens("   ") == []
+
+    def test_none_yields_no_tokens(self, app_class):
+        assert app_class._split_oc_tokens(None) == []
+
+    def test_single_token(self, app_class):
+        assert app_class._split_oc_tokens("256") == ["256"]
+
+    def test_comma_separated(self, app_class):
+        assert app_class._split_oc_tokens("256, 512") == ["256", "512"]
+
+    def test_semicolon_treated_as_comma(self, app_class):
+        assert app_class._split_oc_tokens("256; 512") == ["256", "512"]
+
+    def test_mixed_separators(self, app_class):
+        assert app_class._split_oc_tokens("100, 200; 300") == ["100", "200", "300"]
+
+    def test_trailing_comma_dropped(self, app_class):
+        assert app_class._split_oc_tokens("256,") == ["256"]
+
+    def test_double_comma_dropped(self, app_class):
+        assert app_class._split_oc_tokens("100,,200") == ["100", "200"]
+
+
+class TestParseOcIntList:
+    """List parser for integer Custom: fields (n_estimators, n_neighbors, ...)."""
+
+    def test_empty_string_no_values_no_errors(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("", 1)
+        assert vals == []
+        assert errs == []
+
+    def test_single_value_parses(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("256", 1)
+        assert vals == [256]
+        assert errs == []
+
+    def test_comma_separated_parses_to_list(self, app_class):
+        # The bug this fix closes: previously "256, 512" was silently dropped.
+        vals, errs = app_class._parse_oc_int_list("256, 512", 1)
+        assert vals == [256, 512]
+        assert errs == []
+
+    def test_below_minimum_reported(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("0", 1)
+        assert vals == []
+        assert len(errs) == 1
+        assert "below minimum 1" in errs[0]
+
+    def test_non_integer_reported(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("banana", 1)
+        assert vals == []
+        assert len(errs) == 1
+        assert "not an integer" in errs[0]
+
+    def test_mixed_valid_and_invalid_partial_recovery(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("256, banana, 512", 1)
+        assert vals == [256, 512]
+        assert len(errs) == 1
+        assert "banana" in errs[0]
+
+    def test_duplicates_deduplicated(self, app_class):
+        vals, errs = app_class._parse_oc_int_list("256, 256", 1)
+        assert vals == [256]
+        assert errs == []
+
+    def test_float_truncated_to_int(self, app_class):
+        # Sklearn integer params accept "256.0" via int(float()) cast.
+        vals, errs = app_class._parse_oc_int_list("256.0", 1)
+        assert vals == [256]
+
+
+class TestParseOcFloatList:
+    """List parser for float Custom: fields (contamination, nu, ...)."""
+
+    def test_comma_separated_parses(self, app_class):
+        vals, errs = app_class._parse_oc_float_list("0.02, 0.03", 0.0, 1.0)
+        assert vals == [0.02, 0.03]
+        assert errs == []
+
+    def test_out_of_range_reported(self, app_class):
+        vals, errs = app_class._parse_oc_float_list("1.5", 0.0, 1.0)
+        assert vals == []
+        assert len(errs) == 1
+        assert "not in range" in errs[0]
+
+    def test_zero_excluded_via_strict_lower_bound(self, app_class):
+        vals, errs = app_class._parse_oc_float_list("0.0", 0.0, 1.0)
+        assert vals == []
+        assert len(errs) == 1
+
+    def test_upper_bound_inclusive(self, app_class):
+        vals, errs = app_class._parse_oc_float_list("1.0", 0.0, 1.0)
+        assert vals == [1.0]
+        assert errs == []
+
+    def test_non_numeric_reported(self, app_class):
+        vals, errs = app_class._parse_oc_float_list("abc", 0.0, 1.0)
+        assert vals == []
+        assert len(errs) == 1
+        assert "not a number" in errs[0]
+
+
+class TestParseOcMetricList:
+    """List parser for LOF metric Custom: field (whitelist-validated)."""
+
+    def test_known_metric_accepted(self, app_class):
+        vals, errs = app_class._parse_oc_metric_list("chebyshev", app_class._LOF_KNOWN_METRICS)
+        assert vals == ["chebyshev"]
+        assert errs == []
+
+    def test_typo_rejected(self, app_class):
+        # Pre-fix: "manhatten" propagated to sklearn, fold-failed silently.
+        vals, errs = app_class._parse_oc_metric_list("manhatten", app_class._LOF_KNOWN_METRICS)
+        assert vals == []
+        assert len(errs) == 1
+        assert "manhatten" in errs[0]
+        assert "not a recognised metric" in errs[0]
+
+    def test_case_normalised(self, app_class):
+        vals, errs = app_class._parse_oc_metric_list("Manhattan", app_class._LOF_KNOWN_METRICS)
+        assert vals == ["manhattan"]
+        assert errs == []
+
+    def test_comma_separated(self, app_class):
+        vals, errs = app_class._parse_oc_metric_list(
+            "manhattan, cosine", app_class._LOF_KNOWN_METRICS
+        )
+        assert vals == ["manhattan", "cosine"]
+        assert errs == []
+
+    def test_mixed_valid_invalid(self, app_class):
+        vals, errs = app_class._parse_oc_metric_list(
+            "manhattan, banana", app_class._LOF_KNOWN_METRICS
+        )
+        assert vals == ["manhattan"]
+        assert len(errs) == 1
+        assert "banana" in errs[0]
+
+
+class TestParseOcNComponentsList:
+    """List parser for SIMCA n_components (int OR fraction in (0, 1))."""
+
+    def test_integer_kept_as_int(self, app_class):
+        vals, errs = app_class._parse_oc_n_components_list("5")
+        assert vals == [5]
+        assert errs == []
+
+    def test_fraction_kept_as_float(self, app_class):
+        vals, errs = app_class._parse_oc_n_components_list("0.95")
+        assert vals == [0.95]
+        assert errs == []
+
+    def test_mixed_int_and_fraction(self, app_class):
+        vals, errs = app_class._parse_oc_n_components_list("5, 0.95")
+        assert vals == [5, 0.95]
+        assert errs == []
+
+    def test_zero_rejected(self, app_class):
+        vals, errs = app_class._parse_oc_n_components_list("0")
+        assert vals == []
+        assert len(errs) == 1
+
+    def test_one_rejected_as_fraction(self, app_class):
+        # 1.0 is neither a positive integer count nor in (0, 1) — must reject.
+        vals, errs = app_class._parse_oc_n_components_list("1.0")
+        # 1.0 == int(1.0) and int(1.0) >= 1 -> accepted as int 1
+        assert vals == [1]
+
+
+class TestLofKnownMetrics:
+    """Whitelist of metrics LOF custom field accepts."""
+
+    def test_includes_common_spectroscopy_metrics(self, app_class):
+        for m in ("euclidean", "manhattan", "cosine", "minkowski"):
+            assert m in app_class._LOF_KNOWN_METRICS
+
+    def test_excludes_invalid_strings(self, app_class):
+        assert "banana" not in app_class._LOF_KNOWN_METRICS
+        assert "manhatten" not in app_class._LOF_KNOWN_METRICS

@@ -25016,37 +25016,89 @@ class SpectralPredictApp:
                     return False
         return True
 
+    # Sklearn-supported metrics that LOF accepts. Curated to common-for-spectroscopy
+    # subset; user-typed metrics outside this set are rejected with a clear error
+    # rather than passed straight through to sklearn (where they fail per-fold and
+    # surface as a generic "skipped" result row).
+    _LOF_KNOWN_METRICS = frozenset({
+        "euclidean", "manhattan", "minkowski", "cosine",
+        "chebyshev", "canberra", "braycurtis", "correlation",
+        "l1", "l2", "cityblock",
+    })
+
     @staticmethod
-    def _parse_oc_float(val, lo=0.0, hi=1.0):
-        try:
-            f = float(val)
+    def _split_oc_tokens(val):
+        if not val or not val.strip():
+            return []
+        return [t.strip() for t in val.replace(";", ",").split(",") if t.strip()]
+
+    @staticmethod
+    def _parse_oc_float_list(val, lo=0.0, hi=1.0):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                f = float(tok)
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not a number")
+                continue
             if lo < f <= hi:
-                return f
-        except (ValueError, TypeError):
-            pass
-        return None
+                if f not in values:
+                    values.append(f)
+            else:
+                errors.append(f"{tok!r} not in range ({lo}, {hi}]")
+        return values, errors
 
     @staticmethod
-    def _parse_oc_int(val, min_val=1):
-        try:
-            i = int(float(val))
+    def _parse_oc_int_list(val, min_val=1):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                i = int(float(tok))
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not an integer")
+                continue
             if i >= min_val:
-                return i
-        except (ValueError, TypeError):
-            pass
-        return None
+                if i not in values:
+                    values.append(i)
+            else:
+                errors.append(f"{tok!r} below minimum {min_val}")
+        return values, errors
 
     @staticmethod
-    def _parse_oc_n_components(val):
-        try:
-            f = float(val)
+    def _parse_oc_n_components_list(val):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                f = float(tok)
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not a number")
+                continue
             if f == int(f) and int(f) >= 1:
-                return int(f)
-            if 0.0 < f < 1.0:
-                return f
-        except (ValueError, TypeError):
-            pass
-        return None
+                v = int(f)
+            elif 0.0 < f < 1.0:
+                v = f
+            else:
+                errors.append(f"{tok!r} not a positive integer or fraction in (0, 1)")
+                continue
+            if v not in values:
+                values.append(v)
+        return values, errors
+
+    @staticmethod
+    def _parse_oc_metric_list(val, known_metrics):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            normalized = tok.lower()
+            if normalized in known_metrics:
+                if normalized not in values:
+                    values.append(normalized)
+            else:
+                errors.append(f"{tok!r} not a recognised metric")
+        return values, errors
 
     def _collect_ocsvm_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25073,18 +25125,24 @@ class SpectralPredictApp:
             nus.append(0.1)
         custom = self.ocsvm_nu_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in nus:
-                nus.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in nus:
+                    nus.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("OneClassSVM", "nu", e))
 
         degrees = []
         if self.ocsvm_degree_2.get():
             degrees.append(2)
         custom = self.ocsvm_degree_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in degrees:
-                degrees.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in degrees:
+                    degrees.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("OneClassSVM", "degree", e))
 
         if not kernels:
             kernels = sorted(set(p['kernel'] for p in defaults))
@@ -25110,9 +25168,12 @@ class SpectralPredictApp:
             n_est.append(500)
         custom = self.if_n_estimators_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in n_est:
-                n_est.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in n_est:
+                    n_est.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "n_estimators", e))
 
         contam = []
         if self.if_contamination_001.get():
@@ -25123,9 +25184,12 @@ class SpectralPredictApp:
             contam.append(0.1)
         custom = self.if_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "contamination", e))
 
         max_feat = []
         if self.if_max_features_05.get():
@@ -25134,9 +25198,12 @@ class SpectralPredictApp:
             max_feat.append(1.0)
         custom = self.if_max_features_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in max_feat:
-                max_feat.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in max_feat:
+                    max_feat.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "max_features", e))
 
         max_samp: list = []
         if self.if_max_samples_auto.get():
@@ -25147,13 +25214,20 @@ class SpectralPredictApp:
             max_samp.append(512)
         custom = self.if_max_samples_custom.get().strip()
         if custom:
-            if custom.lower() == 'auto':
-                if 'auto' not in max_samp:
-                    max_samp.append('auto')
-            else:
-                v = self._parse_oc_int(custom, 1)
-                if v is not None and v not in max_samp:
-                    max_samp.append(v)
+            # Tokenize first so 'auto' can co-exist with ints in the same custom string.
+            for tok in self._split_oc_tokens(custom):
+                if tok.lower() == 'auto':
+                    if 'auto' not in max_samp:
+                        max_samp.append('auto')
+                else:
+                    sub_vals, sub_errs = self._parse_oc_int_list(tok, 1)
+                    for v in sub_vals:
+                        if v not in max_samp:
+                            max_samp.append(v)
+                    for e in sub_errs:
+                        self._oc_param_collector_errors.append(
+                            ("IsolationForest", "max_samples", e)
+                        )
 
         if not n_est:
             n_est = sorted(set(p['n_estimators'] for p in defaults))
@@ -25184,9 +25258,12 @@ class SpectralPredictApp:
             contam.append(0.1)
         custom = self.ee_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("EllipticEnvelope", "contamination", e))
 
         support_fracs: list = []
         if self.ee_support_fraction_none.get():
@@ -25197,9 +25274,14 @@ class SpectralPredictApp:
             support_fracs.append(0.75)
         custom = self.ee_support_fraction_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in support_fracs:
-                support_fracs.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in support_fracs:
+                    support_fracs.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(
+                    ("EllipticEnvelope", "support_fraction", e)
+                )
 
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
@@ -25221,9 +25303,12 @@ class SpectralPredictApp:
             nn.append(30)
         custom = self.lof_n_neighbors_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in nn:
-                nn.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in nn:
+                    nn.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "n_neighbors", e))
 
         contam = []
         if self.lof_contamination_001.get():
@@ -25234,9 +25319,12 @@ class SpectralPredictApp:
             contam.append(0.1)
         custom = self.lof_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "contamination", e))
 
         metrics: list[str] = []
         if self.lof_metric_euclidean.get():
@@ -25248,8 +25336,13 @@ class SpectralPredictApp:
         if self.lof_metric_cosine.get():
             metrics.append('cosine')
         custom = self.lof_metric_custom.get().strip()
-        if custom and custom not in metrics:
-            metrics.append(custom)
+        if custom:
+            vals, errs = self._parse_oc_metric_list(custom, self._LOF_KNOWN_METRICS)
+            for v in vals:
+                if v not in metrics:
+                    metrics.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "metric", e))
 
         if not nn:
             nn = sorted(set(p['n_neighbors'] for p in defaults))
@@ -25275,9 +25368,12 @@ class SpectralPredictApp:
             n_comp.append(0.95)
         custom = self.simca_n_components_custom.get().strip()
         if custom:
-            v = self._parse_oc_n_components(custom)
-            if v is not None and v not in n_comp:
-                n_comp.append(v)
+            vals, errs = self._parse_oc_n_components_list(custom)
+            for v in vals:
+                if v not in n_comp:
+                    n_comp.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("PCA-SIMCA", "n_components", e))
 
         alphas = []
         if self.simca_alpha_001.get():
@@ -25286,9 +25382,12 @@ class SpectralPredictApp:
             alphas.append(0.05)
         custom = self.simca_alpha_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in alphas:
-                alphas.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in alphas:
+                    alphas.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("PCA-SIMCA", "alpha", e))
 
         if not n_comp:
             n_comp = sorted(set(p['n_components'] for p in defaults), key=lambda x: (isinstance(x, float), x))
@@ -25298,6 +25397,8 @@ class SpectralPredictApp:
         return {'n_components': n_comp, 'alpha': alphas}
 
     def _collect_one_class_model_param_overrides(self):
+        # Reset per-call so a previous run's errors don't bleed into this invocation.
+        self._oc_param_collector_errors = []
         overrides = {}
         collectors = {
             'OneClassSVM': self._collect_ocsvm_overrides,
@@ -25309,7 +25410,25 @@ class SpectralPredictApp:
         for model_name, collector in collectors.items():
             if not self._one_class_model_card_matches_default(model_name):
                 overrides[model_name] = collector()
+        if self._oc_param_collector_errors:
+            self._show_oc_param_collector_errors(self._oc_param_collector_errors)
         return overrides if overrides else None
+
+    def _show_oc_param_collector_errors(self, errors):
+        # Single summary dialog so the user sees every bad token at once. Run is
+        # not aborted — values that did parse are still used.
+        lines = [f"  • {model}.{param}: {msg}" for model, param, msg in errors]
+        body = (
+            "Some 'Custom:' field tokens could not be parsed and were ignored:\n\n"
+            + "\n".join(lines)
+            + "\n\nThe analysis will proceed with the values that parsed correctly."
+        )
+        try:
+            messagebox.showwarning("Invalid Custom hyperparameter values", body)
+        except Exception:
+            # In headless / test contexts there is no Tk root; fall back to a log
+            # line so the warning still surfaces somewhere.
+            self._log_progress(f"[OC Params] {body}")
 
     def _apply_pending_validation_indices(self):
         """Apply validation indices captured at the prior run's start_run.
