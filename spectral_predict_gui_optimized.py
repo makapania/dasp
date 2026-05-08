@@ -3256,7 +3256,13 @@ class SpectralPredictApp:
         # Default OFF because cost is significant (~5x current TPE wall time);
         # turn ON for classification on small-n datasets where TPE drift is
         # documented (tools/bayesian_topk_stability.py).
-        self.tpe_multistart = tk.BooleanVar(value=False)
+        # Default ON (2026-05-07): multi-seed multistart is methodologically
+        # required for stable top-K rankings. Single-seed TPE drift was
+        # documented in tools/bayesian_topk_stability.py — pairwise top-K
+        # Jaccard ~0 across seeds at n_trials=300. The user explicitly asked
+        # for default-on after the GUI Tk worker-thread crash that surfaced
+        # under multi-seed was hardened.
+        self.tpe_multistart = tk.BooleanVar(value=True)
         self.tpe_n_starts = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
