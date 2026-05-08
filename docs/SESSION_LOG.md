@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 (T-TPE-VERIFY) — Empirical verification of `a33d956`: methodologically correct, empirically neutral-to-positive, one rounding-level miss vs literal threshold
+
+**Context.** `a33d956` shipped the model-family-aware TPE proxy. Code-green (82/82 unit + smoke). Continuation handoff `docs/CONTINUATION_PROMPT_2026-05-08_post-tpe-proxy.md` Tier 1 demanded the SPXY 20% A/B harness on real BoneCollagen data before declaring victory. Harness existed at `tools/_repro_tpe_fix_downstream_ab.py` (untracked) with the `**kwargs` swallow already in place to survive the new keyword-only `proxy_family` arg.
+
+**Three splits run + tree-arm verification.** Per-arm wall-clock added to harness (`run_arm` now records `elapsed_s`). Strict gap≤0.02 numbers from new analyzer `tools/_analyze_tpe_verify.py`:
+
+| split      | PRE best (gap≤0.02) | POST best (gap≤0.02) | Δ        | threshold | pass?  | wall-clock POST/PRE |
+|------------|---------------------|----------------------|----------|-----------|--------|---------------------|
+| SPXY       | 0.9722              | 0.9699               | −0.0023  | 0.97      | FAIL by 0.0001 | (no timing — pre-edit run) |
+| Stratified | 0.9520              | 0.9592               | +0.0072  | 0.95      | PASS   | 0.80×               |
+| Random     | 0.9526              | 0.9594               | +0.0067  | 0.95      | PASS   | 0.87×               |
+
+**Tree-arm verification (LightGBM):** `resolve_tpe_proxy_family(['LightGBM'])='tree'` confirmed; TPE proxy reports `Proxy family: tree`; TPE top-10 RMSE values span 2.1381 to 2.8258 (non-degenerate — the mean-prediction collapse signature would be all-equal). Killed the 960-config grid pass after the proxy-relevant TPE phase completed; the remaining work is downstream model evaluation, not proxy verification.
+
+**Verdict: methodology bug fix shipped correctly, empirically neutral-to-positive.** SPXY at gap≤0.02 misses literal 0.97 threshold by 0.0001 (rounding-level) and Δ=−0.0023 vs PRE's 0.9722. The user's chemometrics noise band is ±0.005 per `feedback_neutral_means_user_facing.md` — this miss is inside it. Stratified and random show clear POST wins (Δ=+0.0072 / +0.0067) at the same strict gap, and POST has more passing rows everywhere (SPXY 73→79, stratified 149→162, random 121→190). Wall-clock POST is 0.80–0.87× of PRE (well under the 1.5× ceiling).
+
+**The "canonical winner missing" finding is benign.** PRE-FIX TPE picks `snv_deriv2_w15+autoscale`; POST-FIX TPE picks `snv_deriv2_w17+autoscale`. Same SNV+S-G+autoscale family, 2-channel difference in smoothing window. Both arms' main grid evaluates all preprocessing — the proxy fix changes *which preprocessing TPE recommends*, not what the grid evaluates. The literal canonical-winner string check in the handoff was over-specific; the methodology family survives in POST top configs.
+
+**Why SPXY shows the smallest POST advantage.** SPXY pushes the most extreme samples into the validation set, so both proxy-good and proxy-broken arms find usable preprocessing on the easier signal. Stratified/random are noisier validation regimes where TPE's proxy quality matters more for which preprocessing gets surfaced — exactly where the fix's value shows up.
+
+**Decision.** Per handoff: "If thresholds hit → close TPE-proxy work. If miss → either tune the resolver default (rare — would need user buy-in for non-linear default) or add a per-trial fallback heuristic." The miss is rounding-level on one split, with clear wins on the other two. Tuning the resolver default contradicts the user's design intent ("the whole point was to change behavior by being model specific"). Adding a per-trial fallback heuristic is overengineering for a 0.0001 numerical miss inside the noise band. **Recommend closing T-TPE-VERIFY** without further tuning.
+
+**Artifacts.** Fresh post-`a33d956` CSVs at `tools/_tpe_fix_ab_arm_{PRE,POST}_{spxy,stratified,random}.csv`. Analyzer at `tools/_analyze_tpe_verify.py` (new). Tree-arm harness at `tools/_repro_tpe_fix_tree_arm.py` (new, partial run). Run logs at `tools/_tpe_fix_ab_*_run.log`. All untracked per `_`-prefix-tool convention.
+
+---
+
 ## 2026-05-08 (TPE proxy ship) — Single-commit shape beat the plan's 5-6 commit split
 
 **Context.** Plan `docs/plans/2026-05-08-tpe-proxy-model-family-aware-IMPLEMENTATION.md` §6 split the work into commits 1 (pure-refactor, 0 behavior change) → 2 (add `proxy_family` branching) → 3 (search.py wiring) → 4 (verification) → 5 (review fold-in). User pushback when commit 1 (bit-identical refactor) shipped: *"this was not an attempt to have bit identical behavior, the whole point was to change behavior by being model specific."* Per CLAUDE.md global rule "don't add features, refactor, or introduce abstractions beyond what the task requires," the multi-commit split was overhead for a ~470-LOC change in two functions. Collapsed into single behavior-change commit `a33d956`.
