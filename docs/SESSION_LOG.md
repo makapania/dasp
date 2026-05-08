@@ -4,6 +4,35 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 (evening) — Preprocessing-discovery refactor postmortem: empirically harmful at the chemometrics gate
+
+**Context.** User asked: are the preprocessing changes (b551421's 4-phase refactor) actually producing better models, or were they justified on metrics that don't matter? Several conversation turns of clarification surfaced the user's actual filter: full leaderboard, NOT top-K by CV (top-K is typically overfit, never auto-picked). Pick is from gap-filtered passing set — models with `|R²cv − R²pred| ≤ ~0.10` ("similar AND high"). Built `tools/preprocessing_refactor_ab.py` to test legacy vs refactor under that exact criterion.
+
+**Verdict on BoneCollagen (single trajectory; TPE seed not plumbed through `run_search`).**
+
+- **TPE multistart (Phase 4) classification**: harmful. Legacy best passing F1=0.944 (`snv_deriv2_w15+autoscale`, BAcccv=0.967, gap=0.033). Refactor best passing F1=0.903 (`deriv2_snv_w17+autoscale`, BAcccv=0.867, gap=0.067). Δ = −0.041 F1, well above n_external=15 noise floor. Refactor's diversity-applied multistart union excluded the legacy's `snv_deriv2_w15+autoscale` family entirely.
+- **TPE multistart (Phase 4) regression**: neutral. Best passing R²pred 0.9680 vs 0.9687, Δ +0.0008 (well within noise). Passing sets 95% disjoint (only 13 of 289 shared) but the best in each region is equally good. Pure compute cost (3-6× wall time), no benefit.
+- **Exhaustive Phase 2 rescore regression**: bit-identical. 115 shared, 0 unique to either arm.
+- **Exhaustive Phase 2 rescore classification**: tied. Best passing F1=0.9441 in both arms; just mid-rank shuffle.
+
+**Why the earlier "classification benefits" finding was wrong.** The autoscale battery and the top-K-by-CV A/B both showed classification gain from multistart. That gain was concentrated in the top-K — exactly the rows the user explicitly does NOT pick because they're overfit. At the gap-filtered level, multistart on classification is the worst outcome among the four cells.
+
+**Pattern named.** This is the THIRD instance of ML-flavored search-machinery shipped without chemometrics-gate validation (per user, 2026-05-07). The pattern is captured in `feedback_chemometrics_conventions.md` §3 but kept recurring because reviewer findings (Codex, DeepSeek, Kimi flagging "TPE drift", "top-K instability", "Jaccard ≈ 0") *feel* concrete and the gap-filtered external validation takes more setup. Empirical postmortem now memorialized in `feedback_preprocessing_refactor_postmortem.md`.
+
+**Action taken.** Two GUI defaults flipped (1-line each):
+- `spectral_predict_gui_optimized.py:3242`: `ga_preprocess_phase2_rescore` `True → False`
+- `spectral_predict_gui_optimized.py:3265`: `tpe_multistart` `True → False` (was flipped to True in `d91d177` 2026-05-07 morning; reverted in this commit)
+
+Plumbing kept callable for any caller that explicitly opts in. Full code rip-out (delete `phase2_adaptive_rescore`, `run_tpe_multistart_preprocessing_discovery`, GUI checkboxes, `_tpe_multistart_*` result-CSV columns, related tests) is a ~15-30 file follow-up — explicitly NOT done in this commit, by user instruction. Phase 1 (delete legacy GA-as-search-mode) and Phase 3 (autoscale dimension) are NOT part of this rollback — Phase 1 is code cleanup, Phase 3 has its own modest external validation in the autoscale battery.
+
+**Diagnostic tools added.**
+- `tools/preprocessing_refactor_ab.py`: legacy-vs-refactor A/B harness on the user's actual chemometrics filter. Reusable template for any future search-machinery refactor — the user's standing rule is now no search-machinery refactor ships without this validation.
+- `tools/dump_tpe_top10_configs.py`: prints the TPE / exhaustive top-10 preprocessing configs for both arms side-by-side, with set-diff at the (preprocessing, window, deriv, autoscale, baseline, smoothing) level.
+
+**Caveats.** Single dataset (BoneCollagen). n_external=15 has its own ±0.02 noise floor on R²/F1 — the 0.041 F1 loss for TPE classification is well above that floor; the regression deltas are all within it. TPE seed not plumbed through `run_search` (separate plumbing follow-up if seed variance is wanted).
+
+---
+
 ## 2026-05-07 (late) — TPE multi-start one_class GUI crash isolated to GUI/Tk worker-thread interaction
 
 **Context.** User reported "the program literally crashed and ended" when running multi-seed TPE on a one_class Quick analysis (49 samples × 2151 wavelengths, IsolationForest + PCA-SIMCA, importance varsel). Crash log at `C:\Users\mspon\AppData\Local\dasp\logs\run_20260507_162018_quick.log` shows TPE multistart begins at 16:53:17, GUI Tk main loop dies by 16:53:19 (zombie `tk.Variable.__del__` destructors firing on the worker thread with `RuntimeError: main thread is not in main loop`).

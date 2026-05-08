@@ -3237,9 +3237,13 @@ class SpectralPredictApp:
         self.ga_preprocess_autoscale = tk.BooleanVar(value=True)
         # Phase 2 (2026-05-06): multi-seed phase-2 rescore. The checkbox
         # toggles between n_seeds=5 (ON, default) and n_seeds=0 (OFF, legacy).
-        # Closes the top-N infiltration problem on small-n / classification
-        # tasks documented in tools/exhaustive_seed_compare.py.
-        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=True)
+        # Phase 2 multi-seed rescore: empirically zero effect on the chemometrics
+        # quality gate (gap-filtered passing-set on external) — see
+        # feedback_preprocessing_refactor_postmortem.md and
+        # tools/preprocessing_refactor_ab.py. Default flipped back to OFF
+        # 2026-05-07 per user instruction. Plumbing kept callable for any
+        # caller that explicitly opts in.
+        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=False)
         self.ga_preprocess_phase2_max_pool_multiplier = tk.IntVar(value=8)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
@@ -3256,13 +3260,15 @@ class SpectralPredictApp:
         # Default OFF because cost is significant (~5x current TPE wall time);
         # turn ON for classification on small-n datasets where TPE drift is
         # documented (tools/bayesian_topk_stability.py).
-        # Default ON (2026-05-07): multi-seed multistart is methodologically
-        # required for stable top-K rankings. Single-seed TPE drift was
-        # documented in tools/bayesian_topk_stability.py — pairwise top-K
-        # Jaccard ~0 across seeds at n_trials=300. The user explicitly asked
-        # for default-on after the GUI Tk worker-thread crash that surfaced
-        # under multi-seed was hardened.
-        self.tpe_multistart = tk.BooleanVar(value=True)
+        # Default flipped back to OFF (2026-05-07 evening) after the empirical
+        # postmortem in tools/preprocessing_refactor_ab.py: at the user's
+        # actual chemometrics filter (gap-filtered passing-set on external),
+        # TPE multistart on classification REMOVES the user's best pick
+        # (snv_deriv2_w15+autoscale, F1=0.944, BAcccv=0.967, gap=0.033) and
+        # caps the refactor's best at F1=0.903 — a 0.041 F1 loss. The earlier
+        # "stable top-K" justification optimized for a metric the user does
+        # not gate on. See feedback_preprocessing_refactor_postmortem.md.
+        self.tpe_multistart = tk.BooleanVar(value=False)
         self.tpe_n_starts = tk.IntVar(value=5)
 
         # Advanced model options (NeuralBoosted)
