@@ -4,6 +4,36 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 (latest) — TPE proxy collapse + reverted "fix" + model-family-aware handoff
+
+**Symptom (user-reported).** GUI's "TPE Top 10 Configurations" pane on `example/BoneCollagen.csv` showed `RMSE=6.8908` for ALL 10 entries regardless of preprocessing. Initially looked cosmetic; user correctly insisted on root cause investigation.
+
+**Diagnosis (DIAG instrumentation in `_objective` + `run_tpe_preprocessing_discovery`).** Per-trial X fingerprints were genuinely distinct (`_apply_full_preprocessing` working correctly) but `t.value` was identical to floating-point precision across 30/30 first completed trials. The 6.890843325188513 number matches mean-prediction CV RMSE for the user's exact 40-sample subset. Root cause: LightGBM's default `min_child_samples=20` requires both children of any split to hold ≥20 samples; with 5-fold CV on n=40 (n_train_per_fold=32), no split is legal, tree degenerates to a single leaf predicting training mean, every preprocessing scores identically. Most chemometrics datasets (n<50) hit this regime.
+
+**Why downstream models stayed good despite the proxy collapse.** `select_diverse_configs` falls back to "1-best-per-preprocessing-type" when scores tie, so 10 distinct preprocessing types still reach the main grid where PLS evaluates them properly with real CV. **TPE on chemometrics-sized data has been functioning as a 75-trial random preprocessing-type sampler, not a TPE optimizer.** The diversity selector was doing the actual work; Optuna+LightGBM provided zero optimization signal.
+
+**Failed first fix attempt (commit `9b9d244`, reverted in `b879b52`).** Scaled `min_child_samples = max(2, n_train_per_fold // 5)`. Made the proxy return distinct scores ON its own metric. But end-to-end A/B on user's actual SPXY 20% workflow showed downstream PLS R²pred DROPPED by 0.032 at gap≤0.02 because of **proxy-vs-downstream-model mismatch**: LightGBM at small n votes for `snv_deriv3+autoscale`, but PLS prefers `snv_deriv2_w15+autoscale`. The diversity-blind selection had been accidentally feeding the canonical PLS winner to the main grid; signal-driven selection filtered it out in favor of LightGBM's preference. Across 3 splits at gap≤0.02: SPXY −0.032 (PRE wins large), Stratified tied, Random tied. The fix only "helped" on splits that didn't matter for the user's workflow.
+
+**Architectural lesson.** A proxy that's smart but wrong about which features matter can be worse than a proxy that's broken-but-symmetric. "Make the proxy smarter" without aligning its preferences with the downstream model is unsafe. The fix's correctness depends on whether the proxy and downstream model are in the same family.
+
+**Display lie fix (commit `258fc00`).** Detect proxy collapse via `np.std([t.value]) < 1e-9` and replace the misleading per-config RMSE display with an honest banner: "LightGBM proxy returned identical scores for all N trials… configs below selected by random+diverse sampling, not by RMSE ranking; your actual model will evaluate each one in the main grid search." Both stdout print path and `progress_callback` path updated. When proxy works (n>=50 or non-LightGBM), existing per-config RMSE display unchanged.
+
+**Next step (handed off, not yet implemented).** Model-family-aware proxy routing — full handoff at `docs/plans/2026-05-08-tpe-proxy-model-family-aware.md`. Tree-family models downstream → tree-family proxy (the previously-reverted `9b9d244` fix, now correctly aligned); linear/PLS family → PLS proxy. Mixed family defaults to PLS (chemometrics-canonical). User will have Codex + Kimi K2.6 evaluate the planning agent's plan before any code is written.
+
+**Methodology lessons worth remembering:**
+
+> **Proxy quality is necessary but not sufficient.** Before "fixing" a proxy that's giving uninformative output, verify the corrected proxy preferences align with the downstream model. The same code change can be correct or harmful depending on whether downstream is in the proxy's preference family.
+
+> **A/B verdicts on a single split are not enough — vary the split method.** My initial "PRE-FIX wins by -0.018" verdict came from a random-stratified split that wasn't even what the user used. With three splits (SPXY, Stratified, Random) the magnitudes ranged from -0.032 to +0.012; cross-split variance can dwarf arm-to-arm differences. Especially important when the holdout method is part of the user's actual workflow. SPXY is harder than random because it deliberately puts y-and-X-extremes in the validation set.
+
+> **Auto-detect the user's holdout method before claiming results match theirs.** I spent multiple iterations comparing apples-to-oranges because my A/B used a hardcoded random-stratified split while the user was running SPXY 20%. The GUI exposes Random / Stratified / SPXY / Kennard-Stone / Manual at `_validation_*` methods (`spectral_predict_gui_optimized.py:19890+`); harnesses comparing to user's results should match the actual algorithm.
+
+> **A "fast trials" symptom in the GUI progress pane after a fix is consistent with normal warmup, not a bug.** Pre-fix every LightGBM call did a trivial mean-prediction fit (uniformly fast); post-fix real fits trigger joblib pool warmup on trials 1-4 (slow) and run from cache thereafter (fast). Optical signal that looks alarming but is just the visible warmup curve.
+
+**Files of record.** `tools/_repro_tpe_top10_rmse.py` (direct backend repro), `tools/_repro_tpe_fix_downstream_ab.py` (cross-split A/B harness with PRE-fix emulation via monkeypatch), `tools/_phase2_isolated_arm.py` (process-isolated single-arm runner), `tools/_tpe_fix_ab_arm_*.csv` (saved val_df data per split per arm — keep for the next agent's verification work).
+
+---
+
 ## 2026-05-08 — Phase 2 multi-seed wall-time was conflated with TPE multistart's 5x cost; empirical retest exonerates Phase 2
 
 **Context.** User pushed back on framing Phase 2 multi-seed rescore as "neutral but costs 5-6x compute." The pushback was methodologically right ("neutral" without including wall-clock is an incomplete verdict; codified as `feedback_neutral_means_user_facing.md`) but the *premise* — that Phase 2 specifically costs 5-6x — was a conflation. The 5-6x figure lives at `gui:11932` ("~5x cost") on the **TPE multistart** checkbox (the one that's also harmful: -0.041 F1 on classification per the 2026-05-07 BoneCollagen postmortem). The Phase 2 checkbox at `gui:11996` says "~1.5x cost" and the BoneCollagen verdict was "regression bit-identical, classification F1 tied."
