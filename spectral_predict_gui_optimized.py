@@ -25417,6 +25417,9 @@ class SpectralPredictApp:
     def _show_oc_param_collector_errors(self, errors):
         # Single summary dialog so the user sees every bad token at once. Run is
         # not aborted — values that did parse are still used.
+        # The collector chain runs on the analysis worker thread; route the
+        # dialog through root.after so we don't repeat the bare-worker-Tk
+        # anti-pattern that the surrounding hardening was meant to close.
         lines = [f"  • {model}.{param}: {msg}" for model, param, msg in errors]
         body = (
             "Some 'Custom:' field tokens could not be parsed and were ignored:\n\n"
@@ -25424,10 +25427,15 @@ class SpectralPredictApp:
             + "\n\nThe analysis will proceed with the values that parsed correctly."
         )
         try:
-            messagebox.showwarning("Invalid Custom hyperparameter values", body)
+            self.root.after(
+                0,
+                lambda b=body: messagebox.showwarning(
+                    "Invalid Custom hyperparameter values", b
+                ),
+            )
         except Exception:
-            # In headless / test contexts there is no Tk root; fall back to a log
-            # line so the warning still surfaces somewhere.
+            # In headless / test contexts there is no Tk root; fall back to a
+            # log line so the warning still surfaces somewhere.
             self._log_progress(f"[OC Params] {body}")
 
     def _apply_pending_validation_indices(self):
@@ -28807,9 +28815,15 @@ class SpectralPredictApp:
             # Defensive containment: if anything in the GUI update path
             # raises (destroyed widget, mid-shutdown Tk, etc.), don't let
             # it propagate up the worker stack and exit the thread mid-search.
+            # Capture full traceback so post-mortem can identify the offending
+            # widget / callback shape, not just the exception class.
             try:
+                import traceback
                 from spectral_predict.run_logging import log_event
-                log_event(f"[GUI] _progress_callback failed: {e!r}")
+                log_event(
+                    f"[GUI] _progress_callback failed: {e!r}\n"
+                    + traceback.format_exc()
+                )
             except Exception:
                 pass
 

@@ -16,17 +16,18 @@ Two hypotheses to distinguish:
        interaction with Tk is what dies. If true, this script will run
        cleanly to completion.
 
-Usage:
-    cd C:\\Users\\mspon\\git\\dasp
-    .venv312\\Scripts\\python.exe tools\\repro_tpe_multistart_one_class.py
+Usage (full repro matching production GUI defaults):
+    python tools/repro_tpe_multistart_one_class.py 75 5
 
-The script generates synthetic data sized to match the user's run (49
-total -> 40 calibration -> ~5 outliers, 2151 features) and exercises
-``run_tpe_multistart_preprocessing_discovery`` with the same settings
-captured from the crash log:
+Fast smoke (verifies the wrapper boots and the first study completes):
+    python tools/repro_tpe_multistart_one_class.py
 
-  - n_starts=5
-  - n_trials=75 per start
+The script generates synthetic data sized to match the user's run (40
+calibration samples × 2151 features, ~5 outliers) and exercises
+``run_tpe_multistart_preprocessing_discovery`` with these settings:
+
+  - n_trials  -> argv[1] (default 10; production GUI uses 75)
+  - n_starts  -> argv[2] (default 3;  production GUI uses 5)
   - per_start_pool=7
   - n_seeds=5
   - task_type='one_class'
