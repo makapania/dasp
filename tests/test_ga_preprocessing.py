@@ -565,6 +565,125 @@ class TestAutoscaleTrainValAsymmetry:
             "(incorrectly) refit on val — the original bug."
         )
 
+    def test_compute_validation_metrics_uses_train_fitted_scaler(self, tmp_path):
+        """Direct regression test against the actual bug surface — pins the
+        train-fitted-scaler invariant inside
+        ``compute_validation_metrics_for_top_models`` itself.
+
+        Pre-fix this function called the GA closure twice (once on train,
+        once on val) and each call refit StandardScaler on its own input
+        — collapsing R²pred. The closure was fixed and the function now
+        explicitly fits StandardScaler on train and reuses .transform on
+        val. This test would catch any future refactor that re-introduces
+        independent val fitting at this boundary, even if the closure is
+        kept correct.
+
+        The contract: the R²pred reported by the function for an
+        autoscale=True chromosome row must be numerically equivalent to
+        what an external sklearn Pipeline (SNV → SG-deriv → StandardScaler)
+        produces with proper fit-on-train, transform-on-val.
+        """
+        import pandas as pd
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.pipeline import Pipeline as SkPipeline
+        from sklearn.cross_decomposition import PLSRegression
+        from sklearn.metrics import r2_score
+        from spectral_predict.preprocess import SNV, SavgolDerivative
+        from spectral_predict.search import compute_validation_metrics_for_top_models
+
+        rng = np.random.RandomState(11)
+        n_train, n_val, n_features = 80, 40, 60
+        wl = np.linspace(1100, 2500, n_features)
+
+        # Synthetic spectra with deliberate train/val column-mean offset,
+        # exactly the kind of distribution shift StandardScaler is supposed
+        # to handle and where the bug used to silently corrupt val outputs.
+        y_train = rng.uniform(0.1, 1.0, n_train)
+        y_val = rng.uniform(0.1, 1.0, n_val)
+        peak = np.exp(-((wl - 1500) / 200) ** 2)
+        X_train = peak[None, :] * y_train[:, None] + 0.02 * rng.randn(n_train, n_features)
+        X_val = peak[None, :] * y_val[:, None] + 0.02 * rng.randn(n_val, n_features) + 0.05
+
+        # Build chromosome: snv_deriv1 + autoscale=1
+        snv_deriv1_idx = PREPROC_TYPES.index("snv_deriv1")
+        w11_idx = WINDOW_SIZES.index(11) if 11 in WINDOW_SIZES else 0
+        chromosome = [snv_deriv1_idx, w11_idx, 1]
+
+        # Reference: what the equivalent sklearn Pipeline would predict.
+        # If the function correctly reuses a train-fitted scaler on val,
+        # its R²pred must match this reference within sklearn precision.
+        ref_pipe = SkPipeline(
+            [
+                ("snv", SNV()),
+                ("sg", SavgolDerivative(deriv=1, window=11)),
+                ("scaler", StandardScaler()),
+            ]
+        )
+        Xt_ref = ref_pipe.fit_transform(X_train)
+        Xv_ref = ref_pipe.transform(X_val)
+        ref_model = PLSRegression(n_components=3).fit(Xt_ref, y_train)
+        y_pred_ref = ref_model.predict(Xv_ref).ravel()
+        r2_ref = r2_score(y_val, y_pred_ref)
+
+        # Build a minimal results DataFrame matching what run_search would
+        # write for one PLS row whose preprocessing was an autoscale=True
+        # exhaustive chromosome.
+        df_results = pd.DataFrame(
+            [
+                {
+                    "Model": "PLS",
+                    "Params": "{'n_components': 3}",
+                    "LVs": 3,
+                    "Preprocess": "snv_deriv1",
+                    "PreprocessBase": "snv_deriv1",
+                    "Deriv": 1,
+                    "Window": 11,
+                    "Poly": 2,
+                    "preprocess_chromosome": str(chromosome),
+                    "Autoscale": True,
+                    "all_vars": "N/A",
+                    "CompositeScore": 0.5,
+                    "baseline_method": None,
+                    "smoothing": False,
+                    "smoothing_window": 17,
+                    "smoothing_polyorder": 2,
+                }
+            ]
+        )
+
+        wavelengths = wl
+        df_out = compute_validation_metrics_for_top_models(
+            df_results,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            task_type="regression",
+            wavelengths=wavelengths,
+            top_n=1,
+        )
+
+        assert "R2pred" in df_out.columns
+        r2_func = df_out.iloc[0]["R2pred"]
+        assert pd.notna(r2_func), (
+            "R²pred is NaN — function failed to rebuild and validate the "
+            "autoscale=True chromosome row. Either the closure-rebuild path "
+            "or the post-closure StandardScaler step is broken."
+        )
+
+        # The function and the manual sklearn Pipeline must produce
+        # numerically equivalent R²pred. Tolerance accommodates any minor
+        # numerical drift from PLS internals; pre-fix this assertion would
+        # have failed by orders of magnitude (R²pred collapsed by ≥0.11
+        # in user data; synthetic shift here makes the gap larger still).
+        assert abs(r2_func - r2_ref) < 1e-3, (
+            f"compute_validation_metrics_for_top_models returned R²pred="
+            f"{r2_func:.4f}, sklearn-Pipeline reference={r2_ref:.4f}. "
+            f"The {abs(r2_func - r2_ref):.4f} gap means val features "
+            f"diverged from the train-fitted-scaler reference — likely "
+            f"a regression of the closure-refit-on-val bug."
+        )
+
     def test_evaluate_fitness_applies_autoscale_externally(self):
         """evaluate_fitness must still apply autoscale to inputs whose
         chromosome's autoscale gene is set — even though the closure no
