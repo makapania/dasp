@@ -46,17 +46,7 @@ Run the SPXY 20% A/B harness on real BoneCollagen data. The harness already exis
 
 ## Tier 3 — Methodology features the user has confirmed they want
 
-### T-19 Auto mode for imbalance handling (HIGH, partially-drafted)
-
-**Per `feedback_t19_auto_mode_deferred.md`:** Auto mode (`imbalance_method='auto'` calling `detect_class_imbalance` and applying per-library balanced-loss on imbalanced data) is **required** for T-19 to be considered shipped. User clarified 2026-05-02: "the automode is the highest priority. another agent is also working but it needs to be done."
-
-**Status:** Draft was stashed as `user-deferred-T19-auto-mode-draft` (6 files: gui_optimized + code_generator + imbalance + nsga2_search + search + unified_bayesian). **Coordination:** check whether the parallel agent ever finished — `git stash list` and `git branch -a | grep -i t19` before starting. If stashed work exists, pop and finish; if another branch exists, ask user which to advance.
-
-**Scope confirmed:**
-- IN: `imbalance_method='auto'` GUI dropdown option that detects imbalance via `imbalance.detect_class_imbalance(threshold=3.0)` and applies the correct native knob per model (`scale_pos_weight` for XGBoost, `class_weight='balanced'` for sklearn, `is_unbalance` for LightGBM, `auto_class_weights` for CatBoost).
-- OUT (deferred per user 2026-05-02): per-model dropdowns exposing each native kwarg separately. Single Auto option is the priority.
-
-**Why:** The user's bone-FTIR / paleoanthropology workflow has imbalanced classes; today the GUI doesn't expose any imbalance-handling, so users get unweighted models even when the data screams for re-weighting. Auto mode is "expose existing model abilities to GUI users without source edits."
+> **Audit correction 2026-05-08:** an earlier draft of this file claimed T-19 Auto mode was "partially-drafted" and pending. That was based on a stale 2026-05-02 memory pin. **T-19 is shipped** — PR #15 (`1d2bf6d`) landed Auto mode + bug fix; PR #38 closed sister sites in Bayesian + NSGA-II; PR #41 closed the validation-rebuild class_weight gap. PROJECT_STATUS bullet was explicitly unrotted at `965dee1` (2026-05-07): user verdict "niche enough to leave open until a specific paper-reproduction asks for it" for the few remaining edge cases (non-balanced ratios, ElasticNet PLS-DA inner LR, per-model override). T-19 entry removed from this list.
 
 ### T-31 multi-class SIMCA (MEDIUM-HIGH, 1-2 weeks)
 
@@ -85,6 +75,24 @@ After survey, scope: smallest defensible shape for dasp (likely paired bootstrap
 
 **Effort:** survey ~1 day, implementation ~3-5 days.
 
+### T-17 PLS-2 multi-Y workflow (HIGH-LEVERAGE, 2-3 weeks)
+
+**Per PROJECT_STATUS open-ticket roster (line 565):** "T-17 PLS-2 (2-3w)" — the multi-Y / PLS-2 workflow. User-elevated 2026-04-29 from the original reconciled-roadmap pass: *"high-leverage but substantial effort."*
+
+**Why:** Today dasp models one Y at a time. PLS-2 fits multiple correlated Y-variables jointly in a single PLS decomposition, exploiting cross-Y covariance for better latent-variable estimation. Standard chemometrics workflow for multi-target spectroscopy (e.g., joint prediction of multiple bone-collagen indicators from one FTIR run). Today users either run dasp N times (no information sharing across Ys) or fall back to Unscrambler/SIMCA-P for joint modeling.
+
+**Status:** PLANNED — no implementation yet. Status doc references it consistently across multiple sessions as an open ticket.
+
+**Scope considerations:** PLS-2 changes the validation-metrics shape (per-Y RMSEcv/R²cv plus pooled), the result-CSV schema (per-Y columns), the GUI Y-target picker (multi-select), and prediction outputs (per-Y predictions). Cross-cuts most of `search.py` — the 2-3 week estimate is real.
+
+### T-01 reframed — external-test-set workflow (~2-3 days)
+
+**Per PROJECT_STATUS line 565 + 1017:** the reconciled-roadmap pass reframed T-01 from "per-fold varsel leakage audit" (false alarm — chemometrics convention allows full-data SNV/SG-deriv per `feedback_chemometrics_conventions.md`) to **external-test-set workflow capability**.
+
+**Why:** Westad & Marini 2015 + Workman 2018 (canonical chemometrics validation refs) recommend external test sets over LOGO/group-aware CV for the user's data regime. dasp today supports SPXY 20% partition (which is what motivated the TPE proxy fix), but the broader "designate an external test set, train on the rest, score the model on the external set with full audit trail" is not first-class — users currently do it via manual file splits.
+
+**Status:** PLANNED. Effort small (~2-3 days) because the validation-rebuild path already exists; this is mostly GUI surface (test-set designation) + result-CSV plumbing for the external-set columns.
+
 ---
 
 ## Excluded — engineering polish (not the user's framing)
@@ -103,10 +111,11 @@ If the user re-prioritizes any of these (e.g., CI rot blocks PR-merge confidence
 
 ## Recommended order
 
-1. **T-TPE-VERIFY** first — it's the cheapest test of whether the just-shipped fix is real.
-2. **T-19 Auto mode** next if the parallel-agent stash still exists; this is the longest-pending high-priority methodology gap.
-3. **T-BASIC-PROXY** when convenient (after T-TPE-VERIFY confirms the resolver design empirically).
-4. **T-31 SIMCA** when ready to invest 1-2 weeks. New methodology.
-5. **T-16 survey** as a parallel side-task; it's read-only research that doesn't conflict with other work.
+1. **T-TPE-VERIFY** first — it's the cheapest test of whether the just-shipped fix is real. Determines whether `a33d956` is a real win or needs tuning.
+2. **T-BASIC-PROXY** if T-TPE-VERIFY confirms the resolver design empirically — same fix, second module, ~3-4h.
+3. **T-01 reframed (external test set)** — small (~2-3d) and complements T-TPE-VERIFY (the SPXY 20% workflow IS an external test set; making it first-class GUI surface closes the loop).
+4. **T-16 survey** as a parallel side-task — read-only research, doesn't conflict.
+5. **T-31 multi-class SIMCA** when ready to invest 1-2 weeks. New methodology, real chemometrics need confirmed.
+6. **T-17 PLS-2** when ready to invest 2-3 weeks. High-leverage but biggest scope; cross-cuts the most files.
 
 Each item above is independently mergeable. Don't bundle.
