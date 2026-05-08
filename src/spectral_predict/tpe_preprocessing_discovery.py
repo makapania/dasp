@@ -130,6 +130,93 @@ def _apply_full_preprocessing(
     return X
 
 
+def _quick_evaluate_tree(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str,
+    cv_folds: int,
+    LGBMRegressor,
+    LGBMClassifier,
+) -> float:
+    """Tree-family LightGBM proxy (non-seeded CV).
+
+    Caller passes in LGBM classes after confirming the import succeeded.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning)
+
+        if task_type == 'one_class':
+            n_outliers = int(np.sum(y == -1))
+            if n_outliers < 2:
+                return 0.0
+            n_splits = min(cv_folds, n_outliers)
+            model = LGBMClassifier(
+                class_weight='balanced',
+                n_estimators=50,
+                max_depth=3,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=1,
+            )
+            cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+            scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+            return scores.mean()
+        elif task_type == 'classification':
+            model = LGBMClassifier(
+                n_estimators=50,
+                max_depth=4,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=1,
+            )
+            scores = cross_val_score(model, X, y, cv=cv_folds, scoring='accuracy')
+            return scores.mean()
+        else:
+            model = LGBMRegressor(
+                n_estimators=50,
+                max_depth=4,
+                random_state=RANDOM_STATE,
+                verbose=-1,
+                n_jobs=1,
+            )
+            scores = cross_val_score(model, X, y, cv=cv_folds, scoring='neg_root_mean_squared_error')
+            return scores.mean()
+
+
+def _quick_evaluate_linear(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str,
+    cv_folds: int,
+) -> float:
+    """Linear-family fallback (PLS / LogReg+StandardScaler) — non-seeded CV.
+
+    Handles regression and classification only. The current `_quick_evaluate`
+    fallback path returns ``-inf`` for one_class without invoking this helper.
+    """
+    if task_type == 'regression':
+        n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
+        n_components = max(2, n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        scores = cross_val_score(pls, X, y, cv=cv_folds, scoring='neg_root_mean_squared_error')
+        return scores.mean()
+    elif task_type == 'classification':
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        clf = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1000, n_jobs=1),
+        )
+        scores = cross_val_score(clf, X, y, cv=cv_folds, scoring='accuracy')
+        return scores.mean()
+    else:
+        raise ValueError(
+            f"task_type={task_type!r} is not handled by _quick_evaluate_linear; "
+            "caller must route one_class separately"
+        )
+
+
 def _quick_evaluate(
     X: np.ndarray,
     y: np.ndarray,
@@ -143,8 +230,15 @@ def _quick_evaluate(
     score : float
         For regression: negative RMSE (higher is better — Optuna maximises).
         For classification/one-class: balanced accuracy (higher is better).
+
+    Notes
+    -----
+    Body delegates to ``_quick_evaluate_tree`` (LGBM available) or
+    ``_quick_evaluate_linear`` (LGBM ImportError + regression/classification
+    fallback). One-class returns ``-inf`` when the LGBM path raises, matching
+    pre-refactor behavior. The T-37 PLS-with-accuracy NaN bug remains closed
+    because the classification fallback still routes via LogReg+StandardScaler.
     """
-    import warnings
     try:
         from lightgbm import LGBMRegressor, LGBMClassifier
 
@@ -152,70 +246,162 @@ def _quick_evaluate(
         cv_folds = min(cv_folds, n_samples // 2)
         cv_folds = max(2, cv_folds)
 
-        with warnings.catch_warnings():
-            warnings.filterwarnings('ignore', category=UserWarning)
-
-            if task_type == 'one_class':
-                n_outliers = int(np.sum(y == -1))
-                if n_outliers < 2:
-                    return 0.0
-                n_splits = min(cv_folds, n_outliers)
-                model = LGBMClassifier(
-                    class_weight='balanced',
-                    n_estimators=50,
-                    max_depth=3,
-                    random_state=RANDOM_STATE,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
-                scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
-                return scores.mean()
-            elif task_type == 'classification':
-                model = LGBMClassifier(
-                    n_estimators=50,
-                    max_depth=4,
-                    random_state=RANDOM_STATE,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                scores = cross_val_score(model, X, y, cv=cv_folds, scoring='accuracy')
-                return scores.mean()
-            else:
-                model = LGBMRegressor(
-                    n_estimators=50,
-                    max_depth=4,
-                    random_state=RANDOM_STATE,
-                    verbose=-1,
-                    n_jobs=1,
-                )
-                scores = cross_val_score(model, X, y, cv=cv_folds, scoring='neg_root_mean_squared_error')
-                return scores.mean()
+        return _quick_evaluate_tree(X, y, task_type, cv_folds, LGBMRegressor, LGBMClassifier)
 
     except Exception:
-        # T-37 fix (post-merge review): the classification fallback used to score
-        # PLSRegression with `scoring='accuracy'`, which produces NaN folds because
-        # PLSRegression returns continuous values. NaN propagates to scores.mean()
-        # and Optuna then filters all those trials out as failed — silently turning
-        # the LightGBM-unavailable case into a no-op for classification. Use a
-        # proper classifier (LogisticRegression on autoscaled inputs) instead.
-        if task_type == 'regression':
-            n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
-            n_components = max(2, n_components)
-            pls = PLSRegression(n_components=n_components, scale=False)
-            scores = cross_val_score(pls, X, y, cv=cv_folds, scoring='neg_root_mean_squared_error')
-            return scores.mean()
-        elif task_type == 'classification':
-            from sklearn.linear_model import LogisticRegression
-            from sklearn.pipeline import make_pipeline
-            clf = make_pipeline(
-                StandardScaler(),
-                LogisticRegression(max_iter=1000, n_jobs=1),
-            )
-            scores = cross_val_score(clf, X, y, cv=cv_folds, scoring='accuracy')
-            return scores.mean()
+        if task_type == 'regression' or task_type == 'classification':
+            return _quick_evaluate_linear(X, y, task_type, cv_folds)
         else:  # one_class — failed trial, don't pollute TPE with garbage
             return -np.inf
+
+
+def _evaluate_with_seed_tree(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str,
+    cv_folds: int,
+    random_state: int,
+    LGBMRegressor,
+    LGBMClassifier,
+) -> float:
+    """Tree-family LightGBM proxy with seeded CV.
+
+    Caller passes in LGBM classes after confirming the import succeeded.
+    All CV splitters are constructed with ``shuffle=True`` and the supplied
+    ``random_state`` so per-seed evaluation actually varies (closes
+    DeepSeek STRONG D1).
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=UserWarning)
+
+        if task_type == 'one_class':
+            n_outliers = int(np.sum(y == -1))
+            if n_outliers < 2:
+                return 0.0
+            n_splits = min(cv_folds, n_outliers)
+            model = LGBMClassifier(
+                class_weight='balanced',
+                n_estimators=50,
+                max_depth=3,
+                random_state=random_state,
+                verbose=-1,
+                n_jobs=1,
+            )
+            cv = StratifiedKFold(
+                n_splits=n_splits, shuffle=True, random_state=random_state
+            )
+            scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
+            return scores.mean()
+        elif task_type == 'classification':
+            model = LGBMClassifier(
+                n_estimators=50,
+                max_depth=4,
+                random_state=random_state,
+                verbose=-1,
+                n_jobs=1,
+            )
+            cv = StratifiedKFold(
+                n_splits=cv_folds, shuffle=True, random_state=random_state
+            )
+            scores = cross_val_score(model, X, y, cv=cv, scoring='accuracy')
+            return scores.mean()
+        else:
+            model = LGBMRegressor(
+                n_estimators=50,
+                max_depth=4,
+                random_state=random_state,
+                verbose=-1,
+                n_jobs=1,
+            )
+            cv = KFold(
+                n_splits=cv_folds, shuffle=True, random_state=random_state
+            )
+            scores = cross_val_score(
+                model, X, y, cv=cv, scoring='neg_root_mean_squared_error'
+            )
+            return scores.mean()
+
+
+def _evaluate_with_seed_linear(
+    X: np.ndarray,
+    y: np.ndarray,
+    task_type: str,
+    cv_folds: int,
+    random_state: int,
+) -> float:
+    """Linear-family fallback (PLS / LogReg+StandardScaler) with seeded CV.
+
+    Handles regression and classification only. Caller routes one_class to
+    ``_evaluate_with_seed_oneclass_iforest`` separately.
+    """
+    if task_type == 'regression':
+        n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
+        n_components = max(2, n_components)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(pls, X, y, cv=cv, scoring='neg_root_mean_squared_error')
+        return scores.mean()
+    elif task_type == 'classification':
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.pipeline import make_pipeline
+        clf = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=1000, n_jobs=1, random_state=random_state),
+        )
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+        scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
+        return scores.mean()
+    else:
+        raise ValueError(
+            f"task_type={task_type!r} is not handled by _evaluate_with_seed_linear; "
+            "caller must route one_class separately"
+        )
+
+
+def _evaluate_with_seed_oneclass_iforest(
+    X: np.ndarray,
+    y: np.ndarray,
+    random_state: int,
+) -> float:
+    """IsolationForest one-class fallback with seeded random_state.
+
+    Closes DeepSeek H1 from the post-Phase-4 review: when LightGBM is
+    unavailable or crashes on one_class, this path keeps the multi-seed
+    rescore informative instead of degenerating to all-inf.
+    """
+    try:
+        from sklearn.ensemble import IsolationForest
+
+        n_outliers = int(np.sum(y == -1))
+        if n_outliers < 2:
+            return 0.0
+        # IF is itself stochastic: random_state controls per-tree
+        # subsampling, so seeded re-evaluation produces seed-varying
+        # scores even on small datasets.
+        X_inlier = X[y != -1]
+        if len(X_inlier) < 5:
+            return 0.0
+        clf = IsolationForest(
+            contamination='auto',
+            random_state=random_state,
+            n_estimators=50,
+            n_jobs=1,
+        )
+        clf.fit(X_inlier)
+        # Score on full data: predict -1 for outliers, 1 for inliers.
+        # Compare to ground-truth label encoding (y == -1 means outlier).
+        preds = clf.predict(X)
+        # Balanced accuracy = average of inlier-recall and outlier-recall
+        inlier_mask = y != -1
+        outlier_mask = y == -1
+        if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
+            return 0.0
+        inlier_recall = (preds[inlier_mask] == 1).mean()
+        outlier_recall = (preds[outlier_mask] == -1).mean()
+        return float((inlier_recall + outlier_recall) / 2)
+    except Exception:
+        return -np.inf
 
 
 def evaluate_config_with_seed(
@@ -250,9 +436,17 @@ def evaluate_config_with_seed(
     float
         For regression: negative RMSE (higher is better).
         For classification / one-class: balanced accuracy (higher is better).
-    """
-    import warnings
 
+    Notes
+    -----
+    Body delegates to ``_evaluate_with_seed_tree`` (LGBM available),
+    ``_evaluate_with_seed_linear`` (LGBM ImportError, regression/classification),
+    or ``_evaluate_with_seed_oneclass_iforest`` (LGBM ImportError or one_class
+    runtime crash). The split try/except behavior is preserved bit-identically:
+    ImportError routes to the sklearn fallback for ALL seeds; runtime errors
+    during CV return -inf per-seed for regression/classification but fall
+    through to IsolationForest for one_class (DeepSeek H1).
+    """
     n_samples = X.shape[0]
     cv_folds = min(cv_folds, n_samples // 2)
     cv_folds = max(2, cv_folds)
@@ -272,55 +466,10 @@ def evaluate_config_with_seed(
 
     if _lgbm_available:
         try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=UserWarning)
-
-                if task_type == 'one_class':
-                    n_outliers = int(np.sum(y == -1))
-                    if n_outliers < 2:
-                        return 0.0
-                    n_splits = min(cv_folds, n_outliers)
-                    model = LGBMClassifier(
-                        class_weight='balanced',
-                        n_estimators=50,
-                        max_depth=3,
-                        random_state=random_state,
-                        verbose=-1,
-                        n_jobs=1,
-                    )
-                    cv = StratifiedKFold(
-                        n_splits=n_splits, shuffle=True, random_state=random_state
-                    )
-                    scores = cross_val_score(model, X, y, cv=cv, scoring='balanced_accuracy')
-                    return scores.mean()
-                elif task_type == 'classification':
-                    model = LGBMClassifier(
-                        n_estimators=50,
-                        max_depth=4,
-                        random_state=random_state,
-                        verbose=-1,
-                        n_jobs=1,
-                    )
-                    cv = StratifiedKFold(
-                        n_splits=cv_folds, shuffle=True, random_state=random_state
-                    )
-                    scores = cross_val_score(model, X, y, cv=cv, scoring='accuracy')
-                    return scores.mean()
-                else:
-                    model = LGBMRegressor(
-                        n_estimators=50,
-                        max_depth=4,
-                        random_state=random_state,
-                        verbose=-1,
-                        n_jobs=1,
-                    )
-                    cv = KFold(
-                        n_splits=cv_folds, shuffle=True, random_state=random_state
-                    )
-                    scores = cross_val_score(
-                        model, X, y, cv=cv, scoring='neg_root_mean_squared_error'
-                    )
-                    return scores.mean()
+            return _evaluate_with_seed_tree(
+                X, y, task_type, cv_folds, random_state,
+                LGBMRegressor, LGBMClassifier,
+            )
         except Exception:
             # LightGBM is installed but the CV run crashed (OOM, numerical
             # issue, etc.). Behavior depends on task_type:
@@ -344,62 +493,10 @@ def evaluate_config_with_seed(
 
     # LightGBM not installed → use the sklearn-only fallback path. Reached
     # for every seed in this branch (consistent objective across seeds).
-    if task_type == 'regression':
-        n_components = min(10, X.shape[1] // 10, X.shape[0] // 2)
-        n_components = max(2, n_components)
-        pls = PLSRegression(n_components=n_components, scale=False)
-        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-        scores = cross_val_score(pls, X, y, cv=cv, scoring='neg_root_mean_squared_error')
-        return scores.mean()
-    elif task_type == 'classification':
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.pipeline import make_pipeline
-        clf = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(max_iter=1000, n_jobs=1, random_state=random_state),
-        )
-        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-        scores = cross_val_score(clf, X, y, cv=cv, scoring='accuracy')
-        return scores.mean()
+    if task_type == 'regression' or task_type == 'classification':
+        return _evaluate_with_seed_linear(X, y, task_type, cv_folds, random_state)
     else:
-        # one_class fallback: IsolationForest on inlier-only training,
-        # score by detection rate on the outlier subset (closes DeepSeek
-        # H1 from the post-Phase-4 review). Without this branch the
-        # one_class multi-seed rescore degraded to a no-op when LightGBM
-        # was unavailable: every config tied at -inf and only diversity
-        # selection ranked them.
-        try:
-            from sklearn.ensemble import IsolationForest
-
-            n_outliers = int(np.sum(y == -1))
-            if n_outliers < 2:
-                return 0.0
-            # IF is itself stochastic: random_state controls per-tree
-            # subsampling, so seeded re-evaluation produces seed-varying
-            # scores even on small datasets.
-            X_inlier = X[y != -1]
-            if len(X_inlier) < 5:
-                return 0.0
-            clf = IsolationForest(
-                contamination='auto',
-                random_state=random_state,
-                n_estimators=50,
-                n_jobs=1,
-            )
-            clf.fit(X_inlier)
-            # Score on full data: predict -1 for outliers, 1 for inliers.
-            # Compare to ground-truth label encoding (y == -1 means outlier).
-            preds = clf.predict(X)
-            # Balanced accuracy = average of inlier-recall and outlier-recall
-            inlier_mask = y != -1
-            outlier_mask = y == -1
-            if inlier_mask.sum() == 0 or outlier_mask.sum() == 0:
-                return 0.0
-            inlier_recall = (preds[inlier_mask] == 1).mean()
-            outlier_recall = (preds[outlier_mask] == -1).mean()
-            return float((inlier_recall + outlier_recall) / 2)
-        except Exception:
-            return -np.inf
+        return _evaluate_with_seed_oneclass_iforest(X, y, random_state)
 
 
 def run_tpe_preprocessing_discovery(
