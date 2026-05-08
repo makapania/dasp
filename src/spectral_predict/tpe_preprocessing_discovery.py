@@ -937,6 +937,11 @@ def run_tpe_multistart_preprocessing_discovery(
         result_configs.append(annotated)
 
     print(f"\n=== TPE Multistart Top {len(result_configs)} Configurations ===")
+    if progress_callback:
+        progress_callback(
+            n_starts, n_starts,
+            f"=== TPE Multistart Top {len(result_configs)} Configurations ===",
+        )
     for i, cfg in enumerate(result_configs):
         window_str = f"w={cfg['window']}" if cfg.get('window') else ""
         extras = []
@@ -950,6 +955,23 @@ def run_tpe_multistart_preprocessing_discovery(
         full_name = f"{cfg['preprocessing']} {window_str}"
         if extras_str:
             full_name += f" [{extras_str}]"
-        print(f"  {i + 1}. {full_name}")
+        # Surface rescored mean score (and std if available) so the GUI line
+        # mirrors the single-start path's format. score is +RMSE for
+        # regression, accuracy/balanced-accuracy for classification/one_class.
+        score_val = cfg.get('score')
+        std_val = cfg.get('_tpe_multistart_rescored_std')
+        if score_val is not None:
+            if task_type == 'regression':
+                score_str = f"RMSE={score_val:.4f}"
+            else:
+                score_str = f"score={score_val:.4f}"
+            if std_val is not None:
+                score_str += f" ±{std_val:.4f}"
+            line = f"  {i + 1}. {full_name}: {score_str}"
+        else:
+            line = f"  {i + 1}. {full_name}"
+        print(line)
+        if progress_callback:
+            progress_callback(n_starts, n_starts, line)
 
     return result_configs
