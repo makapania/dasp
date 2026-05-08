@@ -1119,4 +1119,40 @@ This is not a bug in the validation rebuild per se — it's a contract mismatch 
 
 ---
 
+## 2026-05-08 — Exhaustive preprocessing R²pred bug (autoscale closure refit on val)
+
+Fix commits: `3a4e502` + `ca987b4` (regression test addition per Codex review).
+
+**Symptom**: Exhaustive Preprocessing search produced R²pred ≥0.11 lower than TPE/Bayesian on the same data. CV scores looked fine — only the external validation metric was wrong.
+
+**Root cause**: `chromosome_to_transform` in `src/spectral_predict/ga_preprocessing.py:213-258` returned a closure that, when the autoscale gene was set, ended with `StandardScaler().fit_transform(X)`. `compute_validation_metrics_for_top_models` (`search.py:866-893`) called the closure twice — once on X_train, once on X_val. Each call refit a fresh scaler on its own input. Train features ended up centered to train's column means/stds; val features ended up centered to **val's** column means/stds. Model trained on train-statistic-scaled features predicted on val-statistic-scaled features → R²pred collapsed.
+
+**Why CV looked fine**: search-time GA path (`search.py:2676-2678`) called `ga_transform(X_np)` once on the full training matrix before CV splits. All folds shared the same scaler stats — symmetric across folds. Mild leakage but CV scores looked normal.
+
+**Why TPE/Bayesian didn't have this**: their preprocessing builds a real sklearn `Pipeline` (`search.py:887-890`) where `prep_pipeline.fit_transform(X_train)` followed by `prep_pipeline.transform(X_val)` correctly reuses train-fitted scaler stats on val.
+
+**Architectural trap worth remembering**:
+
+> **Closures that bake `StandardScaler().fit_transform()` are train/val time bombs.** Per-spectrum operations (SNV, SG-derivatives) tolerate fresh-fit-per-call because they use only within-spectrum statistics. Cross-spectrum operations (StandardScaler, MSC reference, PCA) MUST be applied through fit-on-train, transform-on-val state. Inside a callable that gets invoked separately on train and val, this means the callable must either (a) be stateful (sklearn Transformer with separate fit/transform) or (b) restrict itself to per-spectrum ops and let the caller wire the cross-spectrum step explicitly.
+
+**Fix shape (chemometrics-respecting, no methodology change)**:
+- Closure stripped of autoscale → per-spectrum-only.
+- raw chromosomes return `None` regardless of autoscale gene.
+- `evaluate_fitness` and search-time GA path apply autoscale via one-shot full-X `StandardScaler().fit_transform()` after the closure (matches pre-fix CV behaviour, no ranking shift).
+- Validation rebuild path applies autoscale via `StandardScaler().fit(X_train_pre)` then `.transform(...)` for both train and val. Train-fitted scaler reused on val. **This is the actual bug surface.**
+- Old result CSVs with autoscale=True chromosomes but missing/False `Autoscale` column: `search.py:806-822` backfills autoscale from `_decode_autoscale_gene(ga_genes)` so they rebuild correctly.
+
+**Verification**:
+- 42 tests pass including new `TestAutoscaleTrainValAsymmetry` class (4 regression tests).
+- The new direct test against `compute_validation_metrics_for_top_models` builds a minimal df_results row with `preprocess_chromosome=[..., ..., 1]` and `Autoscale=True`, calls the function, and asserts R²pred matches the equivalent sklearn `Pipeline([SNV, SavgolDerivative, StandardScaler])` reference within 1e-3. Pins the bug surface, not just the closure invariant.
+- Bit-exact equivalence demonstrated outside tests: post-fix GA-closure-plus-external-scaler path produces **identical** train/val output (max diff = 0.0) to the sklearn Pipeline used by TPE/Bayesian.
+- Codex review: NEEDS_CHANGES → addressed by `ca987b4` → SAFE_TO_MERGE.
+- DeepSeek V4 Pro Max review (max thinking, llm-call diff bundle): SAFE_TO_MERGE. Cache safe (`preprocess_cache` is local to a single function call), zero-variance edge case non-regression, `evaluate_fitness` bit-identical to pre-fix, regression test tolerance appropriate.
+
+**User-visible impact**: R²pred for `autoscale=True` rows changes — the new numbers are the honest ones the column was supposed to report. CV/RMSEcv numbers and GA fitness rankings are unchanged. Old saved CSVs continue to load; rebuilding them produces correct R²pred (different from what was originally written, because that was wrong).
+
+**Self-rebuke**: in the initial pitch I framed this as a methodology change requiring user confirmation ("GA fitness rankings will shift if we move autoscale to fold-local"). User correctly pushed back — full-X autoscale before CV is chemometrics-acceptable per the field convention; only the train/val asymmetry was a real bug. Don't extend bug fixes into methodology overhauls when chemometrics convention already covers the broader pattern. See memory `feedback_chemometrics_conventions` section 2-3.
+
+---
+
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.
