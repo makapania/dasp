@@ -206,13 +206,21 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     if autoscale:
         name = f"{name}+autoscale"
 
-    # Special case: raw + autoscale=False is a true no-op, return None
-    if preproc_type == 'raw' and not autoscale:
+    # The closure only handles per-spectrum operations (SNV / SG derivatives /
+    # combinations). Column-wise autoscale (StandardScaler) is *cross-sample*
+    # and must be applied OUTSIDE the closure with proper fit-on-train,
+    # transform-on-val state — fitting the scaler twice (once per call) on
+    # train and val separately gave them different scaler params and
+    # collapsed external R²pred. Callers read `_decode_autoscale_gene(genes)`
+    # (or the equivalent metadata they already carry, e.g.
+    # ``preprocess_cfg["autoscale"]``) and apply StandardScaler themselves.
+    # raw therefore returns ``None`` regardless of the autoscale gene; raw +
+    # autoscale=True is a "scaler only" path that the caller realises by
+    # combining the None closure with its own StandardScaler step.
+    if preproc_type == 'raw':
         return (name, None)
 
-    # Build transform function. Captures `autoscale` so the closure applies
-    # StandardScaler at the end when the gene is set.
-    def transform(X, pt=preproc_type, w=window, _autoscale=autoscale):
+    def transform(X, pt=preproc_type, w=window):
         X_out = np.asarray(X, dtype=np.float64)
 
         if pt == 'snv':
@@ -249,10 +257,6 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
         elif pt == 'deriv4_snv':
             X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
             X_out = SNV().fit_transform(X_out)
-        # else (pt == 'raw'): X_out stays as the input (autoscale-only path)
-
-        if _autoscale:
-            X_out = StandardScaler().fit_transform(X_out)
 
         return X_out
 
@@ -331,11 +335,23 @@ def evaluate_fitness(
         # Get transform function
         name, transform_func = chromosome_to_transform(genes)
 
-        # Apply preprocessing
+        # Per-spectrum operations only — autoscale is cross-sample and is
+        # applied separately below so it's never baked into the closure.
         if transform_func is not None:
             X_preproc = transform_func(X)
         else:
-            X_preproc = X
+            X_preproc = np.asarray(X, dtype=np.float64)
+
+        # Apply autoscale (column-wise StandardScaler) when the chromosome's
+        # autoscale gene is set. One-shot fit on the full search-time matrix
+        # before CV is the chemometrics-acceptable convention used here; the
+        # bug was *not* this fit, it was that the same closure later refit a
+        # fresh scaler on each external-validation rebuild call. By moving
+        # autoscale out of the closure, search-time fitness behaviour is
+        # preserved while the rebuild path can fit-on-train / transform-on-val
+        # cleanly (see search.py compute_validation_metrics_for_top_models).
+        if _decode_autoscale_gene(genes):
+            X_preproc = StandardScaler().fit_transform(X_preproc)
 
         # Check for invalid values
         if not np.isfinite(X_preproc).all():

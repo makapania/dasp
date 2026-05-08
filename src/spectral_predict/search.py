@@ -803,11 +803,23 @@ def compute_validation_metrics_for_top_models(
                         ga_genes = np.array(ga_genes_str)
 
                     # Import GA reconstruction function
-                    from spectral_predict.ga_preprocessing import chromosome_to_transform
+                    from spectral_predict.ga_preprocessing import (
+                        chromosome_to_transform,
+                        _decode_autoscale_gene,
+                    )
 
                     # Reconstruct transform from genes
                     _, ga_transform = chromosome_to_transform(ga_genes)
                     use_ga_transform = True
+
+                    # Backfill autoscale from the chromosome itself when the
+                    # row's "Autoscale" column is missing or False but the
+                    # 3-gene chromosome encodes autoscale=True. Pre-fix
+                    # CSVs and any saved-model artefacts written before this
+                    # path stopped baking the scaler into the closure could
+                    # otherwise rebuild without the post-closure scaler step.
+                    if not autoscale and _decode_autoscale_gene(ga_genes):
+                        autoscale = True
                 except Exception as e:
                     genes_preview = (
                         str(ga_genes_str)[:100]
@@ -866,9 +878,30 @@ def compute_validation_metrics_for_top_models(
                 X_train_preprocessed, X_val_preprocessed = preprocess_cache[cache_key]
             else:
                 if use_ga_transform:
-                    # Apply GA transform directly
-                    X_train_preprocessed = ga_transform(X_train)
-                    X_val_preprocessed = ga_transform(X_val)
+                    # GA closure handles per-spectrum operations only. raw
+                    # chromosomes return None — treat as identity at this
+                    # step; autoscale (when set) is applied below with a
+                    # train-fitted scaler.
+                    if ga_transform is not None:
+                        X_train_preprocessed = ga_transform(X_train)
+                        X_val_preprocessed = ga_transform(X_val)
+                    else:
+                        X_train_preprocessed = np.asarray(X_train, dtype=np.float64)
+                        X_val_preprocessed = np.asarray(X_val, dtype=np.float64)
+
+                    # The bug this branch was carrying: pre-fix the closure
+                    # itself called StandardScaler().fit_transform(), so each
+                    # call (one for train, one for val) refit the scaler on
+                    # its own input and produced different scaler params.
+                    # Validation features were centred to *val's* means,
+                    # collapsing R²pred on every autoscale=True row. Fix:
+                    # fit StandardScaler on TRAIN only, reuse on VAL.
+                    if autoscale:
+                        from sklearn.preprocessing import StandardScaler
+
+                        _scaler = StandardScaler().fit(X_train_preprocessed)
+                        X_train_preprocessed = _scaler.transform(X_train_preprocessed)
+                        X_val_preprocessed = _scaler.transform(X_val_preprocessed)
                 else:
                     # Build standard preprocessing pipeline
                     prep_steps = build_preprocessing_pipeline(
@@ -2674,8 +2707,15 @@ def run_search(
 
         # Check if this is a GA-optimized preprocessing config
         if "ga_transform" in preprocess_cfg and preprocess_cfg["ga_transform"] is not None:
-            # Use GA transform directly (it already includes all preprocessing)
+            # GA closure now handles per-spectrum operations only. Autoscale
+            # (column-wise StandardScaler) is applied separately so the
+            # validation-rebuild path can fit-on-train / transform-on-val
+            # without divergent scaler state. One-shot fit on full X_np
+            # matches pre-fix CV behaviour and is chemometrics-acceptable.
             X_preprocessed = preprocess_cfg["ga_transform"](X_np)
+            if preprocess_cfg.get("autoscale", False):
+                from sklearn.preprocessing import StandardScaler
+                X_preprocessed = StandardScaler().fit_transform(X_preprocessed)
         else:
             # Use standard preprocessing pipeline
             # Use base_name if available (for GA configs), otherwise use name

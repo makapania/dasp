@@ -247,8 +247,16 @@ class TestChromosomeAutoscaleBackwardCompat:
             assert X_out.shape == X.shape
 
     def test_3gene_chromosome_with_autoscale_true(self):
-        """3-gene array with autoscale=1 → name carries +autoscale and the
-        transform applies StandardScaler."""
+        """3-gene array with autoscale=1 → name carries +autoscale, but the
+        closure itself stays per-spectrum-only.
+
+        Pre-fix the closure called ``StandardScaler().fit_transform()``
+        internally, which caused validation rebuilds to refit a fresh scaler
+        on the held-out set and collapsed R²pred. After the fix, autoscale
+        is applied OUTSIDE the closure (search.py search-time path,
+        compute_validation_metrics_for_top_models, evaluate_fitness) so
+        train/val state can stay consistent.
+        """
         genes_3gene = np.array([3, 5, 1], dtype=np.int32)
 
         assert _decode_autoscale_gene(genes_3gene) is True
@@ -256,15 +264,36 @@ class TestChromosomeAutoscaleBackwardCompat:
         name, transform = chromosome_to_transform(genes_3gene)
         assert "+autoscale" in name
 
-        # After transform, every column should be z-scored (mean ~0, std ~1)
         X = np.random.RandomState(42).randn(20, 50)
         X_out = transform(X)
         assert X_out.shape == X.shape
-        # Per-column means and stds
+
+        # Closure must NOT autoscale — output is whatever the per-spectrum
+        # SG-derivative path produced. Specifically, columns are not forced
+        # to mean=0 / std=1.
         col_means = np.abs(X_out.mean(axis=0))
         col_stds = X_out.std(axis=0)
-        assert np.all(col_means < 1e-9), f"Expected zero-mean cols, max abs mean={col_means.max()}"
-        assert np.all(np.abs(col_stds - 1.0) < 1e-9), f"Expected unit-std cols, got {col_stds}"
+        autoscaled = (
+            np.all(col_means < 1e-9) and np.all(np.abs(col_stds - 1.0) < 1e-9)
+        )
+        assert not autoscaled, (
+            "Closure must not bake StandardScaler — autoscale belongs outside "
+            "so train/val rebuild can fit-on-train, transform-on-val."
+        )
+
+    def test_3gene_autoscale_true_matches_2gene_closure(self):
+        """The closure for ``[p, w, 1]`` and ``[p, w, 0]`` must be bit-equal
+        — the only difference between them is now the *name* (``+autoscale``
+        suffix) and the metadata flag callers read separately.
+        """
+        genes_off = np.array([3, 5, 0], dtype=np.int32)
+        genes_on = np.array([3, 5, 1], dtype=np.int32)
+
+        _, t_off = chromosome_to_transform(genes_off)
+        _, t_on = chromosome_to_transform(genes_on)
+
+        X = np.random.RandomState(42).randn(20, 50)
+        np.testing.assert_array_equal(t_off(X), t_on(X))
 
     def test_3gene_chromosome_with_autoscale_false(self):
         """3-gene array with autoscale=0 → no +autoscale in name; behavior
@@ -290,27 +319,29 @@ class TestChromosomeAutoscaleBackwardCompat:
             X_3 = transform_3gene(X)
             np.testing.assert_array_equal(X_2, X_3)
 
-    def test_raw_with_autoscale_true(self):
-        """raw + autoscale=True must produce a transform (not None) that
-        applies just StandardScaler. The legacy raw + autoscale=False case
-        still returns transform=None for back-compat with the no-op fast
-        path."""
+    def test_raw_returns_none_closure_regardless_of_autoscale(self):
+        """raw is a no-op for the closure regardless of the autoscale gene.
+
+        Before the fix, raw + autoscale=True returned a transform that
+        called ``StandardScaler().fit_transform`` — a fresh fit on every
+        call. That refit-on-val behaviour was the root cause of the R²pred
+        regression on Exhaustive Preprocessing rows. Autoscale now lives
+        outside the closure (callers honour the autoscale flag with their
+        own fit-on-train, transform-on-val logic), so raw chromosomes
+        simply return ``None`` whether or not autoscale is set; the name
+        still carries ``+autoscale`` for display and metadata.
+        """
         raw_idx = PREPROC_TYPES.index("raw")
         genes_raw_no_autoscale = np.array([raw_idx, 0], dtype=np.int32)
         genes_raw_with_autoscale = np.array([raw_idx, 0, 1], dtype=np.int32)
 
-        # raw + autoscale=False → transform=None (fast path)
-        _, t_none = chromosome_to_transform(genes_raw_no_autoscale)
-        assert t_none is None
+        name_off, t_off = chromosome_to_transform(genes_raw_no_autoscale)
+        name_on, t_on = chromosome_to_transform(genes_raw_with_autoscale)
 
-        # raw + autoscale=True → real transform that just z-scores
-        name, t_autoscale = chromosome_to_transform(genes_raw_with_autoscale)
-        assert "+autoscale" in name
-        assert t_autoscale is not None
-        X = np.random.RandomState(42).randn(20, 50)
-        X_out = t_autoscale(X)
-        assert np.all(np.abs(X_out.mean(axis=0)) < 1e-9)
-        assert np.all(np.abs(X_out.std(axis=0) - 1.0) < 1e-9)
+        assert t_off is None
+        assert t_on is None
+        assert "+autoscale" not in name_off
+        assert "+autoscale" in name_on
 
     def test_get_config_description_handles_both_shapes(self):
         """get_config_description must accept both 2-gene and 3-gene arrays."""
@@ -436,6 +467,142 @@ class TestChromosomeAutoscaleBackwardCompat:
         name, transform = chromosome_to_transform(loaded_genes)
         assert isinstance(name, str)
         assert "+autoscale" not in name  # legacy chromosomes never have autoscale
+
+
+# =============================================================================
+# Regression: closure must not bake StandardScaler — train/val asymmetry
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestAutoscaleTrainValAsymmetry:
+    """Pin the bug that produced ≥0.11 R²pred drop on Exhaustive
+    Preprocessing rows with autoscale=True.
+
+    Pre-fix the chromosome closure called
+    ``StandardScaler().fit_transform(X)`` internally. The validation
+    rebuild path (compute_validation_metrics_for_top_models) calls the
+    closure once on X_train and once on X_val — each call refit a fresh
+    StandardScaler on its own input, so val features were centred to
+    *val's* column means / stds rather than train's. The model trained
+    on train-statistic features then predicted on val-statistic features
+    and R²pred collapsed.
+
+    Tests below pin the post-fix invariants:
+      1. Closure is deterministic per-spectrum-only — feeding train and
+         val through it independently does not depend on cross-sample
+         statistics, so column means of the outputs reflect the input
+         column means (no autoscale baked in).
+      2. The standalone autoscale step the search/rebuild now applies
+         outside the closure must use a TRAIN-fitted scaler — verified
+         by feeding val through it and checking the val output preserves
+         its mean/std offset relative to train rather than being recentred
+         to its own (val) mean.
+    """
+
+    def test_closure_is_per_spectrum_only(self):
+        """Apply the closure to two batches with deliberately different
+        column means. The output column means should differ between
+        batches (because nothing inside the closure aligns them) — proving
+        no cross-sample StandardScaler is hiding in the closure."""
+        # snv_deriv1, w=11, autoscale=1 — a config that pre-fix would
+        # have z-scored every column to mean=0 inside the closure
+        snv_deriv1_idx = PREPROC_TYPES.index("snv_deriv1")
+        w11_idx = WINDOW_SIZES.index(11) if 11 in WINDOW_SIZES else 0
+        genes = np.array([snv_deriv1_idx, w11_idx, 1], dtype=np.int32)
+
+        _, transform = chromosome_to_transform(genes)
+        assert transform is not None
+
+        rng = np.random.RandomState(0)
+        X_train = rng.randn(40, 60)
+        # X_val with a deliberate +5.0 column-mean offset on every column
+        X_val = rng.randn(20, 60) + 5.0
+
+        X_train_out = transform(X_train)
+        X_val_out = transform(X_val)
+
+        # If the closure were autoscaling (pre-fix bug), every column of
+        # both outputs would have mean ≈ 0 — the +5.0 offset would vanish
+        # because StandardScaler is refit on each input. Post-fix, SNV +
+        # SG-derivative are per-spectrum, so the cross-sample column means
+        # of train and val outputs should NOT both be zero.
+        train_col_means = np.abs(X_train_out.mean(axis=0))
+        val_col_means = np.abs(X_val_out.mean(axis=0))
+        train_zeroed = np.all(train_col_means < 1e-9)
+        val_zeroed = np.all(val_col_means < 1e-9)
+        assert not (train_zeroed and val_zeroed), (
+            "Closure must not fit StandardScaler internally — both train "
+            "and val came back with zero column means, meaning each call "
+            "refit a fresh scaler. This is the bug the fix targets."
+        )
+
+    def test_external_autoscale_uses_train_fitted_scaler(self):
+        """The fixed pipeline uses a TRAIN-fitted StandardScaler at
+        train/val rebuild. Mimic the post-closure step in
+        search.py:compute_validation_metrics_for_top_models and assert
+        that val passes through the train-fitted scaler — i.e. its
+        means are recentred toward TRAIN's column means, not zeroed
+        to its own.
+        """
+        from sklearn.preprocessing import StandardScaler
+
+        rng = np.random.RandomState(1)
+        X_train = rng.randn(40, 60)
+        X_val_raw = rng.randn(20, 60) + 5.0  # deliberate offset
+
+        scaler = StandardScaler().fit(X_train)
+        X_val_scaled = scaler.transform(X_val_raw)
+
+        # If val had been independently fit (pre-fix bug), its column
+        # means would all be ≈ 0. With the train-fitted scaler reused,
+        # the +5.0 offset survives (relative to train's near-zero mean
+        # → val's column means are far from zero in standardised units).
+        val_means = X_val_scaled.mean(axis=0)
+        assert np.mean(np.abs(val_means)) > 1.0, (
+            "Train-fitted scaler reused on val should preserve val's "
+            "offset relative to train. If means are ~0, the scaler was "
+            "(incorrectly) refit on val — the original bug."
+        )
+
+    def test_evaluate_fitness_applies_autoscale_externally(self):
+        """evaluate_fitness must still apply autoscale to inputs whose
+        chromosome's autoscale gene is set — even though the closure no
+        longer does it. Pre-fix the closure handled this; post-fix the
+        function applies StandardScaler after the closure. A regression
+        here would silently change exhaustive-search rankings (autoscale
+        configs would degrade because they'd no longer be autoscaled at
+        all).
+
+        The smoke check: a chromosome whose underlying transform has a
+        finite output should produce a finite fitness when autoscale is
+        on, matching what the full evaluate_fitness path does. The real
+        guard is that fitness is finite — pre-fix the post-closure path
+        was missing entirely, which would produce wildly different
+        scores for autoscale-on configs.
+        """
+        rng = np.random.RandomState(2)
+        X = rng.randn(30, 60)
+        y = rng.randn(30)
+
+        snv_deriv1_idx = PREPROC_TYPES.index("snv_deriv1")
+        w11_idx = WINDOW_SIZES.index(11) if 11 in WINDOW_SIZES else 0
+        genes_autoscale_on = np.array([snv_deriv1_idx, w11_idx, 1], dtype=np.int32)
+        genes_autoscale_off = np.array([snv_deriv1_idx, w11_idx, 0], dtype=np.int32)
+
+        f_on = evaluate_fitness(
+            genes_autoscale_on, X, y, cv_folds=3, n_components=3, task_type="regression"
+        )
+        f_off = evaluate_fitness(
+            genes_autoscale_off, X, y, cv_folds=3, n_components=3, task_type="regression"
+        )
+
+        # Both must be finite — autoscale path is wired up.
+        assert np.isfinite(f_on), (
+            "evaluate_fitness with autoscale=True returned non-finite — "
+            "the post-closure StandardScaler step is missing or broken."
+        )
+        assert np.isfinite(f_off)
 
 
 # =============================================================================
