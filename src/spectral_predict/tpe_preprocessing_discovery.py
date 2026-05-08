@@ -756,6 +756,7 @@ def run_tpe_multistart_preprocessing_discovery(
     per_start_pool: int = 7,
     n_seeds: int = 5,
     progress_callback: Optional[Callable] = None,
+    controller=None,
 ) -> List[Dict[str, Any]]:
     """Multi-start TPE + phase-2 multi-seed rescore.
 
@@ -936,12 +937,17 @@ def run_tpe_multistart_preprocessing_discovery(
             annotated['_tpe_multistart_rescored_std'] = std_score
         result_configs.append(annotated)
 
-    print(f"\n=== TPE Multistart Top {len(result_configs)} Configurations ===")
+    # If the user clicked Stop while Phase 2 rescore was running, Phase 2
+    # still ran to completion (it has no cancel hook). Prefix the post-stop
+    # output so the user knows these are completion artifacts of work
+    # already in flight, not new work happening after they stopped.
+    stopped = bool(controller is not None and getattr(controller, "is_ended", False))
+    prefix = "[POST-STOP] " if stopped else ""
+
+    header = f"=== TPE Multistart Top {len(result_configs)} Configurations ==="
+    print(f"\n{prefix}{header}" if stopped else f"\n{header}")
     if progress_callback:
-        progress_callback(
-            n_starts, n_starts,
-            f"=== TPE Multistart Top {len(result_configs)} Configurations ===",
-        )
+        progress_callback(n_starts, n_starts, f"{prefix}{header}")
     for i, cfg in enumerate(result_configs):
         window_str = f"w={cfg['window']}" if cfg.get('window') else ""
         extras = []
@@ -955,9 +961,9 @@ def run_tpe_multistart_preprocessing_discovery(
         full_name = f"{cfg['preprocessing']} {window_str}"
         if extras_str:
             full_name += f" [{extras_str}]"
-        # Surface rescored mean score (and std if available) so the GUI line
-        # mirrors the single-start path's format. score is +RMSE for
-        # regression, accuracy/balanced-accuracy for classification/one_class.
+        # Score sign + format follows the convention established at the rescore
+        # block above and in run_tpe_preprocessing_discovery: +RMSE for
+        # regression, accuracy / balanced-accuracy otherwise.
         score_val = cfg.get('score')
         std_val = cfg.get('_tpe_multistart_rescored_std')
         if score_val is not None:
@@ -967,9 +973,9 @@ def run_tpe_multistart_preprocessing_discovery(
                 score_str = f"score={score_val:.4f}"
             if std_val is not None:
                 score_str += f" ±{std_val:.4f}"
-            line = f"  {i + 1}. {full_name}: {score_str}"
+            line = f"{prefix}  {i + 1}. {full_name}: {score_str}"
         else:
-            line = f"  {i + 1}. {full_name}"
+            line = f"{prefix}  {i + 1}. {full_name}"
         print(line)
         if progress_callback:
             progress_callback(n_starts, n_starts, line)

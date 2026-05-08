@@ -1898,6 +1898,7 @@ def run_search(
                 smoothing_polyorder=smoothing_polyorder,
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_progress,
+                controller=controller,
             )
         else:
             discovered_configs = run_tpe_preprocessing_discovery(
@@ -5827,6 +5828,7 @@ def run_one_class_search(
                 smoothing_polyorder=smoothing_polyorder,
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_oc_progress,
+                controller=controller,
             )
         else:
             discovered = run_tpe_preprocessing_discovery(
