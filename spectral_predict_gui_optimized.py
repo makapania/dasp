@@ -37608,10 +37608,23 @@ F1 Score:  {f1:.4f}
                     print(f"GA preprocessing module imported successfully")
                 except ImportError as e:
                     print(f"ERROR: GA preprocessing module not available: {e}")
-                    self.refine_status.config(text="ERROR: GA module not found")
-                    messagebox.showerror("GA Module Missing",
-                        "GA preprocessing module (ga_pls.py) is not available.\n"
-                        "Please ensure the module is installed or select a different preprocessing method.")
+                    # Worker-thread Tk ops must go through root.after on
+                    # Windows or the main loop can die mid-call. Same shape
+                    # as the analysis-thread hardening on the OC path.
+                    self.root.after(
+                        0,
+                        lambda: self.refine_status.config(
+                            text="ERROR: GA module not found"
+                        ),
+                    )
+                    self.root.after(
+                        0,
+                        lambda: messagebox.showerror(
+                            "GA Module Missing",
+                            "GA preprocessing module (ga_pls.py) is not available.\n"
+                            "Please ensure the module is installed or select a different preprocessing method.",
+                        ),
+                    )
                     return
 
                 # Check if we're loading from a saved GA model or running new GA optimization
@@ -37682,10 +37695,24 @@ F1 Score:  {f1:.4f}
                         print(f"ERROR during GA optimization: {e}")
                         import traceback
                         traceback.print_exc()
-                        self.refine_status.config(text="ERROR: GA optimization failed")
-                        messagebox.showerror("GA Optimization Failed",
-                            f"GA preprocessing optimization failed:\n{str(e)}\n\n"
-                            "Please check console for details or try a different preprocessing method.")
+                        # Worker-thread Tk ops must go through root.after on
+                        # Windows. Capture the exception text for the lambda
+                        # so it doesn't reference the now-out-of-scope `e`.
+                        err_str = str(e)
+                        self.root.after(
+                            0,
+                            lambda: self.refine_status.config(
+                                text="ERROR: GA optimization failed"
+                            ),
+                        )
+                        self.root.after(
+                            0,
+                            lambda msg=err_str: messagebox.showerror(
+                                "GA Optimization Failed",
+                                f"GA preprocessing optimization failed:\n{msg}\n\n"
+                                "Please check console for details or try a different preprocessing method.",
+                            ),
+                        )
                         return
 
                 # Build pipeline with ONLY the model (GA preprocessing already applied)

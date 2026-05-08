@@ -33,6 +33,7 @@ predictions = predict_with_model(model_dict, new_X_data)
 
 import joblib
 import json
+import logging
 import warnings
 import zipfile
 import tempfile
@@ -44,6 +45,8 @@ from typing import Dict, Any, Optional, Union
 
 from . import __version__
 from .resource_paths import is_frozen
+
+logger = logging.getLogger(__name__)
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -845,8 +848,15 @@ def predict_with_uncertainty(
         internals: dict = {}
         predictions = predict_with_model(model_dict, X_new, validate_wavelengths, _internals=internals)
 
-        # Extract decision scores from the already-transformed data
+        # Extract decision scores from the already-transformed data.
+        # Failure here used to be silently swallowed (decision_scores=None,
+        # empty uncertainty/AD payloads, no warning) — the user got
+        # predictions back with no signal that the score-extraction path
+        # broke. Now we log + surface a structured error flag so the GUI
+        # can display "predictions worked, uncertainty broke" alongside
+        # the predictions.
         decision_scores = None
+        decision_score_error = None
         X_proc = internals.get('X_processed')
         if X_proc is not None:
             try:
@@ -854,7 +864,17 @@ def predict_with_uncertainty(
                     decision_scores = model.decision_function(X_proc)
                 elif hasattr(model, 'score_samples'):
                     decision_scores = model.score_samples(X_proc)
-            except Exception:
+                else:
+                    decision_score_error = (
+                        f"{type(model).__name__} exposes neither "
+                        f"decision_function nor score_samples"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "OC decision-score extraction failed for %s: %s: %s",
+                    type(model).__name__, type(exc).__name__, exc,
+                )
+                decision_score_error = f"{type(exc).__name__}: {exc}"
                 decision_scores = None
 
         result: dict = {
@@ -864,6 +884,7 @@ def predict_with_uncertainty(
             'has_uncertainty': False,
             'has_applicability_domain': False,
             'data_type_warning': data_type_warning,
+            'decision_score_error': decision_score_error,
         }
 
         if decision_scores is not None:

@@ -1089,9 +1089,17 @@ def compute_validation_metrics_for_top_one_class_models(
 
             deriv = _maybe_int(row.get('Deriv'), 0)
             window = _maybe_int(row.get('Window'), 0)
+            # When the row stores Poly=None (grid search defers to
+            # SavgolDerivative's polyorder_map), fall back to that SAME map
+            # rather than the older `min(2, window-1)` heuristic. The old
+            # fallback gave poly=2 for deriv=2, but SavgolDerivative actually
+            # uses poly=3 for deriv=2 — val_* metrics drifted off training
+            # by one polynomial order. Source of truth lives in
+            # preprocess.SAVGOL_POLYORDER_DEFAULTS.
+            from .preprocess import SAVGOL_POLYORDER_DEFAULTS
             poly = _maybe_int(
                 row.get('Poly'),
-                min(2, window - 1) if window > 2 else 0,
+                SAVGOL_POLYORDER_DEFAULTS.get(deriv, deriv + 1),
             )
 
             baseline_method = row.get('baseline_method', None)
