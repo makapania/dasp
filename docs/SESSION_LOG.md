@@ -4,6 +4,76 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 (evening) — Preprocessing-discovery refactor postmortem: empirically harmful at the chemometrics gate
+
+**Context.** User asked: are the preprocessing changes (b551421's 4-phase refactor) actually producing better models, or were they justified on metrics that don't matter? Several conversation turns of clarification surfaced the user's actual filter: full leaderboard, NOT top-K by CV (top-K is typically overfit, never auto-picked). Pick is from gap-filtered passing set — models with `|R²cv − R²pred| ≤ ~0.10` ("similar AND high"). Built `tools/preprocessing_refactor_ab.py` to test legacy vs refactor under that exact criterion.
+
+**Verdict on BoneCollagen (single trajectory; TPE seed not plumbed through `run_search`).**
+
+- **TPE multistart (Phase 4) classification**: harmful. Legacy best passing F1=0.944 (`snv_deriv2_w15+autoscale`, BAcccv=0.967, gap=0.033). Refactor best passing F1=0.903 (`deriv2_snv_w17+autoscale`, BAcccv=0.867, gap=0.067). Δ = −0.041 F1, well above n_external=15 noise floor. Refactor's diversity-applied multistart union excluded the legacy's `snv_deriv2_w15+autoscale` family entirely.
+- **TPE multistart (Phase 4) regression**: neutral. Best passing R²pred 0.9680 vs 0.9687, Δ +0.0008 (well within noise). Passing sets 95% disjoint (only 13 of 289 shared) but the best in each region is equally good. Pure compute cost (3-6× wall time), no benefit.
+- **Exhaustive Phase 2 rescore regression**: bit-identical. 115 shared, 0 unique to either arm.
+- **Exhaustive Phase 2 rescore classification**: tied. Best passing F1=0.9441 in both arms; just mid-rank shuffle.
+
+**Why the earlier "classification benefits" finding was wrong.** The autoscale battery and the top-K-by-CV A/B both showed classification gain from multistart. That gain was concentrated in the top-K — exactly the rows the user explicitly does NOT pick because they're overfit. At the gap-filtered level, multistart on classification is the worst outcome among the four cells.
+
+**Pattern named.** This is the THIRD instance of ML-flavored search-machinery shipped without chemometrics-gate validation (per user, 2026-05-07). The pattern is captured in `feedback_chemometrics_conventions.md` §3 but kept recurring because reviewer findings (Codex, DeepSeek, Kimi flagging "TPE drift", "top-K instability", "Jaccard ≈ 0") *feel* concrete and the gap-filtered external validation takes more setup. Empirical postmortem now memorialized in `feedback_preprocessing_refactor_postmortem.md`.
+
+**Action taken.** Two GUI defaults flipped (1-line each):
+- `spectral_predict_gui_optimized.py:3242`: `ga_preprocess_phase2_rescore` `True → False`
+- `spectral_predict_gui_optimized.py:3265`: `tpe_multistart` `True → False` (was flipped to True in `d91d177` 2026-05-07 morning; reverted in this commit)
+
+Plumbing kept callable for any caller that explicitly opts in. Full code rip-out (delete `phase2_adaptive_rescore`, `run_tpe_multistart_preprocessing_discovery`, GUI checkboxes, `_tpe_multistart_*` result-CSV columns, related tests) is a ~15-30 file follow-up — explicitly NOT done in this commit, by user instruction. Phase 1 (delete legacy GA-as-search-mode) and Phase 3 (autoscale dimension) are NOT part of this rollback — Phase 1 is code cleanup, Phase 3 has its own modest external validation in the autoscale battery.
+
+**Diagnostic tools added.**
+- `tools/preprocessing_refactor_ab.py`: legacy-vs-refactor A/B harness on the user's actual chemometrics filter. Reusable template for any future search-machinery refactor — the user's standing rule is now no search-machinery refactor ships without this validation.
+- `tools/dump_tpe_top10_configs.py`: prints the TPE / exhaustive top-10 preprocessing configs for both arms side-by-side, with set-diff at the (preprocessing, window, deriv, autoscale, baseline, smoothing) level.
+
+**Caveats.** Single dataset (BoneCollagen). n_external=15 has its own ±0.02 noise floor on R²/F1 — the 0.041 F1 loss for TPE classification is well above that floor; the regression deltas are all within it. TPE seed not plumbed through `run_search` (separate plumbing follow-up if seed variance is wanted).
+
+---
+
+## 2026-05-07 (late) — TPE multi-start one_class GUI crash isolated to GUI/Tk worker-thread interaction
+
+**Context.** User reported "the program literally crashed and ended" when running multi-seed TPE on a one_class Quick analysis (49 samples × 2151 wavelengths, IsolationForest + PCA-SIMCA, importance varsel). Crash log at `C:\Users\mspon\AppData\Local\dasp\logs\run_20260507_162018_quick.log` shows TPE multistart begins at 16:53:17, GUI Tk main loop dies by 16:53:19 (zombie `tk.Variable.__del__` destructors firing on the worker thread with `RuntimeError: main thread is not in main loop`).
+
+**Bisection.** Wrote a pure-backend repro at `tools/repro_tpe_multistart_one_class.py` that calls `run_tpe_multistart_preprocessing_discovery` directly with the user's exact settings on synthetic data of the same shape. Backend ran 120+ seconds without crashing, completing 7 configs in 22.4s on `n_trials=5, n_starts=2`. **Backend is not the bug.** The crash is in the GUI/Tk worker-thread interaction.
+
+**Likely cause (per Codex investigation, this session).** The analysis worker thread (`_run_analysis_thread`, ~3300 lines starting at line 25499) directly reads `tk.Variable.get()`, mutates widgets, and called bare `messagebox.*` from the worker without `root.after`. On Windows this kills the Tk interpreter randomly under load. The 2-second-after-multistart-begins timing is a red herring — the crash was already loaded; multistart's call shape (longer time before the first trial completes vs. single-start which fires per-trial GUI updates) just exposes it more reliably.
+
+**Defensive hardening shipped this session (not a full fix):**
+- `messagebox.showwarning` at "Crash-resume disabled" (Bayesian SQLite fail) wrapped in `root.after`.
+- `messagebox.showerror` at "Alignment Error" (X/y len mismatch) removed — the `raise ValueError` immediately following propagates to the worker's top-level `except` which already surfaces a messagebox via `root.after`.
+- `_log_progress` `root.after` call wrapped in try/except so a Tk shutdown mid-call can't kill the worker stack.
+- `_progress_callback` split into a thin wrapper + `_progress_callback_impl`; wrapper catches all exceptions, logs them to the disk log via `log_event`, returns. A bad GUI update can no longer escalate to an unhandled exception in the worker thread.
+- Repro script `tools/repro_tpe_multistart_one_class.py` documented + verified on Windows.
+
+**Still needed (separate, larger refactor):**
+- The `messagebox.askyesno` at the iPLS-discontinuous-regions check (~line 27529) is a blocking modal called from the worker thread. Not in the user's crash path (they use importance varsel) but a real risk for iPLS users. Fix needs a thread-safe queue+event pattern OR hoisting the check before the worker thread starts.
+- Hundreds of `tk.Variable.get()` reads in the worker thread. Codex's recommended canonical fix is to snapshot all GUI state on the main thread before starting the analysis thread, pass plain Python values into `_run_analysis_thread`. Days of work; defer until a cleaner repro pinpoints whether the worker-thread Var reads are causing the deaths or just coexisting with them.
+
+**`tpe_multistart` default-on flip is BLOCKED on this fix.** User asked for the checkbox default to flip from False to True (since multi-seed is methodologically necessary), but flipping before the crash is fixed would crash every user. Hold the flip.
+
+**Lesson.** When a Tk crash gives no Python traceback, write a backend-only repro FIRST. Bisecting "GUI vs backend" with one script saved hours of speculative GUI hardening — confirmed in <30s where the fix needs to land.
+
+---
+
+## 2026-05-07 — OC round-2: false-positive BLOCKERs from cross-family review + EE builder None-sort non-issue
+
+**Context.** PR feat/oc-hyperparams-round2 adds LOF metric/contamination, IF max_samples/n_estimators, EE support_fraction to Tab 4C. Cross-family review (Codex + DeepSeek V4 Pro Max + Kimi K2.6) ran on commit 6180749.
+
+**DeepSeek false-positive BLOCKER (Q5 — `_oc_extract_defaults` sort crash).**
+DeepSeek claimed that `sorted(vals, key=lambda x: (isinstance(x, str), x))` would raise `TypeError` when `vals` contains `None` alongside floats. Reasoning: `(False, None) < (False, 0.5)` tries `None < 0.5`. This reasoning is correct *in principle* but the code never hits it: `_oc_extract_defaults` uses a `set()` that only adds values when the key IS present in an entry. EE entries without `support_fraction` key simply don't contribute to the set. `None` is added separately AFTER the sort, via `([None] if has_implicit_none else []) + explicit`. Verified: `_oc_extract_defaults(ee_grid, 'support_fraction')` returns `[0.5, 0.75]` (no None). False positive — no fix needed.
+
+**Kimi false-positive BLOCKER (max_samples crash).**
+Kimi claimed `IsolationForest(max_samples=256)` raises `ValueError` when `n_samples < 256`. Verified: sklearn emits a UserWarning and automatically falls back to `max_samples = n_samples`. Not a crash. The test suite already shows this warning harmlessly on small synthetic datasets. No fix needed.
+
+**Codex: CLEAN.** No BLOCKER or MEDIUM findings. All 7 checklist items verified.
+
+**MEDIUMs all by-design.** DeepSeek Q1 (curated grid expansion IF:5→9, EE:3→5, LOF:3→9), Q2 (IF Cartesian explosion to 54 when override triggered), Q6 (EE 1D→2D: contamination-only change now crosses with support_fraction axis) are all intentional per the task spec. Round-2 explicitly adds new presets to curated grids and new axes to builders.
+
+**Lesson.** When a reviewer claims a crash, always verify with a 1-line Python test before treating it as a BLOCKER. Both false positives here required < 5 lines to disprove. The sort-crash reasoning was especially plausible (correct logic, wrong model of when None enters the sorted set).
+
 ## 2026-05-07 (late) — Cycle 4 sister-site leak: a passing test that asserts the forbidden behavior
 
 **The pattern.** PR #57 cycle 3 closed a Codex MEDIUM by adding UVE-family filtering to `run_one_class_search` (CLAUDE.md:66 — UVE on `y_oc` is a discrimination method, not a one-class method). Cycle 4 cross-family review (Kimi K2.6 + GLM 5.1 + Codex) found the **Bayesian dispatcher in `unified_bayesian.py:1102` still had the leak** for scripted callers passing `task_type='one_class', enable_uve=True`. Codex traced the full call chain: `run_unified_bayesian → create_unified_objective → suggest_categorical('subset_type', available_methods) → compute_importances(X, y_oc, 'uve', …) → uve_selection(X, y_oc, …) → PLSRegression(y_train=y_oc)`.

@@ -367,3 +367,93 @@ class TestMultistartIntegration:
         # Single-start output should NOT carry the multistart halt-reason
         for cfg in result:
             assert "_tpe_multistart_halt_reason" not in cfg
+
+
+@pytest.mark.skipif(not HAS_TPE, reason="optuna / preprocessing_discovery not importable")
+class TestPostStopPrefix:
+    """The user can click Stop while Phase 2 multi-seed rescore is mid-flight.
+    Phase 2 has no cancel hook (intentional — it's a tight rescore loop), so
+    it always runs to completion. After it finishes, the multistart wrapper
+    emits the top-N config list. If the user already saw `[STOPPED]` in the
+    GUI progress pane, an unprefixed top-N emission looks like the search
+    is still alive. Prefix the emission with `[POST-STOP]` so the user
+    knows these are completion artifacts of work already in flight.
+    """
+
+    @pytest.fixture
+    def synthetic_X_y_regression(self):
+        rng = np.random.RandomState(0)
+        X = rng.normal(size=(40, 30))
+        y = rng.normal(size=40)
+        return X, y
+
+    def test_unstopped_run_has_no_post_stop_prefix(self, synthetic_X_y_regression):
+        X, y = synthetic_X_y_regression
+        captured: list[str] = []
+
+        def cb(current, total, message):
+            captured.append(message)
+
+        run_tpe_multistart_preprocessing_discovery(
+            X, y,
+            task_type="regression",
+            n_trials=5,
+            n_top=3,
+            cv_folds=3,
+            n_starts=2,
+            per_start_pool=3,
+            n_seeds=3,
+            enable_baseline=False,
+            enable_smoothing=False,
+            progress_callback=cb,
+            controller=None,  # No stop signal
+        )
+
+        # Top-N emission must appear and must NOT carry the prefix.
+        top_n_lines = [m for m in captured if "Multistart Top" in m]
+        assert top_n_lines, "Top-N emission missing from progress callback"
+        assert not any("[POST-STOP]" in m for m in captured), (
+            "Found [POST-STOP] prefix in an unstopped run"
+        )
+
+    def test_stopped_run_prefixes_top_n_with_post_stop(self, synthetic_X_y_regression):
+        from spectral_predict.search_controller import SearchController
+
+        X, y = synthetic_X_y_regression
+        captured: list[str] = []
+
+        def cb(current, total, message):
+            captured.append(message)
+
+        controller = SearchController()
+        controller.stop()  # Simulate user clicking Stop before/during rescore.
+
+        run_tpe_multistart_preprocessing_discovery(
+            X, y,
+            task_type="regression",
+            n_trials=5,
+            n_top=3,
+            cv_folds=3,
+            n_starts=2,
+            per_start_pool=3,
+            n_seeds=3,
+            enable_baseline=False,
+            enable_smoothing=False,
+            progress_callback=cb,
+            controller=controller,
+        )
+
+        # Top-N emission still happens (Phase 2 finishes the work in flight)
+        # but every line carries the [POST-STOP] prefix so the user can tell
+        # this isn't new search activity.
+        top_n_lines = [m for m in captured if "Multistart Top" in m]
+        assert top_n_lines, "Top-N emission missing even when stopped"
+        for line in top_n_lines:
+            assert line.startswith("[POST-STOP]"), (
+                f"Expected [POST-STOP] prefix on stopped-run header, got: {line!r}"
+            )
+        # The per-config lines should also carry the prefix.
+        config_lines = [m for m in captured if m.lstrip("[POST-STOP] ").startswith(tuple("123456789"))]
+        # At least one numbered config row exists and starts with [POST-STOP].
+        post_stop_configs = [m for m in captured if m.startswith("[POST-STOP]") and ". " in m]
+        assert post_stop_configs, "No [POST-STOP]-prefixed per-config lines found"

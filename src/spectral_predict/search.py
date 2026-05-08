@@ -1898,6 +1898,7 @@ def run_search(
                 smoothing_polyorder=smoothing_polyorder,
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_progress,
+                controller=controller,
             )
         else:
             discovered_configs = run_tpe_preprocessing_discovery(
@@ -5439,19 +5440,40 @@ def _build_if_custom_grid(overrides, default_grid):
     max_feat = overrides.get("max_features", [])
     if not max_feat:
         max_feat = _oc_extract_defaults(default_grid, "max_features")
+    max_samp = overrides.get("max_samples", [])
+    if not max_samp:
+        max_samp = _oc_extract_defaults(default_grid, "max_samples")
+    if not max_samp:
+        max_samp = ["auto"]
 
     combos = [
-        {"n_estimators": int(n), "contamination": c, "max_features": mf}
-        for n, c, mf in product(n_est, contam, max_feat)
+        {"n_estimators": int(n), "contamination": c, "max_features": mf, "max_samples": ms}
+        for n, c, mf, ms in product(n_est, contam, max_feat, max_samp)
     ]
     return combos if combos else default_grid
 
 
 def _build_ee_custom_grid(overrides, default_grid):
+    from itertools import product
+
     contam = overrides.get("contamination", [])
     if not contam:
         contam = _oc_extract_defaults(default_grid, "contamination")
-    combos = [{"contamination": c} for c in contam]
+    support_fracs = overrides.get("support_fraction", [])
+    if not support_fracs:
+        # Any entry in default_grid without the key represents support_fraction=None.
+        has_implicit_none = any("support_fraction" not in p for p in default_grid)
+        explicit = _oc_extract_defaults(default_grid, "support_fraction")
+        support_fracs = ([None] if has_implicit_none else []) + explicit
+    if not support_fracs:
+        support_fracs = [None]
+
+    combos = []
+    for c, sf in product(contam, support_fracs):
+        entry: dict = {"contamination": c}
+        if sf is not None:
+            entry["support_fraction"] = sf
+        combos.append(entry)
     return combos if combos else default_grid
 
 
@@ -5464,8 +5486,15 @@ def _build_lof_custom_grid(overrides, default_grid):
     contam = overrides.get("contamination", [])
     if not contam:
         contam = _oc_extract_defaults(default_grid, "contamination")
+    metrics = overrides.get("metric", [])
+    if not metrics:
+        raw = _oc_extract_defaults(default_grid, "metric")
+        metrics = raw if raw else ["euclidean"]
 
-    combos = [{"n_neighbors": int(n), "contamination": c} for n, c in product(nn, contam)]
+    combos = [
+        {"n_neighbors": int(n), "contamination": c, "metric": m}
+        for n, c, m in product(nn, contam, metrics)
+    ]
     return combos if combos else default_grid
 
 
@@ -5799,6 +5828,7 @@ def run_one_class_search(
                 smoothing_polyorder=smoothing_polyorder,
                 n_starts=tpe_n_starts,
                 progress_callback=tpe_oc_progress,
+                controller=controller,
             )
         else:
             discovered = run_tpe_preprocessing_discovery(

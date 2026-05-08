@@ -3072,6 +3072,8 @@ class SpectralPredictApp:
         self.ocsvm_degree_custom = tk.StringVar(value="")
         # IsolationForest
         self.if_n_estimators_100 = tk.BooleanVar(value=True)
+        self.if_n_estimators_200 = tk.BooleanVar(value=True)
+        self.if_n_estimators_500 = tk.BooleanVar(value=True)
         self.if_n_estimators_custom = tk.StringVar(value="")
         self.if_contamination_001 = tk.BooleanVar(value=True)
         self.if_contamination_005 = tk.BooleanVar(value=True)
@@ -3080,18 +3082,33 @@ class SpectralPredictApp:
         self.if_max_features_05 = tk.BooleanVar(value=True)
         self.if_max_features_10 = tk.BooleanVar(value=True)
         self.if_max_features_custom = tk.StringVar(value="")
+        self.if_max_samples_auto = tk.BooleanVar(value=True)
+        self.if_max_samples_256 = tk.BooleanVar(value=True)
+        self.if_max_samples_512 = tk.BooleanVar(value=True)
+        self.if_max_samples_custom = tk.StringVar(value="")
         # EllipticEnvelope
         self.ee_contamination_001 = tk.BooleanVar(value=True)
         self.ee_contamination_005 = tk.BooleanVar(value=True)
         self.ee_contamination_01 = tk.BooleanVar(value=True)
         self.ee_contamination_custom = tk.StringVar(value="")
+        self.ee_support_fraction_none = tk.BooleanVar(value=True)
+        self.ee_support_fraction_05 = tk.BooleanVar(value=True)
+        self.ee_support_fraction_075 = tk.BooleanVar(value=True)
+        self.ee_support_fraction_custom = tk.StringVar(value="")
         # LOF
         self.lof_n_neighbors_10 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_20 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_30 = tk.BooleanVar(value=True)
         self.lof_n_neighbors_custom = tk.StringVar(value="")
+        self.lof_contamination_001 = tk.BooleanVar(value=True)
         self.lof_contamination_005 = tk.BooleanVar(value=True)
+        self.lof_contamination_01 = tk.BooleanVar(value=True)
         self.lof_contamination_custom = tk.StringVar(value="")
+        self.lof_metric_euclidean = tk.BooleanVar(value=True)
+        self.lof_metric_manhattan = tk.BooleanVar(value=True)
+        self.lof_metric_minkowski = tk.BooleanVar(value=False)
+        self.lof_metric_cosine = tk.BooleanVar(value=False)
+        self.lof_metric_custom = tk.StringVar(value="")
         # PCA-SIMCA
         self.simca_n_components_3 = tk.BooleanVar(value=True)
         self.simca_n_components_5 = tk.BooleanVar(value=True)
@@ -3220,9 +3237,13 @@ class SpectralPredictApp:
         self.ga_preprocess_autoscale = tk.BooleanVar(value=True)
         # Phase 2 (2026-05-06): multi-seed phase-2 rescore. The checkbox
         # toggles between n_seeds=5 (ON, default) and n_seeds=0 (OFF, legacy).
-        # Closes the top-N infiltration problem on small-n / classification
-        # tasks documented in tools/exhaustive_seed_compare.py.
-        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=True)
+        # Phase 2 multi-seed rescore: empirically zero effect on the chemometrics
+        # quality gate (gap-filtered passing-set on external) — see
+        # feedback_preprocessing_refactor_postmortem.md and
+        # tools/preprocessing_refactor_ab.py. Default flipped back to OFF
+        # 2026-05-07 per user instruction. Plumbing kept callable for any
+        # caller that explicitly opts in.
+        self.ga_preprocess_phase2_rescore = tk.BooleanVar(value=False)
         self.ga_preprocess_phase2_max_pool_multiplier = tk.IntVar(value=8)
 
         # Smart Preprocessing Discovery (NEW - replaces GA preprocessing)
@@ -3239,6 +3260,14 @@ class SpectralPredictApp:
         # Default OFF because cost is significant (~5x current TPE wall time);
         # turn ON for classification on small-n datasets where TPE drift is
         # documented (tools/bayesian_topk_stability.py).
+        # Default flipped back to OFF (2026-05-07 evening) after the empirical
+        # postmortem in tools/preprocessing_refactor_ab.py: at the user's
+        # actual chemometrics filter (gap-filtered passing-set on external),
+        # TPE multistart on classification REMOVES the user's best pick
+        # (snv_deriv2_w15+autoscale, F1=0.944, BAcccv=0.967, gap=0.033) and
+        # caps the refactor's best at F1=0.903 — a 0.041 F1 loss. The earlier
+        # "stable top-K" justification optimized for a metric the user does
+        # not gate on. See feedback_preprocessing_refactor_postmortem.md.
         self.tpe_multistart = tk.BooleanVar(value=False)
         self.tpe_n_starts = tk.IntVar(value=5)
 
@@ -13914,9 +13943,11 @@ class SpectralPredictApp:
         ne_frame = ttk.Frame(if_inner)
         ne_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
         ttk.Checkbutton(ne_frame, text="100", variable=self.if_n_estimators_100).grid(row=0, column=0, padx=5)
-        ttk.Label(ne_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
-        ttk.Entry(ne_frame, textvariable=self.if_n_estimators_custom, width=10).grid(row=0, column=2, padx=5)
-        ttk.Label(ne_frame, text="(default: 100)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        ttk.Checkbutton(ne_frame, text="200", variable=self.if_n_estimators_200).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ne_frame, text="500", variable=self.if_n_estimators_500).grid(row=0, column=2, padx=5)
+        ttk.Label(ne_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ne_frame, textvariable=self.if_n_estimators_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ne_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
         r += 1
 
         ttk.Label(if_inner, text="Contamination:", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
@@ -13940,6 +13971,18 @@ class SpectralPredictApp:
         ttk.Label(mf_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
         ttk.Entry(mf_frame, textvariable=self.if_max_features_custom, width=10).grid(row=0, column=3, padx=5)
         ttk.Label(mf_frame, text="(default: both checked)", style='Caption.TLabel').grid(row=0, column=4, padx=10)
+        r += 1
+
+        ttk.Label(if_inner, text="Max Samples (max_samples):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        ms_frame = ttk.Frame(if_inner)
+        ms_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(ms_frame, text="auto", variable=self.if_max_samples_auto).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(ms_frame, text="256", variable=self.if_max_samples_256).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(ms_frame, text="512", variable=self.if_max_samples_512).grid(row=0, column=2, padx=5)
+        ttk.Label(ms_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(ms_frame, textvariable=self.if_max_samples_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(ms_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # --- EllipticEnvelope Card ---
         ee_section, ee_content = self._create_collapsible_section(
@@ -13962,6 +14005,18 @@ class SpectralPredictApp:
         ttk.Label(ec_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
         ttk.Entry(ec_frame, textvariable=self.ee_contamination_custom, width=10).grid(row=0, column=4, padx=5)
         ttk.Label(ec_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(ee_inner, text="Support Fraction (support_fraction):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        sf_frame = ttk.Frame(ee_inner)
+        sf_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(sf_frame, text="None (sklearn default)", variable=self.ee_support_fraction_none).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(sf_frame, text="0.5", variable=self.ee_support_fraction_05).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(sf_frame, text="0.75", variable=self.ee_support_fraction_075).grid(row=0, column=2, padx=5)
+        ttk.Label(sf_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(sf_frame, textvariable=self.ee_support_fraction_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(sf_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
 
         # --- LOF Card ---
         lof_section, lof_content = self._create_collapsible_section(
@@ -13990,10 +14045,25 @@ class SpectralPredictApp:
         r += 1
         lc_frame = ttk.Frame(lof_inner)
         lc_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
-        ttk.Checkbutton(lc_frame, text="0.05", variable=self.lof_contamination_005).grid(row=0, column=0, padx=5)
-        ttk.Label(lc_frame, text="Custom:", style='TLabel').grid(row=0, column=1, padx=(15, 5))
-        ttk.Entry(lc_frame, textvariable=self.lof_contamination_custom, width=10).grid(row=0, column=2, padx=5)
-        ttk.Label(lc_frame, text="(default: 0.05)", style='Caption.TLabel').grid(row=0, column=3, padx=10)
+        ttk.Checkbutton(lc_frame, text="0.01", variable=self.lof_contamination_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lc_frame, text="0.05", variable=self.lof_contamination_005).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lc_frame, text="0.1", variable=self.lof_contamination_01).grid(row=0, column=2, padx=5)
+        ttk.Label(lc_frame, text="Custom:", style='TLabel').grid(row=0, column=3, padx=(15, 5))
+        ttk.Entry(lc_frame, textvariable=self.lof_contamination_custom, width=10).grid(row=0, column=4, padx=5)
+        ttk.Label(lc_frame, text="(default: all checked)", style='Caption.TLabel').grid(row=0, column=5, padx=10)
+        r += 1
+
+        ttk.Label(lof_inner, text="Distance Metric (metric):", style='Subheading.TLabel').grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        r += 1
+        lm_frame = ttk.Frame(lof_inner)
+        lm_frame.grid(row=r, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(lm_frame, text="euclidean", variable=self.lof_metric_euclidean).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(lm_frame, text="manhattan", variable=self.lof_metric_manhattan).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(lm_frame, text="minkowski", variable=self.lof_metric_minkowski).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(lm_frame, text="cosine", variable=self.lof_metric_cosine).grid(row=0, column=3, padx=5)
+        ttk.Label(lm_frame, text="Custom:", style='TLabel').grid(row=0, column=4, padx=(15, 5))
+        ttk.Entry(lm_frame, textvariable=self.lof_metric_custom, width=12).grid(row=0, column=5, padx=5)
+        ttk.Label(lm_frame, text="(default: euclidean + manhattan)", style='Caption.TLabel').grid(row=0, column=6, padx=10)
 
         # --- PCA-SIMCA Card ---
         simca_section, simca_content = self._create_collapsible_section(
@@ -24841,20 +24911,29 @@ class SpectralPredictApp:
                 'degree_2': True, 'degree_custom': '',
             },
             'IsolationForest': {
-                'n_estimators_100': True, 'n_estimators_custom': '',
+                'n_estimators_100': True, 'n_estimators_200': True,
+                'n_estimators_500': True, 'n_estimators_custom': '',
                 'contamination_001': True, 'contamination_005': True,
                 'contamination_01': True, 'contamination_custom': '',
                 'max_features_05': True, 'max_features_10': True,
                 'max_features_custom': '',
+                'max_samples_auto': True, 'max_samples_256': True,
+                'max_samples_512': True, 'max_samples_custom': '',
             },
             'EllipticEnvelope': {
                 'contamination_001': True, 'contamination_005': True,
                 'contamination_01': True, 'contamination_custom': '',
+                'support_fraction_none': True, 'support_fraction_05': True,
+                'support_fraction_075': True, 'support_fraction_custom': '',
             },
             'LOF': {
                 'n_neighbors_10': True, 'n_neighbors_20': True,
                 'n_neighbors_30': True, 'n_neighbors_custom': '',
-                'contamination_005': True, 'contamination_custom': '',
+                'contamination_001': True, 'contamination_005': True,
+                'contamination_01': True, 'contamination_custom': '',
+                'metric_euclidean': True, 'metric_manhattan': True,
+                'metric_minkowski': False, 'metric_cosine': False,
+                'metric_custom': '',
             },
             'PCA-SIMCA': {
                 'n_components_3': True, 'n_components_5': True,
@@ -24885,6 +24964,8 @@ class SpectralPredictApp:
             },
             'IsolationForest': {
                 'n_estimators_100': self.if_n_estimators_100,
+                'n_estimators_200': self.if_n_estimators_200,
+                'n_estimators_500': self.if_n_estimators_500,
                 'n_estimators_custom': self.if_n_estimators_custom,
                 'contamination_001': self.if_contamination_001,
                 'contamination_005': self.if_contamination_005,
@@ -24893,20 +24974,35 @@ class SpectralPredictApp:
                 'max_features_05': self.if_max_features_05,
                 'max_features_10': self.if_max_features_10,
                 'max_features_custom': self.if_max_features_custom,
+                'max_samples_auto': self.if_max_samples_auto,
+                'max_samples_256': self.if_max_samples_256,
+                'max_samples_512': self.if_max_samples_512,
+                'max_samples_custom': self.if_max_samples_custom,
             },
             'EllipticEnvelope': {
                 'contamination_001': self.ee_contamination_001,
                 'contamination_005': self.ee_contamination_005,
                 'contamination_01': self.ee_contamination_01,
                 'contamination_custom': self.ee_contamination_custom,
+                'support_fraction_none': self.ee_support_fraction_none,
+                'support_fraction_05': self.ee_support_fraction_05,
+                'support_fraction_075': self.ee_support_fraction_075,
+                'support_fraction_custom': self.ee_support_fraction_custom,
             },
             'LOF': {
                 'n_neighbors_10': self.lof_n_neighbors_10,
                 'n_neighbors_20': self.lof_n_neighbors_20,
                 'n_neighbors_30': self.lof_n_neighbors_30,
                 'n_neighbors_custom': self.lof_n_neighbors_custom,
+                'contamination_001': self.lof_contamination_001,
                 'contamination_005': self.lof_contamination_005,
+                'contamination_01': self.lof_contamination_01,
                 'contamination_custom': self.lof_contamination_custom,
+                'metric_euclidean': self.lof_metric_euclidean,
+                'metric_manhattan': self.lof_metric_manhattan,
+                'metric_minkowski': self.lof_metric_minkowski,
+                'metric_cosine': self.lof_metric_cosine,
+                'metric_custom': self.lof_metric_custom,
             },
             'PCA-SIMCA': {
                 'n_components_3': self.simca_n_components_3,
@@ -24932,37 +25028,89 @@ class SpectralPredictApp:
                     return False
         return True
 
+    # Sklearn-supported metrics that LOF accepts. Curated to common-for-spectroscopy
+    # subset; user-typed metrics outside this set are rejected with a clear error
+    # rather than passed straight through to sklearn (where they fail per-fold and
+    # surface as a generic "skipped" result row).
+    _LOF_KNOWN_METRICS = frozenset({
+        "euclidean", "manhattan", "minkowski", "cosine",
+        "chebyshev", "canberra", "braycurtis", "correlation",
+        "l1", "l2", "cityblock",
+    })
+
     @staticmethod
-    def _parse_oc_float(val, lo=0.0, hi=1.0):
-        try:
-            f = float(val)
+    def _split_oc_tokens(val):
+        if not val or not val.strip():
+            return []
+        return [t.strip() for t in val.replace(";", ",").split(",") if t.strip()]
+
+    @staticmethod
+    def _parse_oc_float_list(val, lo=0.0, hi=1.0):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                f = float(tok)
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not a number")
+                continue
             if lo < f <= hi:
-                return f
-        except (ValueError, TypeError):
-            pass
-        return None
+                if f not in values:
+                    values.append(f)
+            else:
+                errors.append(f"{tok!r} not in range ({lo}, {hi}]")
+        return values, errors
 
     @staticmethod
-    def _parse_oc_int(val, min_val=1):
-        try:
-            i = int(float(val))
+    def _parse_oc_int_list(val, min_val=1):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                i = int(float(tok))
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not an integer")
+                continue
             if i >= min_val:
-                return i
-        except (ValueError, TypeError):
-            pass
-        return None
+                if i not in values:
+                    values.append(i)
+            else:
+                errors.append(f"{tok!r} below minimum {min_val}")
+        return values, errors
 
     @staticmethod
-    def _parse_oc_n_components(val):
-        try:
-            f = float(val)
+    def _parse_oc_n_components_list(val):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            try:
+                f = float(tok)
+            except (ValueError, TypeError):
+                errors.append(f"{tok!r} is not a number")
+                continue
             if f == int(f) and int(f) >= 1:
-                return int(f)
-            if 0.0 < f < 1.0:
-                return f
-        except (ValueError, TypeError):
-            pass
-        return None
+                v = int(f)
+            elif 0.0 < f < 1.0:
+                v = f
+            else:
+                errors.append(f"{tok!r} not a positive integer or fraction in (0, 1)")
+                continue
+            if v not in values:
+                values.append(v)
+        return values, errors
+
+    @staticmethod
+    def _parse_oc_metric_list(val, known_metrics):
+        values = []
+        errors = []
+        for tok in SpectralPredictApp._split_oc_tokens(val):
+            normalized = tok.lower()
+            if normalized in known_metrics:
+                if normalized not in values:
+                    values.append(normalized)
+            else:
+                errors.append(f"{tok!r} not a recognised metric")
+        return values, errors
 
     def _collect_ocsvm_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -24989,18 +25137,24 @@ class SpectralPredictApp:
             nus.append(0.1)
         custom = self.ocsvm_nu_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in nus:
-                nus.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in nus:
+                    nus.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("OneClassSVM", "nu", e))
 
         degrees = []
         if self.ocsvm_degree_2.get():
             degrees.append(2)
         custom = self.ocsvm_degree_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in degrees:
-                degrees.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in degrees:
+                    degrees.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("OneClassSVM", "degree", e))
 
         if not kernels:
             kernels = sorted(set(p['kernel'] for p in defaults))
@@ -25020,11 +25174,18 @@ class SpectralPredictApp:
         n_est = []
         if self.if_n_estimators_100.get():
             n_est.append(100)
+        if self.if_n_estimators_200.get():
+            n_est.append(200)
+        if self.if_n_estimators_500.get():
+            n_est.append(500)
         custom = self.if_n_estimators_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in n_est:
-                n_est.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in n_est:
+                    n_est.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "n_estimators", e))
 
         contam = []
         if self.if_contamination_001.get():
@@ -25035,9 +25196,12 @@ class SpectralPredictApp:
             contam.append(0.1)
         custom = self.if_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "contamination", e))
 
         max_feat = []
         if self.if_max_features_05.get():
@@ -25046,9 +25210,36 @@ class SpectralPredictApp:
             max_feat.append(1.0)
         custom = self.if_max_features_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in max_feat:
-                max_feat.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in max_feat:
+                    max_feat.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("IsolationForest", "max_features", e))
+
+        max_samp: list = []
+        if self.if_max_samples_auto.get():
+            max_samp.append('auto')
+        if self.if_max_samples_256.get():
+            max_samp.append(256)
+        if self.if_max_samples_512.get():
+            max_samp.append(512)
+        custom = self.if_max_samples_custom.get().strip()
+        if custom:
+            # Tokenize first so 'auto' can co-exist with ints in the same custom string.
+            for tok in self._split_oc_tokens(custom):
+                if tok.lower() == 'auto':
+                    if 'auto' not in max_samp:
+                        max_samp.append('auto')
+                else:
+                    sub_vals, sub_errs = self._parse_oc_int_list(tok, 1)
+                    for v in sub_vals:
+                        if v not in max_samp:
+                            max_samp.append(v)
+                    for e in sub_errs:
+                        self._oc_param_collector_errors.append(
+                            ("IsolationForest", "max_samples", e)
+                        )
 
         if not n_est:
             n_est = sorted(set(p['n_estimators'] for p in defaults))
@@ -25056,8 +25247,15 @@ class SpectralPredictApp:
             contam = sorted(set(p['contamination'] for p in defaults))
         if not max_feat:
             max_feat = sorted(set(p['max_features'] for p in defaults))
+        if not max_samp:
+            max_samp = ['auto']
 
-        return {'n_estimators': n_est, 'contamination': contam, 'max_features': max_feat}
+        return {
+            'n_estimators': n_est,
+            'contamination': contam,
+            'max_features': max_feat,
+            'max_samples': max_samp,
+        }
 
     def _collect_ee_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25072,14 +25270,37 @@ class SpectralPredictApp:
             contam.append(0.1)
         custom = self.ee_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("EllipticEnvelope", "contamination", e))
+
+        support_fracs: list = []
+        if self.ee_support_fraction_none.get():
+            support_fracs.append(None)
+        if self.ee_support_fraction_05.get():
+            support_fracs.append(0.5)
+        if self.ee_support_fraction_075.get():
+            support_fracs.append(0.75)
+        custom = self.ee_support_fraction_custom.get().strip()
+        if custom:
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in support_fracs:
+                    support_fracs.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(
+                    ("EllipticEnvelope", "support_fraction", e)
+                )
 
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
+        if not support_fracs:
+            support_fracs = [None]
 
-        return {'contamination': contam}
+        return {'contamination': contam, 'support_fraction': support_fracs}
 
     def _collect_lof_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25094,25 +25315,55 @@ class SpectralPredictApp:
             nn.append(30)
         custom = self.lof_n_neighbors_custom.get().strip()
         if custom:
-            v = self._parse_oc_int(custom, 1)
-            if v is not None and v not in nn:
-                nn.append(v)
+            vals, errs = self._parse_oc_int_list(custom, 1)
+            for v in vals:
+                if v not in nn:
+                    nn.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "n_neighbors", e))
 
         contam = []
+        if self.lof_contamination_001.get():
+            contam.append(0.01)
         if self.lof_contamination_005.get():
             contam.append(0.05)
+        if self.lof_contamination_01.get():
+            contam.append(0.1)
         custom = self.lof_contamination_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in contam:
-                contam.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in contam:
+                    contam.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "contamination", e))
+
+        metrics: list[str] = []
+        if self.lof_metric_euclidean.get():
+            metrics.append('euclidean')
+        if self.lof_metric_manhattan.get():
+            metrics.append('manhattan')
+        if self.lof_metric_minkowski.get():
+            metrics.append('minkowski')
+        if self.lof_metric_cosine.get():
+            metrics.append('cosine')
+        custom = self.lof_metric_custom.get().strip()
+        if custom:
+            vals, errs = self._parse_oc_metric_list(custom, self._LOF_KNOWN_METRICS)
+            for v in vals:
+                if v not in metrics:
+                    metrics.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("LOF", "metric", e))
 
         if not nn:
             nn = sorted(set(p['n_neighbors'] for p in defaults))
         if not contam:
             contam = sorted(set(p['contamination'] for p in defaults))
+        if not metrics:
+            metrics = ['euclidean']
 
-        return {'n_neighbors': nn, 'contamination': contam}
+        return {'n_neighbors': nn, 'contamination': contam, 'metric': metrics}
 
     def _collect_simca_overrides(self):
         from spectral_predict.contamination import get_one_class_model_grids
@@ -25129,9 +25380,12 @@ class SpectralPredictApp:
             n_comp.append(0.95)
         custom = self.simca_n_components_custom.get().strip()
         if custom:
-            v = self._parse_oc_n_components(custom)
-            if v is not None and v not in n_comp:
-                n_comp.append(v)
+            vals, errs = self._parse_oc_n_components_list(custom)
+            for v in vals:
+                if v not in n_comp:
+                    n_comp.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("PCA-SIMCA", "n_components", e))
 
         alphas = []
         if self.simca_alpha_001.get():
@@ -25140,9 +25394,12 @@ class SpectralPredictApp:
             alphas.append(0.05)
         custom = self.simca_alpha_custom.get().strip()
         if custom:
-            v = self._parse_oc_float(custom, 0.0, 1.0)
-            if v is not None and v not in alphas:
-                alphas.append(v)
+            vals, errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in vals:
+                if v not in alphas:
+                    alphas.append(v)
+            for e in errs:
+                self._oc_param_collector_errors.append(("PCA-SIMCA", "alpha", e))
 
         if not n_comp:
             n_comp = sorted(set(p['n_components'] for p in defaults), key=lambda x: (isinstance(x, float), x))
@@ -25152,6 +25409,8 @@ class SpectralPredictApp:
         return {'n_components': n_comp, 'alpha': alphas}
 
     def _collect_one_class_model_param_overrides(self):
+        # Reset per-call so a previous run's errors don't bleed into this invocation.
+        self._oc_param_collector_errors = []
         overrides = {}
         collectors = {
             'OneClassSVM': self._collect_ocsvm_overrides,
@@ -25163,7 +25422,33 @@ class SpectralPredictApp:
         for model_name, collector in collectors.items():
             if not self._one_class_model_card_matches_default(model_name):
                 overrides[model_name] = collector()
+        if self._oc_param_collector_errors:
+            self._show_oc_param_collector_errors(self._oc_param_collector_errors)
         return overrides if overrides else None
+
+    def _show_oc_param_collector_errors(self, errors):
+        # Single summary dialog so the user sees every bad token at once. Run is
+        # not aborted — values that did parse are still used.
+        # The collector chain runs on the analysis worker thread; route the
+        # dialog through root.after so we don't repeat the bare-worker-Tk
+        # anti-pattern that the surrounding hardening was meant to close.
+        lines = [f"  • {model}.{param}: {msg}" for model, param, msg in errors]
+        body = (
+            "Some 'Custom:' field tokens could not be parsed and were ignored:\n\n"
+            + "\n".join(lines)
+            + "\n\nThe analysis will proceed with the values that parsed correctly."
+        )
+        try:
+            self.root.after(
+                0,
+                lambda b=body: messagebox.showwarning(
+                    "Invalid Custom hyperparameter values", b
+                ),
+            )
+        except Exception:
+            # In headless / test contexts there is no Tk root; fall back to a
+            # log line so the warning still surfaces somewhere.
+            self._log_progress(f"[OC Params] {body}")
 
     def _apply_pending_validation_indices(self):
         """Apply validation indices captured at the prior run's start_run.
@@ -25379,14 +25664,23 @@ class SpectralPredictApp:
                     except Exception:
                         _persist_choice = "never"
                     if _persist_choice in ("auto", "always"):
+                        # Worker-thread Tk operation: route through root.after to
+                        # avoid the "main thread is not in main loop" failure mode
+                        # that surfaces on Windows when blocking GUI calls fire
+                        # off the analysis worker.
+                        _warn_body = (
+                            "Bayesian crash-resume could not be enabled for "
+                            "this run because the SQLite store could not be "
+                            f"initialized:\n\n{run_err}\n\nThe run will "
+                            "continue in-memory. If it crashes you will not "
+                            "be able to resume."
+                        )
                         try:
-                            messagebox.showwarning(
-                                "Crash-resume disabled",
-                                "Bayesian crash-resume could not be enabled for "
-                                "this run because the SQLite store could not be "
-                                f"initialized:\n\n{run_err}\n\nThe run will "
-                                "continue in-memory. If it crashes you will not "
-                                "be able to resume.",
+                            self.root.after(
+                                0,
+                                lambda b=_warn_body: messagebox.showwarning(
+                                    "Crash-resume disabled", b
+                                ),
                             )
                         except Exception:
                             pass
@@ -27285,7 +27579,10 @@ class SpectralPredictApp:
                     f"Try reloading the data or check that the ID column in your CSV matches the spectral file names."
                 )
                 self._log_progress(f"\n[X] ERROR: {error_msg}")
-                messagebox.showerror("Alignment Error", error_msg)
+                # The raise below propagates to the worker's top-level except,
+                # which already surfaces a messagebox via root.after. A bare
+                # showerror here from the worker thread is the kind of Tk
+                # operation that can destabilise the main loop on Windows.
                 raise ValueError(error_msg)
 
             # Ensure indices match
@@ -28516,7 +28813,33 @@ class SpectralPredictApp:
             self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
 
     def _progress_callback(self, info):
-        """Handle progress updates."""
+        """Handle progress updates.
+
+        Called from the analysis worker thread. Every Tk-touching path is
+        either funneled through ``_log_progress`` (which itself wraps
+        ``root.after``) or scheduled via ``root.after`` directly below.
+        Any failure is contained — disk logging in ``_log_progress`` is the
+        durable record.
+        """
+        try:
+            return self._progress_callback_impl(info)
+        except Exception as e:
+            # Defensive containment: if anything in the GUI update path
+            # raises (destroyed widget, mid-shutdown Tk, etc.), don't let
+            # it propagate up the worker stack and exit the thread mid-search.
+            # Capture full traceback so post-mortem can identify the offending
+            # widget / callback shape, not just the exception class.
+            try:
+                import traceback
+                from spectral_predict.run_logging import log_event
+                log_event(
+                    f"[GUI] _progress_callback failed: {e!r}\n"
+                    + traceback.format_exc()
+                )
+            except Exception:
+                pass
+
+    def _progress_callback_impl(self, info):
         msg = info.get('message', '')
         self._log_progress(msg)
 
@@ -28610,6 +28933,13 @@ class SpectralPredictApp:
 
         Disk mirror is best-effort: if `setup_run_logger` hasn't run yet
         (early startup before any search begins), `log_event` no-ops.
+
+        The widget update is scheduled via ``root.after`` so it executes on
+        the main thread. The scheduling itself is wrapped because under rare
+        Tk-shutdown / interpreter-mismatch conditions on Windows the call
+        can raise — letting that propagate from a worker thread can leave
+        the analysis loop in a half-dead state. The disk log preserves the
+        message regardless.
         """
         from spectral_predict.run_logging import log_event
         try:
@@ -28618,7 +28948,10 @@ class SpectralPredictApp:
             # Never let logging break the GUI flow. Silent on purpose —
             # the file logger is a debugging aid, not a critical path.
             pass
-        self.root.after(0, lambda: self._append_progress(message))
+        try:
+            self.root.after(0, lambda: self._append_progress(message))
+        except Exception:
+            pass  # Tk no longer accepting new callbacks; disk log already has it.
 
     def _append_progress(self, message):
         """Append message to progress text (must be called from main thread)."""
