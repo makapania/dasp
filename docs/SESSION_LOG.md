@@ -4,6 +4,24 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 (early) — PR #58 + #59 merge batch: 4 non-obvious lessons from the cross-family + Claude-family review trail
+
+**Context.** PR #58 (OC hyperparameter round 2 + parser hardening + Tk hardening + multi-seed multistart UX) and PR #59 (3 fix-of-fixes from post-#58 triage). Both merged at `46226ca` and `15dd011`. Multiple Codex / DeepSeek V4 Pro / Kimi K2.6 / pr-review-toolkit rounds. Four lessons worth recording so future agents don't re-discover them.
+
+**1. Convergent finding signal — three independent reviewers flagged the same self-introduced bug.**
+After my parser BLOCKER fix (`521e222`) wired `decision_score_error` into the GUI, my own follow-up commit `1e03dc0` introduced a fresh bug: `self.predictions_decision_errors` was created lazily via `if not hasattr(...)` and never reset between Run-Predictions clicks. pr-review-toolkit's `code-reviewer`, `pr-test-analyzer`, and `silent-failure-hunter` all flagged it independently — three Claude-family reviewers, same finding. When that happens, don't second-guess: it IS a real bug. Closed in `504fc40`. Same lazy-init pattern pre-existed for `predictions_applicability` — fixed both adjacent. **Lesson:** convergent flags from orthogonal reviewer roles = high signal. Don't dismiss.
+
+**2. "Defense-in-depth" claims need verification, not greps.**
+I claimed Fix #2 (polyorder fallback in `compute_validation_metrics_for_top_one_class_models`) was "defense-in-depth, never reached today" because every producer I greenlit-greped writes `Poly` explicitly. Codex caught the miss: `search.py:5873` (in `run_one_class_search` — the OC grid path) writes `"polyorder": None` for derivative configs. Result rows get `Poly=None`, the buggy fallback fires (`min(2, window-1)` → poly=2 instead of training's poly=3), and val_* metrics are computed on a *different* preprocessing pipeline than training (cubic vs quadratic 2nd-derivative — fundamentally different signals). The fix is real, not defensive. **Lesson:** when claiming a code path is dead, trace EVERY producer and consumer end-to-end. Greps miss conditional / nested writes. Cross-family reviewers will catch this.
+
+**3. Backend-only repro script bisects H1 vs H2 in 30 seconds.**
+TPE multi-start GUI crash (~2s after wrapper begin, no Python traceback, just zombie `tk.Variable.__del__` destructors). Rather than speculate "is it the multi-start wrapper?" vs "is it the GUI thread interaction?", I wrote `tools/repro_tpe_multistart_one_class.py` calling the wrapper directly with the user's data shape on synthetic data. Backend ran 120+s without crashing. **In ~30 seconds of backend-only execution we conclusively bisected the failure to H2 (GUI/Tk worker-thread interaction), saving hours of speculative GUI hardening** — and pointed the fix at the right layer (worker-thread `messagebox.*` calls + `tk.Variable.get()` reads needing `root.after` marshaling). Pattern: when a Tk crash gives no Python traceback, write a backend repro FIRST. Now committed as a permanent diagnostic in `tools/`.
+
+**4. Fix-of-fix sister-site pattern: the new code reintroduces the anti-pattern.**
+After hardening worker-thread `messagebox` calls in `eeee720`, my parser BLOCKER fix in `521e222` added a NEW worker-thread `messagebox.showwarning` (in `_show_oc_param_collector_errors`) — re-introducing the exact anti-pattern the hardening was meant to remove. Caught by Codex, DeepSeek, AND Kimi convergently as the MUST-FIX MEDIUM. Closed in `8ed29e5`. Cycle 4 of the same pattern observed in this codebase (cf. `2026-05-07 (late)` SESSION_LOG entry on the UVE Bayesian-dispatcher leak). **Lesson:** when fixing an anti-pattern, audit the diff for re-introductions of that same pattern in the new code. The cross-family review consistently catches these; Kimi's sister-site sweep is empirically the highest-yield reviewer for fix-of-fixes per memory `feedback_review_method_signal.md`.
+
+---
+
 ## 2026-05-07 (evening) — Preprocessing-discovery refactor postmortem: empirically harmful at the chemometrics gate
 
 **Context.** User asked: are the preprocessing changes (b551421's 4-phase refactor) actually producing better models, or were they justified on metrics that don't matter? Several conversation turns of clarification surfaced the user's actual filter: full leaderboard, NOT top-K by CV (top-K is typically overfit, never auto-picked). Pick is from gap-filtered passing set — models with `|R²cv − R²pred| ≤ ~0.10` ("similar AND high"). Built `tools/preprocessing_refactor_ab.py` to test legacy vs refactor under that exact criterion.
