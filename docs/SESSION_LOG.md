@@ -4,6 +4,31 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-07 (late) — TPE multi-start one_class GUI crash isolated to GUI/Tk worker-thread interaction
+
+**Context.** User reported "the program literally crashed and ended" when running multi-seed TPE on a one_class Quick analysis (49 samples × 2151 wavelengths, IsolationForest + PCA-SIMCA, importance varsel). Crash log at `C:\Users\mspon\AppData\Local\dasp\logs\run_20260507_162018_quick.log` shows TPE multistart begins at 16:53:17, GUI Tk main loop dies by 16:53:19 (zombie `tk.Variable.__del__` destructors firing on the worker thread with `RuntimeError: main thread is not in main loop`).
+
+**Bisection.** Wrote a pure-backend repro at `tools/repro_tpe_multistart_one_class.py` that calls `run_tpe_multistart_preprocessing_discovery` directly with the user's exact settings on synthetic data of the same shape. Backend ran 120+ seconds without crashing, completing 7 configs in 22.4s on `n_trials=5, n_starts=2`. **Backend is not the bug.** The crash is in the GUI/Tk worker-thread interaction.
+
+**Likely cause (per Codex investigation, this session).** The analysis worker thread (`_run_analysis_thread`, ~3300 lines starting at line 25499) directly reads `tk.Variable.get()`, mutates widgets, and called bare `messagebox.*` from the worker without `root.after`. On Windows this kills the Tk interpreter randomly under load. The 2-second-after-multistart-begins timing is a red herring — the crash was already loaded; multistart's call shape (longer time before the first trial completes vs. single-start which fires per-trial GUI updates) just exposes it more reliably.
+
+**Defensive hardening shipped this session (not a full fix):**
+- `messagebox.showwarning` at "Crash-resume disabled" (Bayesian SQLite fail) wrapped in `root.after`.
+- `messagebox.showerror` at "Alignment Error" (X/y len mismatch) removed — the `raise ValueError` immediately following propagates to the worker's top-level `except` which already surfaces a messagebox via `root.after`.
+- `_log_progress` `root.after` call wrapped in try/except so a Tk shutdown mid-call can't kill the worker stack.
+- `_progress_callback` split into a thin wrapper + `_progress_callback_impl`; wrapper catches all exceptions, logs them to the disk log via `log_event`, returns. A bad GUI update can no longer escalate to an unhandled exception in the worker thread.
+- Repro script `tools/repro_tpe_multistart_one_class.py` documented + verified on Windows.
+
+**Still needed (separate, larger refactor):**
+- The `messagebox.askyesno` at the iPLS-discontinuous-regions check (~line 27529) is a blocking modal called from the worker thread. Not in the user's crash path (they use importance varsel) but a real risk for iPLS users. Fix needs a thread-safe queue+event pattern OR hoisting the check before the worker thread starts.
+- Hundreds of `tk.Variable.get()` reads in the worker thread. Codex's recommended canonical fix is to snapshot all GUI state on the main thread before starting the analysis thread, pass plain Python values into `_run_analysis_thread`. Days of work; defer until a cleaner repro pinpoints whether the worker-thread Var reads are causing the deaths or just coexisting with them.
+
+**`tpe_multistart` default-on flip is BLOCKED on this fix.** User asked for the checkbox default to flip from False to True (since multi-seed is methodologically necessary), but flipping before the crash is fixed would crash every user. Hold the flip.
+
+**Lesson.** When a Tk crash gives no Python traceback, write a backend-only repro FIRST. Bisecting "GUI vs backend" with one script saved hours of speculative GUI hardening — confirmed in <30s where the fix needs to land.
+
+---
+
 ## 2026-05-07 — OC round-2: false-positive BLOCKERs from cross-family review + EE builder None-sort non-issue
 
 **Context.** PR feat/oc-hyperparams-round2 adds LOF metric/contamination, IF max_samples/n_estimators, EE support_fraction to Tab 4C. Cross-family review (Codex + DeepSeek V4 Pro Max + Kimi K2.6) ran on commit 6180749.

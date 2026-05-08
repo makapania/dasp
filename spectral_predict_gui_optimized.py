@@ -25644,14 +25644,23 @@ class SpectralPredictApp:
                     except Exception:
                         _persist_choice = "never"
                     if _persist_choice in ("auto", "always"):
+                        # Worker-thread Tk operation: route through root.after to
+                        # avoid the "main thread is not in main loop" failure mode
+                        # that surfaces on Windows when blocking GUI calls fire
+                        # off the analysis worker.
+                        _warn_body = (
+                            "Bayesian crash-resume could not be enabled for "
+                            "this run because the SQLite store could not be "
+                            f"initialized:\n\n{run_err}\n\nThe run will "
+                            "continue in-memory. If it crashes you will not "
+                            "be able to resume."
+                        )
                         try:
-                            messagebox.showwarning(
-                                "Crash-resume disabled",
-                                "Bayesian crash-resume could not be enabled for "
-                                "this run because the SQLite store could not be "
-                                f"initialized:\n\n{run_err}\n\nThe run will "
-                                "continue in-memory. If it crashes you will not "
-                                "be able to resume.",
+                            self.root.after(
+                                0,
+                                lambda b=_warn_body: messagebox.showwarning(
+                                    "Crash-resume disabled", b
+                                ),
                             )
                         except Exception:
                             pass
@@ -27550,7 +27559,10 @@ class SpectralPredictApp:
                     f"Try reloading the data or check that the ID column in your CSV matches the spectral file names."
                 )
                 self._log_progress(f"\n[X] ERROR: {error_msg}")
-                messagebox.showerror("Alignment Error", error_msg)
+                # The raise below propagates to the worker's top-level except,
+                # which already surfaces a messagebox via root.after. A bare
+                # showerror here from the worker thread is the kind of Tk
+                # operation that can destabilise the main loop on Windows.
                 raise ValueError(error_msg)
 
             # Ensure indices match
@@ -28781,7 +28793,27 @@ class SpectralPredictApp:
             self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
 
     def _progress_callback(self, info):
-        """Handle progress updates."""
+        """Handle progress updates.
+
+        Called from the analysis worker thread. Every Tk-touching path is
+        either funneled through ``_log_progress`` (which itself wraps
+        ``root.after``) or scheduled via ``root.after`` directly below.
+        Any failure is contained — disk logging in ``_log_progress`` is the
+        durable record.
+        """
+        try:
+            return self._progress_callback_impl(info)
+        except Exception as e:
+            # Defensive containment: if anything in the GUI update path
+            # raises (destroyed widget, mid-shutdown Tk, etc.), don't let
+            # it propagate up the worker stack and exit the thread mid-search.
+            try:
+                from spectral_predict.run_logging import log_event
+                log_event(f"[GUI] _progress_callback failed: {e!r}")
+            except Exception:
+                pass
+
+    def _progress_callback_impl(self, info):
         msg = info.get('message', '')
         self._log_progress(msg)
 
@@ -28875,6 +28907,13 @@ class SpectralPredictApp:
 
         Disk mirror is best-effort: if `setup_run_logger` hasn't run yet
         (early startup before any search begins), `log_event` no-ops.
+
+        The widget update is scheduled via ``root.after`` so it executes on
+        the main thread. The scheduling itself is wrapped because under rare
+        Tk-shutdown / interpreter-mismatch conditions on Windows the call
+        can raise — letting that propagate from a worker thread can leave
+        the analysis loop in a half-dead state. The disk log preserves the
+        message regardless.
         """
         from spectral_predict.run_logging import log_event
         try:
@@ -28883,7 +28922,10 @@ class SpectralPredictApp:
             # Never let logging break the GUI flow. Silent on purpose —
             # the file logger is a debugging aid, not a critical path.
             pass
-        self.root.after(0, lambda: self._append_progress(message))
+        try:
+            self.root.after(0, lambda: self._append_progress(message))
+        except Exception:
+            pass  # Tk no longer accepting new callbacks; disk log already has it.
 
     def _append_progress(self, message):
         """Append message to progress text (must be called from main thread)."""
