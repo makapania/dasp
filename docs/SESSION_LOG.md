@@ -25,7 +25,7 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 **How to recognize this anti-pattern in future audits.** Grep for `get_tk_widget().pack(fill='both', expand=True)` and check whether the next pack call in the same function is `side='bottom'` (good) or absent/`side='top'`/`fill='x'` without explicit side (bad). Anti-pattern is also latent in any code that creates `NavigationToolbar2Tk(canvas, parent_frame)` directly — matplotlib's toolbar self-packs `side='bottom'` but only gets cavity if the canvas didn't expand-claim it first.
 
-**Known follow-up (NOT fixed in this commit; flagged by Codex audit).** `_add_plot_export_button()` at `spectral_predict_gui_optimized.py:16572` packs its `button_frame` with default `side='top'` and is called AFTER `canvas.get_tk_widget().pack(... expand=True)` at ~14 sites — including contamination-tab export buttons (~56400/56411, ~56480/56499) which sit in the same Explore-style frame whose toolbar this commit just fixed. So the toolbar is now safe but the export button right below it can still clip on a small laptop. Fix path: add a `side='bottom'` / `before=` parameter to `_add_plot_export_button()` and thread it through, OR re-order the call sites the same way this commit did for toolbars.
+**Follow-up shipped in next commit.** `_add_plot_export_button()` at `spectral_predict_gui_optimized.py:16531` updated to (a) pack at `side='bottom'`, (b) reorder ahead of the LAST expand=True pack-slave via `pack(before=...)`, (c) use `parent_frame.tk.getboolean(...)` for robust Tcl boolean parsing across Tk versions, and (d) accept a `pin_to_bottom: bool = True` keyword for the one call site (`_preview_wavelength_selection`, gui:40336) that packs additional widgets AFTER the export button. No call-site changes needed for the other ~30 sites — the helper auto-detects the canvas via `pack_slaves()` + `pack_info()`. Codex re-review on the helper diff returned no high-risk issues; both LOWs (Tcl boolean parsing + preview-window UX regression) addressed in the final form. Visual change at the two contam sites that have BOTH a toolbar AND an export button (56411, 56499): button moves from below toolbar to above toolbar. Acceptable trade-off; toolbar stays in conventional bottom position.
 
 ---
 
@@ -46,31 +46,6 @@ The GUI exposes three preprocessing-discovery options:
 **Exhaustive already solved this problem.** `ga_preprocessing.py:289-395` exposes `fitness_model` selecting between PLS / LightGBM / MLP / NeuralBoosted. Line 425-428 docstring: *"This ensures preprocessing is optimized for the ACTUAL model the user wants to test, not a proxy model with hardcoded hyperparameters."* This is prior art in the same codebase that corroborates the TPE plan's Q1 (linear-default) decision and Q4 alternative (exact-model-match, deemed too complex for TPE but already shipped for Exhaustive).
 
 **Cross-family review of the plan** (Codex CLI cross-file dispatcher angle + Kimi K2.6 sister-site sweep angle) returned NEEDS_CHANGES with two convergent findings (BLOCKER A/B harness `**kwargs` + MEDIUM CSV manual-per-key plumbing), one Kimi-unique sister-site finding (Basic path same bug), and one Codex-unique test-semantics finding. All folded into the revised plan; Basic explicitly out-of-scope per user direction (TPE-only fix).
-
----
-
-## 2026-05-08 (laptop layout) — Tk pack-order anti-pattern clipped Peak Calculator + 6 sister sites on small screens
-
-**Symptom (user-reported on 16" laptop).** Explore tab → load spectra → Peak Calculator button does not appear at the bottom of the plot's info bar; no scrollbar to recover it. Works fine on desktop monitors.
-
-**Root cause.** Tk pack-manager allocation order. The `_create_explore_plot_in_frame` (and 6 sister sites) packed the matplotlib canvas FIRST with `fill='both', expand=True`, then packed `toolbar_frame` and `info_frame` AFTER with `fill='x'`. Tk pack allocates parcels in pack order: canvas's natural request (`Figure(figsize=(12, 6))` ≈ 600 px) consumed the parent cavity from the top, leaving nothing for the bottom strips on parents shorter than ~660 px (typical Explore sub-tab height on a 16" laptop after notebook chrome). The bottom widgets clipped silently.
-
-**Fix pattern.** Pack bottom strips at `side='bottom', fill='x'` BEFORE the canvas. The canvas, packed last with `expand=True`, then absorbs *whatever cavity is left* and compresses gracefully. This is the canonical Tk "fixed bottom controls + expandable content" idiom — already correctly used at the PCA results frame (line ~7000) by prior code, which served as the template.
-
-**Sites fixed in `spectral_predict_gui_optimized.py`:**
-- `_create_explore_plot_in_frame` (~8838) — the user-reported Peak Calculator clip; both `info_frame` and `toolbar_frame` reordered
-- Target Distribution sub-tab (~7430)
-- Manual Baseline (`_setup_explore_manual_baseline`, ~8537)
-- Predictor Screening (`_create_explore_screening_plot`, ~10770)
-- Wavelength Importance plot (~34866)
-- Calibration Transfer Predictions plot (~47867)
-- Contamination plots — fixed centrally in `_contam_add_toolbar` helper using `pack(side='bottom', fill='x', before=canvas_widget)` to reorder in pack order without touching the 5 call sites
-
-**Verification.** `py_compile` passes; 90/90 `tests/test_peak_calculator.py` pass (peak calculator dialog logic unchanged — only the button's parent layout changed).
-
-**How to recognize this anti-pattern in future audits.** Grep for `get_tk_widget().pack(fill='both', expand=True)` and check whether the next pack call in the same function is `side='bottom'` (good) or absent/`side='top'`/`fill='x'` without explicit side (bad). Anti-pattern is also latent in any code that creates `NavigationToolbar2Tk(canvas, parent_frame)` directly — matplotlib's toolbar self-packs `side='bottom'` but only gets cavity if the canvas didn't expand-claim it first.
-
-**Known follow-up (NOT fixed in this commit; flagged by Codex audit).** `_add_plot_export_button()` at `spectral_predict_gui_optimized.py:16572` packs its `button_frame` with default `side='top'` and is called AFTER `canvas.get_tk_widget().pack(... expand=True)` at ~14 sites — including contamination-tab export buttons (~56400/56411, ~56480/56499) which sit in the same Explore-style frame whose toolbar this commit just fixed. So the toolbar is now safe but the export button right below it can still clip on a small laptop. Fix path: add a `side='bottom'` / `before=` parameter to `_add_plot_export_button()` and thread it through, OR re-order the call sites the same way this commit did for toolbars.
 
 ---
 

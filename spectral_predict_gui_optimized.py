@@ -16528,7 +16528,8 @@ class SpectralPredictApp:
         except Exception as e:
             messagebox.showerror("Error", f"Could not read reference file:\n{e}")
 
-    def _add_plot_export_button(self, parent_frame, figure, default_filename="plot"):
+    def _add_plot_export_button(self, parent_frame, figure, default_filename="plot",
+                                 *, pin_to_bottom: bool = True):
         """Add a small export button to save a matplotlib figure as an image.
 
         Parameters
@@ -16539,6 +16540,12 @@ class SpectralPredictApp:
             The figure to export
         default_filename : str
             Default filename (without extension) for the saved image
+        pin_to_bottom : bool, default True
+            If True (the common case), pack the export button at side='bottom'
+            and reorder it ahead of any expand=True child of parent_frame so
+            it stays visible on small laptop screens. Pass False for dialogs
+            where additional widgets are packed AFTER the export button —
+            otherwise the button gets pinned below those later widgets.
         """
         def export_plot():
             from tkinter import filedialog
@@ -16569,7 +16576,58 @@ class SpectralPredictApp:
 
         # Create a small button frame
         button_frame = ttk.Frame(parent_frame)
-        button_frame.pack(fill='x', padx=10, pady=(5, 10))
+
+        if pin_to_bottom:
+            # Pack at side='bottom' and, if parent_frame already contains a
+            # packed child with expand=True (typically the matplotlib canvas),
+            # reorder this button ahead of it via pack(before=...). Without
+            # this, canvas's expand=True consumes the parent cavity and the
+            # export button clips off the bottom on small laptop screens with
+            # no scrollbar to recover.
+            #
+            # Use the LAST expanding pack-slave so we attach to the most
+            # recently packed canvas (resilient against any stale widgets
+            # left in the pack list — e.g., on replot paths that don't fully
+            # clear winfo_children()).
+            expanding_child = None
+            try:
+                slaves = parent_frame.pack_slaves()
+            except tk.TclError:
+                slaves = []
+            for child in slaves:
+                try:
+                    info = child.pack_info()
+                except (tk.TclError, AttributeError):
+                    continue
+                if not info:
+                    continue
+                # tk.getboolean handles all valid Tcl spellings (0/1, '0'/'1',
+                # 'true'/'false', 'yes'/'no', 'on'/'off') across Tk versions.
+                try:
+                    is_expanding = bool(
+                        parent_frame.tk.getboolean(info.get('expand', 0))
+                    )
+                except (tk.TclError, ValueError):
+                    is_expanding = False
+                if is_expanding:
+                    expanding_child = child  # keep iterating to take the last
+
+            pack_kwargs = dict(side='bottom', fill='x', padx=10, pady=(5, 10))
+            try:
+                if expanding_child is not None:
+                    button_frame.pack(before=expanding_child, **pack_kwargs)
+                else:
+                    button_frame.pack(**pack_kwargs)
+            except tk.TclError:
+                # Defensive fallback if before= target was destroyed between
+                # the pack_slaves() probe and the pack call.
+                button_frame.pack(**pack_kwargs)
+        else:
+            # Pre-laptop-fix behaviour — packs at default side='top' so the
+            # button sits immediately under the plot. Use this when the caller
+            # packs additional widgets into parent_frame AFTER this call;
+            # otherwise pin_to_bottom=True (default) is correct.
+            button_frame.pack(fill='x', padx=10, pady=(5, 10))
 
         export_btn = ttk.Button(button_frame, text="💾 Export Plot",
                                command=export_plot, style='Modern.TButton')
@@ -40332,8 +40390,12 @@ External Validation Performance (n={n_val}):
             canvas.draw()
             canvas.get_tk_widget().pack(fill='both', expand=True, padx=10, pady=10)
 
-            # Add export button to preview window
-            self._add_plot_export_button(preview_window, fig, "wavelength_selection")
+            # Add export button to preview window. pin_to_bottom=False because
+            # the wavelength list and Close button are packed AFTER this call;
+            # if the button were pinned to the bottom of preview_window it
+            # would end up below the Close button.
+            self._add_plot_export_button(preview_window, fig, "wavelength_selection",
+                                          pin_to_bottom=False)
 
         # Show wavelength list in text box
         list_frame = ttk.LabelFrame(preview_window, text="Selected Wavelengths", padding="10")
