@@ -4,6 +4,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-08 (T-16 Phase 1) — dasp's "PLS-DA" is a PLSTransformer+LR hybrid; CV-ANOVA doesn't naturally apply
+
+**Discovery during Phase 1 implementation.** Plan v2 (Codex-reviewed) deferred PLS-DA from CV-ANOVA on a vague "complexity" rationale; user pushed back asking why not bundle PLS-DA. Investigation of `models.py:1354-1387` revealed dasp's classification "PLS-DA" is a **two-stage pipeline**:
+
+```
+Stage 1: PLSTransformer(n_components, max_iter, tol, scale=False)  # PLS as feature reducer on X only
+Stage 2: LogisticRegression(C, solver, max_iter)                    # actual classifier on PLS scores
+```
+
+This is not the canonical chemometrics PLS-DA (PLS-regression-on-dummy-Y + threshold). PLS in dasp's PLS-DA never sees Y. So CV-ANOVA — which tests `PRESS_model_on_Y` against `PRESS_mean_prediction_on_Y` — has no natural input here: there are no continuous PLS-on-Y residuals, only LR class-label predictions.
+
+Three options considered:
+- (A) Skip PLS-DA in Phase 1 — defer to Phase 2's permutation test, which is model-agnostic
+- (B) Compute a side PLSRegression-on-dummy-Y CV per row — adds compute, tests a different model than what dasp shipped
+- (C) Substitute a different statistic (e.g., McNemar vs majority-class) — narrow question, doesn't match Phase 1's column semantics
+
+**Verdict (user direction 2026-05-08):** Option A. Phase 2 permutation will give PLS-DA a Q1 answer when it ships (works for any classifier). PLS-DA gets `nan` in `cv_anova_pvalue` until Phase 2 lands.
+
+**Lesson.** "PLS-DA" in chemometrics literature is canonically PLS-on-dummy-Y. dasp uses the name for a hybrid architecture. Tools/methods designed for canonical PLS-DA may not transfer cleanly. Future Q1/Q2 features should treat PLS-DA-as-dasp-implements-it as a generic classifier (use model-agnostic tests) rather than assuming PLS-DA literature applies.
+
+**Codex BLOCKER pattern recurrence.** First insertion at `_run_single_config` (grid path) was caught by Codex review as missing the symmetric Bayesian-path insertion at `unified_bayesian.py:1700` + `unified_bayesian.py:3137`. Same parallel-call-site pattern that bit the TPE proxy work (`a33d956`). Memory pin candidate: any feature that lands in result-CSV columns must consider both grid (`search.py:_run_single_config`) and Bayesian (`unified_bayesian.py:objective` + `convert_study_to_dataframe`) call sites; missing one produces silent column-drop on the path that wasn't covered. Already implicit in `feedback_review_method_signal.md` (Codex earns its slot on cross-file dispatcher work) but worth a dedicated entry if it recurs.
+
+**Implementation gotcha.** First Bayesian-path insertion used `params.get(...)` matching the grid-path variable name. The actual variable in `unified_bayesian.py` objective scope is `model_params` (assigned at line 1508 from `suggest_model_params(...)`). Caught by integration test 11 returning `NameError: name 'params' is not defined` for all 12 trials. Fixed before commit.
+
+---
+
 ## 2026-05-08 (T-TPE-VERIFY) — Empirical verification of `a33d956`: methodologically correct, empirically neutral-to-positive, one rounding-level miss vs literal threshold
 
 **Context.** `a33d956` shipped the model-family-aware TPE proxy. Code-green (82/82 unit + smoke). Continuation handoff `docs/CONTINUATION_PROMPT_2026-05-08_post-tpe-proxy.md` Tier 1 demanded the SPXY 20% A/B harness on real BoneCollagen data before declaring victory. Harness existed at `tools/_repro_tpe_fix_downstream_ab.py` (untracked) with the `**kwargs` swallow already in place to survive the new keyword-only `proxy_family` arg.
