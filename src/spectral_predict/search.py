@@ -6715,12 +6715,14 @@ def run_one_class_search(
                     skipped_configs += n_skip
                     continue
 
+                used_uniform_fallback = False
                 if np.all(importances == 0):
                     logger.warning(
                         "%s returned all-zero importances, using uniform",
                         varsel_method,
                     )
                     importances = np.ones(n_features_current)
+                    used_uniform_fallback = True
 
                 # Apply edge mask for derivatives
                 # Skip when UVE prefilter active — variables are non-contiguous
@@ -6894,6 +6896,7 @@ def run_one_class_search(
                                 "all_vars": ",".join(
                                     [f"{float(w):g}" for w in wavelengths_subset]
                                 ),
+                                "uniform_fallback": used_uniform_fallback,
                                 "per_contaminant_sensitivity": cal_metrics.get(
                                     "per_contaminant", {}
                                 ),

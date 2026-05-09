@@ -1510,13 +1510,13 @@ TOOLTIP_CONTENT = {
         'smoothing': 'smoothing (Pre-Derivative Smoothing Flag)\n\nWhether a Savitzky-Golay smoothing pass was applied BEFORE the main pipeline (separate from the SG derivative stage).\nTrue / False. The smoothing_window and smoothing_polyorder columns hold the SG settings used.',
         'smoothing_window': 'smoothing_window (Pre-Smoothing Window Size)\n\nSavitzky-Golay window width used by the pre-smoothing pass (must be odd).\nLarger = more smoothing. Only meaningful when smoothing = True.',
         'smoothing_polyorder': 'smoothing_polyorder (Pre-Smoothing Polynomial Order)\n\nSavitzky-Golay polynomial degree for the pre-smoothing pass.\nHigher = preserves more peak shape. Only meaningful when smoothing = True.',
-        'uniform_fallback': 'uniform_fallback (Uniform-Importance Fallback)\n\nTrue when the variable-selection method (CARS, GA-PLS, UVE, SPA, or iPLS) returned all-zero importance scores and dasp substituted a uniform-importance fallback so the search could continue.\nThis DOES affect which variables get selected — treat any rows where this is True with skepticism for variable-importance interpretation. Genuine signal would have produced non-zero importances.',
+        'uniform_fallback': 'uniform_fallback (Uniform-Importance Fallback)\n\nTrue when a variable-selection method (any of the CARS / GA-PLS / UVE / SPA / iPLS family, including composites like uve_cars_spa) returned all-zero importance scores and dasp substituted a uniform-importance fallback so the search could continue.\nThis DOES affect which variables get selected — treat any rows where this is True with skepticism for variable-importance interpretation. Genuine signal would have produced non-zero importances.',
 
         # ===== Preprocessing-discovery diagnostics =====
         'phase2_halt_reason': 'phase2_halt_reason (Phase-2 Multi-Seed Rescore Halt Reason)\n\nExhaustive preprocessing only. Tells you why the Phase-2 multi-seed rescore stopped:\n  converged: rankings stabilized across seeds (good — rescore was useful)\n  cap: hit the per-search seed cap before convergence (rescore was inconclusive)\n  disabled: Phase-2 rescore was off and only the single-seed Phase-1 ranking was used\nSame value is duplicated to every exhaustive-preprocessing row from one search.',
         'tpe_score': 'tpe_score (Tree-structured Parzen Estimator Proxy Score)\n\nThe internal proxy score the TPE (Tree-structured Parzen Estimator) preprocessing-discovery sampler used to rank this preprocessing config (lower = better for regression, higher = better for classification).\nNote: this is the proxy score, not the final downstream model\'s metric — use RMSEcv / Accuracycv for actual model quality.',
         'tpe_multistart_halt_reason': 'tpe_multistart_halt_reason (Tree-structured Parzen Estimator Multistart Halt Reason)\n\nTPE preprocessing-discovery only, when multistart is enabled. Tells you why the cross-start rescore stopped:\n  converged: top configs agreed across starts (rescore was useful)\n  cap: hit the multistart cap before convergence\n  single_iteration: only one start was run (multistart effectively off)\nNone for single-start TPE configs and exhaustive configs.',
-        'tpe_proxy_family': 'tpe_proxy_family (Tree-structured Parzen Estimator Proxy Model Family)\n\nWhich model family the TPE (Tree-structured Parzen Estimator) preprocessing-discovery proxy used to rank preprocessing configs.\nValues: linear (PLS / LogisticRegression — fast, sensitive to centering / scaling) or tree (LightGBM — robust to monotone transforms).\nThe family is auto-selected from the enabled downstream models so the proxy ranking matches what the user will actually fit.',
+        'tpe_proxy_family': 'tpe_proxy_family (Tree-structured Parzen Estimator Proxy Model Family)\n\nWhich model family the TPE (Tree-structured Parzen Estimator) preprocessing-discovery proxy used to rank preprocessing configs.\nValues: linear (PLS / LogisticRegression — fast, sensitive to centering / scaling) or tree (LightGBM — robust to monotone transforms).\nResolves to tree only when the enabled downstream models are exclusively tree-family (LightGBM / XGBoost / CatBoost / RandomForest); mixed model sets fall back to linear (the chemometrics default) so PLS-style preprocessing ranking still applies.',
         'tpe_proxy_model_name': 'tpe_proxy_model_name (Tree-structured Parzen Estimator Proxy Model Name)\n\nThe specific proxy model used by TPE preprocessing-discovery (e.g., PLS, LogisticRegression, LightGBM).\nAudit trail for tpe_proxy_family — lets you confirm which fast surrogate ranked the preprocessing configs.',
 
         # ===== Composite scoring components =====
@@ -29682,10 +29682,12 @@ For detailed documentation, see the User Guide.
                 else:
                     val = row[col]
                     if isinstance(val, float) and np.isfinite(val):
-                        # 5 significant figures; auto-switches to scientific
+                        # 6 significant figures; auto-switches to scientific
                         # for very small / very large values so users can tell
-                        # 3.79e-24 from 0.379.
-                        val = f"{val:.5g}"
+                        # 3.79e-24 from 0.379. 6 sig figs preserves R²>0.9999
+                        # discrimination for paper-reproducibility (.5g would
+                        # round high-quality calibrations to "1").
+                        val = f"{val:.6g}"
                     values.append(val)
 
             # Determine tag for highlighting based on best region (regression), best class (classification), or overfit
