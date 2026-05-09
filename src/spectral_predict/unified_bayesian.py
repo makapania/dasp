@@ -1698,10 +1698,14 @@ def create_unified_objective(
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
-                # CV-ANOVA p-value (Eriksson 2008) — PLS regression only.
-                # Stored as user_attr; emitted into result row in convert_study_to_dataframe.
+                # CV-ANOVA F-test (Eriksson, Trygg & Wold 2008)
                 if model_name == "PLS":
-                    n_lv_for_anova = model_params.get("n_components") or model_params.get("pls__n_components")
+                    if "n_components" in model_params:
+                        n_lv_for_anova = model_params["n_components"]
+                    elif "pls__n_components" in model_params:
+                        n_lv_for_anova = model_params["pls__n_components"]
+                    else:
+                        n_lv_for_anova = None
                     if n_lv_for_anova is not None:
                         cv_anova_p = compute_cv_anova_pvalue(
                             y_true=y, rmsecv=rmse, n_components=int(n_lv_for_anova),

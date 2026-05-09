@@ -190,3 +190,40 @@ def test_bayesian_path_lands_cv_anova_column(synthetic_pls_dataset):
     valid = pvals.dropna()
     assert len(valid) > 0, "expected at least one PLS Bayesian trial with cv_anova_pvalue"
     assert ((valid >= 0.0) & (valid <= 1.0)).all(), f"p-values out of [0,1]: {valid.tolist()}"
+
+
+def test_grid_path_non_pls_rows_get_nan(synthetic_pls_dataset):
+    """Routing-guard pin: non-PLS regression rows must get nan in cv_anova_pvalue."""
+    from spectral_predict.search import run_search
+
+    X_df, y_ser, _wavelengths = synthetic_pls_dataset
+    results_df, _meta = run_search(
+        X_df,
+        y_ser,
+        task_type="regression",
+        folds=5,
+        cv_strategy="kfold",
+        cv_n_repeats=1,
+        enabled_models=["PLS", "Ridge"],
+        models_to_test=["PLS", "Ridge"],
+        tpe_preprocess=False,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        max_n_components=5,
+        progress_callback=None,
+    )
+    assert results_df is not None and "cv_anova_pvalue" in results_df.columns
+
+    ridge_rows = results_df[results_df["Model"] == "Ridge"]
+    assert len(ridge_rows) > 0, "expected at least one Ridge row"
+    ridge_pvals = pd.to_numeric(ridge_rows["cv_anova_pvalue"], errors="coerce")
+    assert ridge_pvals.isna().all(), (
+        f"non-PLS rows should have cv_anova_pvalue=nan; got {ridge_pvals.tolist()}"
+    )
+
+    pls_rows = results_df[results_df["Model"] == "PLS"]
+    assert len(pls_rows) > 0, "expected at least one PLS row"
+    pls_pvals = pd.to_numeric(pls_rows["cv_anova_pvalue"], errors="coerce")
+    assert pls_pvals.notna().all(), (
+        f"PLS rows should have non-nan p-values; got {pls_pvals.tolist()}"
+    )

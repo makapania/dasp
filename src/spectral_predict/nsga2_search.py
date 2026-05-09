@@ -57,7 +57,7 @@ from pymoo.termination import get_termination
 from .preprocess import SNV, SavgolDerivative
 from .models import get_feature_importances
 from .variable_selection import cars_selection
-from .scoring import compute_specificity, lins_ccc
+from .scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
 from .bayesian_utils import _extract_fitted_n_components
 
 # Imbalance handling imports
@@ -3848,6 +3848,14 @@ def convert_nsga2_to_v1_format(
                 row['RPD'] = np.nan
                 row['RER'] = np.nan
                 row['CCCcv'] = np.nan
+
+            # CV-ANOVA F-test (Eriksson, Trygg & Wold 2008)
+            if decoded['model'] == 'PLS' and y is not None:
+                row['cv_anova_pvalue'] = compute_cv_anova_pvalue(
+                    y_true=y, rmsecv=row['RMSEcv'], n_components=int(solution[3]),
+                )
+            else:
+                row['cv_anova_pvalue'] = np.nan
 
             row['CompositeScore'] = row['RMSEcv']  # Use CV RMSE as composite
         else:

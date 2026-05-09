@@ -453,7 +453,7 @@ def compute_cv_anova_pvalue(
     Returns p-value for the null hypothesis that the PLS regression
     model's cross-validated PRESS is no better than mean-prediction PRESS.
     Only defined for single-Y PLS regression with pooled cross-validated
-    predictions; returns nan on degenerate inputs.
+    predictions.
 
     For repeated K-fold CV, dasp reduces repeated predictions to a single
     per-sample average before computing RMSEcv, so PRESS = N * RMSEcv**2
@@ -474,7 +474,11 @@ def compute_cv_anova_pvalue(
     Returns
     -------
     float
-        p-value in [0, 1], or nan on degenerate input.
+        p-value in [0, 1]. Returns 1.0 when PRESS >= SSY (model no better
+        than mean — F-statistic <= 0). Returns nan on degenerate input:
+        n_components < 1; rmsecv non-finite or <= 0; y_true not 1-D, fewer
+        than 2 samples, or contains non-finite values; n_components >= N-1
+        (over-parametrised); SSY <= 0 (zero-variance y).
 
     References
     ----------
@@ -484,15 +488,39 @@ def compute_cv_anova_pvalue(
     """
     if n_components is None or n_components < 1:
         return float("nan")
-    if rmsecv is None or not np.isfinite(rmsecv) or rmsecv <= 0:
+    if rmsecv is None or not np.isfinite(rmsecv):
+        return float("nan")
+    if rmsecv <= 0:
+        # RMSEcv = sqrt(MSE) >= 0 mathematically, and == 0 implies CV
+        # leakage or degenerate y. Surface this rather than silently nan.
+        logger.warning(
+            "compute_cv_anova_pvalue: rmsecv=%r is not strictly positive; "
+            "RMSEcv == 0 implies CV leakage or zero-variance y. Returning nan.",
+            rmsecv,
+        )
         return float("nan")
 
     y = np.asarray(y_true)
     if y.ndim != 1:
+        # dasp's PLS regression is single-Y today; multi-output here means
+        # a dispatch bug somewhere upstream.
+        logger.error(
+            "compute_cv_anova_pvalue: y_true has shape=%s, expected 1-D. "
+            "dasp's PLS regression is single-Y; this indicates a dispatch "
+            "bug. Returning nan.",
+            y.shape,
+        )
         return float("nan")
     if y.size < 2:
         return float("nan")
     if not np.isfinite(y).all():
+        # Upstream NaN-stripping uses pandas.isna which does NOT flag inf;
+        # if non-finite values reach here, log so the upstream gap is visible.
+        logger.warning(
+            "compute_cv_anova_pvalue: y_true contains %d nan / %d inf. "
+            "Upstream filtering may not catch inf. Returning nan.",
+            int(np.isnan(y).sum()), int(np.isinf(y).sum()),
+        )
         return float("nan")
 
     n = int(y.size)
@@ -513,7 +541,7 @@ def compute_cv_anova_pvalue(
 
     f_stat = numerator / denominator
     if f_stat <= 0:
-        return 1.0  # Model not better than mean prediction.
+        return 1.0  # PRESS >= SSY: model no better than mean.
 
     return float(f_dist.sf(f_stat, a, df2))
 
@@ -549,7 +577,10 @@ def create_results_dataframe(task_type):
 
     if task_type == "regression":
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
-        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER", "CCC", "CCCcv"]
+        metric_cols = [
+            "RMSE", "R2", "RMSEcv", "R2cv", "cv_anova_pvalue",
+            "MAEcv", "RPD", "Bias", "RER", "CCC", "CCCcv",
+        ]
     elif task_type == "one_class":
         # One-class detection screening metrics
         metric_cols = [

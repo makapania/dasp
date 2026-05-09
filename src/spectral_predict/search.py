@@ -5135,7 +5135,14 @@ def _run_single_config(
     # Extract LVs (for PLS models) - must be done before building result dict
     # Use int to avoid decimal display, None for non-PLS models
     # CRITICAL FIX: Also check for pls__n_components (PLS-DA pipeline prefixed params)
-    n_comp = params.get("n_components") or params.get("pls__n_components")
+    # Explicit None check (not `or`) so n_components == 0 isn't silently
+    # replaced by the pipeline-prefixed fallback.
+    if "n_components" in params:
+        n_comp = params["n_components"]
+    elif "pls__n_components" in params:
+        n_comp = params["pls__n_components"]
+    else:
+        n_comp = None
     lvs = int(n_comp) if n_comp is not None else None
 
     # Format imbalance handling indicator for display
@@ -5273,7 +5280,7 @@ def _run_single_config(
         result["RPD"] = rpd
         result["Bias"] = bias_cv
         result["RER"] = rer
-        # CV-ANOVA p-value (Eriksson, Trygg & Wold 2008) — PLS regression only
+        # CV-ANOVA F-test (Eriksson, Trygg & Wold 2008)
         if model_name == "PLS" and lvs is not None:
             result["cv_anova_pvalue"] = compute_cv_anova_pvalue(
                 y_true=y, rmsecv=mean_rmse, n_components=lvs,
