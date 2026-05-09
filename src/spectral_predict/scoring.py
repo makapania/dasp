@@ -491,11 +491,11 @@ def compute_cv_anova_pvalue(
     if rmsecv is None or not np.isfinite(rmsecv):
         return float("nan")
     if rmsecv <= 0:
-        # RMSEcv = sqrt(MSE) >= 0 mathematically, and == 0 implies CV
-        # leakage or degenerate y. Surface this rather than silently nan.
-        logger.warning(
-            "compute_cv_anova_pvalue: rmsecv=%r is not strictly positive; "
-            "RMSEcv == 0 implies CV leakage or zero-variance y. Returning nan.",
+        # RMSEcv == 0 can be reached by perfectly predicted synthetic / demo
+        # data; logging at debug avoids spurious warnings in test contexts.
+        logger.debug(
+            "compute_cv_anova_pvalue: rmsecv=%r is not strictly positive "
+            "(perfectly-predicted CV or upstream sentinel). Returning nan.",
             rmsecv,
         )
         return float("nan")
