@@ -15601,17 +15601,24 @@ class SpectralPredictApp:
         tab7d = ttk.Frame(self.model_dev_notebook, style='TFrame')
         self.model_dev_notebook.add(tab7d, text='  📊 Results  ')
 
-        # Create scrollable content
+        # Create scrollable content. Page-level horizontal scroll added so
+        # laptop users can pan right when plot frames extend past the
+        # viewport — fixes the wavelength-importance / residual-diagnostics
+        # right-edge clipping the user reported on 16" laptops.
         canvas = tk.Canvas(tab7d, bg=self.colors['bg'], highlightthickness=0)
         scrollbar = ttk.Scrollbar(tab7d, orient="vertical", command=canvas.yview)
+        hscrollbar = ttk.Scrollbar(tab7d, orient="horizontal", command=canvas.xview)
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab7d", canvas))
         canvas.create_window((0, 0), window=content_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.configure(yscrollcommand=scrollbar.set, xscrollcommand=hscrollbar.set)
 
-        canvas.pack(side="left", fill="both", expand=True)
+        # Pack order matters: bottom strip first claims full width, then
+        # right strip claims height-minus-bottom, then canvas absorbs the rest.
+        hscrollbar.pack(side="bottom", fill="x")
         scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
 
         row = 0
 
