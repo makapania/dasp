@@ -6306,7 +6306,7 @@ def run_one_class_search(
                     # Mirrors the classification grid path at search.py:4506-4507.
                     "PreprocessBase": preprocess_cfg.get("method", preprocess_cfg["name"]),
                     "top_vars": "N/A",
-                    "all_vars": ",".join([f"{float(w):.1f}" for w in wavelengths_current]),
+                    "all_vars": ",".join([f"{float(w):g}" for w in wavelengths_current]),
                     "per_contaminant_sensitivity": cal_metrics.get("per_contaminant", {}),
                     # Persist scaler/PCA/stats for model save/load
                     "scaler": cv_result.get("cal_scaler"),
@@ -6889,10 +6889,10 @@ def run_one_class_search(
                                 # Mirrors the Bayesian contract at
                                 # unified_bayesian.py:1046-1050.
                                 "top_vars": ",".join(
-                                    [f"{float(w):.1f}" for w in wavelengths_subset]
+                                    [f"{float(w):g}" for w in wavelengths_subset]
                                 ),
                                 "all_vars": ",".join(
-                                    [f"{float(w):.1f}" for w in wavelengths_subset]
+                                    [f"{float(w):g}" for w in wavelengths_subset]
                                 ),
                                 "per_contaminant_sensitivity": cal_metrics.get(
                                     "per_contaminant", {}
