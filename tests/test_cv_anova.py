@@ -227,3 +227,45 @@ def test_grid_path_non_pls_rows_get_nan(synthetic_pls_dataset):
     assert pls_pvals.notna().all(), (
         f"PLS rows should have non-nan p-values; got {pls_pvals.tolist()}"
     )
+
+
+def test_grid_path_repeated_cv_lands_cv_anova_column(synthetic_pls_dataset):
+    """Repeated K-fold pin: column still populates and values stay in [0, 1].
+
+    The helper docstring contract for repeated CV is "PRESS = N * RMSEcv**2
+    refers to the averaged-prediction vector" — relying on dasp's
+    cross_val_predict_pooled reducing repeated predictions to per-sample
+    averages before computing RMSEcv. This test pins that contract: if
+    cv_utils.py is ever changed to concatenate raw repeated residuals
+    instead of averaging, this test will catch it because PRESS would
+    then represent N*n_repeats samples and produce an inflated F-statistic.
+    """
+    from spectral_predict.search import run_search
+
+    X_df, y_ser, _wavelengths = synthetic_pls_dataset
+    results_df, _meta = run_search(
+        X_df,
+        y_ser,
+        task_type="regression",
+        folds=5,
+        cv_strategy="kfold",
+        cv_n_repeats=3,
+        enabled_models=["PLS"],
+        models_to_test=["PLS"],
+        tpe_preprocess=False,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        max_n_components=5,
+        progress_callback=None,
+    )
+    assert results_df is not None and "cv_anova_pvalue" in results_df.columns
+
+    pls_rows = results_df[results_df["Model"] == "PLS"]
+    assert len(pls_rows) > 0, "expected at least one PLS row"
+    pvals = pd.to_numeric(pls_rows["cv_anova_pvalue"], errors="coerce")
+    assert pvals.notna().all(), (
+        f"all PLS rows should have non-nan p-values under repeated CV; got {pvals.tolist()}"
+    )
+    assert ((pvals >= 0.0) & (pvals <= 1.0)).all(), (
+        f"p-values out of [0,1] under repeated CV: {pvals.tolist()}"
+    )
