@@ -5,6 +5,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from scipy.stats import f as f_dist
 from sklearn.metrics import confusion_matrix
 
 logger = logging.getLogger(__name__)
@@ -442,6 +443,109 @@ def lins_ccc(y_true, y_pred) -> float:
     return float(2.0 * cov / denominator)
 
 
+def compute_cv_anova_pvalue(
+    y_true,
+    rmsecv: float,
+    n_components: int,
+) -> float:
+    """CV-ANOVA F-test p-value (Eriksson, Trygg & Wold 2008).
+
+    Returns p-value for the null hypothesis that the PLS regression
+    model's cross-validated PRESS is no better than mean-prediction PRESS.
+    Only defined for single-Y PLS regression with pooled cross-validated
+    predictions.
+
+    For repeated K-fold CV, dasp reduces repeated predictions to a single
+    per-sample average before computing RMSEcv, so PRESS = N * RMSEcv**2
+    refers to the averaged-prediction vector. The p-value here therefore
+    tests whether the averaged-CV prediction beats mean prediction — a
+    sensible extension of Eriksson 2008 for repeated CV, not a literal
+    application.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Training target vector (1D, single Y).
+    rmsecv : float
+        Root mean squared error of cross-validation (pooled).
+    n_components : int
+        Number of PLS latent variables (A).
+
+    Returns
+    -------
+    float
+        p-value in [0, 1]. Returns 1.0 when PRESS >= SSY (model no better
+        than mean — F-statistic <= 0). Returns nan on degenerate input:
+        n_components < 1; rmsecv non-finite or <= 0; y_true not 1-D, fewer
+        than 2 samples, or contains non-finite values; n_components >= N-1
+        (over-parametrised); SSY <= 0 (zero-variance y).
+
+    References
+    ----------
+    Eriksson, L., Trygg, J., & Wold, S. (2008). CV-ANOVA for significance
+    testing of PLS and OPLS models. Journal of Chemometrics, 22(11-12),
+    594-600.
+    """
+    if n_components is None or n_components < 1:
+        return float("nan")
+    if rmsecv is None or not np.isfinite(rmsecv):
+        return float("nan")
+    if rmsecv <= 0:
+        # RMSEcv == 0 can be reached by perfectly predicted synthetic / demo
+        # data; logging at debug avoids spurious warnings in test contexts.
+        logger.debug(
+            "compute_cv_anova_pvalue: rmsecv=%r is not strictly positive "
+            "(perfectly-predicted CV or upstream sentinel). Returning nan.",
+            rmsecv,
+        )
+        return float("nan")
+
+    y = np.asarray(y_true)
+    if y.ndim != 1:
+        # dasp's PLS regression is single-Y today; multi-output here means
+        # a dispatch bug somewhere upstream.
+        logger.error(
+            "compute_cv_anova_pvalue: y_true has shape=%s, expected 1-D. "
+            "dasp's PLS regression is single-Y; this indicates a dispatch "
+            "bug. Returning nan.",
+            y.shape,
+        )
+        return float("nan")
+    if y.size < 2:
+        return float("nan")
+    if not np.isfinite(y).all():
+        # Upstream NaN-stripping uses pandas.isna which does NOT flag inf;
+        # if non-finite values reach here, log so the upstream gap is visible.
+        logger.warning(
+            "compute_cv_anova_pvalue: y_true contains %d nan / %d inf. "
+            "Upstream filtering may not catch inf. Returning nan.",
+            int(np.isnan(y).sum()), int(np.isinf(y).sum()),
+        )
+        return float("nan")
+
+    n = int(y.size)
+    a = int(n_components)
+    df2 = n - a - 1
+    if df2 <= 0:
+        return float("nan")
+
+    ssy = float(np.sum((y - y.mean()) ** 2))
+    if ssy <= 0:
+        return float("nan")
+
+    press = n * float(rmsecv) ** 2
+    numerator = (ssy - press) / a
+    denominator = press / df2
+    if denominator <= 0 or not np.isfinite(denominator):
+        return float("nan")
+
+    f_stat = numerator / denominator
+    if f_stat <= 0:
+        return 1.0  # PRESS >= SSY: model no better than mean.
+
+    return float(f_dist.sf(f_stat, a, df2))
+
+
 def create_results_dataframe(task_type):
     """
     Create an empty results dataframe with correct columns.
@@ -473,7 +577,10 @@ def create_results_dataframe(task_type):
 
     if task_type == "regression":
         # Calibration metrics first, then CV metrics, then NIR-specific metrics
-        metric_cols = ["RMSE", "R2", "RMSEcv", "R2cv", "MAEcv", "RPD", "Bias", "RER", "CCC", "CCCcv"]
+        metric_cols = [
+            "RMSE", "R2", "RMSEcv", "R2cv", "cv_anova_pvalue",
+            "MAEcv", "RPD", "Bias", "RER", "CCC", "CCCcv",
+        ]
     elif task_type == "one_class":
         # One-class detection screening metrics
         metric_cols = [
