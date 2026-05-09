@@ -5334,11 +5334,11 @@ def _run_single_config(
     if subset_tag != "full" and subset_indices is not None:
         # Subset model: save only the subset wavelengths
         subset_wavelengths = wavelengths[subset_indices]
-        all_vars_str = ",".join([f"{w:.1f}" for w in subset_wavelengths])
+        all_vars_str = ",".join([f"{w:g}" for w in subset_wavelengths])
         result["all_vars"] = all_vars_str
     else:
         # Full model: save ALL wavelengths used (may be filtered by wl_min/wl_max)
-        all_vars_str = ",".join([f"{w:.1f}" for w in wavelengths])
+        all_vars_str = ",".join([f"{w:g}" for w in wavelengths])
         result["all_vars"] = all_vars_str
 
     # Continue with feature importance extraction if model was already fitted above
@@ -5384,7 +5384,7 @@ def _run_single_config(
                 top_wavelengths = wavelengths[top_indices]
 
             # Format as comma-separated string
-            top_vars_str = ",".join([f"{w:.1f}" for w in top_wavelengths])
+            top_vars_str = ",".join([f"{w:g}" for w in top_wavelengths])
             result["top_vars"] = top_vars_str
 
         except Exception as e:

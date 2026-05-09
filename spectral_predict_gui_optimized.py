@@ -29680,7 +29680,13 @@ For detailed documentation, see the User Guide.
                         pass
                     values.append(val)
                 else:
-                    values.append(row[col])
+                    val = row[col]
+                    if isinstance(val, float) and np.isfinite(val):
+                        # 5 significant figures; auto-switches to scientific
+                        # for very small / very large values so users can tell
+                        # 3.79e-24 from 0.379.
+                        val = f"{val:.5g}"
+                    values.append(val)
 
             # Determine tag for highlighting based on best region (regression), best class (classification), or overfit
             tag = ()

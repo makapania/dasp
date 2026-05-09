@@ -1401,12 +1401,12 @@ def create_unified_objective(
                 if top_indices is not None:
                     selected_wl = wavelengths_for_trial[top_indices]
                     trial.set_user_attr('all_wavelengths',
-                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                        ','.join([f"{w:g}" for w in selected_wl]))
                     trial.set_user_attr('selected_wavelengths',
-                        ','.join([f"{w:.1f}" for w in selected_wl]))
+                        ','.join([f"{w:g}" for w in selected_wl]))
                 else:
                     trial.set_user_attr('all_wavelengths',
-                        ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+                        ','.join([f"{w:g}" for w in wavelengths_for_trial]))
 
                 balanced_accuracy = mean_m.get('balanced_accuracy', 0.0)
                 _oc_metric = -balanced_accuracy
@@ -2018,13 +2018,13 @@ def create_unified_objective(
             if top_indices is not None:
                 selected_wavelengths = wavelengths_for_trial[top_indices] if len(wavelengths_for_trial) > max(top_indices) else []
                 # Store ALL wavelengths for model reconstruction (training order)
-                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.1f}" for w in selected_wavelengths]))
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:g}" for w in selected_wavelengths]))
                 # Store first 50 for display (also training order - most important first)
                 trial.set_user_attr('selected_wavelengths',
-                    ','.join([f"{w:.1f}" for w in selected_wavelengths[:50]]))
+                    ','.join([f"{w:g}" for w in selected_wavelengths[:50]]))
             else:
                 # Full spectrum - store all wavelengths (edge-masked)
-                trial.set_user_attr('all_wavelengths', ','.join([f"{w:.1f}" for w in wavelengths_for_trial]))
+                trial.set_user_attr('all_wavelengths', ','.join([f"{w:g}" for w in wavelengths_for_trial]))
             # Store edge-masked feature count for full_vars
             trial.set_user_attr('full_vars_masked', len(wavelengths_for_trial))
 
