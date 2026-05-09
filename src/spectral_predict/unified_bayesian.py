@@ -66,7 +66,7 @@ from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
 )
-from spectral_predict.scoring import compute_specificity, lins_ccc
+from spectral_predict.scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -1698,6 +1698,16 @@ def create_unified_objective(
                 rmse = float(np.sqrt(mean_squared_error(y, y_pred_cv)))
                 r2 = r2_score(y, y_pred_cv)
 
+                # CV-ANOVA p-value (Eriksson 2008) — PLS regression only.
+                # Stored as user_attr; emitted into result row in convert_study_to_dataframe.
+                if model_name == "PLS":
+                    n_lv_for_anova = model_params.get("n_components") or model_params.get("pls__n_components")
+                    if n_lv_for_anova is not None:
+                        cv_anova_p = compute_cv_anova_pvalue(
+                            y_true=y, rmsecv=rmse, n_components=int(n_lv_for_anova),
+                        )
+                        trial.set_user_attr('cv_anova_pvalue', cv_anova_p)
+
                 # Compute additional NIR spectroscopy metrics from CV predictions
                 mae_cv = mean_absolute_error(y, y_pred_cv)
                 bias_cv = float(np.mean(y_pred_cv - y))
@@ -3135,6 +3145,7 @@ def convert_study_to_dataframe(
             row['RMSEcv'] = trial.user_attrs.get('RMSEcv', trial.value)  # CV
             row['R2cv'] = trial.user_attrs.get('R2cv', np.nan)       # CV
             row['CCCcv'] = trial.user_attrs.get('CCCcv', np.nan)     # CV
+            row['cv_anova_pvalue'] = trial.user_attrs.get('cv_anova_pvalue', np.nan)
             # NIR-specific metrics
             row['MAEcv'] = trial.user_attrs.get('MAEcv', np.nan)
             row['RPD'] = trial.user_attrs.get('RPD', np.nan)

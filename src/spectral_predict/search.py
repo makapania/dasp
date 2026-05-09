@@ -79,7 +79,13 @@ from imblearn.pipeline import Pipeline as ImbPipeline
 
 from .preprocess import build_preprocessing_pipeline
 from .models import get_model_grids, get_feature_importances
-from .scoring import create_results_dataframe, add_result, compute_specificity, lins_ccc
+from .scoring import (
+    add_result,
+    compute_cv_anova_pvalue,
+    compute_specificity,
+    create_results_dataframe,
+    lins_ccc,
+)
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
     spa_selection,
@@ -5267,6 +5273,13 @@ def _run_single_config(
         result["RPD"] = rpd
         result["Bias"] = bias_cv
         result["RER"] = rer
+        # CV-ANOVA p-value (Eriksson, Trygg & Wold 2008) — PLS regression only
+        if model_name == "PLS" and lvs is not None:
+            result["cv_anova_pvalue"] = compute_cv_anova_pvalue(
+                y_true=y, rmsecv=mean_rmse, n_components=lvs,
+            )
+        else:
+            result["cv_anova_pvalue"] = np.nan
         # Add regional performance for consensus predictions (dict format for ensemble)
         result["regional_rmse"] = regional_rmse
         result["y_quartiles"] = quartiles.tolist()  # Save quartile thresholds

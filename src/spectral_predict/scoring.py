@@ -5,6 +5,7 @@ import logging
 
 import numpy as np
 import pandas as pd
+from scipy.stats import f as f_dist
 from sklearn.metrics import confusion_matrix
 
 logger = logging.getLogger(__name__)
@@ -440,6 +441,81 @@ def lins_ccc(y_true, y_pred) -> float:
         return 0.0
 
     return float(2.0 * cov / denominator)
+
+
+def compute_cv_anova_pvalue(
+    y_true,
+    rmsecv: float,
+    n_components: int,
+) -> float:
+    """CV-ANOVA F-test p-value (Eriksson, Trygg & Wold 2008).
+
+    Returns p-value for the null hypothesis that the PLS regression
+    model's cross-validated PRESS is no better than mean-prediction PRESS.
+    Only defined for single-Y PLS regression with pooled cross-validated
+    predictions; returns nan on degenerate inputs.
+
+    For repeated K-fold CV, dasp reduces repeated predictions to a single
+    per-sample average before computing RMSEcv, so PRESS = N * RMSEcv**2
+    refers to the averaged-prediction vector. The p-value here therefore
+    tests whether the averaged-CV prediction beats mean prediction — a
+    sensible extension of Eriksson 2008 for repeated CV, not a literal
+    application.
+
+    Parameters
+    ----------
+    y_true : array-like
+        Training target vector (1D, single Y).
+    rmsecv : float
+        Root mean squared error of cross-validation (pooled).
+    n_components : int
+        Number of PLS latent variables (A).
+
+    Returns
+    -------
+    float
+        p-value in [0, 1], or nan on degenerate input.
+
+    References
+    ----------
+    Eriksson, L., Trygg, J., & Wold, S. (2008). CV-ANOVA for significance
+    testing of PLS and OPLS models. Journal of Chemometrics, 22(11-12),
+    594-600.
+    """
+    if n_components is None or n_components < 1:
+        return float("nan")
+    if rmsecv is None or not np.isfinite(rmsecv) or rmsecv <= 0:
+        return float("nan")
+
+    y = np.asarray(y_true)
+    if y.ndim != 1:
+        return float("nan")
+    if y.size < 2:
+        return float("nan")
+    if not np.isfinite(y).all():
+        return float("nan")
+
+    n = int(y.size)
+    a = int(n_components)
+    df2 = n - a - 1
+    if df2 <= 0:
+        return float("nan")
+
+    ssy = float(np.sum((y - y.mean()) ** 2))
+    if ssy <= 0:
+        return float("nan")
+
+    press = n * float(rmsecv) ** 2
+    numerator = (ssy - press) / a
+    denominator = press / df2
+    if denominator <= 0 or not np.isfinite(denominator):
+        return float("nan")
+
+    f_stat = numerator / denominator
+    if f_stat <= 0:
+        return 1.0  # Model not better than mean prediction.
+
+    return float(f_dist.sf(f_stat, a, df2))
 
 
 def create_results_dataframe(task_type):
