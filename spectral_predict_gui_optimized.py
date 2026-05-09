@@ -6976,7 +6976,7 @@ class SpectralPredictApp:
         info_label.pack(anchor='w', pady=(0, 5))
 
         # Create 2x2 subplot figure
-        fig = Figure(figsize=(12, 9))
+        fig = Figure(figsize=(12, 9), layout='constrained')
         fig.suptitle("PCA \u2014 Quick overview of spectral variance and groupings",
                      fontsize=11, fontweight='bold')
 
@@ -7050,7 +7050,6 @@ class SpectralPredictApp:
         ax4.set_ylabel("Loading", fontsize=9)
         ax4.set_title(f"PC{pc_y} Loadings", fontsize=10)
 
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
 
         # Embed in tkinter — pack bottom controls first so they aren't clipped
         bottom_frame = ttk.Frame(self.explore_pca_results_frame)
@@ -7435,7 +7434,7 @@ class SpectralPredictApp:
 
         try:
             # Create figure
-            fig = Figure(figsize=(10, 5))
+            fig = Figure(figsize=(10, 5), layout='constrained')
             ax = fig.add_subplot(111)
 
             # Convert to consistent type for comparison (handle mixed float/str)
@@ -7482,7 +7481,6 @@ class SpectralPredictApp:
                 ax.legend()
 
             ax.grid(True, alpha=0.3)
-            fig.tight_layout()
 
             # Pack toolbar FIRST at side='bottom' so it isn't clipped on
             # small laptop screens (canvas expand=True would otherwise eat all
@@ -8569,7 +8567,7 @@ class SpectralPredictApp:
 
         wavelengths, spectrum = self._get_mbl_spectrum()
 
-        self._mbl_fig = Figure(figsize=(12, 7))
+        self._mbl_fig = Figure(figsize=(12, 7), layout='constrained')
         self._mbl_ax_top = self._mbl_fig.add_subplot(211)
         self._mbl_ax_bot = self._mbl_fig.add_subplot(212, sharex=self._mbl_ax_top)
 
@@ -8590,7 +8588,6 @@ class SpectralPredictApp:
                               transform=self._mbl_ax_bot.transAxes,
                               ha='center', va='center', color='gray', fontsize=11)
 
-        self._mbl_fig.tight_layout()
 
         # Pack toolbar FIRST at side='bottom' so it stays visible on small
         # laptop screens (canvas would otherwise consume the cavity).
@@ -8685,7 +8682,6 @@ class SpectralPredictApp:
                  f"Left-click: add  |  Right-click: remove nearest"
         )
 
-        self._mbl_fig.tight_layout()
         self._mbl_canvas.draw_idle()
 
     def _compute_mbl_baseline(self, wavelengths: np.ndarray) -> np.ndarray:
@@ -8826,7 +8822,7 @@ class SpectralPredictApp:
         frame_key = id(frame)
         self._explore_plot_state.pop(frame_key, None)
 
-        fig = Figure(figsize=(12, 6))
+        fig = Figure(figsize=(12, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         wavelengths = self.X.columns.values
@@ -8888,11 +8884,6 @@ class SpectralPredictApp:
         fig.canvas.mpl_connect('pick_event',
             lambda event, fk=frame_key: self._on_explore_spectrum_pick(event, fk))
 
-        # Reserve space for legend when active
-        if has_legend:
-            fig.tight_layout(rect=[0, 0, 0.85, 1])
-        else:
-            fig.tight_layout()
 
         # Pack bottom controls FIRST (side='bottom') so they reserve space on
         # small laptop screens. Otherwise the canvas's expand=True consumes the
@@ -10314,7 +10305,7 @@ class SpectralPredictApp:
         if len(valid) > 0:
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            fig = Figure(figsize=(4.5, 2.5), dpi=90)
+            fig = Figure(figsize=(4.5, 2.5), dpi=90, layout='constrained')
             ax = fig.add_subplot(111)
             n_bins = min(30, max(5, len(valid) // 3))
             ax.hist(valid, bins=n_bins, color='steelblue', edgecolor='white', alpha=0.85)
@@ -10322,7 +10313,6 @@ class SpectralPredictApp:
             ax.set_ylabel("Count", fontsize=9)
             ax.set_title("Distribution", fontsize=10, fontweight='bold')
             ax.grid(True, alpha=0.3)
-            fig.tight_layout()
             hist_canvas = FigureCanvasTkAgg(fig, master=dialog._hist_frame)
             hist_canvas.draw()
             hist_canvas.get_tk_widget().pack(fill='x')
@@ -10788,7 +10778,7 @@ class SpectralPredictApp:
         info_frame.pack(side='right', fill='y', padx=(10, 0))
 
         # Create the figure with 2 subplots
-        fig = Figure(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), layout='constrained')
 
         # Plot 1: Raw values (signed for correlation, positive for RF)
         ax1 = fig.add_subplot(211)
@@ -10827,7 +10817,6 @@ class SpectralPredictApp:
         for wl in top_wls:
             ax2.axvline(x=wl, color='red', linestyle='--', alpha=0.5, linewidth=0.8)
 
-        fig.tight_layout()
 
         # Pack toolbar FIRST at side='bottom' so it stays visible on small
         # laptop screens (canvas expand=True would otherwise eat the cavity).
@@ -20967,7 +20956,7 @@ class SpectralPredictApp:
         frame = ttk.Frame(self.plot_notebook)
         self.plot_notebook.add(frame, text=title)
 
-        fig = Figure(figsize=(12, 6))
+        fig = Figure(figsize=(12, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         wavelengths = self.X.columns.values
@@ -21136,7 +21125,7 @@ class SpectralPredictApp:
         plot_frame = ttk.Frame(self.pca_plot_frame)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         scores = self.outlier_report['pca']['scores']
@@ -21332,7 +21321,6 @@ class SpectralPredictApp:
         ax.set_ylabel(f'PC2 ({self.outlier_report["pca"]["variance_explained"][1]*100:.1f}%)')
         ax.set_title('PCA Score Plot (PC1 vs PC2)')
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, plot_frame)
         canvas.draw()
@@ -21411,7 +21399,7 @@ class SpectralPredictApp:
         for widget in self.t2_plot_frame.winfo_children():
             widget.destroy()
 
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         t2_values = self.outlier_report['pca']['hotelling_t2']
@@ -21436,7 +21424,6 @@ class SpectralPredictApp:
         ax.set_title('Hotelling T² Statistic')
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.t2_plot_frame)
         canvas.draw()
@@ -21488,7 +21475,7 @@ class SpectralPredictApp:
         for widget in self.q_plot_frame.winfo_children():
             widget.destroy()
 
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         q_values = self.outlier_report['q_residuals']['q_residuals']
@@ -21513,7 +21500,6 @@ class SpectralPredictApp:
         ax.set_title('Q-Residuals (Squared Prediction Error)')
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.q_plot_frame)
         canvas.draw()
@@ -21565,7 +21551,7 @@ class SpectralPredictApp:
         for widget in self.maha_plot_frame.winfo_children():
             widget.destroy()
 
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         distances = self.outlier_report['mahalanobis']['distances']
@@ -21591,7 +21577,6 @@ class SpectralPredictApp:
         ax.set_title('Mahalanobis Distance in PCA Space')
         ax.legend()
         ax.grid(True, alpha=0.3, axis='y')
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.maha_plot_frame)
         canvas.draw()
@@ -21662,7 +21647,7 @@ class SpectralPredictApp:
         for widget in self.y_dist_plot_frame.winfo_children():
             widget.destroy()
 
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax1 = fig.add_subplot(211)
         ax2 = fig.add_subplot(212)
 
@@ -21695,7 +21680,6 @@ class SpectralPredictApp:
         ax2.set_yticks([])
         ax2.grid(True, alpha=0.3, axis='x')
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.y_dist_plot_frame)
         canvas.draw()
@@ -21723,7 +21707,7 @@ class SpectralPredictApp:
             counts = vc.values
 
         # Create figure with single bar chart
-        fig = Figure(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Create bar chart
@@ -21756,7 +21740,6 @@ class SpectralPredictApp:
                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5),
                fontfamily='monospace', fontsize=8)
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.y_dist_plot_frame)
@@ -22303,7 +22286,7 @@ class SpectralPredictApp:
             widget.destroy()
 
         # Create figure with 2 subplots
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), sharex=True, layout='constrained')
         fig.patch.set_facecolor('#f5f5f5')
 
         wavelengths = results['wavelengths'].astype(float)
@@ -22351,7 +22334,6 @@ class SpectralPredictApp:
         ax2.grid(True, alpha=0.3)
         ax2.set_facecolor('white')
 
-        plt.tight_layout()
 
         # Embed in tkinter
         canvas = FigureCanvasTkAgg(fig, master=self.screening_plot_frame)
@@ -34293,7 +34275,7 @@ Performance (Classification):
         plot_frame = ttk.Frame(self.refine_plot_frame)
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+        fig, axes = plt.subplots(1, 3, figsize=(14, 4), layout='constrained')
 
         # Left: Metrics grouped bar chart (calibration + CV)
         perf = self.refined_performance
@@ -34367,7 +34349,6 @@ Performance (Classification):
         axes[2].set_ylabel('True Label', fontsize=9, fontweight='bold')
         axes[2].set_title('Confusion Matrix', fontsize=11, fontweight='bold')
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, plot_frame)
         canvas.draw()
@@ -34413,7 +34394,7 @@ Performance (Classification):
         plot_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         # Create figure
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         y_true = self.refined_y_true
@@ -34522,7 +34503,6 @@ Performance (Classification):
         if color_values is None or not is_categorical:
             ax.legend(loc='lower right')
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, plot_frame)
         canvas.draw()
@@ -34715,7 +34695,7 @@ Performance (Classification):
             class_labels = np.unique(np.concatenate([self.refined_y_true, self.refined_y_pred]))
 
         # Create figure
-        fig = Figure(figsize=(8, 6))
+        fig = Figure(figsize=(8, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Plot confusion matrix as heatmap
@@ -34741,7 +34721,6 @@ Performance (Classification):
         ax.set_xlabel('Predicted Label', fontsize=10, fontweight='bold')
         ax.set_ylabel('True Label', fontsize=10, fontweight='bold')
         ax.set_title('Confusion Matrix', fontsize=12, fontweight='bold')
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.refine_plot_frame)
@@ -34908,7 +34887,7 @@ F1 Score:  {f1:.4f}
                     self.wavelength_residual_corr_data = np.zeros(len(wavelengths))
 
             # Create figure
-            fig, ax1 = plt.subplots(figsize=(12, 4), dpi=100)
+            fig, ax1 = plt.subplots(figsize=(12, 4), dpi=100, layout='constrained')
             fig.patch.set_facecolor(self.colors['bg'])
             ax1.set_facecolor(self.colors['panel'])
 
@@ -34958,7 +34937,6 @@ F1 Score:  {f1:.4f}
                 ax2.legend(loc='upper left')
 
             ax1.set_title(f'Wavelength Importance ({model_name})', color=self.colors['text'], fontsize=11)
-            fig.tight_layout()
 
             # Click handler
             def on_importance_click(event):
@@ -35302,7 +35280,7 @@ F1 Score:  {f1:.4f}
             outlier_scores = scores[y_oc == -1]
 
             # Plot 1: Score distribution (in residual diagnostics frame)
-            fig1 = Figure(figsize=(8, 5))
+            fig1 = Figure(figsize=(8, 5), layout='constrained')
             ax1 = fig1.add_subplot(111)
 
             bins = 30
@@ -35319,7 +35297,6 @@ F1 Score:  {f1:.4f}
             ax1.set_ylabel('Count', fontsize=10)
             ax1.set_title('One-Class Decision Score Distribution', fontsize=11, fontweight='bold')
             ax1.legend(fontsize=9)
-            fig1.tight_layout()
 
             canvas1 = FigureCanvasTkAgg(fig1, self.residual_diagnostics_frame)
             canvas1.draw()
@@ -35327,7 +35304,7 @@ F1 Score:  {f1:.4f}
             self._add_plot_export_button(self.residual_diagnostics_frame, fig1, "oc_score_distribution")
 
             # Plot 2: Sorted scores with classification (in leverage frame)
-            fig2 = Figure(figsize=(8, 5))
+            fig2 = Figure(figsize=(8, 5), layout='constrained')
             ax2 = fig2.add_subplot(111)
 
             sort_idx = np.argsort(scores)
@@ -35349,7 +35326,6 @@ F1 Score:  {f1:.4f}
                 Line2D([0], [0], color='black', linestyle='--', label='Decision boundary'),
             ]
             ax2.legend(handles=legend_elements, fontsize=9)
-            fig2.tight_layout()
 
             canvas2 = FigureCanvasTkAgg(fig2, self.leverage_plot_frame)
             canvas2.draw()
@@ -35410,7 +35386,7 @@ F1 Score:  {f1:.4f}
         )
 
         # Create 1x3 subplot figure
-        fig = Figure(figsize=(12, 4))
+        fig = Figure(figsize=(12, 4), layout='constrained')
 
         # Plot 1: Residuals vs Fitted
         ax1 = fig.add_subplot(131)
@@ -35452,7 +35428,6 @@ F1 Score:  {f1:.4f}
         ax3.set_title('Q-Q Plot (Normality)', fontsize=11, fontweight='bold')
         ax3.grid(True, alpha=0.3)
 
-        fig.tight_layout()
 
         # Embed in tkinter
         canvas = FigureCanvasTkAgg(fig, plot_container)
@@ -35595,7 +35570,7 @@ F1 Score:  {f1:.4f}
         n_classes = len(class_labels)
 
         # Create figure
-        fig = Figure(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         if n_classes == 2:
@@ -35634,7 +35609,6 @@ F1 Score:  {f1:.4f}
             ax.legend(loc="lower right", fontsize=8)
             ax.grid(True, alpha=0.3)
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.residual_diagnostics_frame)
@@ -35826,7 +35800,7 @@ F1 Score:  {f1:.4f}
         threshold_3p = 3.0 * n_params / n_samples
 
         # Create figure
-        fig = Figure(figsize=(10, 5))
+        fig = Figure(figsize=(10, 5), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Determine colors based on leverage thresholds
@@ -35868,7 +35842,6 @@ F1 Score:  {f1:.4f}
                 verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
                 fontsize=9, family='monospace')
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
         canvas.draw()
@@ -35951,7 +35924,7 @@ F1 Score:  {f1:.4f}
         correct = (self.refined_y_true == self.refined_y_pred)
 
         # Create figure
-        fig = Figure(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Plot histogram for correct and incorrect predictions
@@ -35978,7 +35951,6 @@ F1 Score:  {f1:.4f}
                       label=f'Mean (incorrect): {mean_conf_incorrect:.3f}')
 
         ax.legend()
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.leverage_plot_frame)
@@ -36155,7 +36127,7 @@ F1 Score:  {f1:.4f}
             feature_names = [f"F{i}" for i in range(X_data.shape[1])]
 
         # Create figure for SHAP summary
-        fig = Figure(figsize=(12, 8))
+        fig = Figure(figsize=(12, 8), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Compute mean absolute SHAP values for feature importance ranking
@@ -36204,7 +36176,6 @@ F1 Score:  {f1:.4f}
                 transform=ax.transAxes, fontsize=8, verticalalignment='bottom',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.shap_plot_frame)
@@ -36243,7 +36214,7 @@ F1 Score:  {f1:.4f}
             feature_names = [f"F{i}" for i in range(len(sample_shap))]
 
         # Create waterfall-style plot
-        fig = Figure(figsize=(12, 8))
+        fig = Figure(figsize=(12, 8), layout='constrained')
         ax = fig.add_subplot(111)
 
         # Get top contributors (positive and negative)
@@ -36281,7 +36252,6 @@ F1 Score:  {f1:.4f}
                 transform=ax.transAxes, fontsize=9, ha='right', va='bottom',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.shap_plot_frame)
@@ -36426,7 +36396,7 @@ F1 Score:  {f1:.4f}
             widget.destroy()
 
         # Create figure
-        fig = Figure(figsize=(8, 5))
+        fig = Figure(figsize=(8, 5), layout='constrained')
         ax = fig.add_subplot(111)
 
         param_values = np.array(data['param_values'])
@@ -36503,7 +36473,6 @@ F1 Score:  {f1:.4f}
         ax.text(0.02, 0.98, annotation, transform=ax.transAxes, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8), fontsize=9)
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.complexity_plot_frame)
         canvas.draw()
@@ -36609,7 +36578,7 @@ F1 Score:  {f1:.4f}
             return
 
         # Create figure
-        fig = Figure(figsize=(8, 5))
+        fig = Figure(figsize=(8, 5), layout='constrained')
         ax = fig.add_subplot(111)
 
         train_sizes = np.array(data['train_sizes_abs'])
@@ -36635,7 +36604,6 @@ F1 Score:  {f1:.4f}
         ax.legend(loc='best', fontsize=9)
         ax.grid(True, alpha=0.3)
 
-        fig.tight_layout()
 
         canvas = FigureCanvasTkAgg(fig, self.learning_curve_plot_frame)
         canvas.draw()
@@ -40432,7 +40400,7 @@ External Validation Performance (n={n_val}):
 
         # Create plot
         if HAS_MATPLOTLIB:
-            fig = Figure(figsize=(10, 4))
+            fig = Figure(figsize=(10, 4), layout='constrained')
             ax = fig.add_subplot(111)
 
             # Create binary indicator (1 = selected, 0 = not selected)
@@ -42452,7 +42420,7 @@ External Validation Performance (n={n_val}):
         n_rows = (n_models + n_cols - 1) // n_cols
 
         # Create figure with subplots
-        fig = Figure(figsize=(6*n_cols, 5*n_rows))
+        fig = Figure(figsize=(6*n_cols, 5*n_rows), layout='constrained')
 
         # Helper function to apply coloring to a subplot
         def add_colored_scatter(ax, y_true_data, y_pred_data, color_vals, is_cat):
@@ -42536,7 +42504,6 @@ External Validation Performance (n={n_val}):
             ax.grid(True, alpha=0.3)
             ax.legend(loc='lower right', fontsize=8)
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, plot_container)
@@ -42640,7 +42607,7 @@ External Validation Performance (n={n_val}):
         n_cols = min(2, n_models)
         n_rows = (n_models + n_cols - 1) // n_cols
 
-        fig = Figure(figsize=(6*n_cols, 5*n_rows))
+        fig = Figure(figsize=(6*n_cols, 5*n_rows), layout='constrained')
 
         for idx, col in enumerate(prediction_cols):
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
@@ -42700,7 +42667,6 @@ External Validation Performance (n={n_val}):
             ax.set_ylabel('Actual', fontsize=9)
             ax.set_title(f'{col}\nAcc={accuracy:.3f} F1={f1:.3f}', fontsize=10, fontweight='bold')
 
-        fig.tight_layout()
 
         # Add to GUI
         canvas = FigureCanvasTkAgg(fig, self.prediction_plots_frame)
@@ -45059,7 +45025,7 @@ External Validation Performance (n={n_val}):
         satellite_std = np.std(X_satellite, axis=0)
 
         # Create figure with 2 subplots
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), layout='constrained')
 
         # Plot 1: Primary spectra
         ax1.plot(wl, primary_mean, 'b-', linewidth=2, label='Mean')
@@ -45082,12 +45048,11 @@ External Validation Performance (n={n_val}):
         ax2.grid(True, alpha=0.3)
 
         fig.suptitle('Paired Spectra Preview - Before Calibration Transfer', fontsize=14, fontweight='bold')
-        plt.tight_layout()
         plt.show()
         plt.close(fig)
 
         # Create a second figure for wavelength range comparison
-        fig2, ax = plt.subplots(figsize=(10, 4))
+        fig2, ax = plt.subplots(figsize=(10, 4), layout='constrained')
 
         # Show overlaid comparison
         for i in range(min(10, X_primary.shape[0])):  # Plot first 10 samples
@@ -45104,7 +45069,6 @@ External Validation Performance (n={n_val}):
         ax.legend(loc='best')
         ax.grid(True, alpha=0.3)
 
-        plt.tight_layout()
         plt.show()
         plt.close(fig2)
 
@@ -45176,7 +45140,7 @@ External Validation Performance (n={n_val}):
             def create_comparison_figure(primary_data, satellite_data, transferred_data,
                                         ylabel, title_suffix):
                 """Create figure with Primary, Satellite Before, Satellite After subplots."""
-                fig = Figure(figsize=(12, 4))
+                fig = Figure(figsize=(12, 4), layout='constrained')
 
                 # Subplot 1: Primary
                 ax1 = fig.add_subplot(131)
@@ -45223,7 +45187,6 @@ External Validation Performance (n={n_val}):
                 ax3.legend(fontsize=8)
                 ax3.grid(True, alpha=0.3)
 
-                fig.tight_layout()
                 return fig
 
             # Compute all derivatives
@@ -45278,7 +45241,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
 
             # === Plot 2: Transfer Scatter Plot ===
-            fig2 = Figure(figsize=(7, 6))
+            fig2 = Figure(figsize=(7, 6), layout='constrained')
             ax = fig2.add_subplot(111)
 
             # Flatten arrays for scatter plot
@@ -45304,7 +45267,6 @@ External Validation Performance (n={n_val}):
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3)
 
-            fig2.tight_layout()
 
             # Embed plot 2
             canvas2 = FigureCanvasTkAgg(fig2, self.ct_transfer_plot_frame)
@@ -45342,7 +45304,7 @@ External Validation Performance (n={n_val}):
                 widget.destroy()
 
             # === Plot 1: Multi-Instrument Overlay (2 subplots) ===
-            fig1 = Figure(figsize=(12, 5))
+            fig1 = Figure(figsize=(12, 5), layout='constrained')
 
             # Subplot 1: Before equalization
             ax1 = fig1.add_subplot(121)
@@ -45372,7 +45334,6 @@ External Validation Performance (n={n_val}):
             ax2.legend(fontsize=8, loc='best')
             ax2.grid(True, alpha=0.3)
 
-            fig1.tight_layout()
 
             # Embed plot 1
             canvas1 = FigureCanvasTkAgg(fig1, self.ct_equalize_plot_frame)
@@ -45383,7 +45344,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(self.ct_equalize_plot_frame, fig1, "equalization_overlay")
 
             # === Plot 2: Wavelength Grid Comparison ===
-            fig2 = Figure(figsize=(10, 4))
+            fig2 = Figure(figsize=(10, 4), layout='constrained')
             ax = fig2.add_subplot(111)
 
             # Prepare data for bar chart
@@ -45424,7 +45385,6 @@ External Validation Performance (n={n_val}):
                        ha='center', va='center', fontsize=8, fontweight='bold',
                        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
-            fig2.tight_layout()
 
             # Embed plot 2
             canvas2 = FigureCanvasTkAgg(fig2, self.ct_equalize_plot_frame)
@@ -45462,7 +45422,7 @@ External Validation Performance (n={n_val}):
             std_pred = np.std(y_pred)
 
             # === Plot 1: Prediction Distribution Histogram ===
-            fig1 = Figure(figsize=(8, 5))
+            fig1 = Figure(figsize=(8, 5), layout='constrained')
             ax = fig1.add_subplot(111)
 
             # Histogram
@@ -45485,7 +45445,6 @@ External Validation Performance (n={n_val}):
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3, axis='y')
 
-            fig1.tight_layout()
 
             # Embed plot 1
             canvas1 = FigureCanvasTkAgg(fig1, self.ct_prediction_plot_frame)
@@ -45496,7 +45455,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(self.ct_prediction_plot_frame, fig1, "prediction_distribution")
 
             # === Plot 2: Prediction Results Plot ===
-            fig2 = Figure(figsize=(10, 5))
+            fig2 = Figure(figsize=(10, 5), layout='constrained')
             ax = fig2.add_subplot(111)
 
             # Sample indices
@@ -45519,7 +45478,6 @@ External Validation Performance (n={n_val}):
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3)
 
-            fig2.tight_layout()
 
             # Embed plot 2
             canvas2 = FigureCanvasTkAgg(fig2, self.ct_prediction_plot_frame)
@@ -46173,7 +46131,7 @@ External Validation Performance (n={n_val}):
             wl_s, X_s = self.current_satellite_data
 
             # Create figure with 2 subplots
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), layout='constrained')
 
             # Plot primary
             primary_mean = np.mean(X_m, axis=0)
@@ -46200,7 +46158,6 @@ External Validation Performance (n={n_val}):
             ax2.grid(True, alpha=0.3)
 
             fig.suptitle('Primary vs Satellite Spectra Preview', fontsize=14, fontweight='bold')
-            plt.tight_layout()
             plt.show()
             plt.close(fig)
 
@@ -47966,7 +47923,7 @@ External Validation Performance (n={n_val}):
             widget.destroy()
 
         # Create figure with 2 subplots
-        fig = Figure(figsize=(12, 5), facecolor=self.colors['bg'])
+        fig = Figure(figsize=(12, 5), facecolor=self.colors['bg'], layout='constrained')
 
         # Subplot 1: Distribution of predicted values
         ax1 = fig.add_subplot(121)
@@ -47996,7 +47953,6 @@ External Validation Performance (n={n_val}):
         for spine in ax2.spines.values():
             spine.set_edgecolor(self.colors['text'])
 
-        fig.tight_layout()
 
         # Pack toolbar holder FIRST at side='bottom' so it stays visible on
         # small laptop screens (canvas expand=True would otherwise eat the cavity).
@@ -48690,7 +48646,7 @@ External Validation Performance (n={n_val}):
             for widget in self.ct_export_spectra_plot_frame.winfo_children():
                 widget.destroy()
 
-            fig = Figure(figsize=(10, 3))
+            fig = Figure(figsize=(10, 3), layout='constrained')
             ax = fig.add_subplot(111)
 
             n_samples = X.shape[0]
@@ -48708,7 +48664,6 @@ External Validation Performance (n={n_val}):
             ax.set_ylabel(self.ct_export_data_type.get().capitalize())
             ax.set_title(f'Loaded Spectra ({n_samples} samples)')
             ax.grid(True, alpha=0.3)
-            fig.tight_layout()
 
             canvas = FigureCanvasTkAgg(fig, self.ct_export_spectra_plot_frame)
             canvas.draw()
@@ -48989,7 +48944,7 @@ External Validation Performance (n={n_val}):
             # Helper function to create 2-subplot comparison figure
             def create_comparison_figure(before_data, after_data, ylabel, title_suffix):
                 """Create figure with Before and After subplots."""
-                fig = Figure(figsize=(10, 4))
+                fig = Figure(figsize=(10, 4), layout='constrained')
 
                 # Subplot 1: Before transformation
                 ax1 = fig.add_subplot(121)
@@ -49021,7 +48976,6 @@ External Validation Performance (n={n_val}):
                 ax2.legend(fontsize=8)
                 ax2.grid(True, alpha=0.3)
 
-                fig.tight_layout()
                 return fig
 
             # Compute all derivatives
@@ -53780,7 +53734,7 @@ External Validation Performance (n={n_val}):
 
         # Create preview plot
         if HAS_MATPLOTLIB:
-            fig, ax = plt.subplots(figsize=(8, 4))
+            fig, ax = plt.subplots(figsize=(8, 4), layout='constrained')
             ax.plot(entry.wavelengths, entry.spectrum, 'b-', linewidth=0.8)
             ax.set_xlabel(self._get_x_axis_name())
             ax.set_ylabel('Intensity')
@@ -53995,7 +53949,7 @@ External Validation Performance (n={n_val}):
                 result_spectrum = result_entry.spectrum
 
             # Create comparison plot
-            fig, ax = plt.subplots(figsize=(10, 5))
+            fig, ax = plt.subplots(figsize=(10, 5), layout='constrained')
             ax.plot(wavelengths, query, 'b-', linewidth=0.8, label=f'Query: {sample_id}')
             ax.plot(wavelengths, result_spectrum, 'r-', linewidth=0.8, label=f'Match: {result_id}')
             ax.set_xlabel(self._get_x_axis_name())
@@ -55808,7 +55762,7 @@ External Validation Performance (n={n_val}):
                 from matplotlib.figure import Figure
                 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-                fig = Figure(figsize=(10, 5), dpi=100)
+                fig = Figure(figsize=(10, 5), dpi=100, layout='constrained')
                 ax = fig.add_subplot(111)
 
                 # Plot difference spectrum for each group
@@ -55827,7 +55781,6 @@ External Validation Performance (n={n_val}):
                 ax.set_title(f'Difference Spectra: Contaminant Influence{preproc_label}')
                 ax.legend(loc='upper right')
                 ax.grid(True, alpha=0.3)
-                fig.tight_layout()
 
                 # Embed canvas in plot_frame
                 self.contam_diff_canvas = FigureCanvasTkAgg(fig, master=self.contam_diff_plot_frame)
@@ -55942,7 +55895,7 @@ External Validation Performance (n={n_val}):
         if hasattr(self, '_contam_clean_overview_canvas'):
             self._contam_clean_overview_canvas.get_tk_widget().destroy()
 
-        fig = Figure(figsize=(10, 4), dpi=100)
+        fig = Figure(figsize=(10, 4), dpi=100, layout='constrained')
         ax = fig.add_subplot(111)
 
         # IQR band
@@ -55962,7 +55915,6 @@ External Validation Performance (n={n_val}):
         ax.set_title('Clean Spectra Overview with Exclusion Regions')
         ax.legend(loc='upper right')
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
 
         self._contam_clean_overview_canvas = FigureCanvasTkAgg(
             fig, master=self.contam_clean_overview_plot_frame)
@@ -56242,7 +56194,7 @@ External Validation Performance (n={n_val}):
         if hasattr(self, '_contam_influence_canvas'):
             self._contam_influence_canvas.get_tk_widget().destroy()
 
-        fig = Figure(figsize=(10, 4), dpi=100)
+        fig = Figure(figsize=(10, 4), dpi=100, layout='constrained')
         ax = fig.add_subplot(111)
 
         ax.plot(wavelengths, combined, color='#2196F3', linewidth=1.5, label='Combined Influence')
@@ -56258,7 +56210,6 @@ External Validation Performance (n={n_val}):
         ax.set_ylim(0, max(1.05, float(np.max(combined)) * 1.1) if len(combined) > 0 else 1.05)
         ax.legend(loc='upper right')
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
 
         self._contam_influence_canvas = FigureCanvasTkAgg(fig, master=self.contam_influence_plot_frame)
         self._contam_influence_canvas.draw()
@@ -56485,7 +56436,7 @@ External Validation Performance (n={n_val}):
         if hasattr(self, '_contam_group_spectra_canvas'):
             self._contam_group_spectra_canvas.get_tk_widget().destroy()
 
-        fig = Figure(figsize=(10, 5), dpi=100)
+        fig = Figure(figsize=(10, 5), dpi=100, layout='constrained')
         ax = fig.add_subplot(111)
 
         # Plot clean group in blue
@@ -56519,7 +56470,6 @@ External Validation Performance (n={n_val}):
         ax.set_title(f'Group Spectra: Mean + IQR{preproc_label}')
         ax.legend(loc='upper right')
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
 
         self._contam_group_spectra_canvas = FigureCanvasTkAgg(fig, master=self.contam_group_spectra_plot_frame)
         self._contam_group_spectra_canvas.draw()
@@ -56564,7 +56514,7 @@ External Validation Performance (n={n_val}):
         if hasattr(self, '_contam_spectra_exclusion_canvas'):
             self._contam_spectra_exclusion_canvas.get_tk_widget().destroy()
 
-        fig = Figure(figsize=(10, 5), dpi=100)
+        fig = Figure(figsize=(10, 5), dpi=100, layout='constrained')
         ax = fig.add_subplot(111)
 
         # Plot clean group
@@ -56599,7 +56549,6 @@ External Validation Performance (n={n_val}):
         ax.set_title(f'Spectra with Exclusion Regions{preproc_label}')
         ax.legend(loc='upper right')
         ax.grid(True, alpha=0.3)
-        fig.tight_layout()
 
         self._contam_spectra_exclusion_canvas = FigureCanvasTkAgg(fig, master=self.contam_spectra_exclusion_plot_frame)
         self._contam_spectra_exclusion_canvas.draw()
@@ -57122,7 +57071,7 @@ External Validation Performance (n={n_val}):
         mean_after = np.mean(X_after, axis=0)
 
         # Create figure
-        fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), layout='constrained')
 
         # Before
         if method == 'Exclude Regions':
@@ -57143,7 +57092,6 @@ External Validation Performance (n={n_val}):
         axes[1].set_ylabel('Intensity')
 
         plt.suptitle(f'Contaminant Correction: {method}')
-        plt.tight_layout()
 
         # Show in popup window
         popup = tk.Toplevel(self.root)
@@ -57753,7 +57701,7 @@ External Validation Performance (n={n_val}):
                 self.app_preview_label.pack_forget()
 
             # Create figure with 3 subplots
-            fig = Figure(figsize=(10, 10), dpi=100, facecolor='white')
+            fig = Figure(figsize=(10, 10), dpi=100, facecolor='white', layout='constrained')
 
             # Subplot 1: Mean spectra comparison
             ax1 = fig.add_subplot(3, 1, 1)
@@ -57851,7 +57799,6 @@ External Validation Performance (n={n_val}):
             ax3.grid(True, alpha=0.3, linestyle='--')
 
             # Adjust layout
-            fig.tight_layout(pad=2.0)
 
             # Create toolbar frame first (packed at top)
             self.app_toolbar_frame = ttk.Frame(self.app_preview_plot_frame)
@@ -58073,7 +58020,7 @@ External Validation Performance (n={n_val}):
             self._diag_cleanup_canvas()
 
             # Create figure with 2x2 subplots
-            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white', layout='constrained')
 
             # Subplot 1: PCA Scores (PC1 vs PC2)
             ax1 = fig.add_subplot(2, 2, 1)
@@ -58157,7 +58104,6 @@ External Validation Performance (n={n_val}):
                         fontsize=13, fontweight='bold', y=0.98)
 
             # Adjust layout
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
 
             # Get parent frame for embedding
             parent_frame = self.diag_advanced_plot_label.master
@@ -58248,7 +58194,7 @@ External Validation Performance (n={n_val}):
 
             # Create figure
             if has_before:
-                fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+                fig = Figure(figsize=(12, 10), dpi=100, facecolor='white', layout='constrained')
 
                 X_before = data['X_before']
                 if not np.all(np.isfinite(X_before)):
@@ -58330,7 +58276,7 @@ External Validation Performance (n={n_val}):
 
             else:
                 # Single PCA analysis
-                fig = Figure(figsize=(12, 8), dpi=100, facecolor='white')
+                fig = Figure(figsize=(12, 8), dpi=100, facecolor='white', layout='constrained')
 
                 n_comp = min(5, X_after.shape[0], X_after.shape[1])
                 pca = PCA(n_components=n_comp)
@@ -58363,7 +58309,6 @@ External Validation Performance (n={n_val}):
                 )
 
             # Adjust layout
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
 
             # Get parent frame for embedding
             parent_frame = self.diag_advanced_plot_label.master
@@ -58429,7 +58374,7 @@ External Validation Performance (n={n_val}):
             self._diag_cleanup_canvas()
 
             # Create figure with 2x1 subplots
-            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white')
+            fig = Figure(figsize=(12, 10), dpi=100, facecolor='white', layout='constrained')
 
             # Method 1: PCA-based weights
             n_comp = min(5, X.shape[0], X.shape[1])
@@ -58503,7 +58448,6 @@ External Validation Performance (n={n_val}):
                         fontsize=13, fontweight='bold', y=0.98)
 
             # Adjust layout
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
 
             # Get parent frame for embedding
             parent_frame = self.diag_advanced_plot_label.master

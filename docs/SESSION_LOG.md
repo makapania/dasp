@@ -4,6 +4,22 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-05-09 — matplotlib `tight_layout` doesn't re-fit on Tk widget resize → right-edge clipping on laptop screens
+
+**User report.** Wavelength Importance plot in Model Development tab clipped right edge with no scrollbar on a 16" laptop. Same issue on other plots in the same subtab and elsewhere.
+
+**Root cause.** Figures across `spectral_predict_gui_optimized.py` are constructed with `Figure(figsize=(N, M))` or `plt.subplots(figsize=(N, M))` where N is typically 8-14 inches at dpi=100. The figure's layout margins are computed once by `tight_layout()` based on the original `figsize`. When the Tk canvas widget resizes to fit a smaller parent frame, matplotlib scales the figure DOWN but the layout margins computed from the original figsize don't re-fit, so axis labels overflow the smaller drawable area. The user never sees a scrollbar because matplotlib has scaled the figure to fit — the labels just get pushed past the right edge of the new drawable area.
+
+**Fix.** `layout='constrained'` (matplotlib >= 3.5) on the figure constructor recomputes the layout on every draw, including after a `Configure` event triggers a redraw. Constrained-layout supersedes tight_layout and the two are mutually exclusive (matplotlib warns if both are set). Sweep across the GUI file: 56 `Figure(...)` / `plt.subplots(...)` sites updated; 51 paired `tight_layout()` calls removed plus 1 collapsed `if has_legend: tight_layout(rect=...) else: tight_layout()` block. The one surviving `fig.tight_layout()` (line 5641) is inside `_bind_figure_resize`, a generic resize helper that's defined but never called — kept untouched.
+
+**Why this took a sweep, not a one-line.** The user said "elsewhere too" — the file has ~56 plot sites and the failure mode is the same at every one. Constrained-layout is purely additive (no semantic change) so a blanket sweep is the right shape. The previous bottom-strip pack-order fix from 2026-05-08 solved the same class of problem on the vertical axis (toolbar/info strips clipped off the bottom); this fix solves it on the horizontal axis (axis labels clipped off the right).
+
+**Lesson.** Treat `figsize=` + `tight_layout()` as a deprecated pair for any matplotlib figure that lives inside a resizable Tk container. New plot sites should use `Figure(..., layout='constrained')` (or `plt.subplots(..., layout='constrained')`) and skip `tight_layout()` entirely. The figsize is now just a hint for initial canvas size; constrained-layout will re-fit on every draw.
+
+**Implementation note.** Used a one-shot Python script (deleted after run) to do the regex transform: token-aware paren matching to find the `Figure(...)` / `plt.subplots(...)` call ends, then a separate pass to delete `<x>.tight_layout(...)` and `plt.tight_layout(...)` lines. The regex for "any tight_layout call" must allow attribute chains (e.g., `self._mbl_fig.tight_layout()`) — first iteration of the script missed those because `[\w]+\.` doesn't match dotted attribute paths. Updated to `[\w\.]+\.`.
+
+---
+
 ## 2026-05-08 (T-16 Phase 1) — dasp's "PLS-DA" is a PLSTransformer+LR hybrid; CV-ANOVA doesn't naturally apply
 
 **Discovery during Phase 1 implementation.** Plan v2 (Codex-reviewed) deferred PLS-DA from CV-ANOVA on a vague "complexity" rationale; user pushed back asking why not bundle PLS-DA. Investigation of `models.py:1354-1387` revealed dasp's classification "PLS-DA" is a **two-stage pipeline**:
