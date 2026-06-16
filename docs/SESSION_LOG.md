@@ -4,6 +4,42 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-06-16 — Wavelength Importance click-popup hardcoded "nm" unit (ignored cm⁻¹ x-unit)
+
+**Bug.** Model Development → Results → Wavelength Importance figure: clicking a point opens an
+annotation whose first line was `f"Wavelength: {wl:.1f} nm"` (hardcoded). The figure axis itself
+already routes through the unit-aware helpers, so in cm⁻¹ mode the axis read "Wavenumber (cm⁻¹)"
+while the popup still said "Wavelength … nm". Value was correct (the `wavelengths` array is stored
+in display units and feeds both `ax1.stem(...)` and the popup `wl`); only the label was wrong.
+
+**Fix.** `spectral_predict_gui_optimized.py`, `on_importance_click` in `_plot_wavelength_importance()`
+(~line 34987): use `self._get_x_axis_name()` + `self._get_x_unit_short()` instead of the literal
+"Wavelength … nm". Helpers defined at lines 19628–19647, driven by `self.current_x_unit`.
+
+**Audit — same bug class found in 3 more places (all fixed same commit).** Grepped the GUI for
+`nm` and cross-checked each against whether its plot's `set_xlabel` already routes through
+`_get_spectral_xlabel()` (i.e. is unit-toggle-aware). Confirmed siblings, all now using the helpers:
+- **Predictor-screening listbox** (`_update_screening_info_panel`, ~line 22388/22390): rows read
+  `{wl} nm -> r/imp`; the screening plot axis (22350) is already unit-aware. → use `_get_x_unit_short()`.
+- **Contaminant plot click-popup** (`_contam_create_wavelength_click_handler`, ~line 56452): shared by
+  4 contaminant plots (group spectra / clean overview / influence / exclusion — all use
+  `_get_spectral_xlabel()`). One fix corrects all four popups. → `_get_x_axis_name()` + `_get_x_unit_short()`.
+- **Diagnostics "Wavelength Contribution" plot** (~line 58499/58501/58540): main axis (58477) is
+  unit-aware, but the top-20 barh y-tick labels, the `ax2` ylabel, and the "Top 3 wavelengths" metrics
+  label hardcoded "nm". → helpers.
+
+**Lesson / pin candidate.** The unit helpers (`_get_spectral_xlabel` / `_get_x_unit_short` /
+`_get_x_axis_name`) are the single source of truth for nm-vs-cm⁻¹, but they were added after some
+click-handler annotations / listboxes / tick labels were already written with literal "nm". The
+file's 40+ `set_xlabel` call sites were all swept to the helper; the *satellite* text (popups,
+tooltips, listbox rows, barh tick labels, summary labels) was not. **Audit rule:** when a plot's
+axis is unit-aware, every other piece of text in/around that plot that prints a wavelength value
+must also use the helper. The remaining literal-"nm" hits in the file are legitimate (input-field
+labels, file-I/O metadata, calibration-transfer which always operates in nm, synthetic-data
+generation) and were intentionally left alone.
+
+---
+
 ## 2026-05-08 (T-16 Phase 1) — dasp's "PLS-DA" is a PLSTransformer+LR hybrid; CV-ANOVA doesn't naturally apply
 
 **Discovery during Phase 1 implementation.** Plan v2 (Codex-reviewed) deferred PLS-DA from CV-ANOVA on a vague "complexity" rationale; user pushed back asking why not bundle PLS-DA. Investigation of `models.py:1354-1387` revealed dasp's classification "PLS-DA" is a **two-stage pipeline**:

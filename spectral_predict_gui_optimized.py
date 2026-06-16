@@ -22380,14 +22380,15 @@ class SpectralPredictApp:
         # Clear listbox
         self.screening_listbox.delete(0, tk.END)
 
-        # Add top wavelengths to listbox
+        # Add top wavelengths to listbox (unit-aware: matches the screening plot x-axis)
         metric_name = results['metric_name']
+        unit = self._get_x_unit_short()
         for i, (wl, val) in enumerate(zip(results['top_wavelengths'], results['top_values']), 1):
             if results['method'] == 'correlation':
                 sign = '+' if val > 0 else ''
-                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} nm -> r = {sign}{val:.4f}")
+                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} {unit} -> r = {sign}{val:.4f}")
             else:
-                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} nm -> imp = {val:.5f}")
+                self.screening_listbox.insert(tk.END, f"{i:2}. {float(wl):.1f} {unit} -> imp = {val:.5f}")
 
         # Generate interpretation
         max_abs = results['abs_importances'].max()
@@ -34983,8 +34984,11 @@ F1 Score:  {f1:.4f}
                 wl = wavelengths[nearest_idx]
                 imp = importances[nearest_idx]
 
-                # Build info text
-                info_parts = [f"Wavelength: {wl:.1f} nm", f"Importance: {imp:.4f}"]
+                # Build info text (unit-aware: matches the figure x-axis unit)
+                info_parts = [
+                    f"{self._get_x_axis_name()}: {wl:.1f} {self._get_x_unit_short()}",
+                    f"Importance: {imp:.4f}",
+                ]
                 if self.wavelength_residual_corr_data is not None:
                     res_corr = self.wavelength_residual_corr_data[nearest_idx]
                     info_parts.append(f"Residual Corr: {res_corr:.4f}")
@@ -56446,7 +56450,8 @@ External Validation Performance (n={n_val}):
                 return
             idx = np.argmin(np.abs(wavelengths - event.xdata))
             wl = wavelengths[idx]
-            lines = [f"Wavelength: {wl:.1f} nm"]
+            # Unit-aware: matches the plot x-axis unit (nm vs cm⁻¹)
+            lines = [f"{self._get_x_axis_name()}: {wl:.1f} {self._get_x_unit_short()}"]
             for line_artist in ax.get_lines():
                 label = line_artist.get_label()
                 if label and not label.startswith('_'):
@@ -58493,9 +58498,9 @@ External Validation Performance (n={n_val}):
             ax2.barh(y_pos, top_weights, color=colors, alpha=0.8,
                     edgecolor='black', linewidth=0.5)
             ax2.set_yticks(y_pos)
-            ax2.set_yticklabels([f'{w:.1f} nm' for w in top_wavelengths], fontsize=8)
+            ax2.set_yticklabels([f'{w:.1f} {self._get_x_unit_short()}' for w in top_wavelengths], fontsize=8)
             ax2.set_xlabel('Normalized Weight', fontsize=10)
-            ax2.set_ylabel('Wavelength', fontsize=10)
+            ax2.set_ylabel(self._get_x_axis_name(), fontsize=10)
             ax2.set_title(f'Top {top_n} Most Important Wavelengths',
                          fontsize=12, fontweight='bold')
             ax2.grid(True, alpha=0.3, linestyle='--', axis='x')
@@ -58534,7 +58539,7 @@ External Validation Performance (n={n_val}):
             top_3_wl = ', '.join([f'{w:.1f}' for w in top_wavelengths[:3]])
             self.diag_variance_label.config(
                 text=f"Wavelength Weight Metrics:\n\n"
-                     f"  Top 3 wavelengths: {top_3_wl} nm\n"
+                     f"  Top 3 wavelengths: {top_3_wl} {self._get_x_unit_short()}\n"
                      f"  Max PCA weight: {np.max(weights_pca):.3f}\n"
                      f"  Max variance weight: {np.max(weights_var):.3f}\n"
                      f"  Important wavelengths (top 10%): {important_idx.sum()}"
