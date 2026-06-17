@@ -2957,6 +2957,7 @@ class SpectralPredictApp:
         self.root.bind('<Escape>', lambda e: self._dismiss_annotation())
         self._explore_plot_state = {}  # {frame_key: state_dict} for explore plot info bars
         self._highlight_timers = {}  # {sample_idx: after_id} for re-inclusion flash timers
+        self._spectral_x_canvases = []  # canvases whose x-axis label tracks current_x_unit (fast relabel)
 
         # Peak Calculator state
         self._peak_calc_dialog = None           # PeakCalculatorDialog instance or None
@@ -8600,6 +8601,7 @@ class SpectralPredictApp:
         self._mbl_canvas = FigureCanvasTkAgg(self._mbl_fig, master=self._mbl_plot_frame)
         self._mbl_canvas.draw()
         self._mbl_canvas.get_tk_widget().pack(fill='both', expand=True)
+        self._register_spectral_canvas(self._mbl_canvas)  # enable fast x-unit relabel
 
         # Connect click event
         self._mbl_cid = self._mbl_canvas.mpl_connect('button_press_event', self._on_mbl_click)
@@ -8908,6 +8910,7 @@ class SpectralPredictApp:
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.draw()
         canvas.get_tk_widget().pack(fill='both', expand=True)
+        self._register_spectral_canvas(canvas)  # enable fast x-unit relabel
 
         toolbar = NavigationToolbar2Tk(canvas, toolbar_frame)
         toolbar.update()
@@ -19428,11 +19431,12 @@ class SpectralPredictApp:
                 self.current_x_unit.set(self.original_x_unit.get())
                 return
 
-        # Update labels and plots without converting data
+        # Update labels without converting data. The radios are relabel-only, so the plotted
+        # geometry is unchanged — just swap the x-axis label text in place instead of doing a
+        # full (slow) regenerate of every spectral figure.
         self._update_x_unit_labels()
         self._update_x_unit_status_ui()
-        self._generate_plots()
-        self._generate_explore_plots()
+        self._relabel_spectral_x_axes()
 
     def _convert_x_unit_and_replot(self):
         """Convert x-axis between nm and cm⁻¹ and regenerate plots.
@@ -19717,6 +19721,60 @@ class SpectralPredictApp:
                 self.data_sources_tree.heading('Range', text=f'Range ({unit_short})')
             except Exception:
                 pass
+
+    @staticmethod
+    def _canvas_is_alive(canvas):
+        """True if the canvas's Tk widget still exists (not destroyed by a plot regen)."""
+        try:
+            return bool(canvas.get_tk_widget().winfo_exists())
+        except Exception:
+            return False
+
+    def _register_spectral_canvas(self, canvas):
+        """Track a canvas whose x-axis label follows current_x_unit, for fast relabeling.
+
+        Spectral plot creators call this after embedding their canvas so the x-unit radio
+        override can swap the axis label text in place instead of regenerating the figure.
+
+        Prunes canvases destroyed by a prior regen (and any duplicate of this one) on every
+        call so the registry stays bounded to live canvases even when the user never toggles
+        the x-unit (e.g. repeated filter/exclude/reload), which would otherwise retain dead
+        figures and their Line2D data.
+        """
+        if canvas is None:
+            return
+        self._spectral_x_canvases = [
+            c for c in self._spectral_x_canvases
+            if c is not canvas and self._canvas_is_alive(c)
+        ]
+        self._spectral_x_canvases.append(canvas)
+
+    def _relabel_spectral_x_axes(self):
+        """Fast path for the x-unit radio: swap only the x-axis label text on already-rendered
+        spectral plots instead of regenerating them (relabel-only, no data change).
+
+        An axis currently showing one of the two spectral labels is, by definition, a spectral
+        axis, so non-spectral plots (target distribution, PCA scores) are left untouched.
+        Canvases whose Tk widget was destroyed by a later regen are pruned.
+        """
+        new_label = self._get_spectral_xlabel()
+        spectral_labels = {"Wavelength (nm)", "Wavenumber (cm⁻¹)"}
+        live = []
+        for canvas in self._spectral_x_canvases:
+            if not self._canvas_is_alive(canvas):
+                continue  # widget destroyed by a later regen — drop it
+            live.append(canvas)
+            try:
+                changed = False
+                for ax in canvas.figure.get_axes():
+                    if ax.get_xlabel() in spectral_labels:
+                        ax.set_xlabel(new_label)  # no fontsize → preserves each axis's styling
+                        changed = True
+                if changed:
+                    canvas.draw_idle()
+            except Exception as e:
+                print(f"WARNING: x-axis relabel skipped for one plot: {e}")
+        self._spectral_x_canvases = live
 
     def _update_data_type_status_ui(self):
         """
@@ -21024,6 +21082,7 @@ class SpectralPredictApp:
 
         canvas = FigureCanvasTkAgg(fig, master=frame)
         canvas.draw()
+        self._register_spectral_canvas(canvas)  # enable fast x-unit relabel
 
         # Add navigation toolbar for zoom/pan
         toolbar_frame = ttk.Frame(frame)

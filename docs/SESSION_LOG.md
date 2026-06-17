@@ -4,6 +4,39 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-06-16 — X-unit radio is relabel-only, so it now relabels plots in place instead of full-regenerating them
+
+**Perf fix.** The Import-tab nm/cm⁻¹ radios are *declarative* (`_on_x_unit_override`) — they
+correct a mis-detected unit and never convert values (the 1e7/x converter lives behind the
+hidden `Convert to…` button, disabled in T-21 because reciprocal regrid breaks SG derivatives).
+The handler nonetheless called `_generate_plots()` + `_generate_explore_plots()`, tearing down
+and rebuilding ~11 figures (re-running SG 1st/2nd-deriv transforms + one Line2D per spectrum
+across 3 Import tabs + 8 Explore plots) on every click. Since a relabel changes no data/geometry,
+all that was wasted — only the x-axis label text needs to change.
+
+**Mechanism.** Added `self._spectral_x_canvases` registry; spectral creators register their
+canvas (`_create_plot_tab`, `_create_explore_plot_in_frame`, `_init_manual_baseline_plot`).
+`_relabel_spectral_x_axes()` swaps the xlabel in place on every registered live canvas (axes
+self-identify by current label ∈ {"Wavelength (nm)","Wavenumber (cm⁻¹)"}), then `draw_idle()`.
+`_on_x_unit_override` calls that instead of the two `_generate_*`.
+
+**Gotchas / lessons.**
+- `ax.set_xlabel(text)` with no fontdict/kwargs preserves existing font size/color — so the
+  in-place relabel keeps per-axis styling (Import/Explore 12pt, manual baseline 10pt). Verified
+  against mpl 3.10.8.
+- **Registry liveness (Codex gpt-5.5-high MEDIUM, fixed before commit):** pruning only inside
+  the relabel method leaks destroyed `FigureCanvasTkAgg`/figures when the user regenerates plots
+  *without* toggling units (filter/exclude/reload register fresh canvases, dead ones linger).
+  Fix: `_register_spectral_canvas()` prunes dead canvases (via `winfo_exists()`) and dedups on
+  every call, keeping the registry bounded to live canvases. `_canvas_is_alive()` shared helper.
+- Exact-string label matching is internally consistent with `_get_spectral_xlabel()` today but is
+  fragile if the wording/superscript ever changes — a future axis-metadata flag would be sturdier.
+- Scope matches the old behavior exactly: only Import + Explore plots refresh on toggle. Other
+  tabs (Model Dev / Contaminant / CT) were never refreshed by the override and still aren't —
+  widening registration app-wide is a noted optional follow-up.
+
+---
+
 ## 2026-06-16 — Wavelength Importance click-popup hardcoded "nm" unit (ignored cm⁻¹ x-unit)
 
 **Bug.** Model Development → Results → Wavelength Importance figure: clicking a point opens an
