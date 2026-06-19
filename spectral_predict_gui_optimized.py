@@ -19620,6 +19620,11 @@ class SpectralPredictApp:
         self.data_value_scale = metadata.get('value_scale', 1.0)
         self.source_data_type = metadata.get('source_data_type', None)
         self.data_has_been_converted = False
+        # Clear the legacy absorbance-conversion flag on every fresh load. Otherwise a prior
+        # "Convert to Absorbance" leaves use_absorbance=True, and _apply_transformation would
+        # silently log-transform the newly imported data in the plots while the radio still
+        # reads "Reflectance" — making a radio toggle look like it converts the data.
+        self.use_absorbance.set(False)
 
     def _apply_x_unit_metadata(self, metadata):
         """Apply detected x-axis unit metadata from file load."""
@@ -19825,8 +19830,11 @@ class SpectralPredictApp:
         self.reflectance_radio.config(state='normal')
         self.absorbance_radio.config(state='normal')
 
-        # Legacy checkbox: only allow reflectance -> absorbance conversion
+        # Legacy checkbox: only allow reflectance -> absorbance conversion.
+        # Always start unchecked on a fresh (unconverted) load — the checkbox reflects an
+        # explicit user action, never carried-over state from a previous file.
         if data_type == "reflectance" and not self.data_has_been_converted:
+            self.use_absorbance.set(False)
             self.absorbance_checkbox.config(state='normal')
         else:
             self.use_absorbance.set(False)

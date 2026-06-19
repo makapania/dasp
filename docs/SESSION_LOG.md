@@ -4,6 +4,36 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-06-19 — Radio-button data-type toggle silently log-transforms plots (stale `use_absorbance`)
+
+**Symptom.** User imports a (CSV/XLS) reflectance file; the Import & Preview plots look like
+**absorbance** even though the radio reads **Reflectance**. Clicking the **Absorbance** radio makes
+the plot snap to a reflectance shape — i.e. the radio appears to *convert* the data, which it must
+never do (radios are relabel-only).
+
+**Root cause.** Not the importer — `read_combined_csv`/`read_combined_excel` and
+`detect_spectral_data_type` never touch the values; detection only sets a *label*. The transform
+lives in the hidden legacy `use_absorbance` flag. Every plot generator runs the data through
+`_apply_transformation()` (`spectral_predict_gui_optimized.py:20820`), which applies
+`A = log10(1/R)` iff `use_absorbance` is True AND `data_has_been_converted` is False AND
+`current_data_type != "absorbance"`. `use_absorbance` is set True only by clicking **Convert to
+Absorbance** (`:19588`), but it was **never reset on a new file load** — `_apply_data_type_metadata`
+reset `data_has_been_converted` but not `use_absorbance`, and the `_update_data_type_status_ui`
+reflectance branch (`:19829`) enabled the legacy checkbox without resetting the flag (only the
+`else` branch reset it — an asymmetry). So after any prior conversion, the next import kept
+`use_absorbance=True` → phantom log transform in plots while the radio still says Reflectance.
+Toggling to the Absorbance radio short-circuits at `:20831` (`current_data_type=="absorbance"` →
+return raw), revealing the true reflectance shape. The shape-change-on-toggle is the tell that it's
+this flag, not a detection mislabel (a mislabel changes only the y-axis text, not the curve).
+
+**Fix.** Reset `self.use_absorbance.set(False)` in `_apply_data_type_metadata` (canonical
+load-reset point, alongside `data_has_been_converted = False`), and made the `:19829` reflectance
+branch reset the flag too so the invariant "fresh unconverted load ⇒ `use_absorbance` False" holds
+locally. The legacy checkbox is created but never `.pack`ed (hidden), so this only clears stale
+cross-load state — no user-facing workflow changes.
+
+---
+
 ## 2026-06-19 — Legacy float32 ASD-v1 (.sco) files read as all-NaN because SpecDAL assumes float64
 
 **Root cause.** A user's `.sco` / numbered `.000` FieldSpec files wouldn't import; renaming to
