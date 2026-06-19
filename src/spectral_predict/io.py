@@ -671,11 +671,15 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
     if not asd_dir.is_dir():
         raise ValueError(f"Not a directory: {asd_dir}")
 
-    # Find ASD files
-    asd_files = list(asd_dir.glob("*.sig")) + list(asd_dir.glob("*.asd"))
+    # Find ASD files (.sco = legacy float32 ASD-v1 binary, e.g. older FieldSpec exports)
+    asd_files = (
+        list(asd_dir.glob("*.sig"))
+        + list(asd_dir.glob("*.asd"))
+        + list(asd_dir.glob("*.sco"))
+    )
 
     if len(asd_files) == 0:
-        raise ValueError(f"No .sig or .asd files found in {asd_dir}")
+        raise ValueError(f"No .sig, .asd, or .sco files found in {asd_dir}")
 
     print(f"Found {len(asd_files)} ASD files")
 
@@ -691,10 +695,15 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             print(f"⚠️ WARNING: Duplicate filename '{stem}' - later file will overwrite earlier one")
 
         try:
-            spectrum = _read_single_asd_ascii(asd_file, reader_mode)
-            spectra[stem] = spectrum
+            if _is_binary_asd(asd_file):
+                # Binary ASD (legacy float32 or modern) - bypass the text reader.
+                spectrum = _handle_binary_asd(asd_file, reader_mode)
+            else:
+                spectrum = _read_single_asd_ascii(asd_file, reader_mode)
+            if spectrum is not None:
+                spectra[stem] = spectrum
         except UnicodeDecodeError:
-            # Binary ASD file detected - try to read with SpecDAL
+            # Text read hit binary bytes - fall back to the binary handler.
             spectrum = _handle_binary_asd(asd_file, reader_mode)
             if spectrum is not None:
                 spectra[stem] = spectrum
@@ -821,9 +830,22 @@ def _read_single_asd_ascii(asd_file, reader_mode):
     return pd.Series(df["value"].values, index=df["wavelength"].values)
 
 
+def _is_binary_asd(asd_file):
+    """Return True if the file is a binary ASD (magic bytes ``ASD\\0``).
+
+    ASCII ASD/.sig files start with text such as ``ASD Field Spec Pro``, so a 3-byte
+    ``ASD`` prefix is not sufficient; the 4th byte (NUL) disambiguates binary files.
+    """
+    try:
+        with open(asd_file, "rb") as f:
+            return f.read(4) == b"ASD\x00"
+    except OSError:
+        return False
+
+
 def _handle_binary_asd(asd_file, reader_mode):
     """
-    Handle binary ASD files using SpecDAL.
+    Handle binary ASD files: native legacy reader first, then SpecDAL.
 
     Parameters
     ----------
@@ -842,6 +864,14 @@ def _handle_binary_asd(asd_file, reader_mode):
     ValueError
         If binary ASD cannot be read and SpecDAL not available
     """
+    # Legacy float32 ASD-v1 files (e.g. .sco / numbered .000) are misread by SpecDAL
+    # as float64 -> all-NaN. Decode them natively first; returns None for other layouts.
+    from .readers.asd_native import read_legacy_asd
+
+    legacy = read_legacy_asd(asd_file)
+    if legacy is not None:
+        return legacy
+
     if reader_mode == "auto":
         # Try to import SpecDAL
         try:
@@ -2341,6 +2371,7 @@ def detect_format(path: Union[str, Path]) -> str:
         '.xls': 'excel',
         '.asd': 'asd',
         '.sig': 'asd',
+        '.sco': 'asd',
         '.spc': 'spc',
         '.jdx': 'jcamp',
         '.dx': 'jcamp',
@@ -2370,6 +2401,10 @@ def detect_format(path: Union[str, Path]) -> str:
         try:
             with open(path, 'rb') as f:
                 header = f.read(512)
+
+            # Binary ASD magic (legacy float32 ASD-v1, e.g. .sco files)
+            if header[:4] == b'ASD\x00':
+                return 'asd'
 
             # SPC magic bytes
             if header[:2] == b'\x4d\x4b':  # 'MK' in ASCII
@@ -2652,7 +2687,7 @@ def _detect_directory_format(directory: Path) -> str:
     """Detect format from directory contents."""
     files = list(directory.iterdir())
 
-    if any(f.suffix.lower() in ['.asd', '.sig'] for f in files):
+    if any(f.suffix.lower() in ['.asd', '.sig', '.sco'] for f in files):
         return 'asd'
     elif any(f.suffix.lower() == '.spc' for f in files):
         return 'spc'

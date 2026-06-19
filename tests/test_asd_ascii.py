@@ -109,7 +109,7 @@ def test_read_asd_dir_mixed_sig_asd(tmp_path):
 
 def test_read_asd_dir_no_files(tmp_path):
     """Test error when no ASD files found."""
-    with pytest.raises(ValueError, match="No .sig or .asd files found"):
+    with pytest.raises(ValueError, match="No .sig, .asd, or .sco files found"):
         read_asd_dir(tmp_path)
 
 

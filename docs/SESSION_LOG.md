@@ -4,6 +4,47 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-06-19 — Legacy float32 ASD-v1 (.sco) files read as all-NaN because SpecDAL assumes float64
+
+**Root cause.** A user's `.sco` / numbered `.000` FieldSpec files wouldn't import; renaming to
+`.asd` made them load but every value came back NaN. These are the *oldest* ASD binary format —
+version string `b"ASD\x00"` — which stores the spectrum as **float32** at offset 484
+(file size == `484 + channels*4`; 9088 bytes for 2151 bands). The app reads binary ASD via
+**SpecDAL**, which assumes the modern layout (float64 at the same offset), so it reads past the
+data into garbage → all-NaN. Two independent failures stacked: (1) `read_asd_dir()` only globbed
+`*.sig`/`*.asd`, so `.sco` was never picked up at all; (2) even renamed, SpecDAL mis-decoded it.
+
+**Gotcha — `raw[:3] == b"ASD"` is NOT a safe binary discriminator.** ASCII `.asd`/`.sig` files
+start with literal text `ASD Field Spec Pro`, so their first 3 bytes are also `ASD`. The binary
+magic is 4 bytes `ASD\x00` (`_is_binary_asd` checks 4). Header fields (little-endian): first
+wavelength `float@191`, nm/channel `float@195`, channel count `uint16@204`, dataType `byte@186`
+(1 = reflectance).
+
+**Fix.** New `readers/asd_native.py::read_legacy_asd()` decodes the float32 layout natively and
+is tried *before* SpecDAL in `_handle_binary_asd()`. Discriminator is exact file size:
+`484 + channels*4` → decode float32; `484 + channels*8` → return `None` (modern, hand to SpecDAL);
+neither → raise `ValueError` (corrupt/truncated, so real corruption isn't silently treated as
+"modern, try SpecDAL"). `.sco` added to the glob, `format_map`, `detect_format` magic branch, and
+`_detect_directory_format`. One-off converter at `scripts/convert_old_asd.py` reuses the decoder.
+
+**GUI gate gotcha (caught by Kimi cross-family review).** The backend fix alone is NOT enough:
+the Tkinter GUI does its *own* directory globbing to decide "Detected N ASD files" at six sites
+(`spectral_predict_gui_optimized.py` ~16072 Import-tab auto-detect, ~17663 load path, ~41276
+prediction tab, ~44994 sample-ID ext list, ~45612 + ~45685 dir-load helpers) and gates on that
+*before* `read_asd_dir` runs. All six globbed `*.asd`/`*.sig` only, so a `.sco` folder showed
+"No supported spectral files found" and never reached the backend. Added `.sco` to all six.
+Lesson: format support in `io.py` is necessary but not sufficient — the GUI has parallel
+detection logic that must be updated in lockstep.
+
+**Variant decision.** `.sco` and the bare `.000` companions decode to near-identical reflectance
+(differ ~0.001–0.003) — duplicate measurements of the same scan, not distinct types. Standardized
+on `.sco`-only import: stems (`italy.000`, `italy.001`…) are unique, whereas every bare
+`italy.000…029` has stem `italy` and would collapse 30 spectra into 1 row. Bare numeric files
+still classify as OPUS in `detect_format` (intentionally untouched). Real-folder result:
+30 files × 2151 bands, 0 NaN, reflectance 0.06–0.97, 100% reflectance confidence.
+
+---
+
 ## 2026-06-16 — X-unit radio is relabel-only, so it now relabels plots in place instead of full-regenerating them
 
 **Perf fix.** The Import-tab nm/cm⁻¹ radios are *declarative* (`_on_x_unit_override`) — they

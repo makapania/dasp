@@ -16068,9 +16068,10 @@ class SpectralPredictApp:
         # Auto-detect file type
         # Priority: ASD > CSV > SPC
 
-        # Check for ASD files (case insensitive, includes .sig format)
+        # Check for ASD files (case insensitive, includes .sig + legacy .sco formats)
         asd_files = sorted(set(list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
-                     list(path.glob("*.sig")) + list(path.glob("*.SIG"))))
+                     list(path.glob("*.sig")) + list(path.glob("*.SIG")) +
+                     list(path.glob("*.sco")) + list(path.glob("*.SCO"))))
         if asd_files:
             self.detected_type = "asd"
             self.detection_status.config(
@@ -17659,8 +17660,8 @@ class SpectralPredictApp:
                 dir_path = Path(spectra_path)
                 files = list(dir_path.iterdir())
 
-                # Check for ASD files
-                asd_files = [f for f in files if f.suffix.lower() == '.asd']
+                # Check for ASD files (.asd, .sig, legacy .sco)
+                asd_files = [f for f in files if f.suffix.lower() in ('.asd', '.sig', '.sco')]
                 if asd_files:
                     format_type = 'asd'
                     X, metadata = read_asd_dir(spectra_path)
@@ -41273,7 +41274,7 @@ External Validation Performance (n={n_val}):
 
             if source == 'directory':
                 # Try to detect file type
-                asd_files = sorted(list(path.glob("*.asd")))
+                asd_files = sorted(set(list(path.glob("*.asd")) + list(path.glob("*.sig")) + list(path.glob("*.sco"))))
                 spc_files = sorted(list(path.glob("*.spc")))
                 jcamp_files = sorted(set(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))))
                 ascii_files = sorted(set(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
@@ -44991,7 +44992,7 @@ External Validation Performance (n={n_val}):
             # Get sample IDs from filenames in the directory
             input_path = Path(input_dir)
             sample_files = []
-            for ext in ['.asd', '.sig', '.csv', '.xlsx', '.spc', '.txt']:
+            for ext in ['.asd', '.sig', '.sco', '.csv', '.xlsx', '.spc', '.txt']:
                 sample_files.extend(list(input_path.glob(f'*{ext}')))
 
             sample_ids = [f.stem for f in sample_files]
@@ -45609,7 +45610,9 @@ External Validation Performance (n={n_val}):
         import glob
 
         # Try to detect file type
-        asd_files = sorted(glob.glob(os.path.join(directory, "*.asd")))
+        asd_files = sorted(glob.glob(os.path.join(directory, "*.asd"))
+                           + glob.glob(os.path.join(directory, "*.sig"))
+                           + glob.glob(os.path.join(directory, "*.sco")))
         csv_files = sorted(glob.glob(os.path.join(directory, "*.csv")))
         spc_files = sorted(glob.glob(os.path.join(directory, "*.spc")))
 
@@ -45682,7 +45685,10 @@ External Validation Performance (n={n_val}):
 
         dir_path = Path(directory)
 
-        asd_files = sorted(dir_path.glob("*.asd"))
+        asd_files = sorted(set(
+            list(dir_path.glob("*.asd")) + list(dir_path.glob("*.sig"))
+            + list(dir_path.glob("*.sco"))
+        ))
         spc_files = sorted(dir_path.glob("*.spc"))
         jcamp_files = sorted(set(
             list(dir_path.glob("*.jdx")) + list(dir_path.glob("*.dx"))
