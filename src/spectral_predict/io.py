@@ -873,7 +873,7 @@ def _read_single_asd_ascii(asd_file, reader_mode):
     return pd.Series(df["value"].values, index=df["wavelength"].values)
 
 
-def _is_binary_asd(asd_file):
+def _is_binary_asd(asd_file: Union[str, Path]) -> bool:
     """Return True if the file is a binary ASD (magic bytes ``ASD\\0``).
 
     ASCII ASD/.sig files start with text such as ``ASD Field Spec Pro``, so a 3-byte
