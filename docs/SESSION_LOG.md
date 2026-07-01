@@ -49,6 +49,22 @@ R in PATH — a red test the branch never observed. **Fix:** reworded to "Native
 reader: modern (as5-as8) float64 files are not yet implemented. Only the legacy float32 ASD-v1 format
 … is supported." Contains both anchors in order; verified the regex matches live.
 
+**Follow-up (same day) — fault-tolerance policy reversed after a PR-review pass.** A medium-effort
+PR review of #61 flagged that finding #1's `if binary: raise` was a footgun: one corrupt `.sco` in a
+folder of 30 aborted the *entire* import (loaded 0), and `_file_equalize_batch` amplified it to
+dropping a whole instrument. Per user direction ("one corrupt file should not stop the whole folder;
+just mention skipped files"), `read_asd_dir` now **skips** an unreadable/corrupt file (binary OR
+ASCII), collects the reasons, and prints a `[!] Skipped N ...` summary after the loop; it hard-raises
+only when *zero* files load, and that error now carries the specific reason(s) instead of the generic
+"No valid spectra could be read". The `UnicodeDecodeError` fallback is now nested around just the
+ASCII read so a fallback failure also lands in the skip path. **Windows gotcha:** the summary `print`
+must be ASCII (`[!]`, not `⚠️`) — a `⚠️` on a cp1252 stdout raises `UnicodeEncodeError` and would abort
+`read_asd_dir` in the very corrupt-file path this hardens (the pre-existing duplicate-stem `⚠️` prints
+have the same latent bug). Not folded in (out of the narrowed scope): the truncated-below-484-bytes and
+all-NaN-payload files still route to SpecDAL / enter the matrix silently rather than being skipped —
+noted as optional future hardening. Tests: `test_read_asd_dir_skips_corrupt_and_continues` +
+`test_read_asd_dir_all_corrupt_raises_with_reason` added.
+
 **Review trail.** All 4 fixes locally verified (19 ASD tests pass; corrupt-`.sco` re-raise and the
 regex match confirmed by a direct repro script). Handed the uncommitted diff to Codex 5.5 (gpt-5.5,
 high reasoning, read-only) — **no findings**; it statically checked every converted site for the

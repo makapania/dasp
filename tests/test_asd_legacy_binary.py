@@ -116,6 +116,35 @@ def test_read_asd_dir_end_to_end_sco(tmp_path):
     assert df.columns.min() == 350.0 and df.columns.max() == 2500.0
 
 
+def test_read_asd_dir_skips_corrupt_and_continues(tmp_path, capsys):
+    """One corrupt .sco is skipped and reported; the good files still load."""
+    from spectral_predict.io import read_asd_dir
+
+    for i in range(3):
+        (tmp_path / f"good{i}.sco").write_bytes(_make_legacy_asd(np.linspace(0.13, 0.68, 2151)))
+    # Corrupt: header claims 2151 channels, body truncated to 100.
+    raw = bytearray(_make_legacy_asd(np.zeros(2151)))
+    (tmp_path / "bad.sco").write_bytes(bytes(raw[: 484 + 100 * 4]))
+
+    df, _ = read_asd_dir(tmp_path)
+
+    assert df.shape[0] == 3
+    assert set(df.index) == {"good0", "good1", "good2"}
+    out = capsys.readouterr().out
+    assert "Skipped 1" in out and "bad.sco" in out
+
+
+def test_read_asd_dir_all_corrupt_raises_with_reason(tmp_path):
+    """A folder where every file is corrupt raises with the specific reason, not a generic message."""
+    from spectral_predict.io import read_asd_dir
+
+    raw = bytearray(_make_legacy_asd(np.zeros(2151)))
+    (tmp_path / "bad.sco").write_bytes(bytes(raw[:600]))
+
+    with pytest.raises(ValueError, match="does not match header"):
+        read_asd_dir(tmp_path)
+
+
 def test_nan_payload_does_not_crash(tmp_path):
     """A corrupt float32 payload (NaN/inf) decodes without raising."""
     vals = np.linspace(0.1, 0.5, 100)

@@ -707,6 +707,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
     # Read each file
     spectra = {}
     duplicate_stems = []
+    skipped = []
     for asd_file in sorted(asd_files):
         stem = asd_file.stem
 
@@ -715,28 +716,26 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             duplicate_stems.append(stem)
             print(f"⚠️ WARNING: Duplicate filename '{stem}' - later file will overwrite earlier one")
 
-        binary = _is_binary_asd(asd_file)
         try:
-            if binary:
+            if _is_binary_asd(asd_file):
                 # Binary ASD (legacy float32 or modern) - bypass the text reader.
                 spectrum = _handle_binary_asd(asd_file, reader_mode)
             else:
-                spectrum = _read_single_asd_ascii(asd_file, reader_mode)
-            if spectrum is not None:
-                spectra[stem] = spectrum
-        except UnicodeDecodeError:
-            # Text read hit binary bytes - fall back to the binary handler.
-            spectrum = _handle_binary_asd(asd_file, reader_mode)
+                try:
+                    spectrum = _read_single_asd_ascii(asd_file, reader_mode)
+                except UnicodeDecodeError:
+                    # Text read hit binary bytes - fall back to the binary handler.
+                    spectrum = _handle_binary_asd(asd_file, reader_mode)
             if spectrum is not None:
                 spectra[stem] = spectrum
         except Exception as e:
-            # read_legacy_asd raises ValueError for corrupt/truncated/inconsistent
-            # binary files. Surface those loudly rather than silently dropping the file
-            # (the reader's "raise, don't silently fall back" contract). ASCII read
-            # failures stay tolerant so one junk text file can't abort a whole folder.
-            if binary:
-                raise
-            print(f"Warning: Could not read {asd_file.name}: {e}")
+            # Corrupt/unreadable file (e.g. read_legacy_asd's ValueError on a
+            # truncated .sco, or a modern binary with no SpecDAL). Skip it and keep
+            # loading the rest of the folder — one bad file must not abort the whole
+            # import — then report every skipped file together after the loop.
+            msg = str(e) if asd_file.name in str(e) else f"{asd_file.name}: {e}"
+            skipped.append(msg)
+            print(f"Warning: skipping {msg}")
 
     if duplicate_stems:
         print(f"\n⚠️ Found {len(duplicate_stems)} duplicate ASD filenames (ignoring extensions)")
@@ -745,8 +744,16 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             print(f"... and {len(duplicate_stems) - 10} more")
         print("Keeping LAST occurrence of each duplicate.\n")
 
+    if skipped:
+        print(f"\n[!] Skipped {len(skipped)} unreadable/corrupt file(s):")
+        for line in skipped[:10]:
+            print(f"  - {line}")
+        if len(skipped) > 10:
+            print(f"  ... and {len(skipped) - 10} more")
+
     if len(spectra) == 0:
-        raise ValueError("No valid spectra could be read")
+        detail = f" ({'; '.join(skipped[:5])})" if skipped else ""
+        raise ValueError(f"No valid spectra could be read{detail}")
 
     # Combine into wide matrix
     df = pd.DataFrame(spectra).T  # Transpose so rows = samples
