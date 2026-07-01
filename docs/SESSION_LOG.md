@@ -4,6 +4,151 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — Legacy `.sco` review fold-in: broad-except swallowed corruption guards; GUI detection globs drift; centralized ASD extensions
+
+**Context.** High-effort code review of the `feat/legacy-asd-sco-import` branch (the native legacy
+float32 ASD/`.sco` reader) surfaced 4 real findings, folded in this session and cleared by Codex 5.5.
+
+**1 — Broad `except Exception` defeated the reader's "raise loudly" contract.** `read_legacy_asd`
+deliberately raises `ValueError` for a file that carries the legacy `ASD\x00` magic but has an
+inconsistent header (implausible channel count, bad wavelength axis, or a size matching neither the
+float32 nor float64 layout — i.e. corrupt/truncated). The point is to *not* let real corruption be
+misread as "modern format, hand to SpecDAL". But `read_asd_dir`'s per-file loop caught that
+`ValueError` in a blanket `except Exception as e: print(warning)` and skipped the file — so a corrupt
+legacy folder imported as "No valid spectra could be read" (no hint of corruption), or dropped
+samples silently from a partially-corrupt folder. **Fix:** capture `binary = _is_binary_asd(asd_file)`
+*before* the `try`; in the handler `if binary: raise` (propagate loudly) else keep printing a warning.
+ASCII stays tolerant on purpose — one junk `.sig`/text file shouldn't abort a whole folder — but a
+binary/legacy decode failure is a real signal the user must see. `io.py:~715-737`.
+
+**2 — GUI directory-detection globs drift from backend support.** The GUI gates on its *own* glob of a
+folder before it ever calls `read_asd_dir`. The original `.sco` PR updated 6 such globs but missed
+the **Calibration Transfer tab** (4 sites) plus a few other tabs and the export-naming `folder_ext_map`
+registry — all still `*.asd`/`*.sig` only. Net effect: legacy `.sco` folders showed "No spectral files
+detected" on those tabs despite the backend handling them fine. This is the *second* time an ASD
+extension addition missed a GUI site (Kimi caught one in the original PR). Root lesson: the extension
+list was duplicated ~13 times across the GUI + `io.py`, so every addition is a find-every-copy hazard.
+
+**5 — Centralized to kill the recurrence.** Added `io.ASD_EXTENSIONS = (".asd", ".sig", ".sco")` and
+`io.list_asd_files(directory) -> list[Path]` (case-insensitive via `suffix.lower()`, sorted,
+non-recursive `Path.iterdir`) as the single source of truth. Replaced all ~13 hand-maintained globs:
+folder-enumeration sites use `list_asd_files`; suffix-membership checks and the registry use
+`ASD_EXTENSIONS`. **Path-vs-string gotcha:** some original sites used `glob.glob` (returns `str`) and
+some `Path.glob` (returns `Path`); `list_asd_files` always returns `Path`. Verified (and Codex
+re-verified) every converted site only uses the result for truthiness/`len`/iteration/suffix-membership
+or explicitly `str()`-wraps it (e.g. `str(asd_files[0])`, `str(f)` in the registry loop) — nothing
+relied on `str` elements. GUI imports the two symbols once at module top (`spectral_predict.io` is
+already in the top-level dependency graph via `search_controller`, so no new circular-import risk).
+
+**3 — Reworded error message broke a skipped test on CI only.** `read_binary_asd`'s
+`NotImplementedError` had been reworded and lost the substring `not yet implemented` that
+`tests/test_optional_r_bridge.py::test_native_reader_not_implemented` asserts via
+`match="Native Python.*not yet implemented"`. That whole test file is `skipif(not check_r_available())`,
+so it's silently skipped on the dev Windows box (no Rscript) but FAILS on any CI runner / machine with
+R in PATH — a red test the branch never observed. **Fix:** reworded to "Native Python binary ASD
+reader: modern (as5-as8) float64 files are not yet implemented. Only the legacy float32 ASD-v1 format
+… is supported." Contains both anchors in order; verified the regex matches live.
+
+**Follow-up (same day) — fault-tolerance policy reversed after a PR-review pass.** A medium-effort
+PR review of #61 flagged that finding #1's `if binary: raise` was a footgun: one corrupt `.sco` in a
+folder of 30 aborted the *entire* import (loaded 0), and `_file_equalize_batch` amplified it to
+dropping a whole instrument. Per user direction ("one corrupt file should not stop the whole folder;
+just mention skipped files"), `read_asd_dir` now **skips** an unreadable/corrupt file (binary OR
+ASCII), collects the reasons, and prints a `[!] Skipped N ...` summary after the loop; it hard-raises
+only when *zero* files load, and that error now carries the specific reason(s) instead of the generic
+"No valid spectra could be read". The `UnicodeDecodeError` fallback is now nested around just the
+ASCII read so a fallback failure also lands in the skip path. **Windows gotcha:** the summary `print`
+must be ASCII (`[!]`, not `⚠️`) — a `⚠️` on a cp1252 stdout raises `UnicodeEncodeError` and would abort
+`read_asd_dir` in the very corrupt-file path this hardens (the pre-existing duplicate-stem `⚠️` prints
+have the same latent bug). Not folded in (out of the narrowed scope): the truncated-below-484-bytes and
+all-NaN-payload files still route to SpecDAL / enter the matrix silently rather than being skipped —
+noted as optional future hardening. Tests: `test_read_asd_dir_skips_corrupt_and_continues` +
+`test_read_asd_dir_all_corrupt_raises_with_reason` added.
+
+**Second review round (Codex 5.5 — note: 5.3/5.2 are rejected by the ChatGPT-account codex auth, so it fell back to 5.5).** Four more findings folded in: (1) HIGH — `_normalize_filename_for_matching` (io.py:460) stripped `.asd/.sig/.csv/.txt/.spc` but not `.sco`, so a reference table keyed on `sample.000.sco` failed alignment against spectra indexed `sample.000`; fixed by deriving the ASD part of the list from `ASD_EXTENSIONS` (can't drift again). (2) The new skip-and-report loop only recorded a skip when an exception *escaped* — a `None` return from `_handle_binary_asd` (SpecDAL failed/unavailable, or a sub-484-byte legacy file that returns `None` then SpecDAL-fails) was silently dropped and omitted from the `[!] Skipped` summary; `read_asd_dir` now treats `spectrum is None` as a reported skip. (3) all-NaN payloads: `read_legacy_asd` now raises `ValueError` when a decoded spectrum is *entirely* non-finite (partial NaNs still tolerated — real spectra can have isolated bad channels), so a dead `.sco` is skipped+reported instead of entering `df` as an all-NaN row. (4) LOW — the converter's "No spectra could be decoded" now lists the collected per-file reasons. Tests: renamed `test_nan_payload_does_not_crash` → `test_partial_nan_payload_still_decodes`; added `test_all_nan_payload_rejected` + `test_read_asd_dir_skips_all_nan_spectrum` (23 ASD tests pass; 136 align/match tests pass).
+
+**Review trail.** All 4 fixes locally verified (19 ASD tests pass; corrupt-`.sco` re-raise and the
+regex match confirmed by a direct repro script). Handed the uncommitted diff to Codex 5.5 (gpt-5.5,
+high reasoning, read-only) — **no findings**; it statically checked every converted site for the
+Path-vs-string hazard and confirmed no circular import. Caveat: Codex review was static + import-level;
+it did not launch the GUI or run the R-gated test (out of read-only scope), both covered directly.
+
+**Housekeeping note.** This file is ~1450 lines — well over the ~200-line archive threshold in
+CLAUDE.md. Older entries should be moved to `SESSION_LOG_ARCHIVE.md` in a dedicated housekeeping pass.
+
+---
+
+## 2026-06-19 — Radio-button data-type toggle silently log-transforms plots (stale `use_absorbance`)
+
+**Symptom.** User imports a (CSV/XLS) reflectance file; the Import & Preview plots look like
+**absorbance** even though the radio reads **Reflectance**. Clicking the **Absorbance** radio makes
+the plot snap to a reflectance shape — i.e. the radio appears to *convert* the data, which it must
+never do (radios are relabel-only).
+
+**Root cause.** Not the importer — `read_combined_csv`/`read_combined_excel` and
+`detect_spectral_data_type` never touch the values; detection only sets a *label*. The transform
+lives in the hidden legacy `use_absorbance` flag. Every plot generator runs the data through
+`_apply_transformation()` (`spectral_predict_gui_optimized.py:20820`), which applies
+`A = log10(1/R)` iff `use_absorbance` is True AND `data_has_been_converted` is False AND
+`current_data_type != "absorbance"`. `use_absorbance` is set True only by clicking **Convert to
+Absorbance** (`:19588`), but it was **never reset on a new file load** — `_apply_data_type_metadata`
+reset `data_has_been_converted` but not `use_absorbance`, and the `_update_data_type_status_ui`
+reflectance branch (`:19829`) enabled the legacy checkbox without resetting the flag (only the
+`else` branch reset it — an asymmetry). So after any prior conversion, the next import kept
+`use_absorbance=True` → phantom log transform in plots while the radio still says Reflectance.
+Toggling to the Absorbance radio short-circuits at `:20831` (`current_data_type=="absorbance"` →
+return raw), revealing the true reflectance shape. The shape-change-on-toggle is the tell that it's
+this flag, not a detection mislabel (a mislabel changes only the y-axis text, not the curve).
+
+**Fix.** Reset `self.use_absorbance.set(False)` in `_apply_data_type_metadata` (canonical
+load-reset point, alongside `data_has_been_converted = False`), and made the `:19829` reflectance
+branch reset the flag too so the invariant "fresh unconverted load ⇒ `use_absorbance` False" holds
+locally. The legacy checkbox is created but never `.pack`ed (hidden), so this only clears stale
+cross-load state — no user-facing workflow changes.
+
+---
+
+## 2026-06-19 — Legacy float32 ASD-v1 (.sco) files read as all-NaN because SpecDAL assumes float64
+
+**Root cause.** A user's `.sco` / numbered `.000` FieldSpec files wouldn't import; renaming to
+`.asd` made them load but every value came back NaN. These are the *oldest* ASD binary format —
+version string `b"ASD\x00"` — which stores the spectrum as **float32** at offset 484
+(file size == `484 + channels*4`; 9088 bytes for 2151 bands). The app reads binary ASD via
+**SpecDAL**, which assumes the modern layout (float64 at the same offset), so it reads past the
+data into garbage → all-NaN. Two independent failures stacked: (1) `read_asd_dir()` only globbed
+`*.sig`/`*.asd`, so `.sco` was never picked up at all; (2) even renamed, SpecDAL mis-decoded it.
+
+**Gotcha — `raw[:3] == b"ASD"` is NOT a safe binary discriminator.** ASCII `.asd`/`.sig` files
+start with literal text `ASD Field Spec Pro`, so their first 3 bytes are also `ASD`. The binary
+magic is 4 bytes `ASD\x00` (`_is_binary_asd` checks 4). Header fields (little-endian): first
+wavelength `float@191`, nm/channel `float@195`, channel count `uint16@204`, dataType `byte@186`
+(1 = reflectance).
+
+**Fix.** New `readers/asd_native.py::read_legacy_asd()` decodes the float32 layout natively and
+is tried *before* SpecDAL in `_handle_binary_asd()`. Discriminator is exact file size:
+`484 + channels*4` → decode float32; `484 + channels*8` → return `None` (modern, hand to SpecDAL);
+neither → raise `ValueError` (corrupt/truncated, so real corruption isn't silently treated as
+"modern, try SpecDAL"). `.sco` added to the glob, `format_map`, `detect_format` magic branch, and
+`_detect_directory_format`. One-off converter at `scripts/convert_old_asd.py` reuses the decoder.
+
+**GUI gate gotcha (caught by Kimi cross-family review).** The backend fix alone is NOT enough:
+the Tkinter GUI does its *own* directory globbing to decide "Detected N ASD files" at six sites
+(`spectral_predict_gui_optimized.py` ~16072 Import-tab auto-detect, ~17663 load path, ~41276
+prediction tab, ~44994 sample-ID ext list, ~45612 + ~45685 dir-load helpers) and gates on that
+*before* `read_asd_dir` runs. All six globbed `*.asd`/`*.sig` only, so a `.sco` folder showed
+"No supported spectral files found" and never reached the backend. Added `.sco` to all six.
+Lesson: format support in `io.py` is necessary but not sufficient — the GUI has parallel
+detection logic that must be updated in lockstep.
+
+**Variant decision.** `.sco` and the bare `.000` companions decode to near-identical reflectance
+(differ ~0.001–0.003) — duplicate measurements of the same scan, not distinct types. Standardized
+on `.sco`-only import: stems (`italy.000`, `italy.001`…) are unique, whereas every bare
+`italy.000…029` has stem `italy` and would collapse 30 spectra into 1 row. Bare numeric files
+still classify as OPUS in `detect_format` (intentionally untouched). Real-folder result:
+30 files × 2151 bands, 0 NaN, reflectance 0.06–0.97, 100% reflectance confidence.
+
+---
+
 ## 2026-06-16 — X-unit radio is relabel-only, so it now relabels plots in place instead of full-regenerating them
 
 **Perf fix.** The Import-tab nm/cm⁻¹ radios are *declarative* (`_on_x_unit_override`) — they
