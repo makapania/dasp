@@ -4,6 +4,16 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — T-17 BUILD COMPLETE (F1–F7) session-end wrap
+
+- **Whole build landed byte-identical on the single-Y path — the discipline that made it safe was "additive `if y.ndim==1` / `else`, never edit the legacy limb."** Every varsel + VIP change (F5) and every orchestration seam kept the exact legacy code in the `ndim==1` limb and put multi-Y in `else`. `compute_vip` even branches on `Q.shape[0]==1` to keep the literal `Q[0,:]**2` term. Proof is a pinned gold fixture (`tests/gold_standards/varsel_single_y.npz`, generated from pre-refactor HEAD via `tools/_gen_varsel_gold.py`) asserting `array_equal` on selected indices + `allclose(atol=0,rtol=0)` on score vectors. If a future change to varsel/VIP touches the shared code above the branch, regenerate the gold ONLY from pre-change HEAD or the byte-identity guarantee is silently lost.
+- **Multi-target is Grid-engine ONLY, enforced at three layers (defense in depth).** GUI greys out Bayesian/NSGA-II radios AND forces `optimization_method='grid'` on both selection-change and dispatch (F6); `run_multitarget_search` has its own hard guard rejecting non-grid (F2). Do not "simplify" by removing any one layer — the 2-D Y engines (`run_unified_bayesian`, NSGA-II) are 1-D-only and would crash or silently mis-pool.
+- **Fold Y-scaler is JOINT-fitting-only; metrics are always RAW-unit.** `FoldYScaler` is applied only when `scale_y=True` (JOINT models), fit on the train fold, inverse-transformed before predictions are pooled. INDEPENDENT models fit on RAW per-target Y (`scale_y=False`) so at a fixed config they are bit-for-bit N separate single-target fits. All per-target R²/RMSE/etc. are computed on RAW units regardless of mode, so divergent-variance targets are not flattered by scaling.
+- **Per-feature Codex/DeepSeek reviews were the *gate*, not a final pass.** Codex returned NEEDS-CHANGES on F1/F2/F5/F6/F7 and DeepSeek on F5/F6; each was folded into the paired `fix(T17): review on F{n}` commit before moving on. This means the tip is post-review per feature, but a fresh whole-diff cross-family pass before merge is still advisable (reviews were scoped to one feature's diff, not cross-feature interactions).
+- **Branch had no upstream at session end.** `feat/T17-multitarget-regression` was never pushed during the overnight build (all work local + tagged). Session-end push is `git push -u origin feat/T17-multitarget-regression`; it creates the remote branch for the first time.
+
+---
+
 ## 2026-07-01 — T-17 F7 (multi-Y export + per-target model_io)
 
 - **Exact reproduction hinges on transcribing `multi_y_cv_pool`, not re-deriving it.** The exported multi-target CV loop is a line-for-line transcription of `multi_y.multi_y_cv_pool`'s n_targets≥2 branch (per-fold `FoldYScaler` fit → fit on scaled Y for JOINT → `inverse_transform` → pool by `pred_sum/pred_count`). Because the algorithm and operation order are identical, exported pooled preds match `run_multitarget_search().y_pred_pooled` at `max|diff| == 0.0` for JOINT PLS, INDEPENDENT-native Ridge, and MOR-wrapped SVR — not just `allclose`. Any deviation in fold order, scaler ddof, or zero-std handling would break this, so the FoldYScaler transcription mirrors `std==0 → 1.0` exactly.
