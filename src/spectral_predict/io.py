@@ -642,6 +642,31 @@ def align_xy(X, ref, id_column, target, return_alignment_info=False, drop_na_y=T
     return X_aligned, y
 
 
+# Extensions recognized as ASD spectral files (.sco = legacy float32 ASD-v1 binary,
+# e.g. older FieldSpec exports). Single source of truth so the many directory-detection
+# sites across the backend and GUI can't drift out of sync when a new extension is added.
+ASD_EXTENSIONS = (".asd", ".sig", ".sco")
+
+
+def list_asd_files(directory) -> list[Path]:
+    """Return sorted ASD files (``.asd``/``.sig``/``.sco``, case-insensitive) in a directory.
+
+    Centralizes ASD extension handling so every folder-detection site stays in sync with
+    :data:`ASD_EXTENSIONS`. Case-insensitive on every platform (unlike raw ``glob``).
+
+    Args:
+        directory: Directory to scan (str or Path).
+
+    Returns:
+        Sorted list of matching file paths (empty if the directory has no ASD files).
+    """
+    directory = Path(directory)
+    return sorted(
+        p for p in directory.iterdir()
+        if p.is_file() and p.suffix.lower() in ASD_EXTENSIONS
+    )
+
+
 def read_asd_dir(asd_dir, reader_mode="auto"):
     """
     Read ASD files from a directory.
@@ -672,11 +697,7 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
         raise ValueError(f"Not a directory: {asd_dir}")
 
     # Find ASD files (.sco = legacy float32 ASD-v1 binary, e.g. older FieldSpec exports)
-    asd_files = (
-        list(asd_dir.glob("*.sig"))
-        + list(asd_dir.glob("*.asd"))
-        + list(asd_dir.glob("*.sco"))
-    )
+    asd_files = list_asd_files(asd_dir)
 
     if len(asd_files) == 0:
         raise ValueError(f"No .sig, .asd, or .sco files found in {asd_dir}")
@@ -694,8 +715,9 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             duplicate_stems.append(stem)
             print(f"⚠️ WARNING: Duplicate filename '{stem}' - later file will overwrite earlier one")
 
+        binary = _is_binary_asd(asd_file)
         try:
-            if _is_binary_asd(asd_file):
+            if binary:
                 # Binary ASD (legacy float32 or modern) - bypass the text reader.
                 spectrum = _handle_binary_asd(asd_file, reader_mode)
             else:
@@ -708,6 +730,12 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
             if spectrum is not None:
                 spectra[stem] = spectrum
         except Exception as e:
+            # read_legacy_asd raises ValueError for corrupt/truncated/inconsistent
+            # binary files. Surface those loudly rather than silently dropping the file
+            # (the reader's "raise, don't silently fall back" contract). ASCII read
+            # failures stay tolerant so one junk text file can't abort a whole folder.
+            if binary:
+                raise
             print(f"Warning: Could not read {asd_file.name}: {e}")
 
     if duplicate_stems:
@@ -2687,7 +2715,7 @@ def _detect_directory_format(directory: Path) -> str:
     """Detect format from directory contents."""
     files = list(directory.iterdir())
 
-    if any(f.suffix.lower() in ['.asd', '.sig', '.sco'] for f in files):
+    if any(f.suffix.lower() in ASD_EXTENSIONS for f in files):
         return 'asd'
     elif any(f.suffix.lower() == '.spc' for f in files):
         return 'spc'

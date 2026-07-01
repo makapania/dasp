@@ -161,6 +161,10 @@ except ImportError:
     CLASSIFICATION_TIERS = None
     MODEL_TIERS = None
 
+# Shared ASD extension set + folder helper (single source of truth for .asd/.sig/.sco
+# detection so directory-scan sites across the GUI can't drift out of sync).
+from spectral_predict.io import ASD_EXTENSIONS, list_asd_files
+
 # Import search controller for pause/resume/stop
 from spectral_predict.search_controller import SearchController
 
@@ -16069,9 +16073,7 @@ class SpectralPredictApp:
         # Priority: ASD > CSV > SPC
 
         # Check for ASD files (case insensitive, includes .sig + legacy .sco formats)
-        asd_files = sorted(set(list(path.glob("*.asd")) + list(path.glob("*.ASD")) +
-                     list(path.glob("*.sig")) + list(path.glob("*.SIG")) +
-                     list(path.glob("*.sco")) + list(path.glob("*.SCO"))))
+        asd_files = list_asd_files(path)
         if asd_files:
             self.detected_type = "asd"
             self.detection_status.config(
@@ -17661,7 +17663,7 @@ class SpectralPredictApp:
                 files = list(dir_path.iterdir())
 
                 # Check for ASD files (.asd, .sig, legacy .sco)
-                asd_files = [f for f in files if f.suffix.lower() in ('.asd', '.sig', '.sco')]
+                asd_files = [f for f in files if f.suffix.lower() in ASD_EXTENSIONS]
                 if asd_files:
                     format_type = 'asd'
                     X, metadata = read_asd_dir(spectra_path)
@@ -41282,7 +41284,7 @@ External Validation Performance (n={n_val}):
 
             if source == 'directory':
                 # Try to detect file type
-                asd_files = sorted(set(list(path.glob("*.asd")) + list(path.glob("*.sig")) + list(path.glob("*.sco"))))
+                asd_files = list_asd_files(path)
                 spc_files = sorted(list(path.glob("*.spc")))
                 jcamp_files = sorted(set(list(path.glob("*.jdx")) + list(path.glob("*.dx")) + list(path.glob("*.JDX")) + list(path.glob("*.DX"))))
                 ascii_files = sorted(set(list(path.glob("*.dpt")) + list(path.glob("*.dat")) + list(path.glob("*.asc")) +
@@ -45618,9 +45620,7 @@ External Validation Performance (n={n_val}):
         import glob
 
         # Try to detect file type
-        asd_files = sorted(glob.glob(os.path.join(directory, "*.asd"))
-                           + glob.glob(os.path.join(directory, "*.sig"))
-                           + glob.glob(os.path.join(directory, "*.sco")))
+        asd_files = list_asd_files(directory)
         csv_files = sorted(glob.glob(os.path.join(directory, "*.csv")))
         spc_files = sorted(glob.glob(os.path.join(directory, "*.spc")))
 
@@ -45693,10 +45693,7 @@ External Validation Performance (n={n_val}):
 
         dir_path = Path(directory)
 
-        asd_files = sorted(set(
-            list(dir_path.glob("*.asd")) + list(dir_path.glob("*.sig"))
-            + list(dir_path.glob("*.sco"))
-        ))
+        asd_files = list_asd_files(dir_path)
         spc_files = sorted(dir_path.glob("*.spc"))
         jcamp_files = sorted(set(
             list(dir_path.glob("*.jdx")) + list(dir_path.glob("*.dx"))
@@ -45960,7 +45957,7 @@ External Validation Performance (n={n_val}):
         if os.path.isdir(filepath):
             # Check folder contents
             import glob
-            asd_files = glob.glob(os.path.join(filepath, "*.asd"))
+            asd_files = list_asd_files(filepath)
             spc_files = glob.glob(os.path.join(filepath, "*.spc"))
             csv_files = glob.glob(os.path.join(filepath, "*.csv"))
 
@@ -46621,7 +46618,7 @@ External Validation Performance (n={n_val}):
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        asd_files = list_asd_files(path)
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
         omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
@@ -46802,7 +46799,7 @@ External Validation Performance (n={n_val}):
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        asd_files = list_asd_files(path)
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
         omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
@@ -47010,7 +47007,7 @@ External Validation Performance (n={n_val}):
 
         # Auto-detect file type (priority order)
         path = Path(directory)
-        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        asd_files = list_asd_files(path)
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
         omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
@@ -47059,7 +47056,7 @@ External Validation Performance (n={n_val}):
 
         # Auto-detect file type
         path = Path(directory)
-        asd_files = sorted(list(path.glob("*.asd")) + list(path.glob("*.sig")))
+        asd_files = list_asd_files(path)
         csv_files = sorted(list(path.glob("*.csv")))
         spc_files = sorted(list(path.glob("*.spc")))
         omnic_files = sorted(set(list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG"))))
@@ -47545,7 +47542,7 @@ External Validation Performance (n={n_val}):
                 files = list(dir_path.iterdir())
 
                 # Check for ASD files (including .sig)
-                asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
+                asd_files = [f for f in files if f.suffix.lower() in ASD_EXTENSIONS]
                 if asd_files:
                     format_type = 'asd'
                     X_df, metadata = read_asd_dir(filepath)
@@ -48210,7 +48207,7 @@ External Validation Performance (n={n_val}):
                 files = list(dir_path.iterdir())
 
                 # Check for ASD files (including .sig)
-                asd_files = [f for f in files if f.suffix.lower() in ['.asd', '.sig']]
+                asd_files = [f for f in files if f.suffix.lower() in ASD_EXTENSIONS]
                 if asd_files:
                     detected_format = 'asd_folder'
                     X_df, metadata = read_asd_dir(path)
@@ -49344,7 +49341,7 @@ External Validation Performance (n={n_val}):
                 # Get list of original files to preserve naming
                 import glob
                 folder_ext_map = {
-                    'asd_folder': ['.asd', '.sig'],
+                    'asd_folder': list(ASD_EXTENSIONS),
                     'spc_folder': ['.spc'],
                     'csv_folder': ['.csv'],
                     'jcamp_folder': ['.jdx', '.dx'],
@@ -50508,7 +50505,7 @@ External Validation Performance (n={n_val}):
         if not os.path.isdir(folder_path):
             return 0
 
-        asd_files = glob.glob(os.path.join(folder_path, "*.asd"))
+        asd_files = list_asd_files(folder_path)
         csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
         spc_files = glob.glob(os.path.join(folder_path, "*.spc"))
 
@@ -54240,7 +54237,7 @@ External Validation Performance (n={n_val}):
                     X = df.values  # shape: (n_samples, n_wavelengths)
 
                     # Build filepath for metadata (use first ASD file found)
-                    asd_files = list(Path(folderpath).glob("*.asd")) + list(Path(folderpath).glob("*.sig"))
+                    asd_files = list_asd_files(folderpath)
                     filepath = folderpath if not asd_files else str(asd_files[0])
 
                 except ValueError as e:
@@ -55553,7 +55550,7 @@ External Validation Performance (n={n_val}):
             files = list(path.iterdir())
 
             # Check for ASD files
-            asd_files = [f for f in files if f.suffix.lower() in ('.asd', '.sig')]
+            asd_files = [f for f in files if f.suffix.lower() in ASD_EXTENSIONS]
             if asd_files:
                 from spectral_predict.io import read_asd_dir
                 df, metadata = read_asd_dir(str(path))

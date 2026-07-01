@@ -4,6 +4,62 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — Legacy `.sco` review fold-in: broad-except swallowed corruption guards; GUI detection globs drift; centralized ASD extensions
+
+**Context.** High-effort code review of the `feat/legacy-asd-sco-import` branch (the native legacy
+float32 ASD/`.sco` reader) surfaced 4 real findings, folded in this session and cleared by Codex 5.5.
+
+**1 — Broad `except Exception` defeated the reader's "raise loudly" contract.** `read_legacy_asd`
+deliberately raises `ValueError` for a file that carries the legacy `ASD\x00` magic but has an
+inconsistent header (implausible channel count, bad wavelength axis, or a size matching neither the
+float32 nor float64 layout — i.e. corrupt/truncated). The point is to *not* let real corruption be
+misread as "modern format, hand to SpecDAL". But `read_asd_dir`'s per-file loop caught that
+`ValueError` in a blanket `except Exception as e: print(warning)` and skipped the file — so a corrupt
+legacy folder imported as "No valid spectra could be read" (no hint of corruption), or dropped
+samples silently from a partially-corrupt folder. **Fix:** capture `binary = _is_binary_asd(asd_file)`
+*before* the `try`; in the handler `if binary: raise` (propagate loudly) else keep printing a warning.
+ASCII stays tolerant on purpose — one junk `.sig`/text file shouldn't abort a whole folder — but a
+binary/legacy decode failure is a real signal the user must see. `io.py:~715-737`.
+
+**2 — GUI directory-detection globs drift from backend support.** The GUI gates on its *own* glob of a
+folder before it ever calls `read_asd_dir`. The original `.sco` PR updated 6 such globs but missed
+the **Calibration Transfer tab** (4 sites) plus a few other tabs and the export-naming `folder_ext_map`
+registry — all still `*.asd`/`*.sig` only. Net effect: legacy `.sco` folders showed "No spectral files
+detected" on those tabs despite the backend handling them fine. This is the *second* time an ASD
+extension addition missed a GUI site (Kimi caught one in the original PR). Root lesson: the extension
+list was duplicated ~13 times across the GUI + `io.py`, so every addition is a find-every-copy hazard.
+
+**5 — Centralized to kill the recurrence.** Added `io.ASD_EXTENSIONS = (".asd", ".sig", ".sco")` and
+`io.list_asd_files(directory) -> list[Path]` (case-insensitive via `suffix.lower()`, sorted,
+non-recursive `Path.iterdir`) as the single source of truth. Replaced all ~13 hand-maintained globs:
+folder-enumeration sites use `list_asd_files`; suffix-membership checks and the registry use
+`ASD_EXTENSIONS`. **Path-vs-string gotcha:** some original sites used `glob.glob` (returns `str`) and
+some `Path.glob` (returns `Path`); `list_asd_files` always returns `Path`. Verified (and Codex
+re-verified) every converted site only uses the result for truthiness/`len`/iteration/suffix-membership
+or explicitly `str()`-wraps it (e.g. `str(asd_files[0])`, `str(f)` in the registry loop) — nothing
+relied on `str` elements. GUI imports the two symbols once at module top (`spectral_predict.io` is
+already in the top-level dependency graph via `search_controller`, so no new circular-import risk).
+
+**3 — Reworded error message broke a skipped test on CI only.** `read_binary_asd`'s
+`NotImplementedError` had been reworded and lost the substring `not yet implemented` that
+`tests/test_optional_r_bridge.py::test_native_reader_not_implemented` asserts via
+`match="Native Python.*not yet implemented"`. That whole test file is `skipif(not check_r_available())`,
+so it's silently skipped on the dev Windows box (no Rscript) but FAILS on any CI runner / machine with
+R in PATH — a red test the branch never observed. **Fix:** reworded to "Native Python binary ASD
+reader: modern (as5-as8) float64 files are not yet implemented. Only the legacy float32 ASD-v1 format
+… is supported." Contains both anchors in order; verified the regex matches live.
+
+**Review trail.** All 4 fixes locally verified (19 ASD tests pass; corrupt-`.sco` re-raise and the
+regex match confirmed by a direct repro script). Handed the uncommitted diff to Codex 5.5 (gpt-5.5,
+high reasoning, read-only) — **no findings**; it statically checked every converted site for the
+Path-vs-string hazard and confirmed no circular import. Caveat: Codex review was static + import-level;
+it did not launch the GUI or run the R-gated test (out of read-only scope), both covered directly.
+
+**Housekeeping note.** This file is ~1450 lines — well over the ~200-line archive threshold in
+CLAUDE.md. Older entries should be moved to `SESSION_LOG_ARCHIVE.md` in a dedicated housekeeping pass.
+
+---
+
 ## 2026-06-19 — Radio-button data-type toggle silently log-transforms plots (stale `use_absorbance`)
 
 **Symptom.** User imports a (CSV/XLS) reflectance file; the Import & Preview plots look like

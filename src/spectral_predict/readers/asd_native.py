@@ -117,8 +117,9 @@ def read_binary_asd(asd_file):
         return series
 
     raise NotImplementedError(
-        "Native Python binary ASD reader only supports the legacy float32 ASD-v1 "
-        "format (e.g. .sco / numbered .000 files).\n"
+        "Native Python binary ASD reader: modern (as5-as8) float64 files are not yet "
+        "implemented. Only the legacy float32 ASD-v1 format (e.g. .sco / numbered .000 "
+        "files) is supported.\n"
         "\n"
         "For modern (as5-as8) binary ASD files, options are:\n"
         "  1. Export ASD files to ASCII format (.sig or ASCII .asd)\n"
