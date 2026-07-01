@@ -23,15 +23,23 @@ Design invariants (from the T-17 plan):
   (``scale_y=False``) to preserve the "separate per-target models" guarantee.
 * **Per-target metrics on RAW units** via :mod:`spectral_predict.multi_y`.
 
-F3 scope: all JOINT models are wired -- PLS-2 (flagship), RandomForest (native
-multi-output impurity), MLP (shared hidden layers), CatBoost
-(``loss_function='MultiRMSE'``), and XGBoost
-(``multi_strategy='multi_output_tree'``) -- each fitting the fold-scaled Y block
-natively and predicting ``(n, n_targets)``. Booster early-stopping is DISABLED
-under multi-Y for v1 (no ``eval_set`` / ``od_*`` / ``early_stopping_rounds``).
-The INDEPENDENT models (Ridge, Lasso/ElasticNet, SVR, LightGBM, NeuralBoosted)
-are resolved by :func:`resolve_multitarget_strategy` but *built* in F4; calling
-the builder for a not-yet-wired model raises :class:`NotImplementedError`.
+JOINT models (F3): PLS-2 (flagship), RandomForest (native multi-output
+impurity), MLP (shared hidden layers), CatBoost (``loss_function='MultiRMSE'``),
+and XGBoost (``multi_strategy='multi_output_tree'``) -- each fitting the
+fold-scaled Y block natively and predicting ``(n, n_targets)``. Booster
+early-stopping is DISABLED under multi-Y for v1 (no ``eval_set`` / ``od_*`` /
+``early_stopping_rounds``). The optional JOINT MultiTask linear models
+(``MultiTaskLasso`` / ``MultiTaskElasticNet``, shared L21 row-support) also fit
+on fold-scaled Y.
+
+INDEPENDENT models (F4): Ridge (native per-column 2-D solve) plus SVR, LightGBM,
+plain Lasso/ElasticNet and NeuralBoosted (wrapped in
+:class:`sklearn.multioutput.MultiOutputRegressor`). These fit on RAW per-target
+Y -- at a FIXED config an INDEPENDENT model is bit-identical to N separate
+single-target fits, so fold Y-scaling is NEVER applied (scale-sensitive
+``alpha`` / ``epsilon`` would break that guarantee). They carry
+:data:`INDEPENDENT_PRECISE_NOTE` so batched breadth is never mistaken for
+coupling.
 """
 
 from __future__ import annotations
@@ -175,6 +183,18 @@ _STRATEGY_TABLE: dict[str, MultiTargetStrategy] = {
     "NeuralBoosted": _independent(
         "NeuralBoosted", "MultiOutputRegressor (1-D only estimator)", native=False
     ),
+    # --- Optional JOINT variants of the sparse linear models ---
+    # MultiTaskLasso/ElasticNet impose a shared L21 row-support across targets:
+    # their Frobenius fit + joint sparsity are non-separable, so they are JOINT
+    # and fit on fold-scaled Y (an unscaled high-variance target would dominate
+    # the shared sparsity pattern). Reached via ``supports_optional_joint`` on
+    # plain Lasso/ElasticNet.
+    "MultiTaskLasso": _joint(
+        "MultiTaskLasso", "shared L21 row-support (joint sparsity)"
+    ),
+    "MultiTaskElasticNet": _joint(
+        "MultiTaskElasticNet", "shared L21 row-support + L2 (joint sparsity)"
+    ),
 }
 
 # Aliases accepted for convenience; SVM is the classification-side name for SVR.
@@ -231,7 +251,14 @@ def build_multitarget_estimator(
     ``A <= min(n_samples - 1, n_features)`` via
     :func:`spectral_predict.multi_y.cap_components`; ``scale=False`` matches the
     legacy single-Y ``get_model("PLS")`` builder so single-target parity holds.
-    The INDEPENDENT models are built in F4.
+
+    F4 wires the INDEPENDENT models: Ridge is native (one 2-D solve, per-column);
+    SVR, LightGBM, plain Lasso/ElasticNet and NeuralBoosted are wrapped in
+    :class:`sklearn.multioutput.MultiOutputRegressor` (one cloned base estimator
+    per target, fit on that target's RAW column). The optional JOINT
+    ``MultiTaskLasso`` / ``MultiTaskElasticNet`` variants are native 2-D
+    estimators fit on fold-scaled Y. INDEPENDENT builders' defaults mirror the
+    legacy ``build_model_from_params`` regression builders.
 
     Args:
         strategy: A resolved :class:`MultiTargetStrategy`.
@@ -247,7 +274,8 @@ def build_multitarget_estimator(
         An unfitted sklearn-compatible estimator that accepts a 2-D ``Y`` block.
 
     Raises:
-        NotImplementedError: For models resolved but not yet wired in F2.
+        NotImplementedError: For a resolved strategy whose model name has no
+            builder wired (should not happen for any table entry).
     """
     params = dict(params or {})
     name = strategy.model_name
@@ -334,12 +362,98 @@ def build_multitarget_estimator(
         kwargs.update(strategy.joint_params)  # multi_strategy='multi_output_tree'
         return XGBRegressor(**kwargs)
 
+    # --- JOINT optional MultiTask linear models (fit on fold-scaled Y) ---
+    # MultiTaskLasso/ElasticNet natively accept a 2-D Y block and impose a
+    # shared L21 row-support across targets (genuine joint sparsity). They
+    # require n_targets >= 2 (the single-Y path never routes here).
+    if name == "MultiTaskLasso":
+        from sklearn.linear_model import MultiTaskLasso
+
+        p = dict(params)
+        p.setdefault("alpha", 1.0)
+        p.setdefault("max_iter", 500)
+        p.setdefault("random_state", 42)
+        return MultiTaskLasso(**p)
+
+    if name == "MultiTaskElasticNet":
+        from sklearn.linear_model import MultiTaskElasticNet
+
+        p = dict(params)
+        p.setdefault("alpha", 1.0)
+        p.setdefault("l1_ratio", 0.5)
+        p.setdefault("max_iter", 500)
+        p.setdefault("random_state", 42)
+        return MultiTaskElasticNet(**p)
+
+    # --- INDEPENDENT models (per-target-separable) fit on RAW per-target Y ---
+    # Ridge is native (sklearn solves the 2-D Y system per column in one call).
+    # The rest have no native multi-output, so they are wrapped in
+    # MultiOutputRegressor, which clones the base estimator once per target and
+    # fits each on that target's RAW column -- bit-identical to N separate
+    # single-target fits at a FIXED config. Defaults mirror the legacy
+    # ``build_model_from_params`` regression builders so single-target parity is
+    # preserved. No fold Y-scaling is applied to these models (scale-sensitive
+    # ``alpha`` / ``epsilon`` at fixed hyperparameters would otherwise break the
+    # "separate per-target models" guarantee).
+    if name == "Ridge":
+        from sklearn.linear_model import Ridge
+
+        p = dict(params)
+        p.setdefault("random_state", 42)
+        return Ridge(**p)
+
+    base = _build_independent_base(name, params)
+    if base is not None:
+        from sklearn.multioutput import MultiOutputRegressor
+
+        return MultiOutputRegressor(base)
+
     raise NotImplementedError(
         f"Multi-target estimator for {strategy.model_name!r} ({strategy.mode}) "
-        "is resolved but not yet wired. F3 implements the JOINT models (PLS, "
-        "RandomForest, MLP, CatBoost, XGBoost); the INDEPENDENT models (Ridge, "
-        "Lasso/ElasticNet, SVR, LightGBM, NeuralBoosted) are built in F4."
+        "has no builder wired."
     )
+
+
+def _build_independent_base(name: str, params: dict[str, Any]):
+    """Build the per-target BASE estimator for an INDEPENDENT MOR-wrapped model.
+
+    Returns an unfitted single-target estimator whose defaults mirror the legacy
+    ``build_model_from_params`` regression builders, or ``None`` if ``name`` is
+    not an MOR-wrapped INDEPENDENT model. The caller wraps the result in
+    :class:`sklearn.multioutput.MultiOutputRegressor`.
+    """
+    p = dict(params)
+    if name == "Lasso":
+        from sklearn.linear_model import Lasso
+
+        p.setdefault("max_iter", 500)
+        p.setdefault("random_state", 42)
+        return Lasso(**p)
+    if name == "ElasticNet":
+        from sklearn.linear_model import ElasticNet
+
+        p.setdefault("l1_ratio", 0.5)
+        p.setdefault("max_iter", 500)
+        p.setdefault("random_state", 42)
+        return ElasticNet(**p)
+    if name == "SVR":
+        from sklearn.svm import SVR
+
+        return SVR(**p)
+    if name == "LightGBM":
+        from lightgbm import LGBMRegressor
+
+        p.setdefault("random_state", 42)
+        p.setdefault("n_jobs", -1)
+        p.setdefault("verbosity", -1)
+        return LGBMRegressor(**p)
+    if name == "NeuralBoosted":
+        from .neural_boosted import NeuralBoostedRegressor
+
+        p.setdefault("random_state", 42)
+        p.setdefault("verbose", 0)
+        return NeuralBoostedRegressor(**p)
+    return None
 
 
 @dataclass

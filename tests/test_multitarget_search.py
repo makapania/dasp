@@ -147,12 +147,132 @@ def test_build_pls_estimator_scale_false_and_capped():
     assert est.scale is False  # matches legacy get_model("PLS")
 
 
-def test_build_unwired_model_raises():
-    # F3 wires the JOINT models; only the INDEPENDENT (F4) models still raise.
-    for name in ["Ridge", "Lasso", "ElasticNet", "LightGBM", "SVR", "NeuralBoosted"]:
-        strat = resolve_multitarget_strategy(name)
-        with pytest.raises(NotImplementedError):
-            build_multitarget_estimator(strat, {}, n_samples=30, n_features=10)
+# --------------------------------------------------------------------------- #
+# F4: INDEPENDENT estimator builders (Ridge native + MOR-wrapped) & MultiTask
+# --------------------------------------------------------------------------- #
+def test_build_ridge_is_native_not_wrapped():
+    """Ridge is native multi-output (one 2-D solve), NOT MOR-wrapped."""
+    from sklearn.linear_model import Ridge
+    from sklearn.multioutput import MultiOutputRegressor
+
+    strat = resolve_multitarget_strategy("Ridge")
+    assert strat.native is True
+    est = build_multitarget_estimator(strat, {"alpha": 2.0}, n_samples=30, n_features=10)
+    assert isinstance(est, Ridge)
+    assert not isinstance(est, MultiOutputRegressor)
+    assert est.alpha == 2.0
+
+
+@pytest.mark.parametrize("model_name", ["Lasso", "ElasticNet", "SVR", "LightGBM", "NeuralBoosted"])
+def test_build_independent_wrapped_in_mor(model_name):
+    """Non-native INDEPENDENT models are wrapped in MultiOutputRegressor."""
+    from sklearn.multioutput import MultiOutputRegressor
+
+    strat = resolve_multitarget_strategy(model_name)
+    assert strat.native is False
+    assert strat.mode == "INDEPENDENT"
+    est = build_multitarget_estimator(strat, {}, n_samples=30, n_features=10)
+    assert isinstance(est, MultiOutputRegressor)
+
+
+def test_build_multitask_joint_variants():
+    """MultiTaskLasso/ElasticNet are JOINT, native 2-D, fit on fold-scaled Y."""
+    from sklearn.linear_model import MultiTaskElasticNet, MultiTaskLasso
+
+    ml = resolve_multitarget_strategy("MultiTaskLasso")
+    assert ml.mode == "JOINT" and ml.scale_y is True
+    est = build_multitarget_estimator(ml, {"alpha": 0.5}, n_samples=30, n_features=10)
+    assert isinstance(est, MultiTaskLasso)
+    assert est.alpha == 0.5
+
+    me = resolve_multitarget_strategy("MultiTaskElasticNet")
+    assert me.mode == "JOINT" and me.scale_y is True
+    est2 = build_multitarget_estimator(me, {}, n_samples=30, n_features=10)
+    assert isinstance(est2, MultiTaskElasticNet)
+
+
+@pytest.mark.parametrize("model_name", ["Ridge", "Lasso", "ElasticNet", "SVR", "LightGBM", "NeuralBoosted"])
+def test_independent_native_smoke_raw_y_returns_n3(model_name, rng):
+    """INDEPENDENT smoke: fit a 3-target block on RAW Y and predict (n,3)."""
+    n, p = 40, 12
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 3))
+    Y = base + 0.05 * rng.standard_normal((n, 3))  # RAW Y (NOT scaled)
+
+    strat = resolve_multitarget_strategy(model_name)
+    est = build_multitarget_estimator(strat, {}, n_samples=n, n_features=p)
+    est.fit(X, Y)
+    pred = np.asarray(est.predict(X))
+    assert pred.shape == (n, 3)
+    assert np.all(np.isfinite(pred))
+
+
+@pytest.mark.parametrize("model_name", ["SVR", "LightGBM"])
+def test_independent_fixed_config_equals_separate_single_target_fits(model_name, rng):
+    """F4 core pin: an INDEPENDENT model at a FIXED config is bit-for-bit
+    identical to N separate single-target fits on RAW per-target Y.
+
+    Note the label's precise wording: this bit-identity holds only at a FIXED
+    config; a shared-config *search* need not equal N separate searches.
+    """
+    from spectral_predict.multitarget_search import _build_independent_base
+
+    n, p = 50, 10
+    X = rng.standard_normal((n, p))
+    Y = np.column_stack([
+        X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(n),
+        X[:, 2:5] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(n),
+    ])
+    params = {"C": 2.0} if model_name == "SVR" else {"n_estimators": 25}
+
+    strat = resolve_multitarget_strategy(model_name)
+    est = build_multitarget_estimator(strat, params, n_samples=n, n_features=p)
+    est.fit(X, Y)  # fit on RAW Y (INDEPENDENT => scale_y is False)
+    joint_pred = np.asarray(est.predict(X))
+
+    # Two SEPARATE single-target fits at the identical fixed config.
+    sep = np.column_stack([
+        _build_independent_base(model_name, dict(params)).fit(X, Y[:, s]).predict(X)
+        for s in range(2)
+    ])
+    assert np.array_equal(joint_pred, sep)
+
+
+def test_run_independent_model_end_to_end_label(rng):
+    """Orchestrator smoke for an INDEPENDENT model: (n,3) preds, INDEPENDENT
+    label, scale_y False, and the verbatim precise note threaded into results."""
+    n, p = 45, 10
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 3))
+    Y = base + 0.05 * rng.standard_normal((n, 3))
+    out = run_multitarget_search(
+        X, Y, [{"model_name": "SVR", "params": {}}],
+        cv="kfold", n_folds=3, target_names=["a", "b", "c"],
+    )
+    best = out.best
+    assert best.mode == "INDEPENDENT"
+    assert best.scale_y is False
+    assert best.precise_note == INDEPENDENT_PRECISE_NOTE
+    assert best.metrics["q2"].shape == (3,)
+    assert best.y_pred_pooled.shape == (n, 3)
+
+
+def test_run_multitask_joint_end_to_end(rng):
+    """Optional JOINT MultiTaskLasso runs through the orchestrator on fold-scaled
+    Y and returns per-target metrics of shape (3,)."""
+    n, p = 45, 10
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 3))
+    Y = base + 0.05 * rng.standard_normal((n, 3))
+    out = run_multitarget_search(
+        X, Y, [{"model_name": "MultiTaskLasso", "params": {"alpha": 0.01}}],
+        cv="kfold", n_folds=3,
+    )
+    best = out.best
+    assert best.mode == "JOINT"
+    assert best.scale_y is True
+    assert best.precise_note == ""
+    assert best.metrics["q2"].shape == (3,)
 
 
 # --------------------------------------------------------------------------- #
