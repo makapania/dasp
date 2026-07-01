@@ -2897,6 +2897,10 @@ class SpectralPredictApp:
         self.spectral_file_column = tk.StringVar()
         self.id_column = tk.StringVar()
         self.target_column = tk.StringVar()
+        # T-17 multi-target: canonical list of selected target column names for
+        # the Multi-Target sub-tab. Empty / single-element => single-Y behaviour
+        # unchanged (this list is never read by the legacy single-Y path).
+        self.selected_targets = []
         self.wavelength_min = tk.StringVar(value="")  # Import filter
         self.wavelength_max = tk.StringVar(value="")  # Import filter
 
@@ -11343,6 +11347,7 @@ class SpectralPredictApp:
         self._create_tab4c_model_configuration()
         self._create_tab4d_ensemble_methods()
         self._create_tab4e_validation()
+        self._create_tab4f_multitarget()
 
     def _create_tab4a_basic_settings(self):
         """Subtab 4A: Basic Settings - CV folds, penalties, and preprocessing."""
@@ -12451,9 +12456,14 @@ class SpectralPredictApp:
         opt_method_frame = ttk.Frame(opt_frame)
         opt_method_frame.grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=5)
 
-        ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid").grid(row=0, column=0, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian Optimization", variable=self.optimization_method, value="unified").grid(row=0, column=1, sticky=tk.W, padx=5)
-        ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2").grid(row=0, column=2, sticky=tk.W, padx=5)
+        # Keep references so the multi-target dispatcher can grey out the
+        # 1-D-only engines (Bayesian/NSGA-II) when >1 target is selected (T-17).
+        self.opt_radio_grid = ttk.Radiobutton(opt_method_frame, text="📊 Grid Search", variable=self.optimization_method, value="grid")
+        self.opt_radio_grid.grid(row=0, column=0, sticky=tk.W, padx=5)
+        self.opt_radio_unified = ttk.Radiobutton(opt_method_frame, text="🎯 Bayesian Optimization", variable=self.optimization_method, value="unified")
+        self.opt_radio_unified.grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.opt_radio_nsga2 = ttk.Radiobutton(opt_method_frame, text="🧬 NSGA-II Multi-Objective", variable=self.optimization_method, value="nsga2")
+        self.opt_radio_nsga2.grid(row=0, column=2, sticky=tk.W, padx=5)
 
         # Parameter frame for optimization-specific settings
         param_frame = ttk.Frame(opt_frame)
@@ -14493,6 +14503,375 @@ class SpectralPredictApp:
 
         self.tab3_status = ttk.Label(content_frame, text="Configure analysis settings above", style='Caption.TLabel')
         self.tab3_status.grid(row=row, column=0, columnspan=2)
+
+    # ==================================================================
+    # T-17 Multi-Target sub-tab (Grid-engine ONLY, additive; single-Y
+    # path untouched). Joint multi-output regression over >1 numeric
+    # target with prominent JOINT/INDEPENDENT coupling labels.
+    # ==================================================================
+
+    #: Per-target reporting metric keys (raw units) shown in the results grid.
+    _MULTITARGET_METRIC_KEYS = (
+        ("r2", "R²"),
+        ("rmse", "RMSE"),
+        ("rpd", "RPD"),
+        ("rer", "RER"),
+        ("ccc", "CCCcv"),
+        ("bias", "Bias"),
+    )
+
+    def _create_tab4f_multitarget(self):
+        """Subtab 4F: Multi-Target regression (Grid engine only, T-17).
+
+        Additive sub-tab: multi-select numeric targets, pick models (each
+        tagged JOINT/INDEPENDENT), run the Grid-engine multi-target search and
+        view per-target (R²/RMSE/RPD/RER/CCCcv/Bias, raw units) + joint-Q²
+        results. Selecting >1 target greys out the Bayesian/NSGA-II engines and
+        forces ``optimization_method='grid'`` at dispatch.
+        """
+        tab4f = ttk.Frame(self.config_notebook, style='TFrame')
+        self.config_notebook.add(tab4f, text='  🎯 Multi-Target  ')
+
+        canvas = tk.Canvas(tab4f, bg=self.colors['bg'], highlightthickness=0)
+        scrollbar = ttk.Scrollbar(tab4f, orient="vertical", command=canvas.yview)
+        content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
+
+        content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab4f", canvas))
+        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        row = 0
+
+        ttk.Label(
+            content_frame,
+            text="Multi-Target Regression (joint / batched multi-output)",
+            style='Subheading.TLabel',
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
+        row += 1
+        ttk.Label(
+            content_frame,
+            text=("Model several correlated numeric properties at once. Grid engine ONLY — "
+                  "Bayesian/NSGA-II are 1-D-only and are disabled while >1 target is selected. "
+                  "Single-target modelling is unaffected (use the normal search)."),
+            style='Caption.TLabel', wraplength=680,
+        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
+        row += 1
+
+        # --- Target multi-select ---
+        tgt_outer, tgt_card = self._create_card(
+            content_frame, title="Select Targets",
+            subtitle="Choose 2+ numeric columns (Ctrl/Shift-click for multi-select)")
+        tgt_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        tgt_frame = tk.Frame(tgt_card, bg=self.colors['card_bg'])
+        tgt_frame.pack(fill='both', expand=True)
+
+        self.multitarget_listbox = tk.Listbox(
+            tgt_frame, selectmode=tk.EXTENDED, height=7, exportselection=False, width=40)
+        self.multitarget_listbox.grid(row=0, column=0, rowspan=3, sticky=(tk.W, tk.N, tk.S), padx=(0, 10), pady=2)
+        self.multitarget_listbox.bind('<<ListboxSelect>>', self._on_multitarget_selection_changed)
+
+        ttk.Button(tgt_frame, text="🔄 Refresh Columns",
+                   command=self._refresh_multitarget_columns,
+                   style='Modern.TButton').grid(row=0, column=1, sticky=tk.W, pady=2)
+        self.multitarget_selection_label = ttk.Label(
+            tgt_frame, text="No targets selected.", style='Caption.TLabel', wraplength=320)
+        self.multitarget_selection_label.grid(row=1, column=1, sticky=(tk.W, tk.N), pady=2)
+
+        # --- Model picker with JOINT/INDEPENDENT tags ---
+        mdl_outer, mdl_card = self._create_card(
+            content_frame, title="Select Models",
+            subtitle="Each model is tagged by its true multi-output coupling")
+        mdl_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        mdl_frame = tk.Frame(mdl_card, bg=self.colors['card_bg'])
+        mdl_frame.pack(fill='both', expand=True)
+
+        from spectral_predict.multitarget_search import resolve_multitarget_strategy
+
+        # Regression models offered for multi-target, in a stable order. PLS-DA
+        # (classification) is intentionally excluded.
+        self.multitarget_model_vars: dict[str, tk.BooleanVar] = {}
+        offered = ["PLS", "RandomForest", "MLP", "CatBoost", "XGBoost",
+                   "Ridge", "Lasso", "ElasticNet", "SVR", "LightGBM", "NeuralBoosted"]
+        mr = 0
+        mc = 0
+        for name in offered:
+            try:
+                strat = resolve_multitarget_strategy(name)
+            except ValueError:
+                continue
+            var = tk.BooleanVar(value=(name == "PLS"))
+            self.multitarget_model_vars[name] = var
+            label = f"{name}  [{strat.mode}]"
+            cb = ttk.Checkbutton(mdl_frame, text=label, variable=var)
+            cb.grid(row=mr, column=mc, sticky=tk.W, padx=5, pady=2)
+            CreateToolTip(cb, text=strat.mechanism, delay=400)
+            mc += 1
+            if mc >= 3:
+                mc = 0
+                mr += 1
+
+        ttk.Label(
+            mdl_frame,
+            text=("JOINT = genuinely couples targets (shared structure). "
+                  "INDEPENDENT = separate per-target estimators under one shared searched "
+                  "configuration — not a coupled model, no correlation benefit; for exact "
+                  "equivalence to N independent searches, run separate single-target searches."),
+            style='Caption.TLabel', wraplength=680, foreground=self.colors['accent'],
+        ).grid(row=mr + 1, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+
+        # --- Run + export controls ---
+        ctl_frame = tk.Frame(content_frame, bg=self.colors['bg'])
+        ctl_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(6, 10))
+        row += 1
+        self._create_accent_button(
+            ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search).pack(side='left')
+        ttk.Button(ctl_frame, text="💾 Export CSV",
+                   command=self._export_multitarget_csv,
+                   style='Modern.TButton').pack(side='left', padx=10)
+        self.multitarget_status_label = ttk.Label(
+            ctl_frame, text="", style='Caption.TLabel')
+        self.multitarget_status_label.pack(side='left', padx=10)
+
+        # --- Results grid ---
+        res_outer, res_card = self._create_card(
+            content_frame, title="Results",
+            subtitle="Ranked by joint Q² (= mean per-target raw-unit Q²)")
+        res_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        res_frame = tk.Frame(res_card, bg=self.colors['card_bg'])
+        res_frame.pack(fill='both', expand=True)
+
+        self.multitarget_tree = ttk.Treeview(
+            res_frame, columns=("model", "mode", "joint_q2"), show='headings', height=8)
+        self.multitarget_tree.heading("model", text="Model")
+        self.multitarget_tree.heading("mode", text="Mode")
+        self.multitarget_tree.heading("joint_q2", text="Joint Q²")
+        mt_scroll = ttk.Scrollbar(res_frame, orient="horizontal", command=self.multitarget_tree.xview)
+        self.multitarget_tree.configure(xscrollcommand=mt_scroll.set)
+        self.multitarget_tree.pack(fill='both', expand=True)
+        mt_scroll.pack(fill='x')
+
+        #: Last MultiTargetSearchOutput, retained for CSV export.
+        self._multitarget_last_output = None
+
+        # Prime the column list + engine lock from current state.
+        self._refresh_multitarget_columns()
+
+    def _get_numeric_target_columns(self) -> list:
+        """Return numeric candidate target columns from the active metadata."""
+        source = None
+        if getattr(self, 'combined_metadata_df', None) is not None:
+            source = self.combined_metadata_df
+        elif getattr(self, 'ref', None) is not None:
+            source = self.ref
+        if source is None:
+            return []
+        exclude = self.spectral_file_column.get() if self.spectral_file_column.get() else ''
+        cols = []
+        for c in source.columns:
+            if c == exclude:
+                continue
+            if pd.api.types.is_numeric_dtype(source[c]):
+                cols.append(c)
+        return sorted(cols)
+
+    def _refresh_multitarget_columns(self):
+        """Repopulate the target listbox from currently loaded numeric columns."""
+        if not hasattr(self, 'multitarget_listbox'):
+            return
+        previously = set(self.selected_targets)
+        cols = self._get_numeric_target_columns()
+        self.multitarget_listbox.delete(0, tk.END)
+        for c in cols:
+            self.multitarget_listbox.insert(tk.END, c)
+        # Restore any prior selection that still exists.
+        for i, c in enumerate(cols):
+            if c in previously:
+                self.multitarget_listbox.selection_set(i)
+        self._on_multitarget_selection_changed()
+
+    def _on_multitarget_selection_changed(self, event=None):
+        """Sync ``self.selected_targets`` and lock 1-D-only engines when >1."""
+        if not hasattr(self, 'multitarget_listbox'):
+            return
+        idxs = self.multitarget_listbox.curselection()
+        self.selected_targets = [self.multitarget_listbox.get(i) for i in idxs]
+        n = len(self.selected_targets)
+        if hasattr(self, 'multitarget_selection_label'):
+            if n == 0:
+                txt = "No targets selected."
+            elif n == 1:
+                txt = f"1 target selected ({self.selected_targets[0]}) — single-Y; use the normal search."
+            else:
+                txt = f"{n} targets selected: {', '.join(self.selected_targets)}"
+            self.multitarget_selection_label.config(text=txt)
+        self._update_multitarget_engine_lock()
+
+    def _update_multitarget_engine_lock(self):
+        """Grey out Bayesian/NSGA-II radios and force grid when >1 target.
+
+        Mirrors the UVE/CARS grey-out pattern. When multi-target is active the
+        1-D-only engines cannot be selected and the method is forced to 'grid'
+        so a stale radio value cannot route 2-D Y into a 1-D engine.
+        """
+        multi = len(self.selected_targets) > 1
+        state = 'disabled' if multi else 'normal'
+        for attr in ('opt_radio_unified', 'opt_radio_nsga2'):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    pass
+        if multi and self.optimization_method.get() in ('unified', 'nsga2'):
+            self.optimization_method.set('grid')
+
+    def _run_multitarget_search(self):
+        """Dispatch a Grid-engine multi-target search over the selected targets."""
+        targets = list(self.selected_targets)
+        if len(targets) < 2:
+            messagebox.showwarning(
+                "Multi-Target",
+                "Select at least 2 numeric targets. For a single target, use the normal search.")
+            return
+        if self.X is None or getattr(self, 'X_original', None) is None:
+            messagebox.showwarning("Multi-Target", "Load spectral data first.")
+            return
+
+        source = None
+        if getattr(self, 'combined_metadata_df', None) is not None:
+            source = self.combined_metadata_df
+        elif getattr(self, 'ref', None) is not None:
+            source = self.ref
+        if source is None:
+            messagebox.showerror("Multi-Target", "No reference/metadata table is loaded.")
+            return
+        missing = [t for t in targets if t not in source.columns]
+        if missing:
+            messagebox.showerror("Multi-Target", f"Target column(s) not found: {missing}")
+            return
+
+        model_names = [n for n, v in self.multitarget_model_vars.items() if v.get()]
+        if not model_names:
+            messagebox.showwarning("Multi-Target", "Select at least one model.")
+            return
+
+        # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
+        self.optimization_method.set('grid')
+
+        try:
+            from spectral_predict.multitarget_search import run_multitarget_search
+
+            X_df = self.X
+            Ydf = source[targets].reindex(X_df.index)
+            mask = Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
+            n_valid = int(mask.sum())
+            if n_valid < 3:
+                messagebox.showerror(
+                    "Multi-Target",
+                    f"Only {n_valid} complete sample(s) across the selected targets — "
+                    "not enough to cross-validate.")
+                return
+            X_mat = X_df.loc[mask].to_numpy(dtype=float)
+            Y_mat = Ydf.loc[mask].to_numpy(dtype=float)
+
+            configs = [{"model_name": name, "params": {}} for name in model_names]
+            n_folds = int(self.folds.get()) if self.folds.get() else 5
+
+            self.multitarget_status_label.config(text="Running…")
+            self.root.update_idletasks()
+
+            output = run_multitarget_search(
+                X_mat, Y_mat, configs,
+                cv=self.cv_strategy.get() or "kfold",
+                n_folds=n_folds,
+                target_names=targets,
+                optimization_method="grid",  # hard-forced; 2-D Y never hits a 1-D engine
+            )
+        except Exception as exc:  # surface any dispatch/fit error to the user
+            self.multitarget_status_label.config(text="Failed.")
+            messagebox.showerror("Multi-Target Search Failed", str(exc))
+            return
+
+        self._multitarget_last_output = output
+        self._populate_multitarget_results(output)
+        warn = ""
+        if output.correlation.get("is_weak"):
+            warn = (f"  ⚠ weak mean|corr|={output.correlation.get('mean_abs_corr', float('nan')):.2f} "
+                    "— separate PLS-1 models may be better.")
+        self.multitarget_status_label.config(
+            text=f"Done: {len(output.results)} model(s), {output.n_targets} targets.{warn}")
+
+    def _populate_multitarget_results(self, output):
+        """Render a :class:`MultiTargetSearchOutput` into the results grid."""
+        tree = self.multitarget_tree
+        tree.delete(*tree.get_children())
+
+        target_names = list(output.target_names)
+        columns = ["model", "mode", "joint_q2"]
+        for t in target_names:
+            for key, _lbl in self._MULTITARGET_METRIC_KEYS:
+                columns.append(f"{t}__{key}")
+        tree.configure(columns=columns)
+        tree.heading("model", text="Model")
+        tree.column("model", width=110, anchor=tk.W)
+        tree.heading("mode", text="Mode")
+        tree.column("mode", width=100, anchor=tk.CENTER)
+        tree.heading("joint_q2", text="Joint Q²")
+        tree.column("joint_q2", width=80, anchor=tk.E)
+        for t in target_names:
+            for key, lbl in self._MULTITARGET_METRIC_KEYS:
+                col = f"{t}__{key}"
+                tree.heading(col, text=f"{t} {lbl}")
+                tree.column(col, width=90, anchor=tk.E)
+
+        for res in output.results:
+            per = {d["target"]: d for d in res.metrics["per_target"]}
+            values = [res.model_name, res.mode, f"{res.joint_q2:.4f}"]
+            for t in target_names:
+                d = per.get(t, {})
+                for key, _lbl in self._MULTITARGET_METRIC_KEYS:
+                    val = d.get(key)
+                    values.append(f"{val:.4f}" if isinstance(val, (int, float)) else "")
+            tree.insert("", tk.END, values=values)
+
+    def _export_multitarget_csv(self):
+        """Export the last multi-target results (with mode + per-target metrics)."""
+        output = getattr(self, '_multitarget_last_output', None)
+        if output is None or not output.results:
+            messagebox.showinfo("Export CSV", "Run a multi-target search first.")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title="Export Multi-Target Results")
+        if not path:
+            return
+        rows = []
+        for res in output.results:
+            per = {d["target"]: d for d in res.metrics["per_target"]}
+            record = {
+                "Model": res.model_name,
+                "MultiTarget Mode": res.mode,
+                "Joint_Q2": res.joint_q2,
+                "Coupling_Mechanism": res.mechanism,
+                "Precise_Note": res.precise_note,
+            }
+            for t in output.target_names:
+                d = per.get(t, {})
+                for key, lbl in self._MULTITARGET_METRIC_KEYS:
+                    record[f"{t}_{lbl}"] = d.get(key)
+            rows.append(record)
+        try:
+            pd.DataFrame(rows).to_csv(path, index=False)
+        except Exception as exc:
+            messagebox.showerror("Export CSV Failed", str(exc))
+            return
+        self.multitarget_status_label.config(text=f"Exported: {path}")
 
     def _create_tab5_progress(self):
         """Tab 5: Analysis Progress - Live progress monitor."""

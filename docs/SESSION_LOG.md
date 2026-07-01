@@ -4,6 +4,20 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — T-17 F6: GUI multi-select + Multi-Target sub-tab
+
+Additive GUI surface for the Grid-only multi-target path. Single-Y UI byte-identical (diff is +382/-3, the 3 deletions are only the three optimization-radio lines re-expressed to hold widget references).
+
+- **State**: `self.selected_targets = []` added beside `self.target_column` (init block). Canonical list read ONLY by the new sub-tab; the legacy single-Y path never touches it, so single-Y stays untouched.
+- **New sub-tab** `_create_tab4f_multitarget` registered after tab4e in `_create_analysis_config_tab` (`config_notebook`). Contains: EXTENDED-select `Listbox` of numeric target columns (`_get_numeric_target_columns` filters `pd.api.types.is_numeric_dtype`, excludes the spectral-file column), model picker checkboxes each tagged `[JOINT]`/`[INDEPENDENT]` from `resolve_multitarget_strategy(...).mode` (+ mechanism tooltip), a results `Treeview`, Run + Export-CSV buttons, and the exact honest-labeling precise-note text.
+- **Engine lock**: `_on_multitarget_selection_changed` syncs `selected_targets` and calls `_update_multitarget_engine_lock`, which — when >1 target — sets `opt_radio_unified`/`opt_radio_nsga2` to `state='disabled'` (mirrors UVE/CARS grey-out) and forces `optimization_method='grid'` if it was `unified`/`nsga2`. The three radios (tab4c) now stored as `self.opt_radio_grid/unified/nsga2`. Belt-and-braces: `_run_multitarget_search` also hard-sets `optimization_method='grid'` AND passes `optimization_method="grid"` into `run_multitarget_search` (which itself raises on anything else), so 2-D Y can never reach a 1-D engine.
+- **Results grid**: `Treeview` columns rebuilt per run → `Model`, `Mode`, `Joint Q²`, then per target `{t}__{r2,rmse,rpd,rer,ccc,bias}` (raw units, from `res.metrics["per_target"]`). CSV export writes `MultiTarget Mode` + `Precise_Note` + `Coupling_Mechanism` + `Joint_Q2` + per-target metric columns.
+- **Dispatch**: each checked model → one `{"model_name", "params": {}}` config (defaults; a full hyperparameter grid is out of F6 scope). X = `self.X` (wavelength-filtered), Y = metadata source `[targets]` reindexed to `X.index`, joint NaN mask applied; `cv=self.cv_strategy.get()`, `n_folds=self.folds.get()`.
+- **Gotcha (test)**: `session_app` fixture is session-scoped and does NOT reset `Listbox` selection between tests; an EXTENDED-select `Listbox` keeps prior selection, so a single-target test must `selection_clear(0,"end")` before `selection_set(0)` or it inherits a stale 3-target selection.
+- **Tests**: `tests/gui/test_multitarget_tab.py` (6 tests: state/subtab exist, numeric-only listing, multiselect→grid-lock, single-target→re-enable, run populates joint+per-target columns with correct JOINT/INDEPENDENT modes, run refuses single target). `pytest tests/gui/test_multitarget_tab.py` → 6 passed; full `tests/gui/` exit 0; `tests/test_multi_y.py tests/test_multitarget_search.py tests/test_variable_selection.py` → 121 passed (single-Y varsel gold byte-identity intact).
+
+---
+
 ## 2026-07-01 — T-17 F5-varsel-vip review fold-in: `get_feature_importances` multi-output hardening
 
 **Context.** Cross-family review of F5 (multi-Y varsel + VIP) flagged two real correctness gaps in
