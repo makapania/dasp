@@ -52,6 +52,37 @@ print(f"Wavelength range: {{wavelengths.min():.1f}} - {{wavelengths.max():.1f}} 
 print(f"Target ('{target_column}'): min={{y.min():.3f}}, max={{y.max():.3f}}, mean={{y.mean():.3f}}")
 '''
 
+DATA_LOADING_MULTITARGET_TEMPLATE = '''
+# =============================================================================
+# DATA LOADING (Multi-Target — {multitarget_mode})
+# =============================================================================
+# This model predicts {n_targets} correlated targets jointly.
+# Coupling mode: {multitarget_mode}
+#   JOINT       = targets share model structure (genuine coupling).
+#   INDEPENDENT = separate per-target estimators under one shared configuration
+#                 (no correlation benefit; batched breadth, not coupling).
+
+data = pd.read_csv("{data_path}")  # <-- Replace with your data file path
+
+# Identify spectral columns (columns with numeric names representing wavelengths)
+wavelength_cols = [c for c in data.columns
+                   if c.replace('.', '').replace('-', '').replace('+', '').isdigit()
+                   or (c.replace('.', '').replace('-', '').replace('+', '')[0].isdigit())]
+
+X = data[wavelength_cols].values
+wavelengths = np.array([float(c) for c in wavelength_cols])
+
+# Target block: one column per target, in prediction order.
+TARGET_COLUMNS = {target_columns!r}
+Y = data[TARGET_COLUMNS].values.astype(float)  # shape (n_samples, n_targets)
+if Y.ndim == 1:
+    Y = Y.reshape(-1, 1)
+
+print(f"Loaded {{X.shape[0]}} samples with {{X.shape[1]}} wavelengths")
+print(f"Wavelength range: {{wavelengths.min():.1f}} - {{wavelengths.max():.1f}}")
+print(f"Targets ({{Y.shape[1]}}): {{TARGET_COLUMNS}}")
+'''
+
 DATA_LOADING_CLASSIFICATION_TEMPLATE = '''
 # =============================================================================
 # DATA LOADING

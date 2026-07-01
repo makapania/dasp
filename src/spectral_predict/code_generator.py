@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List, Tuple
 import numpy as np
 
-from .templates.header import HEADER_TEMPLATE, DATA_LOADING_TEMPLATE, DATA_LOADING_CLASSIFICATION_TEMPLATE, DATA_LOADING_ONE_CLASS_TEMPLATE
+from .templates.header import HEADER_TEMPLATE, DATA_LOADING_TEMPLATE, DATA_LOADING_CLASSIFICATION_TEMPLATE, DATA_LOADING_ONE_CLASS_TEMPLATE, DATA_LOADING_MULTITARGET_TEMPLATE
 from .templates.preprocessing import get_preprocessing_template, SNV_TEMPLATE, SAVGOL_DERIVATIVE_TEMPLATE
 from .templates.variable_selection import get_variable_selection_template
 from .templates.models import get_model_template, get_model_imports, MODEL_IMPORTS, DEFAULT_PARAMS, ONE_CLASS_MODELS, ONE_CLASS_NEEDS_SCALING, PCASIMCA_CLASS_TEMPLATE
@@ -23,6 +23,10 @@ from .templates.validation import (
     get_metrics_template,
     get_final_model_template,
     get_prediction_template,
+    get_multitarget_cross_validation_template,
+    get_multitarget_metrics_template,
+    get_multitarget_final_model_template,
+    MULTITARGET_CCC_HELPER,
     FINAL_MODEL_TEMPLATE,
     PREDICTION_TEMPLATE,
 )
@@ -47,6 +51,12 @@ class ExportOptions:
     # Data path placeholder
     data_path: str = 'your_data.csv'
     target_column: str = 'target'
+
+    # Multi-target (T-17 multi-Y) export. When target_columns has >1 entry the
+    # generator emits a multi-target script that loads Y as an (n, n_targets)
+    # block and reproduces multi_y_cv_pool. None/single-entry keeps the legacy
+    # single-Y path byte-identical.
+    target_columns: Optional[List[str]] = None
 
     # Data embedding options
     include_data: bool = False  # Embed actual data in script
@@ -134,6 +144,27 @@ class CodeGenerator:
         self.imbalance_method = model_config.get('imbalance_method', None)
         self.inlier_class_label = model_config.get('inlier_class_label', '')
 
+        # Multi-target (T-17 multi-Y) resolution. Prefer explicit
+        # options.target_columns; fall back to config 'target_names'. Only >1
+        # target activates the multi-target path — a single target keeps the
+        # legacy single-Y generator byte-identical.
+        self.target_names = (
+            self.options.target_columns
+            or model_config.get('target_names')
+            or None
+        )
+        self.is_multitarget = bool(self.target_names) and len(self.target_names) > 1
+        self.multitarget_mode = None
+        self.multitarget_scale_y = False
+        if self.is_multitarget:
+            mode = model_config.get('multitarget_mode')
+            if not mode:
+                from .multitarget_search import resolve_multitarget_strategy
+                mode = resolve_multitarget_strategy(self.model_name).mode
+            self.multitarget_mode = mode
+            # JOINT models are fit on fold/full-data-scaled Y; INDEPENDENT on raw Y.
+            self.multitarget_scale_y = (mode == 'JOINT')
+
         # Update options with target column from config
         if self.target_name:
             self.options.target_column = self.target_name
@@ -186,6 +217,11 @@ class CodeGenerator:
         str
             Complete Python script as a string
         """
+        # Multi-target (T-17 multi-Y) is a fully isolated generator so the
+        # single-Y assembly below stays byte-identical for every legacy config.
+        if self.is_multitarget:
+            return self._generate_multitarget_script()
+
         sections = []
 
         # 1. Header with imports
@@ -254,6 +290,13 @@ class CodeGenerator:
         dict
             Notebook structure compatible with nbformat
         """
+        # Multi-target (T-17 multi-Y): the section-by-section notebook assembly
+        # below is single-Y-only (single target column, 1-D y). Rather than emit
+        # a silently-wrong single-Y notebook for a multi-target config, wrap the
+        # correct multi-target script in a title + single code cell.
+        if self.is_multitarget:
+            return self._generate_multitarget_notebook()
+
         cells = []
 
         # Title cell with optional Colab badge
@@ -774,6 +817,324 @@ def _decode_embedded_data(encoded_str):
                 data_path=self.options.data_path,
                 target_column=self.options.target_column
             )
+
+    # =========================================================================
+    # Multi-target (T-17 multi-Y) generation — fully isolated from single-Y
+    # =========================================================================
+
+    def _generate_multitarget_script(self) -> str:
+        """Assemble a standalone multi-target (multi-Y) reproduction script.
+
+        Loads Y as an ``(n_samples, n_targets)`` block and reproduces
+        :func:`spectral_predict.multi_y.multi_y_cv_pool` — fold Y-scaling for
+        JOINT models, raw Y for INDEPENDENT — so the exported pooled CV
+        predictions match the in-app multi-target run. X-only preprocessing and
+        variable-selection sections are reused unchanged from the single-Y path.
+        """
+        sections = [self._render_multitarget_header()]
+
+        # Preprocessing / variable-selection FUNCTION defs (X-only; reused).
+        if (self.options.include_preprocessing and self.preprocessing != 'raw'
+                and not self.options.include_data):
+            sections.append(self._render_preprocessing_functions())
+        if self.options.include_variable_selection and self.variable_indices is not None:
+            varsel_code = self._render_variable_selection_functions()
+            if varsel_code:
+                sections.append(varsel_code)
+
+        # Data loading (embedded or file-based) — defines X and the Y block.
+        sections.append(self._render_multitarget_data_loading())
+
+        # X-only preprocessing + variable-selection APPLICATION (defines
+        # X_processed then X_final). Always emitted so X_final is defined.
+        sections.append(self._render_preprocessing_application())
+        sections.append(self._render_variable_selection_application())
+
+        # Shared CCC helper used by the multi-target metrics block.
+        sections.append(MULTITARGET_CCC_HELPER)
+
+        # Model instantiation (JOINT native / INDEPENDENT MOR-wrapped).
+        sections.append(self._render_multitarget_model())
+
+        if self.options.include_cross_validation:
+            sections.append(get_multitarget_cross_validation_template(
+                self.cv_folds,
+                cv_strategy=self.cv_strategy,
+                cv_n_repeats=self.cv_n_repeats,
+                scale_y=self.multitarget_scale_y,
+                x_var='X_final',
+            ))
+            sections.append(get_multitarget_metrics_template(
+                self.cv_folds, self.target_names, self.multitarget_mode,
+            ))
+
+        sections.append(get_multitarget_final_model_template(x_var='X_final'))
+
+        if self.options.include_prediction_template:
+            sections.append(self._render_multitarget_prediction_template())
+
+        return '\n'.join(sections)
+
+    def _generate_multitarget_notebook(self) -> dict:
+        """Multi-target notebook: title markdown + one code cell (full script)."""
+        title = (
+            f"# Multi-Target Spectral Analysis: {self.model_name}\n\n"
+            f"Generated by Spectral Predict on {datetime.now().strftime('%Y-%m-%d')}\n\n"
+            f"**MultiTarget Mode**: {self.multitarget_mode}  \n"
+            f"**Targets ({len(self.target_names)})**: {', '.join(map(str, self.target_names))}  \n"
+            f"**Preprocessing**: {self.preprocessing}  \n"
+        )
+        cells = [
+            self._make_markdown_cell(title),
+            self._make_code_cell(self._generate_multitarget_script()),
+        ]
+        import sys as _sys
+        return {
+            'nbformat': 4,
+            'nbformat_minor': 5,
+            'metadata': {
+                'kernelspec': {
+                    'display_name': 'Python 3', 'language': 'python', 'name': 'python3',
+                },
+                'language_info': {
+                    'name': 'python',
+                    'version': (
+                        f'{_sys.version_info.major}.'
+                        f'{_sys.version_info.minor}.'
+                        f'{_sys.version_info.micro}'
+                    ),
+                },
+            },
+            'cells': cells,
+        }
+
+    def _render_multitarget_header(self) -> str:
+        """Header for the multi-target script (mode-labeled, minimal imports)."""
+        from . import __version__ as _dasp_version
+
+        model_details = (
+            f"MultiTarget Mode: {self.multitarget_mode}  "
+            f"({'genuine coupling' if self.multitarget_mode == 'JOINT' else 'separate per-target estimators under one shared config'})\n"
+            f"Targets ({len(self.target_names)}): {', '.join(map(str, self.target_names))}\n"
+            f"Parameters: {self._format_model_details()}"
+        )
+        var_sel_info = ''
+        if self.variable_indices is not None:
+            var_sel_method = self.config.get('variable_selection_method', 'custom')
+            n_vars = len(self.variable_indices) if hasattr(self.variable_indices, '__len__') else 'N/A'
+            var_sel_info = f'Variable Selection: {var_sel_method} ({n_vars} variables)'
+        extra_packages = ''
+        if self.model_name.lower() in ['lightgbm', 'xgboost', 'catboost']:
+            extra_packages = f', {self.model_name.lower()}'
+        return HEADER_TEMPLATE.format(
+            date=datetime.now().strftime('%Y-%m-%d'),
+            model_name=f"{self.model_name} (multi-target)",
+            model_details=model_details,
+            preprocessing=self.preprocessing,
+            variable_selection_info=var_sel_info,
+            cv_folds=self.cv_folds,
+            extra_packages=extra_packages,
+            imports='import numpy as np',  # numpy/pandas already in template body
+            dasp_version=_dasp_version,
+        )
+
+    def _render_multitarget_data_loading(self) -> str:
+        """Load the Y block: embedded (2-D) or a list of target columns."""
+        if self.options.include_data:
+            # Embedded section assigns `y` (may be 2-D). Bridge to the Y block.
+            return self._generate_embedded_data_section() + (
+                '\n\n# Normalize embedded targets to a 2-D (n_samples, n_targets) block\n'
+                'Y = np.asarray(y, dtype=float)\n'
+                'if Y.ndim == 1:\n'
+                '    Y = Y.reshape(-1, 1)\n'
+                f'TARGET_COLUMNS = {list(self.target_names)!r}\n'
+            )
+        return DATA_LOADING_MULTITARGET_TEMPLATE.format(
+            data_path=self.options.data_path,
+            target_columns=list(self.target_names),
+            multitarget_mode=self.multitarget_mode,
+            n_targets=len(self.target_names),
+        )
+
+    def _render_multitarget_model(self) -> str:
+        """Emit the multi-target estimator (mirrors build_multitarget_estimator)."""
+        from .templates.validation import _cv_splitter_code
+
+        name = self.model_name
+        # SVM is the classification-side alias for SVR.
+        if name == 'SVM':
+            name = 'SVR'
+        params = dict(self.params or {})
+        header = (
+            "\n# =============================================================================\n"
+            f"# MODEL ({self.multitarget_mode} multi-target)\n"
+            "# =============================================================================\n"
+        )
+
+        if name == 'PLS':
+            # Cap components at A <= min(min_fold_train - 1, n_features), matching
+            # multitarget_search (component count is fixed before the CV loop and
+            # cloned per fold). Recompute the splitter here (deterministic seed)
+            # so the cap sees the real smallest fold-train size.
+            requested = int(params.get('n_components', 10))
+            cv_import, cv_constructor = _cv_splitter_code(
+                'regression', self.cv_strategy, self.cv_folds, self.cv_n_repeats)
+            return header + (
+                "from sklearn.cross_decomposition import PLSRegression\n"
+                f"{cv_import}\n"
+                f"_REQUESTED_COMPONENTS = {requested}\n"
+                f"_cap_splitter = {cv_constructor}\n"
+                "_min_fold_train = min(len(_tr) for _tr, _ in _cap_splitter.split(X_final, Y))\n"
+                "_cap = max(1, min(_min_fold_train - 1, X_final.shape[1]))\n"
+                "_n_components = max(1, min(_REQUESTED_COMPONENTS, _cap))\n"
+                "model = PLSRegression(n_components=_n_components, scale=False)\n"
+            )
+
+        if name == 'RandomForest':
+            kw = dict(
+                n_estimators=int(params.get('n_estimators', 200)),
+                max_depth=params.get('max_depth', None),
+                max_features=params.get('max_features', 1.0),
+                min_samples_leaf=int(params.get('min_samples_leaf', 1)),
+                random_state=int(params.get('random_state', 42)),
+                n_jobs=int(params.get('n_jobs', -1)),
+            )
+            return header + (
+                "from sklearn.ensemble import RandomForestRegressor\n"
+                f"model = RandomForestRegressor(**{kw!r})\n"
+            )
+
+        if name == 'MLP':
+            kw = dict(
+                hidden_layer_sizes=params.get('hidden_layer_sizes', (64,)),
+                alpha=float(params.get('alpha', 1e-3)),
+                learning_rate_init=float(params.get('learning_rate_init', 1e-3)),
+                max_iter=int(params.get('max_iter', 500)),
+                early_stopping=bool(params.get('early_stopping', True)),
+                random_state=int(params.get('random_state', 42)),
+            )
+            return header + (
+                "from sklearn.neural_network import MLPRegressor\n"
+                f"model = MLPRegressor(**{kw!r})\n"
+            )
+
+        if name == 'CatBoost':
+            kw = dict(
+                iterations=int(params.get('iterations', 100)),
+                learning_rate=float(params.get('learning_rate', 0.1)),
+                depth=int(params.get('depth', 5)),
+                l2_leaf_reg=float(params.get('l2_leaf_reg', 4.0)),
+                min_data_in_leaf=int(params.get('min_data_in_leaf', 1)),
+                random_state=int(params.get('random_state', 42)),
+                verbose=False,
+                loss_function='MultiRMSE',
+            )
+            return header + (
+                "from catboost import CatBoostRegressor\n"
+                f"model = CatBoostRegressor(**{kw!r})\n"
+            )
+
+        if name == 'XGBoost':
+            kw = dict(
+                n_estimators=int(params.get('n_estimators', 100)),
+                learning_rate=float(params.get('learning_rate', 0.1)),
+                max_depth=int(params.get('max_depth', 6)),
+                subsample=float(params.get('subsample', 0.8)),
+                colsample_bytree=float(params.get('colsample_bytree', 0.6)),
+                reg_alpha=float(params.get('reg_alpha', 0.2)),
+                reg_lambda=float(params.get('reg_lambda', 1.5)),
+                min_child_weight=float(params.get('min_child_weight', 1)),
+                gamma=float(params.get('gamma', 0.0)),
+                tree_method='hist',
+                random_state=int(params.get('random_state', 42)),
+                n_jobs=int(params.get('n_jobs', -1)),
+                verbosity=0,
+                multi_strategy='multi_output_tree',
+            )
+            return header + (
+                "from xgboost import XGBRegressor\n"
+                f"model = XGBRegressor(**{kw!r})\n"
+            )
+
+        if name == 'MultiTaskLasso':
+            p = dict(params)
+            p.setdefault('alpha', 1.0)
+            p.setdefault('max_iter', 500)
+            p.setdefault('random_state', 42)
+            return header + (
+                "from sklearn.linear_model import MultiTaskLasso\n"
+                f"model = MultiTaskLasso(**{p!r})\n"
+            )
+
+        if name == 'MultiTaskElasticNet':
+            p = dict(params)
+            p.setdefault('alpha', 1.0)
+            p.setdefault('l1_ratio', 0.5)
+            p.setdefault('max_iter', 500)
+            p.setdefault('random_state', 42)
+            return header + (
+                "from sklearn.linear_model import MultiTaskElasticNet\n"
+                f"model = MultiTaskElasticNet(**{p!r})\n"
+            )
+
+        if name == 'Ridge':
+            p = dict(params)
+            p.setdefault('random_state', 42)
+            return header + (
+                "from sklearn.linear_model import Ridge\n"
+                f"model = Ridge(**{p!r})\n"
+            )
+
+        # INDEPENDENT MOR-wrapped models: one cloned base estimator per target.
+        base_import, base_ctor = self._multitarget_independent_base(name, params)
+        if base_ctor is not None:
+            return header + (
+                "from sklearn.multioutput import MultiOutputRegressor\n"
+                f"{base_import}\n"
+                f"model = MultiOutputRegressor({base_ctor})\n"
+            )
+
+        raise NotImplementedError(
+            f"Multi-target export has no builder for model {self.model_name!r}."
+        )
+
+    @staticmethod
+    def _multitarget_independent_base(name: str, params: dict):
+        """Return (import_line, constructor_expr) for an MOR base, mirroring
+        multitarget_search._build_independent_base. (import, None) if unknown."""
+        p = dict(params)
+        if name == 'Lasso':
+            p.setdefault('max_iter', 500)
+            p.setdefault('random_state', 42)
+            return 'from sklearn.linear_model import Lasso', f'Lasso(**{p!r})'
+        if name == 'ElasticNet':
+            p.setdefault('l1_ratio', 0.5)
+            p.setdefault('max_iter', 500)
+            p.setdefault('random_state', 42)
+            return 'from sklearn.linear_model import ElasticNet', f'ElasticNet(**{p!r})'
+        if name == 'SVR':
+            return 'from sklearn.svm import SVR', f'SVR(**{p!r})'
+        if name == 'LightGBM':
+            p.setdefault('random_state', 42)
+            p.setdefault('n_jobs', -1)
+            p.setdefault('verbosity', -1)
+            return 'from lightgbm import LGBMRegressor', f'LGBMRegressor(**{p!r})'
+        return '', None
+
+    def _render_multitarget_prediction_template(self) -> str:
+        """Prediction template for multi-target: per-target output columns."""
+        return (
+            "\n# =============================================================================\n"
+            "# PREDICTION ON NEW DATA (Multi-Target Template)\n"
+            "# =============================================================================\n"
+            "#\n"
+            "# new_data = pd.read_csv('new_spectra.csv')\n"
+            "# X_new = new_data[wavelength_cols].values\n"
+            "# # Apply the same preprocessing / variable selection used above, then:\n"
+            "# Y_new = predict_raw(model, X_new_final)  # (n_samples, n_targets), RAW units\n"
+            "# results = pd.DataFrame(Y_new, columns=TARGET_COLUMNS)\n"
+            "# results.to_csv('multitarget_predictions.csv', index=False)\n"
+        )
 
     def _render_preprocessing_application(self) -> str:
         """Render preprocessing application code."""

@@ -94,7 +94,8 @@ def save_model(
     cv_predictions: Optional[np.ndarray] = None,
     cv_actuals: Optional[np.ndarray] = None,
     X_train: Optional[np.ndarray] = None,
-    bias_correction: Optional[Dict[str, Any]] = None
+    bias_correction: Optional[Dict[str, Any]] = None,
+    y_scaler: Optional[Any] = None
 ) -> None:
     """
     Save a trained model with all metadata to a .dasp file.
@@ -111,13 +112,16 @@ def save_model(
         Used to convert between text labels and numeric codes.
     cv_residuals : np.ndarray or None
         Cross-validation residuals (predictions - actuals) for uncertainty estimation.
-        Shape: (n_cv_samples,) for regression or (n_cv_samples, n_classes) for classification probabilities.
+        Shape: (n_cv_samples,) for single-target regression, (n_cv_samples, n_classes)
+        for classification probabilities, or (n_cv_samples, n_targets) for
+        multi-target (T-17 multi-Y) regression.
     cv_predictions : np.ndarray or None
         Cross-validation predictions for uncertainty analysis.
-        Shape: (n_cv_samples,) for regression or (n_cv_samples,) for classification.
+        Shape: (n_cv_samples,) for single-target regression/classification, or
+        (n_cv_samples, n_targets) for multi-target (T-17 multi-Y) regression.
     cv_actuals : np.ndarray or None
         Cross-validation actual values for uncertainty analysis.
-        Shape: (n_cv_samples,)
+        Shape: (n_cv_samples,) single-target, or (n_cv_samples, n_targets) multi-target.
     X_train : np.ndarray or None
         Training data (preprocessed) for applicability domain assessment.
         Shape: (n_samples, n_features)
@@ -135,8 +139,22 @@ def save_model(
         - 'polyorder' (int): Savgol polynomial order
         - 'params' (dict): Model hyperparameters
         - 'training_stats' (dict): Training data statistics
+        Multi-target (T-17 multi-Y) fields — all JSON-serializable, round-trip
+        as-is (persist them so a reloaded multi-target model can label + score
+        each target correctly):
+        - 'target_names' (list[str]): per-target column labels, in prediction order
+        - 'multitarget_mode' (str): 'JOINT' or 'INDEPENDENT' honest-coupling label
+        - 'n_targets' (int): number of target columns
+        - 'prediction_columns' (list[str]): output column labels for predict()
+        - 'per_target_metrics' (list[dict]): per-target RAW-unit metrics, in order
     filepath : str or Path
         Output file path. Will append .dasp extension if not present.
+    y_scaler : FoldYScaler-like or None
+        Per-target Y autoscaler used to fit a JOINT multi-target model on
+        fold/full-data-scaled Y (exposes ``mean_`` / ``std_`` arrays of shape
+        (n_targets,)). Persisted so a reloaded model can inverse-transform
+        scaled predictions back to RAW target units. None for single-target
+        and for INDEPENDENT multi-target models (which fit on raw Y).
 
     Raises
     ------
@@ -328,6 +346,21 @@ def save_model(
         else:
             metadata_complete['has_applicability_domain'] = False
 
+        # Save per-target Y-scaler stats if provided (T-17 multi-Y JOINT models).
+        # Stored as raw mean/std arrays (npz) rather than a pickled object so the
+        # inverse-transform stats survive with full float precision and without a
+        # class-import dependency at load time. Single-target and INDEPENDENT
+        # multi-target models pass y_scaler=None, so this block is skipped and the
+        # archive is byte-for-byte the legacy layout.
+        y_scaler_path = tmppath / 'y_scaler.npz'
+        if y_scaler is not None:
+            y_mean = np.asarray(getattr(y_scaler, 'mean_'), dtype=float)
+            y_std = np.asarray(getattr(y_scaler, 'std_'), dtype=float)
+            np.savez(y_scaler_path, mean=y_mean, std=y_std)
+            metadata_complete['has_y_scaler'] = True
+        else:
+            metadata_complete['has_y_scaler'] = False
+
         # Save bias correction if provided
         bias_correction_path = tmppath / 'bias_correction.json'
         if bias_correction is not None:
@@ -357,6 +390,8 @@ def save_model(
                 zf.write(tmppath / 'pca_model.pkl', 'pca_model.pkl')
             if bias_correction_path.exists():
                 zf.write(bias_correction_path, 'bias_correction.json')
+            if y_scaler_path.exists():
+                zf.write(y_scaler_path, 'y_scaler.npz')
             # One-class auxiliary files
             scaler_zip_path = tmppath / "scaler.pkl"
             if scaler_zip_path.exists():
@@ -382,6 +417,9 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         - 'model': Fitted model object
         - 'preprocessor': Fitted preprocessing pipeline (or None)
         - 'metadata': Dictionary with all model metadata
+        - 'y_scaler': Reconstructed per-target Y-scaler (T-17 multi-Y JOINT
+          models) exposing ``mean_`` / ``std_`` and ``inverse_transform``; None
+          for single-target and INDEPENDENT multi-target models.
 
     Raises
     ------
@@ -488,6 +526,19 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
             with open(bias_correction_path, 'r', encoding='utf-8') as f:
                 bias_correction = json.load(f)
 
+        # Load per-target Y-scaler if present (T-17 multi-Y JOINT models).
+        # Reconstruct a FoldYScaler so downstream inverse_transform yields raw
+        # target units. Absent for single-target/INDEPENDENT models -> None.
+        y_scaler = None
+        y_scaler_path = tmppath / 'y_scaler.npz'
+        if y_scaler_path.exists():
+            from .multi_y import FoldYScaler
+
+            with np.load(y_scaler_path) as npz_file:
+                y_scaler = FoldYScaler()
+                y_scaler.mean_ = npz_file['mean']
+                y_scaler.std_ = npz_file['std']
+
     return {
         'model': model,
         'preprocessor': preprocessor,
@@ -499,6 +550,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'bias_correction': bias_correction,
         'scaler': scaler,
         'pca_reducer': pca_reducer,
+        'y_scaler': y_scaler,
     }
 
 
@@ -599,8 +651,12 @@ def predict_with_model(
     Returns
     -------
     np.ndarray
-        Predicted values, shape (n_samples,) for regression or
-        (n_samples, n_classes) for classification
+        Predicted values. Shape (n_samples,) for single-target regression,
+        (n_samples, n_classes) for classification, or (n_samples, n_targets)
+        for multi-target (T-17 multi-Y) regression. For a JOINT multi-target
+        model the loaded per-target Y-scaler is applied so returned values are
+        in RAW target units (INDEPENDENT multi-target models already predict
+        raw units).
 
     Raises
     ------
@@ -741,6 +797,15 @@ def predict_with_model(
 
     # Make predictions
     predictions = model.predict(X_processed)
+
+    # T-17 multi-Y: a JOINT multi-target model is fit on scaled Y, so its raw
+    # predict() output is in scaled units. Inverse-transform with the persisted
+    # per-target Y-scaler to return RAW target units. Gated on y_scaler presence,
+    # so single-target and INDEPENDENT models (y_scaler is None) are untouched
+    # and their prediction path stays byte-identical to the legacy behavior.
+    y_scaler = model_dict.get('y_scaler')
+    if y_scaler is not None:
+        predictions = y_scaler.inverse_transform(predictions)
 
     # If label_encoder exists, convert predictions back to original text labels
     if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:

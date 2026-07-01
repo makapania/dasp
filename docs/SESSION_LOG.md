@@ -4,6 +4,16 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — T-17 F7 (multi-Y export + per-target model_io)
+
+- **Exact reproduction hinges on transcribing `multi_y_cv_pool`, not re-deriving it.** The exported multi-target CV loop is a line-for-line transcription of `multi_y.multi_y_cv_pool`'s n_targets≥2 branch (per-fold `FoldYScaler` fit → fit on scaled Y for JOINT → `inverse_transform` → pool by `pred_sum/pred_count`). Because the algorithm and operation order are identical, exported pooled preds match `run_multitarget_search().y_pred_pooled` at `max|diff| == 0.0` for JOINT PLS, INDEPENDENT-native Ridge, and MOR-wrapped SVR — not just `allclose`. Any deviation in fold order, scaler ddof, or zero-std handling would break this, so the FoldYScaler transcription mirrors `std==0 → 1.0` exactly.
+- **Splitter parity is load-bearing.** `run_multitarget_search` builds `KFold(shuffle=True, random_state=42)` via `build_cv_splitter('kfold','regression',...)`; the export's `_cv_splitter_code('regression',...)` emits the identical constructor. For regression `use_stratified` is False so both are plain `KFold`. PLS component capping is recomputed in the export by re-splitting once for `min_fold_train` (deterministic seed → same folds as the CV loop), matching `multitarget_search`'s fix-before-clone cap.
+- **Byte-identity isolation via a top-of-method early return.** `generate_script()` / `generate_notebook()` route to `_generate_multitarget_script()` / `_generate_multitarget_notebook()` only when `is_multitarget` (len(target_names) > 1). A one-element `target_names` does NOT flip the switch. Single-Y configs never touch the new code, so the legacy path is byte-identical (proven by test_t20 + early-stopping-parity + a `test_single_target_config_does_not_activate_multitarget` guard).
+- **model_io per-target = additive metadata + a `y_scaler.npz` sidecar.** `target_names` / `multitarget_mode` / `per_target_metrics` / `prediction_columns` already round-trip through the JSON metadata dict — no schema change needed. The only binary addition is per-target Y-scaler mean/std (stored as an npz, NOT a pickled object, to keep full float precision without a class-import dependency at load). `predict_with_model` inverse-transforms only when `model_dict['y_scaler'] is not None`, so single-Y and INDEPENDENT multi-target predict paths stay byte-identical.
+- **Pre-existing env failures:** `test_export_code.py::{test_python_script_execution,test_full_workflow_python}` fail on this box because they `subprocess.run(['python', ...])` against a bare `python` on PATH that lacks sklearn (not `.venv312`). Confirmed identical on the clean pre-change tree; documented as T-CI-3/T-CI-4. Not an F7 regression.
+
+---
+
 ## 2026-07-01 — T-17 F6: GUI multi-select + Multi-Target sub-tab
 
 Additive GUI surface for the Grid-only multi-target path. Single-Y UI byte-identical (diff is +382/-3, the 3 deletions are only the three optimization-radio lines re-expressed to hold widget references).
