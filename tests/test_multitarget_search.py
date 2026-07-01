@@ -148,10 +148,77 @@ def test_build_pls_estimator_scale_false_and_capped():
 
 
 def test_build_unwired_model_raises():
-    for name in ["RandomForest", "Ridge", "LightGBM", "SVR", "CatBoost", "XGBoost"]:
+    # F3 wires the JOINT models; only the INDEPENDENT (F4) models still raise.
+    for name in ["Ridge", "Lasso", "ElasticNet", "LightGBM", "SVR", "NeuralBoosted"]:
         strat = resolve_multitarget_strategy(name)
         with pytest.raises(NotImplementedError):
             build_multitarget_estimator(strat, {}, n_samples=30, n_features=10)
+
+
+# --------------------------------------------------------------------------- #
+# F3: JOINT estimator builders (RF, MLP, CatBoost MultiRMSE, XGBoost m.o.tree)
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("model_name", ["RandomForest", "MLP", "CatBoost", "XGBoost"])
+def test_build_joint_estimator_fits_scaled_3target_block(model_name, rng):
+    """Each JOINT model fits a 3-target block on fold-scaled Y and predicts (n,3)."""
+    n, p = 40, 12
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 3))
+    Y = base + 0.05 * rng.standard_normal((n, 3))
+    # Fold-scaled Y (per-target zero-mean/unit-std), the block JOINT models fit on.
+    Y_scaled = (Y - Y.mean(axis=0)) / Y.std(axis=0)
+
+    strat = resolve_multitarget_strategy(model_name)
+    assert strat.mode == "JOINT"
+    est = build_multitarget_estimator(strat, {}, n_samples=n, n_features=p)
+    est.fit(X, Y_scaled)
+    pred = np.asarray(est.predict(X))
+    assert pred.shape == (n, 3)
+    assert np.all(np.isfinite(pred))
+
+
+def test_build_catboost_uses_multirmse_and_no_early_stopping():
+    strat = resolve_multitarget_strategy("CatBoost")
+    est = build_multitarget_estimator(strat, {}, n_samples=40, n_features=12)
+    params = est.get_params()
+    assert params.get("loss_function") == "MultiRMSE"
+    # Booster early-stopping disabled for multi-Y v1: no overfitting-detector wait.
+    assert params.get("od_wait") in (None, 0)
+    assert params.get("early_stopping_rounds") in (None, 0)
+
+
+def test_build_xgboost_uses_multi_output_tree_and_no_early_stopping():
+    strat = resolve_multitarget_strategy("XGBoost")
+    est = build_multitarget_estimator(strat, {}, n_samples=40, n_features=12)
+    params = est.get_params()
+    assert params.get("multi_strategy") == "multi_output_tree"
+    # Booster early-stopping disabled for multi-Y v1.
+    assert params.get("early_stopping_rounds") in (None, 0)
+
+
+@pytest.mark.parametrize("model_name", ["RandomForest", "CatBoost", "XGBoost"])
+def test_run_multitarget_joint_models_smoke(model_name):
+    """End-to-end orchestrator smoke: JOINT tree/booster models score a 3-target
+    block and return per-target metrics of shape (3,)."""
+    rng = np.random.default_rng(7)
+    n, p = 45, 10
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 3))
+    Y = base + 0.05 * rng.standard_normal((n, 3))
+    out = run_multitarget_search(
+        X,
+        Y,
+        [{"model_name": model_name, "params": {}}],
+        cv="kfold",
+        n_folds=3,
+        target_names=["a", "b", "c"],
+    )
+    assert out.n_targets == 3
+    best = out.best
+    assert best.mode == "JOINT"
+    assert best.scale_y is True
+    assert best.metrics["q2"].shape == (3,)
+    assert best.y_pred_pooled.shape[1] == 3
 
 
 # --------------------------------------------------------------------------- #

@@ -23,11 +23,14 @@ Design invariants (from the T-17 plan):
   (``scale_y=False``) to preserve the "separate per-target models" guarantee.
 * **Per-target metrics on RAW units** via :mod:`spectral_predict.multi_y`.
 
-F2 scope: the orchestrator + the PLS-2 (JOINT) flagship are wired and tested.
-Estimator construction for the remaining JOINT models (RandomForest, MLP,
-CatBoost MultiRMSE, XGBoost multi_output_tree) and the INDEPENDENT models
-(Ridge, Lasso/ElasticNet, SVR, LightGBM, NeuralBoosted) is resolved by
-:func:`resolve_multitarget_strategy` but *built* in later T-17 features; calling
+F3 scope: all JOINT models are wired -- PLS-2 (flagship), RandomForest (native
+multi-output impurity), MLP (shared hidden layers), CatBoost
+(``loss_function='MultiRMSE'``), and XGBoost
+(``multi_strategy='multi_output_tree'``) -- each fitting the fold-scaled Y block
+natively and predicting ``(n, n_targets)``. Booster early-stopping is DISABLED
+under multi-Y for v1 (no ``eval_set`` / ``od_*`` / ``early_stopping_rounds``).
+The INDEPENDENT models (Ridge, Lasso/ElasticNet, SVR, LightGBM, NeuralBoosted)
+are resolved by :func:`resolve_multitarget_strategy` but *built* in F4; calling
 the builder for a not-yet-wired model raises :class:`NotImplementedError`.
 """
 
@@ -218,10 +221,17 @@ def build_multitarget_estimator(
 ):
     """Build an unfitted estimator for a resolved multi-target strategy.
 
-    F2 wires the **PLS-2 flagship** only. PLS latent components are capped at
+    F3 wires all **JOINT** models: PLS, RandomForest, MLP, CatBoost
+    (``loss_function='MultiRMSE'``), and XGBoost
+    (``multi_strategy='multi_output_tree'``). Each natively accepts the 2-D
+    fold-scaled ``Y`` block and predicts ``(n, n_targets)``. Booster
+    early-stopping is disabled under multi-Y for v1 (the builder sets no
+    ``od_*`` / ``early_stopping_rounds`` and :func:`multi_y_cv_pool` passes no
+    ``eval_set``). PLS latent components are capped at
     ``A <= min(n_samples - 1, n_features)`` via
     :func:`spectral_predict.multi_y.cap_components`; ``scale=False`` matches the
     legacy single-Y ``get_model("PLS")`` builder so single-target parity holds.
+    The INDEPENDENT models are built in F4.
 
     Args:
         strategy: A resolved :class:`MultiTargetStrategy`.
@@ -240,17 +250,95 @@ def build_multitarget_estimator(
         NotImplementedError: For models resolved but not yet wired in F2.
     """
     params = dict(params or {})
-    if strategy.model_name == "PLS":
+    name = strategy.model_name
+
+    if name == "PLS":
         from sklearn.cross_decomposition import PLSRegression
 
         requested = int(params.get("n_components", 10))
         n_components = cap_components(n_samples, n_features, requested)
         return PLSRegression(n_components=n_components, scale=False)
 
+    if name == "RandomForest":
+        # sklearn native multi-output: impurity is averaged across targets, so a
+        # single forest genuinely couples the fold-scaled target block. Defaults
+        # mirror the legacy get_model("RandomForest") builder.
+        from sklearn.ensemble import RandomForestRegressor
+
+        return RandomForestRegressor(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=params.get("max_depth", None),
+            max_features=params.get("max_features", 1.0),
+            min_samples_leaf=int(params.get("min_samples_leaf", 1)),
+            random_state=int(params.get("random_state", 42)),
+            n_jobs=int(params.get("n_jobs", -1)),
+        )
+
+    if name == "MLP":
+        # sklearn native multi-output: one network with shared hidden layers and
+        # a multi-unit output head. early_stopping is an internal validation
+        # split (NOT booster early-stopping) and is safe under multi-Y.
+        from sklearn.neural_network import MLPRegressor
+
+        return MLPRegressor(
+            hidden_layer_sizes=params.get("hidden_layer_sizes", (64,)),
+            alpha=float(params.get("alpha", 1e-3)),
+            learning_rate_init=float(params.get("learning_rate_init", 1e-3)),
+            max_iter=int(params.get("max_iter", 500)),
+            early_stopping=bool(params.get("early_stopping", True)),
+            random_state=int(params.get("random_state", 42)),
+        )
+
+    if name == "CatBoost":
+        # JOINT via loss_function='MultiRMSE' (from strategy.joint_params): one
+        # ensemble optimizes the summed per-target RMSE on the fold-scaled block.
+        # Booster early-stopping is DISABLED for multi-Y v1 -- we build with no
+        # od_* params and multi_y_cv_pool never passes an eval_set, so fitting is
+        # a plain full-iteration fit.
+        from catboost import CatBoostRegressor
+
+        kwargs: dict[str, Any] = dict(
+            iterations=int(params.get("iterations", 100)),
+            learning_rate=float(params.get("learning_rate", 0.1)),
+            depth=int(params.get("depth", 5)),
+            l2_leaf_reg=float(params.get("l2_leaf_reg", 4.0)),
+            min_data_in_leaf=int(params.get("min_data_in_leaf", 1)),
+            random_state=int(params.get("random_state", 42)),
+            verbose=False,
+        )
+        kwargs.update(strategy.joint_params)  # loss_function='MultiRMSE'
+        return CatBoostRegressor(**kwargs)
+
+    if name == "XGBoost":
+        # JOINT via multi_strategy='multi_output_tree' (from strategy.joint_params,
+        # xgboost >= 2.0): each tree grows vector-valued leaves so targets share
+        # split structure. Booster early-stopping is DISABLED for multi-Y v1 -- no
+        # early_stopping_rounds is set and multi_y_cv_pool passes no eval_set.
+        from xgboost import XGBRegressor
+
+        kwargs = dict(
+            n_estimators=int(params.get("n_estimators", 100)),
+            learning_rate=float(params.get("learning_rate", 0.1)),
+            max_depth=int(params.get("max_depth", 6)),
+            subsample=float(params.get("subsample", 0.8)),
+            colsample_bytree=float(params.get("colsample_bytree", 0.6)),
+            reg_alpha=float(params.get("reg_alpha", 0.2)),
+            reg_lambda=float(params.get("reg_lambda", 1.5)),
+            min_child_weight=float(params.get("min_child_weight", 1)),
+            gamma=float(params.get("gamma", 0.0)),
+            tree_method="hist",
+            random_state=int(params.get("random_state", 42)),
+            n_jobs=int(params.get("n_jobs", -1)),
+            verbosity=0,
+        )
+        kwargs.update(strategy.joint_params)  # multi_strategy='multi_output_tree'
+        return XGBRegressor(**kwargs)
+
     raise NotImplementedError(
         f"Multi-target estimator for {strategy.model_name!r} ({strategy.mode}) "
-        "is resolved but not yet wired. F2 implements PLS-2 only; the remaining "
-        "JOINT/INDEPENDENT models are built in later T-17 features."
+        "is resolved but not yet wired. F3 implements the JOINT models (PLS, "
+        "RandomForest, MLP, CatBoost, XGBoost); the INDEPENDENT models (Ridge, "
+        "Lasso/ElasticNet, SVR, LightGBM, NeuralBoosted) are built in F4."
     )
 
 
