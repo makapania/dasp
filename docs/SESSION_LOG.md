@@ -1494,3 +1494,17 @@ Fix commits: `3a4e502` + `ca987b4` (regression test addition per Codex review).
 ---
 
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.
+
+---
+
+## 2026-07-01 — T-17 F5: Multi-Y-PLS-evaluated varsel + VIP
+
+Extended performance-based variable selection (iPLS fwd/bwd, MC-siPLS, MWPLS, SPA, GA-PLS) and `compute_vip` to multi-target, all as additive `if y.ndim==1` (exact legacy) / `else` (multi via `multi_y` foundation) branches.
+
+- **Shared evaluator wins**: `_evaluate_interval_pls` is the single internal PLS evaluator for iPLS fwd/bwd + MC-siPLS + MWPLS, so one additive `_evaluate_interval_pls_multi` branch covered all four. SPA and GA-PLS each have their own evaluator (`_evaluate_spa_seed`, `_fitness_function`) — their chains/GA-structure/RNG are y-independent, so only the scoring step got a multi-Y branch (no RNG-draw change → GA byte-identity holds).
+- **Multi-Y joint criterion**: JOINT PLS on fold-scaled Y via `multi_y_cv_pool`, per-target Q2 on RAW units via `multi_y_metrics`, joint Q2 = mean per-target Q2. Interval `rmsecv` in multi-Y is the pooled *normalized* RMSECV `sqrt(mean(1-Q2_s))` — scale-free (targets have divergent units) and monotone-decreasing in joint Q2, so ranking by rmsecv == ranking by joint Q2. Raw RMSE can't be averaged across divergent-scale targets.
+- **VIP fix**: `ssq_y = sum_targets(y_loadings**2)` (Wold 2001 / Mehmood 2012 Eq.1) for multi-Y, but branch on `Q.shape[0]==1` to keep the EXACT `Q[0,:]**2` term for single-target → byte-identical.
+- **Grey-out**: UVE/CARS + hybrids (uve_spa, uve_cars, uve_cars_spa, fipls_cars, get_uve_threshold) raise `NotImplementedError` on 2-D Y via `_reject_multi_y` (function-level mirror of the GUI grey-out; deferred to v1.1 via `aggregate_importance`).
+- **Byte-identity proof**: `tests/gold_standards/varsel_single_y.npz` captures selected indices + score vectors for all six methods on a pinned 1-D synthetic case (generated from pre-refactor code via `tools/_gen_varsel_gold.py`). `TestSingleYByteIdentityGold` asserts `array_equal`/`allclose(atol=0,rtol=0)` post-refactor. All pass.
+- Tests: `pytest tests/test_multi_y.py tests/test_variable_selection.py` → 61 passed; existing `test_vip_formula.py` + `test_plsda_importance.py` → 12 passed.
+- **Gotcha**: `ipls_selection` and `fipls_spa_selection` left single-Y-only (untouched) — not in the F5 must-list, not on the multi-Y dispatch path; keeps their byte-identity trivially and avoids scope creep.

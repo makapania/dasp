@@ -632,3 +632,236 @@ class TestVariableSelection:
             # Scores should be non-negative
             assert np.all(scores >= 0), \
                 f"{method_name}: scores should be non-negative"
+
+
+# ============================================================================
+# T-17: Multi-target (multi-Y) variable selection
+# ============================================================================
+import contextlib
+import io
+import os
+
+from spectral_predict.ga_pls import ga_pls_selection
+from spectral_predict.variable_selection import (
+    _prep_varsel_y,
+    _reject_multi_y,
+    cars_selection,
+    ipls_backward,
+    ipls_forward,
+    mc_sipls,
+    mwpls,
+    uve_cars_selection,
+    uve_cars_spa_selection,
+    uve_spa_selection,
+)
+
+GOLD_VARSEL = os.path.join(
+    os.path.dirname(__file__), "gold_standards", "varsel_single_y.npz"
+)
+
+
+def _gold_single_y_data():
+    """Reproduce the EXACT fixed synthetic 1-D case used to build the gold
+    fixture (tools/_gen_varsel_gold.py). Pinned RNG -> deterministic."""
+    seed, n, p = 20260701, 60, 100
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((n, p))
+    coef = np.zeros(p)
+    coef[10:18] = rng.standard_normal(8)
+    coef[55:60] = rng.standard_normal(5)
+    y = X @ coef + 0.1 * rng.standard_normal(n)
+    wavelengths = np.linspace(1000.0, 2500.0, p)
+    return X, y, wavelengths
+
+
+def _subset_arrays(subsets):
+    rmsecv = np.array([s["rmsecv"] for s in subsets], dtype=float)
+    r2 = np.array([s["r2"] for s in subsets], dtype=float)
+    if subsets:
+        best = min(subsets, key=lambda s: s["rmsecv"])
+        best_idx = np.asarray(best["indices"], dtype=int)
+    else:
+        best_idx = np.array([], dtype=int)
+    return rmsecv, r2, best_idx
+
+
+class TestSingleYByteIdentityGold:
+    """Guardrail: every T-17-modified performance-based varsel method stays
+    BYTE-IDENTICAL on the single-Y path, proven against a committed gold
+    fixture captured FROM the pre-refactor code with explicit RNG seeds.
+
+    Existing varsel tests are property/range-only, so a stray perturbation of
+    selected wavelengths or score vectors would slip through without this.
+    """
+
+    def test_gold_fixture_present(self):
+        assert os.path.exists(GOLD_VARSEL), (
+            "varsel_single_y.npz gold fixture missing; regenerate with "
+            "tools/_gen_varsel_gold.py"
+        )
+
+    def test_interval_methods_byte_identical(self):
+        X, y, wl = _gold_single_y_data()
+        gold = np.load(GOLD_VARSEL)
+        with contextlib.redirect_stdout(io.StringIO()):
+            fwd = ipls_forward(X, y, wl, n_intervals=10, max_combine=4,
+                               cv_folds=5, random_state=42)
+            bwd = ipls_backward(X, y, wl, n_intervals=10, cv_folds=5,
+                                random_state=42, min_intervals=1)
+            mc = mc_sipls(X, y, wl, n_intervals=10, n_combinations=120,
+                          max_combine=4, cv_folds=5, random_state=42)
+            mw = mwpls(X, y, wl, window_sizes=[10, 20, 40], step_size=None,
+                       cv_folds=5)
+        for name, subs in [("ipls_fwd", fwd), ("ipls_bwd", bwd),
+                           ("mc_sipls", mc), ("mwpls", mw)]:
+            rmsecv, r2, best_idx = _subset_arrays(subs)
+            np.testing.assert_array_equal(
+                best_idx, gold[f"{name}_best_indices"],
+                err_msg=f"{name}: selected indices drifted (single-Y not byte-identical)",
+            )
+            np.testing.assert_allclose(
+                rmsecv, gold[f"{name}_rmsecv"], atol=0, rtol=0,
+                err_msg=f"{name}: RMSECV vector drifted",
+            )
+            np.testing.assert_allclose(
+                r2, gold[f"{name}_r2"], atol=0, rtol=0,
+                err_msg=f"{name}: R2 vector drifted",
+            )
+
+    def test_spa_byte_identical(self):
+        X, y, _ = _gold_single_y_data()
+        gold = np.load(GOLD_VARSEL)
+        with contextlib.redirect_stdout(io.StringIO()):
+            spa = spa_selection(X, y, n_features=15, cv_folds=5)
+        np.testing.assert_array_equal(np.asarray(spa, dtype=float),
+                                      gold["spa_importances"])
+
+    def test_gapls_byte_identical(self):
+        X, y, _ = _gold_single_y_data()
+        gold = np.load(GOLD_VARSEL)
+        with contextlib.redirect_stdout(io.StringIO()):
+            ga = ga_pls_selection(
+                X, y, task_type="regression", population_size=20,
+                n_generations=8, n_runs=2, cv=5, random_state=42, n_jobs=1,
+                verbose=0, min_wavelengths=5, n_components=5,
+            )
+        np.testing.assert_array_equal(np.asarray(ga, dtype=float),
+                                      gold["gapls_frequency"])
+
+
+class TestMultiYVarsel:
+    """T-17 additive multi-Y branches: the performance-based methods evaluate a
+    JOINT PLS on a 2-D Y block via the multi_y foundation and still return the
+    same subset/importance shapes."""
+
+    @pytest.fixture
+    def multi_y_data(self):
+        rng = np.random.default_rng(7)
+        n, p = 50, 60
+        X = rng.standard_normal((n, p))
+        base = X[:, 10:14] @ rng.standard_normal((4, 1))
+        # divergent target scales -> exercises fold Y-scaling + raw-unit metrics
+        Y = np.hstack([
+            base + 0.05 * rng.standard_normal((n, 1)),
+            50.0 * base + 2.0 * rng.standard_normal((n, 1)),
+            0.1 * base + 0.01 * rng.standard_normal((n, 1)),
+        ])
+        wl = np.linspace(1000.0, 2000.0, p)
+        return X, Y, wl
+
+    def test_prep_varsel_y_shapes(self):
+        y1 = np.arange(10.0)
+        assert _prep_varsel_y(y1).shape == (10,)
+        assert _prep_varsel_y(y1.reshape(-1, 1)).shape == (10,)
+        Y = np.zeros((10, 3))
+        assert _prep_varsel_y(Y).shape == (10, 3)
+
+    def test_ipls_forward_multi_y(self, multi_y_data):
+        X, Y, wl = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            subs = ipls_forward(X, Y, wl, n_intervals=6, max_combine=3, cv_folds=5)
+        assert len(subs) > 0
+        best = max(s["r2"] for s in subs)  # r2 is joint Q2 in multi-Y
+        assert best > 0.5
+
+    def test_ipls_backward_multi_y(self, multi_y_data):
+        X, Y, wl = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            subs = ipls_backward(X, Y, wl, n_intervals=6, cv_folds=5)
+        assert len(subs) > 0
+
+    def test_mc_sipls_multi_y(self, multi_y_data):
+        X, Y, wl = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            subs = mc_sipls(X, Y, wl, n_intervals=6, n_combinations=40,
+                            max_combine=3, cv_folds=5)
+        assert len(subs) > 0
+        for s in subs:
+            assert np.isfinite(s["rmsecv"])
+
+    def test_mwpls_multi_y(self, multi_y_data):
+        X, Y, wl = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            subs = mwpls(X, Y, wl, window_sizes=[10, 20], cv_folds=5)
+        assert len(subs) > 0
+
+    def test_spa_multi_y(self, multi_y_data):
+        X, Y, _ = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = spa_selection(X, Y, n_features=10, cv_folds=5)
+        assert imp.shape == (X.shape[1],)
+        assert (imp > 0).sum() == 10
+
+    def test_ga_pls_multi_y(self, multi_y_data):
+        X, Y, _ = multi_y_data
+        with contextlib.redirect_stdout(io.StringIO()):
+            freq = ga_pls_selection(
+                X, Y, task_type="regression", population_size=16,
+                n_generations=5, n_runs=1, cv=5, random_state=0, n_jobs=1,
+                verbose=0, min_wavelengths=4, n_components=4,
+            )
+        assert freq.shape == (X.shape[1],)
+        assert freq.max() <= 1.0
+
+
+class TestMultiYRejectGuards:
+    """UVE/CARS and their hybrids are greyed out in multi-target v1; the
+    function-level guard must raise (never silently flatten 2-D Y)."""
+
+    @pytest.fixture
+    def XY(self):
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((40, 30))
+        Y = rng.standard_normal((40, 3))
+        return X, Y
+
+    def test_uve_rejects_multi_y(self, XY):
+        X, Y = XY
+        with pytest.raises(NotImplementedError):
+            uve_selection(X, Y)
+
+    def test_cars_rejects_multi_y(self, XY):
+        X, Y = XY
+        with pytest.raises(NotImplementedError):
+            cars_selection(X, Y)
+
+    def test_uve_spa_rejects_multi_y(self, XY):
+        X, Y = XY
+        with pytest.raises(NotImplementedError):
+            uve_spa_selection(X, Y, n_features=5)
+
+    def test_uve_cars_rejects_multi_y(self, XY):
+        X, Y = XY
+        with pytest.raises(NotImplementedError):
+            uve_cars_selection(X, Y)
+
+    def test_uve_cars_spa_rejects_multi_y(self, XY):
+        X, Y = XY
+        with pytest.raises(NotImplementedError):
+            uve_cars_spa_selection(X, Y)
+
+    def test_reject_helper_passes_single_y(self):
+        _reject_multi_y(np.arange(10.0), "X")
+        _reject_multi_y(np.zeros((10, 1)), "X")
+        with pytest.raises(NotImplementedError):
+            _reject_multi_y(np.zeros((10, 2)), "X")

@@ -298,3 +298,58 @@ def test_cap_components():
     assert cap_components(20, 100, requested=5) == 5
     assert cap_components(20, 100, requested=50) == 19  # clamped to cap
     assert cap_components(2, 100, requested=10) == 1  # floored at 1
+
+
+# --------------------------------------------------------------------------- #
+# compute_vip (T-17 canonical multi-Y fix; single-Y byte-identical)
+# --------------------------------------------------------------------------- #
+from spectral_predict.models import compute_vip
+
+
+def _manual_vip(pls, ssq_y):
+    W = np.asarray(pls.x_weights_)
+    T = np.asarray(pls.x_scores_)
+    ssy_comp = ssq_y * np.sum(T ** 2, axis=0)
+    ssy_total = float(np.sum(ssy_comp))
+    n_features = W.shape[0]
+    col_norm_sq = np.sum(W ** 2, axis=0)
+    col_norm_sq = np.where(col_norm_sq > 0.0, col_norm_sq, 1.0)
+    w_norm_sq = (W ** 2) / col_norm_sq
+    return np.sqrt(n_features * (w_norm_sq @ ssy_comp) / ssy_total)
+
+
+def test_compute_vip_multi_y_matches_canonical_formula(xy_multi):
+    """Multi-Y VIP: per-component Y-variance term sums squared y_loadings
+    across targets (Wold 2001 / Mehmood 2012 Eq. 1)."""
+    X, Y = xy_multi
+    pls = PLSRegression(n_components=4).fit(X, Y)
+    vip = compute_vip(pls, X, Y)
+    Q = np.asarray(pls.y_loadings_)
+    ssq_y = np.sum(Q ** 2, axis=0)  # sum across targets per component
+    np.testing.assert_allclose(vip, _manual_vip(pls, ssq_y))
+    # canonical VIP invariant: mean(VIP**2) == 1
+    assert np.mean(vip ** 2) == pytest.approx(1.0, abs=1e-9)
+    assert vip.shape == (X.shape[1],)
+
+
+def test_compute_vip_single_y_byte_identical(rng):
+    """Single-target VIP must keep the EXACT Q[0, :] result (byte-identical)."""
+    X = rng.standard_normal((45, 12))
+    y = X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(45)
+    pls = PLSRegression(n_components=3).fit(X, y)
+    vip = compute_vip(pls, X, y)
+    Q = np.asarray(pls.y_loadings_)
+    ssq_y = Q[0, :] ** 2  # exact legacy single-target term
+    manual = _manual_vip(pls, ssq_y)
+    np.testing.assert_array_equal(vip, manual)  # BYTE-identical, not just close
+
+
+def test_compute_vip_single_target_equals_1col_multi(rng):
+    """A single target fit as (n, 1) must give the exact same VIP as the
+    canonical multi-Y path collapses to for one target (Q.shape[0] == 1)."""
+    X = rng.standard_normal((45, 12))
+    y = X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(45)
+    pls1 = PLSRegression(n_components=3).fit(X, y)
+    pls2 = PLSRegression(n_components=3).fit(X, y.reshape(-1, 1))
+    np.testing.assert_array_equal(compute_vip(pls1, X, y),
+                                  compute_vip(pls2, X, y.reshape(-1, 1)))

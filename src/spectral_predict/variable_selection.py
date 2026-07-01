@@ -14,6 +14,68 @@ from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 
 
+def _prep_varsel_y(y):
+    """Shape-aware target prep for performance-based varsel (T-17).
+
+    Preserves the exact legacy behaviour for the single-target path: a 1-D
+    input, or a 2-D single-column ``(n, 1)`` input, is raveled to ``(n,)`` --
+    byte-identical to the pre-T-17 ``np.asarray(y).ravel()``. A genuine
+    multi-target block ``(n, n_targets>=2)`` is returned 2-D so the multi-Y
+    JOINT-PLS evaluator branch is taken.
+    """
+    arr = np.asarray(y)
+    if arr.ndim == 1:
+        return arr.ravel()
+    if arr.ndim == 2 and arr.shape[1] == 1:
+        return arr.ravel()
+    return arr
+
+
+def _reject_multi_y(y, method):
+    """Raise if ``y`` is a genuine multi-target block.
+
+    UVE/CARS and their hybrids are greyed out in the multi-target UI for v1
+    (PLS-mode L2 / CARS coefficient machinery is single-Y only; deferred to
+    v1.1 via ``multi_y.aggregate_importance``). This is the function-level
+    safety mirror of the GUI grey-out so 2-D Y can never be silently flattened.
+    """
+    arr = np.asarray(y)
+    if arr.ndim == 2 and arr.shape[1] > 1:
+        raise NotImplementedError(
+            f"{method} does not support multi-target (multi-Y) selection in v1; "
+            f"it is greyed out in the multi-target UI (deferred to v1.1 via "
+            f"multi_y.aggregate_importance)."
+        )
+
+
+def _evaluate_interval_pls_multi(X, Y, cv_folds, n_components):
+    """Multi-Y JOINT-PLS interval evaluator (T-17 foundation).
+
+    Fits a JOINT PLS on fold-scaled Y via :func:`multi_y.multi_y_cv_pool`,
+    scores per-target Q2 on RAW units via :func:`multi_y.multi_y_metrics`, and
+    reduces to the joint criterion (mean per-target Q2). The returned scalar
+    ``rmsecv`` is the pooled normalized RMSECV ``sqrt(mean_target(1 - Q2_s))``
+    -- scale-free (targets have divergent units) and monotone-decreasing in
+    joint Q2, so ranking by ``rmsecv`` matches ranking by the joint criterion.
+
+    Returns:
+        ``(rmsecv, joint_q2)`` -- mirrors the single-Y ``(rmsecv, r2)`` shape.
+    """
+    from .multi_y import multi_y_cv_pool, multi_y_metrics
+
+    try:
+        splitter = KFold(n_splits=cv_folds)
+        pls = PLSRegression(n_components=n_components, scale=False)
+        yt, yp = multi_y_cv_pool(pls, X, Y, splitter, scale_y=True)
+        m = multi_y_metrics(yt, yp)
+        joint_q2 = float(m["joint_q2"])
+        mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+        rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
+        return rmsecv, joint_q2
+    except Exception:
+        return np.inf, -1.0
+
+
 def _get_cv_n_jobs():
     """Get n_jobs for CV, respecting frozen app constraints."""
     from spectral_predict.search import _frozen_needs_threading_fallback
@@ -97,6 +159,7 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
     """
     # Convert inputs to numpy arrays and ensure proper shapes
     X = np.asarray(X)
+    _reject_multi_y(y, "UVE")
     y = np.asarray(y).ravel()
 
     n_samples, n_features = X.shape
@@ -237,6 +300,7 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     """
     # Convert inputs
     X = np.asarray(X)
+    _reject_multi_y(y, "UVE threshold")
     y = np.asarray(y).ravel()
 
     n_samples, n_features = X.shape
@@ -332,11 +396,23 @@ def _evaluate_spa_seed(first_var, X, X_norm, y, n_samples, n_vars, n_features, c
     try:
         n_components = min(n_features, n_samples - 1, 10)
         pls = PLSRegression(n_components=n_components, scale=False)
-        cv_scores = cross_val_score(
-            pls, X[:, selected], y,
-            cv=cv_folds, scoring="r2", n_jobs=1,
-        )
-        mean_score = float(np.mean(cv_scores))
+        y_arr = np.asarray(y)
+        if y_arr.ndim > 1 and y_arr.shape[1] > 1:
+            # Multi-target (T-17): score the chain by JOINT PLS mean per-target
+            # Q2 on RAW units via the multi_y foundation. The chain itself is
+            # y-independent, so only the seed-ranking criterion changes.
+            from .multi_y import multi_y_cv_pool, multi_y_metrics
+
+            splitter = KFold(n_splits=cv_folds)
+            yt, yp = multi_y_cv_pool(pls, X[:, selected], y_arr, splitter, scale_y=True)
+            mean_score = float(multi_y_metrics(yt, yp)["joint_q2"])
+        else:
+            # Single-target path -- byte-identical to pre-T-17.
+            cv_scores = cross_val_score(
+                pls, X[:, selected], y,
+                cv=cv_folds, scoring="r2", n_jobs=1,
+            )
+            mean_score = float(np.mean(cv_scores))
         if np.isfinite(mean_score):
             return selected, mean_score
     except Exception:
@@ -408,7 +484,7 @@ def spa_selection(X, y, n_features, cv_folds=5):
     """
     # Convert inputs to numpy arrays and ensure proper shapes
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_vars = X.shape
 
@@ -737,6 +813,7 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
     """
     # Convert inputs to numpy arrays
     X = np.asarray(X)
+    _reject_multi_y(y, "UVE-SPA")
     y = np.asarray(y).ravel()
 
     n_samples, n_vars = X.shape
@@ -851,6 +928,7 @@ def uve_cars_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_c
         Combined importance scores. Shape: (n_features,)
     """
     X = np.asarray(X)
+    _reject_multi_y(y, "UVE-CARS")
     y = np.asarray(y).ravel()
     n_samples, n_vars = X.shape
 
@@ -952,6 +1030,7 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
         Combined importance scores. Shape: (n_features,)
     """
     X = np.asarray(X)
+    _reject_multi_y(y, "UVE-CARS-SPA")
     y = np.asarray(y).ravel()
     n_samples, n_vars = X.shape
 
@@ -1164,6 +1243,7 @@ def fipls_cars_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
         Combined importance scores. Shape: (n_features,)
     """
     X = np.asarray(X)
+    _reject_multi_y(y, "fiPLS-CARS")
     y = np.asarray(y).ravel()
     n_samples, n_vars = X.shape
 
@@ -1314,6 +1394,7 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
 
     # Convert inputs to numpy arrays
     X = np.asarray(X)
+    _reject_multi_y(y, "CARS")
     y = np.asarray(y).ravel()
 
     n_samples, n_variables = X.shape
@@ -1646,6 +1727,12 @@ def _evaluate_interval_pls(X, y, cv_folds):
     n_components = min(10, n_features // 2, n_samples // 2)
     n_components = max(1, n_components)
 
+    y = np.asarray(y)
+    if y.ndim > 1 and y.shape[1] > 1:
+        # Multi-target (T-17): JOINT PLS evaluated on the multi_y foundation.
+        return _evaluate_interval_pls_multi(X, y, cv_folds, n_components)
+
+    # Single-target path -- byte-identical to pre-T-17.
     try:
         pls = PLSRegression(n_components=n_components, scale=False)
         y_pred = cross_val_predict(pls, X, y, cv=cv_folds)
@@ -1775,7 +1862,7 @@ def ipls_forward(X, y, wavelengths, n_intervals=20, max_combine=5, cv_folds=5, r
     Applied Spectroscopy 54(3): 413-419.
     """
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     wavelengths = np.asarray(wavelengths)
 
     n_samples, n_features = X.shape
@@ -1965,7 +2052,7 @@ def ipls_backward(X, y, wavelengths, n_intervals=20, cv_folds=5, random_state=42
     Journal of Chemometrics.
     """
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     wavelengths = np.asarray(wavelengths)
 
     n_samples, n_features = X.shape
@@ -2134,7 +2221,7 @@ def mc_sipls(X, y, wavelengths, n_intervals=20, n_combinations=500,
     from math import comb
 
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     wavelengths = np.asarray(wavelengths)
     n_features = X.shape[1]
 
@@ -2250,7 +2337,7 @@ def mwpls(X, y, wavelengths, window_sizes=None, step_size=None, cv_folds=5):
         Each dict has keys: indices, tag, rmsecv, r2, n_intervals, interval_ids, rank
     """
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     wavelengths = np.asarray(wavelengths)
     n_features = X.shape[1]
 

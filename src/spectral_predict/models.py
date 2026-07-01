@@ -1766,13 +1766,21 @@ def compute_vip(pls_model, X, y):
     Q = np.asarray(pls_model.y_loadings_)
 
     if Q.ndim == 1:
-        q = Q
+        # Single target passed as a 1-D loadings vector.
+        ssq_y = Q ** 2
+    elif Q.shape[0] == 1:
+        # Single target in sklearn's (n_targets, n_components) layout. Keep the
+        # EXACT Q[0, :] result so single-Y VIP stays byte-identical (T-17 guard).
+        ssq_y = Q[0, :] ** 2
     else:
-        q = Q[0, :]
+        # Canonical multi-Y VIP (Wold 2001 / Mehmood 2012 Eq. 1): the per-
+        # component Y-variance term sums the squared Y-loadings across targets,
+        # i.e. replace q_a**2 with sum_targets(y_loadings[:, a]**2).
+        ssq_y = np.sum(Q ** 2, axis=0)
 
     n_features = W.shape[0]
 
-    ssy_comp = (q ** 2) * np.sum(T ** 2, axis=0)
+    ssy_comp = ssq_y * np.sum(T ** 2, axis=0)
     ssy_total = float(np.sum(ssy_comp))
 
     if ssy_total <= 0.0:
