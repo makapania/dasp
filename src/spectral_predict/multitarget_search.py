@@ -38,6 +38,7 @@ from typing import Any, Optional, Sequence
 
 import numpy as np
 
+from .cv_utils import build_cv_splitter
 from .multi_y import (
     cap_components,
     inter_target_correlation,
@@ -225,7 +226,11 @@ def build_multitarget_estimator(
     Args:
         strategy: A resolved :class:`MultiTargetStrategy`.
         params: Hyperparameters for the config (e.g. ``{"n_components": 8}``).
-        n_samples: Training-set sample count (for component capping).
+        n_samples: Sample count used for component capping. Callers inside a CV
+            search MUST pass the **minimum fold training size**, not the full
+            sample count: the estimator is cloned inside each (smaller) train
+            fold, so a component count valid for the full N can exceed a fold's
+            upper bound and raise a sklearn ``ValueError`` inside CV.
         n_features: Feature count (for component capping).
 
     Returns:
@@ -263,6 +268,12 @@ class MultiTargetResult:
         precise_note: Empty for JOINT; the INDEPENDENT honest-labeling note.
         scale_y: Whether fold Y-scaling was used (JOINT only).
         mechanism: Human-readable coupling mechanism description.
+        y_true_pooled: Pooled RAW-unit truths ``(n_tested, n_targets)`` used for
+            scoring (feeds per-target plots/export). At ``n_targets == 1`` this
+            is byte-identical to the legacy raw-Y path.
+        y_pred_pooled: Pooled RAW-unit predictions ``(n_tested, n_targets)``,
+            aligned row-for-row with ``y_true_pooled``. At ``n_targets == 1``
+            this is ``np.array_equal`` to legacy ``cross_val_predict_pooled``.
     """
 
     model_name: str
@@ -273,6 +284,8 @@ class MultiTargetResult:
     precise_note: str
     scale_y: bool
     mechanism: str
+    y_true_pooled: Optional[np.ndarray] = None
+    y_pred_pooled: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -371,19 +384,33 @@ def run_multitarget_search(
 
     correlation = inter_target_correlation(Y_arr, weak_threshold=weak_corr_threshold)
 
+    # Build the CV splitter ONCE so component capping sees the real fold train
+    # sizes. Estimators (e.g. PLS n_components) must be capped against the
+    # SMALLEST fold training set, not the full sample count: the estimator is
+    # cloned inside every (smaller) train fold, and a component count valid for
+    # the full N can exceed a fold's upper bound and raise inside CV.
+    if isinstance(cv, str):
+        splitter = build_cv_splitter(
+            cv, n_folds, "regression", n_repeats=n_repeats,
+            random_state=random_state, y=None,
+        )
+    else:
+        splitter = cv
+    min_fold_train = min(len(train_idx) for train_idx, _ in splitter.split(X_arr, Y_arr))
+
     results: list[MultiTargetResult] = []
     for config in model_configs:
         model_name = config["model_name"]
         params = config.get("params", {})
         strategy = resolve_multitarget_strategy(model_name)
         estimator = build_multitarget_estimator(
-            strategy, params, n_samples, n_features
+            strategy, params, min_fold_train, n_features
         )
         y_true, y_pred = multi_y_cv_pool(
             estimator,
             X_arr,
             Y_arr,
-            cv,
+            splitter,
             scale_y=strategy.scale_y,
             n_folds=n_folds,
             n_repeats=n_repeats,
@@ -400,6 +427,8 @@ def run_multitarget_search(
                 precise_note=strategy.precise_note,
                 scale_y=strategy.scale_y,
                 mechanism=strategy.mechanism,
+                y_true_pooled=y_true,
+                y_pred_pooled=y_pred,
             )
         )
 

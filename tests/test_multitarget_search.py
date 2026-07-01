@@ -185,6 +185,40 @@ def test_consolidation_pin_single_target_q2_equals_legacy_r2(rng):
     assert best.joint_q2 == pytest.approx(legacy_r2, rel=1e-6, abs=1e-6)
 
 
+def test_single_target_byte_identity_pooled_preds_and_score(rng):
+    """Gold-fixture byte-identity pin (T-17 consolidation guardrail).
+
+    At n_targets==1 the orchestrator MUST route through the exact legacy raw-Y
+    pooler, so pooled predictions are ``np.array_equal`` (NOT merely approx) to
+    ``cross_val_predict_pooled`` and the per-target Q2 / joint Q2 EXACTLY equal
+    the legacy ``r2_score``. pytest.approx cannot catch a ~1e-15 regression from
+    the JOINT scale/inverse-transform round-trip; array_equal can.
+    """
+    n, p = 50, 15
+    X = rng.standard_normal((n, p))
+    y = X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(n)
+    cv = build_cv_splitter("kfold", 5, "regression", random_state=7)
+
+    out = run_multitarget_search(
+        X, y, [{"model_name": "PLS", "params": {"n_components": 3}}], cv=cv
+    )
+    best = out.best
+
+    legacy_pred = cross_val_predict_pooled(
+        PLSRegression(n_components=3, scale=False), X, y, cv
+    )
+    legacy_r2 = r2_score(y, np.ravel(legacy_pred))
+
+    # (1) pooled predictions are BYTE-IDENTICAL, not approx.
+    assert best.y_pred_pooled.shape == (n, 1)
+    assert np.array_equal(best.y_pred_pooled.ravel(), np.ravel(legacy_pred))
+    # pooled truths are the raw targets, byte-identical.
+    assert np.array_equal(best.y_true_pooled.ravel(), np.asarray(y, dtype=float))
+    # (2) score vectors byte-identical (exact ==, not approx).
+    assert best.metrics["q2"][0] == legacy_r2
+    assert best.joint_q2 == legacy_r2
+
+
 # --------------------------------------------------------------------------- #
 # Orchestrator: multi-target PLS smoke + ranking + guardrails
 # --------------------------------------------------------------------------- #
@@ -243,6 +277,35 @@ def test_run_rejects_empty_configs(xy_multi):
     X, Y = xy_multi
     with pytest.raises(ValueError):
         run_multitarget_search(X, Y, [])
+
+
+def test_run_high_components_capped_against_fold_size_kfold(rng):
+    """Regression pin (Blocker 3): PLS n_components must be capped against the
+    SMALLEST fold training set, not the full N. n=20, p=25, 5-fold: full-N cap
+    would give 19, but a fold trains on 16 samples (upper bound < 19) and PLS
+    raises ValueError inside CV. The orchestrator must not raise."""
+    X = rng.standard_normal((20, 25))
+    base = X[:, :2] @ rng.standard_normal((2, 1))
+    Y = np.hstack([base + 0.05 * rng.standard_normal((20, 1)),
+                   2.0 * base + 0.05 * rng.standard_normal((20, 1))])
+    out = run_multitarget_search(
+        X, Y, [{"model_name": "PLS", "params": {"n_components": 50}}],
+        cv="kfold", n_folds=5,
+    )
+    assert out.best is not None
+    assert out.best.metrics["q2"].shape == (2,)
+
+
+def test_run_high_components_capped_against_fold_size_loo(rng):
+    """LOO variant of the component-cap regression pin: LOO train folds are
+    n-1, so the cap is min(n-2, p); a huge requested count must still run."""
+    X = rng.standard_normal((15, 30))
+    y = X[:, :2] @ rng.standard_normal(2) + 0.1 * rng.standard_normal(15)
+    out = run_multitarget_search(
+        X, y, [{"model_name": "PLS", "params": {"n_components": 99}}],
+        cv="loo",
+    )
+    assert out.best is not None
 
 
 def test_run_target_names_length_mismatch(xy_multi):

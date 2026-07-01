@@ -163,6 +163,14 @@ def multi_y_cv_pool(
     CV); for non-repeated K-fold / LOO each sample is tested exactly once, so
     the pooled arrays are equivalent to legacy concatenation of fold outputs.
 
+    **Single-target byte-identity.** When ``Y`` resolves to one target column,
+    ``scale_y`` is ignored and predictions are produced by the exact legacy
+    :func:`cv_utils.cross_val_predict_pooled` on the RAW 1-D target. With one
+    target there is no coupling to preserve, and the JOINT scale/inverse-
+    transform round-trip would otherwise perturb pooled predictions at the
+    ~1e-15 level, breaking ``np.array_equal`` byte-identity with the legacy
+    single-Y path (the T-17 consolidation guardrail).
+
     Args:
         estimator: An unfitted sklearn-compatible estimator; cloned per fold.
         X: Feature matrix, shape ``(n_samples, n_features)``.
@@ -191,6 +199,21 @@ def multi_y_cv_pool(
         cv = build_cv_splitter(
             cv, n_folds, task_type, n_repeats=n_repeats, random_state=random_state, y=None
         )
+
+    # Single-target byte-identity branch (T-17 consolidation guardrail). With
+    # one target there is no coupling to preserve, so JOINT fold Y-scaling would
+    # only introduce a scale/inverse-transform round-trip that perturbs the
+    # pooled predictions at the ~1e-15 level (breaking byte-identity with the
+    # legacy raw-Y path). Route straight through the exact legacy pooler on the
+    # RAW 1-D target so single-Y predictions are np.array_equal to legacy.
+    if n_targets == 1:
+        from .cv_utils import cross_val_predict_pooled
+
+        pooled = cross_val_predict_pooled(
+            estimator, X_arr, Y_arr[:, 0], cv, fit_params=fit_params
+        )
+        Y_pred = np.asarray(pooled, dtype=float).reshape(-1, 1)
+        return Y_arr, Y_pred
 
     pred_sum = np.zeros((n_samples, n_targets), dtype=float)
     pred_count = np.zeros(n_samples, dtype=float)
