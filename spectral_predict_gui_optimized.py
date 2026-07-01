@@ -14727,8 +14727,21 @@ class SpectralPredictApp:
                     widget.configure(state=state)
                 except tk.TclError:
                     pass
-        if multi and self.optimization_method.get() in ('unified', 'nsga2'):
-            self.optimization_method.set('grid')
+        if multi:
+            # Save the user's single-Y engine choice ONCE, then force grid.
+            # optimization_method is shared with the single-Y search path, so
+            # it must be restored when multi-target is deselected — otherwise
+            # subsequent single-Y searches stay silently locked to grid.
+            if getattr(self, '_pre_multitarget_opt_method', None) is None:
+                self._pre_multitarget_opt_method = self.optimization_method.get()
+            if self.optimization_method.get() in ('unified', 'nsga2'):
+                self.optimization_method.set('grid')
+        else:
+            # Multi-target inactive: restore the saved single-Y engine choice.
+            saved = getattr(self, '_pre_multitarget_opt_method', None)
+            if saved is not None:
+                self.optimization_method.set(saved)
+                self._pre_multitarget_opt_method = None
 
     def _run_multitarget_search(self):
         """Dispatch a Grid-engine multi-target search over the selected targets."""
@@ -14768,7 +14781,19 @@ class SpectralPredictApp:
 
             X_df = self.X
             Ydf = source[targets].reindex(X_df.index)
-            mask = Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
+            # Apply the SAME sample filters the normal training path uses
+            # (see ~line 27835): active-group subset, user-excluded spectra,
+            # and held-out validation samples. Without this, excluded and
+            # validation spectra leak back into calibration/CV and corrupt
+            # the multi-target results.
+            keep = pd.Series(True, index=X_df.index)
+            if self.active_indices is not None:
+                keep &= X_df.index.isin(self.active_indices)
+            if self.excluded_spectra:
+                keep &= ~X_df.index.isin(self.excluded_spectra)
+            if self.validation_enabled.get() and self.validation_indices:
+                keep &= ~X_df.index.isin(self.validation_indices)
+            mask = keep & Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
             n_valid = int(mask.sum())
             if n_valid < 3:
                 messagebox.showerror(
@@ -14781,6 +14806,7 @@ class SpectralPredictApp:
 
             configs = [{"model_name": name, "params": {}} for name in model_names]
             n_folds = int(self.folds.get()) if self.folds.get() else 5
+            n_repeats = int(self.cv_n_repeats.get()) if self.cv_n_repeats.get() else 5
 
             self.multitarget_status_label.config(text="Running…")
             self.root.update_idletasks()
@@ -14789,6 +14815,7 @@ class SpectralPredictApp:
                 X_mat, Y_mat, configs,
                 cv=self.cv_strategy.get() or "kfold",
                 n_folds=n_folds,
+                n_repeats=n_repeats,  # honor the user's repeated-K-fold repeat count
                 target_names=targets,
                 optimization_method="grid",  # hard-forced; 2-D Y never hits a 1-D engine
             )
