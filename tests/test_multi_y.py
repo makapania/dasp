@@ -153,6 +153,21 @@ def test_metrics_per_target_q2_equals_legacy_r2_at_single_target(rng):
     assert m["joint_q2"] == pytest.approx(r2_score(yt.ravel(), yp.ravel()))
 
 
+def test_metrics_constant_target_q2_matches_sklearn():
+    """Constant-target edge: per-target Q2 must match sklearn
+    r2_score(force_finite=True) -- 1.0 for a perfect constant prediction,
+    0.0 otherwise -- preserving the n_targets==1 legacy-parity contract."""
+    yt = np.full((6, 1), 5.0)
+    yp_perfect = np.full((6, 1), 5.0)
+    m = multi_y_metrics(yt, yp_perfect)
+    assert m["q2"][0] == pytest.approx(r2_score(yt.ravel(), yp_perfect.ravel()))
+    assert m["q2"][0] == 1.0
+    yp_off = np.array([5.0, 5.1, 4.9, 5.0, 5.0, 5.0]).reshape(-1, 1)
+    m_off = multi_y_metrics(yt, yp_off)
+    assert m_off["q2"][0] == pytest.approx(r2_score(yt.ravel(), yp_off.ravel()))
+    assert m_off["q2"][0] == 0.0
+
+
 def test_metrics_rmse_is_raw_not_scaled(xy_multi):
     """RMSE must be raw-unit (scale-sensitive): the huge target has a much
     larger RMSE than the tiny target."""

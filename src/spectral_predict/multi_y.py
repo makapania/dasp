@@ -281,7 +281,13 @@ def multi_y_metrics(
         residual = ps - ts
         press = float(np.sum(residual**2))
         ssy = float(np.sum((ts - ts.mean()) ** 2))
-        q2_s = 1.0 - press / ssy if ssy > 0 else 0.0
+        if ssy > 0:
+            q2_s = 1.0 - press / ssy
+        else:
+            # Constant target (SSY == 0): match sklearn r2_score(force_finite=True)
+            # exactly -- perfect prediction (PRESS == 0) scores 1.0, otherwise 0.0.
+            # Preserves the "per-target Q2 == legacy r2_score at n_targets==1" contract.
+            q2_s = 1.0 if press == 0.0 else 0.0
         q2[s] = q2_s
         r2[s] = q2_s  # raw-unit R2 == Q2 (pooled-mean reference)
         rmse_s = float(np.sqrt(press / len(ts)))
