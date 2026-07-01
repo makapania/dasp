@@ -353,3 +353,80 @@ def test_compute_vip_single_target_equals_1col_multi(rng):
     pls2 = PLSRegression(n_components=3).fit(X, y.reshape(-1, 1))
     np.testing.assert_array_equal(compute_vip(pls1, X, y),
                                   compute_vip(pls2, X, y.reshape(-1, 1)))
+
+
+# --------------------------------------------------------------------------- #
+# get_feature_importances -- multi-target paths (T-17 review, blockers 1 & 2)
+# --------------------------------------------------------------------------- #
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.svm import SVR
+from lightgbm import LGBMRegressor
+
+from spectral_predict.models import get_feature_importances
+
+
+@pytest.mark.parametrize(
+    "model_name, ctor",
+    [
+        ("Ridge", lambda: Ridge(alpha=1.0)),
+        ("Lasso", lambda: Lasso(alpha=0.01)),
+        ("ElasticNet", lambda: ElasticNet(alpha=0.01)),
+    ],
+)
+def test_get_feature_importances_linear_multi_y_aggregates(xy_multi, model_name, ctor):
+    """Blocker 1: multi-output linear coef_ (n_targets, n_features) must be
+    aggregated across targets (mean |coef|), NOT collapsed to target 0."""
+    X, Y = xy_multi
+    model = ctor().fit(X, Y)
+    imp = get_feature_importances(model, model_name, X, Y)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))
+    # Must equal the mean of per-target |coef| -- and NOT target 0 alone.
+    coefs = np.abs(model.coef_)  # (n_targets, n_features)
+    np.testing.assert_allclose(imp, coefs.mean(axis=0))
+    if coefs.shape[0] > 1 and not np.allclose(coefs[0], coefs.mean(axis=0)):
+        assert not np.allclose(imp, coefs[0])  # collapse-to-target-0 is fixed
+
+
+def test_get_feature_importances_linear_single_y_byte_identical(rng):
+    """Guardrail 1: single-Y linear importance must stay byte-identical
+    (coef_ is 1-D, aggregation branch skipped)."""
+    X = rng.standard_normal((40, 10))
+    y = X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(40)
+    model = Ridge(alpha=1.0).fit(X, y)
+    imp = get_feature_importances(model, "Ridge", X, y)
+    np.testing.assert_array_equal(imp, np.abs(model.coef_))
+
+
+@pytest.mark.parametrize(
+    "model_name, base_ctor",
+    [
+        ("LightGBM", lambda: LGBMRegressor(n_estimators=20, verbose=-1)),
+        ("SVR", lambda: SVR(kernel="linear")),
+    ],
+)
+def test_get_feature_importances_mor_wrapped_multi_y(xy_multi, model_name, base_ctor):
+    """Blocker 2: a MultiOutputRegressor-wrapped INDEPENDENT model has no
+    feature_importances_/coef_ on the wrapper -- must aggregate per-target
+    across .estimators_ instead of raising AttributeError."""
+    X, Y = xy_multi
+    model = MultiOutputRegressor(base_ctor()).fit(X, Y)
+    imp = get_feature_importances(model, model_name, X, Y)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))
+    # Equals the mean of each target-estimator's own importance vector.
+    per_target = np.column_stack(
+        [get_feature_importances(est, model_name, X, Y) for est in model.estimators_]
+    )
+    np.testing.assert_allclose(imp, per_target.mean(axis=1))
+
+
+def test_get_feature_importances_lightgbm_single_y_unwrapped(rng):
+    """Guardrail 1: single-Y LightGBM is NOT MOR-wrapped -> uses native
+    feature_importances_ (byte-identical to legacy)."""
+    X = rng.standard_normal((40, 10))
+    y = X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(40)
+    model = LGBMRegressor(n_estimators=20, verbose=-1).fit(X, y)
+    imp = get_feature_importances(model, "LightGBM", X, y)
+    np.testing.assert_array_equal(imp, model.feature_importances_)

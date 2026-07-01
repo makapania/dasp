@@ -1825,6 +1825,22 @@ def get_feature_importances(model, model_name, X, y):
         else:
             model = model.steps[-1][1]
 
+    # Multi-target INDEPENDENT models (T-17) are wrapped in MultiOutputRegressor
+    # (LightGBM/SVR/plain Lasso/EN/NeuralBoosted). The wrapper has no
+    # feature_importances_/coef_ of its own -- only per-target .estimators_ --
+    # so extract each target's importance and aggregate (mean) via the shared
+    # multi_y foundation. Single-Y models are never MOR-wrapped, so this branch
+    # is skipped on the legacy path (byte-identical).
+    from sklearn.multioutput import MultiOutputRegressor
+
+    if isinstance(model, MultiOutputRegressor):
+        from .multi_y import aggregate_importance
+
+        per_target = np.column_stack(
+            [get_feature_importances(est, model_name, X, y) for est in model.estimators_]
+        )
+        return aggregate_importance(per_target, rule="mean")
+
     if model_name in ["PLS", "PLS-DA"]:
         # Use VIP scores
         return compute_vip(model, X, y)
@@ -1832,8 +1848,15 @@ def get_feature_importances(model, model_name, X, y):
     elif model_name in ["Ridge", "Lasso", "ElasticNet"]:
         # Get coefficients (linear models)
         coefs = np.abs(model.coef_)
-        if len(coefs.shape) > 1:
-            coefs = coefs[0]  # Handle multi-output case
+        if coefs.ndim > 1:
+            # Multi-target (T-17): native 2-D solve (Ridge) or joint MultiTask
+            # Lasso/ElasticNet expose coef_ as (n_targets, n_features). Aggregate
+            # |coef| across targets (mean) via the shared multi_y foundation
+            # instead of silently using only target 0. Single-Y coef_ is 1-D, so
+            # this branch is skipped on the legacy path (byte-identical).
+            from .multi_y import aggregate_importance
+
+            return aggregate_importance(coefs.T, rule="mean")
 
         # Return absolute coefficient values as importance
         return coefs

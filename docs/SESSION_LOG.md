@@ -4,6 +4,33 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-01 — T-17 F5-varsel-vip review fold-in: `get_feature_importances` multi-output hardening
+
+**Context.** Cross-family review of F5 (multi-Y varsel + VIP) flagged two real correctness gaps in
+`models.get_feature_importances` plus several false-positives / verify-only items.
+
+**Blocker 1 (fixed).** Ridge/Lasso/ElasticNet branch did `coefs = coefs[0]` on a 2-D `coef_`
+(`(n_targets, n_features)`), silently scoring only target 0. Fixed with an additive `coefs.ndim > 1`
+branch that aggregates `mean(|coef|)` across targets via `multi_y.aggregate_importance(coefs.T)`.
+Single-Y `coef_` is 1-D so the branch is skipped — byte-identical.
+
+**Blocker 2 (fixed).** A `MultiOutputRegressor`-wrapped INDEPENDENT model (LightGBM/SVR/plain
+Lasso-EN/NeuralBoosted) has no `feature_importances_`/`coef_` on the wrapper — only `.estimators_` —
+so the boosting branch raised `AttributeError`. Fixed with a generic `isinstance(model,
+MultiOutputRegressor)` guard right after Pipeline-unwrap that recurses per target-estimator and
+aggregates via `aggregate_importance(rule="mean")`. Single-Y models are never MOR-wrapped → skipped.
+JOINT XGBoost(multi_output_tree)/CatBoost(MultiRMSE) already return an aggregated `(n_features,)`
+vector, so their branch is untouched.
+
+**Dismissed / verify-only.** (5) DeepSeek's "negative mean_nmse → rmsecv=0.0" is impossible:
+`mean_nmse = mean(1 - Q2)` and `Q2 <= 1` always, so it's `>= 0`; the `0.0` fallback only fires on a
+perfect fit. (6) `multi_y_cv_pool` is only ever handed KFold **splitter objects** (GA `_fitness_function`
+gets its splitter from `run_ga_pls`, not an int) — no int-cv path exists. (4) GUI Bayesian/NSGA-II
+grey-out is a later GUI feature — the multi-target GUI isn't wired yet (`grep` finds zero
+`selected_targets`/`multitarget_search` refs in the GUI); F5's protection is the function-level
+`_reject_multi_y` guard, confirmed present. Pinned tests added for Ridge/Lasso/EN/SVR/LightGBM
+multi-target paths + single-Y byte-identity in `tests/test_multi_y.py`.
+
 ## 2026-07-01 — Legacy `.sco` review fold-in: broad-except swallowed corruption guards; GUI detection globs drift; centralized ASD extensions
 
 **Context.** High-effort code review of the `feat/legacy-asd-sco-import` branch (the native legacy
