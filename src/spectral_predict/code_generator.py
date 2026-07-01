@@ -911,10 +911,18 @@ def _decode_embedded_data(encoded_str):
     def _render_multitarget_header(self) -> str:
         """Header for the multi-target script (mode-labeled, minimal imports)."""
         from . import __version__ as _dasp_version
+        from .multitarget_search import INDEPENDENT_PRECISE_NOTE
 
+        if self.multitarget_mode == 'JOINT':
+            mode_caveat = 'genuine coupling'
+        else:
+            # Honest-labeling guardrail (plan §Honest-labeling): INDEPENDENT rows
+            # must carry the exact precise note so batched breadth is never
+            # mistaken for coupling. Pinned verbatim by test_multitarget_export.
+            mode_caveat = INDEPENDENT_PRECISE_NOTE
         model_details = (
             f"MultiTarget Mode: {self.multitarget_mode}  "
-            f"({'genuine coupling' if self.multitarget_mode == 'JOINT' else 'separate per-target estimators under one shared config'})\n"
+            f"({mode_caveat})\n"
             f"Targets ({len(self.target_names)}): {', '.join(map(str, self.target_names))}\n"
             f"Parameters: {self._format_model_details()}"
         )
@@ -1119,6 +1127,17 @@ def _decode_embedded_data(encoded_str):
             p.setdefault('n_jobs', -1)
             p.setdefault('verbosity', -1)
             return 'from lightgbm import LGBMRegressor', f'LGBMRegressor(**{p!r})'
+        if name == 'NeuralBoosted':
+            # Mirrors multitarget_search._build_independent_base: NeuralBoosted is
+            # a 1-D-only dasp estimator wrapped per target in MultiOutputRegressor.
+            # It is a package-internal class, so the exported script imports it
+            # from spectral_predict (requires the package installed to run).
+            p.setdefault('random_state', 42)
+            p.setdefault('verbose', 0)
+            return (
+                'from spectral_predict.neural_boosted import NeuralBoostedRegressor',
+                f'NeuralBoostedRegressor(**{p!r})',
+            )
         return '', None
 
     def _render_multitarget_prediction_template(self) -> str:

@@ -350,16 +350,19 @@ def save_model(
         # Stored as raw mean/std arrays (npz) rather than a pickled object so the
         # inverse-transform stats survive with full float precision and without a
         # class-import dependency at load time. Single-target and INDEPENDENT
-        # multi-target models pass y_scaler=None, so this block is skipped and the
-        # archive is byte-for-byte the legacy layout.
+        # multi-target models pass y_scaler=None, so this block is skipped and
+        # BOTH the archive file list AND metadata.json stay byte-for-byte the
+        # legacy pre-T17 layout: we deliberately do NOT write a has_y_scaler key
+        # when no scaler is persisted. load_model gates on the y_scaler.npz FILE
+        # (not this metadata key), so the key's absence is fully backward- and
+        # forward-compatible; adding has_y_scaler=False here would silently drift
+        # every legacy single-Y metadata.json (guardrail: single-Y byte-identity).
         y_scaler_path = tmppath / 'y_scaler.npz'
         if y_scaler is not None:
             y_mean = np.asarray(getattr(y_scaler, 'mean_'), dtype=float)
             y_std = np.asarray(getattr(y_scaler, 'std_'), dtype=float)
             np.savez(y_scaler_path, mean=y_mean, std=y_std)
             metadata_complete['has_y_scaler'] = True
-        else:
-            metadata_complete['has_y_scaler'] = False
 
         # Save bias correction if provided
         bias_correction_path = tmppath / 'bias_correction.json'

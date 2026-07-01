@@ -183,7 +183,8 @@ class TestMultiTargetSaveLoadRoundtrip:
         )
         loaded = load_model(filepath)
         assert loaded["y_scaler"] is None
-        assert loaded["metadata"]["has_y_scaler"] is False
+        # No scaler persisted -> no has_y_scaler key (metadata byte-identity).
+        assert "has_y_scaler" not in loaded["metadata"]
         raw_pred = predict_with_model(loaded, X, validate_wavelengths=False)
         np.testing.assert_array_equal(raw_pred, model.predict(X))
 
@@ -208,10 +209,99 @@ class TestSingleYByteIdentityGuardrail:
         save_model(model=model, preprocessor=None, metadata=metadata, filepath=filepath)
         loaded = load_model(filepath)
         assert loaded["y_scaler"] is None
-        assert loaded["metadata"]["has_y_scaler"] is False
+        # Legacy single-Y metadata.json must NOT gain a has_y_scaler key.
+        assert "has_y_scaler" not in loaded["metadata"]
 
         pred = predict_with_model(loaded, X, validate_wavelengths=False)
         np.testing.assert_array_equal(pred, model.predict(X))
+
+
+class TestSingleYMetadataGoldSnapshot:
+    """Committed gold snapshot of the single-Y metadata.json top-level key set.
+
+    Locks the legacy pre-T17 metadata layout so no future multi-target change can
+    silently add a key (e.g. has_y_scaler) to single-Y saves. If a new optional
+    feature legitimately adds an always-present key, this frozen set must be
+    updated deliberately in the same commit — that is the whole point of the pin.
+    """
+
+    # Frozen key set for a minimal single-Y regression save (no preprocessor,
+    # label encoder, cv data, applicability domain, bias correction, or Y-scaler).
+    LEGACY_SINGLE_Y_KEYS = frozenset({
+        # Caller-supplied
+        "model_name", "task_type", "preprocessing", "wavelengths",
+        "n_vars", "n_samples", "performance",
+        # Added by save_model
+        "created", "dasp_version", "model_class",
+        "has_label_encoder", "has_cv_data",
+        "has_applicability_domain", "has_bias_correction",
+    })
+
+    def test_single_y_metadata_key_set_is_byte_identical_to_legacy(self, tmp_path):
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(30, 12))
+        y = 2.0 * X[:, 0] + rng.normal(scale=0.1, size=30)
+        model = PLSRegression(n_components=2)
+        model.fit(X, y)
+
+        metadata = {
+            "model_name": "PLS", "task_type": "regression", "preprocessing": "raw",
+            "wavelengths": [float(i) for i in range(12)], "n_vars": 12,
+            "n_samples": 30, "performance": {"R2": 0.9},
+        }
+        filepath = tmp_path / "single_y_gold.dasp"
+        save_model(model=model, preprocessor=None, metadata=metadata, filepath=filepath)
+        loaded = load_model(filepath)
+
+        got = set(loaded["metadata"].keys())
+        assert got == set(self.LEGACY_SINGLE_Y_KEYS), (
+            "single-Y metadata.json key set drifted from the committed legacy "
+            f"snapshot. Added: {sorted(got - self.LEGACY_SINGLE_Y_KEYS)}; "
+            f"missing: {sorted(self.LEGACY_SINGLE_Y_KEYS - got)}"
+        )
+        assert "has_y_scaler" not in got
+
+
+class TestPreF7BackwardCompatLoad:
+    """A pre-F7 .dasp (no has_y_scaler key, no y_scaler.npz) still loads and
+    predicts. Proves the F7 loader is backward-compatible with legacy artifacts."""
+
+    def test_legacy_artifact_without_y_scaler_loads_and_predicts(self, tmp_path):
+        import json
+        import zipfile
+
+        import joblib
+
+        rng = np.random.default_rng(5)
+        X = rng.normal(size=(25, 10))
+        y = 1.5 * X[:, 1] + rng.normal(scale=0.1, size=25)
+        model = PLSRegression(n_components=2)
+        model.fit(X, y)
+        expected = model.predict(X)
+
+        # Hand-build a pre-F7 archive: metadata.json deliberately OMITS
+        # has_y_scaler, and there is NO y_scaler.npz member.
+        legacy_metadata = {
+            "model_name": "PLS", "task_type": "regression", "preprocessing": "raw",
+            "wavelengths": [float(i) for i in range(10)], "n_vars": 10,
+            "n_samples": 25, "performance": {"R2": 0.9},
+            "dasp_version": "0.4.0", "model_class": "PLSRegression",
+            "created": "2026-01-01T00:00:00",
+            "has_label_encoder": False, "has_cv_data": False,
+            "has_applicability_domain": False, "has_bias_correction": False,
+        }
+        model_path = tmp_path / "model.pkl"
+        joblib.dump(model, model_path, compress=3)
+        filepath = tmp_path / "legacy.dasp"
+        with zipfile.ZipFile(filepath, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("metadata.json", json.dumps(legacy_metadata, indent=2))
+            zf.write(model_path, "model.pkl")
+
+        loaded = load_model(filepath)
+        assert loaded["y_scaler"] is None
+        assert "has_y_scaler" not in loaded["metadata"]
+        pred = predict_with_model(loaded, X, validate_wavelengths=False)
+        np.testing.assert_array_equal(pred, expected)
 
 
 if __name__ == "__main__":

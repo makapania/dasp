@@ -59,8 +59,10 @@ DATA_LOADING_MULTITARGET_TEMPLATE = '''
 # This model predicts {n_targets} correlated targets jointly.
 # Coupling mode: {multitarget_mode}
 #   JOINT       = targets share model structure (genuine coupling).
-#   INDEPENDENT = separate per-target estimators under one shared configuration
-#                 (no correlation benefit; batched breadth, not coupling).
+#   INDEPENDENT = separate per-target estimators under one shared searched
+#                 configuration — not a coupled model, no correlation benefit;
+#                 for exact equivalence to N independent searches, run separate
+#                 single-target searches.
 
 data = pd.read_csv("{data_path}")  # <-- Replace with your data file path
 

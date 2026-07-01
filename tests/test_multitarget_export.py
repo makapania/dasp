@@ -19,7 +19,10 @@ import numpy as np
 import pytest
 
 from spectral_predict.code_generator import CodeGenerator, ExportOptions
-from spectral_predict.multitarget_search import run_multitarget_search
+from spectral_predict.multitarget_search import (
+    INDEPENDENT_PRECISE_NOTE,
+    run_multitarget_search,
+)
 
 
 def _correlated_multi_y(seed: int = 0, n_samples: int = 40, n_features: int = 15):
@@ -184,6 +187,51 @@ def test_single_target_config_does_not_activate_multitarget():
     assert "cross_val_predict" in script
     assert "MultiTarget Mode" not in script
     assert "Y_pred_cv" not in script
+
+
+def _generate_multitarget_script(model_name, params, target_names, n_features=15):
+    """Generate a multi-target script WITHOUT embedding/exec (fast, generation
+    only) — used to pin header text and to confirm a builder exists."""
+    config = {
+        "model_name": model_name,
+        "preprocessing": "raw",
+        "task_type": "regression",
+        "params": params,
+        "cv_folds": 5,
+        "target_names": target_names,
+        "wavelengths": list(range(n_features)),
+    }
+    gen = CodeGenerator(config, ExportOptions(include_data=False))
+    assert gen.is_multitarget
+    return gen.generate_script()
+
+
+def test_independent_header_carries_exact_precise_note():
+    """Honest-labeling guardrail: an INDEPENDENT export header must contain the
+    exact INDEPENDENT_PRECISE_NOTE verbatim (pins the string against drift),
+    while a JOINT header must NOT (it is genuine coupling)."""
+    indep_script = _generate_multitarget_script("Ridge", {"alpha": 1.0}, ["A", "B"])
+    joint_script = _generate_multitarget_script("PLS", {"n_components": 3}, ["A", "B"])
+
+    assert INDEPENDENT_PRECISE_NOTE in indep_script, (
+        "INDEPENDENT export header must carry the exact precise note verbatim"
+    )
+    assert "MultiTarget Mode: INDEPENDENT" in indep_script
+    assert INDEPENDENT_PRECISE_NOTE not in joint_script
+    assert "MultiTarget Mode: JOINT" in joint_script
+
+
+def test_neuralboosted_multitarget_export_has_builder():
+    """NeuralBoosted is a runtime-supported INDEPENDENT multi-target model
+    (multitarget_search._build_independent_base), so its export must NOT raise
+    NotImplementedError; the script wraps NeuralBoostedRegressor in a
+    MultiOutputRegressor."""
+    script = _generate_multitarget_script("NeuralBoosted", {}, ["A", "B"])
+    assert "MultiOutputRegressor" in script
+    assert "NeuralBoostedRegressor" in script
+    assert "from spectral_predict.neural_boosted import NeuralBoostedRegressor" in script
+    # INDEPENDENT model -> honest note present.
+    assert INDEPENDENT_PRECISE_NOTE in script
 
 
 if __name__ == "__main__":
