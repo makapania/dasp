@@ -90,6 +90,16 @@ def read_legacy_asd(asd_file) -> pd.Series | None:
         )
 
     values = np.frombuffer(raw, dtype="<f4", count=channels, offset=_HEADER_BYTES)
+
+    # A spectrum with no finite value is a dead/corrupt payload (the same all-NaN
+    # symptom SpecDAL produces on these files). Raise so the caller skips + reports
+    # it rather than letting an all-NaN row silently enter the data matrix. Partial
+    # NaNs are tolerated (real spectra can have isolated bad channels).
+    if not np.any(np.isfinite(values)):
+        raise ValueError(
+            f"{asd_file.name}: decoded spectrum is entirely non-finite (corrupt payload)"
+        )
+
     wavelengths = ch1 + step * np.arange(channels, dtype="float64")
 
     series = pd.Series(np.asarray(values, dtype="float64"), index=np.round(wavelengths, 2))

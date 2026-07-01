@@ -456,8 +456,9 @@ def _normalize_filename_for_matching(filename):
     # Convert to string in case it's not
     filename = str(filename)
 
-    # Remove common extensions
-    for ext in [".asd", ".sig", ".csv", ".txt", ".spc"]:
+    # Remove common extensions (ASD family derived from ASD_EXTENSIONS so it can't
+    # drift when a new ASD extension like .sco is added).
+    for ext in [*ASD_EXTENSIONS, ".csv", ".txt", ".spc"]:
         if filename.lower().endswith(ext):
             filename = filename[: -len(ext)]
             break
@@ -728,6 +729,13 @@ def read_asd_dir(asd_dir, reader_mode="auto"):
                     spectrum = _handle_binary_asd(asd_file, reader_mode)
             if spectrum is not None:
                 spectra[stem] = spectrum
+            else:
+                # A None return (SpecDAL failed/unavailable, or a binary layout this
+                # reader can't decode) means the file couldn't be read. Report it as a
+                # skip rather than silently dropping it from the folder.
+                msg = f"{asd_file.name}: could not be decoded (unsupported or unreadable binary ASD)"
+                skipped.append(msg)
+                print(f"Warning: skipping {msg}")
         except Exception as e:
             # Corrupt/unreadable file (e.g. read_legacy_asd's ValueError on a
             # truncated .sco, or a modern binary with no SpecDAL). Skip it and keep

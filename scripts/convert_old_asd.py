@@ -56,7 +56,7 @@ def convert(input_dir: Path, output_csv: Path, variant: str) -> pd.DataFrame:
         try:
             series = read_legacy_asd(path)
         except ValueError as exc:  # corrupt/truncated legacy file
-            skipped.append(f"{path.name}: {exc}")
+            skipped.append(str(exc) if path.name in str(exc) else f"{path.name}: {exc}")
             continue
         if series is None:  # not the legacy float32 layout
             skipped.append(f"{path.name}: not a legacy float32 ASD file")
@@ -71,7 +71,10 @@ def convert(input_dir: Path, output_csv: Path, variant: str) -> pd.DataFrame:
         spectra[sample_id] = series
 
     if not spectra:
-        raise SystemExit("No spectra could be decoded.")
+        reasons = "\n".join(f"  - {line}" for line in skipped[:10])
+        extra = f"\n... and {len(skipped) - 10} more" if len(skipped) > 10 else ""
+        detail = f"\nReasons:\n{reasons}{extra}" if skipped else ""
+        raise SystemExit(f"No spectra could be decoded.{detail}")
 
     df = pd.DataFrame(spectra).T
     df = df[sorted(df.columns)]

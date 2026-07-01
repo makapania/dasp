@@ -145,8 +145,8 @@ def test_read_asd_dir_all_corrupt_raises_with_reason(tmp_path):
         read_asd_dir(tmp_path)
 
 
-def test_nan_payload_does_not_crash(tmp_path):
-    """A corrupt float32 payload (NaN/inf) decodes without raising."""
+def test_partial_nan_payload_still_decodes(tmp_path):
+    """A payload with a few NaN/inf channels still decodes (real spectra can have isolated bad channels)."""
     vals = np.linspace(0.1, 0.5, 100)
     vals[0] = np.nan
     vals[1] = np.inf
@@ -156,3 +156,29 @@ def test_nan_payload_does_not_crash(tmp_path):
     s = read_legacy_asd(p)
     assert len(s) == 100
     assert np.isnan(s.iloc[0])
+
+
+def test_all_nan_payload_rejected(tmp_path):
+    """An entirely non-finite payload is a corrupt/dead spectrum -> ValueError, not an all-NaN row."""
+    vals = np.full(100, np.nan)
+    p = tmp_path / "dead.sco"
+    p.write_bytes(_make_legacy_asd(vals))
+
+    with pytest.raises(ValueError, match="non-finite"):
+        read_legacy_asd(p)
+
+
+def test_read_asd_dir_skips_all_nan_spectrum(tmp_path, capsys):
+    """An all-NaN .sco is skipped and reported by read_asd_dir; good files still load."""
+    from spectral_predict.io import read_asd_dir
+
+    for i in range(2):
+        (tmp_path / f"good{i}.sco").write_bytes(_make_legacy_asd(np.linspace(0.13, 0.68, 2151)))
+    (tmp_path / "dead.sco").write_bytes(_make_legacy_asd(np.full(2151, np.nan)))
+
+    df, _ = read_asd_dir(tmp_path)
+
+    assert df.shape[0] == 2
+    assert set(df.index) == {"good0", "good1"}
+    out = capsys.readouterr().out
+    assert "dead.sco" in out and "Skipped 1" in out
