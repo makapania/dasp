@@ -78,15 +78,18 @@ def test_implausible_channel_count_raises(tmp_path):
         read_legacy_asd(p)
 
 
-def test_non_reflectance_data_type_still_decodes(tmp_path, capsys):
+def test_non_reflectance_data_type_still_decodes(tmp_path, caplog):
+    import logging
+
     vals = np.linspace(0.1, 0.5, 100)
     p = tmp_path / "raw.sco"
     p.write_bytes(_make_legacy_asd(vals, data_type=0))  # 0 = RAW
 
-    s = read_legacy_asd(p)
+    with caplog.at_level(logging.WARNING):
+        s = read_legacy_asd(p)
 
     assert s is not None and len(s) == 100
-    assert "dataType=0" in capsys.readouterr().out
+    assert "dataType=0" in caplog.text
 
 
 def test_read_binary_asd_delegates(tmp_path):

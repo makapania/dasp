@@ -13,11 +13,14 @@ legacy float32 layout, signalling the caller to fall back.
 
 from __future__ import annotations
 
+import logging
 import struct
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # Legacy ASD-v1 binary header layout (offsets in bytes from start of file).
 _MAGIC = b"ASD\x00"          # version string for the oldest format
@@ -84,9 +87,10 @@ def read_legacy_asd(asd_file) -> pd.Series | None:
 
     if data_type != 1:
         # 1 == reflectance. We still decode, but flag so callers/users can investigate.
-        print(
-            f"Warning: {asd_file.name}: ASD dataType={data_type} (expected 1=reflectance); "
-            "decoding values as-is."
+        logger.warning(
+            "%s: ASD dataType=%d (expected 1=reflectance); decoding values as-is.",
+            asd_file.name,
+            data_type,
         )
 
     values = np.frombuffer(raw, dtype="<f4", count=channels, offset=_HEADER_BYTES)
