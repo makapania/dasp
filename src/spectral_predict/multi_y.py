@@ -352,10 +352,11 @@ def multi_y_metrics(
 def reduce_multi_y_score(per_target: Any, rule: str = "mean") -> float:
     """Reduce a per-target CV score vector to a single scalar.
 
-    Used by performance-based variable selection and hyperparameter /
-    component selection to collapse per-target Q2/RMSE to one number. ``mean``
-    is the correct default because per-target Q2 is scale-invariant on raw
-    units, so equal weighting is automatic.
+    Available helper for collapsing a per-target Q2/RMSE vector to one number
+    (varsel/component-selection paths currently compute their joint criterion
+    inline rather than calling this). ``mean`` is the correct default because
+    per-target Q2 is scale-invariant on raw units, so equal weighting is
+    automatic.
 
     Args:
         per_target: Array-like of per-target scores. A scalar is returned as-is.
@@ -382,7 +383,7 @@ def reduce_multi_y_score(per_target: Any, rule: str = "mean") -> float:
 def extract_pls_multi_y(pls: Any) -> np.ndarray:
     """Return the PLS regression B-matrix as ``(n_features, n_targets)``.
 
-    sklearn >= 1.3 (verified on pinned 1.8) exposes
+    sklearn >= 1.1 (verified on pinned 1.8) exposes
     ``PLSRegression.coef_`` as ``(n_targets, n_features)`` — the transpose of
     the pre-1.1 layout — so the canonical chemometrics B-matrix
     ``(n_features, n_targets)`` is ``pls.coef_.T``. Single-target PLS yields

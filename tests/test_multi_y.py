@@ -131,6 +131,66 @@ def test_cv_pool_single_target_matches_legacy_pooled(rng):
     np.testing.assert_allclose(yt.ravel(), y, atol=1e-12)
 
 
+def test_cv_pool_fold_scaler_fits_train_only_no_leakage(rng):
+    """Central no-leakage pin (pr-review finding): the per-fold FoldYScaler
+    inside multi_y_cv_pool must be fit on TRAIN-fold Y stats ONLY — never the
+    validation fold or the full Y. A regression that fit on full/val Y would
+    inflate CV scores yet pass every other (scale-invariant) multi-target test.
+    """
+    import spectral_predict.multi_y as _my
+
+    n, p = 40, 8
+    X = rng.standard_normal((n, p))
+    Y = np.column_stack([X[:, 0], 50.0 * X[:, 1]]) + 0.1 * rng.standard_normal((n, 2))
+
+    fold_fit_means: list[np.ndarray] = []
+    _Base = _my.FoldYScaler
+
+    class _SpyScaler(_Base):
+        def fit(self, Y_arg):
+            fold_fit_means.append(np.asarray(Y_arg, dtype=float).mean(axis=0).copy())
+            return super().fit(Y_arg)
+
+    splitter = build_cv_splitter("kfold", 4, "regression", random_state=0)
+    expected_train_means = [
+        Y[tr].mean(axis=0)
+        for tr, _ in build_cv_splitter("kfold", 4, "regression", random_state=0).split(X)
+    ]
+
+    # multi_y_cv_pool constructs the module-global FoldYScaler(); patch it.
+    orig = _my.FoldYScaler
+    _my.FoldYScaler = _SpyScaler
+    try:
+        _my.multi_y_cv_pool(
+            PLSRegression(n_components=2, scale=False), X, Y, splitter, scale_y=True
+        )
+    finally:
+        _my.FoldYScaler = orig
+
+    assert len(fold_fit_means) == len(expected_train_means) > 0
+    for got, exp in zip(fold_fit_means, expected_train_means):
+        np.testing.assert_allclose(got, exp, atol=1e-12)
+    # Proves the stats are train-fold, not full-Y: at least one fold mean differs
+    # from the global mean (they would all equal it if fit on the full block).
+    global_mean = Y.mean(axis=0)
+    assert any(not np.allclose(fm, global_mean, atol=1e-9) for fm in fold_fit_means)
+
+
+def test_cv_pool_repeated_kfold_multitarget_averages(rng):
+    """Pooling pin (pr-review finding): repeated_kfold multi-target exercises the
+    pred_sum/pred_count averaging branch (pred_count > 1) broadcast over
+    (n, n_targets) — plain kfold only ever hits pred_count == 1."""
+    n, p = 40, 10
+    X = rng.standard_normal((n, p))
+    Y = np.column_stack([X[:, 0], X[:, 1]]) + 0.1 * rng.standard_normal((n, 2))
+    yt, yp = multi_y_cv_pool(
+        PLSRegression(n_components=2, scale=False), X, Y,
+        "repeated_kfold", scale_y=True, n_folds=4, n_repeats=3, random_state=0,
+    )
+    assert yt.shape == yp.shape == (n, 2)
+    assert np.all(np.isfinite(yp))
+
+
 # --------------------------------------------------------------------------- #
 # multi_y_metrics
 # --------------------------------------------------------------------------- #

@@ -210,7 +210,16 @@ def _fitness_function(
 
                 yt, yp = multi_y_cv_pool(pls, X_selected, y_arr, cv, scale_y=True)
                 m = multi_y_metrics(yt, yp)
+                joint_q2 = float(m["joint_q2"])
                 mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+                # A non-finite per-target q2 (PLS divergence on a degenerate
+                # chromosome) poisons mean_nmse to NaN; `NaN > 0.0` is False so
+                # rmsecv would be 0.0 -> fitness -0.0, the MAXIMUM achievable
+                # value, promoting a broken subset to best (GA maximizes). Fall
+                # to the worst-case sentinel the except branch uses. Mirrors the
+                # guard in variable_selection._evaluate_interval_pls_multi.
+                if not (np.isfinite(joint_q2) and np.isfinite(mean_nmse)):
+                    return -np.inf
                 rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
                 return -rmsecv
             # Single-target path -- byte-identical to pre-T-17.

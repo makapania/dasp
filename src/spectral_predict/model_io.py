@@ -357,6 +357,23 @@ def save_model(
         # (not this metadata key), so the key's absence is fully backward- and
         # forward-compatible; adding has_y_scaler=False here would silently drift
         # every legacy single-Y metadata.json (guardrail: single-Y byte-identity).
+        # Loud guard (silent-failure review): a JOINT multi-target model is fit on
+        # scaled Y, so predict_with_model reconstructs RAW units ONLY via the
+        # persisted y_scaler. Saving a JOINT model without it would make reloaded
+        # predictions silently come back in fold-scaled units. Fail at save time,
+        # not silently at predict time. (INDEPENDENT/single-target correctly pass
+        # y_scaler=None and are unaffected.)
+        if (
+            metadata.get('multitarget_mode') == 'JOINT'
+            and int(metadata.get('n_targets', 1)) > 1
+            and y_scaler is None
+        ):
+            raise ValueError(
+                "JOINT multi-target model (n_targets > 1) was fit on scaled Y but "
+                "no y_scaler was supplied to save_model; reloaded predictions would "
+                "silently be in scaled units. Pass the fitted FoldYScaler."
+            )
+
         y_scaler_path = tmppath / 'y_scaler.npz'
         if y_scaler is not None:
             y_mean = np.asarray(getattr(y_scaler, 'mean_'), dtype=float)

@@ -213,7 +213,10 @@ def test_independent_fixed_config_equals_separate_single_target_fits(model_name,
     identical to N separate single-target fits on RAW per-target Y.
 
     Note the label's precise wording: this bit-identity holds only at a FIXED
-    config; a shared-config *search* need not equal N separate searches.
+    config; a shared-config *search* need not equal N separate searches. These
+    two are MultiOutputRegressor-wrapped, so per-target fits are literally
+    separate -> byte-identical. Native Ridge (2-D solve) is a separate pin
+    below (numerically, not bit, identical).
     """
     from spectral_predict.multitarget_search import _build_independent_base
 
@@ -236,6 +239,36 @@ def test_independent_fixed_config_equals_separate_single_target_fits(model_name,
         for s in range(2)
     ])
     assert np.array_equal(joint_pred, sep)
+
+
+def test_independent_ridge_native_equals_separate_ridge_fits(rng):
+    """F4 pin for the one INDEPENDENT model NOT wrapped in MultiOutputRegressor:
+    Ridge uses a native 2-D solve (pr-review finding — coupling equivalence is a
+    real property, not guaranteed by construction). Ridge is separable per
+    target, so the 2-D solve equals N plain single-target Ridge fits — to
+    floating-point (~1e-15), not bit-for-bit (the 2-D solve path differs from N
+    1-D solves), hence allclose rather than array_equal.
+    """
+    from sklearn.linear_model import Ridge as _SkRidge
+
+    n, p = 50, 10
+    X = rng.standard_normal((n, p))
+    Y = np.column_stack([
+        X[:, :3] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(n),
+        X[:, 2:5] @ rng.standard_normal(3) + 0.1 * rng.standard_normal(n),
+    ])
+    params = {"alpha": 1.5}
+
+    strat = resolve_multitarget_strategy("Ridge")
+    assert strat.mode == "INDEPENDENT" and strat.scale_y is False
+    est = build_multitarget_estimator(strat, params, n_samples=n, n_features=p)
+    est.fit(X, Y)  # native 2-D solve on RAW Y
+    joint_pred = np.asarray(est.predict(X))
+
+    sep = np.column_stack([
+        _SkRidge(alpha=1.5).fit(X, Y[:, s]).predict(X) for s in range(2)
+    ])
+    np.testing.assert_allclose(joint_pred, sep, atol=1e-12)
 
 
 def test_run_independent_model_end_to_end_label(rng):

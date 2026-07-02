@@ -212,6 +212,33 @@ class TestGAPLSFitness:
         assert fitness_small > -np.inf
         assert fitness_large > -np.inf
 
+    def test_multi_y_nonfinite_q2_returns_worst_fitness(self, monkeypatch):
+        """NaN-safety pin (pr-review-toolkit finding, sibling of the interval
+        evaluator fix): a non-finite per-target q2 in the multi-Y GA fitness must
+        return the worst fitness (-inf), NOT collapse to rmsecv=0.0 -> fitness
+        -0.0, which is the MAXIMUM achievable value (GA maximizes) and would
+        promote a diverged chromosome to the winning wavelength set.
+        """
+        import spectral_predict.multi_y as multi_y_mod
+        from sklearn.model_selection import KFold
+
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((30, 12))
+        Y = np.column_stack([X[:, 0], X[:, 1]]) + 0.1 * rng.standard_normal((30, 2))
+        chromosome = np.ones(12, dtype=np.uint8)  # all wavelengths, > min
+
+        def poisoned_metrics(yt, yp, **kwargs):
+            return {"q2": np.array([np.nan, 0.9]), "joint_q2": float("nan")}
+
+        # _fitness_function does `from .multi_y import multi_y_metrics` at call
+        # time, so patch the source module attribute.
+        monkeypatch.setattr(multi_y_mod, "multi_y_metrics", poisoned_metrics)
+        fitness = _fitness_function(
+            chromosome, X, Y, KFold(n_splits=5),
+            task_type="regression", n_components=3, min_wavelengths=5,
+        )
+        assert fitness == -np.inf
+
         # Note: We can't guarantee fitness_small > fitness_large because
         # it depends on the data, but both should be finite
 

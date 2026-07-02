@@ -86,6 +86,22 @@ class TestMultiTargetSaveLoadRoundtrip:
         pred_after = loaded["model"].predict(X)
         np.testing.assert_array_equal(pred_before, pred_after)
 
+    def test_joint_save_without_y_scaler_raises(self, synthetic_multi_y, tmp_path):
+        """Loud-guard pin (silent-failure finding): saving a JOINT multi-target
+        model (n_targets > 1) without its y_scaler must RAISE at save time, not
+        silently return fold-scaled-unit predictions after reload.
+        """
+        X, Y = synthetic_multi_y
+        model, _ = _train_joint_pls(X, Y)
+        target_names = ["yield", "irsf", "carbonate"]
+        metrics = multi_y_metrics(Y, model.predict(X), target_names=target_names)
+        with pytest.raises(ValueError, match="scaled units"):
+            save_model(
+                model=model, preprocessor=None,
+                metadata=_metadata(target_names, metrics["per_target"], "JOINT", X.shape[1]),
+                filepath=tmp_path / "mt_noscaler.dasp", y_scaler=None,
+            )
+
     def test_y_scaler_stats_reload_and_inverse_transform(self, synthetic_multi_y, tmp_path):
         """5c(b): per-target Y-scaler mean/std reload; inverse_transform matches."""
         X, Y = synthetic_multi_y
