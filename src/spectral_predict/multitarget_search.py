@@ -634,7 +634,17 @@ def run_multitarget_search(
             )
         )
 
-    results.sort(key=lambda r: r.joint_q2, reverse=True)
+    # NaN-safe ranking: a model whose pooled predictions go non-finite (e.g. PLS
+    # coef overflow on a collinear fold, MLP divergence) yields joint_q2 == NaN.
+    # Plain sort on a NaN key is undefined per CPython docs and could float a
+    # broken model to rank #1 / best. Push non-finite scores to the bottom.
+    results.sort(
+        key=lambda r: (
+            np.isfinite(r.joint_q2),
+            r.joint_q2 if np.isfinite(r.joint_q2) else float("-inf"),
+        ),
+        reverse=True,
+    )
     return MultiTargetSearchOutput(
         results=results,
         target_names=list(target_names),

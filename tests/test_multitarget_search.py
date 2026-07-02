@@ -466,6 +466,37 @@ def test_run_rejects_empty_configs(xy_multi):
         run_multitarget_search(X, Y, [])
 
 
+def test_run_nan_joint_q2_ranked_below_finite(xy_multi, monkeypatch):
+    """NaN-safe ranking pin: a config whose pooled predictions go non-finite
+    yields ``joint_q2 == NaN``. A plain sort on a NaN key is undefined and could
+    float that broken config to ``best``; the orchestrator must push non-finite
+    scores to the bottom so a finite-scored model is always reported as best.
+    """
+    import spectral_predict.multitarget_search as mts
+
+    real_metrics = mts.multi_y_metrics
+    state = {"call": 0}
+
+    def flaky_metrics(y_true, y_pred, **kwargs):
+        m = dict(real_metrics(y_true, y_pred, **kwargs))
+        state["call"] += 1
+        if state["call"] == 1:  # corrupt the FIRST-evaluated config's score
+            m["joint_q2"] = float("nan")
+        return m
+
+    monkeypatch.setattr(mts, "multi_y_metrics", flaky_metrics)
+    X, Y = xy_multi
+    configs = [
+        {"model_name": "PLS", "params": {"n_components": 3}},  # -> NaN
+        {"model_name": "PLS", "params": {"n_components": 4}},  # -> finite
+    ]
+    out = run_multitarget_search(X, Y, configs, cv="kfold")
+    assert out.best is not None
+    assert np.isfinite(out.best.joint_q2)  # NaN config never reported as best
+    assert out.best.params["n_components"] == 4
+    assert np.isnan(out.results[-1].joint_q2)  # NaN pushed to the bottom
+
+
 def test_run_high_components_capped_against_fold_size_kfold(rng):
     """Regression pin (Blocker 3): PLS n_components must be capped against the
     SMALLEST fold training set, not the full N. n=20, p=25, 5-fold: full-N cap
