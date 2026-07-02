@@ -53,12 +53,21 @@ The T-17 **Multi-Target regression** feature shipped its foundation (F1–F7, PR
 - **GUI:** worker-thread run doesn't block the main loop; Cancel stops it; the tab passes the inherited config (spy/mock the orchestrator and assert it received the config the main Run would).
 - **Regression:** single-Y suites stay green and byte-identical (`run_search` untouched). Full suite + merge-gate diff-failure-set vs `origin/main` at the end (see PROJECT_STATUS "MERGE GATE" note for the protocol: Windows Py3.12, `--ignore=tests/gui`, expect the 5 known pre-existing failures, zero new).
 
-## 7. Already done this session (don't redo)
+## 7. Review checkpoints (MANDATORY — this project reviews at every gate)
+
+This codebase is reviewed heavily and the user expects it. Mirror how the F1–F7 foundation was built: **per-phase review gate → fold NEEDS-CHANGES → proceed**, then a **whole-diff cross-family pass + pr-review-toolkit before merge**, then the **merge gate**. Give every reviewer the by-design list (single-Y byte-identity via additive branches; grid-only; chemometrics conventions are not leakage; UVE/CARS skip-with-notice) so they don't waste findings.
+
+- **Per-phase gate (after each of A / B / C):** run a **Codex** review (`codex-reviewer` agent, or the codex-review skill) on that phase's diff — Codex earns its slot on exactly this kind of cross-file orchestration/dispatcher work. Fold NEEDS-CHANGES before moving on. Add a second orthogonal reviewer (Kimi/GLM via `opencode-call`, full repo access) when the phase is large or touches CV/varsel math.
+- **Whole-diff before merge:** cross-family pass — **Codex + Kimi + GLM** with FULL repo access. For multi-file code review, dispatch **parallel `opencode-call` agents** (NOT the peer-review skill, which is for self-contained targets). Then run the **pr-review-toolkit** (Claude-family specialists) — `silent-failure-hunter` is the single highest-value one here given the NaN-sink history; also `code-reviewer` + `pr-test-analyzer`. The foundation's toolkit pass caught a HIGH the four cross-family passes missed, so do BOTH layers — they are orthogonal.
+- **Merge gate:** local diff-failure-set vs `origin/main` (Windows Py3.12 `.venv312`, `--ignore=tests/gui`; expect the 5 known pre-existing failures — `test_cv_strategy` nameerror, `test_export_code` ×2, `test_t19_class_weight` ×2 — and require ZERO new). Do NOT auto-merge — wait for explicit user greenlight.
+- **Model routing (current, verified 2026-07-02) — dispatch by ALIAS, never a hardcoded version:** `glm` → GLM 5.2 (default); use **`kimi27`** (Kimi K2.7-Code) for coding/review tasks, NOT `kimi` (K2.6, general). GLM bills the z.ai subscription; opencode-go covers Kimi/DeepSeek/etc. When the user says "codex", use Codex — never substitute another model. See memory `feedback_model_version_aliases`, `feedback_codex`, `feedback_review_method_signal`, `feedback_glm_routing`, `feedback_check_ci_before_merge`.
+
+## 8. Already done this session (don't redo)
 
 - **GUI bug fixes committed on the branch (`52c814b`):** (a) Multi-Target results table horizontal scroll — the tab's scroll-canvas inner frame is now pinned to viewport width and the results tree has both x/y scrollbars; (b) **pre-existing** Refine-tab `_on_refine_cv_strategy_changed` crash (`pack(before=<unpacked>)` → `TclError`) — now forgets toggleable widgets and re-packs anchored to the always-packed hint. The Refine fix is unrelated to T-17 and could be split to a separate fix against `main` if PR-cleanliness matters.
 - **Review + gate on the foundation:** F1–F7 passed 4 cross-family review passes (Codex/Kimi K2.6/GLM 5.1/GLM 5.2) + full pr-review-toolkit (5 Claude-family specialists). Three MEDIUM NaN-sinks fixed + pinned. Merge gate: 0 new failures vs `origin/main`. See PROJECT_STATUS + SESSION_LOG (2026-07-02 entries).
 - **Deferred review items (non-blocking, in PR #63 comments):** type enforcement-altitude (`MultiTargetStrategy.__post_init__`, frozen-dict sharing, `MultiTargetResult`/`FoldYScaler` guards); `inter_target_correlation` constant-target nan advisory; interval-subset Returns multi-Y docstring note. Fold any that are cheap while you're in the relevant files.
 
-## 8. Process
+## 9. Process
 
 Follow the superpowers flow: write the spec to `docs/superpowers/specs/2026-07-02-multitarget-full-search-parity-design.md`, self-review (placeholders/consistency/scope/ambiguity), **ask the user to review it**, then invoke `superpowers:writing-plans` for the implementation plan, then `superpowers:executing-plans`. Update `docs/PROJECT_STATUS.md` + `docs/SESSION_LOG.md` and commit per the Session Protocol. Do NOT auto-merge PR #63 — wait for explicit user greenlight.
