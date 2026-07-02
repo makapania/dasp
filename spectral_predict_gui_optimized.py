@@ -14537,7 +14537,11 @@ class SpectralPredictApp:
         content_frame = ttk.Frame(canvas, style='TFrame', padding="30")
 
         content_frame.bind("<Configure>", lambda e: self._debounced_configure_scrollregion("tab4f", canvas))
-        canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        _tab4f_win = canvas.create_window((0, 0), window=content_frame, anchor="nw")
+        # Pin the inner frame to the canvas viewport width so a wide results table
+        # scrolls INSIDE its own horizontal scrollbar instead of forcing the whole
+        # tab wider than the viewport (which the vertical-only canvas would clip).
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(_tab4f_win, width=e.width))
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -14650,10 +14654,19 @@ class SpectralPredictApp:
         self.multitarget_tree.heading("model", text="Model")
         self.multitarget_tree.heading("mode", text="Mode")
         self.multitarget_tree.heading("joint_q2", text="Joint Q²")
-        mt_scroll = ttk.Scrollbar(res_frame, orient="horizontal", command=self.multitarget_tree.xview)
-        self.multitarget_tree.configure(xscrollcommand=mt_scroll.set)
-        self.multitarget_tree.pack(fill='both', expand=True)
-        mt_scroll.pack(fill='x')
+        # Both scrollbars: the per-target metric grid is wide (horizontal) AND the
+        # row count can exceed the visible height (vertical). Grid layout so the
+        # tree and both bars share the frame without the vertical bar getting
+        # clipped (the prior pack layout had only a horizontal bar).
+        mt_yscroll = ttk.Scrollbar(res_frame, orient="vertical", command=self.multitarget_tree.yview)
+        mt_xscroll = ttk.Scrollbar(res_frame, orient="horizontal", command=self.multitarget_tree.xview)
+        self.multitarget_tree.configure(
+            yscrollcommand=mt_yscroll.set, xscrollcommand=mt_xscroll.set)
+        self.multitarget_tree.grid(row=0, column=0, sticky='nsew')
+        mt_yscroll.grid(row=0, column=1, sticky='ns')
+        mt_xscroll.grid(row=1, column=0, sticky='ew')
+        res_frame.rowconfigure(0, weight=1)
+        res_frame.columnconfigure(0, weight=1)
 
         #: Last MultiTargetSearchOutput, retained for CSV export.
         self._multitarget_last_output = None
@@ -15954,23 +15967,26 @@ class SpectralPredictApp:
 
         def _on_refine_cv_strategy_changed(*args):
             strategy = self.refine_cv_strategy.get()
+            # Rebuild deterministically: forget every toggleable widget, then
+            # re-pack the ones this strategy needs, ALWAYS anchored before the
+            # permanently-packed hint. Packing `before=<a forgotten widget>`
+            # raises TclError ("isn't packed"); anchoring to the always-present
+            # hint (and packing left-to-right) avoids that entirely.
+            for w in (self.refine_folds_label, self.refine_folds_spinbox,
+                      self.refine_repeats_label, self.refine_repeats_spinbox):
+                w.pack_forget()
+            anchor = self.refine_cv_hint
             if strategy == 'loo':
-                self.refine_folds_label.pack_forget()
-                self.refine_folds_spinbox.pack_forget()
-                self.refine_repeats_label.pack_forget()
-                self.refine_repeats_spinbox.pack_forget()
                 self.refine_cv_hint.config(text="(one sample held out per iteration)")
             elif strategy == 'repeated_kfold':
-                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
-                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
-                self.refine_repeats_label.pack(side='left', padx=(0, 3), before=self.refine_repeats_spinbox)
-                self.refine_repeats_spinbox.pack(side='left', padx=(0, 8), before=self.refine_cv_hint)
+                self.refine_folds_label.pack(side='left', padx=(0, 3), before=anchor)
+                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=anchor)
+                self.refine_repeats_label.pack(side='left', padx=(0, 3), before=anchor)
+                self.refine_repeats_spinbox.pack(side='left', padx=(0, 8), before=anchor)
                 self.refine_cv_hint.config(text="(folds x repeats iterations)")
             else:  # kfold
-                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
-                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
-                self.refine_repeats_label.pack_forget()
-                self.refine_repeats_spinbox.pack_forget()
+                self.refine_folds_label.pack(side='left', padx=(0, 3), before=anchor)
+                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=anchor)
                 self.refine_cv_hint.config(text="(3-10 folds recommended)")
 
         self.refine_cv_strategy.trace_add('write', _on_refine_cv_strategy_changed)
