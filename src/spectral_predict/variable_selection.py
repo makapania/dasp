@@ -70,6 +70,13 @@ def _evaluate_interval_pls_multi(X, Y, cv_folds, n_components):
         m = multi_y_metrics(yt, yp)
         joint_q2 = float(m["joint_q2"])
         mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+        # A non-finite per-target q2 (PLS SVD divergence on a degenerate
+        # interval) poisons mean_nmse to NaN; the `mean_nmse > 0.0` guard is then
+        # False and rmsecv would collapse to 0.0 — a spurious *perfect* score
+        # that WINS iPLS/MC-siPLS/MWPLS selection. Fall to the same worst-case
+        # sentinel the except branch uses so a broken interval ranks last.
+        if not (np.isfinite(joint_q2) and np.isfinite(mean_nmse)):
+            return np.inf, -1.0
         rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
         return rmsecv, joint_q2
     except Exception:

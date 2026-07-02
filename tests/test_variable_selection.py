@@ -805,6 +805,29 @@ class TestMultiYVarsel:
             subs = mwpls(X, Y, wl, window_sizes=[10, 20], cv_folds=5)
         assert len(subs) > 0
 
+    def test_interval_pls_multi_nonfinite_q2_sinks_to_worst_sentinel(self, monkeypatch):
+        """NaN-safety pin (GLM 5.2 pre-merge finding): a non-finite per-target
+        q2 (PLS SVD divergence on a degenerate interval) must sink the interval
+        to the worst-case ``(inf, -1.0)`` sentinel, NOT a spurious ``rmsecv=0.0``
+        that would win iPLS/MC-siPLS/MWPLS selection as a fake perfect score.
+        """
+        import spectral_predict.multi_y as multi_y_mod
+        from spectral_predict.variable_selection import _evaluate_interval_pls_multi
+
+        rng = np.random.default_rng(0)
+        X = rng.standard_normal((30, 12))
+        Y = np.column_stack([X[:, 0], X[:, 1]]) + 0.1 * rng.standard_normal((30, 2))
+
+        def poisoned_metrics(yt, yp, **kwargs):
+            return {"q2": np.array([np.nan, 0.97]), "joint_q2": float("nan")}
+
+        # _evaluate_interval_pls_multi does `from .multi_y import multi_y_metrics`
+        # at call time, so patch the source module attribute.
+        monkeypatch.setattr(multi_y_mod, "multi_y_metrics", poisoned_metrics)
+        rmsecv, q2 = _evaluate_interval_pls_multi(X, Y, cv_folds=5, n_components=3)
+        assert np.isinf(rmsecv) and rmsecv > 0  # worst rmsecv -> ranks last
+        assert q2 == -1.0
+
     def test_spa_multi_y(self, multi_y_data):
         X, Y, _ = multi_y_data
         with contextlib.redirect_stdout(io.StringIO()):
