@@ -26,6 +26,8 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold
 
+from .variable_selection import _reject_multi_y
+
 
 SelectionMethod = Literal["spa", "cars", "vcpa-iriv"]
 
@@ -454,6 +456,7 @@ def vcpa_iriv(
     # Validate inputs
     if X.shape[0] != y.shape[0]:
         raise ValueError("X and y must have same number of samples")
+    _reject_multi_y(y, "vcpa-iriv")
 
     # Determine which model to use for evaluation
     TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}

@@ -627,6 +627,7 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
     """
     # Convert inputs to numpy arrays and ensure proper shapes
     X = np.asarray(X)
+    _reject_multi_y(y, "ipls (legacy importance path)")
     y = np.asarray(y).ravel()
 
     n_samples, n_features = X.shape
