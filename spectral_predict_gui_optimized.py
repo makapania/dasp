@@ -15851,8 +15851,16 @@ class SpectralPredictApp:
         except Exception:
             # Never let a UI update error kill the poller.
             pass
+        # FIX 2: only stop once a terminal event has actually been handled AND
+        # the worker is done AND the queue is drained. Without the
+        # ``_multitarget_terminal_seen`` latch a final ('done'/'failed') tuple
+        # enqueued between the empty-check and the stop would be dropped and the
+        # UI would stay stuck on "Running…".
         thread = getattr(self, "_multitarget_thread", None)
-        if (thread is not None and thread.is_alive()) or not self._multitarget_queue.empty():
+        terminal_seen = getattr(self, "_multitarget_terminal_seen", False)
+        worker_alive = thread is not None and thread.is_alive()
+        finished = terminal_seen and not worker_alive and self._multitarget_queue.empty()
+        if not finished:
             try:
                 self._multitarget_after_id = self.root.after(
                     100, self._poll_multitarget_queue)

@@ -340,6 +340,53 @@ class TestMultiTargetRunLifecycle:
 
 
 @pytest.mark.gui
+class TestMultiTargetTerminalRace:
+    """FIX 2: the poller must not stop until a terminal ('done'/'failed') event
+    has actually been handled. Otherwise a final tuple enqueued between the
+    empty-check and the stop is dropped and the UI stays stuck on 'Running…'."""
+
+    def _dead_thread(self):
+        import threading
+        t = threading.Thread(target=lambda: None)
+        t.start()
+        t.join()
+        return t
+
+    def _rescheduled(self, spy, app):
+        # NB: bound methods create a fresh wrapper per attribute access, so
+        # compare by == (same __self__ + __func__), never `is`.
+        return any(len(c.args) >= 2 and c.args[1] == app._poll_multitarget_queue
+                   for c in spy.call_args_list)
+
+    def test_poller_reschedules_until_terminal_seen(self, gui_app, monkeypatch):
+        import queue as _q
+        from unittest import mock
+        # Worker already dead + queue currently empty, but NO terminal event has
+        # been handled yet — models the race where the worker set is_alive()->False
+        # and enqueued 'done' just after this drain. The poller must keep polling.
+        gui_app._multitarget_thread = self._dead_thread()
+        gui_app._multitarget_queue = _q.Queue()
+        gui_app._multitarget_terminal_seen = False
+        spy = mock.Mock(return_value="afterid")
+        monkeypatch.setattr(gui_app.root, "after", spy)
+        gui_app._poll_multitarget_queue()
+        assert self._rescheduled(spy, gui_app), \
+            "poller stopped before any terminal event was handled (dropped-'done' race)"
+
+    def test_poller_stops_once_terminal_seen(self, gui_app, monkeypatch):
+        import queue as _q
+        from unittest import mock
+        gui_app._multitarget_thread = self._dead_thread()
+        gui_app._multitarget_queue = _q.Queue()
+        gui_app._multitarget_terminal_seen = True  # terminal already handled
+        spy = mock.Mock(return_value="afterid")
+        monkeypatch.setattr(gui_app.root, "after", spy)
+        gui_app._poll_multitarget_queue()
+        assert not self._rescheduled(spy, gui_app), \
+            "poller kept rescheduling after the run had terminated cleanly"
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 
