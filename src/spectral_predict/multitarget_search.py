@@ -285,44 +285,47 @@ def build_multitarget_estimator(
 
         requested = int(params.get("n_components", 10))
         n_components = cap_components(n_samples, n_features, requested)
-        return PLSRegression(n_components=n_components, scale=False)
+        pls_kwargs: dict[str, Any] = dict(n_components=n_components, scale=False)
+        if "max_iter" in params:
+            pls_kwargs["max_iter"] = int(params["max_iter"])
+        if "tol" in params:
+            pls_kwargs["tol"] = float(params["tol"])
+        return PLSRegression(**pls_kwargs)
 
     if name == "RandomForest":
-        # sklearn native multi-output: impurity is averaged across targets, so a
-        # single forest genuinely couples the fold-scaled target block. Defaults
-        # mirror the legacy get_model("RandomForest") builder.
         from sklearn.ensemble import RandomForestRegressor
 
         return RandomForestRegressor(
             n_estimators=int(params.get("n_estimators", 200)),
             max_depth=params.get("max_depth", None),
-            max_features=params.get("max_features", 1.0),
+            min_samples_split=int(params.get("min_samples_split", 2)),
             min_samples_leaf=int(params.get("min_samples_leaf", 1)),
+            max_features=params.get("max_features", 1.0),
+            bootstrap=bool(params.get("bootstrap", True)),
+            max_leaf_nodes=params.get("max_leaf_nodes", None),
+            min_impurity_decrease=float(params.get("min_impurity_decrease", 0.0)),
             random_state=int(params.get("random_state", 42)),
             n_jobs=int(params.get("n_jobs", -1)),
         )
 
     if name == "MLP":
-        # sklearn native multi-output: one network with shared hidden layers and
-        # a multi-unit output head. early_stopping is an internal validation
-        # split (NOT booster early-stopping) and is safe under multi-Y.
         from sklearn.neural_network import MLPRegressor
 
         return MLPRegressor(
             hidden_layer_sizes=params.get("hidden_layer_sizes", (64,)),
+            activation=params.get("activation", "relu"),
+            solver=params.get("solver", "adam"),
             alpha=float(params.get("alpha", 1e-3)),
+            batch_size=params.get("batch_size", "auto"),
+            learning_rate=params.get("learning_rate", "constant"),
             learning_rate_init=float(params.get("learning_rate_init", 1e-3)),
+            momentum=float(params.get("momentum", 0.9)),
             max_iter=int(params.get("max_iter", 500)),
             early_stopping=bool(params.get("early_stopping", True)),
             random_state=int(params.get("random_state", 42)),
         )
 
     if name == "CatBoost":
-        # JOINT via loss_function='MultiRMSE' (from strategy.joint_params): one
-        # ensemble optimizes the summed per-target RMSE on the fold-scaled block.
-        # Booster early-stopping is DISABLED for multi-Y v1 -- we build with no
-        # od_* params and multi_y_cv_pool never passes an eval_set, so fitting is
-        # a plain full-iteration fit.
         from catboost import CatBoostRegressor
 
         kwargs: dict[str, Any] = dict(
@@ -334,6 +337,14 @@ def build_multitarget_estimator(
             random_state=int(params.get("random_state", 42)),
             verbose=False,
         )
+        if "border_count" in params:
+            kwargs["border_count"] = int(params["border_count"])
+        if "random_strength" in params:
+            kwargs["random_strength"] = float(params["random_strength"])
+        if "bootstrap_type" in params:
+            kwargs["bootstrap_type"] = params["bootstrap_type"]
+        if "bagging_temperature" in params:
+            kwargs["bagging_temperature"] = float(params["bagging_temperature"])
         kwargs.update(strategy.joint_params)  # loss_function='MultiRMSE'
         return CatBoostRegressor(**kwargs)
 

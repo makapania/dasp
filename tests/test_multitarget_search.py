@@ -593,3 +593,68 @@ def test_multitarget_output_skipped_defaults_empty_list():
     assert o1.skipped == []
     o1.skipped.append("uve")
     assert o2.skipped == []  # default_factory => not a shared mutable
+
+
+def test_pls_consumes_max_iter_and_tol():
+    strat = resolve_multitarget_strategy("PLS")
+    est = build_multitarget_estimator(
+        strat, {"n_components": 3, "max_iter": 321, "tol": 1e-4}, n_samples=40, n_features=25
+    )
+    p = est.get_params()
+    assert p["max_iter"] == 321
+    assert p["tol"] == 1e-4
+
+
+def test_rf_consumes_full_hp_set():
+    strat = resolve_multitarget_strategy("RandomForest")
+    est = build_multitarget_estimator(
+        strat,
+        {"n_estimators": 50, "min_samples_split": 5, "bootstrap": False,
+         "max_leaf_nodes": 7, "min_impurity_decrease": 0.01},
+        n_samples=40, n_features=12,
+    )
+    p = est.get_params()
+    assert p["min_samples_split"] == 5
+    assert p["bootstrap"] is False
+    assert p["max_leaf_nodes"] == 7
+    assert p["min_impurity_decrease"] == 0.01
+
+
+def test_mlp_consumes_activation_solver_batch_and_momentum():
+    strat = resolve_multitarget_strategy("MLP")
+    est = build_multitarget_estimator(
+        strat,
+        {"activation": "tanh", "solver": "sgd", "batch_size": 16,
+         "learning_rate": "adaptive", "momentum": 0.5},
+        n_samples=40, n_features=12,
+    )
+    p = est.get_params()
+    assert p["activation"] == "tanh"
+    assert p["solver"] == "sgd"
+    assert p["batch_size"] == 16
+    assert p["learning_rate"] == "adaptive"
+    assert p["momentum"] == 0.5
+
+
+def test_catboost_consumes_border_random_strength_bootstrap_type():
+    strat = resolve_multitarget_strategy("CatBoost")
+    est = build_multitarget_estimator(
+        strat,
+        {"border_count": 32, "random_strength": 2.0, "bootstrap_type": "Bernoulli"},
+        n_samples=40, n_features=12,
+    )
+    p = est.get_params()
+    assert p["border_count"] == 32
+    assert p["random_strength"] == 2.0
+    assert p["bootstrap_type"] == "Bernoulli"
+    # bagging_temperature is INCOMPATIBLE with a non-Bayesian bootstrap_type: must not be set.
+    assert p.get("bagging_temperature") in (None, 1.0)
+
+
+def test_catboost_bagging_temperature_only_with_bayesian():
+    strat = resolve_multitarget_strategy("CatBoost")
+    est = build_multitarget_estimator(
+        strat, {"bootstrap_type": "Bayesian", "bagging_temperature": 3.0},
+        n_samples=40, n_features=12,
+    )
+    assert est.get_params()["bagging_temperature"] == 3.0
