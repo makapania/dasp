@@ -344,7 +344,7 @@ def build_multitarget_estimator(
             kwargs["random_strength"] = float(params["random_strength"])
         if "bootstrap_type" in params:
             kwargs["bootstrap_type"] = params["bootstrap_type"]
-        if "bagging_temperature" in params:
+        if "bagging_temperature" in params and params.get("bootstrap_type", "Bayesian") == "Bayesian":
             kwargs["bagging_temperature"] = float(params["bagging_temperature"])
         kwargs.update(strategy.joint_params)  # loss_function='MultiRMSE'
         return CatBoostRegressor(**kwargs)

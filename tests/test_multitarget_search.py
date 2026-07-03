@@ -660,6 +660,45 @@ def test_catboost_bagging_temperature_only_with_bayesian():
     assert est.get_params()["bagging_temperature"] == 3.0
 
 
+def test_catboost_bernoulli_bootstrap_ignores_bagging_temperature_and_fits():
+    """T-17 FIX 3: bagging_temperature must be forwarded ONLY when the EFFECTIVE
+    bootstrap_type is Bayesian. CatBoost raises at fit() time ("bagging
+    temperature available for bayesian bootstrap only") when a non-Bayesian
+    bootstrap_type (Bernoulli/MVS/No) is paired with a bagging_temperature value.
+    Since the grid can produce exactly that cell, the builder must drop the
+    incompatible param. This pin actually .fit()s -- CatBoostError is deferred to
+    fit() so the existing params-only pins cannot catch the regression.
+    """
+    pytest.importorskip("catboost")
+    rng = np.random.default_rng(7)
+    n, p = 40, 8
+    X = rng.standard_normal((n, p))
+    Y = X[:, :2] @ rng.standard_normal((2, 2)) + 0.05 * rng.standard_normal((n, 2))
+
+    strat = resolve_multitarget_strategy("CatBoost")
+    # Non-Bayesian bootstrap paired with bagging_temperature: builder must drop
+    # the incompatible param so fit() does not raise.
+    est = build_multitarget_estimator(
+        strat,
+        {"bootstrap_type": "Bernoulli", "bagging_temperature": 1.0,
+         "iterations": 10, "depth": 3},
+        n_samples=n - 1, n_features=p,
+    )
+    est.fit(X, Y)  # MUST NOT raise -- on buggy code this raises CatBoostError.
+    assert np.asarray(est.predict(X)).shape == (n, 2)
+
+    # Positive control: a Bayesian build STILL forwards bagging_temperature and
+    # fits -- guards against a lazy "drop bagging_temperature entirely" over-fix.
+    est2 = build_multitarget_estimator(
+        strat,
+        {"bootstrap_type": "Bayesian", "bagging_temperature": 0.5,
+         "iterations": 10, "depth": 3},
+        n_samples=n - 1, n_features=p,
+    )
+    est2.fit(X, Y)
+    assert np.asarray(est2.predict(X)).shape == (n, 2)
+
+
 def test_evaluate_cell_returns_nan_on_failure():
     from spectral_predict.multitarget_search import _evaluate_multitarget_cell
 
