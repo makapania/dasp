@@ -136,3 +136,27 @@ def _interval_subset_adapter(
          "method": method}
         for d in ordered
     ]
+
+
+def verify_spa_multi_y_safe(X: np.ndarray, Y: np.ndarray, *, n_features: int = 5) -> bool:
+    """Return True iff spa_selection produces a sane 2-D-Y importance array.
+
+    Gates BOTH ``spa`` and ``fipls_spa`` (which internally calls spa). If SPA's
+    R2 criterion degenerates on 2-D Y this returns False and the caller demotes
+    both methods to skip-with-notice.
+    """
+    from .variable_selection import spa_selection
+
+    Y = np.asarray(Y, dtype=float)
+    if Y.ndim != 2 or Y.shape[1] < 2:
+        return True  # single-Y path is already verified elsewhere
+    try:
+        imp = np.asarray(spa_selection(X, Y, n_features=n_features), dtype=float)
+    except Exception:
+        return False
+    return bool(
+        imp.ndim == 1
+        and imp.shape[0] == X.shape[1]
+        and np.all(np.isfinite(imp))
+        and np.count_nonzero(imp) >= 1
+    )

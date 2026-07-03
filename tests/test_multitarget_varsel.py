@@ -69,3 +69,21 @@ def test_interval_subset_adapter_returns_truncated_subsets(xy_multi):
         assert s["indices"].size >= 1
         assert s["indices"].size < X.shape[1] or "iPLS" in s["tag"]
         assert isinstance(s["tag"], str)
+
+
+def test_verify_spa_multi_y_safe_true_on_informative_block(xy_multi):
+    from spectral_predict.multitarget_grid import verify_spa_multi_y_safe
+
+    X, Y, _wl = xy_multi
+    assert verify_spa_multi_y_safe(X, Y, n_features=5) is True
+
+
+def test_verify_spa_multi_y_safe_shape_and_finiteness():
+    from spectral_predict.variable_selection import spa_selection
+
+    rng = np.random.default_rng(9)
+    X = rng.standard_normal((40, 20))
+    Y = X[:, :3] @ rng.standard_normal((3, 2)) + 0.05 * rng.standard_normal((40, 2))
+    imp = np.asarray(spa_selection(X, Y, n_features=5), dtype=float)
+    assert imp.shape == (20,)
+    assert np.all(np.isfinite(imp))
