@@ -1154,7 +1154,7 @@ def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
         Combined importance scores. Shape: (n_features,)
     """
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     n_samples, n_vars = X.shape
 
     print(f"\n=== Forward iPLS-SPA Hybrid Selection ===")

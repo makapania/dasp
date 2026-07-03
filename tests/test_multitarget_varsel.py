@@ -123,3 +123,15 @@ def test_importance_reference_fit_tree_model(xy_multi):
     imp = _importance_reference_fit("RandomForest", X, Y, min_fold_train=X.shape[0] - 1)
     assert imp.shape == (X.shape[1],)
     assert np.all(np.isfinite(imp))
+
+
+def test_fipls_spa_preserves_2d_y_when_spa_safe(xy_multi):
+    from spectral_predict.multitarget_grid import verify_spa_multi_y_safe
+    from spectral_predict.variable_selection import fipls_spa_selection
+
+    X, Y, wl = xy_multi
+    if not verify_spa_multi_y_safe(X, Y, n_features=5):
+        pytest.skip("SPA not 2-D-safe in this environment; fipls_spa stays skipped")
+    imp = np.asarray(fipls_spa_selection(X, Y, wl), dtype=float)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))
