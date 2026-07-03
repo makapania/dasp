@@ -571,18 +571,17 @@ def run_multitarget_grid_search(
                         for cmc in _cap_and_dedup_pls_for_subset(
                             [mc], X_ss.shape[1], min_fold_train
                         ):
-                            cells.append((pc, X_ss, sub["tag"],
-                                          "importance", X_ss.shape[1], cmc))
+                            cells.append((pc, X_ss, sub["tag"], "importance", cmc))
                 continue
             idx = s["indices"]
             X_sub = X_pp[:, idx]
             for mc in _cap_and_dedup_pls_for_subset(
                 model_cfgs, X_sub.shape[1], min_fold_train
             ):
-                cells.append((pc, X_sub, s["tag"], s["method"], X_sub.shape[1], mc))
+                cells.append((pc, X_sub, s["tag"], s["method"], mc))
 
     total = len(cells)
-    for i, (pc, X_sub, tag, method, n_vars, mc) in enumerate(cells):
+    for i, (pc, X_sub, tag, method, mc) in enumerate(cells):
         if controller is not None and not controller.check_and_wait():
             break
         res = _evaluate_multitarget_cell(

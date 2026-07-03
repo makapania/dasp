@@ -276,6 +276,61 @@ def test_grid_pls_ncomponents_capped_per_subset_and_reported(grid_xy):
     assert len(keys) == len(set(keys))
 
 
+def test_grid_importance_varsel_produces_narrow_cells(grid_xy):
+    """FIX E(1): the model-specific 'importance' varsel path (exercised via
+    _importance_reference_fit + _importances_to_subsets) must produce leaderboard
+    cells with n_variables < full and a finite best, across a JOINT model (PLS)
+    and an INDEPENDENT model (Ridge)."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy  # p == 30
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS", "Ridge"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["importance"], variable_counts=[5, 10],
+        ipls_subset_limit="All", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+    )
+    imp_cells = [r for r in out.results if r.varsel_method == "importance"]
+    assert imp_cells, "expected 'importance' varsel cells in the leaderboard"
+    assert all(r.n_variables < X.shape[1] for r in imp_cells)
+    assert set(r.n_variables for r in imp_cells) <= {5, 10}
+    assert np.isfinite(out.results[0].joint_q2)
+
+
+def test_grid_sg1_completes_with_finite_best(grid_xy):
+    """FIX G(1): a Savitzky-Golay-derivative preprocessing config must run end to
+    end (exercises the deriv/edge-mask branch that trims X_pp + wl_pp) and yield a
+    finite best."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"sg1": True}, autoscale=False, window_sizes=[11],
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+    )
+    assert out.results
+    assert np.isfinite(out.best.joint_q2)
+    assert any(r.preprocessing == "deriv" for r in out.results)
+
+
+def test_preprocess_fingerprint_discriminates_deriv_and_polyorder():
+    """FIX G(2): two configs sharing name but differing in deriv/polyorder must
+    receive DISTINCT fingerprints (no cache collision)."""
+    from spectral_predict.multitarget_grid import _preprocess_fingerprint
+
+    base = {"name": "deriv", "window": 11}
+    a = {**base, "deriv": 1, "polyorder": 2}
+    b = {**base, "deriv": 2, "polyorder": 3}
+    c = {**base, "deriv": 1, "polyorder": 4}  # same deriv, different polyorder
+    assert a["name"] == b["name"] == c["name"]
+    fps = {_preprocess_fingerprint(a), _preprocess_fingerprint(b),
+           _preprocess_fingerprint(c)}
+    assert len(fps) == 3  # all distinct
+
+
 def test_dedup_keyset_equals_consumed_no_config_lost():
     from spectral_predict.multitarget_grid import _dedup_model_configs
 
