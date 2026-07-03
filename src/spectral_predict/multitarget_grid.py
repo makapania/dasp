@@ -286,3 +286,187 @@ def build_multitarget_varsel_subsets(
                 )
             subsets.extend(cache[key])
     return subsets, skipped
+
+
+def _dedup_model_configs(model_grids: dict) -> list[dict[str, Any]]:
+    """Flatten get_model_grids output to [{'model_name','params'}], deduped by the
+    FULL consumed keyset (builders now consume all keys, so this is a safety net).
+    """
+    out, seen = [], set()
+    for model_name, configs in model_grids.items():
+        for _estimator, params in configs:
+            key = (model_name, frozenset(
+                (k, tuple(v) if isinstance(v, (list, np.ndarray)) else v)
+                for k, v in params.items()
+            ))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"model_name": model_name, "params": dict(params)})
+    return out
+
+
+def run_multitarget_grid_search(
+    X, Y, *, model_names, target_names, wavelengths,
+    preprocessing_methods, autoscale,
+    baseline_method=None, baseline_params=None,
+    smoothing=False, smoothing_window=17, smoothing_polyorder=2,
+    interference_to_add=None, wavelength_restriction=None,
+    variable_selection_methods, variable_counts=None,
+    ipls_subset_limit="Top 10", tier="standard", model_grid_overrides=None,
+    max_n_components=10, max_iter=500, window_sizes=None,
+    cv="kfold", n_folds=5, n_repeats=5, random_state=42,
+    optimization_method="grid", controller=None, progress_callback=None, n_jobs=-1,
+):
+    from sklearn.pipeline import Pipeline
+
+    from .cv_utils import build_cv_splitter
+    from .models import get_model_grids
+    from .multi_y import inter_target_correlation
+    from .multitarget_search import MultiTargetSearchOutput, _evaluate_multitarget_cell
+    from .preprocess import build_preprocessing_pipeline
+    from .search import _apply_edge_mask_to_data
+
+    if optimization_method != "grid":
+        raise ValueError(
+            f"Multi-target grid search is Grid-engine ONLY; got "
+            f"optimization_method={optimization_method!r}. Bayesian/NSGA-II are 1-D-only."
+        )
+
+    X_arr = np.asarray(X, dtype=float)
+    Y_arr = np.asarray(Y, dtype=float)
+    if Y_arr.ndim == 1:
+        Y_arr = Y_arr.reshape(-1, 1)
+    wl = np.asarray(wavelengths, dtype=float)
+    target_names = list(target_names)
+    correlation = inter_target_correlation(Y_arr)
+
+    # Grid-only gate for spa/fipls_spa inclusion (verified once on the raw block).
+    spa_ok = verify_spa_multi_y_safe(X_arr, Y_arr)
+
+    preprocess_configs = build_multitarget_preprocess_configs(
+        preprocessing_methods, window_sizes=window_sizes, autoscale=autoscale,
+        baseline_method=baseline_method, baseline_params=baseline_params,
+        smoothing=smoothing, smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder, interference_to_add=interference_to_add,
+    )
+
+    wl_min = wl_max = wl_regions = None
+    if wavelength_restriction:
+        wl_min = wavelength_restriction.get("min")
+        wl_max = wavelength_restriction.get("max")
+        wl_regions = wavelength_restriction.get("regions")
+    restriction_active = bool(wl_regions or wl_min is not None or wl_max is not None)
+
+    splitter = build_cv_splitter(
+        cv, n_folds, "regression", n_repeats=n_repeats, random_state=random_state, y=None,
+    ) if isinstance(cv, str) else cv
+    min_fold_train = min(len(tr) for tr, _ in splitter.split(X_arr, Y_arr))
+
+    results = []
+    skipped_all: list[str] = []
+    varsel_cache: dict = {}
+    best_finite = None
+    # First pass builds the full cell list so 'total' is honest.
+    cells = []  # (preprocess_cfg, X_sub, wl_sub, subset_dict, model_cfg)
+
+    for pc in preprocess_configs:
+        name = pc.get("base_name", pc["name"])
+        steps = build_preprocessing_pipeline(
+            name, pc["deriv"], pc["window"], pc["polyorder"],
+            task_type="regression", interference=pc.get("interference"), wavelengths=wl,
+            baseline_method=pc.get("baseline_method"), baseline_params=pc.get("baseline_params"),
+            smoothing=pc.get("smoothing", False), smoothing_window=pc.get("smoothing_window", 17),
+            smoothing_polyorder=pc.get("smoothing_polyorder", 2), autoscale=pc.get("autoscale", False),
+        )
+        X_pp = X_arr.copy()
+        if steps:
+            X_pp = Pipeline(steps).fit_transform(X_pp, Y_arr)
+        wl_pp = wl
+        # Wavelength restriction (search.py:2777) then edge-mask if unrestricted (search.py:2876).
+        if restriction_active:
+            if wl_regions:
+                mask = np.zeros(wl_pp.shape[0], dtype=bool)
+                for lo, hi in wl_regions:
+                    mask |= (wl_pp >= lo) & (wl_pp <= hi)
+            else:
+                mask = np.ones(wl_pp.shape[0], dtype=bool)
+                if wl_min is not None:
+                    mask &= wl_pp >= wl_min
+                if wl_max is not None:
+                    mask &= wl_pp <= wl_max
+            X_pp, wl_pp = X_pp[:, mask], wl_pp[mask]
+        elif pc.get("deriv") and pc.get("window"):
+            X_pp, wl_pp, _ = _apply_edge_mask_to_data(X_pp, wl_pp, pc)
+
+        subsets, skipped = build_multitarget_varsel_subsets(
+            variable_selection_methods, X_pp, Y_arr, wl_pp,
+            enabled_models=model_names, variable_counts=variable_counts,
+            ipls_subset_limit=ipls_subset_limit, spa_ok=spa_ok,
+            min_fold_train=min_fold_train, cache=varsel_cache, preprocess_id=pc["name"],
+        )
+        for s in skipped:
+            if s not in skipped_all:
+                skipped_all.append(s)
+
+        clamped = min(min_fold_train - 1, max_n_components)
+        model_grids = get_model_grids(
+            task_type="regression", n_features=X_pp.shape[1], tier=tier,
+            enabled_models=list(model_names), max_n_components=max(1, clamped),
+            max_iter=max_iter, **(model_grid_overrides or {}),
+        )
+        model_cfgs = _dedup_model_configs(model_grids)
+
+        for s in subsets:
+            if s.get("model_specific"):
+                # 'importance' resolved per model below.
+                for mc in model_cfgs:
+                    imp = _importance_reference_fit(mc["model_name"], X_pp, Y_arr, min_fold_train)
+                    for sub in _importances_to_subsets(
+                        imp, "importance", variable_counts=variable_counts,
+                        n_features_sub=X_pp.shape[1],
+                    ):
+                        cells.append((pc, X_pp[:, sub["indices"]], sub["tag"],
+                                      "importance", sub["indices"].size, mc))
+                continue
+            idx = s["indices"]
+            X_sub = X_pp[:, idx]
+            for mc in model_cfgs:
+                cells.append((pc, X_sub, s["tag"], s["method"], X_sub.shape[1], mc))
+
+    total = len(cells)
+    for i, (pc, X_sub, tag, method, n_vars, mc) in enumerate(cells):
+        if controller is not None:
+            controller.check_and_wait()
+        res = _evaluate_multitarget_cell(
+            X_sub, Y_arr, mc["model_name"], mc["params"], splitter, min_fold_train,
+            X_sub.shape[1], target_names, n_folds=n_folds, n_repeats=n_repeats,
+            random_state=random_state, preprocessing=pc["name"],
+            varsel_method=method, varsel_tag=tag,
+        )
+        results.append(res)
+        if np.isfinite(res.joint_q2) and (best_finite is None or res.joint_q2 > best_finite.joint_q2):
+            best_finite = res
+        if progress_callback is not None:
+            bm = None
+            if best_finite is not None:
+                bm = {
+                    "Model": best_finite.model_name, "Preprocess": best_finite.preprocessing,
+                    "Deriv": None, "RMSEcv": float(np.mean(best_finite.metrics.get("rmse", [np.nan]))),
+                    "R2cv": float(best_finite.joint_q2),
+                    "top_vars": str(best_finite.n_variables),
+                }
+            progress_callback({
+                "message": f"Multi-target cell {i + 1}/{total}",
+                "current": i + 1, "total": total, "best_model": bm,
+            })
+
+    results.sort(
+        key=lambda r: (np.isfinite(r.joint_q2),
+                       r.joint_q2 if np.isfinite(r.joint_q2) else float("-inf")),
+        reverse=True,
+    )
+    return MultiTargetSearchOutput(
+        results=results, target_names=target_names, correlation=correlation,
+        n_targets=Y_arr.shape[1], skipped=skipped_all,
+    )
