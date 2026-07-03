@@ -45,3 +45,27 @@ def test_vcpa_iriv_rejects_2d_y(xy_multi):
     X, Y, _wl = xy_multi
     with pytest.raises(NotImplementedError):
         vcpa_iriv(X, Y, n_outer_iterations=1, n_inner_iterations=2, binary_matrix_samples=4)
+
+
+def test_parse_ipls_subset_limit():
+    from spectral_predict.multitarget_grid import _parse_ipls_subset_limit
+
+    assert _parse_ipls_subset_limit("Top 5") == 5
+    assert _parse_ipls_subset_limit("Top 20") == 20
+    assert _parse_ipls_subset_limit("All") is None
+
+
+def test_interval_subset_adapter_returns_truncated_subsets(xy_multi):
+    from spectral_predict.multitarget_grid import _interval_subset_adapter
+
+    X, Y, wl = xy_multi
+    subs = _interval_subset_adapter(
+        "ipls_forward", X, Y, wl, ipls_subset_limit="Top 5"
+    )
+    assert 1 <= len(subs) <= 5
+    for s in subs:
+        assert s["method"] == "ipls_forward"
+        assert isinstance(s["indices"], np.ndarray)
+        assert s["indices"].size >= 1
+        assert s["indices"].size < X.shape[1] or "iPLS" in s["tag"]
+        assert isinstance(s["tag"], str)

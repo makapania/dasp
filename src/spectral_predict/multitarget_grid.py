@@ -102,3 +102,37 @@ def build_multitarget_preprocess_configs(
         configs = without + with_
 
     return configs
+
+
+_INTERVAL_METHODS = {"ipls_forward", "ipls_backward", "mc_sipls", "mwpls"}
+
+
+def _parse_ipls_subset_limit(limit: str) -> Optional[int]:
+    """'Top N' -> N; 'All' (or anything non-numeric) -> None (no truncation)."""
+    if not limit or limit.strip().lower() == "all":
+        return None
+    digits = "".join(ch for ch in str(limit) if ch.isdigit())
+    return int(digits) if digits else None
+
+
+def _interval_subset_adapter(
+    method: str, X_pp: np.ndarray, Y: np.ndarray, wavelengths: np.ndarray,
+    *, ipls_subset_limit: str = "Top 10",
+) -> list[dict[str, Any]]:
+    """Run a multi-Y-safe interval varsel method; return truncated subset dicts."""
+    from .variable_selection import ipls_backward, ipls_forward, mc_sipls, mwpls
+
+    fn = {"ipls_forward": ipls_forward, "ipls_backward": ipls_backward,
+          "mc_sipls": mc_sipls, "mwpls": mwpls}[method]
+    raw = fn(X_pp, Y, wavelengths)  # wavelengths is a required positional
+    # Best RMSECV first (finite before non-finite).
+    ordered = sorted(raw, key=lambda d: (0 if np.isfinite(d.get("rmsecv", np.inf)) else 1,
+                                         d.get("rmsecv", np.inf)))
+    limit = _parse_ipls_subset_limit(ipls_subset_limit)
+    if limit is not None:
+        ordered = ordered[:limit]
+    return [
+        {"indices": np.asarray(d["indices"]), "tag": d.get("tag", method),
+         "method": method}
+        for d in ordered
+    ]
