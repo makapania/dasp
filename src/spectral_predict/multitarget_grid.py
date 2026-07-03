@@ -380,6 +380,34 @@ def _dedup_model_configs(model_grids: dict) -> list[dict[str, Any]]:
     return out
 
 
+def _cap_and_dedup_pls_for_subset(
+    model_cfgs: list[dict[str, Any]], n_features_sub: int, min_fold_train: int,
+) -> list[dict[str, Any]]:
+    """Cap PLS n_components to the per-subset cap (cap_components) BEFORE dedup,
+    so narrow subsets do not spawn duplicate effective cells with overstated
+    n_components. Non-PLS configs pass through unchanged. Returns configs whose
+    params hold the EFFECTIVE post-cap values.
+    """
+    from .multi_y import cap_components
+
+    out, seen = [], set()
+    for mc in model_cfgs:
+        params = dict(mc["params"])
+        if mc["model_name"] == "PLS" and "n_components" in params:
+            params["n_components"] = cap_components(
+                min_fold_train, n_features_sub, int(params["n_components"])
+            )
+        key = (mc["model_name"], frozenset(
+            (k, tuple(v) if isinstance(v, (list, np.ndarray)) else v)
+            for k, v in params.items()
+        ))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"model_name": mc["model_name"], "params": params})
+    return out
+
+
 def run_multitarget_grid_search(
     X, Y, *, model_names, target_names, wavelengths,
     preprocessing_methods, autoscale,
@@ -501,12 +529,18 @@ def run_multitarget_grid_search(
                         imp, "importance", variable_counts=variable_counts,
                         n_features_sub=X_pp.shape[1],
                     ):
-                        cells.append((pc, X_pp[:, sub["indices"]], sub["tag"],
-                                      "importance", sub["indices"].size, mc))
+                        X_ss = X_pp[:, sub["indices"]]
+                        for cmc in _cap_and_dedup_pls_for_subset(
+                            [mc], X_ss.shape[1], min_fold_train
+                        ):
+                            cells.append((pc, X_ss, sub["tag"],
+                                          "importance", X_ss.shape[1], cmc))
                 continue
             idx = s["indices"]
             X_sub = X_pp[:, idx]
-            for mc in model_cfgs:
+            for mc in _cap_and_dedup_pls_for_subset(
+                model_cfgs, X_sub.shape[1], min_fold_train
+            ):
                 cells.append((pc, X_sub, s["tag"], s["method"], X_sub.shape[1], mc))
 
     total = len(cells)

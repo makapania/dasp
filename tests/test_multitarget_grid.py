@@ -126,6 +126,55 @@ def test_grid_search_progress_callback_dict_shape(grid_xy):
     assert "best_model" in last
 
 
+def test_grid_pls_ncomponents_capped_per_subset_and_reported(grid_xy):
+    """T-17 FIX 5: PLS n_components must be capped PER-SUBSET (to the
+    cap_components limit) BEFORE dedup, so a narrow top-N subset does not
+    spawn duplicate effective cells whose reported params overstate
+    n_components. Spec (design doc line 186): params holds the EFFECTIVE
+    (post-cap) hyperparameters."""
+    from spectral_predict.models import get_model_grids
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+
+    # PRECONDITION (documents the grid CAN request >5): at max_n_components=10
+    # the PLS grid emits some n_components in the 6..10 range.
+    grids = get_model_grids(
+        task_type="regression", n_features=30, tier="standard",
+        enabled_models=["PLS"], max_n_components=10, max_iter=500,
+    )
+    requested = {p.get("n_components") for (_e, p) in grids["PLS"]}
+    assert max(nc for nc in requested if nc is not None) > 5
+
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["spa"], variable_counts=[5],
+        ipls_subset_limit="All", tier="standard", max_n_components=10,
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+    )
+    # SPA must be 2-D-safe on this block (not skipped).
+    assert "spa" not in out.skipped
+
+    narrow = [r for r in out.results if r.model_name == "PLS" and r.n_variables == 5]
+    assert narrow, "expected PLS cells on the top-5 SPA subset"
+
+    # CORE DISCRIMINATOR (b): EVERY narrow PLS cell reports n_components <= 5
+    # (the per-subset cap), never the requested 6..10.
+    assert all(r.params.get("n_components", 0) <= 5 for r in narrow), (
+        "overstated n_components on narrow subset: "
+        + str(sorted(r.params.get("n_components") for r in narrow))
+    )
+
+    # SECONDARY (a) dedup: no two narrow PLS rows share identical effective
+    # (preprocessing, varsel_tag, params).
+    keys = [
+        (r.preprocessing, r.varsel_tag, frozenset(r.params.items()))
+        for r in narrow
+    ]
+    assert len(keys) == len(set(keys))
+
+
 def test_dedup_keyset_equals_consumed_no_config_lost():
     from spectral_predict.multitarget_grid import _dedup_model_configs
 
