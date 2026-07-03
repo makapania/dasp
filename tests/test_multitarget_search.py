@@ -568,3 +568,28 @@ def test_run_target_names_length_mismatch(xy_multi):
             [{"model_name": "PLS", "params": {"n_components": 2}}],
             target_names=["only_one"],
         )
+
+
+def test_multitarget_result_has_appendonly_fields():
+    from spectral_predict.multitarget_search import MultiTargetResult
+
+    r = MultiTargetResult(
+        model_name="PLS", mode="JOINT", params={}, joint_q2=0.5, metrics={},
+        precise_note="", scale_y=True, mechanism="x",
+    )
+    # New append-only fields default sanely.
+    assert r.preprocessing == "raw"
+    assert r.varsel_method == "full"
+    assert r.varsel_tag == "full"
+    assert r.n_variables is None
+    assert r.error is None
+
+
+def test_multitarget_output_skipped_defaults_empty_list():
+    from spectral_predict.multitarget_search import MultiTargetSearchOutput
+
+    o1 = MultiTargetSearchOutput(results=[], target_names=["a"], correlation={}, n_targets=1)
+    o2 = MultiTargetSearchOutput(results=[], target_names=["b"], correlation={}, n_targets=1)
+    assert o1.skipped == []
+    o1.skipped.append("uve")
+    assert o2.skipped == []  # default_factory => not a shared mutable

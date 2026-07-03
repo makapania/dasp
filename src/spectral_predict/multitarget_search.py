@@ -488,6 +488,11 @@ class MultiTargetResult:
     mechanism: str
     y_true_pooled: Optional[np.ndarray] = None
     y_pred_pooled: Optional[np.ndarray] = None
+    preprocessing: str = "raw"
+    varsel_method: str = "full"
+    varsel_tag: str = "full"
+    n_variables: Optional[int] = None
+    error: Optional[str] = None
 
 
 @dataclass
@@ -506,6 +511,7 @@ class MultiTargetSearchOutput:
     target_names: list[str]
     correlation: dict[str, Any]
     n_targets: int
+    skipped: list[str] = field(default_factory=list)
 
     @property
     def best(self) -> Optional[MultiTargetResult]:
