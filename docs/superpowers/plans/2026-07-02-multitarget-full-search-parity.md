@@ -2016,7 +2016,7 @@ import pytest
 def _load_example():
     from spectral_predict.io import read_asd_dir
 
-    X = read_asd_dir("example")           # (49, 2151)
+    X, _meta = read_asd_dir("example")    # returns (df, metadata) tuple; df is (49, 2151)
     ref = pd.read_csv("example/BoneCollagen.csv")
     ref["_key"] = ref["File Number"].astype(str).str.replace(" ", "", regex=False)
     idx_key = [str(i).replace(" ", "") for i in X.index]
