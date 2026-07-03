@@ -167,6 +167,66 @@ def test_grid_search_progress_callback_dict_shape(grid_xy):
     assert "best_model" in last
 
 
+def test_grid_varsel_producer_failure_is_skipped_not_fatal(grid_xy, monkeypatch):
+    """FIX C: one raising varsel producer must NOT abort the whole search.
+
+    The per-method interval adapter runs with no try/except on unfixed code, so
+    a single raising (preprocess, method) aborts run_multitarget_grid_search
+    entirely. The fix appends the method to out.skipped and continues; the 'full'
+    cells and every other result still rank.
+    """
+    import spectral_predict.multitarget_grid as mtg
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    def _boom(*a, **k):
+        raise RuntimeError("interval adapter blew up")
+
+    monkeypatch.setattr(mtg, "_interval_subset_adapter", _boom)
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    # Search COMPLETED despite the producer raising.
+    assert "ipls_forward" in out.skipped
+    # 'full' cells still built + ranked.
+    assert out.results
+    assert np.isfinite(out.results[0].joint_q2)
+    assert any(r.varsel_method == "full" for r in out.results)
+
+
+def test_grid_importance_reference_fit_failure_is_skipped_not_fatal(grid_xy, monkeypatch):
+    """FIX C: a raising _importance_reference_fit (model-specific importance fit)
+    must NOT abort the search. The offending method+model is recorded in
+    out.skipped and the run completes with other cells still ranking."""
+    import spectral_predict.multitarget_grid as mtg
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    def _boom(model_name, *a, **k):
+        raise RuntimeError(f"importance fit blew up for {model_name}")
+
+    monkeypatch.setattr(mtg, "_importance_reference_fit", _boom)
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS", "Ridge"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["importance"], variable_counts=[5],
+        ipls_subset_limit="All", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    # Search COMPLETED; importance failure surfaced in skipped.
+    assert any("importance" in s for s in out.skipped)
+    # 'full' cells still built + ranked.
+    assert out.results
+    assert np.isfinite(out.results[0].joint_q2)
+    assert any(r.varsel_method == "full" for r in out.results)
+
+
 def test_grid_pls_ncomponents_capped_per_subset_and_reported(grid_xy):
     """T-17 FIX 5: PLS n_components must be capped PER-SUBSET (to the
     cap_components limit) BEFORE dedup, so a narrow top-N subset does not

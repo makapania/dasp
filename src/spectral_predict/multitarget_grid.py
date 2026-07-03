@@ -343,9 +343,16 @@ def build_multitarget_varsel_subsets(
         key = (preprocess_id, method)
         if kind == "subset":
             if key not in cache:
-                cache[key] = _interval_subset_adapter(
-                    method, X_pp, Y, wavelengths, ipls_subset_limit=ipls_subset_limit
-                )
+                # First-pass resilience (mirrors the per-cell NaN-sink discipline):
+                # one raising (preprocess, method) must NOT abort the whole search.
+                try:
+                    cache[key] = _interval_subset_adapter(
+                        method, X_pp, Y, wavelengths, ipls_subset_limit=ipls_subset_limit
+                    )
+                except Exception:
+                    if method not in skipped:
+                        skipped.append(method)
+                    continue
             # Copy-on-return: hand out fresh dicts/arrays so a caller mutating a
             # returned subset's indices cannot poison the cached entry.
             subsets.extend(
@@ -357,11 +364,16 @@ def build_multitarget_varsel_subsets(
                 subsets.append({"method": "importance", "model_specific": True})
                 continue
             if key not in cache:
-                imp = _model_independent_importances(method, X_pp, Y, wavelengths=wavelengths)
-                cache[key] = _importances_to_subsets(
-                    imp, method, variable_counts=variable_counts,
-                    n_features_sub=n_features_sub,
-                )
+                try:
+                    imp = _model_independent_importances(method, X_pp, Y, wavelengths=wavelengths)
+                    cache[key] = _importances_to_subsets(
+                        imp, method, variable_counts=variable_counts,
+                        n_features_sub=n_features_sub,
+                    )
+                except Exception:
+                    if method not in skipped:
+                        skipped.append(method)
+                    continue
             # Copy-on-return (see the subset branch above).
             subsets.extend(
                 {**d, "indices": np.array(d["indices"], copy=True)} for d in cache[key]
@@ -540,7 +552,17 @@ def run_multitarget_grid_search(
             if s.get("model_specific"):
                 # 'importance' resolved per model below.
                 for mc in model_cfgs:
-                    imp = _importance_reference_fit(mc["model_name"], X_pp, Y_arr, min_fold_train)
+                    # First-pass resilience: one model's importance-fit failure
+                    # must NOT abort the search; record method+model and continue.
+                    try:
+                        imp = _importance_reference_fit(
+                            mc["model_name"], X_pp, Y_arr, min_fold_train
+                        )
+                    except Exception:
+                        notice = f"importance:{mc['model_name']}"
+                        if notice not in skipped_all:
+                            skipped_all.append(notice)
+                        continue
                     for sub in _importances_to_subsets(
                         imp, "importance", variable_counts=variable_counts,
                         n_features_sub=X_pp.shape[1],
