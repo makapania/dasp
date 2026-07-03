@@ -14631,8 +14631,9 @@ class SpectralPredictApp:
         ctl_frame = tk.Frame(content_frame, bg=self.colors['bg'])
         ctl_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(6, 10))
         row += 1
-        self._create_accent_button(
-            ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search).pack(side='left')
+        self.multitarget_run_button = self._create_accent_button(
+            ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search)
+        self.multitarget_run_button.pack(side='left')
         # Separate controller + worker thread: Cancel stops ONLY the multi-target
         # search, never the single-Y ``self.search_controller``.
         ttk.Button(ctl_frame, text="⏹ Cancel",
@@ -14683,6 +14684,9 @@ class SpectralPredictApp:
         self._multitarget_controller = _MTSearchController()
         #: Worker thread handle for the multi-target search (for join-on-cancel).
         self._multitarget_thread = None
+        #: Scheduled ``root.after`` id for the queue poller, so a new run can
+        #: cancel a stale pending poll before starting (FIX 1).
+        self._multitarget_after_id = None
         #: Thread-safe event channel from worker → main thread. The worker NEVER
         #: touches a Tk widget (nor ``root.after`` — Tcl rejects cross-thread
         #: command registration with "main thread is not in main loop" on Win32);
@@ -15718,9 +15722,18 @@ class SpectralPredictApp:
         stop/pause controls are untouched. All Tk writes are marshalled to the
         main thread via ``self.root.after(0, ...)``.
         """
+        import queue as _mt_queue
         import threading
 
         from spectral_predict.search_controller import SearchController
+
+        # FIX 1(a): reject a second start while a run is still alive so we never
+        # have two live workers / two pollers competing for one results grid.
+        existing = getattr(self, "_multitarget_thread", None)
+        if existing is not None and existing.is_alive():
+            messagebox.showinfo(
+                "Multi-Target", "A multi-target run is already in progress.")
+            return
 
         cfg = self._collect_multitarget_config()
         if cfg is None:
@@ -15728,6 +15741,21 @@ class SpectralPredictApp:
         # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
         self.optimization_method.set("grid")
         self._multitarget_controller = SearchController()
+
+        # FIX 1(b): cancel any pending poll from a prior run before rescheduling.
+        if getattr(self, "_multitarget_after_id", None) is not None:
+            try:
+                self.root.after_cancel(self._multitarget_after_id)
+            except Exception:
+                pass
+            self._multitarget_after_id = None
+        # FIX 1(c): fresh per-run queue so a prior run's stale messages can't be
+        # drained into this run.
+        self._multitarget_queue = _mt_queue.Queue()
+        # FIX 2: reset the terminal-seen latch for this run.
+        self._multitarget_terminal_seen = False
+        # Disable Run while active; re-enabled in done/failed/cancel.
+        self._set_multitarget_running(True)
 
         # Honest pre-run heads-up: n_preprocess x n_model_configs is a LOWER
         # bound (varsel subsets multiply it further). Cheap — no varsel runs here.
@@ -15757,7 +15785,16 @@ class SpectralPredictApp:
         self._multitarget_thread.start()
         # Drain worker events on the MAIN thread. ``root.after`` scheduled here
         # (main thread) is reliable; the worker only writes to the queue.
-        self.root.after(100, self._poll_multitarget_queue)
+        self._multitarget_after_id = self.root.after(100, self._poll_multitarget_queue)
+
+    def _set_multitarget_running(self, running: bool) -> None:
+        """Enable/disable the Run button for the multi-target run lifecycle."""
+        btn = getattr(self, "multitarget_run_button", None)
+        if btn is not None:
+            try:
+                btn.config(state="disabled" if running else "normal")
+            except Exception:
+                pass
 
     def _run_multitarget_search_thread(self, cfg):
         """Worker body: run ``run_multitarget_grid_search`` and report the
@@ -15817,15 +15854,22 @@ class SpectralPredictApp:
         thread = getattr(self, "_multitarget_thread", None)
         if (thread is not None and thread.is_alive()) or not self._multitarget_queue.empty():
             try:
-                self.root.after(100, self._poll_multitarget_queue)
+                self._multitarget_after_id = self.root.after(
+                    100, self._poll_multitarget_queue)
             except Exception:
                 pass
+        else:
+            self._multitarget_after_id = None
 
     def _multitarget_failed(self, msg):
+        self._multitarget_terminal_seen = True
+        self._set_multitarget_running(False)
         self.multitarget_status_label.config(text="Failed.")
         messagebox.showerror("Multi-Target Search Failed", msg)
 
     def _multitarget_done(self, output):
+        self._multitarget_terminal_seen = True
+        self._set_multitarget_running(False)
         self._multitarget_last_output = output
         self._populate_multitarget_results(output)
         warn = ""
@@ -15841,6 +15885,7 @@ class SpectralPredictApp:
         ctrl = getattr(self, "_multitarget_controller", None)
         if ctrl is not None:
             ctrl.stop()
+        self._set_multitarget_running(False)
         if hasattr(self, "multitarget_status_label"):
             self.multitarget_status_label.config(text="Cancelling…")
 

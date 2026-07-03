@@ -245,6 +245,100 @@ class TestMultiTargetPlsTolParity:
         assert out["pls_tol_list"] == [1e-6]
 
 
+def _pump_until(app, predicate, timeout=10.0):
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            app.root.update()
+        except Exception:
+            pass
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
+
+
+@pytest.mark.gui
+class TestMultiTargetRunLifecycle:
+    """FIX 1: guard concurrent runs (reject 2nd + disable Run button), track
+    ``_multitarget_after_id``, and use a FRESH per-run queue so a prior run's
+    stale terminal message can't bleed into a new run."""
+
+    def _prime(self, app):
+        _load_multitarget_data(app)
+        app._refresh_multitarget_columns()
+        app.multitarget_listbox.selection_clear(0, "end")
+        app.multitarget_listbox.selection_set(0, 2)
+        app._on_multitarget_selection_changed()
+        for name, var in app.multitarget_model_vars.items():
+            var.set(name == "PLS")
+        app._multitarget_last_output = None
+
+    def _blocking_backend(self, monkeypatch, started, release):
+        def _grid(X, Y, **kwargs):
+            started.set()
+            release.wait(10)
+            from spectral_predict.multitarget_search import MultiTargetSearchOutput
+            return MultiTargetSearchOutput(
+                results=[], target_names=kwargs["target_names"],
+                correlation={}, n_targets=Y.shape[1], skipped=[])
+        import spectral_predict.multitarget_grid as mg
+        monkeypatch.setattr(mg, "run_multitarget_grid_search", _grid)
+
+    def test_second_run_rejected_and_button_disabled(self, gui_app, monkeypatch):
+        import threading
+        self._prime(gui_app)
+        started, release = threading.Event(), threading.Event()
+        self._blocking_backend(monkeypatch, started, release)
+        thread_a = None
+        try:
+            gui_app._run_multitarget_search()  # run A
+            assert started.wait(5), "worker A never started"
+            thread_a = gui_app._multitarget_thread
+            assert thread_a.is_alive()
+
+            # Second start while A is alive must be rejected — no new worker.
+            gui_app._run_multitarget_search()
+            assert gui_app._multitarget_thread is thread_a, "a second worker was started"
+
+            # Run button disabled while active; poll after-id tracked.
+            assert str(gui_app.multitarget_run_button.cget("state")) == "disabled"
+            assert getattr(gui_app, "_multitarget_after_id", None) is not None
+        finally:
+            release.set()
+            if thread_a is not None:
+                _pump_until(gui_app, lambda: not thread_a.is_alive()
+                            and gui_app._multitarget_queue.empty())
+        # Poller runs _multitarget_done on the main thread and re-enables Run.
+        _pump_until(gui_app, lambda: gui_app._multitarget_last_output is not None)
+        assert str(gui_app.multitarget_run_button.cget("state")) == "normal"
+
+    def test_fresh_queue_per_run(self, gui_app, monkeypatch):
+        import threading
+        self._prime(gui_app)
+        started, release = threading.Event(), threading.Event()
+        self._blocking_backend(monkeypatch, started, release)
+        stale = gui_app._multitarget_queue
+        stale.put(("done", "STALE"))  # leftover from a hypothetical prior run
+        thread_a = None
+        try:
+            gui_app._run_multitarget_search()
+            assert started.wait(5)
+            thread_a = gui_app._multitarget_thread
+            # A fresh queue is installed per run, so the stale message can never
+            # be drained into this run.
+            assert gui_app._multitarget_queue is not stale
+        finally:
+            release.set()
+            if thread_a is not None:
+                _pump_until(gui_app, lambda: not thread_a.is_alive()
+                            and gui_app._multitarget_queue.empty())
+        _pump_until(gui_app, lambda: gui_app._multitarget_last_output is not None)
+        # The stale 'done' never overwrote the real run's output.
+        assert gui_app._multitarget_last_output != "STALE"
+
+
 @pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
