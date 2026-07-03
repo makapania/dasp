@@ -224,3 +224,65 @@ def _importance_reference_fit(
     else:
         matrix = np.ones((n_features, 1))
     return aggregate_importance(matrix, rule="mean")
+
+
+SKIP_WITH_NOTICE = {
+    "uve", "uve_spa", "cars", "cars-tree", "uve_cars", "uve_cars_tree",
+    "uve_cars_spa", "fipls_cars", "ipls", "vcpa-iriv",
+}
+
+
+def classify_varsel_method(method: str, *, enabled_models, spa_ok: bool) -> str:
+    """Route a GUI varsel method string to 'subset' / 'importance' / 'skip'."""
+    if method in SKIP_WITH_NOTICE:
+        return "skip"
+    if method in _INTERVAL_METHODS:
+        return "subset"
+    if method in ("spa", "fipls_spa"):
+        return "importance" if spa_ok else "skip"
+    if method == "ga":
+        has_linear = any(m in LINEAR_MODELS for m in (enabled_models or []))
+        return "importance" if has_linear else "skip"
+    if method == "importance":
+        return "importance"
+    return "skip"
+
+
+def build_multitarget_varsel_subsets(
+    methods, X_pp, Y, wavelengths, *, enabled_models, variable_counts,
+    ipls_subset_limit, spa_ok, min_fold_train, cache, preprocess_id,
+    apply_uve_prefilter: bool = False,
+):
+    """Return (subsets_incl_full, skipped_notices), caching per (preprocess, method)."""
+    n_features_sub = int(X_pp.shape[1])
+    subsets: list[dict[str, Any]] = [
+        {"indices": np.arange(n_features_sub), "tag": "full", "method": "full"}
+    ]
+    skipped: list[str] = []
+    if apply_uve_prefilter:
+        skipped.append("apply_uve_prefilter")
+    for method in (methods or []):
+        kind = classify_varsel_method(method, enabled_models=enabled_models, spa_ok=spa_ok)
+        if kind == "skip":
+            skipped.append(method)
+            continue
+        key = (preprocess_id, method)
+        if kind == "subset":
+            if key not in cache:
+                cache[key] = _interval_subset_adapter(
+                    method, X_pp, Y, wavelengths, ipls_subset_limit=ipls_subset_limit
+                )
+            subsets.extend(cache[key])
+        elif kind == "importance":
+            if method == "importance":
+                # model-specific: orchestrator resolves per (preprocess, model).
+                subsets.append({"method": "importance", "model_specific": True})
+                continue
+            if key not in cache:
+                imp = _model_independent_importances(method, X_pp, Y)
+                cache[key] = _importances_to_subsets(
+                    imp, method, variable_counts=variable_counts,
+                    n_features_sub=n_features_sub,
+                )
+            subsets.extend(cache[key])
+    return subsets, skipped

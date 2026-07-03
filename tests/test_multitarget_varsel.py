@@ -135,3 +135,52 @@ def test_fipls_spa_preserves_2d_y_when_spa_safe(xy_multi):
     imp = np.asarray(fipls_spa_selection(X, Y, wl), dtype=float)
     assert imp.shape == (X.shape[1],)
     assert np.all(np.isfinite(imp))
+
+
+def test_classify_varsel_method():
+    from spectral_predict.multitarget_grid import classify_varsel_method
+
+    assert classify_varsel_method("ipls_forward", enabled_models=["PLS"], spa_ok=True) == "subset"
+    assert classify_varsel_method("mwpls", enabled_models=["RandomForest"], spa_ok=True) == "subset"
+    assert classify_varsel_method("spa", enabled_models=["PLS"], spa_ok=True) == "importance"
+    assert classify_varsel_method("spa", enabled_models=["PLS"], spa_ok=False) == "skip"
+    assert classify_varsel_method("fipls_spa", enabled_models=["PLS"], spa_ok=False) == "skip"
+    assert classify_varsel_method("importance", enabled_models=["RandomForest"], spa_ok=True) == "importance"
+    # ga is linear-only: present linear model -> importance; tree-only -> skip.
+    assert classify_varsel_method("ga", enabled_models=["PLS"], spa_ok=True) == "importance"
+    assert classify_varsel_method("ga", enabled_models=["RandomForest"], spa_ok=True) == "skip"
+    # UVE/CARS/legacy always skip.
+    for m in ["uve", "cars", "cars-tree", "uve_cars", "ipls", "vcpa-iriv", "fipls_cars"]:
+        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=True) == "skip"
+
+
+def test_build_varsel_subsets_full_plus_interval_and_skips(xy_multi):
+    from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+    X, Y, wl = xy_multi
+    cache = {}
+    subs, skipped = build_multitarget_varsel_subsets(
+        ["ipls_forward", "uve", "cars"], X, Y, wl,
+        enabled_models=["PLS"], variable_counts=[5, 10],
+        ipls_subset_limit="Top 5", spa_ok=True,
+        min_fold_train=X.shape[0] - 1, cache=cache,
+        preprocess_id="raw",
+    )
+    tags = [s["tag"] for s in subs]
+    assert "full" in tags
+    assert subs[0]["method"] == "full"
+    assert any(s["method"] == "ipls_forward" for s in subs)
+    assert set(skipped) == {"uve", "cars"}
+
+
+def test_build_varsel_subsets_cache_hit(xy_multi):
+    from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+    X, Y, wl = xy_multi
+    cache = {}
+    build_multitarget_varsel_subsets(
+        ["spa"], X, Y, wl, enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="All", spa_ok=True, min_fold_train=X.shape[0] - 1,
+        cache=cache, preprocess_id="raw",
+    )
+    assert ("raw", "spa") in cache  # importance memoized per (preprocess, method)
