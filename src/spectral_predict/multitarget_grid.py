@@ -281,7 +281,15 @@ def _importance_reference_fit(
         coef = np.abs(np.asarray(est.coef_, dtype=float))
         matrix = coef.T if coef.ndim == 2 else coef.reshape(n_features, -1)
     else:
-        matrix = np.ones((n_features, 1))
+        # Native models lacking both feature_importances_ and coef_ (e.g. sklearn
+        # MLPRegressor, which exposes coefs_ as a list) must NOT collapse to a
+        # uniform np.ones vector -- that yields meaningless top-N varsel subsets.
+        # Delegate to the shared single-Y importance extractor (|first-layer
+        # weights| for MLP) so multi-target parity holds with single-Y behavior.
+        imp = np.asarray(
+            get_feature_importances(est, model_name, X_pp, Y), dtype=float
+        ).ravel()
+        matrix = imp.reshape(n_features, -1)
     return aggregate_importance(matrix, rule="mean")
 
 

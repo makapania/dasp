@@ -380,3 +380,77 @@ def test_fipls_spa_importance_adapter_selects_informative_not_index0():
         f"from {informative}"
     )
     assert union != {0}, f"fipls_spa union collapsed to degenerate {{0}}: {union}"
+
+
+# --- T-17 FIX 4: MLP model-specific importance must not fall back to np.ones ---
+
+def test_importance_reference_fit_mlp_not_uniform():
+    """BEHAVIORAL: MLP importance must NOT collapse to a uniform np.ones vector.
+
+    sklearn MLPRegressor exposes coefs_ (a list), NOT coef_ and NOT
+    feature_importances_, so the buggy else-branch in _importance_reference_fit
+    falls through to matrix = np.ones((n_features, 1)) -> a perfectly uniform
+    aggregated importance -> meaningless top-N varsel subsets. The fix delegates
+    to models.get_feature_importances (|first-layer weights|), matching single-Y.
+    """
+    from spectral_predict.multitarget_grid import _importance_reference_fit
+
+    rng = np.random.default_rng(7)
+    n, p = 60, 12
+    X = rng.standard_normal((n, p))
+    informative = [2, 3, 4]
+    Y = X[:, informative] @ rng.standard_normal((3, 2)) + 0.05 * rng.standard_normal((n, 2))
+
+    imp = _importance_reference_fit("MLP", X, Y, min_fold_train=n - 1)
+    imp = np.asarray(imp, dtype=float)
+
+    assert imp.shape == (p,)
+    assert np.all(np.isfinite(imp))
+    # CORE: the importance vector is NOT all-equal. On buggy code imp is a
+    # uniform (aggregated np.ones) vector -> all-equal -> this FAILS. On fixed
+    # code it reflects |first-layer weights| -> non-uniform -> PASSES.
+    assert not np.allclose(imp, imp[0]), (
+        f"MLP importance is uniform (all-equal={imp[0]}): the np.ones fallback "
+        f"is still in place."
+    )
+
+
+def test_importance_reference_fit_mlp_delegates_to_get_feature_importances(monkeypatch):
+    """PATH/SPY: the MLP else-branch MUST delegate to the shared single-Y
+    importance extractor models.get_feature_importances.
+
+    _importance_reference_fit re-imports get_feature_importances from .models
+    at call time, so patching the module attribute takes effect. On buggy code
+    the else-branch uses np.ones and never calls get_feature_importances for
+    MLP -> the spy stays empty -> this FAILS.
+    """
+    import spectral_predict.models as models_module
+    from spectral_predict.multitarget_grid import _importance_reference_fit
+
+    rng = np.random.default_rng(7)
+    n, p = 60, 12
+    X = rng.standard_normal((n, p))
+    informative = [2, 3, 4]
+    Y = X[:, informative] @ rng.standard_normal((3, 2)) + 0.05 * rng.standard_normal((n, 2))
+
+    called: list[str] = []
+
+    def spy(model, name, X, y):
+        called.append(name)
+        return np.linspace(1, 2, X.shape[1])
+
+    monkeypatch.setattr(models_module, "get_feature_importances", spy)
+
+    imp = _importance_reference_fit("MLP", X, Y, min_fold_train=n - 1)
+    imp = np.asarray(imp, dtype=float)
+
+    # The spy WAS called with model_name "MLP". On buggy code the else-branch
+    # never calls get_feature_importances for MLP -> called stays empty -> FAILS.
+    assert "MLP" in called, (
+        f"get_feature_importances was not called for MLP (called={called}); "
+        f"the np.ones fallback is still in place."
+    )
+    # Sanity: returned array matches the spy's non-uniform values shape.
+    expected = np.linspace(1, 2, p)
+    assert imp.shape == expected.shape
+    assert not np.allclose(imp, imp[0])
