@@ -81,7 +81,7 @@ class TestMultiTargetTab:
         assert str(gui_app.opt_radio_unified.cget("state")) == "normal"
         assert str(gui_app.opt_radio_nsga2.cget("state")) == "normal"
 
-    def test_run_populates_joint_and_per_target_columns(self, gui_app):
+    def test_run_populates_joint_and_per_target_columns(self, gui_app, monkeypatch):
         _load_multitarget_data(gui_app)
         gui_app._refresh_multitarget_columns()
         gui_app.multitarget_listbox.selection_set(0, 2)
@@ -91,15 +91,50 @@ class TestMultiTargetTab:
         for name, var in gui_app.multitarget_model_vars.items():
             var.set(name in ("PLS", "Ridge"))
 
+        # The full inherited grid expands to many cells (preprocessing x varsel x
+        # HP grid); that expansion is the backend's concern (covered by
+        # tests/test_multitarget_grid.py). Here we isolate the GUI populate path:
+        # stub the backend to a controlled 2-row output (1 PLS JOINT + 1 Ridge
+        # INDEPENDENT) and verify the worker->queue->poller->_populate plumbing.
+        from spectral_predict.multitarget_search import (
+            MultiTargetResult, MultiTargetSearchOutput,
+        )
+
+        targets = ["prop_0", "prop_1", "prop_2"]
+
+        def _per_target():
+            return [{"target": t, "r2": 0.9, "rmse": 0.1, "rpd": 3.0,
+                     "rer": 5.0, "ccc": 0.85, "bias": 0.0} for t in targets]
+
+        def _fake_grid(X, Y, **kwargs):
+            return MultiTargetSearchOutput(
+                results=[
+                    MultiTargetResult(
+                        model_name="PLS", mode="JOINT", params={}, joint_q2=0.8,
+                        metrics={"per_target": _per_target(), "q2": np.array([0.8, 0.8, 0.8])},
+                        precise_note="", scale_y=True, mechanism="x",
+                    ),
+                    MultiTargetResult(
+                        model_name="Ridge", mode="INDEPENDENT", params={}, joint_q2=0.7,
+                        metrics={"per_target": _per_target(), "q2": np.array([0.7, 0.7, 0.7])},
+                        precise_note="independent", scale_y=False, mechanism="n separate fits",
+                    ),
+                ],
+                target_names=targets, correlation={}, n_targets=3, skipped=[],
+            )
+
+        import spectral_predict.multitarget_grid as mg
+        monkeypatch.setattr(mg, "run_multitarget_grid_search", _fake_grid)
+
         gui_app._run_multitarget_search()
 
-        # The search now runs on a daemon worker thread; the worker never calls
+        # The search runs on a daemon worker thread; the worker never calls
         # root.after (Tcl rejects cross-thread registration), it enqueues events
         # that a main-thread poller (scheduled via root.after) drains. Pump the
         # Tk event loop so that poller fires and _multitarget_done runs (which
         # stores _multitarget_last_output + populates the tree) before asserting.
         import time
-        deadline = time.time() + 120
+        deadline = time.time() + 30
         while time.time() < deadline:
             try:
                 gui_app.root.update()
@@ -125,15 +160,7 @@ class TestMultiTargetTab:
         for t in ("prop_0", "prop_1", "prop_2"):
             for key in ("r2", "rmse", "rpd", "rer", "ccc", "bias"):
                 assert f"{t}__{key}" in cols
-        # The grid now expands preprocessing × hyperparameters × model into many
-        # cells (full single-Y parity), so the row count is no longer 1-per-model.
-        # Assert the leaderboard is populated and BOTH selected models appear.
-        rows = [gui_app.multitarget_tree.item(r, "values")
-                for r in gui_app.multitarget_tree.get_children()]
-        assert len(rows) >= 2
-        row_models = {r[0] for r in rows}
-        assert "PLS" in row_models
-        assert "Ridge" in row_models
+        assert len(gui_app.multitarget_tree.get_children()) == 2
 
     def test_run_refuses_single_target(self, gui_app):
         _load_multitarget_data(gui_app)
@@ -182,3 +209,29 @@ class TestMultiTargetGridDispatch:
         gui_app._multitarget_controller = SearchController()
         gui_app._cancel_multitarget_search()
         assert gui_app._multitarget_controller.is_ended() or gui_app._multitarget_controller._stop_requested
+
+
+@pytest.mark.gui
+def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
+    from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
+
+    res = MultiTargetResult(
+        model_name="PLS", mode="JOINT", params={"n_components": 5}, joint_q2=0.8,
+        metrics={"per_target": [{"target": "a", "r2": 0.8, "rmse": 1.0, "rpd": 2.0,
+                                 "rer": 3.0, "ccc": 0.9, "bias": 0.0}],
+                 "q2": np.array([0.8])},
+        precise_note="", scale_y=True, mechanism="x",
+        preprocessing="snv", varsel_method="ipls_forward", varsel_tag="fwd", n_variables=25,
+    )
+    out = MultiTargetSearchOutput(results=[res], target_names=["a"], correlation={},
+                                  n_targets=1, skipped=["uve"])
+    gui_app._populate_multitarget_results(out)
+    cols = list(gui_app.multitarget_tree["columns"])
+    assert "preprocessing" in cols
+    assert "varsel" in cols
+    assert "nvars" in cols
+    row = gui_app.multitarget_tree.get_children()[0]
+    values = gui_app.multitarget_tree.item(row, "values")
+    assert "snv" in values
+    assert "ipls_forward" in values
+    assert "25" in values

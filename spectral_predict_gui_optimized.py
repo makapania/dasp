@@ -15845,17 +15845,19 @@ class SpectralPredictApp:
         tree.delete(*tree.get_children())
 
         target_names = list(output.target_names)
-        columns = ["model", "mode", "joint_q2"]
+        columns = ["preprocessing", "varsel", "nvars", "key_hp", "model", "mode", "joint_q2"]
         for t in target_names:
             for key, _lbl in self._MULTITARGET_METRIC_KEYS:
                 columns.append(f"{t}__{key}")
         tree.configure(columns=columns)
-        tree.heading("model", text="Model")
-        tree.column("model", width=110, anchor=tk.W)
-        tree.heading("mode", text="Mode")
-        tree.column("mode", width=100, anchor=tk.CENTER)
-        tree.heading("joint_q2", text="Joint Q²")
-        tree.column("joint_q2", width=80, anchor=tk.E)
+        for cid, text, w, anchor in [
+            ("preprocessing", "Preprocess", 110, tk.W), ("varsel", "Varsel", 110, tk.W),
+            ("nvars", "#Vars", 60, tk.E), ("key_hp", "Key HP", 140, tk.W),
+            ("model", "Model", 110, tk.W), ("mode", "Mode", 100, tk.CENTER),
+            ("joint_q2", "Joint Q²", 80, tk.E),
+        ]:
+            tree.heading(cid, text=text)
+            tree.column(cid, width=w, anchor=anchor)
         for t in target_names:
             for key, lbl in self._MULTITARGET_METRIC_KEYS:
                 col = f"{t}__{key}"
@@ -15863,8 +15865,12 @@ class SpectralPredictApp:
                 tree.column(col, width=90, anchor=tk.E)
 
         for res in output.results:
-            per = {d["target"]: d for d in res.metrics["per_target"]}
-            values = [res.model_name, res.mode, f"{res.joint_q2:.4f}"]
+            per = {d["target"]: d for d in res.metrics.get("per_target", [])}
+            key_hp = ", ".join(f"{k}={v}" for k, v in list(res.params.items())[:3])
+            jq = f"{res.joint_q2:.4f}" if np.isfinite(res.joint_q2) else "NaN"
+            values = [res.preprocessing, res.varsel_method,
+                      "" if res.n_variables is None else str(res.n_variables),
+                      key_hp, res.model_name, res.mode, jq]
             for t in target_names:
                 d = per.get(t, {})
                 for key, _lbl in self._MULTITARGET_METRIC_KEYS:
@@ -15886,8 +15892,13 @@ class SpectralPredictApp:
             return
         rows = []
         for res in output.results:
-            per = {d["target"]: d for d in res.metrics["per_target"]}
+            per = {d["target"]: d for d in res.metrics.get("per_target", [])}
             record = {
+                "Preprocessing": res.preprocessing,
+                "Varsel_Method": res.varsel_method,
+                "Varsel_Tag": res.varsel_tag,
+                "N_Variables": res.n_variables,
+                "Key_Hyperparameters": ", ".join(f"{k}={v}" for k, v in res.params.items()),
                 "Model": res.model_name,
                 "MultiTarget Mode": res.mode,
                 "Joint_Q2": res.joint_q2,
