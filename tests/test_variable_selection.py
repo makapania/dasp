@@ -776,6 +776,51 @@ class TestMultiYVarsel:
         Y = np.zeros((10, 3))
         assert _prep_varsel_y(Y).shape == (10, 3)
 
+    def test_prep_varsel_y_ravel_equality_and_ndim(self):
+        """FIX F: 1-D and (n,1) inputs both ravel to the SAME 1-D vector
+        (byte-identical to the legacy np.asarray(y).ravel()); a genuine (n,3)
+        block is returned 2-D unchanged."""
+        n = 12
+        y1d = np.arange(n, dtype=float)
+        out_1d = _prep_varsel_y(y1d)
+        out_col = _prep_varsel_y(y1d.reshape(-1, 1))
+        assert out_1d.ndim == 1 and out_col.ndim == 1
+        assert np.array_equal(out_1d, np.arange(n))
+        assert np.array_equal(out_col, np.arange(n))
+        Y = np.arange(n * 3, dtype=float).reshape(n, 3)
+        out_block = _prep_varsel_y(Y)
+        assert out_block.ndim == 2
+        assert np.array_equal(out_block, Y)
+
+    def test_single_y_ravel_swap_byte_identity(self):
+        """FIX F: pin the ravel->_prep_varsel_y swap for the two changed entry
+        points. Passing 1-D y and (n,1) y must yield IDENTICAL importance arrays,
+        so a future regression that stops preserving single-Y equivalence is
+        caught."""
+        from spectral_predict.variable_selection import fipls_spa_selection
+
+        rng = np.random.default_rng(20260702)
+        n, p = 40, 30
+        wl = np.linspace(1000.0, 2000.0, p)
+        X = rng.standard_normal((n, p))
+        y = X[:, 3:6] @ rng.standard_normal(3) + 0.05 * rng.standard_normal(n)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            ipls_1d = np.asarray(
+                ipls_selection(X, y, n_intervals=10, n_components=5, cv_folds=5),
+                dtype=float,
+            )
+            ipls_col = np.asarray(
+                ipls_selection(X, y.reshape(-1, 1), n_intervals=10, n_components=5,
+                               cv_folds=5),
+                dtype=float,
+            )
+            fs_1d = np.asarray(fipls_spa_selection(X, y, wl), dtype=float)
+            fs_col = np.asarray(fipls_spa_selection(X, y.reshape(-1, 1), wl), dtype=float)
+
+        np.testing.assert_array_equal(ipls_1d, ipls_col)
+        np.testing.assert_array_equal(fs_1d, fs_col)
+
     def test_ipls_forward_multi_y(self, multi_y_data):
         X, Y, wl = multi_y_data
         with contextlib.redirect_stdout(io.StringIO()):
