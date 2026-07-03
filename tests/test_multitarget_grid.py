@@ -188,3 +188,108 @@ def test_dedup_keyset_equals_consumed_no_config_lost():
     out = _dedup_model_configs(grids)
     assert len(out) == 2
     assert {c["params"]["bootstrap"] for c in out} == {True, False}
+
+
+# --------------------------------------------------------------------------- #
+# T-17 FIX 6b: wavelength restriction that selects zero columns must raise
+# --------------------------------------------------------------------------- #
+def test_grid_wavelength_restriction_empty_raises(grid_xy):
+    """A wavelength restriction with NO overlap must raise a clear ValueError
+    (single-Y parity, search.py:~2791/~2830) instead of silently proceeding
+    into a degenerate (n, 0) feature block.
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    # wl spans 1000-2000 nm; 99990-99999 has zero overlap.
+    with pytest.raises(ValueError, match="excludes all wavelengths"):
+        run_multitarget_grid_search(
+            X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+            wavelength_restriction={"min": 99990.0, "max": 99999.0},
+            preprocessing_methods={"raw": True}, autoscale=False,
+            variable_selection_methods=[], tier="quick",
+            cv="kfold", n_folds=3, n_repeats=1,
+        )
+
+
+def test_grid_wavelength_restriction_nonempty_does_not_raise(grid_xy):
+    """POSITIVE control: a NON-empty restriction must NOT raise (guards against
+    an over-broad raise that would also trip on valid restrictions).
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        wavelength_restriction={"min": 1200.0, "max": 1800.0},
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    assert out.results  # non-empty, finite best
+    assert np.isfinite(out.best.joint_q2)
+
+
+# --------------------------------------------------------------------------- #
+# T-17 FIX 6c: Cancel must interrupt the preprocessing/subset-build loop
+# --------------------------------------------------------------------------- #
+class _Stopped:
+    """Fake controller whose check_and_wait() always returns False (stop)."""
+    def __init__(self):
+        self.calls = 0
+
+    def check_and_wait(self) -> bool:
+        self.calls += 1
+        return False
+
+
+class _Running:
+    """Fake controller whose check_and_wait() always returns True (continue)."""
+    def __init__(self):
+        self.calls = 0
+
+    def check_and_wait(self) -> bool:
+        self.calls += 1
+        return True
+
+
+def test_grid_controller_prestopped_early_exit(grid_xy):
+    """A controller that reports stop BEFORE the first preprocessing iteration
+    must interrupt the cell-BUILD loop so NO cells are built or evaluated.
+
+    On buggy code: (1) the preprocess loop had no controller check, and (2) the
+    eval-loop check ignored the False return value -- so the full search ran
+    and out.results was NON-empty.
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    ctrl = _Stopped()
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS", "Ridge"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True, "snv": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, controller=ctrl,
+    )
+    # EARLY EXIT: no cells built or evaluated.
+    assert out.results == []
+    assert ctrl.calls >= 1
+
+
+def test_grid_controller_running_completes(grid_xy):
+    """POSITIVE control: a controller whose check_and_wait() always returns True
+    must NOT early-exit -- the same run yields non-empty out.results (guards
+    against an always-break over-fix).
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    ctrl = _Running()
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, controller=ctrl,
+    )
+    assert out.results  # non-empty

@@ -555,8 +555,9 @@ def _evaluate_multitarget_cell(
     non-finite fold, sklearn ValueError) returns ``joint_q2=np.nan`` + ``error`` —
     never a finite 0.0 — so the NaN-safe rank sinks it.
     """
-    strategy = resolve_multitarget_strategy(model_name)
+    strategy: Optional[MultiTargetStrategy] = None
     try:
+        strategy = resolve_multitarget_strategy(model_name)
         estimator = build_multitarget_estimator(
             strategy, params, min_fold_train, n_features_sub
         )
@@ -575,10 +576,17 @@ def _evaluate_multitarget_cell(
             varsel_tag=varsel_tag, n_variables=int(n_features_sub), error=None,
         )
     except Exception as exc:  # NaN-sink: never a finite 0.0
+        # strategy may be None if resolve_multitarget_strategy raised (e.g. an
+        # UNKNOWN model name). Guarded fallbacks keep this cell's NaN sink
+        # honest without aborting the whole search.
         return MultiTargetResult(
-            model_name=model_name, mode=strategy.mode, params=dict(params),
-            joint_q2=np.nan, metrics={}, precise_note=strategy.precise_note,
-            scale_y=strategy.scale_y, mechanism=strategy.mechanism,
+            model_name=model_name,
+            mode=(strategy.mode if strategy is not None else "UNKNOWN"),
+            params=dict(params),
+            joint_q2=np.nan, metrics={},
+            precise_note=(strategy.precise_note if strategy is not None else ""),
+            scale_y=(strategy.scale_y if strategy is not None else False),
+            mechanism=(strategy.mechanism if strategy is not None else ""),
             y_true_pooled=None, y_pred_pooled=None,
             preprocessing=preprocessing, varsel_method=varsel_method,
             varsel_tag=varsel_tag, n_variables=int(n_features_sub), error=str(exc),

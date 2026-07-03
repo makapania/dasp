@@ -754,3 +754,40 @@ def test_run_multitarget_search_sinks_bad_config_to_nan_not_abort():
     assert out.best.model_name == "PLS"
     assert np.isnan(out.results[-1].joint_q2)
     assert out.results[-1].error is not None
+
+
+# --------------------------------------------------------------------------- #
+# T-17 FIX 6a: unknown model must NaN-sink, not abort the whole search
+# --------------------------------------------------------------------------- #
+def test_unknown_model_sinks_to_nan_and_sibling_still_ranks():
+    """A single UNKNOWN model name (resolve_multitarget_strategy raises ValueError)
+    must sink ONE cell to a NaN result, not abort the ENTIRE search.
+
+    On buggy code the resolve call lived OUTSIDE the try, so the ValueError
+    propagated up through run_multitarget_search and the whole call raised
+    instead of returning a ranked MultiTargetSearchOutput.
+    """
+    rng = np.random.default_rng(3)
+    n, p = 40, 10
+    X = rng.standard_normal((n, p))
+    Y = X[:, :2] @ rng.standard_normal((2, 2)) + 0.05 * rng.standard_normal((n, 2))
+    out = run_multitarget_search(
+        X, Y,
+        [
+            {"model_name": "NotAModel", "params": {}},          # unknown -> NaN sink
+            {"model_name": "PLS", "params": {"n_components": 2}},  # finite
+        ],
+        cv="kfold", n_folds=3, n_repeats=1, target_names=["a", "b"],
+    )
+    # Unknown-model cell: NaN joint_q2, error populated and names the bad model.
+    bad = next(r for r in out.results if r.model_name == "NotAModel")
+    assert np.isnan(bad.joint_q2)
+    assert bad.error is not None
+    assert "NotAModel" in bad.error
+
+    # Sibling finite model: a real, finite joint_q2.
+    good = next(r for r in out.results if r.model_name == "PLS")
+    assert np.isfinite(good.joint_q2)
+
+    # NaN-safe ranking: the finite model is reported as best, never the NaN cell.
+    assert out.best.model_name == "PLS"

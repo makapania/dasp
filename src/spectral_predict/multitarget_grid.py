@@ -473,6 +473,8 @@ def run_multitarget_grid_search(
     cells = []  # (preprocess_cfg, X_sub, wl_sub, subset_dict, model_cfg)
 
     for pc in preprocess_configs:
+        if controller is not None and not controller.check_and_wait():
+            break
         name = pc.get("base_name", pc["name"])
         steps = build_preprocessing_pipeline(
             name, pc["deriv"], pc["window"], pc["polyorder"],
@@ -498,6 +500,11 @@ def run_multitarget_grid_search(
                 if wl_max is not None:
                     mask &= wl_pp <= wl_max
             X_pp, wl_pp = X_pp[:, mask], wl_pp[mask]
+            if X_pp.shape[1] == 0:
+                raise ValueError(
+                    "Wavelength restriction excludes all wavelengths; "
+                    "no spectral columns remain."
+                )
         elif pc.get("deriv") and pc.get("window"):
             X_pp, wl_pp, _ = _apply_edge_mask_to_data(X_pp, wl_pp, pc)
 
@@ -545,8 +552,8 @@ def run_multitarget_grid_search(
 
     total = len(cells)
     for i, (pc, X_sub, tag, method, n_vars, mc) in enumerate(cells):
-        if controller is not None:
-            controller.check_and_wait()
+        if controller is not None and not controller.check_and_wait():
+            break
         res = _evaluate_multitarget_cell(
             X_sub, Y_arr, mc["model_name"], mc["params"], splitter, min_fold_train,
             X_sub.shape[1], target_names, n_folds=n_folds, n_repeats=n_repeats,
