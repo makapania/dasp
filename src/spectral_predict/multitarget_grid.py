@@ -208,6 +208,13 @@ def _importances_to_subsets(
 ) -> list[dict[str, Any]]:
     """Top-N subsets from an importance array (mirrors search.py:3695/3766)."""
     imp = np.asarray(importances, dtype=float)
+    # NaN-sink discipline: argsort places NaN LAST (treats it as the largest
+    # value), so a raw argsort would hand NaN/inf features back as the "top" set.
+    # If nothing is finite there is no meaningful subset; otherwise push every
+    # non-finite entry to -inf so it sinks to the bottom instead of the top.
+    if not np.any(np.isfinite(imp)):
+        return []
+    imp = np.where(np.isfinite(imp), imp, -np.inf)
     counts = variable_counts or [10, 20, 50, 100, 250, 500, 1000]
     valid = [n for n in counts if n < n_features_sub]
     subsets: list[dict[str, Any]] = []

@@ -106,6 +106,42 @@ def test_importances_to_subsets_top_n_filtered(xy_multi):
     assert "top5" in top5["tag"]
 
 
+def test_importances_to_subsets_nan_features_sink_not_selected():
+    """FIX B (NaN-sink): NaN importances must NOT be chosen as 'top' features.
+
+    np.argsort puts NaN LAST (treated as the largest value), so a raw argsort
+    would select exactly the NaN indices for the top-N subset. The fix sinks
+    non-finite entries to -inf so finite features win. Here the informative
+    indices carry NaN and everything else is finite -> the produced top-N must
+    exclude the NaN indices entirely.
+    """
+    from spectral_predict.multitarget_grid import _importances_to_subsets
+
+    p = 40
+    imp = np.arange(p, dtype=float)  # finite baseline
+    nan_idx = [37, 38, 39]  # would be the argsort 'top' on buggy code (NaN=largest)
+    imp[nan_idx] = np.nan
+    subs = _importances_to_subsets(
+        imp, "spa", variable_counts=[5], n_features_sub=p
+    )
+    assert len(subs) == 1
+    picked = set(subs[0]["indices"].tolist())
+    # On buggy code picked would be {35,36,37,38,39} (NaN sorted last=top). Fixed:
+    # NaN indices sink to -inf and are never selected.
+    assert not (picked & set(nan_idx)), (
+        f"NaN feature indices {nan_idx} were selected as top: {sorted(picked)}"
+    )
+
+
+def test_importances_to_subsets_all_nan_returns_empty():
+    """FIX B: an all-NaN importance vector yields no subset (returns [])."""
+    from spectral_predict.multitarget_grid import _importances_to_subsets
+
+    imp = np.full(40, np.nan)
+    subs = _importances_to_subsets(imp, "spa", variable_counts=[5, 10], n_features_sub=40)
+    assert subs == []
+
+
 def test_model_independent_importances_spa_and_ga(xy_multi):
     from spectral_predict.multitarget_grid import _model_independent_importances
 
