@@ -67,7 +67,11 @@ def test_interval_subset_adapter_returns_truncated_subsets(xy_multi):
         assert s["method"] == "ipls_forward"
         assert isinstance(s["indices"], np.ndarray)
         assert s["indices"].size >= 1
-        assert s["indices"].size < X.shape[1] or "iPLS" in s["tag"]
+        # De-tautologized (FIX D): the old `or "iPLS" in s["tag"]` was always
+        # true (ipls_forward always tags 'fwd_iPLS'), so it masked the real
+        # truncation assertion. A genuine interval subset is strictly narrower
+        # than the full feature block.
+        assert s["indices"].size < X.shape[1]
         assert isinstance(s["tag"], str)
 
 
@@ -104,6 +108,33 @@ def test_importances_to_subsets_top_n_filtered(xy_multi):
     assert set(top5["indices"].tolist()) == {35, 36, 37, 38, 39}  # highest importances
     assert top5["method"] == "spa"
     assert "top5" in top5["tag"]
+
+
+def test_verify_spa_multi_y_safe_false_when_spa_raises(xy_multi, monkeypatch):
+    """FIX G(3): verify_spa_multi_y_safe returns False when the underlying
+    spa_selection degenerates (here: raises) on a genuine 2-D Y block, so the
+    caller demotes spa/fipls_spa to skip-with-notice."""
+    import spectral_predict.variable_selection as vs
+    from spectral_predict.multitarget_grid import verify_spa_multi_y_safe
+
+    X, Y, _wl = xy_multi  # Y is (n, 3) -> genuine multi-Y, guard is exercised
+
+    def _boom(*a, **k):
+        raise RuntimeError("SPA degenerated on 2-D Y")
+
+    monkeypatch.setattr(vs, "spa_selection", _boom)
+    assert verify_spa_multi_y_safe(X, Y, n_features=5) is False
+
+
+def test_verify_spa_multi_y_safe_false_when_all_zero(xy_multi, monkeypatch):
+    """FIX G(3, sibling): an all-zero importance (no features selected) is also
+    demoted to False."""
+    import spectral_predict.variable_selection as vs
+    from spectral_predict.multitarget_grid import verify_spa_multi_y_safe
+
+    X, Y, _wl = xy_multi
+    monkeypatch.setattr(vs, "spa_selection", lambda *a, **k: np.zeros(X.shape[1]))
+    assert verify_spa_multi_y_safe(X, Y, n_features=5) is False
 
 
 def test_importances_to_subsets_nan_features_sink_not_selected():
@@ -157,6 +188,20 @@ def test_importance_reference_fit_tree_model(xy_multi):
 
     X, Y, _wl = xy_multi
     imp = _importance_reference_fit("RandomForest", X, Y, min_fold_train=X.shape[0] - 1)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))
+
+
+def test_importance_reference_fit_independent_multioutput(xy_multi):
+    """FIX E(2): _importance_reference_fit for an INDEPENDENT model resolved to a
+    MultiOutputRegressor (LightGBM) must return a per-feature importance of shape
+    (n_features,) with all-finite values (exercises the MultiOutputRegressor
+    column-stack + aggregate branch)."""
+    from spectral_predict.multitarget_grid import _importance_reference_fit
+
+    X, Y, _wl = xy_multi
+    imp = _importance_reference_fit("LightGBM", X, Y, min_fold_train=X.shape[0] - 1)
+    imp = np.asarray(imp, dtype=float)
     assert imp.shape == (X.shape[1],)
     assert np.all(np.isfinite(imp))
 
