@@ -15635,8 +15635,6 @@ class SpectralPredictApp:
 
     def _collect_multitarget_config(self):
         """Assemble the inherited search config (same state the normal Run reads)."""
-        from spectral_predict.search_controller import SearchController
-
         targets = list(self.selected_targets)
         if len(targets) < 2:
             messagebox.showwarning(
@@ -15719,8 +15717,11 @@ class SpectralPredictApp:
         varsel, per-model HPs, CV strategy, tier, …) and routes it through
         ``run_multitarget_grid_search`` on a daemon thread with a SEPARATE
         ``SearchController`` (never ``self.search_controller``) so the single-Y
-        stop/pause controls are untouched. All Tk writes are marshalled to the
-        main thread via ``self.root.after(0, ...)``.
+        stop/pause controls are untouched. The worker NEVER touches Tk (nor
+        ``root.after`` — Tcl rejects cross-thread command registration); it only
+        puts ("progress"|"done"|"failed", payload) tuples on ``_multitarget_queue``.
+        A main-thread poller (``_poll_multitarget_queue``, scheduled via
+        ``root.after`` FROM the main thread) drains the queue and does all Tk writes.
         """
         import queue as _mt_queue
         import threading
