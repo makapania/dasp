@@ -658,3 +658,60 @@ def test_catboost_bagging_temperature_only_with_bayesian():
         n_samples=40, n_features=12,
     )
     assert est.get_params()["bagging_temperature"] == 3.0
+
+
+def test_evaluate_cell_returns_nan_on_failure():
+    from spectral_predict.multitarget_search import _evaluate_multitarget_cell
+
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((30, 8))
+    Y = rng.standard_normal((30, 2))
+    splitter = build_cv_splitter("kfold", 3, "regression", n_repeats=1, random_state=42, y=None)
+    # An impossible param forces the estimator to raise inside CV -> NaN sink.
+    res = _evaluate_multitarget_cell(
+        X, Y, "SVR", {"C": -5.0}, splitter, min_fold_train=20,
+        n_features_sub=8, target_names=["a", "b"],
+    )
+    assert np.isnan(res.joint_q2)
+    assert res.error is not None
+    assert res.model_name == "SVR"
+
+
+def test_evaluate_cell_success_carries_metadata():
+    from spectral_predict.multitarget_search import _evaluate_multitarget_cell
+
+    rng = np.random.default_rng(2)
+    X = rng.standard_normal((40, 10))
+    base = X[:, :3] @ rng.standard_normal((3, 2))
+    Y = base + 0.05 * rng.standard_normal((40, 2))
+    splitter = build_cv_splitter("kfold", 3, "regression", n_repeats=1, random_state=42, y=None)
+    res = _evaluate_multitarget_cell(
+        X, Y, "PLS", {"n_components": 4}, splitter, min_fold_train=25,
+        n_features_sub=10, target_names=["a", "b"],
+        preprocessing="snv", varsel_method="ipls_forward", varsel_tag="fwd_iPLS_1000-1100nm",
+    )
+    assert res.error is None
+    assert res.preprocessing == "snv"
+    assert res.varsel_method == "ipls_forward"
+    assert res.varsel_tag == "fwd_iPLS_1000-1100nm"
+    assert res.n_variables == 10
+    assert res.metrics["q2"].shape == (2,)
+
+
+def test_run_multitarget_search_sinks_bad_config_to_nan_not_abort():
+    """F2 refactor: a failing cell no longer aborts the whole search; it sinks to NaN."""
+    rng = np.random.default_rng(3)
+    X = rng.standard_normal((40, 10))
+    base = X[:, :3] @ rng.standard_normal((3, 2))
+    Y = base + 0.05 * rng.standard_normal((40, 2))
+    out = run_multitarget_search(
+        X, Y,
+        [{"model_name": "SVR", "params": {"C": -1.0}},   # bad -> NaN
+         {"model_name": "PLS", "params": {"n_components": 3}}],  # good
+        cv="kfold", n_folds=3, target_names=["a", "b"],
+    )
+    assert len(out.results) == 2
+    # Good config ranks first; bad config sunk to the bottom with NaN + error.
+    assert out.best.model_name == "PLS"
+    assert np.isnan(out.results[-1].joint_q2)
+    assert out.results[-1].error is not None

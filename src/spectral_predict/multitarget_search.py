@@ -64,6 +64,7 @@ __all__ = [
     "MultiTargetSearchOutput",
     "resolve_multitarget_strategy",
     "build_multitarget_estimator",
+    "_evaluate_multitarget_cell",
     "run_multitarget_search",
 ]
 
@@ -530,6 +531,60 @@ class MultiTargetSearchOutput:
         return self.results[0] if self.results else None
 
 
+def _evaluate_multitarget_cell(
+    X_sub: Any,
+    Y: Any,
+    model_name: str,
+    params: dict[str, Any],
+    splitter: Any,
+    min_fold_train: int,
+    n_features_sub: int,
+    target_names: list[str],
+    *,
+    n_folds: int = 5,
+    n_repeats: int = 5,
+    random_state: int = 42,
+    preprocessing: str = "raw",
+    varsel_method: str = "full",
+    varsel_tag: str = "full",
+) -> MultiTargetResult:
+    """Evaluate one (preprocess, varsel-subset, model, hp) cell; NaN-sink on failure.
+
+    ``n_features_sub`` MUST be ``X_sub.shape[1]`` (the subset feature count) so PLS
+    component capping cannot over-request. Any exception (degenerate subset,
+    non-finite fold, sklearn ValueError) returns ``joint_q2=np.nan`` + ``error`` —
+    never a finite 0.0 — so the NaN-safe rank sinks it.
+    """
+    strategy = resolve_multitarget_strategy(model_name)
+    try:
+        estimator = build_multitarget_estimator(
+            strategy, params, min_fold_train, n_features_sub
+        )
+        y_true, y_pred = multi_y_cv_pool(
+            estimator, X_sub, Y, splitter,
+            scale_y=strategy.scale_y, n_folds=n_folds,
+            n_repeats=n_repeats, random_state=random_state,
+        )
+        metrics = multi_y_metrics(y_true, y_pred, target_names=target_names)
+        return MultiTargetResult(
+            model_name=model_name, mode=strategy.mode, params=dict(params),
+            joint_q2=metrics["joint_q2"], metrics=metrics,
+            precise_note=strategy.precise_note, scale_y=strategy.scale_y,
+            mechanism=strategy.mechanism, y_true_pooled=y_true, y_pred_pooled=y_pred,
+            preprocessing=preprocessing, varsel_method=varsel_method,
+            varsel_tag=varsel_tag, n_variables=int(n_features_sub), error=None,
+        )
+    except Exception as exc:  # NaN-sink: never a finite 0.0
+        return MultiTargetResult(
+            model_name=model_name, mode=strategy.mode, params=dict(params),
+            joint_q2=np.nan, metrics={}, precise_note=strategy.precise_note,
+            scale_y=strategy.scale_y, mechanism=strategy.mechanism,
+            y_true_pooled=None, y_pred_pooled=None,
+            preprocessing=preprocessing, varsel_method=varsel_method,
+            varsel_tag=varsel_tag, n_variables=int(n_features_sub), error=str(exc),
+        )
+
+
 def run_multitarget_search(
     X: Any,
     Y: Any,
@@ -621,33 +676,11 @@ def run_multitarget_search(
     for config in model_configs:
         model_name = config["model_name"]
         params = config.get("params", {})
-        strategy = resolve_multitarget_strategy(model_name)
-        estimator = build_multitarget_estimator(
-            strategy, params, min_fold_train, n_features
-        )
-        y_true, y_pred = multi_y_cv_pool(
-            estimator,
-            X_arr,
-            Y_arr,
-            splitter,
-            scale_y=strategy.scale_y,
-            n_folds=n_folds,
-            n_repeats=n_repeats,
-            random_state=random_state,
-        )
-        metrics = multi_y_metrics(y_true, y_pred, target_names=target_names)
         results.append(
-            MultiTargetResult(
-                model_name=model_name,
-                mode=strategy.mode,
-                params=dict(params),
-                joint_q2=metrics["joint_q2"],
-                metrics=metrics,
-                precise_note=strategy.precise_note,
-                scale_y=strategy.scale_y,
-                mechanism=strategy.mechanism,
-                y_true_pooled=y_true,
-                y_pred_pooled=y_pred,
+            _evaluate_multitarget_cell(
+                X_arr, Y_arr, model_name, params, splitter, min_fold_train,
+                X_arr.shape[1], target_names,
+                n_folds=n_folds, n_repeats=n_repeats, random_state=random_state,
             )
         )
 
