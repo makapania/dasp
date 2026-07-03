@@ -15700,6 +15700,7 @@ class SpectralPredictApp:
             "wavelength_restriction": self._collect_wavelength_restriction(),
             "variable_selection_methods": self._collect_selected_varsel_methods(),
             "variable_counts": self._collect_variable_counts() or None,
+            "apply_uve_prefilter": self.apply_uve_prefilter.get(),
             "ipls_subset_limit": self.ipls_subset_limit.get(),
             "tier": self._resolve_tier(),
             "model_grid_overrides": self._build_model_grid_overrides(),

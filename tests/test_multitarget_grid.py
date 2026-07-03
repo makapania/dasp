@@ -108,6 +108,47 @@ def test_grid_search_end_to_end_ranks_and_skips(grid_xy):
     assert "uve" in out.skipped
 
 
+def test_grid_search_apply_uve_prefilter_surfaces_skip(grid_xy):
+    """FIX A: apply_uve_prefilter=True must flow from run_multitarget_grid_search
+    into build_multitarget_varsel_subsets so the skip-notice branch fires and
+    'apply_uve_prefilter' appears in out.skipped (UVE-on-y is a discrimination
+    method, not a multi-Y method -- greyed out, surfaced as a skip notice).
+
+    On unfixed code the run function has no apply_uve_prefilter param -> the call
+    raises TypeError and this test fails.
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, apply_uve_prefilter=True,
+    )
+    assert "apply_uve_prefilter" in out.skipped
+    # The run still completes and ranks (the skip notice does not abort search).
+    assert out.results
+    assert np.isfinite(out.results[0].joint_q2)
+
+
+def test_grid_search_no_uve_prefilter_no_notice(grid_xy):
+    """FIX A (negative control): default apply_uve_prefilter=False must NOT add
+    the skip notice (guards against an always-on notice)."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    assert "apply_uve_prefilter" not in out.skipped
+
+
 def test_grid_search_progress_callback_dict_shape(grid_xy):
     from spectral_predict.multitarget_grid import run_multitarget_grid_search
 

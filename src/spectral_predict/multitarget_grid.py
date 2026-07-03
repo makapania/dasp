@@ -422,6 +422,7 @@ def run_multitarget_grid_search(
     smoothing=False, smoothing_window=17, smoothing_polyorder=2,
     interference_to_add=None, wavelength_restriction=None,
     variable_selection_methods, variable_counts=None,
+    apply_uve_prefilter: bool = False,
     ipls_subset_limit="Top 10", tier="standard", model_grid_overrides=None,
     max_n_components=10, max_iter=500, window_sizes=None,
     cv="kfold", n_folds=5, n_repeats=5, random_state=42,
@@ -521,6 +522,7 @@ def run_multitarget_grid_search(
             ipls_subset_limit=ipls_subset_limit, spa_ok=spa_ok,
             cache=varsel_cache,
             preprocess_id=_preprocess_fingerprint(pc),
+            apply_uve_prefilter=apply_uve_prefilter,
         )
         for s in skipped:
             if s not in skipped_all:
