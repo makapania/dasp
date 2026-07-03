@@ -87,3 +87,39 @@ def test_verify_spa_multi_y_safe_shape_and_finiteness():
     imp = np.asarray(spa_selection(X, Y, n_features=5), dtype=float)
     assert imp.shape == (20,)
     assert np.all(np.isfinite(imp))
+
+
+def test_importances_to_subsets_top_n_filtered(xy_multi):
+    from spectral_predict.multitarget_grid import _importances_to_subsets
+
+    X, _Y, _wl = xy_multi
+    imp = np.arange(X.shape[1], dtype=float)  # 40 features, strictly increasing
+    subs = _importances_to_subsets(
+        imp, "spa", variable_counts=[5, 10, 999], n_features_sub=X.shape[1]
+    )
+    # 999 >= 40 is filtered out; 5 and 10 remain.
+    sizes = sorted(s["indices"].size for s in subs)
+    assert sizes == [5, 10]
+    top5 = next(s for s in subs if s["indices"].size == 5)
+    assert set(top5["indices"].tolist()) == {35, 36, 37, 38, 39}  # highest importances
+    assert top5["method"] == "spa"
+    assert "top5" in top5["tag"]
+
+
+def test_model_independent_importances_spa_and_ga(xy_multi):
+    from spectral_predict.multitarget_grid import _model_independent_importances
+
+    X, Y, _wl = xy_multi
+    imp_spa = _model_independent_importances("spa", X, Y)
+    assert imp_spa is not None and imp_spa.shape == (X.shape[1],)
+    imp_ga = _model_independent_importances("ga", X, Y)
+    assert imp_ga is not None and imp_ga.shape == (X.shape[1],)
+
+
+def test_importance_reference_fit_tree_model(xy_multi):
+    from spectral_predict.multitarget_grid import _importance_reference_fit
+
+    X, Y, _wl = xy_multi
+    imp = _importance_reference_fit("RandomForest", X, Y, min_fold_train=X.shape[0] - 1)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))

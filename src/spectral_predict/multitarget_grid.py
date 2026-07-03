@@ -106,6 +106,9 @@ def build_multitarget_preprocess_configs(
 
 _INTERVAL_METHODS = {"ipls_forward", "ipls_backward", "mc_sipls", "mwpls"}
 
+LINEAR_MODELS = {"PLS", "Ridge", "Lasso", "ElasticNet"}
+_IMPORTANCE_METHODS = {"spa", "ga", "importance", "fipls_spa"}
+
 
 def _parse_ipls_subset_limit(limit: str) -> Optional[int]:
     """'Top N' -> N; 'All' (or anything non-numeric) -> None (no truncation)."""
@@ -160,3 +163,64 @@ def verify_spa_multi_y_safe(X: np.ndarray, Y: np.ndarray, *, n_features: int = 5
         and np.all(np.isfinite(imp))
         and np.count_nonzero(imp) >= 1
     )
+
+
+def _importances_to_subsets(
+    importances: np.ndarray, method: str, *, variable_counts, n_features_sub: int,
+) -> list[dict[str, Any]]:
+    """Top-N subsets from an importance array (mirrors search.py:3695/3766)."""
+    imp = np.asarray(importances, dtype=float)
+    counts = variable_counts or [10, 20, 50, 100, 250, 500, 1000]
+    valid = [n for n in counts if n < n_features_sub]
+    subsets: list[dict[str, Any]] = []
+    for n_top in valid:
+        top = np.argsort(imp, kind="stable")[-n_top:][::-1]
+        subsets.append({"indices": np.asarray(top), "tag": f"{method}_top{n_top}",
+                        "method": method})
+    return subsets
+
+
+def _model_independent_importances(method: str, X_pp: np.ndarray, Y: np.ndarray):
+    """spa / ga importance arrays (model-independent, cached per preprocess)."""
+    if method == "spa":
+        from .variable_selection import spa_selection
+        return np.asarray(spa_selection(X_pp, Y, n_features=max(5, X_pp.shape[1] // 10)),
+                          dtype=float)
+    if method == "ga":
+        from .ga_pls import ga_pls_selection
+        return np.asarray(ga_pls_selection(X_pp, Y, task_type="regression", verbose=0),
+                          dtype=float)
+    return None
+
+
+def _importance_reference_fit(
+    model_name: str, X_pp: np.ndarray, Y: np.ndarray, min_fold_train: int,
+) -> np.ndarray:
+    """Model-specific importances: fit a reference estimator on full X_pp/Y,
+    extract a (n_features, n_targets) matrix, aggregate to per-feature scores."""
+    from sklearn.multioutput import MultiOutputRegressor
+
+    from .models import get_feature_importances
+    from .multi_y import aggregate_importance
+    from .multitarget_search import build_multitarget_estimator, resolve_multitarget_strategy
+
+    Y = np.asarray(Y, dtype=float)
+    strategy = resolve_multitarget_strategy(model_name)
+    est = build_multitarget_estimator(strategy, {}, min_fold_train, X_pp.shape[1])
+    est.fit(X_pp, Y)  # importances are rank-only; raw-Y fit is adequate
+    n_features = X_pp.shape[1]
+
+    if isinstance(est, MultiOutputRegressor):
+        cols = []
+        for i, sub in enumerate(est.estimators_):
+            imp = get_feature_importances(sub, model_name, X_pp, Y[:, i])
+            cols.append(np.asarray(imp, dtype=float).ravel())
+        matrix = np.column_stack(cols)  # (n_features, n_targets)
+    elif hasattr(est, "feature_importances_"):
+        matrix = np.asarray(est.feature_importances_, dtype=float).reshape(n_features, -1)
+    elif hasattr(est, "coef_"):
+        coef = np.abs(np.asarray(est.coef_, dtype=float))
+        matrix = coef.T if coef.ndim == 2 else coef.reshape(n_features, -1)
+    else:
+        matrix = np.ones((n_features, 1))
+    return aggregate_importance(matrix, rule="mean")
