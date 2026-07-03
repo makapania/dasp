@@ -17,6 +17,20 @@ Auto-commit note: the environment/orchestrator committed the bulk of this work a
 
 ---
 
+## 2026-07-02 — T-17 Phase B (GUI): worker-thread queue+poller race patterns caught at review
+
+Phase B reworked the Multi-Target tab to dispatch `run_multitarget_grid_search` on a worker thread. The plan said "marshal Tk writes via `root.after(0,...)` from the worker" — that raises `RuntimeError: main thread is not in main loop` on Win32 Tcl (cross-thread command registration is rejected). Correct pattern (now in the tab): the worker ONLY enqueues `("progress"|"done"|"failed", payload)` onto a `queue.Queue`; a `_poll_multitarget_queue` scheduled via `root.after(100,...)` **from the main thread** drains it and does every widget write. Reusable GUI-threading lessons from the review (Codex + Kimi K2.7 both flagged the first two):
+
+- **A queue+poller's stop condition must gate on a "terminal handled" latch, not `thread.is_alive()` + `queue.empty()`.** A final `done`/`failed` tuple enqueued *between* the empty-check and the stop decision is dropped, and the UI hangs on "Running…" forever. Fix: a `_multitarget_terminal_seen` flag set inside the done/failed handlers; stop only when `terminal_seen and not worker_alive and queue.empty()`.
+- **A repeat Run orphans the prior worker + double-schedules the poller** unless you guard concurrent runs. Fix: reject a 2nd start while a worker is alive (+ disable the Run button for the run lifecycle), track the poll's `after`-id and `after_cancel` any pending poll, and install a FRESH per-run `queue.Queue` so a prior run's stale `done` can't overwrite the new run's result.
+- **A poller's blanket `except Exception: pass` silently eats terminal-handler errors** — if `_populate_multitarget_results` raises on a `done`, status stays "Running…" with no error. Narrow it to per-message handling that surfaces the failure (status "Failed." + logged traceback + dialog).
+- **`SearchController.is_ended` @property → method** was forced by the plan's verbatim cancel test; safe only because every reader uses call syntax (grep confirmed: `gui:24810`, `tpe_preprocessing_discovery.py:1262` via `getattr(...,lambda:False)()`, tests). A missed bare `.is_ended` would be a truthy bound method → cancellation silently always-true. **When flipping a property to a method, grep every reader.**
+- **GUI config-inheritance drift:** the multi-target `_collect_pls_overrides` dropped the `pls_tol_1e5` checkbox the single-Y collector reads (`:27954`) — a per-model HP collector that mirrors another must be diffed field-by-field against the reference, not eyeballed.
+
+All 6 fixed with discriminating tests (`4cdb47a`..`898e083`); 23 GUI/controller tests pass; `search.py`/`run_search` 0-diff.
+
+---
+
 ## 2026-07-02 — T-17 "full search parity": Phase A backend built by GLM workers, 8 real defects caught at the phase-boundary review
 
 Multi-target full-search-parity (spec `docs/superpowers/specs/2026-07-02-...design.md`, plan `docs/superpowers/plans/2026-07-02-...parity.md`). New file `src/spectral_predict/multitarget_grid.py` orchestrates a preprocessing × varsel × model × hyperparameter grid above the F2 seed evaluator; `run_search` untouched. Phase A (Tasks 1-11) was implemented by GLM-5.2 workers under an Opus orchestrator, then reviewed by Codex + Kimi K2.7. **The green suite (167 tests) hid real silent-wrong-result bugs; the phase-boundary review caught 8.** Lessons worth keeping:
