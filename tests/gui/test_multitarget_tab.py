@@ -93,6 +93,25 @@ class TestMultiTargetTab:
 
         gui_app._run_multitarget_search()
 
+        # The search now runs on a daemon worker thread; the worker never calls
+        # root.after (Tcl rejects cross-thread registration), it enqueues events
+        # that a main-thread poller (scheduled via root.after) drains. Pump the
+        # Tk event loop so that poller fires and _multitarget_done runs (which
+        # stores _multitarget_last_output + populates the tree) before asserting.
+        import time
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                gui_app.root.update()
+            except Exception:
+                pass
+            if gui_app._multitarget_last_output is not None:
+                break
+            thread = getattr(gui_app, "_multitarget_thread", None)
+            if thread is not None and not thread.is_alive() and gui_app._multitarget_queue.empty():
+                break  # worker finished without producing output
+            time.sleep(0.02)
+
         out = gui_app._multitarget_last_output
         assert out is not None
         assert out.n_targets == 3
@@ -106,7 +125,15 @@ class TestMultiTargetTab:
         for t in ("prop_0", "prop_1", "prop_2"):
             for key in ("r2", "rmse", "rpd", "rer", "ccc", "bias"):
                 assert f"{t}__{key}" in cols
-        assert len(gui_app.multitarget_tree.get_children()) == 2
+        # The grid now expands preprocessing × hyperparameters × model into many
+        # cells (full single-Y parity), so the row count is no longer 1-per-model.
+        # Assert the leaderboard is populated and BOTH selected models appear.
+        rows = [gui_app.multitarget_tree.item(r, "values")
+                for r in gui_app.multitarget_tree.get_children()]
+        assert len(rows) >= 2
+        row_models = {r[0] for r in rows}
+        assert "PLS" in row_models
+        assert "Ridge" in row_models
 
     def test_run_refuses_single_target(self, gui_app):
         _load_multitarget_data(gui_app)
@@ -117,3 +144,41 @@ class TestMultiTargetTab:
         gui_app._multitarget_last_output = None
         gui_app._run_multitarget_search()  # should warn + no-op (dialogs suppressed)
         assert gui_app._multitarget_last_output is None
+
+
+@pytest.mark.gui
+class TestMultiTargetGridDispatch:
+    def test_dispatch_passes_inherited_config_and_uses_separate_controller(self, gui_app, monkeypatch):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)
+        gui_app._on_multitarget_selection_changed()
+        gui_app.multitarget_model_vars["PLS"].set(True)
+
+        captured = {}
+
+        def _fake_grid(X, Y, **kwargs):
+            captured.update(kwargs)
+            from spectral_predict.multitarget_search import MultiTargetSearchOutput
+            return MultiTargetSearchOutput(results=[], target_names=kwargs["target_names"],
+                                           correlation={}, n_targets=Y.shape[1], skipped=["uve"])
+
+        import spectral_predict.multitarget_grid as mg
+        monkeypatch.setattr(mg, "run_multitarget_grid_search", _fake_grid)
+        # Run the worker body synchronously for the test.
+        gui_app._run_multitarget_search_thread(
+            gui_app._collect_multitarget_config()
+        )
+        assert "PLS" in captured["model_names"]
+        assert "preprocessing_methods" in captured
+        assert "model_grid_overrides" in captured
+        assert captured["optimization_method"] == "grid"
+        # A SEPARATE controller instance is used, not the single-Y one.
+        assert gui_app._multitarget_controller is not gui_app.search_controller
+
+    def test_cancel_stops_multitarget_controller(self, gui_app):
+        from spectral_predict.search_controller import SearchController
+        gui_app._multitarget_controller = SearchController()
+        gui_app._cancel_multitarget_search()
+        assert gui_app._multitarget_controller.is_ended() or gui_app._multitarget_controller._stop_requested

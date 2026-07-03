@@ -1259,7 +1259,7 @@ def run_tpe_multistart_preprocessing_discovery(
     # still ran to completion (it has no cancel hook). Prefix the post-stop
     # output so the user knows these are completion artifacts of work
     # already in flight, not new work happening after they stopped.
-    stopped = bool(controller is not None and getattr(controller, "is_ended", False))
+    stopped = bool(controller is not None and getattr(controller, "is_ended", lambda: False)())
     prefix = "[POST-STOP] " if stopped else ""
 
     header = f"=== TPE Multistart Top {len(result_configs)} Configurations ==="

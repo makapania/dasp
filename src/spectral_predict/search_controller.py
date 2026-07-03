@@ -30,6 +30,11 @@ class SearchController:
         # worker is currently inside `_pause_event.wait()`; cleared otherwise.
         self._actually_paused = threading.Event()
         self._pause_event.set()  # Start in running state (not paused)
+        # T-17: explicit stop-requested flag (set by stop()/end(), cleared by
+        # reset()). Lets callers distinguish "a stop was requested" from the
+        # end-event internals, and gives the multi-target cancel path a
+        # plain attribute to assert against.
+        self._stop_requested = False
 
     def pause(self):
         """Request a pause. The worker blocks at the next checkpoint.
@@ -46,6 +51,7 @@ class SearchController:
     def end(self):
         """End the search immediately. Also unblocks if paused."""
         self._end_event.set()
+        self._stop_requested = True
         self._pause_event.set()  # Unblock if waiting on pause
 
     def stop(self):
@@ -57,6 +63,7 @@ class SearchController:
         self._pause_event.set()
         self._end_event.clear()
         self._actually_paused.clear()
+        self._stop_requested = False
 
     def check_and_wait(self) -> bool:
         """Check for end signal and wait if paused.
@@ -95,7 +102,13 @@ class SearchController:
         """
         return self._actually_paused.is_set()
 
-    @property
     def is_ended(self) -> bool:
-        """Check if end was requested."""
+        """Check if end was requested.
+
+        Note: unlike ``is_paused`` / ``is_actually_paused`` (which are
+        properties), this is a regular method so callers can distinguish
+        "query the flag" (``ctrl.is_ended()``) from the boolean value at
+        call sites — required by the T-17 multi-target cancel path which
+        asserts ``ctrl.is_ended() or ctrl._stop_requested``.
+        """
         return self._end_event.is_set()

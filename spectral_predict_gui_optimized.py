@@ -14633,6 +14633,11 @@ class SpectralPredictApp:
         row += 1
         self._create_accent_button(
             ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search).pack(side='left')
+        # Separate controller + worker thread: Cancel stops ONLY the multi-target
+        # search, never the single-Y ``self.search_controller``.
+        ttk.Button(ctl_frame, text="⏹ Cancel",
+                   command=self._cancel_multitarget_search,
+                   style='Modern.TButton').pack(side='left', padx=(10, 0))
         ttk.Button(ctl_frame, text="💾 Export CSV",
                    command=self._export_multitarget_csv,
                    style='Modern.TButton').pack(side='left', padx=10)
@@ -14670,6 +14675,22 @@ class SpectralPredictApp:
 
         #: Last MultiTargetSearchOutput, retained for CSV export.
         self._multitarget_last_output = None
+        #: Separate SearchController for the multi-target worker — a DISTINCT
+        #: instance from ``self.search_controller`` so the single-Y stop/pause
+        #: controls are never touched. ``_run_multitarget_search`` replaces it
+        #: with a fresh controller before each run.
+        from spectral_predict.search_controller import SearchController as _MTSearchController
+        self._multitarget_controller = _MTSearchController()
+        #: Worker thread handle for the multi-target search (for join-on-cancel).
+        self._multitarget_thread = None
+        #: Thread-safe event channel from worker → main thread. The worker NEVER
+        #: touches a Tk widget (nor ``root.after`` — Tcl rejects cross-thread
+        #: command registration with "main thread is not in main loop" on Win32);
+        #: it only puts ("progress"|"done"|"failed", payload) tuples here. The
+        #: main thread drains this via ``_poll_multitarget_queue`` (scheduled
+        #: with ``root.after`` FROM the main thread, which is reliable).
+        import queue as _mt_queue
+        self._multitarget_queue = _mt_queue.Queue()
 
         # Prime the column list + engine lock from current state.
         self._refresh_multitarget_columns()
@@ -14756,95 +14777,1067 @@ class SpectralPredictApp:
                 self.optimization_method.set(saved)
                 self._pre_multitarget_opt_method = None
 
-    def _run_multitarget_search(self):
-        """Dispatch a Grid-engine multi-target search over the selected targets."""
+    def _collect_preprocessing_methods(self) -> dict:
+        """Mirror the preprocessing-method checkbox read in ``_run_analysis_thread`` (~26335)."""
+        return {
+            'raw': self.use_raw.get(),
+            'snv': self.use_snv.get(),
+            'sg1': self.use_sg1.get(),
+            'sg2': self.use_sg2.get(),
+            'sg3': self.use_sg3.get(),
+            'sg4': self.use_sg4.get(),
+            'deriv_snv': self.use_deriv_snv.get(),
+        }
+
+    def _collect_variable_counts(self) -> list:
+        """Mirror the top-N variable-count checkbox read (~26359)."""
+        counts = []
+        if self.var_10.get():
+            counts.append(10)
+        if self.var_20.get():
+            counts.append(20)
+        if self.var_50.get():
+            counts.append(50)
+        if self.var_100.get():
+            counts.append(100)
+        if self.var_250.get():
+            counts.append(250)
+        if self.var_500.get():
+            counts.append(500)
+        if self.var_1000.get():
+            counts.append(1000)
+        return counts
+
+    def _collect_window_sizes(self) -> list:
+        """Mirror the SG window-size checkbox read (~26390)."""
+        windows = []
+        if self.window_7.get():
+            windows.append(7)
+        if self.window_11.get():
+            windows.append(11)
+        if self.window_17.get():
+            windows.append(17)
+        if self.window_23.get():
+            windows.append(23)
+        if self.window_31.get():
+            windows.append(31)
+        custom = self.window_custom.get().strip()
+        if custom:
+            try:
+                windows.extend(int(x.strip()) for x in custom.split(','))
+            except ValueError:
+                pass
+        return windows or [17]
+
+    def _collect_selected_varsel_methods(self) -> list:
+        """Mirror the variable-selection checkbox read (~28126)."""
+        methods = []
+        if self.varsel_importance.get():
+            methods.append('importance')
+        if self.varsel_spa.get():
+            methods.append('spa')
+        if self.varsel_uve.get():
+            methods.append('uve')
+        if self.varsel_uve_spa.get():
+            methods.append('uve_spa')
+        if self.varsel_ipls.get():
+            methods.append('ipls')
+        if self.varsel_ipls_forward.get():
+            methods.append('ipls_forward')
+        if self.varsel_ipls_backward.get():
+            methods.append('ipls_backward')
+        if self.varsel_mc_sipls.get():
+            methods.append('mc_sipls')
+        if self.varsel_mwpls.get():
+            methods.append('mwpls')
+        if self.varsel_cars.get():
+            methods.append('cars')
+        if self.varsel_cars_tree.get():
+            methods.append('cars-tree')
+        if self.varsel_vcpa.get():
+            methods.append('vcpa-iriv')
+        if self.varsel_ga.get():
+            methods.append('ga')
+        if self.varsel_uve_cars.get():
+            methods.append('uve_cars')
+        if self.varsel_uve_cars_tree.get():
+            methods.append('uve_cars_tree')
+        if self.varsel_uve_cars_spa.get():
+            methods.append('uve_cars_spa')
+        if self.varsel_fipls_spa.get():
+            methods.append('fipls_spa')
+        if self.varsel_fipls_cars.get():
+            methods.append('fipls_cars')
+        return methods or ['importance']
+
+    def _collect_wavelength_restriction(self):
+        """Mirror the analysis-wl restriction build (~27990) → dict for the grid backend."""
+        if not self.enable_analysis_wl_restriction.get():
+            return None
+        wl_min_value = None
+        wl_max_value = None
+        wl_min_str = self.analysis_wl_min.get().strip()
+        wl_max_str = self.analysis_wl_max.get().strip()
+        try:
+            if wl_min_str:
+                wl_min_value = float(wl_min_str)
+            if wl_max_str:
+                wl_max_value = float(wl_max_str)
+        except ValueError:
+            wl_min_value = None
+            wl_max_value = None
+        regions_value = None
+        custom_wl_text = self.analysis_wl_custom.get().strip()
+        if custom_wl_text:
+            try:
+                regions, _err = self._parse_wavelength_regions(custom_wl_text)
+            except Exception:
+                regions = None
+            if regions:
+                regions_value = [(float(lo), float(hi)) for lo, hi in regions]
+                # Custom regions take precedence over min/max (search.py semantics).
+                wl_min_value = None
+                wl_max_value = None
+        if regions_value is None and wl_min_value is None and wl_max_value is None:
+            return None
+        return {"min": wl_min_value, "max": wl_max_value, "regions": regions_value}
+
+    def _resolve_tier(self) -> str:
+        """Mirror the tier sourcing used by the single-Y launch handler."""
+        return self.model_tier.get() or "standard"
+
+    # ---- Per-model hyperparameter collectors (additive; mirror _run_analysis_thread). ----
+    # These read the SAME self.* HP widget vars the single-Y path reads, returning a
+    # dict keyed EXACTLY by get_model_grids() kwarg names. None => "use tier default".
+    # They DO NOT touch _run_analysis_thread; the single-Y locals stay byte-identical.
+
+    def _collect_neuralboosted_overrides(self) -> dict:
+        n_estimators_list = []
+        if self.n_estimators_50.get():
+            n_estimators_list.append(50)
+        if self.n_estimators_100.get():
+            n_estimators_list.append(100)
+        custom = self.n_estimators_custom.get().strip()
+        if custom:
+            try:
+                n_estimators_list.extend(int(x.strip()) for x in custom.split(','))
+            except ValueError:
+                pass
+        if not n_estimators_list:
+            n_estimators_list = [100]
+        learning_rates = []
+        if self.lr_005.get():
+            learning_rates.append(0.05)
+        if self.lr_01.get():
+            learning_rates.append(0.1)
+        if self.lr_02.get():
+            learning_rates.append(0.2)
+        if self.lr_03.get():
+            learning_rates.append(0.3)
+        if not learning_rates:
+            learning_rates = [0.1, 0.2, 0.3]
+        hidden_sizes = []
+        if self.neuralboosted_hidden_3.get():
+            hidden_sizes.append(3)
+        if self.neuralboosted_hidden_5.get():
+            hidden_sizes.append(5)
+        custom_hidden = self.neuralboosted_hidden_custom.get().strip()
+        if custom_hidden:
+            try:
+                v = int(custom_hidden)
+                if v > 0 and v not in hidden_sizes:
+                    hidden_sizes.append(v)
+            except ValueError:
+                pass
+        if not hidden_sizes:
+            hidden_sizes = [3, 5]
+        activations = []
+        if self.neuralboosted_activation_tanh.get():
+            activations.append('tanh')
+        if self.neuralboosted_activation_identity.get():
+            activations.append('identity')
+        if self.neuralboosted_activation_relu.get():
+            activations.append('relu')
+        if self.neuralboosted_activation_logistic.get():
+            activations.append('logistic')
+        if not activations:
+            activations = ['tanh', 'identity']
+        return {
+            "n_estimators_list": n_estimators_list,
+            "learning_rates": learning_rates,
+            "neuralboosted_hidden_sizes": hidden_sizes,
+            "neuralboosted_activations": activations,
+        }
+
+    def _collect_rf_overrides(self) -> dict:
+        def _ints(attrs_vals, custom_attr=None, cast=int, valid=lambda v: True):
+            out = []
+            for attr, val in attrs_vals:
+                if attr.get():
+                    out.append(val)
+            if custom_attr is not None:
+                raw = custom_attr.get().strip()
+                if raw:
+                    try:
+                        v = cast(raw)
+                        if valid(v) and v not in out:
+                            out.append(v)
+                    except ValueError:
+                        pass
+            return out
+
+        trees = _ints([(self.rf_n_trees_100, 100), (self.rf_n_trees_200, 200),
+                       (self.rf_n_trees_500, 500)], self.rf_n_trees_custom)
+        if not trees:
+            trees = [100]
+        trees = sorted(trees)
+
+        depth = []
+        if self.rf_max_depth_none.get():
+            depth.append(None)
+        if self.rf_max_depth_30.get():
+            depth.append(30)
+        cd = self.rf_max_depth_custom.get().strip()
+        if cd:
+            if cd.lower() == 'none':
+                if None not in depth:
+                    depth.append(None)
+            else:
+                try:
+                    v = int(cd)
+                    if v > 0 and v not in depth:
+                        depth.append(v)
+                except ValueError:
+                    pass
+        if not depth:
+            depth = [None, 30]
+        depth = sorted(depth, key=lambda x: (x is not None, x))
+
+        mss = _ints([(self.rf_min_samples_split_2, 2), (self.rf_min_samples_split_5, 5),
+                     (self.rf_min_samples_split_10, 10), (self.rf_min_samples_split_20, 20)],
+                    self.rf_min_samples_split_custom, valid=lambda v: v >= 2)
+        mss = sorted(mss) if mss else None
+
+        msl = _ints([(self.rf_min_samples_leaf_1, 1), (self.rf_min_samples_leaf_2, 2),
+                     (self.rf_min_samples_leaf_5, 5), (self.rf_min_samples_leaf_10, 10)],
+                    self.rf_min_samples_leaf_custom, valid=lambda v: v >= 1)
+        msl = sorted(msl) if msl else None
+
+        mf = []
+        if self.rf_max_features_sqrt.get():
+            mf.append('sqrt')
+        if self.rf_max_features_log2.get():
+            mf.append('log2')
+        if self.rf_max_features_none.get():
+            mf.append(None)
+        cmf = self.rf_max_features_custom.get().strip()
+        if cmf:
+            if cmf.lower() == 'none':
+                if None not in mf:
+                    mf.append(None)
+            elif cmf.lower() in ('sqrt', 'log2'):
+                if cmf.lower() not in mf:
+                    mf.append(cmf.lower())
+            else:
+                try:
+                    v = float(cmf)
+                    if v not in mf:
+                        mf.append(v)
+                except ValueError:
+                    pass
+        mf = mf or None
+
+        boot = []
+        if self.rf_bootstrap_true.get():
+            boot.append(True)
+        if self.rf_bootstrap_false.get():
+            boot.append(False)
+        boot = boot or None
+
+        mln = []
+        if self.rf_max_leaf_nodes_none.get():
+            mln.append(None)
+        if self.rf_max_leaf_nodes_50.get():
+            mln.append(50)
+        if self.rf_max_leaf_nodes_100.get():
+            mln.append(100)
+        cmln = self.rf_max_leaf_nodes_custom.get().strip()
+        if cmln:
+            if cmln.lower() == 'none':
+                if None not in mln:
+                    mln.append(None)
+            else:
+                try:
+                    v = int(cmln)
+                    if v > 0 and v not in mln:
+                        mln.append(v)
+                except ValueError:
+                    pass
+        mln = sorted(mln, key=lambda x: (x is not None, x)) if mln else None
+
+        mid = []
+        if self.rf_min_impurity_decrease_0.get():
+            mid.append(0.0)
+        if self.rf_min_impurity_decrease_001.get():
+            mid.append(0.01)
+        if self.rf_min_impurity_decrease_01.get():
+            mid.append(0.1)
+        cmid = self.rf_min_impurity_decrease_custom.get().strip()
+        if cmid:
+            try:
+                v = float(cmid)
+                if v >= 0.0 and v not in mid:
+                    mid.append(v)
+            except ValueError:
+                pass
+        mid = sorted(mid) if mid else None
+
+        return {
+            "rf_n_trees_list": trees, "rf_max_depth_list": depth,
+            "rf_min_samples_split_list": mss, "rf_min_samples_leaf_list": msl,
+            "rf_max_features_list": mf, "rf_bootstrap_list": boot,
+            "rf_max_leaf_nodes_list": mln, "rf_min_impurity_decrease_list": mid,
+        }
+
+    def _collect_ridge_overrides(self) -> dict:
+        alphas = []
+        for attr, v in [(self.ridge_alpha_0001, 0.001), (self.ridge_alpha_001, 0.01),
+                        (self.ridge_alpha_01, 0.1), (self.ridge_alpha_1, 1.0),
+                        (self.ridge_alpha_10, 10.0)]:
+            if attr.get():
+                alphas.append(v)
+        custom = self.ridge_alpha_custom.get().strip()
+        if custom:
+            try:
+                v = float(custom)
+                if v > 0 and v not in alphas:
+                    alphas.append(v)
+            except ValueError:
+                pass
+        if not alphas:
+            alphas = [0.001, 0.01, 0.1, 1.0, 10.0]
+        alphas = sorted(alphas)
+        solver = []
+        for attr, v in [(self.ridge_solver_auto, 'auto'), (self.ridge_solver_svd, 'svd'),
+                        (self.ridge_solver_cholesky, 'cholesky'), (self.ridge_solver_lsqr, 'lsqr'),
+                        (self.ridge_solver_sag, 'sag')]:
+            if attr.get():
+                solver.append(v)
+        solver = solver or None
+        tol = []
+        for attr, v in [(self.ridge_tol_1e4, 1e-4), (self.ridge_tol_1e3, 1e-3),
+                        (self.ridge_tol_1e5, 1e-5)]:
+            if attr.get():
+                tol.append(v)
+        custom_tol = self.ridge_tol_custom.get().strip()
+        if custom_tol:
+            try:
+                v = float(custom_tol)
+                if v > 0 and v not in tol:
+                    tol.append(v)
+            except ValueError:
+                pass
+        tol = sorted(tol) if tol else None
+        return {"ridge_alphas_list": alphas, "ridge_solver_list": solver, "ridge_tol_list": tol}
+
+    def _collect_lasso_overrides(self) -> dict:
+        alphas = []
+        for attr, v in [(self.lasso_alpha_0001, 0.001), (self.lasso_alpha_001, 0.01),
+                        (self.lasso_alpha_01, 0.1), (self.lasso_alpha_1, 1.0)]:
+            if attr.get():
+                alphas.append(v)
+        custom = self.lasso_alpha_custom.get().strip()
+        if custom:
+            try:
+                v = float(custom)
+                if v > 0 and v not in alphas:
+                    alphas.append(v)
+            except ValueError:
+                pass
+        if not alphas:
+            alphas = [0.001, 0.01, 0.1, 1.0]
+        alphas = sorted(alphas)
+        selection = []
+        if self.lasso_selection_cyclic.get():
+            selection.append('cyclic')
+        if self.lasso_selection_random.get():
+            selection.append('random')
+        selection = selection or None
+        tol = []
+        for attr, v in [(self.lasso_tol_1e4, 1e-4), (self.lasso_tol_1e3, 1e-3),
+                        (self.lasso_tol_1e5, 1e-5)]:
+            if attr.get():
+                tol.append(v)
+        custom_tol = self.lasso_tol_custom.get().strip()
+        if custom_tol:
+            try:
+                v = float(custom_tol)
+                if v > 0 and v not in tol:
+                    tol.append(v)
+            except ValueError:
+                pass
+        tol = sorted(tol) if tol else None
+        return {"lasso_alphas_list": alphas, "lasso_selection_list": selection, "lasso_tol_list": tol}
+
+    def _collect_elasticnet_overrides(self) -> dict:
+        alphas = []
+        for attr, v in [(self.elasticnet_alpha_001, 0.01), (self.elasticnet_alpha_01, 0.1),
+                        (self.elasticnet_alpha_10, 1.0)]:
+            if attr.get():
+                alphas.append(v)
+        custom = self.elasticnet_alpha_custom.get().strip()
+        if custom:
+            try:
+                v = float(custom)
+                if v > 0 and v not in alphas:
+                    alphas.append(v)
+            except ValueError:
+                pass
+        if not alphas:
+            alphas = [0.01, 0.1, 1.0]
+        alphas = sorted(alphas)
+        l1 = []
+        for attr, v in [(self.elasticnet_l1_ratio_03, 0.3), (self.elasticnet_l1_ratio_05, 0.5),
+                        (self.elasticnet_l1_ratio_07, 0.7)]:
+            if attr.get():
+                l1.append(v)
+        custom_l1 = self.elasticnet_l1_ratio_custom.get().strip()
+        if custom_l1:
+            try:
+                v = float(custom_l1)
+                if 0 < v <= 1 and v not in l1:
+                    l1.append(v)
+            except ValueError:
+                pass
+        if not l1:
+            l1 = [0.3, 0.5, 0.7]
+        l1 = sorted(l1)
+        selection = []
+        if self.elasticnet_selection_cyclic.get():
+            selection.append('cyclic')
+        if self.elasticnet_selection_random.get():
+            selection.append('random')
+        selection = selection or None
+        tol = []
+        for attr, v in [(self.elasticnet_tol_1e4, 1e-4), (self.elasticnet_tol_1e3, 1e-3),
+                        (self.elasticnet_tol_1e5, 1e-5)]:
+            if attr.get():
+                tol.append(v)
+        custom_tol = self.elasticnet_tol_custom.get().strip()
+        if custom_tol:
+            try:
+                v = float(custom_tol)
+                if v > 0 and v not in tol:
+                    tol.append(v)
+            except ValueError:
+                pass
+        tol = sorted(tol) if tol else None
+        return {"elasticnet_alphas_list": alphas, "elasticnet_l1_ratios": l1,
+                "elasticnet_selection_list": selection, "elasticnet_tol_list": tol}
+
+    def _collect_pls_overrides(self) -> dict:
+        max_iters = []
+        if self.pls_max_iter_500.get():
+            max_iters.append(500)
+        if self.pls_max_iter_1000.get():
+            max_iters.append(1000)
+        custom = self.pls_max_iter_custom.get().strip()
+        if custom:
+            try:
+                v = int(custom)
+                if v > 0 and v not in max_iters:
+                    max_iters.append(v)
+            except ValueError:
+                pass
+        if not max_iters:
+            max_iters = [500]
+        max_iters = sorted(max_iters)
+        tols = []
+        if self.pls_tol_1e7.get():
+            tols.append(1e-7)
+        if self.pls_tol_1e6.get():
+            tols.append(1e-6)
+        # PLS tol custom handling: the single-Y path reads self.pls_tol_custom if present.
+        custom_tol = getattr(self, "pls_tol_custom", None)
+        if custom_tol is not None:
+            raw = custom_tol.get().strip()
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0 and v not in tols:
+                        tols.append(v)
+                except ValueError:
+                    pass
+        tols = sorted(tols) if tols else None
+        return {"pls_max_iter_list": max_iters, "pls_tol_list": tols}
+
+    def _collect_xgb_overrides(self) -> dict:
+        def _list(attr_val_pairs, custom_attr=None, cast=int, valid=lambda v: True):
+            out = []
+            for attr, v in attr_val_pairs:
+                if attr.get():
+                    out.append(v)
+            if custom_attr is not None:
+                raw = custom_attr.get().strip()
+                if raw:
+                    try:
+                        v = cast(raw)
+                        if valid(v) and v not in out:
+                            out.append(v)
+                    except ValueError:
+                        pass
+            return out
+        n_est = _list([(self.xgb_n_estimators_100, 100), (self.xgb_n_estimators_200, 200)],
+                      self.xgb_n_estimators_custom)
+        if not n_est:
+            n_est = [100, 200]
+        lr = _list([(self.xgb_lr_005, 0.05), (self.xgb_lr_01, 0.1)], self.xgb_lr_custom,
+                   cast=float, valid=lambda v: 0 < v <= 1.0)
+        if not lr:
+            lr = [0.05, 0.1]
+        depths = _list([(self.xgb_max_depth_3, 3), (self.xgb_max_depth_6, 6),
+                        (self.xgb_max_depth_9, 9)], self.xgb_max_depth_custom)
+        if not depths:
+            depths = [3, 6]
+        subsample = _list([(self.xgb_subsample_08, 0.8), (self.xgb_subsample_10, 1.0)],
+                          self.xgb_subsample_custom, cast=float, valid=lambda v: 0 < v <= 1.0)
+        if not subsample:
+            subsample = [0.8, 1.0]
+        colsample = _list([(self.xgb_colsample_08, 0.8), (self.xgb_colsample_10, 1.0)],
+                          self.xgb_colsample_custom, cast=float, valid=lambda v: 0 < v <= 1.0)
+        if not colsample:
+            colsample = [0.8, 1.0]
+        reg_alpha = _list([(self.xgb_reg_alpha_0, 0.0), (self.xgb_reg_alpha_01, 0.1),
+                           (self.xgb_reg_alpha_05, 0.5)], self.xgb_reg_alpha_custom,
+                          cast=float, valid=lambda v: v >= 0)
+        if not reg_alpha:
+            reg_alpha = [0.0, 0.1]
+        reg_lambda = _list([(self.xgb_reg_lambda_10, 1.0), (self.xgb_reg_lambda_50, 5.0)],
+                           self.xgb_reg_lambda_custom, cast=float, valid=lambda v: v >= 0) or None
+        mcw = _list([(self.xgb_min_child_weight_1, 1), (self.xgb_min_child_weight_3, 3),
+                     (self.xgb_min_child_weight_5, 5), (self.xgb_min_child_weight_7, 7)],
+                    self.xgb_min_child_weight_custom) or None
+        gamma = _list([(self.xgb_gamma_0, 0.0), (self.xgb_gamma_01, 0.1), (self.xgb_gamma_03, 0.3),
+                       (self.xgb_gamma_05, 0.5), (self.xgb_gamma_10, 1.0)],
+                      self.xgb_gamma_custom, cast=float, valid=lambda v: v >= 0) or None
+        return {
+            "xgb_n_estimators_list": n_est, "xgb_learning_rates": lr, "xgb_max_depths": depths,
+            "xgb_subsample": subsample, "xgb_colsample_bytree": colsample,
+            "xgb_reg_alpha": reg_alpha, "xgb_reg_lambda": reg_lambda,
+            "xgb_min_child_weight_list": mcw, "xgb_gamma_list": gamma,
+        }
+
+    def _collect_lightgbm_overrides(self) -> dict:
+        def _list(attr_val_pairs, custom_attr=None, cast=int, valid=lambda v: True):
+            out = []
+            for attr, v in attr_val_pairs:
+                if attr.get():
+                    out.append(v)
+            if custom_attr is not None:
+                raw = custom_attr.get().strip()
+                if raw:
+                    try:
+                        v = cast(raw)
+                        if valid(v) and v not in out:
+                            out.append(v)
+                    except ValueError:
+                        pass
+            return out or None
+        return {
+            "lightgbm_n_estimators_list": _list(
+                [(self.lightgbm_n_estimators_50, 50), (self.lightgbm_n_estimators_100, 100),
+                 (self.lightgbm_n_estimators_200, 200)], self.lightgbm_n_estimators_custom),
+            "lightgbm_learning_rates": _list(
+                [(self.lightgbm_lr_005, 0.05), (self.lightgbm_lr_01, 0.1), (self.lightgbm_lr_02, 0.2)],
+                self.lightgbm_lr_custom, cast=float, valid=lambda v: 0 < v <= 1.0),
+            "lightgbm_num_leaves_list": _list(
+                [(self.lightgbm_num_leaves_31, 31), (self.lightgbm_num_leaves_50, 50),
+                 (self.lightgbm_num_leaves_70, 70)], self.lightgbm_num_leaves_custom,
+                valid=lambda v: v > 1),
+            "lightgbm_max_depth_list": _list(
+                [(self.lightgbm_max_depth_m1, -1), (self.lightgbm_max_depth_5, 5),
+                 (self.lightgbm_max_depth_10, 10), (self.lightgbm_max_depth_20, 20),
+                 (self.lightgbm_max_depth_50, 50)], self.lightgbm_max_depth_custom),
+            "lightgbm_min_child_samples_list": _list(
+                [(self.lightgbm_min_child_samples_5, 5), (self.lightgbm_min_child_samples_10, 10),
+                 (self.lightgbm_min_child_samples_20, 20), (self.lightgbm_min_child_samples_50, 50),
+                 (self.lightgbm_min_child_samples_100, 100)], self.lightgbm_min_child_samples_custom),
+            "lightgbm_subsample_list": _list(
+                [(self.lightgbm_subsample_05, 0.5), (self.lightgbm_subsample_07, 0.7),
+                 (self.lightgbm_subsample_08, 0.8), (self.lightgbm_subsample_085, 0.85),
+                 (self.lightgbm_subsample_10, 1.0)], self.lightgbm_subsample_custom,
+                cast=float, valid=lambda v: 0 < v <= 1.0),
+            "lightgbm_colsample_bytree_list": _list(
+                [(self.lightgbm_colsample_bytree_05, 0.5), (self.lightgbm_colsample_bytree_07, 0.7),
+                 (self.lightgbm_colsample_bytree_08, 0.8), (self.lightgbm_colsample_bytree_085, 0.85),
+                 (self.lightgbm_colsample_bytree_10, 1.0)], self.lightgbm_colsample_bytree_custom,
+                cast=float, valid=lambda v: 0 < v <= 1.0),
+            "lightgbm_reg_alpha_list": _list(
+                [(self.lightgbm_reg_alpha_00, 0.0), (self.lightgbm_reg_alpha_01, 0.1),
+                 (self.lightgbm_reg_alpha_05, 0.5), (self.lightgbm_reg_alpha_10, 1.0)],
+                self.lightgbm_reg_alpha_custom, cast=float, valid=lambda v: v >= 0),
+            "lightgbm_reg_lambda_list": _list(
+                [(self.lightgbm_reg_lambda_00, 0.0), (self.lightgbm_reg_lambda_05, 0.5),
+                 (self.lightgbm_reg_lambda_10, 1.0), (self.lightgbm_reg_lambda_20, 2.0)],
+                self.lightgbm_reg_lambda_custom, cast=float, valid=lambda v: v >= 0),
+        }
+
+    def _collect_catboost_overrides(self) -> dict:
+        def _list(attr_val_pairs, custom_attr=None, cast=int, valid=lambda v: True):
+            out = []
+            for attr, v in attr_val_pairs:
+                if attr.get():
+                    out.append(v)
+            if custom_attr is not None:
+                raw = custom_attr.get().strip()
+                if raw:
+                    try:
+                        v = cast(raw)
+                        if valid(v) and v not in out:
+                            out.append(v)
+                    except ValueError:
+                        pass
+            return out or None
+        return {
+            "catboost_iterations_list": _list(
+                [(self.catboost_iterations_100, 100), (self.catboost_iterations_200, 200)],
+                self.catboost_iterations_custom),
+            "catboost_learning_rates": _list(
+                [(self.catboost_lr_005, 0.05), (self.catboost_lr_01, 0.1)],
+                self.catboost_lr_custom, cast=float, valid=lambda v: 0 < v <= 1.0),
+            "catboost_depths": _list(
+                [(self.catboost_depth_4, 4), (self.catboost_depth_6, 6)],
+                self.catboost_depth_custom),
+            "catboost_l2_leaf_reg_list": _list(
+                [(self.catboost_l2_leaf_reg_10, 1.0), (self.catboost_l2_leaf_reg_30, 3.0),
+                 (self.catboost_l2_leaf_reg_100, 10.0), (self.catboost_l2_leaf_reg_300, 30.0)],
+                self.catboost_l2_leaf_reg_custom, cast=float, valid=lambda v: v >= 0),
+            "catboost_border_count_list": _list(
+                [(self.catboost_border_count_32, 32), (self.catboost_border_count_64, 64),
+                 (self.catboost_border_count_128, 128), (self.catboost_border_count_254, 254)],
+                self.catboost_border_count_custom),
+            "catboost_bagging_temperature_list": _list(
+                [(self.catboost_bagging_temperature_00, 0.0),
+                 (self.catboost_bagging_temperature_05, 0.5),
+                 (self.catboost_bagging_temperature_10, 1.0),
+                 (self.catboost_bagging_temperature_30, 3.0)],
+                self.catboost_bagging_temperature_custom, cast=float, valid=lambda v: v >= 0),
+            "catboost_random_strength_list": _list(
+                [(self.catboost_random_strength_05, 0.5), (self.catboost_random_strength_10, 1.0),
+                 (self.catboost_random_strength_20, 2.0), (self.catboost_random_strength_50, 5.0)],
+                self.catboost_random_strength_custom, cast=float, valid=lambda v: v >= 0),
+        }
+
+    def _collect_svr_overrides(self) -> dict:
+        kernels = []
+        if self.svr_kernel_rbf.get():
+            kernels.append('rbf')
+        if self.svr_kernel_linear.get():
+            kernels.append('linear')
+        if not kernels:
+            kernels = ['rbf', 'linear']
+        C_list = []
+        if self.svr_C_10.get():
+            C_list.append(1.0)
+        if self.svr_C_100.get():
+            C_list.append(10.0)
+        custom_C = getattr(self, "svr_C_custom", None)
+        if custom_C is not None:
+            raw = custom_C.get().strip()
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0 and v not in C_list:
+                        C_list.append(v)
+                except ValueError:
+                    pass
+        if not C_list:
+            C_list = [1.0, 10.0]
+        gamma_list = []
+        if self.svr_gamma_scale.get():
+            gamma_list.append('scale')
+        if self.svr_gamma_auto.get():
+            gamma_list.append('auto')
+        custom_gamma = getattr(self, "svr_gamma_custom", None)
+        if custom_gamma is not None:
+            raw = custom_gamma.get().strip()
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0 and v not in gamma_list:
+                        gamma_list.append(v)
+                except ValueError:
+                    pass
+        if not gamma_list:
+            gamma_list = ['scale']
+        eps = []
+        for attr, v in [(self.svr_epsilon_001, 0.01), (self.svr_epsilon_005, 0.05),
+                        (self.svr_epsilon_01, 0.1), (self.svr_epsilon_02, 0.2),
+                        (self.svr_epsilon_05, 0.5)]:
+            if attr.get():
+                eps.append(v)
+        if not eps:
+            eps = [0.1]
+        degree = []
+        for attr, v in [(self.svr_degree_2, 2), (self.svr_degree_3, 3),
+                        (self.svr_degree_4, 4), (self.svr_degree_5, 5)]:
+            if attr.get():
+                degree.append(v)
+        if not degree:
+            degree = [3]
+        coef0 = []
+        for attr, v in [(self.svr_coef0_00, 0.0), (self.svr_coef0_05, 0.5),
+                        (self.svr_coef0_10, 1.0), (self.svr_coef0_20, 2.0)]:
+            if attr.get():
+                coef0.append(v)
+        if not coef0:
+            coef0 = [0.0]
+        shrinking = []
+        if self.svr_shrinking_true.get():
+            shrinking.append(True)
+        if self.svr_shrinking_false.get():
+            shrinking.append(False)
+        if not shrinking:
+            shrinking = [True]
+        return {
+            "svr_kernels": kernels, "svr_C_list": C_list, "svr_gamma_list": gamma_list,
+            "svr_epsilon_list": eps, "svr_degree_list": degree,
+            "svr_coef0_list": coef0, "svr_shrinking_list": shrinking,
+        }
+
+    def _collect_mlp_overrides(self) -> dict:
+        hidden = []
+        if self.mlp_hidden_64.get():
+            hidden.append((64,))
+        if self.mlp_hidden_128_64.get():
+            hidden.append((128, 64))
+        custom_hidden = getattr(self, "mlp_hidden_custom", None)
+        if custom_hidden is not None:
+            raw = custom_hidden.get().strip()
+            if raw:
+                try:
+                    tup = tuple(int(x.strip()) for x in raw.split(','))
+                    if all(t > 0 for t in tup) and tup not in hidden:
+                        hidden.append(tup)
+                except ValueError:
+                    pass
+        if not hidden:
+            hidden = [(64,), (128, 64)]
+        alphas = []
+        if self.mlp_alpha_1e3.get():
+            alphas.append(0.001)
+        custom_alpha = getattr(self, "mlp_alpha_custom", None)
+        if custom_alpha is not None:
+            raw = custom_alpha.get().strip()
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0 and v not in alphas:
+                        alphas.append(v)
+                except ValueError:
+                    pass
+        if not alphas:
+            alphas = [0.001]
+        lr_inits = []
+        if self.mlp_lr_init_1e3.get():
+            lr_inits.append(0.001)
+        custom_lr_init = getattr(self, "mlp_lr_init_custom", None)
+        if custom_lr_init is not None:
+            raw = custom_lr_init.get().strip()
+            if raw:
+                try:
+                    v = float(raw)
+                    if v > 0 and v not in lr_inits:
+                        lr_inits.append(v)
+                except ValueError:
+                    pass
+        if not lr_inits:
+            lr_inits = [0.001]
+        activation = []
+        for attr, v in [(self.mlp_activation_relu, 'relu'), (self.mlp_activation_tanh, 'tanh'),
+                        (self.mlp_activation_logistic, 'logistic'),
+                        (self.mlp_activation_identity, 'identity')]:
+            if attr.get():
+                activation.append(v)
+        if not activation:
+            activation = ['relu']
+        solver = []
+        for attr, v in [(self.mlp_solver_adam, 'adam'), (self.mlp_solver_lbfgs, 'lbfgs'),
+                        (self.mlp_solver_sgd, 'sgd')]:
+            if attr.get():
+                solver.append(v)
+        if not solver:
+            solver = ['adam']
+        batch = []
+        if self.mlp_batch_auto.get():
+            batch.append('auto')
+        if self.mlp_batch_32.get():
+            batch.append(32)
+        if self.mlp_batch_64.get():
+            batch.append(64)
+        if self.mlp_batch_128.get():
+            batch.append(128)
+        if not batch:
+            batch = ['auto']
+        schedule = []
+        for attr, v in [(self.mlp_lr_schedule_constant, 'constant'),
+                        (self.mlp_lr_schedule_invscaling, 'invscaling'),
+                        (self.mlp_lr_schedule_adaptive, 'adaptive')]:
+            if attr.get():
+                schedule.append(v)
+        if not schedule:
+            schedule = ['constant']
+        momentum = []
+        if self.mlp_momentum_09.get():
+            momentum.append(0.9)
+        if not momentum:
+            momentum = [0.9]
+        return {
+            "mlp_hidden_layer_sizes_list": hidden, "mlp_alphas_list": alphas,
+            "mlp_learning_rate_inits": lr_inits, "mlp_activation_list": activation,
+            "mlp_solver_list": solver, "mlp_batch_size_list": batch,
+            "mlp_learning_rate_schedule_list": schedule, "mlp_momentum_list": momentum,
+        }
+
+    def _build_model_grid_overrides(self) -> dict:
+        """Assemble the FULL per-model HP override dict for ``get_model_grids``.
+
+        Keys are EXACTLY the regression-relevant kwargs of ``get_model_grids``
+        (covering the offered multi-target models: PLS, RandomForest, MLP,
+        CatBoost, XGBoost, Ridge, Lasso, ElasticNet, SVR, LightGBM,
+        NeuralBoosted). Values mirror the single-Y ``_run_analysis_thread``
+        widget reads verbatim (additive duplication, NOT a refactor of the
+        single-Y locals). ``None`` means "let the tier fill the default" —
+        exactly where the single-Y path also passes ``None``.
+        """
+        overrides: dict = {}
+        overrides.update(self._collect_neuralboosted_overrides())
+        overrides.update(self._collect_rf_overrides())
+        overrides.update(self._collect_ridge_overrides())
+        overrides.update(self._collect_lasso_overrides())
+        overrides.update(self._collect_elasticnet_overrides())
+        overrides.update(self._collect_pls_overrides())
+        overrides.update(self._collect_xgb_overrides())
+        overrides.update(self._collect_lightgbm_overrides())
+        overrides.update(self._collect_catboost_overrides())
+        overrides.update(self._collect_svr_overrides())
+        overrides.update(self._collect_mlp_overrides())
+        return overrides
+
+    def _collect_multitarget_config(self):
+        """Assemble the inherited search config (same state the normal Run reads)."""
+        from spectral_predict.search_controller import SearchController
+
         targets = list(self.selected_targets)
         if len(targets) < 2:
             messagebox.showwarning(
                 "Multi-Target",
                 "Select at least 2 numeric targets. For a single target, use the normal search.")
-            return
-        if self.X is None or getattr(self, 'X_original', None) is None:
-            messagebox.showwarning("Multi-Target", "Load spectral data first.")
-            return
-
+            return None
         source = None
-        if getattr(self, 'combined_metadata_df', None) is not None:
+        if getattr(self, "combined_metadata_df", None) is not None:
             source = self.combined_metadata_df
-        elif getattr(self, 'ref', None) is not None:
+        elif getattr(self, "ref", None) is not None:
             source = self.ref
-        if source is None:
-            messagebox.showerror("Multi-Target", "No reference/metadata table is loaded.")
-            return
+        if source is None or self.X is None:
+            messagebox.showerror("Multi-Target", "Load spectral data and a reference table first.")
+            return None
         missing = [t for t in targets if t not in source.columns]
         if missing:
             messagebox.showerror("Multi-Target", f"Target column(s) not found: {missing}")
-            return
-
+            return None
         model_names = [n for n, v in self.multitarget_model_vars.items() if v.get()]
         if not model_names:
             messagebox.showwarning("Multi-Target", "Select at least one model.")
-            return
+            return None
 
-        # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
-        self.optimization_method.set('grid')
+        X_df = self.X
+        Ydf = source[targets].reindex(X_df.index)
+        # Apply the SAME sample filters as the normal training path: active-group
+        # subset, user-excluded spectra, and held-out validation samples. Without
+        # this, excluded / validation spectra leak back into CV.
+        keep = pd.Series(True, index=X_df.index)
+        if self.active_indices is not None:
+            keep &= X_df.index.isin(self.active_indices)
+        if self.excluded_spectra:
+            keep &= ~X_df.index.isin(self.excluded_spectra)
+        if self.validation_enabled.get() and self.validation_indices:
+            keep &= ~X_df.index.isin(self.validation_indices)
+        mask = keep & Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
+        if int(mask.sum()) < 3:
+            messagebox.showerror(
+                "Multi-Target",
+                f"Only {int(mask.sum())} complete sample(s) across the selected targets — "
+                "not enough to cross-validate.")
+            return None
 
+        baseline_method, baseline_params = self._get_baseline_params()
         try:
-            from spectral_predict.multitarget_search import run_multitarget_search
+            wavelengths = np.asarray(self.X.columns, dtype=float)
+        except (ValueError, TypeError):
+            wavelengths = np.arange(self.X.shape[1], dtype=float)
 
-            X_df = self.X
-            Ydf = source[targets].reindex(X_df.index)
-            # Apply the SAME sample filters the normal training path uses
-            # (see ~line 27835): active-group subset, user-excluded spectra,
-            # and held-out validation samples. Without this, excluded and
-            # validation spectra leak back into calibration/CV and corrupt
-            # the multi-target results.
-            keep = pd.Series(True, index=X_df.index)
-            if self.active_indices is not None:
-                keep &= X_df.index.isin(self.active_indices)
-            if self.excluded_spectra:
-                keep &= ~X_df.index.isin(self.excluded_spectra)
-            if self.validation_enabled.get() and self.validation_indices:
-                keep &= ~X_df.index.isin(self.validation_indices)
-            mask = keep & Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
-            n_valid = int(mask.sum())
-            if n_valid < 3:
-                messagebox.showerror(
-                    "Multi-Target",
-                    f"Only {n_valid} complete sample(s) across the selected targets — "
-                    "not enough to cross-validate.")
-                return
-            X_mat = X_df.loc[mask].to_numpy(dtype=float)
-            Y_mat = Ydf.loc[mask].to_numpy(dtype=float)
+        return {
+            "X": X_df.loc[mask].to_numpy(dtype=float),
+            "Y": Ydf.loc[mask].to_numpy(dtype=float),
+            "model_names": model_names, "target_names": targets,
+            "wavelengths": wavelengths,
+            "preprocessing_methods": self._collect_preprocessing_methods(),
+            "autoscale": self.use_autoscale.get(),
+            "baseline_method": baseline_method,
+            "baseline_params": baseline_params,
+            "smoothing": self.enable_smoothing.get(),
+            "smoothing_window": self.smoothing_window.get(),
+            "smoothing_polyorder": self.smoothing_polyorder.get(),
+            "window_sizes": self._collect_window_sizes(),
+            "wavelength_restriction": self._collect_wavelength_restriction(),
+            "variable_selection_methods": self._collect_selected_varsel_methods(),
+            "variable_counts": self._collect_variable_counts() or None,
+            "ipls_subset_limit": self.ipls_subset_limit.get(),
+            "tier": self._resolve_tier(),
+            "model_grid_overrides": self._build_model_grid_overrides(),
+            "max_n_components": self.max_n_components.get(),
+            "max_iter": self.max_iter.get(),
+            "cv": self.cv_strategy.get() or "kfold",
+            "n_folds": int(self.folds.get() or 5),
+            "n_repeats": int(self.cv_n_repeats.get() or 5),
+        }
 
-            configs = [{"model_name": name, "params": {}} for name in model_names]
-            n_folds = int(self.folds.get()) if self.folds.get() else 5
-            n_repeats = int(self.cv_n_repeats.get()) if self.cv_n_repeats.get() else 5
+    def _run_multitarget_search(self):
+        """Dispatch a Grid-engine multi-target grid search on a worker thread.
 
-            self.multitarget_status_label.config(text="Running…")
-            self.root.update_idletasks()
+        Inherits the SAME configuration the normal Run reads (preprocessing,
+        varsel, per-model HPs, CV strategy, tier, …) and routes it through
+        ``run_multitarget_grid_search`` on a daemon thread with a SEPARATE
+        ``SearchController`` (never ``self.search_controller``) so the single-Y
+        stop/pause controls are untouched. All Tk writes are marshalled to the
+        main thread via ``self.root.after(0, ...)``.
+        """
+        import threading
 
-            output = run_multitarget_search(
-                X_mat, Y_mat, configs,
-                cv=self.cv_strategy.get() or "kfold",
-                n_folds=n_folds,
-                n_repeats=n_repeats,  # honor the user's repeated-K-fold repeat count
-                target_names=targets,
-                optimization_method="grid",  # hard-forced; 2-D Y never hits a 1-D engine
-            )
-        except Exception as exc:  # surface any dispatch/fit error to the user
-            self.multitarget_status_label.config(text="Failed.")
-            messagebox.showerror("Multi-Target Search Failed", str(exc))
+        from spectral_predict.search_controller import SearchController
+
+        cfg = self._collect_multitarget_config()
+        if cfg is None:
             return
+        # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
+        self.optimization_method.set("grid")
+        self._multitarget_controller = SearchController()
 
+        # Honest pre-run heads-up: n_preprocess x n_model_configs is a LOWER
+        # bound (varsel subsets multiply it further). Cheap — no varsel runs here.
+        try:
+            from spectral_predict.models import get_model_grids
+            from spectral_predict.multitarget_grid import build_multitarget_preprocess_configs
+
+            n_pp = len(build_multitarget_preprocess_configs(
+                cfg["preprocessing_methods"], window_sizes=cfg["window_sizes"],
+                autoscale=cfg["autoscale"], baseline_method=cfg["baseline_method"],
+                smoothing=cfg["smoothing"]))
+            grids = get_model_grids(
+                task_type="regression", n_features=cfg["wavelengths"].shape[0],
+                max_n_components=max(1, min(int(cfg["max_n_components"]), 10)),
+                max_iter=cfg["max_iter"], tier=cfg["tier"],
+                enabled_models=cfg["model_names"],
+                **(cfg["model_grid_overrides"] or {}))
+            n_cfg = sum(len(v) for v in grids.values())
+            hint = f"  (≥ {n_pp * n_cfg} cells before variable selection — may take a while)"
+        except Exception:
+            hint = "  (running the full inherited grid — may take a while)"
+        self.multitarget_status_label.config(text="Running…" + hint)
+        self.root.update_idletasks()
+
+        self._multitarget_thread = threading.Thread(
+            target=self._run_multitarget_search_thread, args=(cfg,), daemon=True)
+        self._multitarget_thread.start()
+        # Drain worker events on the MAIN thread. ``root.after`` scheduled here
+        # (main thread) is reliable; the worker only writes to the queue.
+        self.root.after(100, self._poll_multitarget_queue)
+
+    def _run_multitarget_search_thread(self, cfg):
+        """Worker body: run ``run_multitarget_grid_search`` and report the
+        result/failure via the thread-safe queue. NEVER touches a Tk widget
+        and NEVER calls ``root.after`` (Tcl rejects cross-thread command
+        registration on Win32) — all UI writes happen in
+        ``_poll_multitarget_queue`` on the main thread.
+        """
+        from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+        X = cfg.pop("X")
+        Y = cfg.pop("Y")
+        # The controller is created by _run_multitarget_search; fall back to None
+        # when the thread is invoked directly (e.g. tests) so the backend simply
+        # skips the cancel checkpoints.
+        controller = getattr(self, "_multitarget_controller", None)
+        try:
+            output = run_multitarget_grid_search(
+                X, Y, optimization_method="grid",
+                controller=controller,
+                progress_callback=self._multitarget_progress, **cfg)
+        except Exception as exc:
+            self._multitarget_queue.put(("failed", str(exc)))
+            return
+        self._multitarget_queue.put(("done", output))
+
+    def _multitarget_progress(self, info):
+        """Progress callback (called from the worker thread). Thread-safe:
+        only enqueues a payload; the main-thread poller does the Tk write.
+        ``info`` carries ``best_model`` as a DICT
+        (``{Model,Preprocess,Deriv,RMSEcv,R2cv,top_vars}``) — never a
+        dataclass — matching ``_progress_callback_impl``'s shape.
+        """
+        self._multitarget_queue.put(("progress", info))
+
+    def _poll_multitarget_queue(self):
+        """Drain worker events ON THE MAIN THREAD and update the UI. Scheduled
+        via ``root.after`` from the main thread (reliable). Re-schedules itself
+        until the worker has finished AND the queue is empty.
+        """
+        try:
+            while True:
+                try:
+                    kind, payload = self._multitarget_queue.get_nowait()
+                except Exception:
+                    break
+                if kind == "progress":
+                    msg = (payload or {}).get("message", "Running…")
+                    self.multitarget_status_label.config(text=msg)
+                elif kind == "done":
+                    self._multitarget_done(payload)
+                elif kind == "failed":
+                    self._multitarget_failed(payload)
+        except Exception:
+            # Never let a UI update error kill the poller.
+            pass
+        thread = getattr(self, "_multitarget_thread", None)
+        if (thread is not None and thread.is_alive()) or not self._multitarget_queue.empty():
+            try:
+                self.root.after(100, self._poll_multitarget_queue)
+            except Exception:
+                pass
+
+    def _multitarget_failed(self, msg):
+        self.multitarget_status_label.config(text="Failed.")
+        messagebox.showerror("Multi-Target Search Failed", msg)
+
+    def _multitarget_done(self, output):
         self._multitarget_last_output = output
         self._populate_multitarget_results(output)
         warn = ""
         if output.correlation.get("is_weak"):
             warn = (f"  ⚠ weak mean|corr|={output.correlation.get('mean_abs_corr', float('nan')):.2f} "
                     "— separate PLS-1 models may be better.")
+        note = ("  Skipped: " + ", ".join(output.skipped)) if output.skipped else ""
         self.multitarget_status_label.config(
-            text=f"Done: {len(output.results)} model(s), {output.n_targets} targets.{warn}")
+            text=f"Done: {len(output.results)} cell(s), {output.n_targets} targets.{note}{warn}")
+
+    def _cancel_multitarget_search(self):
+        """Stop the multi-target worker via its OWN controller (never the single-Y one)."""
+        ctrl = getattr(self, "_multitarget_controller", None)
+        if ctrl is not None:
+            ctrl.stop()
+        if hasattr(self, "multitarget_status_label"):
+            self.multitarget_status_label.config(text="Cancelling…")
 
     def _populate_multitarget_results(self, output):
         """Render a :class:`MultiTargetSearchOutput` into the results grid."""
@@ -23803,7 +24796,7 @@ class SpectralPredictApp:
         """
         if not self.search_controller:
             return
-        if self.search_controller.is_ended:
+        if self.search_controller.is_ended():
             return
         if not self.search_controller.is_paused:
             # User resumed before worker acked — stay in 'running' state.
