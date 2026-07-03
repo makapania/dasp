@@ -296,3 +296,87 @@ def test_varsel_cache_returned_subset_mutation_isolated():
     # Freshly returned indices must be UNCHANGED (not -1, not [999]).
     assert np.array_equal(twin["indices"], original)
     assert (-1 not in twin["indices"])
+
+
+# --- T-17 FIX 2: fipls_spa importance adapter must not collapse to index [0] ---
+
+def test_fipls_spa_model_independent_importances_full_width():
+    """Direct unit assertion: the fipls_spa branch of _model_independent_importances
+    returns a full-width importance array whose peak sits on the signal band.
+
+    On the BUGGY code this either returns None (no wavelengths kwarg accepted ->
+    TypeError) or, if the kwarg existed but the branch didn't, a degenerate nan.
+    """
+    from spectral_predict.multitarget_grid import (
+        _model_independent_importances,
+        verify_spa_multi_y_safe,
+    )
+
+    rng = np.random.default_rng(20260702)
+    n, p = 60, 40
+    wl = np.linspace(1000.0, 2000.0, p)
+    X = rng.standard_normal((n, p))
+    informative = [18, 19, 20, 21]
+    Y = X[:, informative] @ rng.standard_normal((4, 2)) + 0.02 * rng.standard_normal((n, 2))
+
+    if not verify_spa_multi_y_safe(X, Y, n_features=5):
+        pytest.skip("SPA not 2-D-safe here")
+
+    imp = _model_independent_importances("fipls_spa", X, Y, wavelengths=wl)
+    assert imp is not None
+    imp = np.asarray(imp, dtype=float)
+    assert imp.shape == (p,)
+    assert np.all(np.isfinite(imp))
+    assert np.count_nonzero(imp) > 1
+    assert (set(np.argsort(imp)[-4:].tolist()) & set(informative)) or \
+           (np.argmax(imp) in informative)
+
+
+def test_fipls_spa_importance_adapter_selects_informative_not_index0():
+    """Discriminating end-to-end test through build_multitarget_varsel_subsets.
+
+    Signal lives in columns {18,19,20,21} -- NOT at index 0. A correctly-wired
+    fipls_spa adapter must produce subsets that include at least one informative
+    feature and are NOT the degenerate lone-index {0} subset.
+
+    On the BUGGY code, _model_independent_importances returns None for fipls_spa;
+    _importances_to_subsets turns np.asarray(None,float)=nan into argsort([nan])
+    -> index [0] only -> union collapses to {0}, size 1.
+    """
+    from spectral_predict.multitarget_grid import (
+        build_multitarget_varsel_subsets,
+        verify_spa_multi_y_safe,
+    )
+
+    rng = np.random.default_rng(20260702)
+    n, p = 60, 40
+    wl = np.linspace(1000.0, 2000.0, p)
+    X = rng.standard_normal((n, p))
+    informative = [18, 19, 20, 21]
+    Y = X[:, informative] @ rng.standard_normal((4, 2)) + 0.02 * rng.standard_normal((n, 2))
+
+    if not verify_spa_multi_y_safe(X, Y, n_features=5):
+        pytest.skip("SPA not 2-D-safe here")
+
+    subs, _skipped = build_multitarget_varsel_subsets(
+        ["fipls_spa"], X, Y, wl,
+        enabled_models=["PLS"], variable_counts=[5, 10],
+        ipls_subset_limit="All", spa_ok=True, min_fold_train=n - 1,
+        cache={}, preprocess_id="raw",
+    )
+
+    fs = [s for s in subs if s["method"] == "fipls_spa"]
+    assert fs, "expected at least one fipls_spa subset"
+
+    # At least one fipls_spa subset must carry more than a lone index.
+    assert any(s["indices"].size > 1 for s in fs), (
+        f"fipls_spa subsets are degenerate (all size 1): "
+        f"{[s['indices'].tolist() for s in fs]}"
+    )
+
+    union = set(np.concatenate([s["indices"] for s in fs]).tolist())
+    assert union & set(informative), (
+        f"fipls_spa union {union} does not include any informative feature "
+        f"from {informative}"
+    )
+    assert union != {0}, f"fipls_spa union collapsed to degenerate {{0}}: {union}"

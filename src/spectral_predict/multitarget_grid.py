@@ -218,8 +218,15 @@ def _importances_to_subsets(
     return subsets
 
 
-def _model_independent_importances(method: str, X_pp: np.ndarray, Y: np.ndarray):
-    """spa / ga importance arrays (model-independent, cached per preprocess)."""
+def _model_independent_importances(
+    method: str, X_pp: np.ndarray, Y: np.ndarray, wavelengths: Optional[np.ndarray] = None,
+):
+    """spa / ga / fipls_spa importance arrays (model-independent, cached per preprocess).
+
+    ``wavelengths`` is required by the ``fipls_spa`` branch (forward-iPLS needs
+    wavelength positions to build intervals); it is otherwise unused. Kept
+    optional/keyword so existing 3-positional-arg callers keep working.
+    """
     if method == "spa":
         from .variable_selection import spa_selection
         return np.asarray(spa_selection(X_pp, Y, n_features=max(5, X_pp.shape[1] // 10)),
@@ -228,6 +235,20 @@ def _model_independent_importances(method: str, X_pp: np.ndarray, Y: np.ndarray)
         from .ga_pls import ga_pls_selection
         return np.asarray(ga_pls_selection(X_pp, Y, task_type="regression", verbose=0),
                           dtype=float)
+    if method == "fipls_spa":
+        from .variable_selection import fipls_spa_selection
+
+        if wavelengths is None:
+            raise ValueError("fipls_spa requires wavelengths")
+        imp = np.asarray(
+            fipls_spa_selection(X_pp, Y, wavelengths), dtype=float,
+        )
+        if imp.shape != (X_pp.shape[1],):
+            raise ValueError(
+                f"fipls_spa_selection returned importance with shape {imp.shape}; "
+                f"expected ({X_pp.shape[1]},)"
+            )
+        return imp
     return None
 
 
@@ -321,7 +342,7 @@ def build_multitarget_varsel_subsets(
                 subsets.append({"method": "importance", "model_specific": True})
                 continue
             if key not in cache:
-                imp = _model_independent_importances(method, X_pp, Y)
+                imp = _model_independent_importances(method, X_pp, Y, wavelengths=wavelengths)
                 cache[key] = _importances_to_subsets(
                     imp, method, variable_counts=variable_counts,
                     n_features_sub=n_features_sub,
