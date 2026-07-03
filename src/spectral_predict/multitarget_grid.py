@@ -14,6 +14,44 @@ import numpy as np
 _SG_SPEC = {"sg1": (1, 2), "sg2": (2, 3), "sg3": (3, 4), "sg4": (4, 5)}
 
 
+def _preprocess_fingerprint(pc: dict) -> tuple:
+    """Fully-discriminating hashable key for a preprocess config.
+
+    ``build_multitarget_preprocess_configs`` emits MANY distinct configs that
+    share the same ``name`` string ("deriv", "snv_deriv", "raw") while differing
+    in deriv/window/polyorder/baseline_method/smoothing/autoscale/interference.
+    Keying the per-preprocess varsel cache by ``pc["name"]`` therefore collides
+    two different X blocks on one cache entry (cache bleed -> wrong variables).
+
+    This helper collapses EVERY dimension that changes the produced X block into
+    a hashable tuple, so two configs share a fingerprint iff they are identical
+    as preprocessors. ``pc.get(...)`` with defaults keeps it crash-safe when keys
+    are absent (e.g. ``autoscale`` is only set once autoscale-doubling runs).
+    """
+    def _freeze(v):
+        if isinstance(v, dict):
+            return tuple(sorted((k, _freeze(val)) for k, val in v.items()))
+        if isinstance(v, (list, tuple)):
+            return tuple(_freeze(x) for x in v)
+        if isinstance(v, np.ndarray):
+            return (tuple(v.shape), tuple(np.asarray(v).ravel().tolist()))
+        return v
+
+    return (
+        _freeze(pc.get("name")),
+        _freeze(pc.get("deriv")),
+        _freeze(pc.get("window")),
+        _freeze(pc.get("polyorder")),
+        _freeze(pc.get("baseline_method")),
+        _freeze(pc.get("baseline_params")),
+        _freeze(pc.get("smoothing", False)),
+        _freeze(pc.get("smoothing_window")),
+        _freeze(pc.get("smoothing_polyorder")),
+        _freeze(pc.get("autoscale", False)),
+        _freeze(pc.get("interference")),
+    )
+
+
 def _base_config(name: str, deriv, window, polyorder, *, interference_to_add,
                  baseline_method, baseline_params, smoothing,
                  smoothing_window, smoothing_polyorder) -> dict[str, Any]:
@@ -272,7 +310,11 @@ def build_multitarget_varsel_subsets(
                 cache[key] = _interval_subset_adapter(
                     method, X_pp, Y, wavelengths, ipls_subset_limit=ipls_subset_limit
                 )
-            subsets.extend(cache[key])
+            # Copy-on-return: hand out fresh dicts/arrays so a caller mutating a
+            # returned subset's indices cannot poison the cached entry.
+            subsets.extend(
+                {**d, "indices": np.array(d["indices"], copy=True)} for d in cache[key]
+            )
         elif kind == "importance":
             if method == "importance":
                 # model-specific: orchestrator resolves per (preprocess, model).
@@ -284,7 +326,10 @@ def build_multitarget_varsel_subsets(
                     imp, method, variable_counts=variable_counts,
                     n_features_sub=n_features_sub,
                 )
-            subsets.extend(cache[key])
+            # Copy-on-return (see the subset branch above).
+            subsets.extend(
+                {**d, "indices": np.array(d["indices"], copy=True)} for d in cache[key]
+            )
     return subsets, skipped
 
 
@@ -403,7 +448,8 @@ def run_multitarget_grid_search(
             variable_selection_methods, X_pp, Y_arr, wl_pp,
             enabled_models=model_names, variable_counts=variable_counts,
             ipls_subset_limit=ipls_subset_limit, spa_ok=spa_ok,
-            min_fold_train=min_fold_train, cache=varsel_cache, preprocess_id=pc["name"],
+            min_fold_train=min_fold_train, cache=varsel_cache,
+            preprocess_id=_preprocess_fingerprint(pc),
         )
         for s in skipped:
             if s not in skipped_all:

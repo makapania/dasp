@@ -184,3 +184,115 @@ def test_build_varsel_subsets_cache_hit(xy_multi):
         cache=cache, preprocess_id="raw",
     )
     assert ("raw", "spa") in cache  # importance memoized per (preprocess, method)
+
+
+# --- T-17 FIX 1: varsel cache key collision + mutation poisoning guards ---
+
+def test_preprocess_fingerprint_discriminates_window():
+    """Two configs sharing name='deriv' but differing in window MUST fingerprint
+    differently. Documents the bug: the OLD production key (pc['name']) collides."""
+    from spectral_predict.multitarget_grid import (
+        _preprocess_fingerprint,
+        build_multitarget_preprocess_configs,
+    )
+
+    cfgs = build_multitarget_preprocess_configs({"sg1": True}, window_sizes=[11, 21])
+    deriv_cfgs = [c for c in cfgs if c["name"] == "deriv"]
+    assert len(deriv_cfgs) == 2, "expected two 'deriv' configs differing in window"
+    a, b = deriv_cfgs
+    # Document the bug: the OLD production cache key (pc["name"]) is identical.
+    assert a["name"] == b["name"] == "deriv"
+    # The fingerprint MUST discriminate them, and must be hashable.
+    fpa, fpb = _preprocess_fingerprint(a), _preprocess_fingerprint(b)
+    assert fpa != fpb
+    hash(fpa)
+    hash(fpb)
+
+
+def test_varsel_cache_no_bleed_across_distinct_fingerprints():
+    """Two DIFFERENT X blocks with distinct preprocess fingerprints must yield
+    DIFFERENT ipls_forward subsets from a shared cache (no cache bleed)."""
+    from spectral_predict.multitarget_grid import (
+        _preprocess_fingerprint,
+        build_multitarget_varsel_subsets,
+    )
+
+    rng = np.random.default_rng(20260702)
+    n, p = 60, 40
+    wl = np.linspace(1000.0, 2000.0, p)
+    # X1 carries signal in columns 0-3; X2 in columns 20-23. Strong SNR.
+    X1 = rng.standard_normal((n, p))
+    Y1 = X1[:, :4] @ rng.standard_normal((4, 2)) + 0.02 * rng.standard_normal((n, 2))
+    X2 = rng.standard_normal((n, p))
+    Y2 = X2[:, 20:24] @ rng.standard_normal((4, 2)) + 0.02 * rng.standard_normal((n, 2))
+
+    cfg_a = {"name": "deriv", "deriv": 1, "window": 11, "polyorder": 2}
+    cfg_b = {"name": "deriv", "deriv": 1, "window": 21, "polyorder": 2}
+    # OLD key collides (same name); fingerprints must not.
+    assert cfg_a["name"] == cfg_b["name"]
+    fpa, fpb = _preprocess_fingerprint(cfg_a), _preprocess_fingerprint(cfg_b)
+    assert fpa != fpb
+
+    cache: dict = {}
+    subs_a, _ = build_multitarget_varsel_subsets(
+        ["ipls_forward"], X1, Y1, wl, enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        cache=cache, preprocess_id=fpa,
+    )
+    subs_b, _ = build_multitarget_varsel_subsets(
+        ["ipls_forward"], X2, Y2, wl, enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        cache=cache, preprocess_id=fpb,
+    )
+
+    ipls_a = [s for s in subs_a if s["method"] == "ipls_forward"]
+    ipls_b = [s for s in subs_b if s["method"] == "ipls_forward"]
+    assert ipls_a and ipls_b
+
+    picked_a = np.unique(np.concatenate([np.asarray(s["indices"]) for s in ipls_a]))
+    picked_b = np.unique(np.concatenate([np.asarray(s["indices"]) for s in ipls_b]))
+    # Core anti-bleed assertion: the two blocks select DIFFERENT index sets
+    # (each reflects its own informative region, not the other's cache entry).
+    assert not np.array_equal(picked_a, picked_b)
+    # Directional lean: each block must reach its own signal region.
+    assert picked_a.min() < 10, "block A must select a low-index (signal) feature"
+    assert picked_b.max() >= 20, "block B must select a high-index (signal) feature"
+    # Cache holds two distinct entries (fingerprints did not collide).
+    assert (fpa, "ipls_forward") in cache
+    assert (fpb, "ipls_forward") in cache
+    assert len({(fpa, "ipls_forward"), (fpb, "ipls_forward")}) == 2
+
+
+def test_varsel_cache_returned_subset_mutation_isolated():
+    """Mutating a returned subset's indices in place must NOT poison the cache;
+    a second identical call returns clean (un-mutated) indices."""
+    from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+    rng = np.random.default_rng(20260702)
+    n, p = 60, 40
+    wl = np.linspace(1000.0, 2000.0, p)
+    X = rng.standard_normal((n, p))
+    Y = X[:, :4] @ rng.standard_normal((4, 2)) + 0.02 * rng.standard_normal((n, 2))
+
+    cache: dict = {}
+    args = dict(
+        methods=["ipls_forward"], X_pp=X, Y=Y, wavelengths=wl,
+        enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        cache=cache, preprocess_id="raw",
+    )
+    subs1, _ = build_multitarget_varsel_subsets(**args)
+    target = next(s for s in subs1 if s["method"] == "ipls_forward")
+    assert target["indices"].size >= 1
+
+    original = np.array(target["indices"], copy=True)
+    # Poison the returned indices in place AND via rebind+contents mutation.
+    target["indices"][:] = -1
+    target["indices"] = np.array([999])
+    target["indices"][...] = -1
+
+    subs2, _ = build_multitarget_varsel_subsets(**args)
+    twin = next(s for s in subs2 if s.get("tag") == target["tag"])
+    # Freshly returned indices must be UNCHANGED (not -1, not [999]).
+    assert np.array_equal(twin["indices"], original)
+    assert (-1 not in twin["indices"])
