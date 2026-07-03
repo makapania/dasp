@@ -125,16 +125,67 @@ def test_importance_reference_fit_tree_model(xy_multi):
     assert np.all(np.isfinite(imp))
 
 
-def test_fipls_spa_preserves_2d_y_when_spa_safe(xy_multi):
+def test_fipls_spa_preserves_2d_y_when_spa_safe():
+    """Strengthened (T-17 FIX 7a): proves multi-Y fipls_spa genuinely uses BOTH
+    targets, not just the stronger one.
+
+    Builds a block where the two targets are driven by DISJOINT, well-separated
+    feature bands (blockA=[4,5,6], blockB=[30,31,32]) with comparably strong
+    signals. The 2-D fit must reach BOTH bands, and the multi-Y importance must
+    NOT be identical to either single-target run. The old test only checked
+    shape + finiteness, which passes even if SPA silently collapsed to one
+    target's band.
+    """
     from spectral_predict.multitarget_grid import verify_spa_multi_y_safe
     from spectral_predict.variable_selection import fipls_spa_selection
 
-    X, Y, wl = xy_multi
+    rng = np.random.default_rng(20260702)
+    n, p = 60, 40
+    wl = np.linspace(1000.0, 2000.0, p)
+    X = rng.standard_normal((n, p))
+    blockA = [4, 5, 6]
+    blockB = [30, 31, 32]  # disjoint from blockA, well separated
+    # Two comparably strong signals, each driven by its own disjoint band.
+    Y0 = X[:, blockA] @ rng.standard_normal((3,)) + 0.02 * rng.standard_normal(n)
+    Y1 = X[:, blockB] @ rng.standard_normal((3,)) + 0.02 * rng.standard_normal(n)
+    Y = np.column_stack([Y0, Y1])
+
     if not verify_spa_multi_y_safe(X, Y, n_features=5):
-        pytest.skip("SPA not 2-D-safe in this environment; fipls_spa stays skipped")
-    imp = np.asarray(fipls_spa_selection(X, Y, wl), dtype=float)
-    assert imp.shape == (X.shape[1],)
-    assert np.all(np.isfinite(imp))
+        pytest.skip("SPA not 2-D-safe here")
+
+    imp_multi = np.asarray(fipls_spa_selection(X, Y, wl), dtype=float)
+    imp_t0 = np.asarray(fipls_spa_selection(X, Y[:, [0]], wl), dtype=float)
+    imp_t1 = np.asarray(fipls_spa_selection(X, Y[:, [1]], wl), dtype=float)
+
+    # Shape + finiteness (the old weak assertions, kept).
+    assert imp_multi.shape == (p,)
+    assert imp_t0.shape == (p,)
+    assert imp_t1.shape == (p,)
+    assert np.all(np.isfinite(imp_multi))
+    assert np.all(np.isfinite(imp_t0))
+    assert np.all(np.isfinite(imp_t1))
+
+    # CORE STRENGTHENING 1: the 2-D fit reaches BOTH targets' bands. fipls_spa
+    # zeros non-selected features, so nonzero(imp_multi) is the selected set.
+    sel = set(np.nonzero(imp_multi)[0].tolist())
+    assert sel & set(blockA), (
+        f"multi-Y fipls_spa did not reach blockA {blockA}; selected={sorted(sel)}"
+    )
+    assert sel & set(blockB), (
+        f"multi-Y fipls_spa did not reach blockB {blockB}; selected={sorted(sel)}"
+    )
+
+    # CORE STRENGTHENING 2: the multi-Y importance is genuinely multi-Y -- it is
+    # NOT identical to either single-target run (would indicate SPA ignored one
+    # target column entirely).
+    assert not np.allclose(imp_multi, imp_t0), (
+        "multi-Y fipls_spa importance is identical to the target-0-only run; "
+        "the second target was not used."
+    )
+    assert not np.allclose(imp_multi, imp_t1), (
+        "multi-Y fipls_spa importance is identical to the target-1-only run; "
+        "the first target was not used."
+    )
 
 
 def test_classify_varsel_method():
@@ -163,7 +214,7 @@ def test_build_varsel_subsets_full_plus_interval_and_skips(xy_multi):
         ["ipls_forward", "uve", "cars"], X, Y, wl,
         enabled_models=["PLS"], variable_counts=[5, 10],
         ipls_subset_limit="Top 5", spa_ok=True,
-        min_fold_train=X.shape[0] - 1, cache=cache,
+        cache=cache,
         preprocess_id="raw",
     )
     tags = [s["tag"] for s in subs]
@@ -180,7 +231,7 @@ def test_build_varsel_subsets_cache_hit(xy_multi):
     cache = {}
     build_multitarget_varsel_subsets(
         ["spa"], X, Y, wl, enabled_models=["PLS"], variable_counts=[5],
-        ipls_subset_limit="All", spa_ok=True, min_fold_train=X.shape[0] - 1,
+        ipls_subset_limit="All", spa_ok=True,
         cache=cache, preprocess_id="raw",
     )
     assert ("raw", "spa") in cache  # importance memoized per (preprocess, method)
@@ -236,12 +287,12 @@ def test_varsel_cache_no_bleed_across_distinct_fingerprints():
     cache: dict = {}
     subs_a, _ = build_multitarget_varsel_subsets(
         ["ipls_forward"], X1, Y1, wl, enabled_models=["PLS"], variable_counts=[5],
-        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        ipls_subset_limit="Top 5", spa_ok=True,
         cache=cache, preprocess_id=fpa,
     )
     subs_b, _ = build_multitarget_varsel_subsets(
         ["ipls_forward"], X2, Y2, wl, enabled_models=["PLS"], variable_counts=[5],
-        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        ipls_subset_limit="Top 5", spa_ok=True,
         cache=cache, preprocess_id=fpb,
     )
 
@@ -278,7 +329,7 @@ def test_varsel_cache_returned_subset_mutation_isolated():
     args = dict(
         methods=["ipls_forward"], X_pp=X, Y=Y, wavelengths=wl,
         enabled_models=["PLS"], variable_counts=[5],
-        ipls_subset_limit="Top 5", spa_ok=True, min_fold_train=n - 1,
+        ipls_subset_limit="Top 5", spa_ok=True,
         cache=cache, preprocess_id="raw",
     )
     subs1, _ = build_multitarget_varsel_subsets(**args)
@@ -361,7 +412,7 @@ def test_fipls_spa_importance_adapter_selects_informative_not_index0():
     subs, _skipped = build_multitarget_varsel_subsets(
         ["fipls_spa"], X, Y, wl,
         enabled_models=["PLS"], variable_counts=[5, 10],
-        ipls_subset_limit="All", spa_ok=True, min_fold_train=n - 1,
+        ipls_subset_limit="All", spa_ok=True,
         cache={}, preprocess_id="raw",
     )
 

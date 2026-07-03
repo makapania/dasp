@@ -317,7 +317,7 @@ def classify_varsel_method(method: str, *, enabled_models, spa_ok: bool) -> str:
 
 def build_multitarget_varsel_subsets(
     methods, X_pp, Y, wavelengths, *, enabled_models, variable_counts,
-    ipls_subset_limit, spa_ok, min_fold_train, cache, preprocess_id,
+    ipls_subset_limit, spa_ok, cache, preprocess_id,
     apply_uve_prefilter: bool = False,
 ):
     """Return (subsets_incl_full, skipped_notices), caching per (preprocess, method)."""
@@ -512,7 +512,7 @@ def run_multitarget_grid_search(
             variable_selection_methods, X_pp, Y_arr, wl_pp,
             enabled_models=model_names, variable_counts=variable_counts,
             ipls_subset_limit=ipls_subset_limit, spa_ok=spa_ok,
-            min_fold_train=min_fold_train, cache=varsel_cache,
+            cache=varsel_cache,
             preprocess_id=_preprocess_fingerprint(pc),
         )
         for s in skipped:
