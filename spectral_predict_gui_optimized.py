@@ -15257,6 +15257,8 @@ class SpectralPredictApp:
             tols.append(1e-7)
         if self.pls_tol_1e6.get():
             tols.append(1e-6)
+        if self.pls_tol_1e5.get():
+            tols.append(1e-5)
         # PLS tol custom handling: the single-Y path reads self.pls_tol_custom if present.
         custom_tol = getattr(self, "pls_tol_custom", None)
         if custom_tol is not None:
@@ -15268,7 +15270,10 @@ class SpectralPredictApp:
                         tols.append(v)
                 except ValueError:
                     pass
-        tols = sorted(tols) if tols else None
+        # Match the single-Y empty-fallback ([1e-6] when no tol box is checked, :27970).
+        if not tols:
+            tols = [1e-6]
+        tols = sorted(tols)
         return {"pls_max_iter_list": max_iters, "pls_tol_list": tols}
 
     def _collect_xgb_overrides(self) -> dict:

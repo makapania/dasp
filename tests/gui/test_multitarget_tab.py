@@ -212,6 +212,40 @@ class TestMultiTargetGridDispatch:
 
 
 @pytest.mark.gui
+class TestMultiTargetPlsTolParity:
+    """FIX 4: multi-target ``_collect_pls_overrides`` must read ``pls_tol_1e5``
+    (single-Y path does at :27954) and match the single-Y empty-fallback [1e-6]."""
+
+    def _reset_tol_vars(self, app):
+        for attr, val in (("pls_tol_1e7", False), ("pls_tol_1e6", False),
+                          ("pls_tol_1e5", False)):
+            getattr(app, attr).set(val)
+        app.pls_tol_custom.set("")
+
+    def test_tol_1e5_reaches_multitarget_grid(self, gui_app):
+        self._reset_tol_vars(gui_app)
+        gui_app.pls_tol_1e5.set(True)  # only the 1e-5 box checked
+        try:
+            out = gui_app._collect_pls_overrides()
+        finally:
+            self._reset_tol_vars(gui_app)
+            gui_app.pls_tol_1e6.set(True)  # restore default
+        tols = out["pls_tol_list"]
+        assert tols is not None, "1e-5 selection was dropped (pls_tol_list is None)"
+        assert 1e-5 in tols
+
+    def test_empty_selection_falls_back_to_1e6(self, gui_app):
+        self._reset_tol_vars(gui_app)  # nothing checked, no custom
+        try:
+            out = gui_app._collect_pls_overrides()
+        finally:
+            self._reset_tol_vars(gui_app)
+            gui_app.pls_tol_1e6.set(True)  # restore default
+        # Single-Y path defaults to [1e-6] when no tol box is checked (:27970).
+        assert out["pls_tol_list"] == [1e-6]
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 
