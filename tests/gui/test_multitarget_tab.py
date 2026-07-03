@@ -387,6 +387,28 @@ class TestMultiTargetTerminalRace:
 
 
 @pytest.mark.gui
+class TestMultiTargetPollerErrorSurfacing:
+    """FIX 3: the poller must not silently swallow an exception raised by a
+    terminal handler (_multitarget_done/_failed) — it should surface it."""
+
+    def test_terminal_handler_error_is_surfaced(self, gui_app, monkeypatch):
+        import queue as _q
+        gui_app._multitarget_thread = None
+        gui_app._multitarget_queue = _q.Queue()
+        gui_app._multitarget_terminal_seen = False
+
+        def _boom(output):
+            raise RuntimeError("populate blew up")
+
+        monkeypatch.setattr(gui_app, "_populate_multitarget_results", _boom)
+        gui_app.multitarget_status_label.config(text="Running…")
+        gui_app._multitarget_queue.put(("done", object()))
+        gui_app._poll_multitarget_queue()  # messagebox.showerror suppressed by fixture
+        assert "Fail" in gui_app.multitarget_status_label.cget("text"), \
+            "terminal-handler error was silently swallowed (status stuck)"
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 

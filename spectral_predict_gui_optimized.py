@@ -15835,12 +15835,12 @@ class SpectralPredictApp:
         via ``root.after`` from the main thread (reliable). Re-schedules itself
         until the worker has finished AND the queue is empty.
         """
-        try:
-            while True:
-                try:
-                    kind, payload = self._multitarget_queue.get_nowait()
-                except Exception:
-                    break
+        while True:
+            try:
+                kind, payload = self._multitarget_queue.get_nowait()
+            except Exception:
+                break  # queue empty for now
+            try:
                 if kind == "progress":
                     msg = (payload or {}).get("message", "Running…")
                     self.multitarget_status_label.config(text=msg)
@@ -15848,9 +15848,24 @@ class SpectralPredictApp:
                     self._multitarget_done(payload)
                 elif kind == "failed":
                     self._multitarget_failed(payload)
-        except Exception:
-            # Never let a UI update error kill the poller.
-            pass
+            except Exception as exc:
+                # FIX 3: a terminal/handler error must be SURFACED, not silently
+                # swallowed — the run is over and the user has to know it failed.
+                self._multitarget_terminal_seen = True
+                self._set_multitarget_running(False)
+                try:
+                    self.multitarget_status_label.config(text="Failed.")
+                except Exception:
+                    pass
+                import logging as _logging
+                _logging.getLogger("spectral_predict").error(
+                    "Multi-target result handling failed: %s", exc, exc_info=True)
+                try:
+                    messagebox.showerror(
+                        "Multi-Target Search Failed",
+                        f"Displaying the multi-target results failed: {exc}")
+                except Exception:
+                    pass
         # FIX 2: only stop once a terminal event has actually been handled AND
         # the worker is done AND the queue is drained. Without the
         # ``_multitarget_terminal_seen`` latch a final ('done'/'failed') tuple
