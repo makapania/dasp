@@ -539,6 +539,36 @@ class TestMultiTargetCouplingSelector:
 
 
 @pytest.mark.gui
+def test_cell_lower_bound_excludes_non_joint_capable_in_joint_mode(gui_app):
+    """The pre-run cell-count heads-up must weight each model's HP configs by its
+    coupling capability (mirroring _expand_model_modes): in JOINT mode an
+    independent-only model (Ridge) emits 0 cells and must NOT be counted. The old
+    flat ``n_cfg`` (total configs, incl. Ridge) over-counted."""
+    from spectral_predict.models import get_model_grids
+
+    grids = get_model_grids(
+        task_type="regression", n_features=24, max_n_components=5,
+        tier="standard", enabled_models=["PLS", "Ridge"],
+    )
+    # Precondition: both models actually contribute configs (else non-discriminating).
+    assert len(grids["PLS"]) >= 1
+    assert len(grids["Ridge"]) >= 1
+
+    n_pp = 3
+    got = gui_app._multitarget_cell_lower_bound(grids, n_pp, "joint")
+
+    # PLS is joint-capable (weight 1); Ridge has no joint variant (weight 0), so
+    # the estimate equals ONLY the PLS contribution.
+    expected = n_pp * len(grids["PLS"])
+    assert got == expected
+
+    # Discriminating: the old flat weighting counted every config (incl. Ridge),
+    # which would over-estimate here.
+    flat_old = n_pp * sum(len(v) for v in grids.values())
+    assert got < flat_old
+
+
+@pytest.mark.gui
 def test_tab_change_refreshes_target_list(gui_app):
     """FIX 1: the target list is primed only at tab creation + the Refresh button,
     so a data load never updated it. Showing the Multi-Target sub-tab fires

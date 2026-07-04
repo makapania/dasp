@@ -15797,6 +15797,35 @@ class SpectralPredictApp:
             "effective_n_notice": effective_n_notice,
         }
 
+    @staticmethod
+    def _multitarget_cell_lower_bound(grids, n_pp, coupling_mode):
+        """Lower-bound cell count for the multi-target pre-run heads-up.
+
+        Weights each model's HP-config count by how many coupling modes it will
+        emit, mirroring ``multitarget_grid._expand_model_modes`` EXACTLY so the
+        heads-up matches what the backend actually runs: ``independent`` -> 1,
+        ``joint`` -> 1 iff the model has a joint variant else 0, ``both`` -> 2 iff
+        joint-capable else 1. Independent-only models (Ridge/SVR/LightGBM/…) that
+        raise ``NoJointVariantError`` in joint mode therefore contribute 0 cells
+        under Joint (they are skip-with-notice). Variable-selection subsets
+        multiply this further, so it stays a ">= N" lower bound.
+
+        Args:
+            grids: ``get_model_grids`` output ({model_name: [(estimator, params), …]}).
+            n_pp: Number of preprocessing configs.
+            coupling_mode: ``"independent"`` / ``"joint"`` / ``"both"``.
+
+        Returns:
+            The lower-bound cell count (int).
+        """
+        from spectral_predict.multitarget_grid import _expand_model_modes
+
+        n_cfg = sum(
+            len(cfgs) * len(_expand_model_modes(model_name, coupling_mode)[0])
+            for model_name, cfgs in grids.items()
+        )
+        return n_pp * n_cfg
+
     def _run_multitarget_search(self):
         """Dispatch a Grid-engine multi-target grid search on a worker thread.
 
@@ -15863,12 +15892,9 @@ class SpectralPredictApp:
                 max_iter=cfg["max_iter"], tier=cfg["tier"],
                 enabled_models=cfg["model_names"],
                 **(cfg["model_grid_overrides"] or {}))
-            n_cfg = sum(len(v) for v in grids.values())
-            # Both roughly doubles the capable-model cells (INDEPENDENT + JOINT);
-            # Joint drops the independent-only models. Keep the heads-up honest.
             coupling_mode = self.multitarget_coupling.get()
-            mult = 2 if coupling_mode == "both" else 1
-            hint = (f"  (≥ {n_pp * n_cfg * mult} cells [{coupling_mode}] before "
+            n_cells = self._multitarget_cell_lower_bound(grids, n_pp, coupling_mode)
+            hint = (f"  (≥ {n_cells} cells [{coupling_mode}] before "
                     "variable selection — may take a while)")
         except Exception:
             hint = "  (running the full inherited grid — may take a while)"
