@@ -436,6 +436,56 @@ def test_effective_n_notice_reports_incomplete_row_drop(gui_app):
 
 
 @pytest.mark.gui
+class TestMultiTargetValidationLock:
+    """FIX 5: SPXY + Stratified partitioning key off ONE target's y distribution,
+    so they are single-Y ONLY. When >1 target is selected both radios grey out and
+    the algorithm is forced to Kennard-Stone; dropping back to <=1 restores the
+    user's prior choice (validation_algorithm is SHARED with the single-Y path)."""
+
+    def _restore(self, app):
+        app.multitarget_listbox.selection_clear(0, "end")
+        app.multitarget_listbox.selection_set(0)
+        app._on_multitarget_selection_changed()
+        app._pre_multitarget_val_algo = None
+        app.validation_algorithm.set("SPXY")
+
+    def test_multiselect_disables_radios_and_forces_kennard_stone(self, gui_app):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app._pre_multitarget_val_algo = None
+        gui_app.validation_algorithm.set("SPXY")
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)  # all 3 targets
+        gui_app._on_multitarget_selection_changed()
+        try:
+            assert gui_app.validation_algorithm.get() == "Kennard-Stone"
+            assert str(gui_app._val_radio_spxy.cget("state")) == "disabled"
+            assert str(gui_app._val_radio_stratified.cget("state")) == "disabled"
+        finally:
+            self._restore(gui_app)
+
+    def test_single_target_restores_prior_algo_and_reenables(self, gui_app):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app._pre_multitarget_val_algo = None
+        gui_app.validation_algorithm.set("Stratified")
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)
+        gui_app._on_multitarget_selection_changed()
+        assert gui_app.validation_algorithm.get() == "Kennard-Stone"  # saved + forced
+        # Drop to a single target — the prior algorithm is restored, radios re-enabled.
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0)
+        gui_app._on_multitarget_selection_changed()
+        try:
+            assert gui_app.validation_algorithm.get() == "Stratified"
+            assert str(gui_app._val_radio_spxy.cget("state")) == "normal"
+            assert str(gui_app._val_radio_stratified.cget("state")) == "normal"
+        finally:
+            self._restore(gui_app)
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 

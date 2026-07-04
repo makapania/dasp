@@ -14419,8 +14419,12 @@ class SpectralPredictApp:
         ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
-        ttk.Radiobutton(algo_frame, text="SPXY ⭐",
-                       variable=self.validation_algorithm, value="SPXY").grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        # Kept as instance refs so the multi-target lock (FIX 5) can grey them out:
+        # SPXY (d_y on one target) and Stratified (balances one target's
+        # distribution) are single-Y ONLY and invalid for >1 target.
+        self._val_radio_spxy = ttk.Radiobutton(algo_frame, text="SPXY ⭐",
+                       variable=self.validation_algorithm, value="SPXY")
+        self._val_radio_spxy.grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
         ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
@@ -14429,8 +14433,9 @@ class SpectralPredictApp:
         ttk.Label(algo_frame, text="Simple random selection",
                  style='Caption.TLabel').grid(row=2, column=1, sticky=tk.W, pady=3)
 
-        ttk.Radiobutton(algo_frame, text="Stratified",
-                       variable=self.validation_algorithm, value="Stratified").grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        self._val_radio_stratified = ttk.Radiobutton(algo_frame, text="Stratified",
+                       variable=self.validation_algorithm, value="Stratified")
+        self._val_radio_stratified.grid(row=3, column=0, sticky=tk.W, padx=(0, 15), pady=3)
         ttk.Label(algo_frame, text="Ensures balanced target variable distribution",
                  style='Caption.TLabel').grid(row=3, column=1, sticky=tk.W, pady=3)
 
@@ -14765,6 +14770,16 @@ class SpectralPredictApp:
                     widget.configure(state=state)
                 except tk.TclError:
                     pass
+        # FIX 5: SPXY and Stratified are single-Y ONLY (both key off ONE target's
+        # y distribution) so grey them out under multi-target. validation_algorithm
+        # is shared with the single-Y path, so the choice must be saved/restored.
+        for attr in ('_val_radio_spxy', '_val_radio_stratified'):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                try:
+                    widget.configure(state=state)
+                except tk.TclError:
+                    pass
         if multi:
             # Save the user's single-Y engine choice ONCE, then force grid.
             # optimization_method is shared with the single-Y search path, so
@@ -14774,12 +14789,22 @@ class SpectralPredictApp:
                 self._pre_multitarget_opt_method = self.optimization_method.get()
             if self.optimization_method.get() in ('unified', 'nsga2'):
                 self.optimization_method.set('grid')
+            # Same save-once/force pattern for the validation algorithm.
+            if getattr(self, '_pre_multitarget_val_algo', None) is None:
+                if self.validation_algorithm.get() in ('SPXY', 'Stratified'):
+                    self._pre_multitarget_val_algo = self.validation_algorithm.get()
+                    self.validation_algorithm.set('Kennard-Stone')
         else:
             # Multi-target inactive: restore the saved single-Y engine choice.
             saved = getattr(self, '_pre_multitarget_opt_method', None)
             if saved is not None:
                 self.optimization_method.set(saved)
                 self._pre_multitarget_opt_method = None
+            # Restore the saved single-Y validation algorithm.
+            saved_val = getattr(self, '_pre_multitarget_val_algo', None)
+            if saved_val is not None:
+                self.validation_algorithm.set(saved_val)
+                self._pre_multitarget_val_algo = None
 
     def _collect_preprocessing_methods(self) -> dict:
         """Mirror the preprocessing-method checkbox read in ``_run_analysis_thread`` (~26335)."""
