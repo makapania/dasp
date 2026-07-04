@@ -27,6 +27,25 @@ def test_preprocess_configs_sg_polyorder_pairing():
     assert (2, 3) in derivs  # sg2 -> deriv 2 / poly 3
 
 
+def test_describe_preprocess_config_includes_deriv_and_window():
+    """FIX 3: the leaderboard/CSV preprocessing label must carry the SG
+    derivative order + window (+ polyorder), not just the bare ``name`` — so
+    ``snv_deriv d1 w11`` is distinguishable from ``snv_deriv d2 w17``."""
+    from spectral_predict.multitarget_grid import (
+        _describe_preprocess_config,
+        build_multitarget_preprocess_configs,
+    )
+
+    cfgs = build_multitarget_preprocess_configs({"sg2": True}, window_sizes=[17])
+    pc = next(c for c in cfgs if c["deriv"] == 2 and c["window"] == 17)
+    label = _describe_preprocess_config(pc)
+    assert "d2" in label, f"deriv order missing from label: {label!r}"
+    assert "w17" in label, f"SG window missing from label: {label!r}"
+    assert "p3" in label, f"polyorder missing from label: {label!r}"
+    # A raw config yields the bare name with no numeric suffixes.
+    assert _describe_preprocess_config({"name": "raw"}) == "raw"
+
+
 def test_preprocess_configs_autoscale_doubling():
     from spectral_predict.multitarget_grid import build_multitarget_preprocess_configs
 
@@ -313,7 +332,12 @@ def test_grid_sg1_completes_with_finite_best(grid_xy):
     )
     assert out.results
     assert np.isfinite(out.best.joint_q2)
-    assert any(r.preprocessing == "deriv" for r in out.results)
+    # FIX 3: the label now carries deriv order + SG window (not the bare name).
+    assert any(
+        r.preprocessing.startswith("deriv") and "d1" in r.preprocessing
+        and "w11" in r.preprocessing
+        for r in out.results
+    )
 
 
 def test_preprocess_fingerprint_discriminates_deriv_and_polyorder():

@@ -52,6 +52,30 @@ def _preprocess_fingerprint(pc: dict) -> tuple:
     )
 
 
+def _describe_preprocess_config(pc: dict) -> str:
+    """Compact human-readable preprocessing label including SG deriv/window/polyorder.
+
+    ``pc['name']`` alone (e.g. ``"snv_deriv"``) omits the derivative order,
+    Savitzky-Golay window, and polyorder that distinguish otherwise same-named
+    cells, so the leaderboard/CSV cannot tell ``snv_deriv d1 w11`` from
+    ``snv_deriv d2 w17``. This threads those numeric params onto the composed
+    ``name`` (which already encodes baseline / smoothing / autoscale), e.g.
+    ``"snv_deriv d2 w17 p3"`` or ``"raw"``.
+    """
+    name = pc.get("name", "raw")
+    parts = [name]
+    deriv = pc.get("deriv")
+    window = pc.get("window")
+    poly = pc.get("polyorder")
+    if deriv:
+        parts.append(f"d{int(deriv)}")
+    if window:
+        parts.append(f"w{int(window)}")
+    if poly is not None:
+        parts.append(f"p{int(poly)}")
+    return " ".join(parts)
+
+
 def _base_config(name: str, deriv, window, polyorder, *, interference_to_add,
                  baseline_method, baseline_params, smoothing,
                  smoothing_window, smoothing_polyorder) -> dict[str, Any]:
@@ -587,7 +611,7 @@ def run_multitarget_grid_search(
         res = _evaluate_multitarget_cell(
             X_sub, Y_arr, mc["model_name"], mc["params"], splitter, min_fold_train,
             X_sub.shape[1], target_names, n_folds=n_folds, n_repeats=n_repeats,
-            random_state=random_state, preprocessing=pc["name"],
+            random_state=random_state, preprocessing=_describe_preprocess_config(pc),
             varsel_method=method, varsel_tag=tag,
         )
         results.append(res)
