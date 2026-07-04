@@ -17,6 +17,20 @@ Auto-commit note: the environment/orchestrator committed the bulk of this work a
 
 ---
 
+## 2026-07-04 — T-17 post-merge-review UX fixes from hands-on GUI testing (5 fixes)
+
+User shakedown of the shipped Multi-Target tab surfaced 5 issues; all fixed (`a4fe20d`..`fc6e33e`), 109 target tests green. Reusable lessons:
+
+- **ttk.Treeview horizontal scroll needs BOTH a width-constrained container AND `stretch=False` columns.** The Multi-Target results table "looked like it should scroll but didn't." Root cause was two-layered: (1) the tab's `content_frame` had no `columnconfigure(0, weight=1)`, so the wide tree ballooned to natural width and was clipped at the viewport (the earlier `52c814b` fix pinned the canvas window but missed this); (2) even after constraining the tree to viewport width, `xview` stayed `(0, 1.0)` because Treeview columns default to `stretch=True` and squish to fit instead of overflowing. Fix required BOTH: `content_frame.columnconfigure(0, weight=1)` AND `stretch=False` on every results column in `_populate_multitarget_results`. Verified visually in the running app (xview → `(0, 0.61)`, screenshots showed the right-most per-target columns revealed on scroll). Code-only reasoning got the first layer, not the second — a visual verification was essential.
+- **Widgets primed at tab-creation time show empty until data loads unless refreshed on a load/show event.** The multi-target target listbox was populated only at tab creation (no data yet) + a manual "Refresh" button; it was hooked into none of the data-load paths the single-Y target combo uses. Fix: bind the config-notebook `<<NotebookTabChanged>>` (after confirming it had no existing handler) to refresh on show.
+- **Validation partitioning for multiple targets: only X-agnostic methods are valid.** SPXY (`d_X + d_y` on one target) and Stratified (balances one target's distribution) are single-Y; Kennard-Stone (spectral-only), Random, and Manual are target-agnostic. Multi-target now greys out SPXY+Stratified and forces Kennard-Stone (save/restore so single-Y keeps all 5). A genuine joint multi-Y SPXY (`d_X + d_Y` over all targets) is a possible v1.1 follow-up if response-range coverage across targets is wanted.
+- **Complete-case shrink is silent unless surfaced.** Multi-target requires rows with ALL selected targets present (necessary for JOINT); heterogeneous missingness shrinks N. Added an effective-N notice ("Using 30 complete samples across 2 targets; 19 dropped").
+- **Leaderboard preprocessing detail:** the result carried only the config NAME (`snv_deriv`), not deriv/window/polyorder — now a compact label (`snv_deriv d2 w17 p3`).
+
+Follow-up queued (user-approved, spec `docs/superpowers/specs/2026-07-04-multitarget-coupling-mode-choice.md`): make coupling a user choice (Independent / Joint / Both) — INDEPENDENT available for ALL models (PLS-1-per-target etc.), JOINT where supported, "Both" for on-leaderboard comparison; default Independent. Currently mode is a fixed model attribute (JOINT-capable models can't run independent), which denies the common separate-model-per-property workflow.
+
+---
+
 ## 2026-07-02 — T-17 merge-readiness: pr-review-toolkit found residuals the per-phase cross-family passes missed (again)
 
 Whole-feature-diff review before merge (spec §9): 3 Claude-family toolkit specialists on top of the per-phase Codex+Kimi K2.7 cross-family passes. **code-reviewer returned CLEAN** (all guardrails re-verified: single-Y 0-diff, `is_ended` migration complete, cache fingerprint, NaN-sink, CatBoost gate, fipls_spa 2-D safety, kwargs plumbing, GUI threading). silent-failure-hunter + pr-test-analyzer each found real residuals — orthogonality confirmed a 2nd time this ticket (cf. the foundation's 3rd-NaN-sink). Reusable lessons:
