@@ -14704,6 +14704,16 @@ class SpectralPredictApp:
         # Prime the column list + engine lock from current state.
         self._refresh_multitarget_columns()
 
+        # FIX 1: the target list is only primed here (tab creation) and on the
+        # Refresh button — it never saw a data load. Refresh whenever the
+        # Multi-Target sub-tab is shown so newly-loaded numeric columns appear.
+        # config_notebook has no other <<NotebookTabChanged>> handler (only the
+        # top-level self.notebook does), so a fresh single bind is safe.
+        self.config_notebook.bind(
+            '<<NotebookTabChanged>>',
+            lambda e: self._refresh_multitarget_columns() if hasattr(self, 'multitarget_listbox') else None,
+        )
+
     def _get_numeric_target_columns(self) -> list:
         """Return numeric candidate target columns from the active metadata."""
         source = None

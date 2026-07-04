@@ -486,6 +486,21 @@ class TestMultiTargetValidationLock:
 
 
 @pytest.mark.gui
+def test_tab_change_refreshes_target_list(gui_app):
+    """FIX 1: the target list is primed only at tab creation + the Refresh button,
+    so a data load never updated it. Showing the Multi-Target sub-tab fires
+    <<NotebookTabChanged>> on config_notebook, which must refresh the list."""
+    _load_multitarget_data(gui_app)
+    # Simulate freshly-loaded data whose columns have not yet reached the listbox.
+    gui_app.multitarget_listbox.delete(0, "end")
+    assert list(gui_app.multitarget_listbox.get(0, "end")) == []
+    gui_app.config_notebook.event_generate("<<NotebookTabChanged>>")
+    gui_app.root.update()
+    listed = list(gui_app.multitarget_listbox.get(0, "end"))
+    assert set(listed) == {"prop_0", "prop_1", "prop_2"}
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 
