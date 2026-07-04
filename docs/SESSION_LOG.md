@@ -4,6 +4,19 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-04 — T-17 coupling-mode-choice feature shipped (default Independent)
+
+Coupling is now a user choice — **Independent / Joint / Both, default Independent**. Previously coupling was a fixed model attribute (a JOINT-capable model like PLS could only run JOINT), which denied the common separate-model-per-property workflow. Key points:
+
+- **INDEPENDENT is available for ALL models** (PLS-1-per-target etc.). **JOINT** runs only where a joint variant exists (PLS/RandomForest/MLP/CatBoost/XGBoost natively, and Lasso/ElasticNet via MultiTask). A no-joint-variant model requested in **Joint** mode raises the new catchable `NoJointVariantError` (a `ValueError` subclass) → **skip-with-notice** (never aborts the run). **Both** emits INDEPENDENT + JOINT for joint-capable models, INDEPENDENT-only otherwise.
+- **Byte-identity guardrail preserved:** `resolve_multitarget_strategy(model_name, mode=None)` keeps `mode=None` → table-default resolution, so the F2 seed evaluator and the single-Y consolidation pin (which depends on PLS resolving to JOINT) stay byte-identical. `search.py` is 0-diff.
+- **One intended behavior change:** a DEFAULT multi-target grid run now produces **INDEPENDENT (PLS-1)** rather than the prior **JOINT (PLS-2)** — expected, since the default coupling is now Independent.
+- **Cell-count heads-up fix (Codex LOW, `b509fc4`):** the pre-run "≥ N cells" estimate used a flat `n_cfg×2` (Both) / `n_cfg×1` (Joint) for ALL models, ignoring joint capability — so Joint over-counted the independent-only models it actually skips. Now `_multitarget_cell_lower_bound` weights each model's HP-config count by `len(_expand_model_modes(model, coupling_mode))`, mirroring the backend EXACTLY (independent=1; joint=1 iff joint-capable else 0; both=2 iff joint-capable else 1). Kept the ">= N" lower-bound framing (varsel subsets still multiply it). Discriminating test: Joint mode with PLS + Ridge counts PLS-only (Ridge → 0), which the old flat weighting got wrong.
+
+Commits: `8547b9c`/`7c857ed`/`4b87be2` (feature) + `b509fc4` (cell-count fix). 216 tests green.
+
+---
+
 ## 2026-07-02 — T-17 Phase B (Task 12, GUI): `root.after` from a worker thread is unreliable on Win32 Tcl; `is_ended` is a property the verbatim cancel test calls as a method
 
 Task 12 = rework `_run_multitarget_search` to inherit the full single-Y config and dispatch on a worker thread with a separate `SearchController` + Cancel. Two non-obvious blockers:
