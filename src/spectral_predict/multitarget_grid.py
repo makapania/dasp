@@ -14,6 +14,48 @@ import numpy as np
 _SG_SPEC = {"sg1": (1, 2), "sg2": (2, 3), "sg3": (3, 4), "sg4": (4, 5)}
 
 
+def _is_joint_capable(model_name: str) -> bool:
+    """True iff the model has a joint multi-target variant (resolving it in joint
+    mode does not raise). Unknown models are treated as not joint-capable."""
+    from .multitarget_search import resolve_multitarget_strategy
+
+    try:
+        resolve_multitarget_strategy(model_name, mode="joint")
+        return True
+    except ValueError:
+        # NoJointVariantError (no joint variant) and unknown-model ValueError both
+        # mean "cannot run joint here".
+        return False
+
+
+def _expand_model_modes(model_name: str, coupling_mode: str):
+    """Map a coupling_mode to the coupling mode(s) to emit for one model.
+
+    Returns (modes, skip_notice) where modes is a list of "independent"/"joint"
+    strings and skip_notice is None or a user-facing skip string.
+
+    - "independent": every model -> ["independent"].
+    - "joint": joint-capable -> ["joint"]; else [] + skip-with-notice.
+    - "both": joint-capable -> ["independent", "joint"]; else ["independent"]
+      (a non-joint-capable model still runs its single INDEPENDENT cell).
+    """
+    cm = (coupling_mode or "independent").lower()
+    if cm == "independent":
+        return ["independent"], None
+    if cm == "joint":
+        if _is_joint_capable(model_name):
+            return ["joint"], None
+        return [], f"{model_name} has no joint variant — skipped in Joint mode"
+    if cm == "both":
+        if _is_joint_capable(model_name):
+            return ["independent", "joint"], None
+        return ["independent"], None
+    raise ValueError(
+        f"Unknown coupling_mode {coupling_mode!r}; expected "
+        "'independent', 'joint', or 'both'."
+    )
+
+
 def _preprocess_fingerprint(pc: dict) -> tuple:
     """Fully-discriminating hashable key for a preprocess config.
 
@@ -463,6 +505,7 @@ def run_multitarget_grid_search(
     max_n_components=10, max_iter=500, window_sizes=None,
     cv="kfold", n_folds=5, n_repeats=5, random_state=42,
     optimization_method="grid", controller=None, progress_callback=None, n_jobs=-1,
+    coupling_mode: str = "independent",
 ):
     from sklearn.pipeline import Pipeline
 
@@ -477,6 +520,13 @@ def run_multitarget_grid_search(
         raise ValueError(
             f"Multi-target grid search is Grid-engine ONLY; got "
             f"optimization_method={optimization_method!r}. Bayesian/NSGA-II are 1-D-only."
+        )
+
+    coupling_mode = (coupling_mode or "independent").lower()
+    if coupling_mode not in ("independent", "joint", "both"):
+        raise ValueError(
+            f"coupling_mode must be 'independent', 'joint', or 'both'; got "
+            f"{coupling_mode!r}."
         )
 
     X_arr = np.asarray(X, dtype=float)
@@ -514,7 +564,14 @@ def run_multitarget_grid_search(
     varsel_cache: dict = {}
     best_finite = None
     # First pass builds the full cell list so 'total' is honest.
-    cells = []  # (preprocess_cfg, X_sub, wl_sub, subset_dict, model_cfg)
+    cells = []  # (preprocess_cfg, X_sub, wl_sub, subset_dict, model_cfg, coupling_mode)
+
+    def _emit_cells(pc_, X_, tag_, method_, mc_):
+        modes, notice = _expand_model_modes(mc_["model_name"], coupling_mode)
+        if notice is not None and notice not in skipped_all:
+            skipped_all.append(notice)
+        for _mode in modes:
+            cells.append((pc_, X_, tag_, method_, mc_, _mode))
 
     for pc in preprocess_configs:
         if controller is not None and not controller.check_and_wait():
@@ -595,24 +652,24 @@ def run_multitarget_grid_search(
                         for cmc in _cap_and_dedup_pls_for_subset(
                             [mc], X_ss.shape[1], min_fold_train
                         ):
-                            cells.append((pc, X_ss, sub["tag"], "importance", cmc))
+                            _emit_cells(pc, X_ss, sub["tag"], "importance", cmc)
                 continue
             idx = s["indices"]
             X_sub = X_pp[:, idx]
             for mc in _cap_and_dedup_pls_for_subset(
                 model_cfgs, X_sub.shape[1], min_fold_train
             ):
-                cells.append((pc, X_sub, s["tag"], s["method"], mc))
+                _emit_cells(pc, X_sub, s["tag"], s["method"], mc)
 
     total = len(cells)
-    for i, (pc, X_sub, tag, method, mc) in enumerate(cells):
+    for i, (pc, X_sub, tag, method, mc, mode) in enumerate(cells):
         if controller is not None and not controller.check_and_wait():
             break
         res = _evaluate_multitarget_cell(
             X_sub, Y_arr, mc["model_name"], mc["params"], splitter, min_fold_train,
             X_sub.shape[1], target_names, n_folds=n_folds, n_repeats=n_repeats,
             random_state=random_state, preprocessing=_describe_preprocess_config(pc),
-            varsel_method=method, varsel_tag=tag,
+            varsel_method=method, varsel_tag=tag, mode=mode,
         )
         results.append(res)
         if np.isfinite(res.joint_q2) and (best_finite is None or res.joint_q2 > best_finite.joint_q2):

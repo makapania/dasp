@@ -457,6 +457,93 @@ def test_grid_controller_prestopped_early_exit(grid_xy):
     assert ctrl.calls >= 1
 
 
+# --------------------------------------------------------------------------- #
+# Coupling-mode expansion (Independent / Joint / Both) — §3b
+# --------------------------------------------------------------------------- #
+def test_grid_default_coupling_is_independent(grid_xy):
+    """Default coupling_mode='independent': a JOINT-by-default model (PLS) now
+    runs INDEPENDENT and every result carries the precise note. (On unfixed code
+    PLS ran JOINT, so all-INDEPENDENT fails.)"""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+    )
+    assert out.results
+    assert all(r.mode == "INDEPENDENT" for r in out.results)
+    assert all(r.precise_note for r in out.results)
+    assert np.isfinite(out.results[0].joint_q2)
+
+
+def test_grid_both_mode_emits_joint_and_independent_rows(grid_xy):
+    """CORE DISCRIMINATOR: coupling_mode='both' on a capable model emits TWO rows
+    (JOINT + INDEPENDENT) per config; dedup keyed on mode does not collapse them."""
+    from collections import defaultdict
+
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+        coupling_mode="both",
+    )
+    assert out.results
+    assert {r.mode for r in out.results} == {"JOINT", "INDEPENDENT"}
+    # Every distinct (preprocess, varsel, params) config appears with BOTH modes.
+    by_key = defaultdict(set)
+    for r in out.results:
+        by_key[(r.preprocessing, r.varsel_tag, frozenset(r.params.items()))].add(r.mode)
+    assert by_key
+    assert all(v == {"JOINT", "INDEPENDENT"} for v in by_key.values())
+
+
+def test_grid_joint_mode_skips_no_variant_model(grid_xy):
+    """coupling_mode='joint' with a no-joint-variant model (Ridge) -> skip-with-
+    notice (in out.skipped), NOT raised; the run completes and the joint-capable
+    model (PLS) still ranks as JOINT."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS", "Ridge"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+        coupling_mode="joint",
+    )
+    assert any("Ridge" in s for s in out.skipped)
+    assert out.results
+    assert all(r.model_name == "PLS" for r in out.results)
+    assert all(r.mode == "JOINT" for r in out.results)
+    assert np.isfinite(out.results[0].joint_q2)
+
+
+def test_grid_joint_mode_lasso_uses_multitask(grid_xy):
+    """coupling_mode='joint' routes Lasso through its MultiTask JOINT variant
+    (JOINT mode, no precise note)."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["Lasso"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+        coupling_mode="joint",
+    )
+    lasso_rows = [r for r in out.results if r.model_name == "Lasso"]
+    assert lasso_rows
+    assert all(r.mode == "JOINT" for r in lasso_rows)
+    assert all(r.precise_note == "" for r in lasso_rows)
+
+
 def test_grid_controller_running_completes(grid_xy):
     """POSITIVE control: a controller whose check_and_wait() always returns True
     must NOT early-exit -- the same run yields non-empty out.results (guards
