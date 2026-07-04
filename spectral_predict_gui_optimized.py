@@ -14606,6 +14606,7 @@ class SpectralPredictApp:
         mdl_frame = tk.Frame(mdl_card, bg=self.colors['card_bg'])
         mdl_frame.pack(fill='both', expand=True)
 
+        from spectral_predict.multitarget_grid import _is_joint_capable
         from spectral_predict.multitarget_search import resolve_multitarget_strategy
 
         # Regression models offered for multi-target, in a stable order. PLS-DA
@@ -14622,7 +14623,12 @@ class SpectralPredictApp:
                 continue
             var = tk.BooleanVar(value=(name == "PLS"))
             self.multitarget_model_vars[name] = var
-            label = f"{name}  [{strat.mode}]"
+            # Show each model's coupling CAPABILITY (not a fixed mode) so the user
+            # understands what Joint / Both will do: joint-capable models can run
+            # coupled OR per-target; the rest are independent-only.
+            capable = _is_joint_capable(name)
+            cap = "joint or independent" if capable else "independent only"
+            label = f"{name}  — {cap}"
             cb = ttk.Checkbutton(mdl_frame, text=label, variable=var)
             cb.grid(row=mr, column=mc, sticky=tk.W, padx=5, pady=2)
             CreateToolTip(cb, text=strat.mechanism, delay=400)
@@ -14639,6 +14645,28 @@ class SpectralPredictApp:
                   "equivalence to N independent searches, run separate single-target searches."),
             style='Caption.TLabel', wraplength=680, foreground=self.colors['accent'],
         ).grid(row=mr + 1, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+
+        # --- Coupling-mode selector (Independent / Joint / Both) ---
+        # Coupling is a user CHOICE, not a fixed model attribute: Independent
+        # (default) fits a separate per-target model for every selected model;
+        # Joint runs the coupled variant for joint-capable models (independent-only
+        # models are skipped-with-notice); Both puts the two side-by-side on the
+        # leaderboard for capable models.
+        self.multitarget_coupling = tk.StringVar(value="independent")
+        cpl_outer, cpl_card = self._create_card(
+            content_frame, title="Coupling Mode",
+            subtitle="How to model the selected targets together (default: Independent)")
+        cpl_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
+        row += 1
+        cpl_frame = tk.Frame(cpl_card, bg=self.colors['card_bg'])
+        cpl_frame.pack(fill='both', expand=True)
+        for val, text in [
+            ("independent", "Independent — separate model per target (all models)"),
+            ("joint", "Joint — one coupled model (joint-capable models only; others skipped)"),
+            ("both", "Both — Independent + Joint side-by-side for joint-capable models"),
+        ]:
+            ttk.Radiobutton(cpl_frame, text=text, value=val,
+                            variable=self.multitarget_coupling).pack(anchor=tk.W, pady=1)
 
         # --- Run + export controls ---
         ctl_frame = tk.Frame(content_frame, bg=self.colors['bg'])
@@ -15765,6 +15793,7 @@ class SpectralPredictApp:
             "cv": self.cv_strategy.get() or "kfold",
             "n_folds": int(self.folds.get() or 5),
             "n_repeats": int(self.cv_n_repeats.get() or 5),
+            "coupling_mode": self.multitarget_coupling.get(),
             "effective_n_notice": effective_n_notice,
         }
 
@@ -15835,7 +15864,12 @@ class SpectralPredictApp:
                 enabled_models=cfg["model_names"],
                 **(cfg["model_grid_overrides"] or {}))
             n_cfg = sum(len(v) for v in grids.values())
-            hint = f"  (≥ {n_pp * n_cfg} cells before variable selection — may take a while)"
+            # Both roughly doubles the capable-model cells (INDEPENDENT + JOINT);
+            # Joint drops the independent-only models. Keep the heads-up honest.
+            coupling_mode = self.multitarget_coupling.get()
+            mult = 2 if coupling_mode == "both" else 1
+            hint = (f"  (≥ {n_pp * n_cfg * mult} cells [{coupling_mode}] before "
+                    "variable selection — may take a while)")
         except Exception:
             hint = "  (running the full inherited grid — may take a while)"
         prefix = (effective_n_notice + "  ") if effective_n_notice else ""

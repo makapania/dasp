@@ -486,6 +486,59 @@ class TestMultiTargetValidationLock:
 
 
 @pytest.mark.gui
+class TestMultiTargetCouplingSelector:
+    """Coupling-mode selector (Independent / Joint / Both), default Independent,
+    forwarded to the grid backend as ``coupling_mode``."""
+
+    def test_coupling_state_and_default(self, gui_app):
+        assert hasattr(gui_app, "multitarget_coupling")
+        assert gui_app.multitarget_coupling.get() == "independent"
+
+    def test_collect_config_forwards_coupling_mode(self, gui_app):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)
+        gui_app._on_multitarget_selection_changed()
+        gui_app.multitarget_model_vars["PLS"].set(True)
+        try:
+            cfg = gui_app._collect_multitarget_config()
+            assert cfg is not None
+            assert cfg["coupling_mode"] == "independent"
+            gui_app.multitarget_coupling.set("both")
+            cfg2 = gui_app._collect_multitarget_config()
+            assert cfg2["coupling_mode"] == "both"
+        finally:
+            gui_app.multitarget_coupling.set("independent")
+
+    def test_coupling_mode_reaches_backend_kwargs(self, gui_app, monkeypatch):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)
+        gui_app._on_multitarget_selection_changed()
+        gui_app.multitarget_model_vars["PLS"].set(True)
+        gui_app.multitarget_coupling.set("joint")
+
+        captured = {}
+
+        def _fake_grid(X, Y, **kwargs):
+            captured.update(kwargs)
+            from spectral_predict.multitarget_search import MultiTargetSearchOutput
+            return MultiTargetSearchOutput(
+                results=[], target_names=kwargs["target_names"],
+                correlation={}, n_targets=Y.shape[1], skipped=[])
+
+        import spectral_predict.multitarget_grid as mg
+        monkeypatch.setattr(mg, "run_multitarget_grid_search", _fake_grid)
+        try:
+            gui_app._run_multitarget_search_thread(gui_app._collect_multitarget_config())
+        finally:
+            gui_app.multitarget_coupling.set("independent")
+        assert captured["coupling_mode"] == "joint"
+
+
+@pytest.mark.gui
 def test_tab_change_refreshes_target_list(gui_app):
     """FIX 1: the target list is primed only at tab creation + the Refresh button,
     so a data load never updated it. Showing the Multi-Target sub-tab fires
