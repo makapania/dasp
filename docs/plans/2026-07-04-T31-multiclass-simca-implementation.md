@@ -4,7 +4,7 @@
 **Spec:** `docs/superpowers/specs/2026-07-04-T31-multiclass-class-modeling.md` (review-hardened; Codex 5.5 + DeepSeek V4 Pro on the plan, Codex 5.5 + MiniMax M3 on the spec)
 **Status:** not started
 **Effort:** ~1–2 weeks (new infrastructure + GUI + export + tests)
-**Execution model:** Opus orchestrates; delegated coding subtasks may go to GLM-5.2 write-mode workers (`opencode-call`, HALT-OR-BLOCK). Opus reviews at each phase boundary (Codex + one cross-family pass), then full pr-review-toolkit at merge-readiness. Do NOT auto-merge — user greenlight only.
+**Execution model:** Opus orchestrates; delegated coding subtasks go to GLM-5.2 write-mode workers (`opencode-call`, HALT-OR-BLOCK). Opus drives TDD, reviews every task diff, and commits per task. **Multi-family review at every major checkpoint (mandatory — user directive):** each phase boundary gets a panel of **Codex + ≥2 orthogonal families** (from GLM 5.2 / Kimi / DeepSeek V4 Pro / MiniMax M3 — rotate so a family that wrote code doesn't review its own), plus the full **pr-review-toolkit** at merge-readiness. Single-reviewer gates are not sufficient. Do NOT auto-merge — user greenlight only.
 
 ---
 
@@ -87,7 +87,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Impl:** pickle the whole `MultiClassClassModel` as `model.pkl` (owns engines/calibrators/scaler(s)/varsel-mask/α/registry/column-order); mirror scaler to `autoscaler.pkl`; `metadata.json` += `task_type`, `class_names`, `engine_family`, `alpha`, `varsel_path`, `scaling`. Extend `predict_with_model`/`predict_with_uncertainty` to return the §6 schema shapes. Add the `task_type` validator gate.
 - **Done:** round-trip + compat-gate tests green.
 
-**Phase A gate:** Codex + one cross-family pass on `simca.py` + `model_io.py`; fold findings with discriminating tests.
+**Phase A gate (MAJOR checkpoint — multi-family):** Codex + ≥2 orthogonal families (GLM/Kimi/DeepSeek/MiniMax) on `simca.py` + `model_io.py` — the load-bearing math/CV/calibration/persistence. Fold findings with discriminating tests (revert-and-confirm-FAIL). GLM 5.2 (if it wrote the code) does not review its own diff.
 
 ---
 
@@ -108,7 +108,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Impl:** reuse the `implemented_oc_varsel` methods as a global prefilter; tag `varsel_path` on results.
 - **Done:** both varsel paths green; novelty guard passes.
 
-**Phase B gate:** Codex + cross-family on the varsel diff.
+**Phase B gate (multi-family):** Codex + ≥2 orthogonal families on the varsel diff (Wold math + supervised-novelty guard).
 
 ---
 
@@ -129,7 +129,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Impl:** `create_results_dataframe('multiclass_simca')` column set; scoring branch.
 - **Done:** green.
 
-**Phase C gate:** Codex + cross-family; **end-to-end smoke** — real multi-class spectral set through `run_multiclass_simca_search` + a genuinely held-out novel class; save→load→predict round-trip reproduces the decision matrix at max|diff|=0.
+**Phase C gate (MAJOR checkpoint — multi-family):** Codex + ≥2 orthogonal families on the search + task-type-plumbing diff (dispatcher/fall-through risk); **end-to-end smoke** — real multi-class spectral set through `run_multiclass_simca_search` + a genuinely held-out novel class; save→load→predict round-trip reproduces the decision matrix at max|diff|=0.
 
 ---
 
@@ -156,7 +156,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 
 ## 3. Merge-readiness
 
-- Full pr-review-toolkit (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer).
+- **Full multi-family whole-diff pass** — Codex + ≥2 orthogonal families (GLM/Kimi/DeepSeek/MiniMax) on the cumulative diff, THEN the full pr-review-toolkit (code-reviewer, silent-failure-hunter, pr-test-analyzer, type-design-analyzer). The two layers are orthogonal — the toolkit has caught HIGHs the cross-family passes missed and vice versa.
 - **Merge gate:** local diff-failure-set vs `origin/main` (main red on cloud CI since 2025-10-27) — PR adds **zero new failures**. Run the full suite ex-GUI on HEAD and on `origin/main`, diff the failure sets.
 - Commit per task with explicit `git add` paths (never `git add -A` — many untracked scratch files); CRLF `git diff --stat` check after GUI edits. Commit before any control-yielding op. Do NOT auto-merge — await user greenlight.
 
