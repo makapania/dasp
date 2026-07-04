@@ -14551,6 +14551,14 @@ class SpectralPredictApp:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # FIX 2: give column 0 weight so the grid columns fill (and are bounded by)
+        # the canvas-pinned viewport width instead of ballooning to the wide results
+        # tree's natural width. Without this the wide per-target Treeview forces
+        # content_frame past the viewport (clipped by the vertical-only canvas) and
+        # the tree's own x-scrollbar never sees overflow. With it, the tree is bounded
+        # to the viewport and scrolls horizontally INSIDE res_frame.
+        content_frame.columnconfigure(0, weight=1)
+
         row = 0
 
         ttk.Label(
@@ -15985,12 +15993,15 @@ class SpectralPredictApp:
             ("joint_q2", "Joint Q²", 80, tk.E),
         ]:
             tree.heading(cid, text=text)
-            tree.column(cid, width=w, anchor=anchor)
+            # stretch=False keeps each column at its fixed width so a wide
+            # per-target grid overflows the viewport horizontally (engaging the
+            # x-scrollbar) instead of squishing every column to fit (FIX 2).
+            tree.column(cid, width=w, anchor=anchor, stretch=False)
         for t in target_names:
             for key, lbl in self._MULTITARGET_METRIC_KEYS:
                 col = f"{t}__{key}"
                 tree.heading(col, text=f"{t} {lbl}")
-                tree.column(col, width=90, anchor=tk.E)
+                tree.column(col, width=90, anchor=tk.E, stretch=False)
 
         for res in output.results:
             per = {d["target"]: d for d in res.metrics.get("per_target", [])}
