@@ -59,6 +59,7 @@ from .multi_y import (
 
 __all__ = [
     "INDEPENDENT_PRECISE_NOTE",
+    "NoJointVariantError",
     "MultiTargetStrategy",
     "MultiTargetResult",
     "MultiTargetSearchOutput",
@@ -81,6 +82,15 @@ INDEPENDENT_PRECISE_NOTE = (
 
 _JOINT = "JOINT"
 _INDEPENDENT = "INDEPENDENT"
+
+
+class NoJointVariantError(ValueError):
+    """Raised when a model with no joint variant is requested in joint mode.
+
+    A ValueError subclass so callers can catch it specifically (the grid
+    orchestrator turns it into a skip-with-notice) while it stays catchable as a
+    plain ValueError.
+    """
 
 
 @dataclass(frozen=True)
@@ -202,7 +212,37 @@ _STRATEGY_TABLE: dict[str, MultiTargetStrategy] = {
 _MODEL_ALIASES = {"SVM": "SVR"}
 
 
-def resolve_multitarget_strategy(model_name: str) -> MultiTargetStrategy:
+# Mechanism strings for the INDEPENDENT (per-target, MultiOutputRegressor-wrapped)
+# variants of the models that are JOINT by default. Reached via mode="independent".
+_INDEPENDENT_VARIANT_MECHANISM: dict[str, str] = {
+    "PLS": "separate PLS-1 per target (MultiOutputRegressor, scale=False)",
+    "RandomForest": "separate RandomForest per target (MultiOutputRegressor)",
+    "MLP": "separate MLP per target (MultiOutputRegressor)",
+    "CatBoost": "separate CatBoost per target (MultiOutputRegressor)",
+    "XGBoost": "separate XGBoost per target (MultiOutputRegressor)",
+}
+
+
+def _independent_variant(model_name: str) -> MultiTargetStrategy:
+    """Build the INDEPENDENT (MOR-wrapped per-target) variant of a JOINT-by-default
+    model. joint_params is empty so no native-joint kwarg leaks into the base
+    estimator, and scale_y is False so INDEPENDENT never applies fold Y-scaling.
+    """
+    return MultiTargetStrategy(
+        model_name=model_name,
+        mode=_INDEPENDENT,
+        mechanism=_INDEPENDENT_VARIANT_MECHANISM[model_name],
+        scale_y=False,
+        native=False,
+        precise_note=INDEPENDENT_PRECISE_NOTE,
+        joint_params={},
+        supports_optional_joint=False,
+    )
+
+
+def resolve_multitarget_strategy(
+    model_name: str, mode: Optional[str] = None
+) -> MultiTargetStrategy:
     """Resolve a model's multi-target coupling strategy.
 
     Pure function. Returns the JOINT/INDEPENDENT mode, the fold-Y-scaling rule,
@@ -212,26 +252,65 @@ def resolve_multitarget_strategy(model_name: str) -> MultiTargetStrategy:
         model_name: Canonical regression model name (e.g. ``"PLS"``,
             ``"Ridge"``, ``"LightGBM"``). ``"SVM"`` is accepted as an alias for
             ``"SVR"``.
+        mode: Optional caller-chosen coupling override. ``None`` (default)
+            returns the table default (this preserves the consolidation pin,
+            which depends on PLS resolving to JOINT). ``"joint"`` forces the
+            JOINT variant when one exists; on a model with no joint variant it
+            raises :class:`NoJointVariantError`. ``"independent"`` forces the
+            INDEPENDENT (per-target, MultiOutputRegressor-wrapped) variant.
 
     Returns:
         The :class:`MultiTargetStrategy` for the model.
 
     Raises:
-        ValueError: If ``model_name`` is unknown. Failing loud here is a
+        ValueError: If ``model_name`` is unknown, or if ``mode`` is not one of
+            ``None`` / ``"joint"`` / ``"independent"``. Failing loud here is a
             statistical-integrity guardrail: a silently-defaulted mode could
             mislabel a batched model as coupling.
+        NoJointVariantError: If ``mode="joint"`` is requested for a model that
+            has no joint multi-target variant.
     """
     if not isinstance(model_name, str):
         raise ValueError(f"model_name must be a str, got {type(model_name).__name__}.")
     key = _MODEL_ALIASES.get(model_name, model_name)
-    strategy = _STRATEGY_TABLE.get(key)
-    if strategy is None:
+    base = _STRATEGY_TABLE.get(key)
+    if base is None:
         raise ValueError(
             f"Unknown multi-target model {model_name!r}. Known models: "
             f"{sorted(_STRATEGY_TABLE)}. Refusing to guess a coupling mode "
             "(would risk mislabeling batched breadth as coupling)."
         )
-    return strategy
+    if mode is None:
+        return base
+    m = mode.lower()
+    if m == "joint":
+        if base.mode == _JOINT:
+            return base
+        if base.supports_optional_joint:
+            return _STRATEGY_TABLE["MultiTask" + key]
+        raise NoJointVariantError(
+            f"{model_name} has no joint multi-target variant — cannot run in "
+            "joint mode. Joint-capable models: PLS, RandomForest, MLP, "
+            "CatBoost, XGBoost, Lasso, ElasticNet."
+        )
+    if m == "independent":
+        if base.mode == _INDEPENDENT:
+            return base
+        return _independent_variant(key)
+    raise ValueError(
+        f"Unknown coupling mode {mode!r}; expected 'independent', 'joint', or None."
+    )
+
+
+def _maybe_wrap_independent(strategy: MultiTargetStrategy, estimator):
+    """Wrap a native-joint model's base estimator in MultiOutputRegressor when the
+    resolved strategy is the INDEPENDENT (per-target) variant; return it unchanged
+    otherwise (true JOINT native fit)."""
+    if strategy.mode == _INDEPENDENT and not strategy.native:
+        from sklearn.multioutput import MultiOutputRegressor
+
+        return MultiOutputRegressor(estimator)
+    return estimator
 
 
 def build_multitarget_estimator(
@@ -291,39 +370,45 @@ def build_multitarget_estimator(
             pls_kwargs["max_iter"] = int(params["max_iter"])
         if "tol" in params:
             pls_kwargs["tol"] = float(params["tol"])
-        return PLSRegression(**pls_kwargs)
+        return _maybe_wrap_independent(strategy, PLSRegression(**pls_kwargs))
 
     if name == "RandomForest":
         from sklearn.ensemble import RandomForestRegressor
 
-        return RandomForestRegressor(
-            n_estimators=int(params.get("n_estimators", 200)),
-            max_depth=params.get("max_depth", None),
-            min_samples_split=int(params.get("min_samples_split", 2)),
-            min_samples_leaf=int(params.get("min_samples_leaf", 1)),
-            max_features=params.get("max_features", 1.0),
-            bootstrap=bool(params.get("bootstrap", True)),
-            max_leaf_nodes=params.get("max_leaf_nodes", None),
-            min_impurity_decrease=float(params.get("min_impurity_decrease", 0.0)),
-            random_state=int(params.get("random_state", 42)),
-            n_jobs=int(params.get("n_jobs", -1)),
+        return _maybe_wrap_independent(
+            strategy,
+            RandomForestRegressor(
+                n_estimators=int(params.get("n_estimators", 200)),
+                max_depth=params.get("max_depth", None),
+                min_samples_split=int(params.get("min_samples_split", 2)),
+                min_samples_leaf=int(params.get("min_samples_leaf", 1)),
+                max_features=params.get("max_features", 1.0),
+                bootstrap=bool(params.get("bootstrap", True)),
+                max_leaf_nodes=params.get("max_leaf_nodes", None),
+                min_impurity_decrease=float(params.get("min_impurity_decrease", 0.0)),
+                random_state=int(params.get("random_state", 42)),
+                n_jobs=int(params.get("n_jobs", -1)),
+            ),
         )
 
     if name == "MLP":
         from sklearn.neural_network import MLPRegressor
 
-        return MLPRegressor(
-            hidden_layer_sizes=params.get("hidden_layer_sizes", (64,)),
-            activation=params.get("activation", "relu"),
-            solver=params.get("solver", "adam"),
-            alpha=float(params.get("alpha", 1e-3)),
-            batch_size=params.get("batch_size", "auto"),
-            learning_rate=params.get("learning_rate", "constant"),
-            learning_rate_init=float(params.get("learning_rate_init", 1e-3)),
-            momentum=float(params.get("momentum", 0.9)),
-            max_iter=int(params.get("max_iter", 500)),
-            early_stopping=bool(params.get("early_stopping", True)),
-            random_state=int(params.get("random_state", 42)),
+        return _maybe_wrap_independent(
+            strategy,
+            MLPRegressor(
+                hidden_layer_sizes=params.get("hidden_layer_sizes", (64,)),
+                activation=params.get("activation", "relu"),
+                solver=params.get("solver", "adam"),
+                alpha=float(params.get("alpha", 1e-3)),
+                batch_size=params.get("batch_size", "auto"),
+                learning_rate=params.get("learning_rate", "constant"),
+                learning_rate_init=float(params.get("learning_rate_init", 1e-3)),
+                momentum=float(params.get("momentum", 0.9)),
+                max_iter=int(params.get("max_iter", 500)),
+                early_stopping=bool(params.get("early_stopping", True)),
+                random_state=int(params.get("random_state", 42)),
+            ),
         )
 
     if name == "CatBoost":
@@ -347,7 +432,7 @@ def build_multitarget_estimator(
         if "bagging_temperature" in params and params.get("bootstrap_type", "Bayesian") == "Bayesian":
             kwargs["bagging_temperature"] = float(params["bagging_temperature"])
         kwargs.update(strategy.joint_params)  # loss_function='MultiRMSE'
-        return CatBoostRegressor(**kwargs)
+        return _maybe_wrap_independent(strategy, CatBoostRegressor(**kwargs))
 
     if name == "XGBoost":
         # JOINT via multi_strategy='multi_output_tree' (from strategy.joint_params,
@@ -372,7 +457,7 @@ def build_multitarget_estimator(
             verbosity=0,
         )
         kwargs.update(strategy.joint_params)  # multi_strategy='multi_output_tree'
-        return XGBRegressor(**kwargs)
+        return _maybe_wrap_independent(strategy, XGBRegressor(**kwargs))
 
     # --- JOINT optional MultiTask linear models (fit on fold-scaled Y) ---
     # MultiTaskLasso/ElasticNet natively accept a 2-D Y block and impose a
@@ -544,6 +629,7 @@ def _evaluate_multitarget_cell(
     n_folds: int = 5,
     n_repeats: int = 5,
     random_state: int = 42,
+    mode: Optional[str] = None,
     preprocessing: str = "raw",
     varsel_method: str = "full",
     varsel_tag: str = "full",
@@ -557,7 +643,7 @@ def _evaluate_multitarget_cell(
     """
     strategy: Optional[MultiTargetStrategy] = None
     try:
-        strategy = resolve_multitarget_strategy(model_name)
+        strategy = resolve_multitarget_strategy(model_name, mode)
         estimator = build_multitarget_estimator(
             strategy, params, min_fold_train, n_features_sub
         )

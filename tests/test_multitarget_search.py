@@ -791,3 +791,143 @@ def test_unknown_model_sinks_to_nan_and_sibling_still_ranks():
 
     # NaN-safe ranking: the finite model is reported as best, never the NaN cell.
     assert out.best.model_name == "PLS"
+
+
+# --------------------------------------------------------------------------- #
+# Coupling-mode choice (Independent / Joint) — mode-aware strategy resolution
+# --------------------------------------------------------------------------- #
+def test_resolve_mode_none_preserves_table_default():
+    """Backward-compat: mode=None (default) returns the table's natural mode, so
+    the single-Y consolidation pin (PLS -> JOINT) is untouched."""
+    assert resolve_multitarget_strategy("PLS").mode == "JOINT"
+    assert resolve_multitarget_strategy("PLS", mode=None).mode == "JOINT"
+    assert resolve_multitarget_strategy("Ridge").mode == "INDEPENDENT"
+    assert resolve_multitarget_strategy("Ridge", mode=None).mode == "INDEPENDENT"
+
+
+@pytest.mark.parametrize("model_name", ["PLS", "RandomForest", "MLP", "CatBoost", "XGBoost"])
+def test_resolve_joint_native_model_independent_mode(model_name):
+    """A currently-JOINT-only model becomes INDEPENDENT under mode='independent':
+    scale_y False, native False (MOR-wrapped), carries the precise note."""
+    strat = resolve_multitarget_strategy(model_name, mode="independent")
+    assert strat.model_name == model_name
+    assert strat.mode == "INDEPENDENT"
+    assert strat.scale_y is False
+    assert strat.native is False
+    assert strat.precise_note == INDEPENDENT_PRECISE_NOTE
+    # JOINT mode still returns the coupling strategy.
+    assert resolve_multitarget_strategy(model_name, mode="joint").mode == "JOINT"
+
+
+def test_resolve_independent_pls_mechanism_reads_separate_per_target():
+    """Honest labeling: independent PLS mechanism reads like 'separate PLS-1 per target'."""
+    strat = resolve_multitarget_strategy("PLS", mode="independent")
+    assert "separate" in strat.mechanism.lower()
+    assert "PLS-1" in strat.mechanism or "per target" in strat.mechanism.lower()
+
+
+def test_build_independent_pls_is_mor_wrapped_pls1():
+    """Independent PLS builds MultiOutputRegressor(PLSRegression(scale=False))."""
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.multioutput import MultiOutputRegressor
+
+    strat = resolve_multitarget_strategy("PLS", mode="independent")
+    est = build_multitarget_estimator(strat, {"n_components": 3}, n_samples=40, n_features=15)
+    assert isinstance(est, MultiOutputRegressor)
+    base = est.estimator
+    assert isinstance(base, PLSRegression)
+    assert base.scale is False
+
+
+def test_independent_pls_differs_from_joint_pls2(rng):
+    """CORE DISCRIMINATOR: independent PLS-1-per-target is numerically DISTINCT
+    from joint PLS-2 on a correlated 2-target block — proving both modes are
+    reachable and genuinely different (not the same estimator relabeled)."""
+    from sklearn.cross_decomposition import PLSRegression
+    from sklearn.multioutput import MultiOutputRegressor
+
+    n, p = 60, 15
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 1))
+    Y = np.hstack([base + 0.05 * rng.standard_normal((n, 1)),
+                   2.0 * base + 0.05 * rng.standard_normal((n, 1))])
+
+    joint = build_multitarget_estimator(
+        resolve_multitarget_strategy("PLS", mode="joint"), {"n_components": 3}, n, p)
+    indep = build_multitarget_estimator(
+        resolve_multitarget_strategy("PLS", mode="independent"), {"n_components": 3}, n, p)
+    assert isinstance(joint, PLSRegression)
+    assert isinstance(indep, MultiOutputRegressor)
+
+    pj = np.asarray(joint.fit(X, Y).predict(X))
+    pi = np.asarray(indep.fit(X, Y).predict(X))
+    assert pj.shape == pi.shape == (n, 2)
+    # PLS-2 shares latent variables across targets; PLS-1-per-target does not.
+    assert not np.allclose(pj, pi)
+
+
+@pytest.mark.parametrize("model_name", ["RandomForest", "MLP", "CatBoost", "XGBoost"])
+def test_build_independent_joint_model_is_mor_wrapped(model_name):
+    """RF/MLP/CatBoost/XGBoost under independent mode are MOR-wrapped single-target
+    estimators (no joint_params leak like MultiRMSE / multi_output_tree)."""
+    from sklearn.multioutput import MultiOutputRegressor
+
+    strat = resolve_multitarget_strategy(model_name, mode="independent")
+    est = build_multitarget_estimator(strat, {}, n_samples=40, n_features=12)
+    assert isinstance(est, MultiOutputRegressor)
+
+
+def test_resolve_lasso_joint_uses_multitask():
+    """Lasso/ElasticNet in joint mode resolve to their MultiTask JOINT variant."""
+    from sklearn.linear_model import MultiTaskElasticNet, MultiTaskLasso
+
+    ls = resolve_multitarget_strategy("Lasso", mode="joint")
+    assert ls.model_name == "MultiTaskLasso"
+    assert ls.mode == "JOINT"
+    assert ls.precise_note == ""
+    est = build_multitarget_estimator(ls, {"alpha": 0.5}, n_samples=30, n_features=10)
+    assert isinstance(est, MultiTaskLasso)
+
+    en = resolve_multitarget_strategy("ElasticNet", mode="joint")
+    assert en.model_name == "MultiTaskElasticNet"
+    est2 = build_multitarget_estimator(en, {}, n_samples=30, n_features=10)
+    assert isinstance(est2, MultiTaskElasticNet)
+
+    # Independent mode keeps the plain (per-target) linear model.
+    assert resolve_multitarget_strategy("Lasso", mode="independent").mode == "INDEPENDENT"
+
+
+@pytest.mark.parametrize("model_name", ["Ridge", "SVR", "LightGBM", "NeuralBoosted"])
+def test_resolve_no_joint_variant_raises_catchable(model_name):
+    """A model with no joint variant, requested in joint mode, raises a clear,
+    catchable error (the orchestrator turns it into skip-with-notice)."""
+    from spectral_predict.multitarget_search import NoJointVariantError
+
+    with pytest.raises(NoJointVariantError):
+        resolve_multitarget_strategy(model_name, mode="joint")
+    # NoJointVariantError is a ValueError subclass (stays catchable as ValueError).
+    with pytest.raises(ValueError):
+        resolve_multitarget_strategy(model_name, mode="joint")
+    # Independent mode still works for these.
+    assert resolve_multitarget_strategy(model_name, mode="independent").mode == "INDEPENDENT"
+
+
+def test_evaluate_cell_independent_mode_for_joint_model(rng):
+    """A JOINT-native model (RandomForest) evaluated with mode='independent'
+    produces a finite INDEPENDENT-labeled result carrying the precise note."""
+    from spectral_predict.multitarget_search import _evaluate_multitarget_cell
+
+    n, p = 45, 10
+    X = rng.standard_normal((n, p))
+    base = X[:, :3] @ rng.standard_normal((3, 2))
+    Y = base + 0.05 * rng.standard_normal((n, 2))
+    splitter = build_cv_splitter("kfold", 3, "regression", n_repeats=1, random_state=42, y=None)
+    res = _evaluate_multitarget_cell(
+        X, Y, "RandomForest", {"n_estimators": 20}, splitter, min_fold_train=25,
+        n_features_sub=p, target_names=["a", "b"], mode="independent",
+    )
+    assert res.mode == "INDEPENDENT"
+    assert res.precise_note == INDEPENDENT_PRECISE_NOTE
+    assert res.scale_y is False
+    assert np.isfinite(res.joint_q2)
+    assert res.metrics["q2"].shape == (2,)
