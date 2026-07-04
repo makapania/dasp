@@ -48,7 +48,7 @@ alpha is GLOBAL. Only n_components is tuned per class (filter the existing PCA-S
 Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 
 ### A1 — `PCASIMCA.p_joint` accessor + numeric fixtures + docstring fix
-- **Test:** (a) `p_joint = chi2(4).sf(fisher_stat)` in [0,1], accept iff `p_joint >= alpha` matches existing `predict`; (b) **numeric reference fixtures** pinning T²/Q/`p_joint`/decision on a fixed small matrix (compute once, freeze); (c) **Fisher-vs-Bonferroni calibration test** (§9.6) — on synthetic data the Fisher-combined accept rate stays within a stated tolerance of the per-axis-Bonferroni (α/2 each) accept rate. (§9.13, §9.6)
+- **Test:** (a) `p_joint = chi2(4).sf(fisher_stat)` in [0,1], accept iff `p_joint >= alpha` matches existing `predict`; (b) **numeric reference fixtures** — a **deterministic hardcoded input matrix** (e.g. `np.arange`-derived or a fixed `RandomState(0)` 12×5 array, stated literally in the test) fit by `PCASIMCA(n_components=2, alpha=0.05)`; capture T²/Q/`p_joint`/decision from the reference impl on the first green run and **freeze them as literal expected values in the test file** (assert to 1e-9). (c) **Fisher-vs-Bonferroni test** (§9.6) — on synthetic data the Fisher accept rate is within a stated tolerance of per-axis-Bonferroni (α/2 each). (§9.13, §9.6)
 - **Impl:** add `PCASIMCA.p_joint(X)` returning `stats.chi2.sf(fisher_stat, 4)` (reuse `decision_function` internals). Fix the `_fit_chi2` docstring ("MLE" → "method-of-moments `method='mm'`", `contamination.py:184-188`).
 - **Done:** accessor + numeric fixtures + Fisher/Bonferroni test green; docstring accurate. No behavior change to `decision_function`.
 
@@ -73,7 +73,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Done:** nested CV green; leakage instrumentation test passes; `"per_class_cv"` default resolves through A.1.
 
 ### A6 — LOCO / external novelty evaluation mode
-- **Test:** LOCO refits all K−1 models with the held-out class excluded; no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining. Synthetic held-out 4th class → ≥80% novelty (non-overlap). **Baseline contract (GPT-5.5):** the PLS-DA baseline forces the 4th-class samples into a **specific trained class** — assert the forced class identity AND its reported probability/confidence, not just "forces a class." (§9.1, §9.8)
+- **Test:** LOCO refits all K−1 models with the held-out class excluded; no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining. **Deterministic fixture:** 3 well-separated Gaussian blobs (`RandomState(0)`) as classes A/B/C; the held-out 4th class is constructed **adjacent to class B in feature space** so PLS-DA's argmax is deterministic. Assert: SIMCA labels ≥80% of the 4th class "novel"; **PLS-DA forces ≥90% of them to class B with mean predicted proba > 0.5** (exact rate/proba frozen from the first run). (§9.1, §9.8)
 - **Impl:** `evaluate_novelty(X, y, mode="loco"|"external", external=None)` per spec §5.4.
 - **Done:** novelty mode green; acceptance-target test green.
 

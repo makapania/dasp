@@ -54,8 +54,8 @@ Both are textbook **class-modeling** cases: a specimen can legitimately belong t
 ```
 class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     def __init__(self, engine="pca-simca", alpha=0.05,
-                 n_components="per_class_cv", scaling="OPEN §5.5",
-                 engine_params=None): ...
+                 n_components="per_class_cv", scaling="per_class",  # §5.5 (resolved)
+                 min_class_samples=10, engine_params=None): ...
 
     def fit(self, X, y):                 # y = class labels (K classes)
         # per class k: select train-only inliers (y == k),
@@ -177,7 +177,7 @@ No `.dasp` precedent exists for a dict/list of models. **Format:** the `MultiCla
 8. **LOCO refits all K−1**: no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining models.
 9. **Supervised-varsel novelty guard:** external-novel-class test shows `varsel_path=supervised` does not degrade novelty rate below the full-spectra baseline.
 10. **Wold DPOW** ranking stable across resamples (Spearman ρ ≥ 0.8); "balanced" retains ≥2/3 known-relevant variables.
-11. Persistence round-trip reproduces `p_values`/`decision_matrix`/`summary_label`/`accepted_classes`; old-build load raises `NotImplementedError`.
+11. Persistence round-trip reproduces `p_values`/`decision_matrix`/`summary_label`/`accepted_classes`; the **current build raises `NotImplementedError` on an unknown/unsupported `task_type`** (guards the current silent regression-path fall-through; a new build cannot make an *old* build raise).
 12. Plumbing: `multiclass_simca` never falls through to classification at any task-type branch site.
 13. Numeric reference tests pinning T²/Q/`p_joint`/decision on a fixed matrix.
 
