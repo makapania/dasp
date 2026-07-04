@@ -34,7 +34,7 @@ Per class k, PCA(n_components=nk) on class-k samples (post scaling mode §5.5):
   p_joint = chi2(4).sf(fisher)                    # the value used in the P matrix + ranking
 
 Non-SIMCA engine (OCSVM/IF/LOF/EE), per class:
-  score s normalized "higher = more normal" (pin per engine, §5.3; IsolationForest negate score_samples)
+  score s normalized "higher = more normal" (pin per engine, §5.3; IsolationForest score_samples AS-IS — do NOT negate)
   null = cross-fit engine scores on train-only inliers (m >= 10)
   p    = (1 + #{null <= s}) / (m + 1);  accept iff p >= alpha
 ```
@@ -47,15 +47,15 @@ alpha is GLOBAL. Only n_components is tuned per class (filter the existing PCA-S
 
 Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 
-### A1 — `PCASIMCA.p_joint` accessor + docstring fix
-- **Test:** `p_joint = chi2(4).sf(fisher_stat)` equals `1 - decision-as-cdf` on a fixed matrix; `p_joint` in [0,1]; accept iff `p_joint >= alpha` matches existing `predict`. (§9.13)
-- **Impl:** add `PCASIMCA.p_joint(X)` returning `stats.chi2.sf(fisher_stat, 4)` (reuse the `decision_function` internals). Fix the `_fit_chi2` docstring ("MLE" → "method-of-moments `method='mm'`", `contamination.py:187`).
-- **Done:** accessor + reference test green; docstring accurate. No behavior change to `decision_function`.
+### A1 — `PCASIMCA.p_joint` accessor + numeric fixtures + docstring fix
+- **Test:** (a) `p_joint = chi2(4).sf(fisher_stat)` in [0,1], accept iff `p_joint >= alpha` matches existing `predict`; (b) **numeric reference fixtures** pinning T²/Q/`p_joint`/decision on a fixed small matrix (compute once, freeze); (c) **Fisher-vs-Bonferroni calibration test** (§9.6) — on synthetic data the Fisher-combined accept rate stays within a stated tolerance of the per-axis-Bonferroni (α/2 each) accept rate. (§9.13, §9.6)
+- **Impl:** add `PCASIMCA.p_joint(X)` returning `stats.chi2.sf(fisher_stat, 4)` (reuse `decision_function` internals). Fix the `_fit_chi2` docstring ("MLE" → "method-of-moments `method='mm'`", `contamination.py:184-188`).
+- **Done:** accessor + numeric fixtures + Fisher/Bonferroni test green; docstring accurate. No behavior change to `decision_function`.
 
 ### A2 — `MultiClassClassModel` core (SIMCA engine only)
-- **Test:** fit on synthetic K=3; `decision_matrix(X)` returns `(P (n,K) in [0,1], A (n,K) bool)`; `predict` yields summary labels `single/multiple/novel` with the "≥2 of K" rule; novel row → all-reject. (§9.2)
-- **Impl:** `MultiClassClassModel(engine="pca-simca", alpha=0.05, n_components="per_class_cv", scaling="per_class", engine_params=None)`. `fit(X,y)` stores `classes_` (ordered), fits one engine per class on that class's samples, builds `P` from `p_joint`; `A = P >= alpha`. `predict` → argmax `p_joint` over accepted for the hard label.
-- **Done:** core API green; decision rule per spec §5.2.
+- **Test:** fit on synthetic K=3 with a **fixed** `n_components` (int or per-class dict — `"per_class_cv"` is not wired until A5); `decision_matrix(X)` returns `(P (n,K) in [0,1], A (n,K) bool)`; `predict` yields `single/multiple/novel` with the "≥2 of K" rule; novel row → all-reject. **`n_k < 10` → class marked unmodelable, its column preserved (not dropped) and flagged** (§8). **False-rejection reliability (§9.5):** K=3 sizes {5, 30, 100} → empirical false-rejection at α=0.05 ∈ [0.02, 0.10] per modeled class; the size-5 class is flagged unmodelable. (§9.2, §9.5)
+- **Impl:** `MultiClassClassModel(engine="pca-simca", alpha=0.05, n_components=<int|dict>, scaling="per_class", min_class_samples=10, engine_params=None)`. `fit(X,y)` stores `classes_` (ordered), enforces `min_class_samples` (mark unmodelable, keep column), fits one engine per modeled class on that class's samples, builds `P` from `p_joint`; `A = P >= alpha`. `predict` → argmax `p_joint` over accepted. (`n_components="per_class_cv"` becomes the public default in A5, not here.)
+- **Done:** core API + unmodelable handling + false-rejection test green; decision rule per spec §5.2.
 
 ### A3 — scaling modes (`per_class` / `global` / `none`)
 - **Test:** `scaling="none"` single-class model == bare `PCASIMCA` accept/reject bit-for-bit (functional-equivalence anchor); `per_class` fits a scaler per class; `global` one scaler; all fit train-only. (§9.3)
@@ -64,16 +64,16 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 
 ### A4 — non-SIMCA per-class p-value calibration
 - **Test:** for each of OCSVM/IF/LOF/EE, held-out-inlier accept rate ∈ [1−α−0.10, 1−α+0.10] at n ∈ {10,30,100}; assert IsolationForest direction not inverted. (§9.7)
-- **Impl:** calibration object per §5.3 — per-engine normalized score ("higher=more normal", pin the exact call incl. IF `-score_samples`), cross-fit null on train-only inliers, `p=(1+#{null≤s})/(m+1)`, min m=10 else class unmodelable.
+- **Impl:** calibration object per §5.3 — per-engine normalized score ("higher=more normal", pin the exact call; **IF `score_samples` AS-IS, NOT negated** — GPT-5.5 caught the inversion bug), cross-fit null on train-only inliers, `p=(1+#{null≤s})/(m+1)`, min m=10 else class unmodelable.
 - **Done:** all four engines produce valid level-α p-values feeding the same `P` matrix.
 
 ### A5 — two-stage nested leakage-safe CV
 - **Test:** A.1 tuning samples are disjoint from the A.2 evaluation samples they feed (assert via instrumentation); per-class n_components selected under global α (α never varies); reuses `run_one_class_cv` one-vs-rest. (§9.4)
-- **Impl:** for each A.2 outer-train split, run A.1 (`run_one_class_cv`, `compute_calibration=False`, class k=+1 rest=−1, select balanced_accuracy) to pick each class's n_components; then fit K models + scaling + calibration + varsel on that split only; score held-out pool from all classes vs all K; pool. Filter the PCA-SIMCA grid to n_components only.
-- **Done:** nested CV green; leakage instrumentation test passes.
+- **Impl:** for each A.2 outer-train split, run A.1 (`run_one_class_cv`, `compute_calibration=False`, class k=+1 rest=−1, select balanced_accuracy) to pick each class's n_components; then fit K models + scaling + calibration + varsel on that split only; score held-out pool from all classes vs all K; pool. **Filter the existing PCA-SIMCA grid to n_components only and inject the orchestrator α** (global α; α never tuned). **Wire `n_components="per_class_cv"` as the public constructor default here** (A2 used fixed values).
+- **Done:** nested CV green; leakage instrumentation test passes; `"per_class_cv"` default resolves through A.1.
 
 ### A6 — LOCO / external novelty evaluation mode
-- **Test:** LOCO refits all K−1 models with the held-out class excluded; no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining. Synthetic held-out 4th class → ≥80% novelty (non-overlap) while PLS-DA forces a class. (§9.1, §9.8)
+- **Test:** LOCO refits all K−1 models with the held-out class excluded; no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining. Synthetic held-out 4th class → ≥80% novelty (non-overlap). **Baseline contract (GPT-5.5):** the PLS-DA baseline forces the 4th-class samples into a **specific trained class** — assert the forced class identity AND its reported probability/confidence, not just "forces a class." (§9.1, §9.8)
 - **Impl:** `evaluate_novelty(X, y, mode="loco"|"external", external=None)` per spec §5.4.
 - **Done:** novelty mode green; acceptance-target test green.
 
@@ -83,7 +83,7 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Done:** metrics green with pinned reference values.
 
 ### A8 — persistence (`.dasp` multi-class format + predict schema + compat gate)
-- **Test:** fit → `save_model` → `load_model` → `predict` reproduces `p_values`/`decision_matrix`/`summary_label`/`accepted_classes` exactly; an old-build load path raises `NotImplementedError`. (§9.11)
+- **Test:** fit → `save_model` → `load_model` → `predict` reproduces `p_values`/`decision_matrix`/`summary_label`/`accepted_classes` exactly. **Compat gate (GPT-5.5 reword — can't make an *old* build raise from new code):** the **current** build raises `NotImplementedError` when `load_model`/`predict_with_model` encounters an **unsupported/unknown `task_type`** (guards forward-compat, and stops the current silent regression-path fall-through). (§9.11)
 - **Impl:** pickle the whole `MultiClassClassModel` as `model.pkl` (owns engines/calibrators/scaler(s)/varsel-mask/α/registry/column-order); mirror scaler to `autoscaler.pkl`; `metadata.json` += `task_type`, `class_names`, `engine_family`, `alpha`, `varsel_path`, `scaling`. Extend `predict_with_model`/`predict_with_uncertainty` to return the §6 schema shapes. Add the `task_type` validator gate.
 - **Done:** round-trip + compat-gate tests green.
 
@@ -125,9 +125,9 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 - **Done:** search green on synthetic multi-class.
 
 ### C3 — result columns + composite score
-- **Test:** result dataframe has the multiclass column set; `compute_composite_score` ranks by the §7 metric.
-- **Impl:** `create_results_dataframe('multiclass_simca')` column set; scoring branch.
-- **Done:** green.
+- **Test:** result dataframe has the multiclass column set **including an explicit `engine_family` column per row** (spec decision #3) and `varsel_path`; `compute_composite_score` ranks by the §7 metric.
+- **Impl:** `create_results_dataframe('multiclass_simca')` column set (with `engine_family`, `varsel_path`); scoring branch. C2 populates `engine_family` on every emitted row.
+- **Done:** green; `engine_family` present and correct on all rows.
 
 **Phase C gate (MAJOR checkpoint — multi-family):** Codex + ≥2 orthogonal families on the search + task-type-plumbing diff (dispatcher/fall-through risk); **end-to-end smoke** — real multi-class spectral set through `run_multiclass_simca_search` + a genuinely held-out novel class; save→load→predict round-trip reproduces the decision matrix at max|diff|=0.
 
@@ -137,12 +137,12 @@ Two co-equal load-bearing risks: the CV/novelty harness AND persistence.
 
 ### D1 — 5th task radio + controls
 - **Test (GUI):** selecting "Multi-Class Class Modeling" shows the engine picker + α + n_components + varsel-path controls; hides one-class/classification-only widgets; disambiguated from the existing one-class PCA-SIMCA entry point.
-- **Impl:** add radio value `multiclass_simca` at the task-radio block (~:6464-6471); extend `_on_task_type_changed` (~:18398-18540); new control panel.
+- **Impl:** add radio value `multiclass_simca` at the task-radio block (~:6462-6465 on this branch); extend `_on_task_type_changed` (~:16773 on this branch — NOT ~18398, which is data-loading); new control panel. *(GUI line numbers differ on this main-based branch from the earlier T-17-branch scout — re-grep each symbol at edit time.)*
 - **Done:** GUI toggle green.
 
 ### D2 — results view (decision matrix + Wold plots)
 - **Test (GUI):** results render the per-sample decision matrix + single/multiple/novel labels + Wold MPOW/DPOW diagnostic plots; CSV export includes the decision matrix.
-- **Impl:** dispatch patterned on `if task_type=="one_class"` (:29497) on a worker thread (queue + `root.after` poller); results Treeview + plots.
+- **Impl:** dispatch patterned on the one-class detection branch (~:29535 on this branch; :29497 is the empty-results guard — re-grep at edit time) on a worker thread (queue + `root.after` poller); results Treeview + plots.
 - **Done:** results view green.
 
 ### D3 — code export
