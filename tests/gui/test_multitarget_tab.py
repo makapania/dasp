@@ -409,6 +409,33 @@ class TestMultiTargetPollerErrorSurfacing:
 
 
 @pytest.mark.gui
+def test_effective_n_notice_reports_incomplete_row_drop(gui_app):
+    """FIX 4: complete-case CV across all selected targets silently shrinks N when
+    one target is missing on some rows. The config must carry an effective-N notice
+    that reports the correct dropped count."""
+    _load_multitarget_data(gui_app, n=40, n_targets=2)
+    # Inject NaNs into ONE target on 5 rows — those rows are incomplete-case.
+    col = gui_app.ref.columns.get_loc("prop_1")
+    gui_app.ref.iloc[:5, col] = np.nan
+    gui_app._refresh_multitarget_columns()
+    gui_app.multitarget_listbox.selection_clear(0, "end")
+    gui_app.multitarget_listbox.selection_set(0, 1)  # prop_0 + prop_1
+    gui_app._on_multitarget_selection_changed()
+    gui_app.multitarget_model_vars["PLS"].set(True)
+    try:
+        cfg = gui_app._collect_multitarget_config()
+        assert cfg is not None
+        notice = cfg["effective_n_notice"]
+        assert "5 dropped" in notice, f"wrong drop count in notice: {notice!r}"
+        # 40 rows - 5 incomplete = 35 complete cases actually used.
+        assert cfg["Y"].shape[0] == 35
+    finally:
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0)
+        gui_app._on_multitarget_selection_changed()
+
+
+@pytest.mark.gui
 def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     from spectral_predict.multitarget_search import MultiTargetResult, MultiTargetSearchOutput
 

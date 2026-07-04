@@ -15670,13 +15670,26 @@ class SpectralPredictApp:
             keep &= ~X_df.index.isin(self.excluded_spectra)
         if self.validation_enabled.get() and self.validation_indices:
             keep &= ~X_df.index.isin(self.validation_indices)
-        mask = keep & Ydf.notna().all(axis=1) & X_df.notna().all(axis=1)
-        if int(mask.sum()) < 3:
+        y_complete = Ydf.notna().all(axis=1)
+        eligible = keep & X_df.notna().all(axis=1)
+        mask = eligible & y_complete
+        n_valid = int(mask.sum())
+        if n_valid < 3:
             messagebox.showerror(
                 "Multi-Target",
-                f"Only {int(mask.sum())} complete sample(s) across the selected targets — "
+                f"Only {n_valid} complete sample(s) across the selected targets — "
                 "not enough to cross-validate.")
             return None
+        # Honest effective-N notice: complete cases are required across ALL selected
+        # targets, so heterogeneous missingness silently shrinks N. Report the drop.
+        n_dropped = int((eligible & ~y_complete).sum())
+        if n_dropped > 0:
+            effective_n_notice = (
+                f"Using {n_valid} complete samples across {len(targets)} targets "
+                f"({n_dropped} dropped for missing values).")
+        else:
+            effective_n_notice = (
+                f"Using {n_valid} complete samples across {len(targets)} targets.")
 
         baseline_method, baseline_params = self._get_baseline_params()
         try:
@@ -15709,6 +15722,7 @@ class SpectralPredictApp:
             "cv": self.cv_strategy.get() or "kfold",
             "n_folds": int(self.folds.get() or 5),
             "n_repeats": int(self.cv_n_repeats.get() or 5),
+            "effective_n_notice": effective_n_notice,
         }
 
     def _run_multitarget_search(self):
@@ -15740,6 +15754,8 @@ class SpectralPredictApp:
         cfg = self._collect_multitarget_config()
         if cfg is None:
             return
+        # FIX 4: pop the effective-N heads-up (not a backend kwarg) and show it.
+        effective_n_notice = cfg.pop("effective_n_notice", "")
         # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
         self.optimization_method.set("grid")
         self._multitarget_controller = SearchController()
@@ -15779,7 +15795,8 @@ class SpectralPredictApp:
             hint = f"  (≥ {n_pp * n_cfg} cells before variable selection — may take a while)"
         except Exception:
             hint = "  (running the full inherited grid — may take a while)"
-        self.multitarget_status_label.config(text="Running…" + hint)
+        prefix = (effective_n_notice + "  ") if effective_n_notice else ""
+        self.multitarget_status_label.config(text=prefix + "Running…" + hint)
         self.root.update_idletasks()
 
         self._multitarget_thread = threading.Thread(
@@ -15809,6 +15826,7 @@ class SpectralPredictApp:
 
         X = cfg.pop("X")
         Y = cfg.pop("Y")
+        cfg.pop("effective_n_notice", None)  # FIX 4: UI-only, not a backend kwarg
         # The controller is created by _run_multitarget_search; fall back to None
         # when the thread is invoked directly (e.g. tests) so the backend simply
         # skips the cancel checkpoints.
