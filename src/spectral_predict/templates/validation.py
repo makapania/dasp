@@ -130,6 +130,160 @@ ccc = _lins_ccc(all_y_true_arr, all_y_pred_arr)
 y_pred_cv = all_y_pred_arr
 '''
 
+MULTITARGET_CROSS_VALIDATION_TEMPLATE = '''
+# =============================================================================
+# CROSS-VALIDATION (Multi-Target — mirrors spectral_predict.multi_y.multi_y_cv_pool)
+# =============================================================================
+
+{cv_import}
+from sklearn.base import clone
+import numpy as np
+
+# SCALE_Y is True for JOINT models (fit on per-fold-standardized Y so no single
+# high-variance target dominates the shared criterion; predictions are inverse-
+# transformed to RAW units before scoring) and False for INDEPENDENT models
+# (fit on RAW per-target Y — scale-sensitive at fixed hyperparameters).
+SCALE_Y = {scale_y}
+
+
+class FoldYScaler:
+    """Per-target train-fold Y autoscaler (transcribed from multi_y.FoldYScaler).
+
+    Zero-variance columns get std=1.0 so the transform is a pure centering.
+    """
+
+    def __init__(self):
+        self.mean_ = None
+        self.std_ = None
+
+    def fit(self, Y):
+        arr = np.asarray(Y, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        self.mean_ = arr.mean(axis=0)
+        std = arr.std(axis=0, ddof=0)
+        self.std_ = np.where(std == 0.0, 1.0, std)
+        return self
+
+    def transform(self, Y):
+        arr = np.asarray(Y, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return (arr - self.mean_) / self.std_
+
+    def inverse_transform(self, Y):
+        arr = np.asarray(Y, dtype=float)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return arr * self.std_ + self.mean_
+
+
+# Set up cross-validation (same splitter Model Development used)
+cv = {cv_constructor}
+
+# multi_y_cv_pool: per-sample pooled predictions in RAW target units. Averaged
+# across repeats for Repeated K-Fold; a single test per sample otherwise.
+_n_samples, _n_targets = {x_var}.shape[0], Y.shape[1]
+pred_sum = np.zeros((_n_samples, _n_targets), dtype=float)
+pred_count = np.zeros(_n_samples, dtype=float)
+
+for train_idx, test_idx in cv.split({x_var}, Y):
+    est = clone(model)
+    Y_train = Y[train_idx]
+    if SCALE_Y:
+        _scaler = FoldYScaler().fit(Y_train)
+        Y_fit = _scaler.transform(Y_train)
+    else:
+        _scaler = None
+        Y_fit = Y_train
+    est.fit({x_var}[train_idx], Y_fit)
+    pred = np.asarray(est.predict({x_var}[test_idx]), dtype=float)
+    if pred.ndim == 1:
+        pred = pred.reshape(-1, 1)
+    if _scaler is not None:
+        pred = _scaler.inverse_transform(pred)
+    pred_sum[test_idx] += pred
+    pred_count[test_idx] += 1
+
+_mask = pred_count > 0
+Y_pred_cv = pred_sum[_mask] / pred_count[_mask, None]
+Y_true_cv = Y[_mask]
+'''
+
+MULTITARGET_METRICS_TEMPLATE = '''
+# =============================================================================
+# EVALUATION METRICS (Multi-Target — per-target RAW units + joint Q²)
+# =============================================================================
+# Mirrors spectral_predict.multi_y.multi_y_metrics: per-target Q²/R² are computed
+# on RAW units (scale-invariant, so equal weighting is automatic) and the joint
+# selection criterion is the mean of the per-target Q².
+
+TARGET_NAMES = {target_names!r}
+
+per_target_metrics = []
+for _s in range(Y_true_cv.shape[1]):
+    _ts = Y_true_cv[:, _s]
+    _ps = Y_pred_cv[:, _s]
+    _resid = _ps - _ts
+    _press = float(np.sum(_resid ** 2))
+    _ssy = float(np.sum((_ts - _ts.mean()) ** 2))
+    if _ssy > 0:
+        _q2 = 1.0 - _press / _ssy
+    else:
+        _q2 = 1.0 if _press == 0.0 else 0.0
+    _rmse = float(np.sqrt(_press / len(_ts)))
+    _std = float(np.std(_ts))
+    _rpd = _std / _rmse if _rmse > 0 else 0.0
+    _rer = float(np.ptp(_ts)) / _rmse if _rmse > 0 else 0.0
+    _ccc = _lins_ccc(_ts, _ps)
+    _bias = float(np.mean(_resid))
+    per_target_metrics.append({{
+        'target': TARGET_NAMES[_s] if _s < len(TARGET_NAMES) else f'target_{{_s}}',
+        'r2': _q2, 'q2': _q2, 'rmse': _rmse, 'rpd': _rpd,
+        'rer': _rer, 'ccc': _ccc, 'bias': _bias,
+    }})
+
+joint_q2 = float(np.mean([m['q2'] for m in per_target_metrics]))
+
+print(f"\\nMulti-Target Cross-validation Results ({cv_folds}-fold, {multitarget_mode}):")
+print(f"  Joint Q² (mean per-target): {{joint_q2:.4f}}")
+for _m in per_target_metrics:
+    print(f"  [{{_m['target']}}] R²={{_m['r2']:.4f}}  RMSE={{_m['rmse']:.4f}}  "
+          f"RPD={{_m['rpd']:.2f}}  RER={{_m['rer']:.2f}}  "
+          f"CCC={{_m['ccc']:.4f}}  Bias={{_m['bias']:+.4f}}")
+'''
+
+MULTITARGET_FINAL_MODEL_TEMPLATE = '''
+# =============================================================================
+# TRAIN FINAL MODEL (Multi-Target)
+# =============================================================================
+# JOINT models: fit on the FULL-training-set-scaled Y (fold scaling was a
+# CV-metric device only); predictions are inverse-transformed to RAW units.
+# INDEPENDENT models: fit on RAW per-target Y directly.
+
+if SCALE_Y:
+    final_y_scaler = FoldYScaler().fit(Y)
+    model.fit({x_var}, final_y_scaler.transform(Y))
+else:
+    final_y_scaler = None
+    model.fit({x_var}, Y)
+
+
+def predict_raw(model, X_block):
+    """Predict in RAW target units (inverse-transform for JOINT models)."""
+    _p = np.asarray(model.predict(X_block), dtype=float)
+    if _p.ndim == 1:
+        _p = _p.reshape(-1, 1)
+    if final_y_scaler is not None:
+        _p = final_y_scaler.inverse_transform(_p)
+    return _p
+
+
+Y_pred_cal = predict_raw(model, {x_var})
+print(f"\\nFinal model trained on {{{x_var}.shape[0]}} samples with "
+      f"{{{x_var}.shape[1]}} features, {{Y.shape[1]}} targets")
+'''
+
 CROSS_VALIDATION_CLASSIFICATION_TEMPLATE = '''
 # =============================================================================
 # CROSS-VALIDATION (matches Model Development)
@@ -612,3 +766,68 @@ def get_prediction_template(task_type: str) -> str:
     if task_type == 'one_class':
         return PREDICTION_ONE_CLASS_TEMPLATE
     return PREDICTION_TEMPLATE
+
+
+# The regression CV template embeds a _lins_ccc helper. The multi-target CV
+# template omits it (to keep the CV block focused on the pooling loop), so its
+# metrics block reuses this shared definition. Emitted once before the
+# multi-target CV block by the code generator.
+MULTITARGET_CCC_HELPER = '''
+def _lins_ccc(y_true, y_pred):
+    """Lin's Concordance Correlation Coefficient (Lin 1989, Biometrics 45(1))."""
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    if np.isnan(y_true).any() or np.isnan(y_pred).any():
+        return float('nan')
+    mean_t = y_true.mean()
+    mean_p = y_pred.mean()
+    var_t = y_true.var()
+    var_p = y_pred.var()
+    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
+    denom = var_t + var_p + (mean_t - mean_p) ** 2
+    if denom == 0.0:
+        return 1.0
+    if var_t == 0.0 or var_p == 0.0:
+        return 0.0
+    return float(2.0 * cov / denom)
+'''
+
+
+def get_multitarget_cross_validation_template(
+    cv_folds: int,
+    cv_strategy: str = 'kfold',
+    cv_n_repeats: int = 5,
+    scale_y: bool = True,
+    x_var: str = 'X_final',
+) -> str:
+    """Return the multi-target CV code block (mirrors multi_y_cv_pool).
+
+    Uses the same splitter Model Development used so the exported pooled
+    predictions reproduce the in-app run. ``scale_y`` selects JOINT (fold
+    Y-scaling + inverse-transform) vs INDEPENDENT (raw Y) fitting.
+    """
+    cv_import, cv_constructor = _cv_splitter_code('regression', cv_strategy, cv_folds, cv_n_repeats)
+    return MULTITARGET_CROSS_VALIDATION_TEMPLATE.format(
+        cv_import=cv_import,
+        cv_constructor=cv_constructor,
+        scale_y='True' if scale_y else 'False',
+        x_var=x_var,
+    )
+
+
+def get_multitarget_metrics_template(
+    cv_folds: int,
+    target_names: list,
+    multitarget_mode: str,
+) -> str:
+    """Return the multi-target per-target + joint-Q² metrics block."""
+    return MULTITARGET_METRICS_TEMPLATE.format(
+        cv_folds=cv_folds,
+        target_names=list(target_names),
+        multitarget_mode=multitarget_mode,
+    )
+
+
+def get_multitarget_final_model_template(x_var: str = 'X_final') -> str:
+    """Return the multi-target final-model training block."""
+    return MULTITARGET_FINAL_MODEL_TEMPLATE.format(x_var=x_var)

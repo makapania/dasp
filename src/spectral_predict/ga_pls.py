@@ -200,6 +200,29 @@ def _fitness_function(
     try:
         if task_type == 'regression':
             pls = PLSRegression(n_components=actual_n_comp, scale=False)
+            y_arr = np.asarray(y)
+            if y_arr.ndim > 1 and y_arr.shape[1] > 1:
+                # Multi-target (T-17): JOINT PLS fitness = pooled normalized
+                # RMSECV sqrt(mean_target(1 - Q2_s)) on the multi_y foundation.
+                # Scale-free (divergent target units) and monotone in joint Q2,
+                # so higher fitness == higher joint Q2, matching single-Y sign.
+                from .multi_y import multi_y_cv_pool, multi_y_metrics
+
+                yt, yp = multi_y_cv_pool(pls, X_selected, y_arr, cv, scale_y=True)
+                m = multi_y_metrics(yt, yp)
+                joint_q2 = float(m["joint_q2"])
+                mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+                # A non-finite per-target q2 (PLS divergence on a degenerate
+                # chromosome) poisons mean_nmse to NaN; `NaN > 0.0` is False so
+                # rmsecv would be 0.0 -> fitness -0.0, the MAXIMUM achievable
+                # value, promoting a broken subset to best (GA maximizes). Fall
+                # to the worst-case sentinel the except branch uses. Mirrors the
+                # guard in variable_selection._evaluate_interval_pls_multi.
+                if not (np.isfinite(joint_q2) and np.isfinite(mean_nmse)):
+                    return -np.inf
+                rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
+                return -rmsecv
+            # Single-target path -- byte-identical to pre-T-17.
             y_pred = cross_val_predict(pls, X_selected, y, cv=cv)
             rmsecv = np.sqrt(mean_squared_error(y, y_pred))
             return -rmsecv  # Negative because GA maximizes
@@ -582,11 +605,18 @@ def ga_pls_selection(
     ...     selection_threshold=0.7
     ... )
     """
-    # Convert inputs
+    # Convert inputs. Shape-aware (T-17): a 1-D or single-column target ravels
+    # to (n,) -- byte-identical to the pre-T-17 path -- while a genuine
+    # multi-target block (n, n_targets>=2) is kept 2-D so the JOINT-PLS
+    # multi-Y fitness branch is taken. GA structure/RNG is y-independent, so
+    # only the fitness criterion changes for multi-target.
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = np.asarray(y)
+    if y.ndim == 1 or (y.ndim == 2 and y.shape[1] == 1):
+        y = y.ravel()
 
     n_samples, n_wavelengths = X.shape
+
     cv_folds = cv
 
     # Validate inputs
@@ -680,8 +710,9 @@ def ga_pls_selection(
         print(f"  Stable wavelengths (freq >= {selection_threshold}): {n_stable}")
         print(f"  Best fitness across runs: {max(all_fitness):.4f}")
 
-    # Optional: Permutation test
-    if enable_permutation_test and verbose > 0:
+    # Optional: Permutation test (single-target only; multi-Y permutation
+    # significance is deferred with the multi-Y varsel reporting work).
+    if enable_permutation_test and verbose > 0 and np.asarray(y).ndim == 1:
         print(f"\nRunning permutation test ({n_permutations} permutations)...")
         p_value = _permutation_test(
             X, y, selection_frequency, n_permutations,

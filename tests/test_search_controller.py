@@ -13,7 +13,7 @@ def test_initial_state_running():
     c = SearchController()
     assert not c.is_paused
     assert not c.is_actually_paused
-    assert not c.is_ended
+    assert not c.is_ended()
 
 
 def test_pause_requested_before_acknowledged():
@@ -112,7 +112,7 @@ def test_reset_clears_actually_paused():
     c.reset()
     assert not c.is_paused
     assert not c.is_actually_paused
-    assert not c.is_ended
+    assert not c.is_ended()
 
 
 def test_check_and_wait_when_not_paused_does_not_set_actually_paused():

@@ -1766,13 +1766,21 @@ def compute_vip(pls_model, X, y):
     Q = np.asarray(pls_model.y_loadings_)
 
     if Q.ndim == 1:
-        q = Q
+        # Single target passed as a 1-D loadings vector.
+        ssq_y = Q ** 2
+    elif Q.shape[0] == 1:
+        # Single target in sklearn's (n_targets, n_components) layout. Keep the
+        # EXACT Q[0, :] result so single-Y VIP stays byte-identical (T-17 guard).
+        ssq_y = Q[0, :] ** 2
     else:
-        q = Q[0, :]
+        # Canonical multi-Y VIP (Wold 2001 / Mehmood 2012 Eq. 1): the per-
+        # component Y-variance term sums the squared Y-loadings across targets,
+        # i.e. replace q_a**2 with sum_targets(y_loadings[:, a]**2).
+        ssq_y = np.sum(Q ** 2, axis=0)
 
     n_features = W.shape[0]
 
-    ssy_comp = (q ** 2) * np.sum(T ** 2, axis=0)
+    ssy_comp = ssq_y * np.sum(T ** 2, axis=0)
     ssy_total = float(np.sum(ssy_comp))
 
     if ssy_total <= 0.0:
@@ -1817,6 +1825,22 @@ def get_feature_importances(model, model_name, X, y):
         else:
             model = model.steps[-1][1]
 
+    # Multi-target INDEPENDENT models (T-17) are wrapped in MultiOutputRegressor
+    # (LightGBM/SVR/plain Lasso/EN/NeuralBoosted). The wrapper has no
+    # feature_importances_/coef_ of its own -- only per-target .estimators_ --
+    # so extract each target's importance and aggregate (mean) via the shared
+    # multi_y foundation. Single-Y models are never MOR-wrapped, so this branch
+    # is skipped on the legacy path (byte-identical).
+    from sklearn.multioutput import MultiOutputRegressor
+
+    if isinstance(model, MultiOutputRegressor):
+        from .multi_y import aggregate_importance
+
+        per_target = np.column_stack(
+            [get_feature_importances(est, model_name, X, y) for est in model.estimators_]
+        )
+        return aggregate_importance(per_target, rule="mean")
+
     if model_name in ["PLS", "PLS-DA"]:
         # Use VIP scores
         return compute_vip(model, X, y)
@@ -1824,8 +1848,15 @@ def get_feature_importances(model, model_name, X, y):
     elif model_name in ["Ridge", "Lasso", "ElasticNet"]:
         # Get coefficients (linear models)
         coefs = np.abs(model.coef_)
-        if len(coefs.shape) > 1:
-            coefs = coefs[0]  # Handle multi-output case
+        if coefs.ndim > 1:
+            # Multi-target (T-17): native 2-D solve (Ridge) or joint MultiTask
+            # Lasso/ElasticNet expose coef_ as (n_targets, n_features). Aggregate
+            # |coef| across targets (mean) via the shared multi_y foundation
+            # instead of silently using only target 0. Single-Y coef_ is 1-D, so
+            # this branch is skipped on the legacy path (byte-identical).
+            from .multi_y import aggregate_importance
+
+            return aggregate_importance(coefs.T, rule="mean")
 
         # Return absolute coefficient values as importance
         return coefs

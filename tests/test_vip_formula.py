@@ -162,3 +162,23 @@ class TestVIPEdgeCases:
         vip = compute_vip(pls, X, y)
         assert vip.shape == (8,)
         assert np.all(vip == 0.0)
+
+    def test_compute_vip_1d_y_loadings_matches_2d(self):
+        """Pin the defensive ``Q.ndim == 1`` branch in compute_vip.
+
+        Current sklearn always exposes ``y_loadings_`` as 2-D ``(1, n_comp)``
+        for a single target, so the 1-D branch is byte-identical to legacy but
+        unexercised (flagged by a T-17 byte-identity review). If a future
+        sklearn returns a raveled 1-D loadings vector, VIP must be unchanged.
+        """
+        rng = np.random.default_rng(3)
+        X = rng.standard_normal((40, 10))
+        y = X[:, 0] + 0.1 * rng.standard_normal(40)
+        pls = PLSRegression(n_components=3, scale=False)
+        pls.fit(X, y)
+
+        vip_2d = compute_vip(pls, X, y)  # sklearn's native (1, n_comp) layout
+        pls.y_loadings_ = np.ravel(pls.y_loadings_)  # force the 1-D branch
+        vip_1d = compute_vip(pls, X, y)
+
+        np.testing.assert_array_equal(vip_1d, vip_2d)
