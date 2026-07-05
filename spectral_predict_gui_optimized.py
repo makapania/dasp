@@ -30523,7 +30523,11 @@ For detailed documentation, see the User Guide.
 
         # --- LVs ≤ spinbox (only if column exists) ---
         if 'LVs' in df.columns:
-            max_lvs = int(pd.to_numeric(df['LVs'], errors='coerce').dropna().max()) if df['LVs'].notna().any() else 30
+            # Guard on the COERCED values, not the raw column: multiclass SIMCA
+            # writes LVs="auto" (or a per-class dict string), which is notna() but
+            # coerces to all-NaN -> int(NaN) crashed the whole leaderboard render.
+            _lvs_numeric = pd.to_numeric(df['LVs'], errors='coerce').dropna()
+            max_lvs = int(_lvs_numeric.max()) if len(_lvs_numeric) else 30
             self.filter_max_lvs_var.set(max_lvs)
             self._filter_max_lvs_default = max_lvs
             ttk.Label(self.active_filter_frame, text="LVs ≤").pack(side='left')
@@ -30539,7 +30543,8 @@ For detailed documentation, see the User Guide.
 
         # --- n_vars ≤ spinbox (only if column exists) ---
         if 'n_vars' in df.columns:
-            max_nvars = int(pd.to_numeric(df['n_vars'], errors='coerce').dropna().max()) if df['n_vars'].notna().any() else 9999
+            _nvars_numeric = pd.to_numeric(df['n_vars'], errors='coerce').dropna()
+            max_nvars = int(_nvars_numeric.max()) if len(_nvars_numeric) else 9999
             self.filter_max_nvars_var.set(max_nvars)
             self._filter_max_nvars_default = max_nvars
             ttk.Label(self.active_filter_frame, text="n_vars ≤").pack(side='left')

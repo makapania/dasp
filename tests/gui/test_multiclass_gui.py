@@ -164,6 +164,35 @@ def test_run_analysis_accepts_multiclass_engine_selection(gui_app):
     assert started["v"] is True
 
 
+def test_multiclass_leaderboard_renders(gui_app):
+    """Regression: the leaderboard filter bar did int(NaN) on the non-numeric
+    multiclass LVs column ("auto" / per-class dict string), crashing the whole
+    results-table render. It must populate without error."""
+    import numpy as np
+    import pandas as pd
+    from spectral_predict.search import run_multiclass_simca_search
+
+    app = gui_app
+    rng = np.random.default_rng(0)
+    blocks, labels = [], []
+    for k in range(4):
+        blocks.append(rng.normal(k * 4.0, 1.0, size=(25, 30)))
+        labels += [f"C{k}"] * 25
+    X = pd.DataFrame(np.vstack(blocks))
+    y = pd.Series(labels)
+    res = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw", "snv"],
+        n_components=0.99, varsel_paths=["none"], cv_splits=3,
+    )
+    if "Select" not in res.columns:
+        res.insert(0, "Select", False)
+    # ComplexityScore must be computed (not NaN'd by the str-int TypeError)
+    assert res["ComplexityScore"].notna().all()
+    app._populate_results_table(res)
+    app.root.update_idletasks()
+    assert len(app.results_tree.get_children()) == len(res)
+
+
 def test_show_decision_view_opens_window(gui_app):
     import tkinter as tk
 

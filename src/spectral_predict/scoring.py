@@ -292,6 +292,15 @@ def _compute_unified_complexity(row):
 
     # 3. Latent Variable Complexity (25% weight) - for PLS models
     lvs = row.get("LVs", np.nan)
+    # Multi-class SIMCA writes a non-numeric LVs ("auto" or a per-class dict
+    # string like "{'A': 7, 'B': 9}"), which would blow up (lvs - 2) below with
+    # a str - int TypeError. Coerce anything non-numeric to NaN so it falls to
+    # the median-complexity default rather than aborting the whole column.
+    if not isinstance(lvs, (int, float)):
+        try:
+            lvs = float(lvs)
+        except (TypeError, ValueError):
+            lvs = np.nan
     # PCA-SIMCA stores dimensionality as n_components in Params; LVs may be 0 or missing
     if (pd.isna(lvs) or lvs == 0) and model == "PCA-SIMCA":
         try:
