@@ -163,6 +163,60 @@ class TestWoldVarselB1:
             assert np.all(np.isfinite(arr))
 
 
+class TestWoldPlotDataB2:
+    """B2: Wold diagnostic plot data — per-variable MPOW/DPOW arrays in the
+    correct (K, n_features) shape and class order for the Phase-D GUI to render.
+    """
+
+    def test_plot_data_shapes_and_class_order(self):
+        from spectral_predict.simca import (
+            wold_diagnostic_plot_data,
+            wold_variable_powers,
+        )
+
+        X, y, _ = _graded([50, 50, 50], seed=0)
+        K, p = 3, X.shape[1]
+        data = wold_diagnostic_plot_data(X, y, n_components=2, scaling="none")
+        assert list(data["classes"]) == list(np.unique(y))
+        assert data["modeling_power"].shape == (K, p)
+        assert data["discriminating_power"].shape == (K, p)
+        assert data["modeling_power_agg"].shape == (p,)
+        assert data["discriminating_power_agg"].shape == (p,)
+        assert len(data["variables"]) == p
+        # row k must correspond to class classes[k]
+        powers = wold_variable_powers(X, y, n_components=2, scaling="none")
+        for k, c in enumerate(data["classes"]):
+            np.testing.assert_allclose(
+                data["modeling_power"][k], powers["modeling_power_per_class"][c]
+            )
+            np.testing.assert_allclose(
+                data["discriminating_power"][k],
+                powers["discriminating_power_per_class"][c],
+            )
+        np.testing.assert_allclose(
+            data["modeling_power_agg"], powers["modeling_power"]
+        )
+
+    def test_plot_data_wavelength_axis(self):
+        from spectral_predict.simca import wold_diagnostic_plot_data
+
+        X, y, _ = _graded([40, 40, 40], seed=1)
+        wl = np.linspace(1000.0, 2500.0, X.shape[1])
+        data = wold_diagnostic_plot_data(
+            X, y, n_components=2, scaling="none", wavelengths=wl
+        )
+        np.testing.assert_allclose(np.asarray(data["variables"], dtype=float), wl)
+
+    def test_plot_data_defaults_variables_to_indices(self):
+        from spectral_predict.simca import wold_diagnostic_plot_data
+
+        X, y, _ = _graded([40, 40, 40], seed=2)
+        data = wold_diagnostic_plot_data(X, y, n_components=2, scaling="none")
+        np.testing.assert_array_equal(
+            np.asarray(data["variables"]), np.arange(X.shape[1])
+        )
+
+
 class TestMultiClassCoreA2:
     def test_decision_matrix_shapes_and_bounds(self):
         X, y = _blobs([40, 40, 40])

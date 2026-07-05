@@ -1342,3 +1342,67 @@ def wold_variable_selection(
         mask[keep] = True
         return mask
     return score >= np.mean(score)
+
+
+def wold_diagnostic_plot_data(
+    X, y, n_components: int = 5, scaling: str = "none", wavelengths=None
+) -> dict:
+    """Package Wold MPOW/DPOW arrays for the Phase-D diagnostic plots (B2).
+
+    Thin presentation layer over :func:`wold_variable_powers`: stacks the
+    per-class modeling / discriminating power into ``(K, n_features)`` arrays
+    whose row ``k`` corresponds to ``classes[k]`` (``classes = np.unique(y)``),
+    plus the macro-averaged aggregates and an x-axis for the GUI.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    y : array-like of shape (n_samples,)
+        Class labels.
+    n_components : int, default=5
+        Forwarded to :func:`wold_variable_powers`.
+    scaling : {"none", "per_class", "global"}, default="none"
+        Forwarded to :func:`wold_variable_powers`.
+    wavelengths : array-like of shape (n_features,), optional
+        x-axis values for the plot. Defaults to ``np.arange(n_features)``.
+
+    Returns
+    -------
+    dict
+        Keys:
+
+        - ``"classes"``: ``(K,)`` class labels (column/row order).
+        - ``"variables"``: ``(n_features,)`` plot x-axis (wavelengths or indices).
+        - ``"modeling_power"`` / ``"discriminating_power"``: ``(K, n_features)``
+          arrays; row ``k`` is class ``classes[k]``.
+        - ``"modeling_power_agg"`` / ``"discriminating_power_agg"``:
+          ``(n_features,)`` macro-averaged aggregates.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y)
+    n_features = X.shape[1]
+    classes = np.unique(y)
+
+    powers = wold_variable_powers(
+        X, y, n_components=n_components, scaling=scaling
+    )
+    modeling = np.vstack(
+        [powers["modeling_power_per_class"][c] for c in classes]
+    )
+    discriminating = np.vstack(
+        [powers["discriminating_power_per_class"][c] for c in classes]
+    )
+
+    if wavelengths is None:
+        variables = np.arange(n_features)
+    else:
+        variables = np.asarray(wavelengths)
+
+    return {
+        "classes": classes,
+        "variables": variables,
+        "modeling_power": modeling,
+        "discriminating_power": discriminating,
+        "modeling_power_agg": powers["modeling_power"],
+        "discriminating_power_agg": powers["discriminating_power"],
+    }
