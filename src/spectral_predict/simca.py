@@ -28,6 +28,7 @@ import warnings
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
@@ -1018,3 +1019,326 @@ def novelty_tradeoff_auc(y_true, P, classes) -> float:
     trapz = getattr(np, "trapezoid", None) or np.trapz
     auc = float(trapz(nr, fr))
     return float(min(1.0, max(0.0, auc)))
+
+
+# ============================================================================
+# Task B1: Wold (1976) variable selection — modeling power + discriminating
+# power (spec §5.6). Class-modeling-native diagnostics on the genuine
+# multi-class label (the one-class UVE/iPLS exclusion does NOT apply here).
+# ============================================================================
+
+
+def wold_modeling_power(X, n_components: int) -> np.ndarray:
+    r"""Classical Wold (1976) per-variable modeling power for one class (B1).
+
+    Fits ``PCA(n_components)`` on the rows of ``X`` (a single class),
+    reconstructs, and returns the fraction of each variable's variance captured
+    by the model:
+
+    .. math:: \mathrm{MPOW}_j = 1 - \frac{s_{\mathrm{resid},j}}{s_{\mathrm{total},j}}
+
+    where ``s_resid`` is the population (``ddof=0``) standard deviation of the
+    PCA residual ``E = X - \hat{X}`` and ``s_total`` is the population standard
+    deviation of the raw variable. Values near 1 mean the variable is well
+    described by the PCA subspace; values near 0 mean mostly unmodeled noise.
+
+    This is the CLASSICAL Wold 1976 per-variable modeling power and is DISTINCT
+    from the DD-SIMCA per-variable :math:`T^2 / Q` decomposition used by
+    :class:`~spectral_predict.contamination.PCASIMCA` (spec §5.6).
+
+    Zero-variance columns (``s_total == 0``) return ``MPOW = 0.0`` (no variance
+    to model) -- never NaN/inf (``np.errstate`` + mask guarded).
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+        ONE class's rows.
+    n_components : int
+        Requested PCA components; capped at ``min(n_samples - 1, n_features)``.
+
+    Returns
+    -------
+    ndarray of shape (n_features,)
+        Per-variable modeling power (constant columns return 0.0).
+    """
+    X = np.asarray(X, dtype=np.float64)
+    n_samples, n_features = X.shape
+    nc = max(1, min(int(n_components), n_samples - 1, n_features))
+    pca = PCA(n_components=nc).fit(X)
+    Xhat = pca.inverse_transform(pca.transform(X))
+    E = X - Xhat
+    s_resid = E.std(axis=0, ddof=0)
+    s_total = X.std(axis=0, ddof=0)
+    MPOW = np.zeros(n_features, dtype=np.float64)
+    nz = s_total != 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        MPOW[nz] = 1.0 - s_resid[nz] / s_total[nz]
+    return MPOW
+
+
+def _wold_cross_fit_own_rms(
+    Xc_raw: np.ndarray,
+    n_components: int,
+    scaling: str,
+    global_scaler,
+) -> np.ndarray:
+    """Cross-fit per-variable RMS residual (about zero) of one class on its own PCA.
+
+    K-fold (``n_splits = min(5, n_class)``, no shuffle) over the class's RAW
+    rows; each fold fits a fresh PCA on the fold-train rows (with per-fold
+    train-only scaling under ``scaling="per_class"``) and reconstructs the
+    fold-test rows. Out-of-fold residuals are collected into a full
+    ``(n_class, n_features)`` array and reduced as
+    ``sqrt(mean(resid**2, axis=0))`` -- the RMS ABOUT ZERO, NOT ``std``. Keeping
+    the mean in the residual is CRITICAL: the between-class mean offset must
+    survive so the DPOW ratio (cross / own) is meaningful (using ``std`` would
+    center it out and collapse DPOW toward 1, breaking the stability test).
+
+    Parameters
+    ----------
+    Xc_raw : ndarray of shape (n_class, n_features)
+        ONE class's RAW (unscaled) rows.
+    n_components : int
+        Requested PCA components (capped per fold at
+        ``min(n_train - 1, n_features)``).
+    scaling : {"none", "per_class", "global"}
+        Scaling mode. ``"per_class"`` fits a fresh :class:`StandardScaler` on
+        each fold-train only (no leakage of the held-out fold row into the
+        scaler that scores it); ``"global"`` reuses the already-fit
+        ``global_scaler``; ``"none"`` passes rows through unscaled.
+    global_scaler : fitted StandardScaler or None
+        The train-level global scaler, used only when ``scaling="global"``.
+
+    Returns
+    -------
+    ndarray of shape (n_features,)
+        Per-variable cross-fit RMS residual about zero.
+    """
+    n, n_features = Xc_raw.shape
+    n_splits = min(5, n)
+    kf = KFold(n_splits=n_splits, shuffle=False)
+    residuals = np.zeros((n, n_features), dtype=np.float64)
+    filled = np.zeros(n, dtype=bool)
+    for train_idx, test_idx in kf.split(Xc_raw):
+        X_tr_raw = Xc_raw[train_idx]
+        X_te_raw = Xc_raw[test_idx]
+        if scaling == "per_class":
+            fold_scaler = StandardScaler().fit(X_tr_raw)
+            X_tr = fold_scaler.transform(X_tr_raw)
+            X_te = fold_scaler.transform(X_te_raw)
+        elif scaling == "global":
+            X_tr = global_scaler.transform(X_tr_raw)
+            X_te = global_scaler.transform(X_te_raw)
+        else:  # "none"
+            X_tr = X_tr_raw
+            X_te = X_te_raw
+        n_tr = X_tr.shape[0]
+        nc_fold = max(1, min(int(n_components), n_tr - 1, n_features))
+        pca = PCA(n_components=nc_fold).fit(X_tr)
+        recon = pca.inverse_transform(pca.transform(X_te))
+        residuals[test_idx] = X_te - recon
+        filled[test_idx] = True
+    res = residuals[filled] if not filled.all() else residuals
+    return np.sqrt(np.mean(res**2, axis=0))
+
+
+def wold_variable_powers(
+    X, y, n_components: int = 5, scaling: str = "none"
+) -> dict:
+    r"""Wold per-variable modeling power + discriminating power (B1, spec §5.6).
+
+    Computes classical Wold (1976) modeling power (MPOW) and one-vs-rest
+    discriminating power (DPOW) for every variable, per class and macro-averaged
+    across classes. Both are class-modeling-native diagnostics computed on the
+    genuine multi-class label (the one-class UVE/iPLS exclusion does NOT apply
+    here).
+
+    Discriminating power (Wold): for each class ``c`` and variable ``v``,
+
+    .. math:: \mathrm{DPOW}_{c,v} = \frac{1}{K-1}\sum_{j \neq c}
+        \frac{\mathrm{cross\_rms}_{c\to j,v}}{\mathrm{own\_rms}_{c,v}}
+
+    where ``own_rms`` is the CROSS-FIT RMS residual of class ``c`` on its own PCA
+    model (K-fold out-of-fold, about zero -- see :func:`_wold_cross_fit_own_rms`),
+    and ``cross_rms[c->j]`` is the RMS residual of class-``c`` rows reconstructed
+    by class-``j`` 's PCA model. The RMS is taken ABOUT ZERO
+    (``sqrt(mean(resid**2))``) -- NOT ``std`` -- so the between-class mean offset
+    survives (using ``std`` would center it out and collapse DPOW toward 1).
+    Where ``own_rms == 0`` the ratio is set to 0.0 (finite guard); non-finite
+    values also map to 0.0.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    y : array-like of shape (n_samples,)
+        Class labels.
+    n_components : int, default=5
+        PCA components per class (capped at ``min(n_class - 1, n_features)``).
+    scaling : {"none", "per_class", "global"}, default="none"
+        Column-scaling mode. All scalers are fit train-only. ``"per_class"``
+        fits one :class:`StandardScaler` per class on that class's rows; the
+        DPOW cross term transforms class-``c`` rows by class-``j`` 's scaler
+        before scoring on model_j (mirroring
+        :meth:`MultiClassClassModel.decision_matrix`). ``"global"`` fits one
+        scaler across all rows. ``"none"`` passes ``X`` through unchanged.
+
+    Returns
+    -------
+    dict
+        Keys:
+
+        - ``"modeling_power"``: ``(n_features,)`` macro-average of per-class MPOW.
+        - ``"discriminating_power"``: ``(n_features,)`` macro-average of
+          per-class DPOW.
+        - ``"modeling_power_per_class"``: ``{class_label: (n_features,) ndarray}``.
+        - ``"discriminating_power_per_class"``:
+          ``{class_label: (n_features,) ndarray}``.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y)
+    classes = np.unique(y)
+    n_features = X.shape[1]
+
+    # --- scaling setup (all scalers fit train-only) -----------------------
+    if scaling == "global":
+        global_scaler = StandardScaler().fit(X)
+    else:
+        global_scaler = None
+    per_class_scalers: dict = {}
+    if scaling == "per_class":
+        for c in classes:
+            per_class_scalers[c] = StandardScaler().fit(X[y == c])
+
+    def _to_class_space(Xc, c):
+        if scaling == "none":
+            return Xc
+        if scaling == "per_class":
+            return per_class_scalers[c].transform(Xc)
+        return global_scaler.transform(Xc)
+
+    def _to_other_space(Xc, j):
+        # Mirrors MultiClassClassModel.decision_matrix: a sample scored against
+        # class j is transformed by class j's scaler (per_class) / the global
+        # scaler (global) / raw (none) before scoring on model_j.
+        if scaling == "none":
+            return Xc
+        if scaling == "per_class":
+            return per_class_scalers[j].transform(Xc)
+        return global_scaler.transform(Xc)
+
+    # --- per-class MPOW + full PCA models (models feed the DPOW cross term) -
+    modeling_power_per_class: dict = {}
+    models: dict = {}
+    for c in classes:
+        Xc = X[y == c]
+        Xc_s = _to_class_space(Xc, c)
+        nc = max(1, min(int(n_components), Xc.shape[0] - 1, n_features))
+        models[c] = PCA(n_components=nc).fit(Xc_s)
+        modeling_power_per_class[c] = wold_modeling_power(Xc_s, n_components)
+
+    # --- per-class DPOW (one-vs-rest cross residual-RMS ratio) -------------
+    discriminating_power_per_class: dict = {}
+    for c in classes:
+        Xc = X[y == c]
+        own_rms = _wold_cross_fit_own_rms(
+            Xc, n_components, scaling, global_scaler
+        )
+        ratios = []
+        for j in classes:
+            if j == c:
+                continue
+            Xc_in_j = _to_other_space(Xc, j)
+            model_j = models[j]
+            recon_j = model_j.inverse_transform(model_j.transform(Xc_in_j))
+            cross_rms = np.sqrt(np.mean((Xc_in_j - recon_j) ** 2, axis=0))
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(own_rms == 0.0, 0.0, cross_rms / own_rms)
+            ratio = np.where(np.isfinite(ratio), ratio, 0.0)
+            ratios.append(ratio)
+        if ratios:
+            discriminating_power_per_class[c] = np.mean(np.vstack(ratios), axis=0)
+        else:
+            discriminating_power_per_class[c] = np.zeros(
+                n_features, dtype=np.float64
+            )
+
+    modeling_power = np.mean(
+        np.vstack([modeling_power_per_class[c] for c in classes]), axis=0
+    )
+    discriminating_power = np.mean(
+        np.vstack([discriminating_power_per_class[c] for c in classes]), axis=0
+    )
+
+    return {
+        "modeling_power": modeling_power,
+        "discriminating_power": discriminating_power,
+        "modeling_power_per_class": modeling_power_per_class,
+        "discriminating_power_per_class": discriminating_power_per_class,
+    }
+
+
+def wold_variable_selection(
+    X,
+    y,
+    mode: str = "balanced",
+    n_components: int = 5,
+    n_select: int | None = None,
+    scaling: str = "none",
+) -> np.ndarray:
+    """Wold modeling/discriminating-power variable selection (B1, spec §5.6).
+
+    Scores every variable by the chosen ``mode`` and keeps the top variables.
+
+    Parameters
+    ----------
+    X : array-like of shape (n_samples, n_features)
+    y : array-like of shape (n_samples,)
+        Class labels.
+    mode : {"modeling", "discriminating", "balanced"}, default="balanced"
+        Scoring rule: ``"modeling"`` -> MPOW; ``"discriminating"`` -> DPOW;
+        ``"balanced"`` -> ``MPOW * DPOW``.
+    n_components : int, default=5
+        Forwarded to :func:`wold_variable_powers`.
+    n_select : int or None, default=None
+        If an int, keep exactly the top-``n_select`` variables by score (ties
+        broken toward the lower variable index via a stable sort on the
+        negated score). If ``None``, keep every variable whose score is
+        ``>= mean(score)``.
+    scaling : {"none", "per_class", "global"}, default="none"
+        Forwarded to :func:`wold_variable_powers`.
+
+    Returns
+    -------
+    ndarray of shape (n_features,), dtype bool
+        Selection mask.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not one of ``"modeling"`` / ``"discriminating"`` /
+        ``"balanced"``.
+    """
+    if mode not in ("modeling", "discriminating", "balanced"):
+        raise ValueError(
+            f"Unknown mode={mode!r}; expected 'modeling', 'discriminating', "
+            f"or 'balanced'."
+        )
+    powers = wold_variable_powers(X, y, n_components=n_components, scaling=scaling)
+    if mode == "modeling":
+        score = np.asarray(powers["modeling_power"], dtype=np.float64)
+    elif mode == "discriminating":
+        score = np.asarray(powers["discriminating_power"], dtype=np.float64)
+    else:  # balanced
+        score = (
+            np.asarray(powers["modeling_power"], dtype=np.float64)
+            * np.asarray(powers["discriminating_power"], dtype=np.float64)
+        )
+    n_features = score.shape[0]
+    if n_select is not None:
+        mask = np.zeros(n_features, dtype=bool)
+        # Stable argsort on -score -> descending score, ties keep lower index.
+        order = np.argsort(-score, kind="stable")
+        keep = order[: int(n_select)]
+        mask[keep] = True
+        return mask
+    return score >= np.mean(score)

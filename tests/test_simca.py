@@ -41,6 +41,128 @@ def _center(k, n_features=20, sep=10.0):
     return c
 
 
+def _graded(sizes, n_features=24, n_relevant=6, seed=0, sep=14.0):
+    """K classes whose features carry a GRADED between-class separation (feature
+    0 strongest, geometrically decreasing) plus a shared within-class latent
+    structure. The gradient gives a genuine, recoverable discriminating-power
+    ranking (so a stability test is meaningful) and high modeling power; the
+    top-``n_relevant`` separation features are returned as "relevant"."""
+    rng = np.random.RandomState(seed)
+    strength = np.geomspace(sep, sep / 8.0, n_features)  # distinct, decreasing
+    loading = rng.normal(size=n_features)
+    Xs, ys = [], []
+    for k, n in enumerate(sizes):
+        X = rng.normal(scale=0.3, size=(n, n_features))
+        t = rng.normal(size=(n, 1))
+        X += t * loading            # shared within-class latent -> high MPOW
+        X += (k + 1) * strength     # between-class separation, graded per feature
+        Xs.append(X)
+        ys.append(np.full(n, k))
+    relevant = np.argsort(strength)[::-1][:n_relevant]
+    return np.vstack(Xs), np.concatenate(ys), relevant
+
+
+class TestWoldVarselB1:
+    """B1: Wold (1976) modeling power + discriminating power variable selection
+    (spec §5.6). MPOW_j = 1 - s_resid,j / s_total,j (classical Wold, distinct
+    from the DD-SIMCA per-variable T^2/Q framework). Discriminating power =
+    macro-averaged one-vs-rest cross-fit residual-RMS ratios. Selection modes:
+    modeling / discriminating / balanced (max MPOW*DPOW). All varsel here is
+    legitimate class-modeling-native math on the genuine multi-class label —
+    the one-class UVE/iPLS exclusion (CLAUDE.md) does NOT apply to the true
+    multi-class case.
+    """
+
+    def test_modeling_power_matches_reference(self):
+        # MPOW hand/reference value on a fixed matrix: 1 - std(resid)/std(raw)
+        # per variable, residual from an INDEPENDENT sklearn PCA reconstruction.
+        from sklearn.decomposition import PCA
+
+        from spectral_predict.simca import wold_modeling_power
+
+        X = np.arange(1, 33, dtype=float).reshape(8, 4) % 7 + np.array(
+            [0.0, 1.0, 2.0, 3.0]
+        )
+        nc = 2
+        mp = wold_modeling_power(X, n_components=nc)
+        pca = PCA(n_components=nc).fit(X)
+        resid = X - pca.inverse_transform(pca.transform(X))
+        expected = 1.0 - resid.std(axis=0, ddof=0) / X.std(axis=0, ddof=0)
+        assert mp.shape == (4,)
+        np.testing.assert_allclose(mp, expected, atol=1e-9)
+
+    def test_modeling_power_zero_variance_guard(self):
+        # A constant (zero-variance) column has no variance to model -> MPOW 0,
+        # never NaN/inf from a divide-by-zero.
+        from spectral_predict.simca import wold_modeling_power
+
+        rng = np.random.RandomState(0)
+        X = rng.normal(size=(20, 5))
+        X[:, 2] = 4.0  # constant column
+        mp = wold_modeling_power(X, n_components=2)
+        assert np.all(np.isfinite(mp))
+        assert mp[2] == pytest.approx(0.0)
+
+    def test_discriminating_power_ranking_stable(self):
+        # DPOW ranking is stable across resamples: each resample's per-variable
+        # aggregate DPOW correlates with the consensus (mean) ranking at
+        # Spearman rho >= 0.8 (median over 20 resamples). (spec §5.6 / §9.10)
+        from scipy.stats import spearmanr
+
+        from spectral_predict.simca import wold_variable_powers
+
+        dpows = []
+        for seed in range(20):
+            X, y, _ = _graded([80, 80, 80], seed=seed)
+            powers = wold_variable_powers(X, y, n_components=2, scaling="none")
+            dpows.append(np.asarray(powers["discriminating_power"]))
+        arr = np.vstack(dpows)
+        consensus = arr.mean(axis=0)
+        rhos = [spearmanr(consensus, arr[i]).correlation for i in range(len(dpows))]
+        assert np.median(rhos) >= 0.8, f"median consensus rho={np.median(rhos):.3f}"
+
+    def test_balanced_retains_relevant_variables(self):
+        # "balanced" (max MPOW*DPOW) retains >= 2/3 of the known-relevant
+        # variables in its selected set. (spec §5.6 / §9.10)
+        from spectral_predict.simca import wold_variable_selection
+
+        X, y, relevant = _graded([80, 80, 80], seed=1)
+        mask = wold_variable_selection(
+            X, y, mode="balanced", n_components=2, n_select=8, scaling="none"
+        )
+        assert mask.shape == (X.shape[1],)
+        assert mask.dtype == bool
+        kept = set(np.where(mask)[0].tolist())
+        retained = len(kept & set(int(i) for i in relevant))
+        assert retained >= int(np.ceil(2 / 3 * len(relevant))), (
+            f"retained {retained}/{len(relevant)} relevant"
+        )
+
+    def test_selection_modes_return_masks(self):
+        # All three modes return a boolean mask of the requested size.
+        from spectral_predict.simca import wold_variable_selection
+
+        X, y, _ = _graded([60, 60, 60], seed=2)
+        for mode in ("modeling", "discriminating", "balanced"):
+            mask = wold_variable_selection(
+                X, y, mode=mode, n_components=2, n_select=10, scaling="none"
+            )
+            assert mask.shape == (X.shape[1],)
+            assert mask.dtype == bool
+            assert int(mask.sum()) == 10, mode
+
+    def test_per_class_scaling_produces_finite_powers(self):
+        # scaling="per_class" (SIMCA-textbook) path yields finite, sane powers.
+        from spectral_predict.simca import wold_variable_powers
+
+        X, y, _ = _graded([60, 60, 60], seed=3)
+        powers = wold_variable_powers(X, y, n_components=2, scaling="per_class")
+        for key in ("modeling_power", "discriminating_power"):
+            arr = np.asarray(powers[key])
+            assert arr.shape == (X.shape[1],)
+            assert np.all(np.isfinite(arr))
+
+
 class TestMultiClassCoreA2:
     def test_decision_matrix_shapes_and_bounds(self):
         X, y = _blobs([40, 40, 40])
