@@ -163,3 +163,51 @@ class TestScalingModesA3:
         _, a_none = none.decision_matrix(X_test)
         _, a_perc = perc.decision_matrix(X_test)
         assert not np.array_equal(a_none[:, 0], a_perc[:, 0])
+
+
+class TestNonSIMCAEnginesA4:
+    """A4: pluggable per-class engines (OCSVM/IsolationForest/LOF/EllipticEnvelope),
+    each calibrated to a per-class empirical p-value so accept/reject is a real
+    level-alpha test (spec 5.3). p = (1 + #{null <= s}) / (m + 1) over a cross-fit
+    null of the engine's "higher = more normal" score.
+    """
+
+    @pytest.mark.parametrize(
+        "engine", ["ocsvm", "isolation-forest", "lof", "elliptic-envelope"]
+    )
+    def test_calibrated_false_rejection(self, engine):
+        # Held-out inliers from the training distribution are accepted at ~1-alpha.
+        rng = np.random.RandomState(10)
+        X_train = rng.normal(size=(150, 12))
+        y_train = np.zeros(150, dtype=int)
+        X_test = rng.normal(size=(2000, 12))
+        alpha = 0.05
+        m = MultiClassClassModel(
+            engine=engine, alpha=alpha, scaling="none", min_class_samples=10
+        ).fit(X_train, y_train)
+        _, A = m.decision_matrix(X_test)
+        accept = A[:, 0].mean()
+        assert (1 - alpha) - 0.10 <= accept <= (1 - alpha) + 0.10, f"{engine}: {accept:.3f}"
+
+    def test_pvalues_in_unit_interval(self):
+        rng = np.random.RandomState(12)
+        X = rng.normal(size=(120, 12))
+        m = MultiClassClassModel(engine="ocsvm", scaling="none").fit(
+            X, np.zeros(120, dtype=int)
+        )
+        P, _ = m.decision_matrix(rng.normal(size=(300, 12)))
+        finite = np.isfinite(P)
+        assert np.all(P[finite] >= 0.0) and np.all(P[finite] <= 1.0)
+
+    def test_isolationforest_direction_not_inverted(self):
+        # The sign bug GPT-5.5 caught: a far outlier must get a LOWER p-value
+        # (more anomalous) than a central inlier. If score_samples were negated,
+        # this inverts and the assertion fails.
+        rng = np.random.RandomState(11)
+        X_train = rng.normal(size=(150, 12))
+        m = MultiClassClassModel(
+            engine="isolation-forest", alpha=0.05, scaling="none"
+        ).fit(X_train, np.zeros(150, dtype=int))
+        P_in, _ = m.decision_matrix(np.zeros((1, 12)))          # center = most normal
+        P_out, _ = m.decision_matrix(np.full((1, 12), 20.0))    # far = most abnormal
+        assert P_out[0, 0] < P_in[0, 0]

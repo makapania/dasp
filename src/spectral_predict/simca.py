@@ -5,11 +5,14 @@ models (SIMCA flagship) evaluated at a *global* level ``alpha``, producing a
 per-sample x per-class decision matrix and a single / multiple / novel summary
 label.
 
-This is task **A2 + A3** of the T-31 build: the core orchestrator with the
-SIMCA (``"pca-simca"``) engine and three column-scaling modes
-(``scaling="per_class"`` is the textbook default). Non-SIMCA engines (A4),
-per-class CV ``n_components`` tuning (A5), novelty evaluation (A6), dedicated
-metrics (A7), and ``.dasp`` persistence (A8) arrive in subsequent tasks.
+This is task **A2 + A3 + A4** of the T-31 build: the core orchestrator with
+the SIMCA (``"pca-simca"``) engine, three column-scaling modes
+(``scaling="per_class"`` is the textbook default), and four non-SIMCA
+per-class engines (``"ocsvm"`` / ``"isolation-forest"`` / ``"lof"`` /
+``"elliptic-envelope"``) each calibrated to a per-class empirical p-value
+(spec section 5.3). Per-class CV ``n_components`` tuning (A5), novelty
+evaluation (A6), dedicated metrics (A7), and ``.dasp`` persistence (A8) arrive
+in subsequent tasks.
 
 References
 ----------
@@ -23,9 +26,26 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 
-from spectral_predict.contamination import PCASIMCA
+from spectral_predict.contamination import PCASIMCA, get_one_class_model
+
+
+# Non-SIMCA per-class engines (spec section 5.3 / task A4). Maps a
+# MultiClassClassModel engine name to ``(builder_name, score_method)`` where
+# ``builder_name`` is understood by ``contamination.get_one_class_model``
+# (sensible NIR defaults: LOF novelty=True, IsolationForest random_state=42)
+# and ``score_method`` is the sklearn method returning the "higher = more
+# normal" score. PINNED per engine: IsolationForest uses ``score_samples``
+# AS-IS (do NOT negate -- sklearn already returns higher=more-normal;
+# GPT-5.5 verified). Negating breaks test_isolationforest_direction_not_inverted.
+_NON_SIMCA_ENGINES: dict[str, tuple[str, str]] = {
+    "ocsvm": ("OneClassSVM", "decision_function"),
+    "isolation-forest": ("IsolationForest", "score_samples"),
+    "lof": ("LOF", "decision_function"),
+    "elliptic-envelope": ("EllipticEnvelope", "decision_function"),
+}
 
 
 class MultiClassClassModel(BaseEstimator, ClassifierMixin):
@@ -40,9 +60,15 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     Parameters
     ----------
     engine : str, default="pca-simca"
-        Per-class membership engine. A2 implements only ``"pca-simca"``
-        (DD-SIMCA via :class:`~spectral_predict.contamination.PCASIMCA`);
-        OCSVM / IF / LOF / EE engines arrive in A4.
+        Per-class membership engine. One of:
+
+        - ``"pca-simca"`` (DD-SIMCA via
+          :class:`~spectral_predict.contamination.PCASIMCA`; flagship).
+        - ``"ocsvm"`` / ``"isolation-forest"`` / ``"lof"`` / ``"elliptic-envelope"``
+          -- non-SIMCA one-class engines (built via
+          :func:`~spectral_predict.contamination.get_one_class_model`), each
+          calibrated to a per-class empirical p-value via a cross-fit null on
+          that class's training rows (spec section 5.3 / task A4).
     alpha : float, default=0.05
         Global significance level shared by every per-class model, so the
         ">= 2 of K" multiple-membership rule is coherent across classes
@@ -82,6 +108,11 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     models_ : dict
         Fitted per-class engines keyed by class label. Unmodelable classes are
         absent from this dict.
+    nulls_ : dict
+        Per-class cross-fit null score arrays (non-SIMCA engines only, task
+        A4), keyed by class label. Each value is a sorted-ascending ndarray of
+        out-of-fold "higher = more normal" scores used by the empirical
+        p-value calibration. Empty for the ``"pca-simca"`` engine.
     unmodelable_ : set
         Class labels with fewer than ``min_class_samples`` training rows.
     scalers_ : dict
@@ -141,6 +172,12 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 "of T-31; pass an int or a {class_label: int} dict for now."
             )
 
+        if self.engine != "pca-simca" and self.engine not in _NON_SIMCA_ENGINES:
+            raise ValueError(
+                f"Unknown engine={self.engine!r}; expected 'pca-simca' or one of "
+                f"{sorted(_NON_SIMCA_ENGINES)}."
+            )
+
         # --- scaling setup (all scalers fit train-only inside fit) ------------
         # scalers_: {class_label: StandardScaler} populated only under per_class;
         # global_scaler_: single StandardScaler populated only under global.
@@ -153,33 +190,44 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         self.classes_ = np.unique(y)
         self.unmodelable_: set = set()
         self.models_: dict = {}
+        # Per-class cross-fit null arrays (non-SIMCA engines only, task A4).
+        # Each value is sorted ascending so _empirical_p can use searchsorted.
+        self.nulls_: dict = {}
+
+        is_simca = self.engine == "pca-simca"
 
         for c in self.classes_:
             X_c = X[y == c]
             if X_c.shape[0] < self.min_class_samples:
-                # Too few rows for a reliable MoM chi^2 fit: mark unmodelable,
-                # keep the decision-matrix column, fit no scaler/engine (spec §8).
+                # Too few rows for a reliable MoM chi^2 fit / cross-fit null:
+                # mark unmodelable, keep the decision-matrix column, fit no
+                # scaler/engine (spec section 8).
                 self.unmodelable_.add(c)
                 continue
 
-            # Apply this class's scaling mode (train-only fit) before PCA.
+            # Apply this class's scaling mode (train-only fit) before the engine.
             if self.scaling == "per_class":
                 self.scalers_[c] = StandardScaler().fit(X_c)
                 X_c_scaled = self.scalers_[c].transform(X_c)
             elif self.scaling == "global":
                 X_c_scaled = self.global_scaler_.transform(X_c)
-            else:  # "none" — X passes through unchanged
+            else:  # "none" -- X passes through unchanged
                 X_c_scaled = X_c
 
-            n_components_c = self._n_components_for(c)
-            if self.engine == "pca-simca":
+            if is_simca:
+                n_components_c = self._n_components_for(c)
                 self.models_[c] = PCASIMCA(
                     n_components=n_components_c, alpha=self.alpha
                 ).fit(X_c_scaled)
             else:
-                raise NotImplementedError(
-                    f"engine={self.engine!r} is implemented in task A4 of T-31; "
-                    'only engine="pca-simca" is available in A2.'
+                builder_name, score_method = _NON_SIMCA_ENGINES[self.engine]
+                final_engine = get_one_class_model(builder_name)
+                final_engine.fit(X_c_scaled)
+                self.models_[c] = final_engine
+                # Cross-fit null on this class's scaled rows (train-only) so the
+                # empirical p-value is a real level-alpha test (spec section 5.3).
+                self.nulls_[c] = self._cross_fit_null(
+                    X_c_scaled, builder_name, score_method
                 )
 
         return self
@@ -208,6 +256,10 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         P = np.full((n_samples, K), np.nan, dtype=np.float64)
         A = np.zeros((n_samples, K), dtype=bool)
 
+        is_simca = self.engine == "pca-simca"
+        if not is_simca:
+            _, score_method = _NON_SIMCA_ENGINES[self.engine]
+
         for k, c in enumerate(self.classes_):
             if c in self.unmodelable_:
                 continue  # leave P[:, k] = NaN and A[:, k] = False
@@ -218,7 +270,11 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 X_eval = self.global_scaler_.transform(X)
             else:  # "none"
                 X_eval = X
-            P[:, k] = self.models_[c].p_joint(X_eval)
+            if is_simca:
+                P[:, k] = self.models_[c].p_joint(X_eval)
+            else:
+                scores = getattr(self.models_[c], score_method)(X_eval)
+                P[:, k] = self._empirical_p(scores, self.nulls_[c])
             A[:, k] = P[:, k] >= self.alpha
 
         return P, A
@@ -270,3 +326,66 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         if isinstance(nc, dict):
             return int(nc[label])
         return int(nc)
+
+    def _cross_fit_null(
+        self, X_scaled: np.ndarray, builder_name: str, score_method: str
+    ) -> np.ndarray:
+        """Build the cross-fit "normality" null array for one class (train-only).
+
+        K-fold (5-fold, or fewer if the class is small) on the class's *scaled*
+        training rows; for each fold, fit a fresh engine (built via
+        :func:`~spectral_predict.contamination.get_one_class_model`) on the
+        other folds and score the held-out fold with the pinned
+        ``score_method``. Collects the out-of-fold "higher = more normal"
+        scores as the empirical null (spec section 5.3 / task A4). Failed fold
+        fits are silently skipped (spec).
+
+        Parameters
+        ----------
+        X_scaled : ndarray of shape (n_class, n_features)
+            This class's already-scaled training rows (scaling was applied by
+            :meth:`fit` upstream, train-only).
+        builder_name : str
+            One-class model name understood by ``get_one_class_model``.
+        score_method : str
+            sklearn method name returning the engine's "higher = more normal"
+            score (pinned per engine in :data:`_NON_SIMCA_ENGINES`).
+
+        Returns
+        -------
+        null : ndarray of shape (m,), sorted ascending
+            Out-of-fold scores; ``m`` ~= ``n_class`` (fewer if folds failed).
+        """
+        n = X_scaled.shape[0]
+        n_splits = min(5, n)
+        kf = KFold(n_splits=n_splits, shuffle=False)
+        scores_list = []
+        for train_idx, test_idx in kf.split(X_scaled):
+            try:
+                fold_engine = get_one_class_model(builder_name)
+                fold_engine.fit(X_scaled[train_idx])
+                fold_scores = getattr(fold_engine, score_method)(X_scaled[test_idx])
+            except Exception:
+                continue  # spec: skip failed folds
+            scores_list.extend(np.asarray(fold_scores).ravel().tolist())
+        return np.asarray(sorted(scores_list), dtype=np.float64)
+
+    @staticmethod
+    def _empirical_p(scores: np.ndarray, null: np.ndarray) -> np.ndarray:
+        """Add-one-smoothed empirical p-value (spec section 5.3 / task A4).
+
+        ``p = (1 + #{null <= s}) / (m + 1)`` -- lower-tail is anomalous since
+        "higher score = more normal". ``null`` must be sorted ascending; uses
+        :func:`numpy.searchsorted` (``side="right"``) for vectorized
+        ``O((n + m) log m)`` evaluation.
+
+        Returns NaN where ``null`` is empty (defensive -- modeled classes have
+        ``min_class_samples`` rows, so a fully-empty null implies every fold
+        failed; treated as uninformative).
+        """
+        m = null.shape[0]
+        scores = np.asarray(scores, dtype=np.float64)
+        if m == 0:
+            return np.full(scores.shape, np.nan, dtype=np.float64)
+        counts = np.searchsorted(null, scores, side="right")
+        return (1.0 + counts) / (m + 1.0)
