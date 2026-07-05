@@ -160,7 +160,8 @@ No `.dasp` precedent exists for a dict/list of models. **Format:** the `MultiCla
 
 ## 8. Edge cases
 
-- **Unmodelable / too-small class:** numerical threshold is **n_k ≥ 10** for the MoM χ² fit / calibration (§5.1, §5.3), not just the `PCASIMCA` n≥3 PCA floor. Below it, mark the class unmodelable / lower its fold count / mark the row invalid with a stated reason — **never silently drop a decision-matrix column** (both reviewers). Define the degenerate-Q `zero_guard` meaning in the multi-class context.
+- **Unmodelable / too-small class:** numerical threshold is **n_k ≥ 10** (`min_class_samples`) for the MoM χ² fit / calibration (§5.1, §5.3), not just the `PCASIMCA` n≥3 PCA floor. Below it, mark the class unmodelable / lower its fold count / mark the row invalid with a stated reason — **never silently drop a decision-matrix column** (both reviewers). Define the degenerate-Q `zero_guard` meaning in the multi-class context.
+  - ⚠ **A2 empirical finding (route to Phase-A review):** `min_class_samples=10` is a *crash* floor, not a *calibration* floor — a modelable class at n≈15 still over-rejects ~39% at α=0.05 (nc=3), n=30 over-rejects ~8–12%. **"Modelable" ≠ "well-calibrated."** Two follow-ups to decide with the review panel: (a) make the floor `n_components`-aware / raise it; (b) surface the per-class calibration quality in the A7 metrics (report each class's empirical false-rejection + Wilson CI so an over-rejecting small class is visible, not hidden).
 - **Functional-equivalence guard (Codex/MiniMax — tighten the clause):** a single-class `MultiClassClassModel(engine="pca-simca", scaling="none", same α + n_components)` produces **identical accept/reject scores** to bare `PCASIMCA` (not bit-identity; `scaling="none"` is required because bare `PCASIMCA` does no column scaling). Add separate tests for `scaling="per_class"`.
 
 ---
@@ -171,7 +172,7 @@ No `.dasp` precedent exists for a dict/list of models. **Format:** the `MultiCla
 2. Decision-rule edge cases (0 / 1 / ≥2 acceptances); global-α coherence.
 3. Per-class-engine **functional-equivalence** (`scaling="none"`, matching α/n_components) to bare `PCASIMCA`; plus a separate `scaling="per_class"` test.
 4. **Leakage:** autoscale, calibration, varsel fit train-only inside folds; A.1 tuning nested per outer-train split, disjoint from A.2 evaluation samples.
-5. **Per-class MoM reliability:** K=3 sizes {5, 30, 100} → empirical false-rejection at α=0.05 ∈ [0.02, 0.10] per modeled class; size-5 flagged unmodelable (n<10).
+5. **Per-class MoM reliability (empirically calibrated in A2):** K=3 sizes {5, 30, 100}. A **well-sampled** class (n=100) → false-rejection at α=0.05 ∈ [0.02, 0.10]; a **small-but-modelable** class (n=30) **over-rejects** (~0.08–0.12, draw-dependent) and is only bounded (≤0.15), because the `var/(2·mean)` MoM χ² is high-variance at small n; size-5 flagged unmodelable (n<10). **Verified n-scaling: n=100→~0.05, n=30→~0.08–0.12, n=15→~0.39.** ⚠ **Open for Phase-A review (§8):** `min_class_samples=10` prevents a crash but does NOT guarantee good calibration — n≈15 still over-rejects catastrophically. Decide whether the floor should be higher or **n_components-aware** (e.g. n ≥ c·n_components).
 6. **Fisher approximation:** Fisher-combined accept rate vs per-axis-Bonferroni accept rate within a stated tolerance on synthetic data.
 7. Non-SIMCA calibration: held-out-inlier accept rate ∈ [1−α−0.10, 1−α+0.10] per engine at n ∈ {10, 30, 100}; IsolationForest direction not inverted.
 8. **LOCO refits all K−1**: no-class rate = fraction of held-out-class samples accepted by 0 of the K−1 remaining models.
