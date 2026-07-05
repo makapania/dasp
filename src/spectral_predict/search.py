@@ -6987,3 +6987,509 @@ def run_one_class_search(
         )
 
     return df_results
+
+
+# ============================================================================
+# T-31 Phase C / task C2: run_multiclass_simca_search
+# ============================================================================
+
+# Maps a search-layer varsel_path token to the MultiClassClassModel
+# variable_selection constructor value (spec §7 / Phase-B guardrail #7). "none"
+# -> no prefilter; the wold_* / importance strings pass straight through.
+_MULTICLASS_VARSEL_PATHS: dict[str, str | None] = {
+    "none": None,
+    "wold_modeling": "wold_modeling",
+    "wold_discriminating": "wold_discriminating",
+    "wold_balanced": "wold_balanced",
+    "importance": "importance",
+}
+
+
+def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
+    """Leave-one-class-out novelty-vs-false-rejection AUC (spec §7 ranking metric).
+
+    A training set has NO truly-novel samples, so
+    :func:`~spectral_predict.simca.novelty_tradeoff_auc` on the in-sample OOF
+    decision matrix returns NaN (its novel-sample denominator is zero). This
+    helper synthesizes the novel population by leave-one-class-out (LOCO): each
+    class in turn is treated as "novel" against a model fit on the remaining
+    ``K-1`` classes, while the false-rejection axis comes from the in-sample OOF
+    own-class p-values. The α-sweep AUC of ``novelty_rate`` vs
+    ``false_rejection_rate`` is the ranking metric.
+
+    Parameters
+    ----------
+    build_model_fn : callable
+        Zero-arg factory returning a FRESH (unfitted)
+        :class:`~spectral_predict.simca.MultiClassClassModel` configured exactly
+        as the row under test (engine / alpha / scaling / varsel / ...). Called
+        once for the OOF CV and once per held-out class.
+    X : ndarray of shape (n_samples, n_features)
+        Preprocessed spectra (per-spectrum ops already applied outside folds).
+    y : array-like of shape (n_samples,)
+        Class labels.
+    cv_splits : int, default=5
+        Outer folds for the OOF own-class p-values.
+
+    Returns
+    -------
+    float
+        AUC in ``[0, 1]``; ``float("nan")`` if it cannot be computed (no finite
+        own-class p-values, or every LOCO fit failed).
+
+    Notes
+    -----
+    - ``false_rejection_rate(α)`` = fraction of known rows whose OWN-class OOF
+      p-value ``< α`` (rows with a NaN own-p — e.g. their class was unmodelable
+      in every fold — are excluded from the denominator).
+    - ``novelty_rate(α)`` = fraction of held-out-class rows flagged novel, i.e.
+      ALL finite foreign-class p-values ``< α`` (a row with no finite p-value is
+      vacuously novel at every α; NaN entries are treated as ``< α``). Reduced
+      per row to ``max(finite p)`` so ``all(< α) ⇔ max < α``.
+    - Threshold sweep = the sorted unique finite p-values (own + foreign) plus
+      ``{0, 1}``, downsampled to ≤500 thresholds for real-data scale.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y)
+    classes = np.unique(y)
+
+    # (1) In-sample OOF own-class p-values -> false-rejection axis.
+    try:
+        cv = build_model_fn().cross_validate(X, y, n_splits=cv_splits)
+    except Exception as exc:  # noqa: BLE001 — NaN-safe: any CV failure -> NaN AUC
+        logger.warning("multiclass LOCO AUC: OOF cross_validate failed: %s", exc)
+        return float("nan")
+    P_oof, _ = cv["decision_matrix"]
+    col_of = {c: k for k, c in enumerate(list(cv["classes"]))}
+    own_p = np.array(
+        [P_oof[i, col_of[y[i]]] if y[i] in col_of else np.nan for i in range(len(y))],
+        dtype=np.float64,
+    )
+    own_p_finite = own_p[np.isfinite(own_p)]
+
+    # (2) LOCO -> novelty axis. Each class held out as the novel population.
+    nov_stats: list[float] = []
+    for c in classes:
+        held_mask = y == c
+        if not np.any(held_mask):
+            continue
+        try:
+            m = build_model_fn()
+            m.fit(X[y != c], y[y != c])
+            P_c, _ = m.decision_matrix(X[held_mask])
+        except Exception as exc:  # noqa: BLE001 — skip a failed LOCO fold, NaN-safe
+            logger.warning("multiclass LOCO AUC: LOCO fit for class %r failed: %s", c, exc)
+            continue
+        for row in P_c:
+            finite = row[np.isfinite(row)]
+            nov_stats.append(-np.inf if finite.size == 0 else float(np.max(finite)))
+
+    if own_p_finite.size == 0 or len(nov_stats) == 0:
+        return float("nan")
+    nov_arr = np.asarray(nov_stats, dtype=np.float64)
+
+    # (3) Threshold sweep + trapezoid AUC.
+    thresholds = np.unique(
+        np.concatenate([own_p_finite, nov_arr[np.isfinite(nov_arr)], [0.0, 1.0]])
+    )
+    if thresholds.size > 500:
+        idx = np.unique(np.linspace(0, thresholds.size - 1, 500).astype(int))
+        thresholds = thresholds[idx]
+
+    false_rej = np.array([float(np.mean(own_p_finite < a)) for a in thresholds])
+    novelty = np.array([float(np.mean(nov_arr < a)) for a in thresholds])
+    order = np.argsort(false_rej, kind="stable")
+    trapz = getattr(np, "trapezoid", None) or np.trapz
+    auc = float(trapz(novelty[order], false_rej[order]))
+    return float(min(1.0, max(0.0, auc)))
+
+
+def run_multiclass_simca_search(
+    X,
+    y,
+    wavelengths=None,
+    engines=None,
+    preprocess_configs=None,
+    preprocessing_methods=None,
+    window_sizes=None,
+    alpha=0.05,
+    varsel_paths=None,
+    variable_selection_n_select=None,
+    min_class_samples=10,
+    cv_splits=5,
+    variable_penalty=0,
+    gap_penalty=0,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing=False,
+    smoothing_window=17,
+    smoothing_polyorder=2,
+    progress_callback=None,
+    controller=None,
+):
+    """T-31 multi-class SIMCA / class-modeling search (spec §7).
+
+    Grid = ``preprocessing_configs × engines × varsel_paths`` (NO ``G^K``
+    per-class ``n_components`` product — each row auto-tunes per-class
+    ``n_components`` INSIDE the row via ``n_components="per_class_cv"``). Each
+    row fits a :class:`~spectral_predict.simca.MultiClassClassModel`, computes
+    OOF class-modeling metrics via ``cross_validate`` +
+    :func:`~spectral_predict.simca.multiclass_simca_metrics`, and a
+    leave-one-class-out ``NoveltyAUC`` (:func:`_multiclass_loco_novelty_auc`)
+    that drives ranking (higher = better).
+
+    Per-spectrum preprocessing (SNV / SG derivatives / baseline) is applied to
+    ``X`` OUTSIDE the folds per chemometrics convention; column-autoscale,
+    per-class calibration, and variable selection are fit train-only INSIDE
+    ``MultiClassClassModel.fit`` / ``cross_validate`` (never re-fit here).
+
+    Parameters
+    ----------
+    X : array-like or DataFrame of shape (n_samples, n_features)
+        Spectra.
+    y : array-like of shape (n_samples,)
+        Class labels.
+    wavelengths : array-like, optional
+        Feature axis; inferred from ``X.columns`` when ``X`` is a DataFrame,
+        else ``arange(n_features)``.
+    engines : list of str, optional
+        MultiClassClassModel engine names; defaults to
+        :data:`~spectral_predict.model_registry.MULTICLASS_ENGINES`.
+    preprocess_configs : list of dict, optional
+        Explicit preprocessing configs (each: ``method``/``name``/``deriv``/
+        ``window``/``polyorder`` + optional baseline/smoothing). If omitted they
+        are built from ``preprocessing_methods`` × ``window_sizes``.
+    preprocessing_methods : list of str, optional
+        Preprocessing method names (default ``["raw", "snv", "deriv1",
+        "deriv2", "snv_deriv1", "snv_deriv2"]``) when ``preprocess_configs`` is
+        None.
+    window_sizes : list of int, optional
+        Savitzky-Golay windows for derivative methods (default ``[7, 19]``).
+    alpha : float, default=0.05
+        Global significance level (never per-class; spec decision #6).
+    varsel_paths : list of str, optional
+        Variable-selection paths to enumerate; each maps via
+        :data:`_MULTICLASS_VARSEL_PATHS` to a ``variable_selection`` value.
+        Default ``["none"]``.
+    variable_selection_n_select : int, optional
+        ``n_select`` forwarded to the model's variable selection (top-N).
+    min_class_samples : int, default=10
+        Hard modeling floor (spec §5.1 / §8); classes below it are flagged
+        unmodelable, never dropped.
+    cv_splits : int, default=5
+        Outer CV folds for the OOF decision matrix + own-class p-values.
+    variable_penalty, gap_penalty : int, default=0
+        Forwarded to :func:`~spectral_predict.scoring.compute_composite_score`
+        (gap penalty is a no-op for this task).
+    baseline_method, baseline_params : optional
+        Baseline correction forwarded to the preprocessing pipeline.
+    enable_smoothing, smoothing_window, smoothing_polyorder : optional
+        Savitzky-Golay pre-smoothing forwarded to the preprocessing pipeline.
+    progress_callback : callable, optional
+        Receives ``{stage, message, current, total}`` dicts.
+    controller : object, optional
+        Optional pause/stop controller with ``check_and_wait()``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Results (schema of ``create_results_dataframe("multiclass_simca")``)
+        ranked by :func:`~spectral_predict.scoring.compute_composite_score`.
+    """
+    import warnings
+
+    from .model_registry import MULTICLASS_ENGINES
+    from .scoring import add_result, compute_composite_score, create_results_dataframe
+    from .simca import MultiClassClassModel, multiclass_simca_metrics
+
+    X_np = X.values if hasattr(X, "values") else np.asarray(X)
+    X_np = np.asarray(X_np, dtype=np.float64)
+    y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    if wavelengths is not None:
+        wavelengths_full = np.asarray(wavelengths)
+    elif hasattr(X, "columns"):
+        wavelengths_full = np.asarray(X.columns.values)
+    else:
+        wavelengths_full = np.arange(X_np.shape[1])
+
+    if engines is None:
+        engines = list(MULTICLASS_ENGINES)
+    if varsel_paths is None:
+        varsel_paths = ["none"]
+    for vp in varsel_paths:
+        if vp not in _MULTICLASS_VARSEL_PATHS:
+            raise ValueError(
+                f"Unknown varsel_path {vp!r}; expected one of "
+                f"{sorted(_MULTICLASS_VARSEL_PATHS)}."
+            )
+
+    # --- Build preprocessing configs (per-spectrum ops applied outside folds) --
+    if preprocess_configs is None:
+        if preprocessing_methods is None:
+            preprocessing_methods = [
+                "raw", "snv", "deriv1", "deriv2", "snv_deriv1", "snv_deriv2",
+            ]
+        if window_sizes is None:
+            window_sizes = [7, 19]
+        preprocess_configs = []
+        for method in preprocessing_methods:
+            if method in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+                deriv_order = 1 if method.endswith("1") else 2
+                pipeline_method = method.replace("1", "").replace("2", "")
+                for ws in window_sizes:
+                    preprocess_configs.append(
+                        {
+                            "method": pipeline_method,
+                            "name": f"{method}_w{ws}",
+                            "deriv": deriv_order,
+                            "window": ws,
+                            "polyorder": None,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": enable_smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+            else:
+                preprocess_configs.append(
+                    {
+                        "method": method,
+                        "name": method,
+                        "deriv": None,
+                        "window": None,
+                        "polyorder": None,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": enable_smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+
+    total_configs = len(preprocess_configs) * len(engines) * len(varsel_paths)
+    current_config = 0
+    n_total_classes = int(len(np.unique(y_np)))
+
+    logger.info("=" * 70)
+    logger.info("MULTI-CLASS SIMCA SEARCH")
+    logger.info("=" * 70)
+    logger.info("Classes: %d | Engines: %s", n_total_classes, engines)
+    logger.info("Preprocessing configs: %d | Varsel paths: %s", len(preprocess_configs), varsel_paths)
+    logger.info("Total configurations: %d (alpha=%s)", total_configs, alpha)
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "info",
+                "message": f"Starting multi-class SIMCA search: {total_configs} configurations",
+                "current": 0,
+                "total": total_configs,
+            }
+        )
+
+    df_results = create_results_dataframe("multiclass_simca")
+    _user_stopped = False
+
+    for preprocess_cfg in preprocess_configs:
+        if _user_stopped:
+            break
+        # Per-spectrum preprocessing on ALL rows (chemometrics convention: NOT
+        # leakage). Column-autoscale/calibration/varsel stay train-only inside
+        # the model. Build the pipeline and fit/transform the full matrix.
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["method"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+        wavelengths_current = wavelengths_full.copy()
+        if pipe_steps:
+            from sklearn.pipeline import Pipeline as SkPipeline
+
+            prep_pipe = SkPipeline(pipe_steps)
+            try:
+                prep_pipe.fit(X_np)
+                X_pp = prep_pipe.transform(X_np)
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                logger.warning(
+                    "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
+                    preprocess_cfg["name"], exc,
+                )
+                X_pp = None
+        else:
+            X_pp = X_np.copy()
+
+        # Derivative edge mask (drops undefined SG edge columns) when applicable.
+        if (
+            X_pp is not None
+            and preprocess_cfg.get("deriv")
+            and preprocess_cfg.get("window")
+        ):
+            X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
+                X_pp, wavelengths_current, preprocess_cfg
+            )
+
+        for engine in engines:
+            if _user_stopped:
+                break
+            for varsel_path in varsel_paths:
+                if controller and not controller.check_and_wait():
+                    _user_stopped = True
+                    break
+
+                current_config += 1
+                prep_name = preprocess_cfg["name"]
+                progress_msg = f"Testing {engine} + {prep_name} + varsel={varsel_path}"
+                logger.info("[%d/%d] %s", current_config, total_configs, progress_msg)
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "model_testing",
+                            "message": progress_msg,
+                            "current": current_config,
+                            "total": total_configs,
+                        }
+                    )
+
+                varsel_value = _MULTICLASS_VARSEL_PATHS[varsel_path]
+
+                def _build():
+                    return MultiClassClassModel(
+                        engine=engine,
+                        alpha=alpha,
+                        n_components="per_class_cv",
+                        scaling="per_class",
+                        min_class_samples=min_class_samples,
+                        variable_selection=varsel_value,
+                        n_select=variable_selection_n_select,
+                    )
+
+                # Base row (common cols + tags); metrics start NaN and are
+                # filled on success. Any failure records the row with NaN
+                # metrics + a reason (never crashes the whole search; spec §8).
+                full_vars = int(X_pp.shape[1]) if X_pp is not None else int(len(wavelengths_current))
+                row = {
+                    "Task": "multiclass_simca",
+                    "Model": engine,
+                    "Params": f"alpha={alpha}, scaling=per_class",
+                    "Preprocess": prep_name,
+                    "Deriv": preprocess_cfg.get("deriv"),
+                    "Window": preprocess_cfg.get("window"),
+                    "Poly": preprocess_cfg.get("polyorder"),
+                    "LVs": "auto",
+                    "n_vars": full_vars,
+                    "full_vars": full_vars,
+                    "SubsetTag": varsel_path,
+                    "Imbalance": "—",
+                    "NoveltyAUC": np.nan,
+                    "Efficiency": np.nan,
+                    "NoveltyRate": np.nan,
+                    "NoClassRate": np.nan,
+                    "AmbiguityRate": np.nan,
+                    "ExactSetRate": np.nan,
+                    "MeanSensitivity": np.nan,
+                    "MeanSpecificity": np.nan,
+                    "Alpha": alpha,
+                    "MinClassN": np.nan,
+                    "n_classes": n_total_classes,
+                    "engine_family": engine,
+                    "varsel_path": varsel_path,
+                    "unmodelable_classes": "",
+                    "reason": "",
+                    "top_vars": "N/A",
+                    "all_vars": "",
+                }
+
+                if X_pp is None:
+                    row["reason"] = "preprocessing_failed"
+                    df_results = add_result(df_results, row)
+                    continue
+
+                try:
+                    # Full fit -> per-class n_components, varsel mask, modeled set.
+                    full_model = _build().fit(X_pp, y_np)
+                    modeled = list(full_model.models_.keys())
+                    if modeled:
+                        row["MinClassN"] = int(
+                            min(int(np.sum(y_np == c)) for c in modeled)
+                        )
+                    if full_model.n_components_:
+                        row["LVs"] = str(full_model.n_components_)
+                    if getattr(full_model, "varsel_mask_", None) is not None:
+                        row["n_vars"] = int(full_model.varsel_mask_.sum())
+                    if full_model.unmodelable_:
+                        row["unmodelable_classes"] = str(
+                            sorted(full_model.unmodelable_.tolist()
+                                   if hasattr(full_model.unmodelable_, "tolist")
+                                   else full_model.unmodelable_)
+                        )
+
+                    # OOF class-modeling metrics.
+                    cv = _build().cross_validate(X_pp, y_np, n_splits=cv_splits)
+                    _, A_oof = cv["decision_matrix"]
+                    metrics = multiclass_simca_metrics(y_np, A_oof, list(cv["classes"]))
+                    sens = np.asarray(
+                        list(metrics["per_class_sensitivity"].values()), dtype=np.float64
+                    )
+                    spec = np.asarray(
+                        list(metrics["per_class_specificity"].values()), dtype=np.float64
+                    )
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", RuntimeWarning)
+                        mean_sens = (
+                            float(np.nanmean(sens))
+                            if sens.size and not np.all(np.isnan(sens))
+                            else np.nan
+                        )
+                        mean_spec = (
+                            float(np.nanmean(spec))
+                            if spec.size and not np.all(np.isnan(spec))
+                            else np.nan
+                        )
+                    row["Efficiency"] = metrics["efficiency"]
+                    row["NoveltyRate"] = metrics["novelty_detection_rate"]
+                    row["NoClassRate"] = metrics["no_class_rate"]
+                    row["AmbiguityRate"] = metrics["ambiguity_rate"]
+                    row["ExactSetRate"] = metrics["exact_set_rate"]
+                    row["MeanSensitivity"] = mean_sens
+                    row["MeanSpecificity"] = mean_spec
+
+                    # LOCO NoveltyAUC (the ranking metric).
+                    row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
+                        _build, X_pp, y_np, cv_splits=cv_splits
+                    )
+                except Exception as exc:  # noqa: BLE001 — NaN-safe per-config guard
+                    logger.warning(
+                        "Multi-class config %s + %s (varsel=%s) failed: %s",
+                        engine, prep_name, varsel_path, exc,
+                    )
+                    row["reason"] = f"{type(exc).__name__}: {exc}"
+
+                df_results = add_result(df_results, row)
+
+    if len(df_results) > 0:
+        df_results = compute_composite_score(
+            df_results, "multiclass_simca", variable_penalty, gap_penalty
+        )
+
+    logger.info("=" * 70)
+    logger.info("MULTI-CLASS SIMCA SEARCH COMPLETE")
+    logger.info("Total configurations: %d", len(df_results))
+    logger.info("=" * 70)
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "info",
+                "message": f"Multi-class SIMCA search complete: {len(df_results)} results",
+                "current": total_configs,
+                "total": total_configs,
+            }
+        )
+
+    return df_results
