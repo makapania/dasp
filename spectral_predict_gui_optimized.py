@@ -23911,6 +23911,13 @@ class SpectralPredictApp:
                 name for name, var in self.one_class_model_checkboxes.items()
                 if var.get()
             ]
+        elif task_type_check == "multiclass_simca":
+            # Multi-class class modeling selects per-class ENGINES, not the
+            # standard model checkboxes. The dispatch re-collects them from
+            # mc_engine_vars; this guard just needs a non-empty list.
+            selected_models = [
+                engine for engine, var in self.mc_engine_vars.items() if var.get()
+            ]
         else:
             selected_models = []
             if self.use_pls.get():

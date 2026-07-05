@@ -117,6 +117,53 @@ def test_decision_matrix_dataframe_columns(gui_app):
     assert len(dm) == len(view["labels"])
 
 
+def test_run_analysis_accepts_multiclass_engine_selection(gui_app):
+    """Regression: the pre-run 'select a model' guard must recognise the
+    multi-class engine picker (mc_engine_vars), not just the standard/one-class
+    model checkboxes. Previously it always warned 'Please select at least one
+    model' for multiclass no matter how many engines were checked."""
+    import threading
+    from unittest.mock import patch
+
+    import numpy as np
+    import pandas as pd
+
+    app = gui_app
+    rng = np.random.default_rng(0)
+    blocks, labels = [], []
+    for k in range(3):
+        blocks.append(rng.normal(k * 4.0, 1.0, size=(12, 20)))
+        labels += [f"C{k}"] * 12
+    app.X = pd.DataFrame(np.vstack(blocks))
+    app.X_original = app.X.copy()
+    app.y = pd.Series(labels)
+    app.task_type.set("multiclass_simca")
+    app._on_task_type_changed()
+    app.mc_engine_vars["pca-simca"].set(True)
+
+    warned = {}
+    started = {"v": False}
+
+    class _FakeThread:
+        def __init__(self, target, args, daemon):
+            self._t, self._a = target, args
+
+        def start(self):
+            self._t(*self._a)
+
+    def _stub_worker(*_a, **_k):
+        started["v"] = True
+
+    with patch("tkinter.messagebox.showwarning",
+               side_effect=lambda title, msg: warned.setdefault("m", (title, msg))), \
+         patch.object(app, "_run_analysis_thread", _stub_worker), \
+         patch("threading.Thread", _FakeThread):
+        app._run_analysis()
+
+    assert warned.get("m") is None, f"unexpected warning: {warned.get('m')}"
+    assert started["v"] is True
+
+
 def test_show_decision_view_opens_window(gui_app):
     import tkinter as tk
 
