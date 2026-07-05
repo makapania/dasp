@@ -126,7 +126,14 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         - ``"importance"``: supervised per-feature importance from
           :func:`~spectral_predict.unified_bayesian.compute_importances` on the
           genuine multi-class label (``task_type="classification"``). Tagged
-          ``varsel_path_ = "supervised"``.
+          ``varsel_path_ = "supervised"``. NOTE: supervised selection optimizes
+          for DISCRIMINATION between the known classes, so it can miss a future
+          novel class that is distinctive ONLY on the low-importance features it
+          discards; the novelty guard verifies no degradation on representative
+          novels but cannot cover that adversarial case (spec §5 guardrail).
+        - a boolean ``ndarray`` of shape ``(n_features,)``: a precomputed mask
+          used directly (``varsel_path_ = "precomputed"``) — the hook for the C
+          search layer to wire any external selection method.
         - Any other string raises :class:`NotImplementedError` at fit time
           (the fuller supervised method set — spa/cars/ga/... — is enumerated
           in the C search layer, not the model layer).
@@ -1502,6 +1509,16 @@ def wold_variable_powers(
     }
 
 
+def _minmax_unit(a: np.ndarray) -> np.ndarray:
+    """Min-max scale an array to [0, 1]; a constant array maps to all zeros."""
+    a = np.asarray(a, dtype=np.float64)
+    lo = np.min(a)
+    hi = np.max(a)
+    if hi <= lo:
+        return np.zeros_like(a)
+    return (a - lo) / (hi - lo)
+
+
 def wold_variable_selection(
     X,
     y,
@@ -1521,7 +1538,8 @@ def wold_variable_selection(
         Class labels.
     mode : {"modeling", "discriminating", "balanced"}, default="balanced"
         Scoring rule: ``"modeling"`` -> MPOW; ``"discriminating"`` -> DPOW;
-        ``"balanced"`` -> ``MPOW * DPOW``.
+        ``"balanced"`` -> ``minmax(MPOW) * minmax(DPOW)`` (both min-max scaled to
+        [0, 1] before multiplying, so the unbounded DPOW scale cannot dominate).
     n_components : int, default=5
         Forwarded to :func:`wold_variable_powers`.
     n_select : int or None, default=None
@@ -1558,9 +1576,13 @@ def wold_variable_selection(
     elif mode == "discriminating":
         score = np.asarray(powers["discriminating_power"], dtype=np.float64)
     else:  # balanced
-        score = (
+        # Min-max normalize MPOW and (unbounded) DPOW to [0, 1] BEFORE multiplying
+        # (Phase-B gate MiniMax M2, user-approved), so the DPOW scale cannot
+        # dominate the product; a constant array normalizes to zeros.
+        score = _minmax_unit(
             np.asarray(powers["modeling_power"], dtype=np.float64)
-            * np.asarray(powers["discriminating_power"], dtype=np.float64)
+        ) * _minmax_unit(
+            np.asarray(powers["discriminating_power"], dtype=np.float64)
         )
     n_features = score.shape[0]
     if n_select is not None:

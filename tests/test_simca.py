@@ -479,6 +479,31 @@ class TestPhaseBGateFoldins:
         m2 = wold_variable_selection(X, y, mode="balanced", n_components=3, n_select=10)
         np.testing.assert_array_equal(m1, m2)
 
+    def test_balanced_normalizes_before_product(self, monkeypatch):
+        # MiniMax M2 (user-approved fix): "balanced" min-max normalizes MPOW and
+        # DPOW to [0,1] before multiplying, so the unbounded DPOW scale cannot
+        # dominate. Controlled powers where the two rankings DIVERGE:
+        #   mpow=[0.9,0.1,0.5], dpow=[10,100,20]
+        #   unnormalized product = [9, 10, 10] -> top-1 (stable) = var1 (DPOW wins)
+        #   normalized:  mm(mpow)=[1,0,0.5], mm(dpow)=[0,1,0.111]
+        #                product = [0, 0, 0.0556]        -> top-1 = var2 (balanced)
+        import spectral_predict.simca as sm
+
+        monkeypatch.setattr(
+            sm,
+            "wold_variable_powers",
+            lambda *a, **k: {
+                "modeling_power": np.array([0.9, 0.1, 0.5]),
+                "discriminating_power": np.array([10.0, 100.0, 20.0]),
+                "modeling_power_per_class": {},
+                "discriminating_power_per_class": {},
+            },
+        )
+        X = np.zeros((6, 3))
+        y = np.array([0, 0, 1, 1, 2, 2])
+        mask = sm.wold_variable_selection(X, y, mode="balanced", n_select=1)
+        assert int(np.where(mask)[0][0]) == 2  # normalized balanced picks var2
+
 
 class TestMultiClassCoreA2:
     def test_decision_matrix_shapes_and_bounds(self):
