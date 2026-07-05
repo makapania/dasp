@@ -78,3 +78,54 @@ def test_switching_away_restores_standard_path(gui_app):
     assert not _is_managed(app.mc_hyperparams_frame)
     assert not _is_managed(app.mc_models_frame)
     assert _is_managed(app.standard_models_frame)
+
+
+# ---------------------------------------------------------------------------
+# D2 — decision-matrix + Wold view rendering
+# ---------------------------------------------------------------------------
+
+def _make_view():
+    import numpy as np
+    import pandas as pd
+    from spectral_predict.search import build_multiclass_decision_view
+
+    rng = np.random.default_rng(1)
+    blocks, labels = [], []
+    for k in range(3):
+        blocks.append(rng.normal(k * 4.0, 1.0, size=(30, 30)))
+        labels += [f"C{k}"] * 30
+    X = pd.DataFrame(np.vstack(blocks), columns=[f"w{j}" for j in range(30)])
+    y = pd.Series(labels)
+    cfg = {
+        "method": "raw", "name": "raw", "deriv": None, "window": None,
+        "polyorder": None, "baseline_method": None, "baseline_params": None,
+        "smoothing": False, "smoothing_window": 17, "smoothing_polyorder": 2,
+    }
+    return build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=cfg, n_components=0.99,
+    )
+
+
+def test_decision_matrix_dataframe_columns(gui_app):
+    app = gui_app
+    view = _make_view()
+    dm = app._multiclass_decision_matrix_dataframe(view)
+    assert list(dm.columns[:3]) == ["Sample", "TrueClass", "Decision"]
+    assert "Accepted" in dm.columns
+    for c in view["classes"]:
+        assert f"p({c})" in dm.columns
+    assert len(dm) == len(view["labels"])
+
+
+def test_show_decision_view_opens_window(gui_app):
+    import tkinter as tk
+
+    app = gui_app
+    view = _make_view()
+    before = [w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    app._show_multiclass_decision_view(view)
+    app.root.update_idletasks()
+    after = [w for w in app.root.winfo_children() if isinstance(w, tk.Toplevel)]
+    assert len(after) == len(before) + 1
+    # clean up the window we opened
+    after[-1].destroy()

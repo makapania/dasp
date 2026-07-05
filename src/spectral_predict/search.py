@@ -7148,6 +7148,169 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
     return float(min(1.0, max(0.0, auc)))
 
 
+def _multiclass_preprocess_matrix(X_np, preprocess_cfg, wavelengths_full):
+    """Apply one multi-class preprocessing config to the FULL matrix.
+
+    Per-spectrum ops (SNV / SG derivatives / baseline) are applied outside folds
+    (chemometrics convention — NOT leakage); column-autoscale / calibration /
+    varsel stay train-only inside the model. A malformed config returns
+    ``(None, wavelengths, reason)`` instead of raising, so one bad config never
+    aborts the whole search (spec §8 / Codex M2). Shared by the search loop and
+    :func:`build_multiclass_decision_view` so both preprocess identically.
+
+    Returns ``(X_pp | None, wavelengths_current, reason)``.
+    """
+    wavelengths_current = np.asarray(wavelengths_full).copy()
+    try:
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["method"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+        if pipe_steps:
+            from sklearn.pipeline import Pipeline as SkPipeline
+
+            prep_pipe = SkPipeline(pipe_steps)
+            prep_pipe.fit(X_np)
+            X_pp = prep_pipe.transform(X_np)
+        else:
+            X_pp = X_np.copy()
+
+        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+            X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
+                X_pp, wavelengths_current, preprocess_cfg
+            )
+        return X_pp, wavelengths_current, ""
+    except Exception as exc:  # noqa: BLE001 — one bad config must not abort
+        return (
+            None,
+            wavelengths_current,
+            f"preprocessing_failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def build_multiclass_decision_view(
+    X,
+    y,
+    *,
+    engine,
+    preprocess_cfg,
+    alpha=0.05,
+    n_components=0.99,
+    scaling="per_class",
+    min_class_samples=10,
+    variable_selection=None,
+    n_select=None,
+    wavelengths=None,
+    sample_ids=None,
+):
+    """Fit ONE multi-class config on the full data and return its per-sample
+    decision view (T-31 Phase D2 data provider; the GUI renders it).
+
+    The model is fit on the full (preprocessed) training matrix and evaluated on
+    it — this is the in-sample decision matrix shown to the user, NOT a
+    leakage-safe estimate (those are the leaderboard's OOF/LOCO metrics). It is
+    the "here is what every trained class model says about every sample" view.
+
+    Returns a dict with keys:
+        ``classes`` (list), ``p_values`` (n, K float), ``accept`` (n, K bool),
+        ``labels`` (n,) single-class / ``"multiple"`` / ``"novel"``,
+        ``true_labels`` (n,), ``sample_ids`` (n,), ``resolved_n_components``
+        (dict class -> int), ``unmodelable_classes`` (list),
+        ``wold`` (:func:`wold_diagnostic_plot_data` dict, or ``None`` if it
+        could not be computed), ``preprocess_name`` (str), ``reason`` (str;
+        non-empty only on preprocessing/fit failure).
+    """
+    from .simca import MultiClassClassModel, wold_diagnostic_plot_data
+
+    X_np = X.values if hasattr(X, "values") else np.asarray(X)
+    X_np = np.asarray(X_np, dtype=np.float64)
+    y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    if wavelengths is not None:
+        wavelengths_full = np.asarray(wavelengths)
+    elif hasattr(X, "columns"):
+        wavelengths_full = np.asarray(X.columns.values)
+    else:
+        wavelengths_full = np.arange(X_np.shape[1])
+    if sample_ids is None:
+        sample_ids = (
+            list(X.index) if hasattr(X, "index") else list(range(X_np.shape[0]))
+        )
+
+    empty = {
+        "classes": [],
+        "p_values": np.empty((0, 0)),
+        "accept": np.empty((0, 0), dtype=bool),
+        "labels": [],
+        "true_labels": list(y_np),
+        "sample_ids": list(sample_ids),
+        "resolved_n_components": {},
+        "unmodelable_classes": [],
+        "wold": None,
+        "preprocess_name": preprocess_cfg.get("name", ""),
+        "reason": "",
+    }
+
+    X_pp, wl_current, reason = _multiclass_preprocess_matrix(
+        X_np, preprocess_cfg, wavelengths_full
+    )
+    if X_pp is None:
+        empty["reason"] = reason or "preprocessing_failed"
+        return empty
+
+    try:
+        model = MultiClassClassModel(
+            engine=engine,
+            alpha=alpha,
+            n_components=n_components,
+            scaling=scaling,
+            min_class_samples=min_class_samples,
+            variable_selection=variable_selection,
+            n_select=n_select,
+        ).fit(X_pp, y_np)
+        P, A = model.decision_matrix(X_pp)
+        labels = list(model.predict(X_pp))
+    except Exception as exc:  # noqa: BLE001 — surface as a reason, never crash the GUI
+        empty["reason"] = f"{type(exc).__name__}: {exc}"
+        return empty
+
+    unmodelable = getattr(model, "unmodelable_", None)
+    if unmodelable is not None and hasattr(unmodelable, "tolist"):
+        unmodelable = unmodelable.tolist()
+    unmodelable = sorted(unmodelable) if unmodelable else []
+
+    # Wold MPOW/DPOW is a variable-space diagnostic (its own per-class PCA), so
+    # it is meaningful regardless of the membership engine. Compute defensively.
+    try:
+        wold = wold_diagnostic_plot_data(
+            X_pp, y_np, n_components=n_components, scaling=scaling,
+            wavelengths=wl_current,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wold diagnostic plot data failed: %s", exc)
+        wold = None
+
+    return {
+        "classes": list(model.classes_),
+        "p_values": np.asarray(P, dtype=np.float64),
+        "accept": np.asarray(A, dtype=bool),
+        "labels": labels,
+        "true_labels": list(y_np),
+        "sample_ids": list(sample_ids),
+        "resolved_n_components": dict(getattr(model, "n_components_", {}) or {}),
+        "unmodelable_classes": unmodelable,
+        "wold": wold,
+        "preprocess_name": preprocess_cfg.get("name", ""),
+        "reason": "",
+    }
+
+
 def run_multiclass_simca_search(
     X,
     y,
@@ -7171,6 +7334,7 @@ def run_multiclass_simca_search(
     smoothing_polyorder=2,
     progress_callback=None,
     controller=None,
+    compute_top_decision_view=False,
 ):
     """T-31 multi-class SIMCA / class-modeling search (spec §7).
 
@@ -7357,41 +7521,14 @@ def run_multiclass_simca_search(
         # a single malformed config (e.g. build_preprocessing_pipeline raising on
         # a bad window/polyorder) must NOT abort the whole search — it emits NaN
         # rows with a reason instead.
-        wavelengths_current = wavelengths_full.copy()
-        pp_reason = ""
-        try:
-            pipe_steps = build_preprocessing_pipeline(
-                preprocess_cfg["method"],
-                preprocess_cfg["deriv"],
-                preprocess_cfg["window"],
-                preprocess_cfg["polyorder"],
-                baseline_method=preprocess_cfg.get("baseline_method"),
-                baseline_params=preprocess_cfg.get("baseline_params"),
-                smoothing=preprocess_cfg.get("smoothing", False),
-                smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
-            )
-            if pipe_steps:
-                from sklearn.pipeline import Pipeline as SkPipeline
-
-                prep_pipe = SkPipeline(pipe_steps)
-                prep_pipe.fit(X_np)
-                X_pp = prep_pipe.transform(X_np)
-            else:
-                X_pp = X_np.copy()
-
-            # Derivative edge mask (drops undefined SG edge columns) when applicable.
-            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
-                X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
-                    X_pp, wavelengths_current, preprocess_cfg
-                )
-        except Exception as exc:  # noqa: BLE001 — one bad config must not abort
+        X_pp, wavelengths_current, pp_reason = _multiclass_preprocess_matrix(
+            X_np, preprocess_cfg, wavelengths_full
+        )
+        if X_pp is None:
             logger.warning(
                 "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
-                preprocess_cfg["name"], exc,
+                preprocess_cfg["name"], pp_reason,
             )
-            X_pp = None
-            pp_reason = f"preprocessing_failed: {type(exc).__name__}: {exc}"
 
         for engine in engines:
             if _user_stopped:
@@ -7551,6 +7688,35 @@ def run_multiclass_simca_search(
         df_results = compute_composite_score(
             df_results, "multiclass_simca", variable_penalty, gap_penalty
         )
+
+    # Optionally build the per-sample decision view for the top-ranked config
+    # (Phase D2). Attached via df.attrs so the return type stays a DataFrame for
+    # every existing caller. The winning preprocess_cfg is looked up by name from
+    # the authoritative in-scope list (no fragile name parsing).
+    if compute_top_decision_view and len(df_results) > 0:
+        try:
+            top = df_results.iloc[0]
+            top_cfg = next(
+                (c for c in preprocess_configs if c["name"] == top["Preprocess"]),
+                None,
+            )
+            if top_cfg is not None and not top.get("reason"):
+                df_results.attrs["top_decision_view"] = build_multiclass_decision_view(
+                    X_np,
+                    y_np,
+                    engine=str(top["engine_family"]),
+                    preprocess_cfg=top_cfg,
+                    alpha=alpha,
+                    n_components=n_components,
+                    scaling="per_class",
+                    min_class_samples=min_class_samples,
+                    variable_selection=_MULTICLASS_VARSEL_PATHS[str(top["varsel_path"])],
+                    n_select=variable_selection_n_select,
+                    wavelengths=wavelengths_full,
+                    sample_ids=(list(X.index) if hasattr(X, "index") else None),
+                )
+        except Exception as exc:  # noqa: BLE001 — the leaderboard still returns
+            logger.warning("Top decision-view build failed: %s", exc)
 
     logger.info("=" * 70)
     logger.info("MULTI-CLASS SIMCA SEARCH COMPLETE")

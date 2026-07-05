@@ -28383,6 +28383,150 @@ class SpectralPredictApp:
                 self.root.after(0, lambda: self._update_search_buttons('idle'))
                 return
 
+            # ═══════════════════════════════════════════════════════════════════
+            # MULTI-CLASS CLASS MODELING (SIMCA) — separate pipeline (T-31 Phase D)
+            # ═══════════════════════════════════════════════════════════════════
+            if task_type == "multiclass_simca":
+                from spectral_predict.search import run_multiclass_simca_search
+
+                selected_engines = [e for e, v in self.mc_engine_vars.items() if v.get()]
+                if not selected_engines:
+                    selected_engines = ['pca-simca']
+                selected_varsel = [p for p, v in self.mc_varsel_vars.items() if v.get()]
+                if not selected_varsel:
+                    selected_varsel = ['none']
+
+                # Preprocessing + window sizes reuse the Basic Settings checkboxes.
+                mc_preprocess = []
+                if self.use_raw.get():
+                    mc_preprocess.append('raw')
+                if self.use_snv.get():
+                    mc_preprocess.append('snv')
+                if self.use_sg1.get():
+                    mc_preprocess.append('deriv1')
+                if self.use_sg2.get():
+                    mc_preprocess.append('deriv2')
+                if not mc_preprocess:
+                    mc_preprocess = ['raw', 'snv', 'deriv1']
+                mc_windows = []
+                if self.window_7.get():
+                    mc_windows.append(7)
+                if self.window_11.get():
+                    mc_windows.append(11)
+                if self.window_17.get():
+                    mc_windows.append(17)
+                if self.window_23.get():
+                    mc_windows.append(23)
+                if self.window_31.get():
+                    mc_windows.append(31)
+                if not mc_windows:
+                    mc_windows = [17]
+
+                # n_components: float in (0,1) = per-class variance frac; int; or
+                # the "per_class_cv" sentinel.
+                mc_ncomp_raw = str(self.mc_n_components.get()).strip()
+                if mc_ncomp_raw == "per_class_cv":
+                    mc_ncomp = "per_class_cv"
+                else:
+                    try:
+                        _f = float(mc_ncomp_raw)
+                        mc_ncomp = _f if 0.0 < _f < 1.0 else int(round(_f))
+                    except ValueError:
+                        self._log_progress(
+                            f"  [Warning] Could not parse n_components '{mc_ncomp_raw}'; using 0.99"
+                        )
+                        mc_ncomp = 0.99
+
+                baseline_method_mc, baseline_params_mc = self._get_baseline_params()
+
+                self._log_progress("\nRunning Multi-Class Class Modeling (SIMCA)...")
+                self._log_progress(f"  Engines: {selected_engines}")
+                self._log_progress(f"  Variable-selection paths: {selected_varsel}")
+                self._log_progress(
+                    f"  alpha={self.mc_alpha.get()}, n_components={mc_ncomp}, "
+                    f"min_class_n={self.mc_min_class_samples.get()}"
+                )
+                try:
+                    results_df = run_multiclass_simca_search(
+                        X=X_filtered,
+                        y=y_filtered,
+                        engines=selected_engines,
+                        preprocessing_methods=mc_preprocess,
+                        window_sizes=mc_windows,
+                        alpha=self.mc_alpha.get(),
+                        n_components=mc_ncomp,
+                        varsel_paths=selected_varsel,
+                        variable_selection_n_select=self.mc_varsel_n_select.get(),
+                        min_class_samples=self.mc_min_class_samples.get(),
+                        cv_splits=self.folds.get(),
+                        variable_penalty=self.variable_penalty.get(),
+                        gap_penalty=self.gap_penalty.get(),
+                        baseline_method=baseline_method_mc,
+                        baseline_params=baseline_params_mc,
+                        enable_smoothing=self.enable_smoothing.get(),
+                        smoothing_window=self.smoothing_window.get(),
+                        smoothing_polyorder=self.smoothing_polyorder.get(),
+                        progress_callback=self._progress_callback,
+                        controller=self.search_controller,
+                        compute_top_decision_view=True,
+                    )
+                except Exception as mc_err:
+                    self._log_progress(f"  Error in multi-class search: {mc_err}")
+                    import traceback
+                    self._log_progress(traceback.format_exc())
+                    results_df = None
+
+                self._mc_decision_view = None
+                if results_df is not None and len(results_df) > 0:
+                    self._log_progress(
+                        f"\nMulti-class search complete: {len(results_df)} configurations tested"
+                    )
+                    self.results = results_df
+                    self.results_df = results_df
+                    if 'Select' not in results_df.columns:
+                        results_df.insert(0, 'Select', False)
+                    self._mc_decision_view = results_df.attrs.get('top_decision_view')
+                    self.root.after(0, lambda df=results_df: self._populate_results_table(df))
+
+                    try:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_dir = Path(self.output_dir.get())
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+                        results_path = output_dir / f"multiclass_results_{safe_target}_{timestamp}.csv"
+                        results_df.drop(columns=['all_vars'], errors='ignore').to_csv(
+                            results_path, index=False
+                        )
+                        self._log_progress(f"\n> Results saved: {results_path}")
+                        if self._mc_decision_view and not self._mc_decision_view.get('reason'):
+                            dm_path = output_dir / f"multiclass_decision_matrix_{safe_target}_{timestamp}.csv"
+                            self._multiclass_decision_matrix_dataframe(
+                                self._mc_decision_view
+                            ).to_csv(dm_path, index=False)
+                            self._log_progress(f"> Decision matrix saved: {dm_path}")
+                    except Exception as exp_err:
+                        self._log_progress(f"  [Warning] Failed to save multi-class CSVs: {exp_err}")
+
+                    if self._mc_decision_view and not self._mc_decision_view.get('reason'):
+                        self.root.after(
+                            0, lambda v=self._mc_decision_view: self._show_multiclass_decision_view(v)
+                        )
+                    elif self._mc_decision_view and self._mc_decision_view.get('reason'):
+                        self._log_progress(
+                            f"  [Warning] Decision view unavailable: {self._mc_decision_view['reason']}"
+                        )
+                else:
+                    self._log_progress("\nMulti-class search returned no results.")
+
+                self._log_progress("\n> Analysis complete!")
+                self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
+                self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
+                if hasattr(self, 'running_figure'):
+                    self.root.after(0, lambda: self.running_figure.stop_animation())
+                self.root.after(0, self._play_completion_chime)
+                self.root.after(0, lambda: self._update_search_buttons('idle'))
+                return
+
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
             optimization_method = self.optimization_method.get()
 
@@ -29633,6 +29777,166 @@ For detailed documentation, see the User Guide.
             except Exception:
                 pass
 
+    def _multiclass_decision_matrix_dataframe(self, view):
+        """Build a human-readable decision-matrix DataFrame from a decision view.
+
+        Columns: Sample, TrueClass, Decision, p(<class>) per class, Accepted
+        (comma-joined accepted class names). Used for CSV export and the
+        in-app table (T-31 Phase D2).
+        """
+        import pandas as pd
+
+        classes = list(view['classes'])
+        P = view['p_values']
+        A = view['accept']
+        sample_ids = view['sample_ids']
+        true_labels = view['true_labels']
+        labels = view['labels']
+
+        rows = []
+        for i in range(len(sample_ids)):
+            accepted = [classes[j] for j in range(len(classes)) if bool(A[i, j])]
+            row = {
+                'Sample': sample_ids[i],
+                'TrueClass': true_labels[i] if i < len(true_labels) else '',
+                'Decision': labels[i] if i < len(labels) else '',
+            }
+            for j, c in enumerate(classes):
+                row[f'p({c})'] = float(P[i, j])
+            row['Accepted'] = ', '.join(str(a) for a in accepted)
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def _show_multiclass_decision_view(self, view):
+        """Open a window with the per-sample decision matrix + Wold MPOW/DPOW plots.
+
+        Runs on the Tk main thread (scheduled via root.after from the worker).
+        The decision matrix is the IN-SAMPLE view (every trained class model's
+        verdict on every sample); leakage-safe ranking lives in the leaderboard.
+        """
+        try:
+            import numpy as np
+            import pandas as pd
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+            classes = list(view['classes'])
+            labels = list(view['labels'])
+            n = len(labels)
+            n_single = sum(1 for x in labels if x in classes)
+            n_multi = sum(1 for x in labels if x == 'multiple')
+            n_novel = sum(1 for x in labels if x == 'novel')
+
+            win = tk.Toplevel(self.root)
+            win.title("Multi-Class Decision Matrix")
+            win.geometry("980x720")
+
+            header = ttk.Frame(win)
+            header.pack(fill='x', padx=10, pady=(10, 4))
+            ttk.Label(
+                header,
+                text=f"Classes: {', '.join(str(c) for c in classes)}  |  "
+                     f"Samples: {n}  —  single-class: {n_single}, "
+                     f"multiple: {n_multi}, novel: {n_novel}",
+                style='Subheading.TLabel',
+            ).pack(anchor='w')
+            unmodelable = view.get('unmodelable_classes') or []
+            if unmodelable:
+                ttk.Label(
+                    header,
+                    text=f"Unmodelable classes (too few samples): {unmodelable}",
+                    style='Caption.TLabel',
+                ).pack(anchor='w')
+            ttk.Label(
+                header,
+                text="Decision matrix is IN-SAMPLE (every class model's verdict on "
+                     "every sample). A sample accepted by no class is 'novel'; by "
+                     "several is 'multiple'.",
+                style='Caption.TLabel',
+            ).pack(anchor='w')
+
+            dm_df = self._multiclass_decision_matrix_dataframe(view)
+
+            # --- Decision matrix table ---
+            table_frame = ttk.Frame(win)
+            table_frame.pack(fill='both', expand=True, padx=10, pady=4)
+            cols = list(dm_df.columns)
+            tree = ttk.Treeview(table_frame, columns=cols, show='headings', height=14)
+            for c in cols:
+                tree.heading(c, text=c)
+                width = 150 if c in ('Sample', 'Accepted') else 90
+                tree.column(c, width=width, anchor='center', stretch=False)
+            for _, r in dm_df.iterrows():
+                vals = []
+                for c in cols:
+                    v = r[c]
+                    if isinstance(v, float):
+                        vals.append(f"{v:.4f}")
+                    else:
+                        vals.append(str(v))
+                tag = ''
+                if r['Decision'] == 'novel':
+                    tag = 'novel'
+                elif r['Decision'] == 'multiple':
+                    tag = 'multiple'
+                tree.insert('', 'end', values=vals, tags=(tag,))
+            tree.tag_configure('novel', background='#fdecea')
+            tree.tag_configure('multiple', background='#fff8e1')
+            vsb = ttk.Scrollbar(table_frame, orient='vertical', command=tree.yview)
+            hsb = ttk.Scrollbar(table_frame, orient='horizontal', command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            tree.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            table_frame.rowconfigure(0, weight=1)
+            table_frame.columnconfigure(0, weight=1)
+
+            # --- Wold MPOW / DPOW diagnostic plots ---
+            wold = view.get('wold')
+            if wold is not None:
+                plot_frame = ttk.Frame(win)
+                plot_frame.pack(fill='both', expand=True, padx=10, pady=4)
+                fig = Figure(figsize=(9, 2.6), dpi=100)
+                variables = np.asarray(wold.get('variables'))
+                mpow = np.asarray(wold['modeling_power_agg'])
+                dpow = np.asarray(wold['discriminating_power_agg'])
+                ax1 = fig.add_subplot(1, 2, 1)
+                ax1.plot(variables, mpow, color='#1f77b4', lw=0.9)
+                ax1.set_title('Wold Modeling Power (agg)', fontsize=9)
+                ax1.set_xlabel('Variable', fontsize=8)
+                ax1.tick_params(labelsize=7)
+                ax2 = fig.add_subplot(1, 2, 2)
+                ax2.plot(variables, dpow, color='#d62728', lw=0.9)
+                ax2.set_title('Wold Discriminating Power (agg)', fontsize=9)
+                ax2.set_xlabel('Variable', fontsize=8)
+                ax2.tick_params(labelsize=7)
+                fig.tight_layout()
+                canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            # --- Save button ---
+            btn_frame = ttk.Frame(win)
+            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+
+            def _save_decision_csv():
+                from tkinter import filedialog
+                path = filedialog.asksaveasfilename(
+                    defaultextension='.csv',
+                    filetypes=[('CSV', '*.csv')],
+                    title='Save decision matrix',
+                )
+                if path:
+                    dm_df.to_csv(path, index=False)
+                    self._log_progress(f"> Decision matrix saved: {path}")
+
+            ttk.Button(btn_frame, text="Save Decision Matrix CSV",
+                       command=_save_decision_csv).pack(side='right')
+        except Exception as exc:
+            self._log_progress(f"  [Warning] Could not render decision view: {exc}")
+            import traceback
+            self._log_progress(traceback.format_exc())
+
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
         if results_df is None or len(results_df) == 0:
@@ -29792,6 +30096,8 @@ For detailed documentation, see the User Guide.
             'preprocess_chromosome',
             'smart_selected_wavelengths', 'smart_n_wavelengths',
             'smart_score', 'smart_importance_method', 'smart_model_name',
+            # T-31 multi-class: the full variable list is not human-readable.
+            'all_vars',
         }
         columns = [c for c in results_df.columns if c not in INTERNAL_COLUMNS]
 
