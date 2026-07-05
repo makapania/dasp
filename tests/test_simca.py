@@ -211,3 +211,54 @@ class TestNonSIMCAEnginesA4:
         P_in, _ = m.decision_matrix(np.zeros((1, 12)))          # center = most normal
         P_out, _ = m.decision_matrix(np.full((1, 12), 20.0))    # far = most abnormal
         assert P_out[0, 0] < P_in[0, 0]
+
+
+class TestNestedCVA5:
+    """A5: per-class n_components tuning ("per_class_cv", the new default) via
+    one-vs-rest CV, and a nested leakage-safe outer CV (cross_validate). alpha
+    stays global (never tuned).
+    """
+
+    def test_per_class_cv_is_default(self):
+        # A5 flips the constructor default from the A2 placeholder int to
+        # "per_class_cv".
+        assert MultiClassClassModel().n_components == "per_class_cv"
+
+    def test_per_class_cv_resolves_per_class_components(self):
+        # "per_class_cv" tunes each class's n_components by one-vs-rest CV and
+        # records the choice in n_components_ (a {class: int} dict).
+        X, y = _blobs([60, 60, 60])
+        m = MultiClassClassModel(
+            engine="pca-simca", n_components="per_class_cv", scaling="none"
+        ).fit(X, y)
+        assert set(m.n_components_) == set(m.classes_.tolist())
+        for c in m.classes_:
+            assert isinstance(m.n_components_[c], (int, np.integer))
+            assert m.n_components_[c] >= 1
+        P, A = m.decision_matrix(X)
+        assert P.shape == (len(X), 3)
+
+    def test_cross_validate_covers_all_samples(self):
+        X, y = _blobs([60, 60, 60])
+        m = MultiClassClassModel(engine="pca-simca", n_components=5, scaling="none")
+        res = m.cross_validate(X, y, n_splits=5)
+        assert len(res["labels"]) == len(X)
+        P, A = res["decision_matrix"]
+        assert P.shape == (len(X), 3) and A.shape == (len(X), 3)
+        # every sample belongs to exactly one outer test fold
+        assert sorted(np.concatenate([f for f in res["test_indices"]])) == list(range(len(X)))
+
+    def test_cross_validate_no_outer_leakage(self):
+        # Structural leakage pin: each sample's out-of-fold prediction must come
+        # from a fold whose TRAINING set excluded it. (A.1 per-class tuning is
+        # then nested-safe by construction, since fit() only sees fold-train.)
+        X, y = _blobs([60, 60, 60])
+        res = MultiClassClassModel(
+            engine="pca-simca", n_components="per_class_cv", scaling="none"
+        ).cross_validate(X, y, n_splits=5)
+        for f, test_idx in enumerate(res["test_indices"]):
+            train_idx = set(res["train_indices"][f].tolist())
+            assert not (set(test_idx.tolist()) & train_idx)  # disjoint
+        # and the union of train+test for each fold is the whole dataset
+        for f, test_idx in enumerate(res["test_indices"]):
+            assert len(res["train_indices"][f]) + len(test_idx) == len(X)

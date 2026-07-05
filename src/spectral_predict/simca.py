@@ -26,10 +26,15 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.model_selection import KFold
+from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from spectral_predict.contamination import PCASIMCA, get_one_class_model
+from spectral_predict.contamination import (
+    PCASIMCA,
+    get_one_class_model,
+    get_one_class_model_grids,
+    run_one_class_cv,
+)
 
 
 # Non-SIMCA per-class engines (spec section 5.3 / task A4). Maps a
@@ -73,10 +78,15 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         Global significance level shared by every per-class model, so the
         ">= 2 of K" multiple-membership rule is coherent across classes
         (spec decision #6).
-    n_components : int or dict, default=5
-        PCA components for the ``"pca-simca"`` engine — either one int applied
-        to every class or a ``{class_label: int}`` mapping. The string
-        ``"per_class_cv"`` (per-class CV tuning) lands in A5.
+    n_components : int, dict, or "per_class_cv", default="per_class_cv"
+        PCA components for the ``"pca-simca"`` engine. An int applies the same
+        value to every class; a ``{class_label: int}`` mapping sets it per
+        class; the string ``"per_class_cv"`` (default, task A5) tunes each
+        modeled class's components by one-vs-rest CV via
+        :func:`~spectral_predict.contamination.run_one_class_cv` (candidate
+        grid = distinct int ``n_components`` from
+        :func:`~spectral_predict.contamination.get_one_class_model_grids`;
+        alpha stays global / fixed). Unused by non-SIMCA engines.
     scaling : {"none", "per_class", "global"}, default="per_class"
         Column-scaling mode (spec section 5.5). All scalers are
         :class:`~sklearn.preprocessing.StandardScaler` instances fit train-only
@@ -128,7 +138,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         self,
         engine: str = "pca-simca",
         alpha: float = 0.05,
-        n_components: int | dict | str = 5,
+        n_components: int | dict | str = "per_class_cv",
         scaling: str = "per_class",
         min_class_samples: int = 10,
         engine_params: dict | None = None,
@@ -166,12 +176,6 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 'expected "none", "per_class", or "global".'
             )
 
-        if self.n_components == "per_class_cv":
-            raise NotImplementedError(
-                'n_components="per_class_cv" (per-class CV tuning) lands in task A5 '
-                "of T-31; pass an int or a {class_label: int} dict for now."
-            )
-
         if self.engine != "pca-simca" and self.engine not in _NON_SIMCA_ENGINES:
             raise ValueError(
                 f"Unknown engine={self.engine!r}; expected 'pca-simca' or one of "
@@ -193,6 +197,10 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         # Per-class cross-fit null arrays (non-SIMCA engines only, task A4).
         # Each value is sorted ascending so _empirical_p can use searchsorted.
         self.nulls_: dict = {}
+        # Per-class resolved PCA n_components (task A5). {class_label: int};
+        # populated for modeled SIMCA classes only (empty for non-SIMCA engines
+        # and unmodelable classes).
+        self.n_components_: dict = {}
 
         is_simca = self.engine == "pca-simca"
 
@@ -215,7 +223,24 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 X_c_scaled = X_c
 
             if is_simca:
-                n_components_c = self._n_components_for(c)
+                if self.n_components == "per_class_cv":
+                    # Tune this class's n_components by one-vs-rest CV (task A5).
+                    # X_s = the SAME column-scaling space the final model uses
+                    # for class c: per_class -> transform ALL X by class c's
+                    # scaler; global -> the global scaler; none -> raw X.
+                    if self.scaling == "per_class":
+                        X_s = self.scalers_[c].transform(X)
+                    elif self.scaling == "global":
+                        X_s = self.global_scaler_.transform(X)
+                    else:  # "none"
+                        X_s = X
+                    y_oc = np.where(y == c, 1, -1)
+                    n_components_c = self._tune_per_class_n_components(
+                        X_s, y_oc, X_c.shape[0], X.shape[1]
+                    )
+                else:
+                    n_components_c = self._n_components_for(c)
+                self.n_components_[c] = n_components_c
                 self.models_[c] = PCASIMCA(
                     n_components=n_components_c, alpha=self.alpha
                 ).fit(X_c_scaled)
@@ -314,6 +339,92 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
 
         return out
 
+    def cross_validate(self, X, y, n_splits: int = 5) -> dict:
+        """Nested leakage-safe outer CV (task A5).
+
+        For each outer fold a FRESH :class:`MultiClassClassModel` is fit on the
+        fold's training rows only (clone-style: same engine / alpha /
+        n_components / scaling / min_class_samples / engine_params as this
+        instance), so any ``"per_class_cv"`` tuning runs on fold-train only —
+        no outer leakage. The fold's held-out rows are then scored into
+        out-of-fold (OOF) ``P`` / ``A`` arrays and summary labels.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+        y : array-like of shape (n_samples,)
+        n_splits : int, default=5
+            Outer fold count. Reduced to ``min(n_splits, <smallest class
+            count>)`` when a class has fewer rows than ``n_splits``
+            (StratifiedKFold requirement); clamped to a minimum of 2.
+
+        Returns
+        -------
+        dict
+            With exactly these keys:
+
+            - ``"labels"``: ``(n_samples,)`` object OOF summary labels.
+            - ``"decision_matrix"``: ``(P, A)`` tuple of ``(n_samples, K)``
+              OOF p-values (float; ``NaN`` where a class is unmodelable or
+              absent from a fold) and acceptance flags (bool).
+            - ``"classes"``: global sorted unique class labels (column order).
+            - ``"test_indices"``: list of per-fold test-index ndarrays.
+            - ``"train_indices"``: list of per-fold train-index ndarrays (same
+              fold order as ``test_indices``).
+        """
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y)
+        classes = np.unique(y)
+        K = len(classes)
+        n = X.shape[0]
+
+        min_class_count = int(min(np.sum(y == c) for c in classes))
+        n_splits = max(2, min(n_splits, min_class_count))
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=False)
+
+        P = np.full((n, K), np.nan, dtype=np.float64)
+        A = np.zeros((n, K), dtype=bool)
+        labels = np.empty(n, dtype=object)
+
+        test_indices: list[np.ndarray] = []
+        train_indices: list[np.ndarray] = []
+
+        for train_idx, test_idx in skf.split(X, y):
+            fold_model = MultiClassClassModel(
+                engine=self.engine,
+                alpha=self.alpha,
+                n_components=self.n_components,
+                scaling=self.scaling,
+                min_class_samples=self.min_class_samples,
+                engine_params=self.engine_params,
+            )
+            fold_model.fit(X[train_idx], y[train_idx])
+
+            P_fold, A_fold = fold_model.decision_matrix(X[test_idx])
+            fold_classes = fold_model.classes_
+            for k_global, c in enumerate(classes):
+                if c in fold_model.unmodelable_:
+                    continue  # leave NaN / False
+                matches = np.where(fold_classes == c)[0]
+                if matches.size == 0:
+                    continue  # class absent from fold-train -> leave NaN / False
+                k_fold = int(matches[0])
+                P[test_idx, k_global] = P_fold[:, k_fold]
+                A[test_idx, k_global] = A_fold[:, k_fold]
+
+            labels[test_idx] = fold_model.predict(X[test_idx])
+
+            test_indices.append(test_idx)
+            train_indices.append(train_idx)
+
+        return {
+            "labels": labels,
+            "decision_matrix": (P, A),
+            "classes": classes,
+            "test_indices": test_indices,
+            "train_indices": train_indices,
+        }
+
     def _n_components_for(self, label) -> int:
         """Resolve ``n_components`` for a single class label.
 
@@ -326,6 +437,85 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         if isinstance(nc, dict):
             return int(nc[label])
         return int(nc)
+
+    def _tune_per_class_n_components(
+        self, X_s: np.ndarray, y_oc: np.ndarray, n_class: int, n_features: int
+    ) -> int:
+        """Select this class's PCA ``n_components`` by one-vs-rest CV (task A5).
+
+        Candidate grid = the distinct integer ``n_components`` values from the
+        ``"PCA-SIMCA"`` entry of
+        :func:`~spectral_predict.contamination.get_one_class_model_grids` (its
+        alpha axis is ignored — alpha is fixed at ``self.alpha``). Each
+        candidate is capped at ``min(n_class - 1, n_features)``; non-integer
+        (e.g. variance-fraction floats), non-positive, and duplicate candidates
+        are dropped. For each surviving candidate a one-vs-rest CV is run via
+        :func:`~spectral_predict.contamination.run_one_class_cv` on this class's
+        column-scaled space ``X_s`` and the candidate with the highest mean
+        balanced_accuracy wins (ties broken toward the smallest
+        ``n_components`` since candidates are visited ascending with strict
+        ``>``). Falls back to ``min(5, n_class - 1)`` if the grid is empty or
+        every candidate is skipped.
+
+        Parameters
+        ----------
+        X_s : ndarray of shape (n_samples, n_features)
+            Full ``X`` projected into the SAME column-scaling space the final
+            model uses for this class (per_class/global scaler applied, or raw
+            under ``scaling="none"``).
+        y_oc : ndarray of shape (n_samples,)
+            One-vs-rest labels: ``+1`` for this class, ``-1`` otherwise.
+        n_class : int
+            Number of training rows in this class (used for the cap).
+        n_features : int
+            Number of features (used for the cap).
+
+        Returns
+        -------
+        n_components : int
+            The chosen int ``n_components`` for this class.
+        """
+        cap = min(n_class - 1, n_features)
+        grid = get_one_class_model_grids().get("PCA-SIMCA", [])
+        candidates: list[int] = []
+        seen: set[int] = set()
+        for entry in grid:
+            nc = entry.get("n_components")
+            if isinstance(nc, bool) or not isinstance(nc, (int, np.integer)):
+                continue  # drop variance-fraction (float) candidates
+            nc = min(int(nc), cap)
+            if nc < 1 or nc in seen:
+                continue
+            seen.add(nc)
+            candidates.append(nc)
+        candidates.sort()
+        if not candidates:
+            return min(5, max(1, n_class - 1))
+
+        best_nc: int | None = None
+        best_score = -np.inf
+        for nc in candidates:
+            try:
+                result = run_one_class_cv(
+                    X_s,
+                    y_oc,
+                    "PCA-SIMCA",
+                    {"n_components": nc, "alpha": self.alpha},
+                    compute_calibration=False,
+                )
+            except Exception:
+                continue
+            if result.get("skipped"):
+                continue
+            score = result.get("mean_metrics", {}).get("balanced_accuracy", np.nan)
+            if not np.isfinite(score):
+                continue
+            if score > best_score:  # strict > -> ties keep the smallest nc
+                best_score = score
+                best_nc = nc
+        if best_nc is None:
+            return min(5, max(1, n_class - 1))
+        return best_nc
 
     def _cross_fit_null(
         self, X_scaled: np.ndarray, builder_name: str, score_method: str
