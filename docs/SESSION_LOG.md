@@ -4,6 +4,26 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-04 — T-31 Multi-Class SIMCA Phase A (A1–A8) built + 3-family review-gate hardening
+
+**Branch `feat/T31-multiclass-simca` (off origin/main). Phase A backend complete, pushed, not merged.** Execution model: Opus orchestrator wrote each task's contract tests (TDD, confirmed-red first), GLM-5.2 write-mode workers (opencode-call, HALT-OR-BLOCK) implemented to the tests, Opus reviewed every diff + committed per task. New module `src/spectral_predict/simca.py` (`MultiClassClassModel` + `multiclass_simca_metrics`/`wilson_ci`/`novelty_tradeoff_auc`), `PCASIMCA.p_joint` in contamination.py (A1), `predict_with_model` multiclass branch + `_SUPPORTED_TASK_TYPES` gate in model_io.py (A8).
+
+**Non-obvious findings (empirically verified, worth not re-discovering):**
+- **DD-SIMCA small-n over-rejection is severe and MoM-driven.** Held-out false-rejection at α=0.05: n=100→~5%, n=30→~8–12%, n=15→~39% (nc=3). `PCASIMCA`'s `var/(2·mean)` method-of-moments χ² fit is high-variance below ~n=30. `min_class_samples=10` was only a *crash* floor (PCASIMCA needs n≥3), NOT a calibration floor. Empirically confirmed in A2; the naive `[0.02,0.10]` false-rejection test band only holds for well-sampled (n≥100) classes.
+- **Empirical p-value (conformal, add-one) mathematically cannot reject below m=20.** For non-SIMCA engines the per-class p = `(1+#{null≤s})/(m+1)`, so min p = `1/(m+1)`; at m=10 that's 0.091 > 0.05 → nothing ever rejected regardless of anomaly. DeepSeek's catch; verified live. Rejection first possible at m≥20. Fix: non-SIMCA classes with n<20 marked unmodelable.
+- **User-approved layered floor policy:** hard block n<min_class_samples(10) unmodelable; non-SIMCA n<20 unmodelable+warn; SIMCA warns at n<max(20,5·n_comp) but still models; per-class calibration surfaced via A7 metrics + Wilson CIs. Grounded in Rodionova & Pomerantsev 2018 (20–30 samples/class).
+- **Scaler-prefit-before-inner-CV is a (mild) leakage.** The per-class StandardScaler was fit on all class rows before `_cross_fit_null`'s KFold, so held-out null rows influenced their own scaler. Fixed: fit a fresh scaler per null-fold for `scaling="per_class"`. (Only Codex flagged; DeepSeek/Kimi considered the engine cross-fit already leakage-free.)
+- **NaN (unmodelable) columns silently broke two metrics:** `novelty_tradeoff_auc` collapsed to 0 (NaN comparisons are False, so novel samples never counted as novel) and `efficiency` propagated NaN. Fixed: treat NaN as never-accept (`np.isnan(P) | (P<alpha)`), use `nanmean`.
+- **IsolationForest score direction:** `score_samples` is already higher=more-normal — do NOT negate (a spec bug GPT-5.5 caught pre-build; pinned by `test_isolationforest_direction_not_inverted`).
+
+**3-family gate verdict:** core sound (p_joint byte-identical vs pre-A1, all engine signs correct, nested-CV leakage-safe, forward-compat gate preserves legacy None/absent task_type). All findings were small-n/NaN/edge; folded into `cbb69bf` with 6 discriminating tests (`TestPhaseAHardening`). Deferred to merge-readiness: tuning-scaler leakage (negligible, affects only discrete nc choice), `_cross_fit_null` EE-without-PCA-wrapper, `predict_with_uncertainty` multiclass branch (needed before Phase D GUI), AUC threshold downsampling (production-scale only).
+
+**Real-data smoke** (`Contaminated Samples Raw_ORAU Added.xlsx`, 757×2151 FTIR, `Site` = 10 classes): train on Calibrate+Colby, hold out other sites → SIMCA labels 53% (2 known) to 86% (1 known) of held-out-site samples "novel" vs LDA/PLS-DA forcing 100% into a trained site; in-site false-novel ~9%. Raw spectra; Phase C preprocessing will improve it. This is the exact fossil-bone-site-doesn't-generalize use case from the spec.
+
+**NEXT: Phase B** (Wold varsel + diagnostics + supervised prefilter). Then C (search/wiring/e2e), D (GUI/export), merge-gate vs origin/main.
+
+---
+
 ## 2026-07-01 — Legacy `.sco` review fold-in: broad-except swallowed corruption guards; GUI detection globs drift; centralized ASD extensions
 
 **Context.** High-effort code review of the `feat/legacy-asd-sco-import` branch (the native legacy
