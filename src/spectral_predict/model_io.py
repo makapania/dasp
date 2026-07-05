@@ -566,6 +566,14 @@ def _compute_reliability_scores(
     return np.clip(np.round(scores), 5, 95).astype(int)
 
 
+# Recognized metadata["task_type"] values (spec §6). An explicit value outside
+# this set is rejected by ``predict_with_model`` as a forward-compat gate; a
+# missing or null task_type is treated as a legacy model (no gate).
+_SUPPORTED_TASK_TYPES = frozenset(
+    {"regression", "classification", "one_class", "multiclass_simca"}
+)
+
+
 def predict_with_model(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
@@ -718,8 +726,39 @@ def predict_with_model(
     else:
         raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
 
-    # One-class prediction branch
+    # --- task-type dispatch (spec §6) -----------------------------------------
     task_type = metadata.get("task_type", "regression")
+
+    # Forward-compat gate: reject genuinely-unknown task types. A missing
+    # task_type defaults to "regression" above (legacy regression models) and an
+    # explicit null is also left alone (legacy); only an explicit value outside
+    # the recognized set raises. This must NOT fire for any of the four
+    # recognized values or for absent/null task_type.
+    if task_type is not None and task_type not in _SUPPORTED_TASK_TYPES:
+        raise NotImplementedError(
+            f"task_type={task_type!r} is not supported by this build "
+            f"(expected one of {sorted(_SUPPORTED_TASK_TYPES)} or absent)."
+        )
+
+    # Multi-class SIMCA (task A8, spec §6): the model is a MultiClassClassModel
+    # orchestrator that owns all per-class state. Return its decision matrix,
+    # per-row summary label, and per-row accepted-class lists as a dict — NOT
+    # the ndarray that regression / classification / one_class return.
+    if task_type == "multiclass_simca":
+        P, A = model.decision_matrix(X_processed)
+        labels = model.predict(X_processed)
+        accepted_classes = [
+            [c for c, accepted in zip(model.classes_, A[i]) if accepted]
+            for i in range(A.shape[0])
+        ]
+        return {
+            "p_values": P,
+            "decision_matrix": A,
+            "summary_label": labels,
+            "accepted_classes": accepted_classes,
+        }
+
+    # One-class prediction branch
     if task_type == "one_class":
         # Apply one-class scaler if present
         oc_scaler = model_dict.get("scaler")

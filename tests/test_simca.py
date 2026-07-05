@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from spectral_predict.contamination import PCASIMCA
+from spectral_predict.model_io import load_model, predict_with_model, save_model
 from spectral_predict.simca import (
     MultiClassClassModel,
     multiclass_simca_metrics,
@@ -367,3 +368,51 @@ class TestMetricsA7:
         auc = novelty_tradeoff_auc(y, P, classes)
         assert 0.0 <= auc <= 1.0
         assert auc >= 0.8
+
+
+class TestPersistenceA8:
+    """A8: .dasp round-trip for the whole MultiClassClassModel orchestrator +
+    a decision-matrix prediction schema + a forward-compat task_type gate (§6).
+    """
+
+    def _fit(self):
+        X, y = _blobs([60, 60, 60])
+        m = MultiClassClassModel(
+            engine="pca-simca", n_components=5, scaling="per_class"
+        ).fit(X, y)
+        return m, X, y
+
+    def _meta(self, m):
+        return {
+            "model_name": "MultiClassSIMCA",
+            "task_type": "multiclass_simca",
+            "wavelengths": list(range(20)),
+            "n_vars": 20,
+            "class_names": [int(c) for c in m.classes_],
+            "alpha": m.alpha,
+            "scaling": m.scaling,
+            "engine_family": m.engine,
+        }
+
+    def test_save_load_roundtrip_reproduces_decision_matrix(self, tmp_path):
+        m, X, y = self._fit()
+        fp = tmp_path / "mc.dasp"
+        save_model(m, None, self._meta(m), fp)
+        out = predict_with_model(load_model(fp), X, validate_wavelengths=False)
+        assert set(out) >= {
+            "p_values", "decision_matrix", "summary_label", "accepted_classes"
+        }
+        P_ref, A_ref = m.decision_matrix(X)
+        np.testing.assert_allclose(out["p_values"], P_ref, equal_nan=True)
+        np.testing.assert_array_equal(out["decision_matrix"], A_ref)
+        np.testing.assert_array_equal(out["summary_label"], m.predict(X))
+        assert len(out["accepted_classes"]) == len(X)
+
+    def test_unknown_task_type_raises(self, tmp_path):
+        m, X, y = self._fit()
+        meta = self._meta(m)
+        meta["task_type"] = "some_future_task"
+        fp = tmp_path / "future.dasp"
+        save_model(m, None, meta, fp)
+        with pytest.raises(NotImplementedError):
+            predict_with_model(load_model(fp), X, validate_wavelengths=False)
