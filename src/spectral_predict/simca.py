@@ -671,3 +671,224 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             return np.full(scores.shape, np.nan, dtype=np.float64)
         counts = np.searchsorted(null, scores, side="right")
         return (1.0 + counts) / (m + 1.0)
+
+
+def multiclass_simca_metrics(y_true, A, classes) -> dict:
+    """Dedicated multilabel / class-modeling metrics (spec section 7, task A7).
+
+    Evaluates an acceptance matrix against ground-truth labels using the SIMCA
+    class-modeling metric family (the belongs-to-none / one / several decision
+    rule of Oliveri & Downey 2012). This is NOT the inverted
+    ``one_class_metrics`` and NOT the single-label ``compute_imbalance_metrics``.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True class labels. Labels NOT in ``classes`` are treated as truly novel.
+    A : ndarray of shape (n_samples, K), dtype bool
+        Acceptance matrix; columns ordered by ``classes``. ``A[i, k]`` is True
+        iff sample ``i`` is accepted by class ``classes[k]``.
+    classes : list-like of length K
+        Class labels defining the column order of ``A``.
+
+    Returns
+    -------
+    dict
+        Keys: ``per_class_sensitivity``, ``per_class_specificity``,
+        ``novelty_detection_rate``, ``no_class_rate``, ``ambiguity_rate``,
+        ``exact_set_rate``, ``efficiency``, ``pairwise_confusion``. Empty
+        denominators yield ``float("nan")`` (never divides by zero).
+    """
+    y_true = np.asarray(y_true)
+    A = np.asarray(A, dtype=bool)
+    classes = list(classes)
+    K = len(classes)
+    n = A.shape[0]
+    class_to_col = {c: k for k, c in enumerate(classes)}
+
+    novel_mask = ~np.isin(y_true, classes)
+    n_accepts = A.sum(axis=1)
+
+    # --- per-class sensitivity / specificity -------------------------------
+    per_class_sensitivity: dict = {}
+    per_class_specificity: dict = {}
+    for c in classes:
+        k = class_to_col[c]
+        is_k = y_true == c
+        not_k = ~is_k
+        denom_sens = int(np.sum(is_k))
+        denom_spec = int(np.sum(not_k))
+        if denom_sens == 0:
+            per_class_sensitivity[c] = float("nan")
+        else:
+            per_class_sensitivity[c] = float(np.sum(is_k & A[:, k]) / denom_sens)
+        if denom_spec == 0:
+            per_class_specificity[c] = float("nan")
+        else:
+            per_class_specificity[c] = float(np.sum(not_k & ~A[:, k]) / denom_spec)
+
+    # --- novelty detection rate (novel samples flagged as 0-accept) ---------
+    n_novel = int(np.sum(novel_mask))
+    if n_novel == 0:
+        novelty_detection_rate = float("nan")
+    else:
+        novelty_detection_rate = float(
+            np.sum(novel_mask & (n_accepts == 0)) / n_novel
+        )
+
+    # --- no-class / ambiguity / exact-set rates -----------------------------
+    no_class_rate = float(np.sum(n_accepts == 0) / n) if n > 0 else float("nan")
+    ambiguity_rate = float(np.sum(n_accepts >= 2) / n) if n > 0 else float("nan")
+
+    if n == 0:
+        exact_set_rate = float("nan")
+    else:
+        exact = np.zeros(n, dtype=bool)
+        for i in range(n):
+            accepted_cols = frozenset(np.where(A[i])[0].tolist())
+            if novel_mask[i]:
+                true_cols: frozenset = frozenset()
+            else:
+                true_cols = frozenset({class_to_col[y_true[i]]})
+            exact[i] = accepted_cols == true_cols
+        exact_set_rate = float(np.mean(exact))
+
+    # --- efficiency: geomean of mean sensitivity / mean specificity --------
+    sens_values = list(per_class_sensitivity.values())
+    spec_values = list(per_class_specificity.values())
+    if K == 0:
+        efficiency = float("nan")
+    else:
+        mean_sens = float(np.mean(sens_values))
+        mean_spec = float(np.mean(spec_values))
+        if np.isfinite(mean_sens) and np.isfinite(mean_spec):
+            efficiency = float(np.sqrt(mean_sens * mean_spec))
+        else:
+            efficiency = float("nan")
+
+    # --- pairwise confusion: fraction of class-i accepted by class-j --------
+    pairwise_confusion: dict = {}
+    for i_cls in classes:
+        for j_cls in classes:
+            if i_cls == j_cls:
+                continue
+            col_j = class_to_col[j_cls]
+            is_i = y_true == i_cls
+            denom = int(np.sum(is_i))
+            if denom == 0:
+                pairwise_confusion[(i_cls, j_cls)] = float("nan")
+            else:
+                pairwise_confusion[(i_cls, j_cls)] = float(
+                    np.sum(is_i & A[:, col_j]) / denom
+                )
+
+    return {
+        "per_class_sensitivity": per_class_sensitivity,
+        "per_class_specificity": per_class_specificity,
+        "novelty_detection_rate": novelty_detection_rate,
+        "no_class_rate": no_class_rate,
+        "ambiguity_rate": ambiguity_rate,
+        "exact_set_rate": exact_set_rate,
+        "efficiency": efficiency,
+        "pairwise_confusion": pairwise_confusion,
+    }
+
+
+def wilson_ci(k, n, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval for a binomial proportion (task A7).
+
+    Parameters
+    ----------
+    k : int or float
+        Number of successes.
+    n : int or float
+        Number of trials.
+    z : float, default=1.96
+        Z-score for the confidence level (1.96 = 95% two-sided).
+
+    Returns
+    -------
+    tuple[float, float]
+        ``(lo, hi)`` bounds clamped to ``[0, 1]``. Returns
+        ``(float("nan"), float("nan"))`` when ``n == 0``.
+    """
+    if n == 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = (p + z2 / (2.0 * n)) / denom
+    half = (z / denom) * np.sqrt(p * (1.0 - p) / n + z2 / (4.0 * n * n))
+    lo = max(0.0, center - half)
+    hi = min(1.0, center + half)
+    return (float(lo), float(hi))
+
+
+def novelty_tradeoff_auc(y_true, P, classes) -> float:
+    """AUC of the novelty-vs-false-rejection tradeoff curve (task A7).
+
+    Sweeps the acceptance threshold ``alpha`` and integrates the tradeoff
+    between detecting truly-novel samples and falsely rejecting known ones.
+
+    For each threshold ``alpha``, acceptance is ``A(alpha) = P >= alpha``:
+
+    - ``false_rejection_rate(alpha)`` = fraction of KNOWN samples whose
+      own-class p-value falls below ``alpha`` (rejected by their own class).
+    - ``novelty_rate(alpha)`` = fraction of NOVEL samples accepted by NO class
+      (``P[j, :] < alpha`` for all columns).
+
+    The ``(false_rejection_rate, novelty_rate)`` points are sorted by
+    false-rejection rate and trapezoid-integrated; the AUC is clamped to
+    ``[0, 1]``.
+
+    Parameters
+    ----------
+    y_true : array-like of shape (n_samples,)
+        True class labels. Labels NOT in ``classes`` are truly novel.
+    P : ndarray of shape (n_samples, K)
+        Per-class p-values (columns ordered by ``classes``); acceptance at
+        threshold ``alpha`` is ``P >= alpha``.
+    classes : list-like of length K
+        Class labels defining the column order of ``P``.
+
+    Returns
+    -------
+    float
+        AUC of ``novelty_rate`` over ``false_rejection_rate`` across the swept
+        threshold set (``np.unique`` of ``P`` plus 0 and 1), clamped to
+        ``[0, 1]``. Returns ``float("nan")`` if there are no known or no novel
+        samples.
+    """
+    y_true = np.asarray(y_true)
+    P = np.asarray(P, dtype=np.float64)
+    classes = list(classes)
+    class_to_col = {c: k for k, c in enumerate(classes)}
+
+    known_mask = np.isin(y_true, classes)
+    novel_mask = ~known_mask
+    if not np.any(known_mask) or not np.any(novel_mask):
+        return float("nan")
+
+    known_idx = np.where(known_mask)[0]
+    own_cols = np.array([class_to_col[y_true[i]] for i in known_idx], dtype=int)
+    known_own_p = P[known_idx, own_cols]
+
+    novel_idx = np.where(novel_mask)[0]
+    novel_P = P[novel_idx]
+
+    thresholds = np.unique(np.concatenate([P.ravel(), [0.0, 1.0]]))
+
+    false_rej_rates = np.empty(thresholds.shape[0], dtype=np.float64)
+    novelty_rates = np.empty(thresholds.shape[0], dtype=np.float64)
+    for t, alpha in enumerate(thresholds):
+        false_rej_rates[t] = float(np.mean(known_own_p < alpha))
+        novelty_rates[t] = float(np.mean(np.all(novel_P < alpha, axis=1)))
+
+    order = np.argsort(false_rej_rates, kind="stable")
+    fr = false_rej_rates[order]
+    nr = novelty_rates[order]
+
+    # numpy 2.0+ renamed trapz -> trapezoid; fall back for older versions.
+    trapz = getattr(np, "trapezoid", None) or np.trapz
+    auc = float(trapz(nr, fr))
+    return float(min(1.0, max(0.0, auc)))

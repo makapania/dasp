@@ -14,7 +14,12 @@ import numpy as np
 import pytest
 
 from spectral_predict.contamination import PCASIMCA
-from spectral_predict.simca import MultiClassClassModel
+from spectral_predict.simca import (
+    MultiClassClassModel,
+    multiclass_simca_metrics,
+    novelty_tradeoff_auc,
+    wilson_ci,
+)
 
 
 def _blobs(sizes, n_features=20, seed=0, sep=10.0):
@@ -309,3 +314,56 @@ class TestNoveltyModeA6:
         lda = LinearDiscriminantAnalysis().fit(X, y)
         forced = np.mean(np.isin(lda.predict(X_ext), np.unique(y)))
         assert forced >= 0.9
+
+
+class TestMetricsA7:
+    """A7: dedicated multilabel/class-model metrics (spec section 7). NOT the
+    inverted one_class_metrics, NOT single-label compute_imbalance_metrics.
+    """
+
+    # A fully hand-worked 6-sample, 2-class (classes [0,1]) decision matrix.
+    # Rows: (true label, accept flags [class0, class1]). Label 9 = truly novel
+    # (not in classes).
+    _CLASSES = [0, 1]
+    _Y = np.array([0, 0, 1, 1, 9, 9])
+    _A = np.array(
+        [
+            [True, False],   # s0 true0 -> {0}         correct
+            [False, False],  # s1 true0 -> {}          false-novel
+            [False, True],   # s2 true1 -> {1}         correct
+            [True, True],    # s3 true1 -> {0,1}       ambiguous
+            [False, False],  # s4 novel -> {}          correct novelty
+            [True, False],   # s5 novel -> {0}         missed novelty
+        ]
+    )
+
+    def test_metrics_hand_computed(self):
+        m = multiclass_simca_metrics(self._Y, self._A, self._CLASSES)
+        assert m["per_class_sensitivity"][0] == pytest.approx(0.5)   # s0,s1 -> 1/2
+        assert m["per_class_sensitivity"][1] == pytest.approx(1.0)   # s2,s3 -> 2/2
+        assert m["per_class_specificity"][0] == pytest.approx(0.5)   # 2/4 non-0 rejected
+        assert m["per_class_specificity"][1] == pytest.approx(1.0)   # 4/4 non-1 rejected
+        assert m["novelty_detection_rate"] == pytest.approx(0.5)     # s4,s5 -> 1/2
+        assert m["no_class_rate"] == pytest.approx(2 / 6)            # s1,s4
+        assert m["ambiguity_rate"] == pytest.approx(1 / 6)           # s3
+        assert m["exact_set_rate"] == pytest.approx(0.5)             # s0,s2,s4
+        assert m["efficiency"] == pytest.approx(0.75)                # geomean(0.75,0.75)
+
+    def test_wilson_ci_brackets_estimate(self):
+        lo, hi = wilson_ci(5, 100)
+        assert 0.0 <= lo < 0.05 < hi <= 1.0
+        lo0, hi0 = wilson_ci(0, 10)
+        assert lo0 >= 0.0 and hi0 > 0.0     # one-sided-ish; lower bound never negative
+
+    def test_novelty_tradeoff_auc_bounds_and_separation(self):
+        # Known class-0 samples score high p for class 0, ~0 for others; truly
+        # novel samples score ~0 everywhere -> the alpha-sweep AUC is high.
+        classes = [0, 1]
+        y = np.array([0] * 50 + [9] * 50)
+        P = np.zeros((100, 2))
+        P[:50, 0] = 0.9          # known-0 accepted by class 0
+        P[:50, 1] = 0.01
+        P[50:, :] = 0.01         # novel: low everywhere
+        auc = novelty_tradeoff_auc(y, P, classes)
+        assert 0.0 <= auc <= 1.0
+        assert auc >= 0.8
