@@ -28486,6 +28486,9 @@ class SpectralPredictApp:
                     if 'Select' not in results_df.columns:
                         results_df.insert(0, 'Select', False)
                     self._mc_decision_view = results_df.attrs.get('top_decision_view')
+                    # Stash the training data so the decision-view window can embed
+                    # it in an exported reproduction script (Phase D3).
+                    self._mc_export_data = (X_filtered, y_filtered)
                     self.root.after(0, lambda df=results_df: self._populate_results_table(df))
 
                     try:
@@ -29930,8 +29933,48 @@ For detailed documentation, see the User Guide.
                     dm_df.to_csv(path, index=False)
                     self._log_progress(f"> Decision matrix saved: {path}")
 
+            def _export_repro(kind):
+                from tkinter import filedialog
+                from spectral_predict.code_generator import (
+                    generate_multiclass_reproduction_notebook,
+                    generate_multiclass_reproduction_script,
+                )
+                config = view.get('config')
+                if not config:
+                    self._log_progress("  [Warning] No config on decision view; cannot export.")
+                    return
+                data = getattr(self, '_mc_export_data', None)
+                data_X, data_y = (data if data else (None, None))
+                wl = list(data_X.columns) if data_X is not None and hasattr(data_X, 'columns') else None
+                if kind == 'script':
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.py', filetypes=[('Python Script', '*.py')],
+                        title='Export reproduction script',
+                    )
+                    if not path:
+                        return
+                    code = generate_multiclass_reproduction_script(
+                        config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                    Path(path).write_text(code, encoding='utf-8')
+                else:
+                    import json as _json
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.ipynb', filetypes=[('Jupyter Notebook', '*.ipynb')],
+                        title='Export reproduction notebook',
+                    )
+                    if not path:
+                        return
+                    nb = generate_multiclass_reproduction_notebook(
+                        config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                    Path(path).write_text(_json.dumps(nb, indent=1), encoding='utf-8')
+                self._log_progress(f"> Reproduction {kind} saved: {path}")
+
             ttk.Button(btn_frame, text="Save Decision Matrix CSV",
                        command=_save_decision_csv).pack(side='right')
+            ttk.Button(btn_frame, text="Export Notebook",
+                       command=lambda: _export_repro('notebook')).pack(side='right', padx=(0, 6))
+            ttk.Button(btn_frame, text="Export Repro Script",
+                       command=lambda: _export_repro('script')).pack(side='right', padx=(0, 6))
         except Exception as exc:
             self._log_progress(f"  [Warning] Could not render decision view: {exc}")
             import traceback

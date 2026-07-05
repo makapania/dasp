@@ -7243,6 +7243,19 @@ def build_multiclass_decision_view(
             list(X.index) if hasattr(X, "index") else list(range(X_np.shape[0]))
         )
 
+    # Full config echoed back so the view is self-describing (Phase D3 export can
+    # regenerate the exact decision matrix from it).
+    config = {
+        "engine": engine,
+        "alpha": alpha,
+        "n_components": n_components,
+        "scaling": scaling,
+        "min_class_samples": min_class_samples,
+        "variable_selection": variable_selection,
+        "n_select": n_select,
+        "preprocess_cfg": dict(preprocess_cfg),
+    }
+
     empty = {
         "classes": [],
         "p_values": np.empty((0, 0)),
@@ -7254,6 +7267,7 @@ def build_multiclass_decision_view(
         "unmodelable_classes": [],
         "wold": None,
         "preprocess_name": preprocess_cfg.get("name", ""),
+        "config": config,
         "reason": "",
     }
 
@@ -7307,6 +7321,7 @@ def build_multiclass_decision_view(
         "unmodelable_classes": unmodelable,
         "wold": wold,
         "preprocess_name": preprocess_cfg.get("name", ""),
+        "config": config,
         "reason": "",
     }
 
