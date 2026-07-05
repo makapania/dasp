@@ -7005,7 +7005,7 @@ _MULTICLASS_VARSEL_PATHS: dict[str, str | None] = {
 }
 
 
-def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
+def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None):
     """Leave-one-class-out novelty-vs-false-rejection AUC (spec §7 ranking metric).
 
     A training set has NO truly-novel samples, so
@@ -7070,12 +7070,18 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
     y = np.asarray(y)
     classes = np.unique(y)
 
-    # (1) In-sample OOF own-class p-values -> false-rejection axis.
-    try:
-        cv = build_model_fn().cross_validate(X, y, n_splits=cv_splits)
-    except Exception as exc:  # noqa: BLE001 — NaN-safe: any CV failure -> NaN AUC
-        logger.warning("multiclass LOCO AUC: OOF cross_validate failed: %s", exc)
-        return float("nan")
+    # (1) In-sample OOF own-class p-values -> false-rejection axis. Reuse the
+    # caller's already-computed OOF CV when provided (the search loop computes it
+    # for the leaderboard metrics), halving the per-config CV cost at real-data
+    # scale (757x2151, K=10) instead of running cross_validate twice.
+    if oof_cv is not None:
+        cv = oof_cv
+    else:
+        try:
+            cv = build_model_fn().cross_validate(X, y, n_splits=cv_splits)
+        except Exception as exc:  # noqa: BLE001 — NaN-safe: any CV failure -> NaN AUC
+            logger.warning("multiclass LOCO AUC: OOF cross_validate failed: %s", exc)
+            return float("nan")
     P_oof, _ = cv["decision_matrix"]
     col_of = {c: k for k, c in enumerate(list(cv["classes"]))}
     own_p = np.array(
@@ -7679,7 +7685,7 @@ def run_multiclass_simca_search(
                     # remains an unimplemented alternative the user is undecided
                     # on.
                     row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
-                        _build, X_pp, y_np, cv_splits=cv_splits
+                        _build, X_pp, y_np, cv_splits=cv_splits, oof_cv=cv
                     )
                 except Exception as exc:  # noqa: BLE001 — NaN-safe per-config guard
                     logger.warning(

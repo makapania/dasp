@@ -889,6 +889,28 @@ def predict_with_uncertainty(
                 f"but prediction data is {prediction_data_type.upper()}."
             )
 
+    # Multi-class class-modeling (SIMCA): predict_with_model already returns the
+    # per-sample decision schema (p-values + accept matrix + accepted class sets
+    # + summary labels). Surface it through the uncertainty envelope so the GUI
+    # predict path gets a well-formed result instead of an ndarray-shaped one
+    # (T-31 Phase D fold-in). Applicability domain is not defined per-model here
+    # (each class has its own model), so it is left empty.
+    if task_type == 'multiclass_simca':
+        pred = predict_with_model(model_dict, X_new, validate_wavelengths)
+        return {
+            'predictions': pred['summary_label'],
+            'uncertainty': {
+                'p_values': pred['p_values'],
+                'decision_matrix': pred['decision_matrix'],
+                'accepted_classes': pred['accepted_classes'],
+                'class_names': list(getattr(model, 'classes_', [])),
+            },
+            'applicability_domain': {},
+            'has_uncertainty': True,
+            'has_applicability_domain': False,
+            'data_type_warning': data_type_warning,
+        }
+
     # One-class models: extract decision scores for uncertainty/applicability domain
     if task_type == 'one_class':
         internals: dict = {}

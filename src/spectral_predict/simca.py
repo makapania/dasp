@@ -941,6 +941,8 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         n_splits = min(5, n)
         kf = KFold(n_splits=n_splits, shuffle=False)
         scores_list = []
+        n_failed = 0
+        last_err = None
         for train_idx, test_idx in kf.split(X_raw):
             X_tr, X_te = X_raw[train_idx], X_raw[test_idx]
             try:
@@ -958,9 +960,38 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 )
                 fold_engine.fit(X_tr_s)
                 fold_scores = getattr(fold_engine, score_method)(X_te_s)
-            except Exception:
-                continue  # spec: skip failed folds
+            except Exception as exc:  # spec: skip failed folds, but do not hide it
+                n_failed += 1
+                last_err = exc
+                continue
             scores_list.extend(np.asarray(fold_scores).ravel().tolist())
+
+        # Surface silent calibration collapse. EllipticEnvelope (and other
+        # covariance-based engines) fail when n_features > n_samples — real
+        # spectra are ~2151-wide, so an EE class with a few dozen samples fails
+        # EVERY fold, returning an empty null and silently breaking p-value
+        # calibration. Warn with the cause and a remedy (variable selection or a
+        # narrower analysis window) instead of returning an empty array quietly.
+        if n_failed:
+            n_feat = X_raw.shape[1]
+            if not scores_list:
+                warnings.warn(
+                    f"{builder_name}: ALL {n_splits} null-calibration folds failed "
+                    f"(n_features={n_feat} > n_samples per fold); the empirical "
+                    f"p-value null is empty and this engine cannot calibrate on "
+                    f"this feature space. Reduce features (variable selection / "
+                    f"analysis window) or choose a different engine. "
+                    f"Last error: {type(last_err).__name__}: {last_err}",
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    f"{builder_name}: {n_failed}/{n_splits} null-calibration folds "
+                    f"failed (n_features={n_feat}); p-value calibration uses only "
+                    f"the surviving folds. Last error: "
+                    f"{type(last_err).__name__}: {last_err}",
+                    stacklevel=2,
+                )
         return np.asarray(sorted(scores_list), dtype=np.float64)
 
     @staticmethod
