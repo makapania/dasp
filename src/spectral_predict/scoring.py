@@ -63,6 +63,14 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     elif task_type == "one_class":
         bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
         performance_score = -bal_acc_cv - 0.0001 * df["Sensitivitycv"].fillna(0)
+    elif task_type == "multiclass_simca":
+        # Rank by the alpha-sweep NoveltyAUC (higher = better -> lower score),
+        # tie-broken toward the larger smallest-class n (spec §7). MinClassN is
+        # scaled tiny so it only orders exact NoveltyAUC ties.
+        performance_score = (
+            -df["NoveltyAUC"].astype(np.float64).fillna(0.0)
+            - 1e-9 * df.get("MinClassN", pd.Series(0, index=df.index)).astype(np.float64).fillna(0.0)
+        )
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -73,6 +81,9 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     elif task_type == "one_class":
         bal_acc_cv_range = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
         perf_range = bal_acc_cv_range.max() - bal_acc_cv_range.min()
+    elif task_type == "multiclass_simca":
+        auc = df["NoveltyAUC"].astype(np.float64)
+        perf_range = auc.max() - auc.min()
     else:
         perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
@@ -125,6 +136,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
             bal_acc_cv = bal_acc_cv.fillna(0.0)
             gap_ratio = np.where(bal_acc_cv > 1e-10, bal_acc / bal_acc_cv, 1.0)
             gap_fraction = np.where(both_nan, 1.0, np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0))
+
+        elif task_type == "multiclass_simca":
+            # No calibration-vs-CV gap concept for class modeling (metrics come
+            # from a single OOF decision matrix); the gap penalty is a no-op.
+            gap_fraction = 0.0
 
         else:  # classification
             acc = df["Accuracy"].astype(np.float64)
@@ -590,6 +606,17 @@ def create_results_dataframe(task_type):
             # Cross-validation metrics
             "Sensitivitycv", "Specificitycv", "Precisioncv", "F1cv",
             "Accuracycv", "BalancedAcccv", "AUCcv",
+        ]
+    elif task_type == "multiclass_simca":
+        # T-31 multi-class class-modeling metrics (NOT single-label — a sample
+        # may be accepted by 0 / 1 / >=2 classes). Ranked by NoveltyAUC (the
+        # alpha-sweep AUC of novelty-vs-false-rejection, spec §7). engine_family
+        # + varsel_path are per-row tags (spec decision #3 / #5).
+        metric_cols = [
+            "NoveltyAUC", "Efficiency", "NoveltyRate", "NoClassRate",
+            "AmbiguityRate", "ExactSetRate", "MeanSensitivity", "MeanSpecificity",
+            "Alpha", "MinClassN", "n_classes",
+            "engine_family", "varsel_path",
         ]
     else:
         # Calibration metrics first, then CV metrics, then advanced metrics
