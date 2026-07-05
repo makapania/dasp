@@ -425,6 +425,98 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             "train_indices": train_indices,
         }
 
+    def evaluate_novelty(
+        self, X, y, mode: str = "loco", external_X=None
+    ) -> dict | float:
+        """Leakage-safe novelty evaluation (task A6, spec section 5.4).
+
+        Fits FRESH :class:`MultiClassClassModel` instances (constructed with
+        the same ``engine`` / ``alpha`` / ``n_components`` / ``scaling`` /
+        ``min_class_samples`` / ``engine_params`` as this instance) so no
+        already-fitted state is reused -- the same leakage discipline as
+        :meth:`cross_validate`.
+
+        Two modes:
+
+        - ``mode="loco"`` (leave-one-class-out): for each class ``c`` in
+          ``np.unique(y)``, fit a fresh model on the ``K - 1`` REMAINING
+          classes (``X[y != c]``, ``y[y != c]``) -- the held-out class NEVER
+          enters the fitting data -- then predict the held-out class's rows
+          ``X[y == c]``. Its novelty rate is the fraction of those rows
+          accepted by NONE of the ``K - 1`` remaining class models,
+          ``mean(predict(X[y == c]) == "novel")``.
+        - ``mode="external"`` (requires ``external_X``): fit a fresh model on
+          ALL of ``(X, y)`` and predict ``external_X``.
+
+        Parameters
+        ----------
+        X : array-like of shape (n_samples, n_features)
+            Known-class spectra.
+        y : array-like of shape (n_samples,)
+            Known class labels.
+        mode : {"loco", "external"}, default="loco"
+        external_X : array-like of shape (n_external, n_features), optional
+            Required for ``mode="external"``; ignored for ``mode="loco"``.
+
+        Returns
+        -------
+        dict or float
+            - ``mode="loco"``: ``{class_label: novelty_rate}`` whose keys are
+              exactly ``set(np.unique(y))``; each value is a float in
+              ``[0, 1]``.
+            - ``mode="external"``: a float in ``[0, 1]`` -- the fraction of
+              ``external_X`` flagged ``"novel"``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is neither ``"loco"`` nor ``"external"``, or if
+            ``mode="external"`` and ``external_X`` is ``None``.
+        """
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y)
+
+        if mode == "loco":
+            classes = np.unique(y)
+            rates: dict = {}
+            for c in classes:
+                train_mask = y != c
+                held_out = MultiClassClassModel(
+                    engine=self.engine,
+                    alpha=self.alpha,
+                    n_components=self.n_components,
+                    scaling=self.scaling,
+                    min_class_samples=self.min_class_samples,
+                    engine_params=self.engine_params,
+                )
+                held_out.fit(X[train_mask], y[train_mask])
+                preds = held_out.predict(X[y == c])
+                rates[c] = float(np.mean(preds == "novel"))
+            return rates
+
+        if mode == "external":
+            if external_X is None:
+                raise ValueError(
+                    'mode="external" requires external_X '
+                    "(a separate held-out set to score)."
+                )
+            external_X = np.asarray(external_X, dtype=np.float64)
+            model = MultiClassClassModel(
+                engine=self.engine,
+                alpha=self.alpha,
+                n_components=self.n_components,
+                scaling=self.scaling,
+                min_class_samples=self.min_class_samples,
+                engine_params=self.engine_params,
+            )
+            model.fit(X, y)
+            preds = model.predict(external_X)
+            return float(np.mean(preds == "novel"))
+
+        raise ValueError(
+            f"Unknown mode={mode!r}; expected 'loco' or 'external'."
+        )
+
     def _n_components_for(self, label) -> int:
         """Resolve ``n_components`` for a single class label.
 

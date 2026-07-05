@@ -262,3 +262,50 @@ class TestNestedCVA5:
         # and the union of train+test for each fold is the whole dataset
         for f, test_idx in enumerate(res["test_indices"]):
             assert len(res["train_indices"][f]) + len(test_idx) == len(X)
+
+
+class TestNoveltyModeA6:
+    """A6: novelty evaluation. LOCO holds out each class (refit on the rest) and
+    measures how often the held-out class is flagged "novel" (none-of-the-above);
+    external mode fits on the known classes and scores a separate held-out set.
+    """
+
+    def test_loco_holds_out_vs_insample(self):
+        X, y = _blobs([80, 80, 80], sep=12.0)
+        params = dict(engine="pca-simca", n_components=5, scaling="per_class")
+        loco = MultiClassClassModel(**params).evaluate_novelty(X, y, mode="loco")
+        assert set(loco) == set(np.unique(y).tolist())
+        assert min(loco.values()) >= 0.8  # a held-out class is flagged novel
+        # in-sample (all classes modeled) accepts its own members
+        insample = np.mean(
+            MultiClassClassModel(**params).fit(X, y).predict(X) == "novel"
+        )
+        assert insample <= 0.15
+
+    def test_external_novelty_mode(self):
+        X, y = _blobs([80, 80, 80], sep=12.0)
+        rng = np.random.RandomState(4)
+        X_ext = rng.normal(size=(80, 20))
+        X_ext[:, 9] += 120.0  # far, unseen region of feature space
+        nov = MultiClassClassModel(
+            engine="pca-simca", n_components=5, scaling="per_class"
+        ).evaluate_novelty(X, y, mode="external", external_X=X_ext)
+        assert nov >= 0.8
+
+    def test_discriminant_baseline_forces_a_class(self):
+        # Acceptance contrast (§9.1): SIMCA flags the novel class as "none of the
+        # above"; a discriminant baseline (LDA, like PLS-DA) forces (almost) all
+        # of it into a trained class — it can never abstain.
+        from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+        X, y = _blobs([80, 80, 80], sep=12.0)
+        rng = np.random.RandomState(4)
+        X_ext = rng.normal(size=(80, 20))
+        X_ext[:, 9] += 120.0
+        simca = MultiClassClassModel(
+            engine="pca-simca", n_components=5, scaling="per_class"
+        ).fit(X, y)
+        assert np.mean(simca.predict(X_ext) == "novel") >= 0.8
+        lda = LinearDiscriminantAnalysis().fit(X, y)
+        forced = np.mean(np.isin(lda.predict(X_ext), np.unique(y)))
+        assert forced >= 0.9
