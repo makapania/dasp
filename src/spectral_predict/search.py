@@ -7029,7 +7029,14 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None)
     y : array-like of shape (n_samples,)
         Class labels.
     cv_splits : int, default=5
-        Outer folds for the OOF own-class p-values.
+        Outer folds for the OOF own-class p-values. IGNORED when ``oof_cv`` is
+        supplied (the caller's precomputed CV is reused verbatim).
+    oof_cv : dict, optional
+        A precomputed ``MultiClassClassModel.cross_validate`` result (with keys
+        ``decision_matrix`` and ``classes``). When given, step (1)'s OOF CV is
+        reused instead of recomputed — the search loop already computes it for
+        the leaderboard metrics, so passing it halves the per-config OOF CV cost.
+        Must correspond to the SAME config ``build_model_fn`` produces.
 
     Returns
     -------
@@ -7272,6 +7279,7 @@ def build_multiclass_decision_view(
         "resolved_n_components": {},
         "unmodelable_classes": [],
         "wold": None,
+        "wold_error": "",
         "preprocess_name": preprocess_cfg.get("name", ""),
         "config": config,
         "reason": "",
@@ -7307,14 +7315,22 @@ def build_multiclass_decision_view(
 
     # Wold MPOW/DPOW is a variable-space diagnostic (its own per-class PCA), so
     # it is meaningful regardless of the membership engine. Compute defensively.
+    # wold_diagnostic_plot_data's per-class PCA is INT-ONLY: passing the model's
+    # n_components verbatim would break it — a variance fraction like the 0.99
+    # default int()s to 0 -> max(1,0)=1 PCA component (Wold computed on a 1-D
+    # subspace, not the ~99%-variance one the models use), and "per_class_cv"
+    # raises. Resolve to a representative int matching the fitted models.
+    wold_nc = _resolve_wold_n_components(n_components, model, X_pp)
+    wold_error = ""
     try:
         wold = wold_diagnostic_plot_data(
-            X_pp, y_np, n_components=n_components, scaling=scaling,
+            X_pp, y_np, n_components=wold_nc, scaling=scaling,
             wavelengths=wl_current,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Wold diagnostic plot data failed: %s", exc)
         wold = None
+        wold_error = f"{type(exc).__name__}: {exc}"
 
     return {
         "classes": list(model.classes_),
@@ -7326,10 +7342,38 @@ def build_multiclass_decision_view(
         "resolved_n_components": dict(getattr(model, "n_components_", {}) or {}),
         "unmodelable_classes": unmodelable,
         "wold": wold,
+        "wold_error": wold_error,
         "preprocess_name": preprocess_cfg.get("name", ""),
         "config": config,
         "reason": "",
     }
+
+
+def _resolve_wold_n_components(n_components, model, X_pp):
+    """Resolve the model's ``n_components`` policy to a concrete int for the
+    INT-ONLY Wold diagnostic PCA, matching the fitted models as closely as
+    possible.
+
+    - Prefer the model's RESOLVED per-class component counts (SIMCA populates
+      ``n_components_``); use their max so the diagnostic subspace is at least as
+      rich as any class model.
+    - Else (non-SIMCA engines, empty ``n_components_``): resolve a variance
+      fraction against pooled data via PCA; the ``"per_class_cv"`` sentinel and
+      any non-fraction fall back to a bounded default.
+    """
+    resolved = getattr(model, "n_components_", {}) or {}
+    max_pc = min(X_pp.shape[0] - 1, X_pp.shape[1])
+    if resolved:
+        return int(max(1, min(max(resolved.values()), max_pc)))
+    if isinstance(n_components, str):  # "per_class_cv"
+        return int(max(1, min(10, max_pc)))
+    if isinstance(n_components, float) and 0.0 < n_components < 1.0:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(random_state=0).fit(X_pp)
+        cum = np.cumsum(pca.explained_variance_ratio_)
+        return int(max(1, min(int(np.searchsorted(cum, n_components)) + 1, max_pc)))
+    return int(max(1, min(int(n_components), max_pc)))
 
 
 def run_multiclass_simca_search(

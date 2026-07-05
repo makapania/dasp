@@ -2180,7 +2180,28 @@ def _multiclass_data_section(data_X=None, data_y=None, wavelengths=None) -> str:
         X_arr = np.asarray(data_X.values if hasattr(data_X, 'values') else data_X,
                            dtype=np.float64)
         y_arr = data_y.values if hasattr(data_y, 'values') else np.asarray(data_y)
-        y_list = [str(v) for v in y_arr]
+
+        def _jsonable(v):
+            # Preserve int/float/bool label dtypes (numpy scalars -> python
+            # scalars); fall back to str only for genuinely non-numeric labels.
+            # This keeps the reproduced decision matrix's class identity and the
+            # in-app one aligned (Codex review).
+            if hasattr(v, 'item'):
+                try:
+                    return v.item()
+                except Exception:
+                    return str(v)
+            if isinstance(v, (int, float, bool, str)):
+                return v
+            return str(v)
+
+        y_list = [_jsonable(v) for v in y_arr]
+        # Preserve the original sample index so exported decision-matrix rows
+        # carry the same Sample IDs as the in-app view (which uses X.index).
+        if hasattr(data_X, 'index'):
+            idx_list = [_jsonable(v) for v in np.asarray(data_X.index)]
+        else:
+            idx_list = list(range(X_arr.shape[0]))
         if wavelengths is not None:
             wl_list = [float(w) if np.isreal(w) else str(w) for w in np.asarray(wavelengths)]
         elif hasattr(data_X, 'columns'):
@@ -2193,9 +2214,10 @@ def _multiclass_data_section(data_X=None, data_y=None, wavelengths=None) -> str:
             f"_X = np.frombuffer(base64.b64decode({x_b64!r}), dtype=np.float64)"
             f".reshape({X_arr.shape!r})\n"
             f"_y = np.array(json.loads({json.dumps(json.dumps(y_list))}))\n"
+            f"_idx = json.loads({json.dumps(json.dumps(idx_list))})\n"
             f"_wl = json.loads({json.dumps(json.dumps(wl_list))})\n"
-            "X = pd.DataFrame(_X, columns=_wl)\n"
-            "y = pd.Series(_y)\n"
+            "X = pd.DataFrame(_X, columns=_wl, index=_idx)\n"
+            "y = pd.Series(_y, index=_idx)\n"
         )
     return (
         "# --- Data ---\n"

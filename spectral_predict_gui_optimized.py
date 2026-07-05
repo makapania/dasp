@@ -28430,16 +28430,38 @@ class SpectralPredictApp:
                 else:
                     try:
                         _f = float(mc_ncomp_raw)
-                        mc_ncomp = _f if 0.0 < _f < 1.0 else int(round(_f))
                     except ValueError:
                         self._log_progress(
                             f"  [Warning] Could not parse n_components '{mc_ncomp_raw}'; using 0.99"
+                        )
+                        _f = 0.99
+                    if 0.0 < _f < 1.0:
+                        mc_ncomp = _f
+                    elif _f >= 1.0:
+                        # >=1 means an integer component count. Guard the 1.0
+                        # boundary explicitly so a user who typed "1.0" meaning
+                        # "100% variance" does not silently get a 1-component
+                        # model.
+                        mc_ncomp = int(round(_f))
+                    else:  # _f <= 0 is nonsensical as a count OR a fraction
+                        self._log_progress(
+                            f"  [Warning] n_components '{mc_ncomp_raw}' is not a "
+                            f"valid fraction (0,1) or positive int; using 0.99"
                         )
                         mc_ncomp = 0.99
 
                 baseline_method_mc, baseline_params_mc = self._get_baseline_params()
 
                 self._log_progress("\nRunning Multi-Class Class Modeling (SIMCA)...")
+                # Be honest: the class-modeling search does not consume an
+                # external validation set (its ranking is LOCO NoveltyAUC on the
+                # training data). Tell the user rather than silently ignoring it.
+                if self.validation_enabled.get() and self.validation_indices:
+                    self._log_progress(
+                        "  [Note] A validation set is loaded but multi-class class "
+                        "modeling does not apply one — ranking uses LOCO NoveltyAUC "
+                        "on the training data. Confirm novelty on a true external class."
+                    )
                 self._log_progress(f"  Engines: {selected_engines}")
                 self._log_progress(f"  Variable-selection paths: {selected_varsel}")
                 self._log_progress(
@@ -28470,11 +28492,13 @@ class SpectralPredictApp:
                         controller=self.search_controller,
                         compute_top_decision_view=True,
                     )
+                    mc_failed = False
                 except Exception as mc_err:
                     self._log_progress(f"  Error in multi-class search: {mc_err}")
                     import traceback
                     self._log_progress(traceback.format_exc())
                     results_df = None
+                    mc_failed = True
 
                 self._mc_decision_view = None
                 if results_df is not None and len(results_df) > 0:
@@ -28518,8 +28542,27 @@ class SpectralPredictApp:
                         self._log_progress(
                             f"  [Warning] Decision view unavailable: {self._mc_decision_view['reason']}"
                         )
+                    else:
+                        # No decision view attached at all (top config had a
+                        # failure reason, or the winning preprocess_cfg lookup
+                        # missed). The leaderboard 'reason' column has the cause.
+                        self._log_progress(
+                            "  [Warning] No decision-matrix view for the top "
+                            "configuration — see the leaderboard 'reason' column."
+                        )
+                elif mc_failed:
+                    self._log_progress("\n[X] Multi-class search FAILED — see the error above.")
                 else:
                     self._log_progress("\nMulti-class search returned no results.")
+
+                if mc_failed:
+                    self._log_progress("\n[X] Analysis failed.")
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    self.root.after(0, lambda: self.progress_info.config(text="Analysis Failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
+                    return
 
                 self._log_progress("\n> Analysis complete!")
                 self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
@@ -29896,13 +29939,27 @@ For detailed documentation, see the User Guide.
 
             # --- Wold MPOW / DPOW diagnostic plots ---
             wold = view.get('wold')
+            if wold is None and view.get('wold_error'):
+                ttk.Label(
+                    win,
+                    text=f"Wold diagnostics unavailable: {view['wold_error']}",
+                    style='Caption.TLabel',
+                ).pack(anchor='w', padx=10, pady=(2, 0))
             if wold is not None:
                 plot_frame = ttk.Frame(win)
                 plot_frame.pack(fill='both', expand=True, padx=10, pady=4)
                 fig = Figure(figsize=(9, 2.6), dpi=100)
-                variables = np.asarray(wold.get('variables'))
                 mpow = np.asarray(wold['modeling_power_agg'])
                 dpow = np.asarray(wold['discriminating_power_agg'])
+                # Wavelengths may be string labels (e.g. CSV headers); matplotlib
+                # would treat them as categorical or raise. Coerce to numeric,
+                # falling back to a plain index.
+                try:
+                    variables = np.asarray(wold.get('variables'), dtype=float)
+                    if variables.shape != mpow.shape:
+                        variables = np.arange(len(mpow))
+                except (TypeError, ValueError):
+                    variables = np.arange(len(mpow))
                 ax1 = fig.add_subplot(1, 2, 1)
                 ax1.plot(variables, mpow, color='#1f77b4', lw=0.9)
                 ax1.set_title('Wold Modeling Power (agg)', fontsize=9)
@@ -29923,51 +29980,63 @@ For detailed documentation, see the User Guide.
             btn_frame.pack(fill='x', padx=10, pady=(4, 10))
 
             def _save_decision_csv():
-                from tkinter import filedialog
-                path = filedialog.asksaveasfilename(
-                    defaultextension='.csv',
-                    filetypes=[('CSV', '*.csv')],
-                    title='Save decision matrix',
-                )
-                if path:
-                    dm_df.to_csv(path, index=False)
-                    self._log_progress(f"> Decision matrix saved: {path}")
+                # Button callbacks run on the Tk main loop; an unhandled
+                # exception (file locked by Excel, permission denied) would be
+                # swallowed by Tk's default handler and the user would see
+                # nothing. Surface it in the log AND a dialog.
+                from tkinter import filedialog, messagebox
+                try:
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.csv',
+                        filetypes=[('CSV', '*.csv')],
+                        title='Save decision matrix',
+                    )
+                    if path:
+                        dm_df.to_csv(path, index=False)
+                        self._log_progress(f"> Decision matrix saved: {path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to save decision matrix: {exc}")
+                    messagebox.showerror("Save failed", f"Could not save the CSV:\n{exc}")
 
             def _export_repro(kind):
-                from tkinter import filedialog
-                from spectral_predict.code_generator import (
-                    generate_multiclass_reproduction_notebook,
-                    generate_multiclass_reproduction_script,
-                )
-                config = view.get('config')
-                if not config:
-                    self._log_progress("  [Warning] No config on decision view; cannot export.")
-                    return
-                data = getattr(self, '_mc_export_data', None)
-                data_X, data_y = (data if data else (None, None))
-                wl = list(data_X.columns) if data_X is not None and hasattr(data_X, 'columns') else None
-                if kind == 'script':
-                    path = filedialog.asksaveasfilename(
-                        defaultextension='.py', filetypes=[('Python Script', '*.py')],
-                        title='Export reproduction script',
+                from tkinter import filedialog, messagebox
+                try:
+                    from spectral_predict.code_generator import (
+                        generate_multiclass_reproduction_notebook,
+                        generate_multiclass_reproduction_script,
                     )
-                    if not path:
+                    config = view.get('config')
+                    if not config:
+                        self._log_progress("  [Warning] No config on decision view; cannot export.")
                         return
-                    code = generate_multiclass_reproduction_script(
-                        config, data_X=data_X, data_y=data_y, wavelengths=wl)
-                    Path(path).write_text(code, encoding='utf-8')
-                else:
-                    import json as _json
-                    path = filedialog.asksaveasfilename(
-                        defaultextension='.ipynb', filetypes=[('Jupyter Notebook', '*.ipynb')],
-                        title='Export reproduction notebook',
-                    )
-                    if not path:
-                        return
-                    nb = generate_multiclass_reproduction_notebook(
-                        config, data_X=data_X, data_y=data_y, wavelengths=wl)
-                    Path(path).write_text(_json.dumps(nb, indent=1), encoding='utf-8')
-                self._log_progress(f"> Reproduction {kind} saved: {path}")
+                    data = getattr(self, '_mc_export_data', None)
+                    data_X, data_y = (data if data else (None, None))
+                    wl = list(data_X.columns) if data_X is not None and hasattr(data_X, 'columns') else None
+                    if kind == 'script':
+                        path = filedialog.asksaveasfilename(
+                            defaultextension='.py', filetypes=[('Python Script', '*.py')],
+                            title='Export reproduction script',
+                        )
+                        if not path:
+                            return
+                        code = generate_multiclass_reproduction_script(
+                            config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                        Path(path).write_text(code, encoding='utf-8')
+                    else:
+                        import json as _json
+                        path = filedialog.asksaveasfilename(
+                            defaultextension='.ipynb', filetypes=[('Jupyter Notebook', '*.ipynb')],
+                            title='Export reproduction notebook',
+                        )
+                        if not path:
+                            return
+                        nb = generate_multiclass_reproduction_notebook(
+                            config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                        Path(path).write_text(_json.dumps(nb, indent=1), encoding='utf-8')
+                    self._log_progress(f"> Reproduction {kind} saved: {path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to export {kind}: {exc}")
+                    messagebox.showerror("Export failed", f"Could not export the {kind}:\n{exc}")
 
             ttk.Button(btn_frame, text="Save Decision Matrix CSV",
                        command=_save_decision_csv).pack(side='right')
@@ -29976,9 +30045,14 @@ For detailed documentation, see the User Guide.
             ttk.Button(btn_frame, text="Export Repro Script",
                        command=lambda: _export_repro('script')).pack(side='right', padx=(0, 6))
         except Exception as exc:
-            self._log_progress(f"  [Warning] Could not render decision view: {exc}")
+            self._log_progress(f"  [X] Could not render decision view: {exc}")
             import traceback
             self._log_progress(traceback.format_exc())
+            # Don't strand a half-built, button-less window.
+            try:
+                win.destroy()
+            except Exception:
+                pass
 
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
@@ -42640,6 +42714,50 @@ External Validation Performance (n={n_val}):
                         else:
                             self.uncertainty_tree.item(item_id, tags=('low_conf',))
 
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')
+
+        elif 'p_values' in first_uncertainty:
+            # === MULTI-CLASS CLASS MODELING: per-class p-values + decision ===
+            # predict_with_uncertainty returns predictions=summary labels and
+            # uncertainty={p_values, decision_matrix, accepted_classes,
+            # class_names}. Without this branch the multiclass dict falls through
+            # to the regression formatter and f"{pred:.4f}" raises on a string.
+            class_names = list(first_uncertainty.get('class_names', []))
+            columns = ['Sample', 'Model', 'Decision', 'Accepted'] + [f'p({c})' for c in class_names]
+            self.uncertainty_tree['columns'] = columns
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=160, anchor='w')
+                elif col in ('Decision', 'Accepted'):
+                    self.uncertainty_tree.column(col, width=130, anchor='center')
+                else:
+                    self.uncertainty_tree.column(col, width=90, anchor='e')
+
+            for model_name, uncertainty in self.predictions_uncertainty.items():
+                if 'p_values' not in uncertainty:
+                    continue
+                P = np.asarray(uncertainty['p_values'])
+                accepted = uncertainty.get('accepted_classes') or []
+                mc_classes = list(uncertainty.get('class_names', class_names))
+                predictions = self.predictions_df[model_name].values
+                for i, sample in enumerate(sample_names):
+                    acc = ', '.join(str(a) for a in accepted[i]) if i < len(accepted) else ''
+                    row_values = [str(sample), model_name, str(predictions[i]), acc]
+                    for j in range(len(mc_classes)):
+                        row_values.append(f"{P[i, j]:.4f}" if not np.isnan(P[i, j]) else "N/A")
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+                    decision = str(predictions[i])
+                    if decision == 'novel':
+                        self.uncertainty_tree.item(item_id, tags=('low_conf',))
+                    elif decision == 'multiple':
+                        self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                    else:
+                        self.uncertainty_tree.item(item_id, tags=('high_conf',))
             self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')
             self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
             self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')

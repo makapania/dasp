@@ -128,3 +128,35 @@ def test_cross_fit_null_partial_failure_warns_but_survives(monkeypatch):
             scaling="none",
         )
     assert null.size > 0
+
+
+def test_empty_null_marks_class_unmodelable(monkeypatch):
+    """A class whose null calibration comes back EMPTY must be marked
+    unmodelable (dropped from models_), not left as a live column that silently
+    rejects every sample (all-NaN p >= alpha is False)."""
+    import spectral_predict.simca as simca_mod
+
+    # C0's null comes back empty (first call); C1/C2 calibrate normally.
+    orig = simca_mod.MultiClassClassModel._cross_fit_null
+    state = {"n": 0}
+
+    def _wrapped(self, X_raw, builder_name, score_method, scaling, reuse_scaler=None):
+        state["n"] += 1
+        if state["n"] == 1:
+            return np.asarray([], dtype=np.float64)
+        return orig(self, X_raw, builder_name, score_method, scaling, reuse_scaler)
+
+    monkeypatch.setattr(simca_mod.MultiClassClassModel, "_cross_fit_null", _wrapped)
+
+    X, y = _synthetic(K=3, n=30, p=20, seed=9)  # n>=20 so all classes modelable
+    m = MultiClassClassModel(engine="ocsvm", alpha=0.05, scaling="none",
+                             min_class_samples=10).fit(X, y)
+    classes = sorted(set(y))
+    # The class whose null was empty is unmodelable and absent from models_.
+    assert classes[0] in m.unmodelable_
+    assert classes[0] not in m.models_
+    # Its decision-matrix column is all-NaN (dropped), not silently all-reject.
+    P, A = m.decision_matrix(X)
+    k0 = list(m.classes_).index(classes[0])
+    assert np.isnan(P[:, k0]).all()
+    assert not A[:, k0].any()

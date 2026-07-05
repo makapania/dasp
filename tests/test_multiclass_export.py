@@ -86,6 +86,37 @@ def test_generated_script_reproduces_decision_matrix(tmp_path):
     )
 
 
+def test_generated_script_reproduces_deriv_config(tmp_path):
+    """Edge-mask (deriv+window) config must reproduce identically — the export
+    embeds raw X and re-runs the same preprocessing, so the mask is re-derived
+    inside the same function both times."""
+    X, y = _synthetic(K=3, n=25, p=40, seed=4)
+    # real float wavelengths so the edge mask has meaningful columns to drop
+    X.columns = [1000.0 + j for j in range(X.shape[1])]
+    cfg = {"method": "deriv", "name": "deriv1_w7", "deriv": 1, "window": 7,
+           "polyorder": None, "baseline_method": None, "baseline_params": None,
+           "smoothing": False, "smoothing_window": 17, "smoothing_polyorder": 2}
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=cfg, alpha=0.05, n_components=0.99,
+        wavelengths=list(X.columns),
+    )
+    inapp = _inapp_decision_matrix(view)
+
+    script = generate_multiclass_reproduction_script(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns))
+    (tmp_path / "repro.py").write_text(script, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(tmp_path / "repro.py")],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, f"script failed:\n{proc.stderr}"
+    produced = pd.read_csv(tmp_path / "decision_matrix.csv")
+    produced["Accepted"] = produced["Accepted"].fillna("")
+    inapp["Accepted"] = inapp["Accepted"].fillna("")
+    assert list(produced["Decision"]) == list(inapp["Decision"])
+    pcols = [c for c in inapp.columns if c.startswith("p(")]
+    np.testing.assert_allclose(
+        produced[pcols].to_numpy(), inapp[pcols].to_numpy(), rtol=1e-6, atol=1e-9)
+
+
 def test_generated_notebook_is_valid_nbformat():
     X, y = _synthetic()
     view = build_multiclass_decision_view(

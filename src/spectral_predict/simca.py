@@ -457,6 +457,20 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 self.nulls_[c] = self._cross_fit_null(
                     X_c, builder_name, score_method, self.scaling, reuse_scaler
                 )
+                # An EMPTY null (every calibration fold failed — e.g.
+                # EllipticEnvelope covariance on n_features > n_samples) yields
+                # all-NaN p-values, which would make this a LIVE decision-matrix
+                # column that silently accepts nothing (NaN >= alpha is False) —
+                # corrupting per-class sensitivity/novelty and hiding the failure
+                # (the class would NOT appear in unmodelable_). Mark it
+                # unmodelable so decision_matrix drops the column and the failure
+                # surfaces in unmodelable_ / the leaderboard. (_cross_fit_null
+                # already warned with the root cause.)
+                if self.nulls_[c].size == 0:
+                    self.unmodelable_.add(c)
+                    del self.models_[c]
+                    self.nulls_.pop(c, None)
+                    continue
 
         # If every class was unmodelable, there is nothing to score with.
         # Raise rather than silently produce an all-NaN decision matrix

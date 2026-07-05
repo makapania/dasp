@@ -60,6 +60,31 @@ def test_decision_view_wold_aggregates_present():
     assert wold["discriminating_power_agg"].shape == (p,)
 
 
+@pytest.mark.parametrize("nc", [0.99, 5, "per_class_cv"])
+def test_decision_view_wold_computed_at_model_components(nc):
+    """Regression guard: n_components as a variance fraction (0.99 default) or the
+    per_class_cv sentinel must NOT collapse the Wold PCA to 1 component (the old
+    int(0.99)==0 -> 1 bug) nor null the plots."""
+    # Correlated features so a 99%-variance subspace genuinely needs >1 PC.
+    rng = np.random.default_rng(2)
+    blocks, labels = [], []
+    for k in range(3):
+        base = rng.normal(k * 4.0, 1.0, size=(45, 1))
+        noise = rng.normal(0.0, 0.3, size=(45, 30))
+        blocks.append(base + noise)
+        labels += [f"C{k}"] * 45
+    X = pd.DataFrame(np.vstack(blocks), columns=[float(j) for j in range(30)])
+    y = pd.Series(labels)
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=_RAW_CFG, n_components=nc,
+    )
+    assert view["wold"] is not None, f"wold nulled for n_components={nc!r}"
+    assert view["wold_error"] == ""
+    if nc == 0.99:
+        # the resolved per-class components must exceed 1 for correlated data
+        assert max(view["resolved_n_components"].values()) > 1
+
+
 def test_decision_view_matches_direct_model_fit():
     """The provider's decision matrix equals a direct MultiClassClassModel fit."""
     from spectral_predict.simca import MultiClassClassModel
