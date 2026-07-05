@@ -2,6 +2,7 @@
 
 import ast
 import logging
+from bisect import bisect_left
 
 import numpy as np
 import pandas as pd
@@ -64,13 +65,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
         bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
         performance_score = -bal_acc_cv - 0.0001 * df["Sensitivitycv"].fillna(0)
     elif task_type == "multiclass_simca":
-        # Rank by the alpha-sweep NoveltyAUC (higher = better -> lower score),
-        # tie-broken toward the larger smallest-class n (spec §7). MinClassN is
-        # scaled tiny so it only orders exact NoveltyAUC ties.
-        performance_score = (
-            -df["NoveltyAUC"].astype(np.float64).fillna(0.0)
-            - 1e-9 * df.get("MinClassN", pd.Series(0, index=df.index)).astype(np.float64).fillna(0.0)
-        )
+        # Rank by the alpha-sweep NoveltyAUC (higher = better -> lower score).
+        # NaN AUC is preserved here (not fillna'd) so the lexicographic Rank
+        # override below can force it LAST; the MinClassN tie-break is applied
+        # there too (NOT via a fragile additive 1e-9 term — Codex H2/M1, Kimi M5).
+        performance_score = -df["NoveltyAUC"].astype(np.float64)
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -175,8 +174,27 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Composite score (lower is better)
     df["CompositeScore"] = performance_score + var_penalty_term + gap_penalty_term
 
-    # Rank (1 = best)
-    df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
+    if task_type == "multiclass_simca":
+        # Lexicographic ranking (Codex H2/M1 + Kimi M5): NaN NoveltyAUC always
+        # LAST; among finite rows lower CompositeScore (= higher penalty-adjusted
+        # NoveltyAUC) wins; EXACT ties broken by the larger smallest-class n.
+        # Encoded as a (CompositeScore, -MinClassN) sort key so a huge MinClassN
+        # can never outweigh a real AUC gap, and a sub-1e-9 gap never flips.
+        auc = df["NoveltyAUC"].astype(np.float64)
+        nan_mask = auc.isna()
+        df.loc[nan_mask, "CompositeScore"] = np.inf  # NaN rows sort last
+        min_class_n = (
+            df.get("MinClassN", pd.Series(0.0, index=df.index))
+            .astype(np.float64)
+            .fillna(0.0)
+        )
+        keys = list(zip(df["CompositeScore"].to_numpy(), (-min_class_n).to_numpy()))
+        sorted_keys = sorted(keys)
+        ranks = [bisect_left(sorted_keys, k) + 1 for k in keys]  # method="min"
+        df["Rank"] = np.asarray(ranks, dtype=int)
+    else:
+        # Rank (1 = best)
+        df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
 
     # Sort by rank and reset index to ensure sequential IDs for GUI display
     df = df.sort_values("Rank").reset_index(drop=True)
@@ -212,6 +230,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
         if task_type == "regression":
             display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
+        elif task_type == "multiclass_simca":
+            display_cols = ["Rank", "Model", "NoveltyAUC", "Efficiency", "MinClassN",
+                           "n_vars", "PerformanceScore", "VarPenalty", "GapPenalty",
+                           "CompositeScore"]
         else:
             display_cols = ["Rank", "Model", "Accuracy", "Accuracycv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
@@ -617,6 +639,9 @@ def create_results_dataframe(task_type):
             "AmbiguityRate", "ExactSetRate", "MeanSensitivity", "MeanSpecificity",
             "Alpha", "MinClassN", "n_classes",
             "engine_family", "varsel_path",
+            # Emitted by run_multiclass_simca_search; declared so downstream
+            # consumers stay in sync (Kimi M3).
+            "unmodelable_classes", "reason",
         ]
     else:
         # Calibration metrics first, then CV metrics, then advanced metrics

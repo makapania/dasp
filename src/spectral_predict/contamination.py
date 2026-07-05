@@ -145,7 +145,10 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
             n_comp = min(int(self.n_components), max_components)
 
         self.n_components_ = n_comp
-        self.pca_ = PCA(n_components=n_comp)
+        # random_state=0: pin randomized-SVD nondeterminism for >500-sample
+        # classes so two fits reproduce the decision matrix exactly (T-31
+        # Phase-C gate, Kimi M6; extends the Phase-B Wold pinning).
+        self.pca_ = PCA(n_components=n_comp, random_state=0)
         self.scores_ = self.pca_.fit_transform(X)
         self.n_train_ = n_samples
 

@@ -81,10 +81,13 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         Global significance level shared by every per-class model, so the
         ">= 2 of K" multiple-membership rule is coherent across classes
         (spec decision #6).
-    n_components : int, dict, or "per_class_cv", default="per_class_cv"
+    n_components : int, float, dict, or "per_class_cv", default="per_class_cv"
         PCA components for the ``"pca-simca"`` engine. An int applies the same
-        value to every class; a ``{class_label: int}`` mapping sets it per
-        class; the string ``"per_class_cv"`` (default, task A5) tunes each
+        value to every class; a FLOAT in ``(0, 1)`` is a per-class
+        variance-explained fraction (T-31 Decision D, novelty-oriented) passed
+        through to each class's :class:`PCASIMCA`; a ``{class_label: int}``
+        mapping sets it per class; the string ``"per_class_cv"`` (default, task
+        A5) tunes each
         modeled class's components by one-vs-rest CV via
         :func:`~spectral_predict.contamination.run_one_class_cv` (candidate
         grid = distinct int ``n_components`` from
@@ -415,21 +418,25 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                     )
                 else:
                     n_components_c = self._n_components_for(c)
-                self.n_components_[c] = n_components_c
+
+                # Fit first so a variance-fraction float (n_components in (0,1))
+                # is resolved to its concrete int by PCASIMCA; record the RESOLVED
+                # int (not the requested fraction) for reporting (Decision D).
+                self.models_[c] = PCASIMCA(
+                    n_components=n_components_c, alpha=self.alpha
+                ).fit(X_c_scaled)
+                resolved_nc = int(self.models_[c].n_components_)
+                self.n_components_[c] = resolved_nc
 
                 # DD-SIMCA small-n calibration warning (Phase-A fix 1): the MoM
                 # chi^2 fit is high-variance at small n, so the model may
                 # over-reject. Still model the class (do not mark unmodelable).
-                warn_floor = max(20, 5 * n_components_c)
+                warn_floor = max(20, 5 * resolved_nc)
                 if n_class < warn_floor:
                     warnings.warn(
                         f"class {c}: n={n_class} < {warn_floor}; DD-SIMCA "
                         f"calibration may over-reject at small n"
                     )
-
-                self.models_[c] = PCASIMCA(
-                    n_components=n_components_c, alpha=self.alpha
-                ).fit(X_c_scaled)
             else:
                 builder_name, score_method = _NON_SIMCA_ENGINES[self.engine]
                 # Forward user-supplied engine hyperparameters (Phase-A fix 2).
@@ -772,13 +779,20 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         keep = np.isin(y, modelable)
         return X[keep], y[keep]
 
-    def _n_components_for(self, label) -> int:
+    def _n_components_for(self, label) -> int | float:
         """Resolve ``n_components`` for a single class label.
 
-        ``n_components`` may be an int (same for all classes) or a
-        ``{class_label: int}`` dict. ``label`` is a scalar from ``classes_``;
-        numpy integer scalars hash-equal to Python ints, so dict lookup works
-        regardless of whether the user keyed the dict with Python or numpy ints.
+        ``n_components`` may be an int (same for all classes), a
+        ``{class_label: int}`` dict, or a FLOAT in ``(0, 1)`` (a per-class
+        variance-explained fraction; T-31 Decision D, novelty-oriented). ``label``
+        is a scalar from ``classes_``; numpy integer scalars hash-equal to Python
+        ints, so dict lookup works regardless of whether the user keyed the dict
+        with Python or numpy ints.
+
+        A variance-fraction float is passed straight THROUGH to
+        :class:`~spectral_predict.contamination.PCASIMCA` (which resolves it to a
+        capped int); it must NOT be ``int()``-truncated here (that would turn
+        ``0.99`` into ``0`` and silently kill the model).
         """
         nc = self.n_components
         if isinstance(nc, dict):
@@ -787,8 +801,13 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                     f"n_components dict missing key {label!r} "
                     f"(have: {sorted(nc.keys())})"
                 )
-            return int(nc[label])
-        return int(nc)
+            val = nc[label]
+        else:
+            val = nc
+        # Variance-fraction float in (0, 1): pass through for PCASIMCA to resolve.
+        if isinstance(val, float) and 0.0 < val < 1.0:
+            return val
+        return int(val)
 
     def _tune_per_class_n_components(
         self, X_s: np.ndarray, y_oc: np.ndarray, n_class: int, n_features: int

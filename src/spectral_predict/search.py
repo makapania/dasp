@@ -7037,17 +7037,34 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
         AUC in ``[0, 1]``; ``float("nan")`` if it cannot be computed (no finite
         own-class p-values, or every LOCO fit failed).
 
+    The curve plots ``novelty_rate`` (y) against ``false_rejection_rate`` (x)
+    over an α-sweep; equivalently novelty vs ``1 - correct-acceptance``. The
+    trapezoidal AUC is direction-invariant (``trapz`` integrates whichever way
+    the x-values are ordered), so the exact axis label does not affect ranking.
+
+    LOCO is a WITHIN-DATASET novelty PROXY that OVER-estimates the spec §1
+    held-out-foreign-class target: each held-out class is ruled on by only
+    ``K-1`` models and is itself in-distribution, whereas a truly foreign class
+    faces all ``K`` ruling models. Treat ``NoveltyAUC`` as an optimistic upper
+    bound and verify on a genuine held-out novel class (Decision A).
+
     Notes
     -----
     - ``false_rejection_rate(α)`` = fraction of known rows whose OWN-class OOF
       p-value ``< α`` (rows with a NaN own-p — e.g. their class was unmodelable
       in every fold — are excluded from the denominator).
-    - ``novelty_rate(α)`` = fraction of held-out-class rows flagged novel, i.e.
-      ALL finite foreign-class p-values ``< α`` (a row with no finite p-value is
-      vacuously novel at every α; NaN entries are treated as ``< α``). Reduced
-      per row to ``max(finite p)`` so ``all(< α) ⇔ max < α``.
+    - ``novelty_rate(α)`` is CLASS-BALANCED (Decision B, spec §7
+      "small-class-robust"): per held-out class ``c`` it is the fraction of
+      class-``c`` rows flagged novel (``max(finite foreign p) < α``); the overall
+      rate is the mean over classes, so each class weighs equally regardless of
+      size. A held row whose foreign p-values are ALL NaN (every ``K-1`` class
+      unmodelable in that LOCO fit) is EXCLUDED from both numerator and
+      denominator (B4 — it must not be treated as vacuously novel).
     - Threshold sweep = the sorted unique finite p-values (own + foreign) plus
-      ``{0, 1}``, downsampled to ≤500 thresholds for real-data scale.
+      ``{0, 1, 2}`` (the ``2`` guarantees the false-rejection axis reaches 1 so a
+      perfect separator does not collapse to AUC 0 — B1), downsampled to ≤2000
+      thresholds for real-data scale; duplicate false-rejection x-values are
+      deduped (max novelty kept) before the trapezoid.
     """
     X = np.asarray(X, dtype=np.float64)
     y = np.asarray(y)
@@ -7068,7 +7085,10 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
     own_p_finite = own_p[np.isfinite(own_p)]
 
     # (2) LOCO -> novelty axis. Each class held out as the novel population.
-    nov_stats: list[float] = []
+    # Per-class novelty statistics (max finite foreign p per row, or NaN if a row
+    # has NO finite foreign p — B4: excluded from num+denom, never vacuously
+    # novel). Kept per class so novelty_rate can be CLASS-BALANCED (B5).
+    nov_by_class: dict = {}
     for c in classes:
         held_mask = y == c
         if not np.any(held_mask):
@@ -7080,27 +7100,51 @@ def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5):
         except Exception as exc:  # noqa: BLE001 — skip a failed LOCO fold, NaN-safe
             logger.warning("multiclass LOCO AUC: LOCO fit for class %r failed: %s", c, exc)
             continue
+        stats_c = []
         for row in P_c:
             finite = row[np.isfinite(row)]
-            nov_stats.append(-np.inf if finite.size == 0 else float(np.max(finite)))
+            stats_c.append(np.nan if finite.size == 0 else float(np.max(finite)))
+        nov_by_class[c] = np.asarray(stats_c, dtype=np.float64)
 
-    if own_p_finite.size == 0 or len(nov_stats) == 0:
+    # Drop classes with no valid (finite) held rows; if none remain there is no
+    # novel population to score.
+    valid_by_class = [
+        arr[np.isfinite(arr)] for arr in nov_by_class.values()
+    ]
+    valid_by_class = [arr for arr in valid_by_class if arr.size > 0]
+    if own_p_finite.size == 0 or len(valid_by_class) == 0:
         return float("nan")
-    nov_arr = np.asarray(nov_stats, dtype=np.float64)
 
     # (3) Threshold sweep + trapezoid AUC.
+    all_foreign = np.concatenate(valid_by_class)
+    # The 2.0 anchor forces false_rej to reach 1.0 (B1: a perfect separator whose
+    # own-p are all 1.0 otherwise never leaves x=0 -> AUC 0).
     thresholds = np.unique(
-        np.concatenate([own_p_finite, nov_arr[np.isfinite(nov_arr)], [0.0, 1.0]])
+        np.concatenate([own_p_finite, all_foreign, [0.0, 1.0, 2.0]])
     )
-    if thresholds.size > 500:
-        idx = np.unique(np.linspace(0, thresholds.size - 1, 500).astype(int))
+    if thresholds.size > 2000:
+        logger.info(
+            "multiclass LOCO AUC: downsampling %d thresholds to 2000",
+            thresholds.size,
+        )
+        idx = np.unique(np.linspace(0, thresholds.size - 1, 2000).astype(int))
         thresholds = thresholds[idx]
 
+    def _class_balanced_novelty(a: float) -> float:
+        # Mean over classes of each class's own-row novel fraction (B5).
+        rates = [float(np.mean(arr < a)) for arr in valid_by_class]
+        return float(np.mean(rates))
+
     false_rej = np.array([float(np.mean(own_p_finite < a)) for a in thresholds])
-    novelty = np.array([float(np.mean(nov_arr < a)) for a in thresholds])
-    order = np.argsort(false_rej, kind="stable")
+    novelty = np.array([_class_balanced_novelty(a) for a in thresholds])
+
+    # Dedupe duplicate false_rej x-values keeping the MAX novelty (B1), then
+    # trapezoid over the (sorted-unique) x.
+    uniq_fr, inv = np.unique(false_rej, return_inverse=True)
+    max_nov = np.full(uniq_fr.shape, -np.inf, dtype=np.float64)
+    np.maximum.at(max_nov, inv, novelty)
     trapz = getattr(np, "trapezoid", None) or np.trapz
-    auc = float(trapz(novelty[order], false_rej[order]))
+    auc = float(trapz(max_nov, uniq_fr))
     return float(min(1.0, max(0.0, auc)))
 
 
@@ -7113,6 +7157,7 @@ def run_multiclass_simca_search(
     preprocessing_methods=None,
     window_sizes=None,
     alpha=0.05,
+    n_components=0.99,
     varsel_paths=None,
     variable_selection_n_select=None,
     min_class_samples=10,
@@ -7130,8 +7175,9 @@ def run_multiclass_simca_search(
     """T-31 multi-class SIMCA / class-modeling search (spec §7).
 
     Grid = ``preprocessing_configs × engines × varsel_paths`` (NO ``G^K``
-    per-class ``n_components`` product — each row auto-tunes per-class
-    ``n_components`` INSIDE the row via ``n_components="per_class_cv"``). Each
+    per-class ``n_components`` product — every row shares the single
+    ``n_components`` policy, resolved per class INSIDE the row; the default is a
+    novelty-oriented variance fraction, see the ``n_components`` param). Each
     row fits a :class:`~spectral_predict.simca.MultiClassClassModel`, computes
     OOF class-modeling metrics via ``cross_validate`` +
     :func:`~spectral_predict.simca.multiclass_simca_metrics`, and a
@@ -7167,6 +7213,16 @@ def run_multiclass_simca_search(
         Savitzky-Golay windows for derivative methods (default ``[7, 19]``).
     alpha : float, default=0.05
         Global significance level (never per-class; spec decision #6).
+    n_components : float, int, dict, or "per_class_cv", default=0.99
+        Per-class PCA components forwarded to each row's
+        :class:`~spectral_predict.simca.MultiClassClassModel`. The default FLOAT
+        ``0.99`` is a per-class variance-explained fraction — the
+        NOVELTY-oriented choice (T-31 Decision D): on real held-out sites a
+        99%-variance model flagged 100% of a foreign site novel at ~8% in-sample
+        false-novel, versus only ~17% for ``"per_class_cv"``. ``"per_class_cv"``
+        (one-vs-rest balanced-accuracy tuning) optimizes within-known
+        DISCRIMINATION, not novelty, and under-detects held-out foreign classes;
+        it remains selectable but is not the default.
     varsel_paths : list of str, optional
         Variable-selection paths to enumerate; each maps via
         :data:`_MULTICLASS_VARSEL_PATHS` to a ``variable_selection`` value.
@@ -7297,43 +7353,45 @@ def run_multiclass_simca_search(
         # Per-spectrum preprocessing on ALL rows (chemometrics convention: NOT
         # leakage). Column-autoscale/calibration/varsel stay train-only inside
         # the model. Build the pipeline and fit/transform the full matrix.
-        pipe_steps = build_preprocessing_pipeline(
-            preprocess_cfg["method"],
-            preprocess_cfg["deriv"],
-            preprocess_cfg["window"],
-            preprocess_cfg["polyorder"],
-            baseline_method=preprocess_cfg.get("baseline_method"),
-            baseline_params=preprocess_cfg.get("baseline_params"),
-            smoothing=preprocess_cfg.get("smoothing", False),
-            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
-            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
-        )
+        # Build + fit/transform + edge-mask are ALL inside one guard (Codex M2):
+        # a single malformed config (e.g. build_preprocessing_pipeline raising on
+        # a bad window/polyorder) must NOT abort the whole search — it emits NaN
+        # rows with a reason instead.
         wavelengths_current = wavelengths_full.copy()
-        if pipe_steps:
-            from sklearn.pipeline import Pipeline as SkPipeline
+        pp_reason = ""
+        try:
+            pipe_steps = build_preprocessing_pipeline(
+                preprocess_cfg["method"],
+                preprocess_cfg["deriv"],
+                preprocess_cfg["window"],
+                preprocess_cfg["polyorder"],
+                baseline_method=preprocess_cfg.get("baseline_method"),
+                baseline_params=preprocess_cfg.get("baseline_params"),
+                smoothing=preprocess_cfg.get("smoothing", False),
+                smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+                smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+            )
+            if pipe_steps:
+                from sklearn.pipeline import Pipeline as SkPipeline
 
-            prep_pipe = SkPipeline(pipe_steps)
-            try:
+                prep_pipe = SkPipeline(pipe_steps)
                 prep_pipe.fit(X_np)
                 X_pp = prep_pipe.transform(X_np)
-            except (ValueError, np.linalg.LinAlgError) as exc:
-                logger.warning(
-                    "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
-                    preprocess_cfg["name"], exc,
-                )
-                X_pp = None
-        else:
-            X_pp = X_np.copy()
+            else:
+                X_pp = X_np.copy()
 
-        # Derivative edge mask (drops undefined SG edge columns) when applicable.
-        if (
-            X_pp is not None
-            and preprocess_cfg.get("deriv")
-            and preprocess_cfg.get("window")
-        ):
-            X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
-                X_pp, wavelengths_current, preprocess_cfg
+            # Derivative edge mask (drops undefined SG edge columns) when applicable.
+            if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+                X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
+                    X_pp, wavelengths_current, preprocess_cfg
+                )
+        except Exception as exc:  # noqa: BLE001 — one bad config must not abort
+            logger.warning(
+                "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
+                preprocess_cfg["name"], exc,
             )
+            X_pp = None
+            pp_reason = f"preprocessing_failed: {type(exc).__name__}: {exc}"
 
         for engine in engines:
             if _user_stopped:
@@ -7363,7 +7421,7 @@ def run_multiclass_simca_search(
                     return MultiClassClassModel(
                         engine=engine,
                         alpha=alpha,
-                        n_components="per_class_cv",
+                        n_components=n_components,
                         scaling="per_class",
                         min_class_samples=min_class_samples,
                         variable_selection=varsel_value,
@@ -7407,7 +7465,7 @@ def run_multiclass_simca_search(
                 }
 
                 if X_pp is None:
-                    row["reason"] = "preprocessing_failed"
+                    row["reason"] = pp_reason or "preprocessing_failed"
                     df_results = add_result(df_results, row)
                     continue
 
@@ -7460,7 +7518,14 @@ def run_multiclass_simca_search(
                     row["MeanSensitivity"] = mean_sens
                     row["MeanSpecificity"] = mean_spec
 
-                    # LOCO NoveltyAUC (the ranking metric).
+                    # LOCO NoveltyAUC (the single-objective ranking metric, spec
+                    # §7). Decision A: this is a within-dataset proxy that
+                    # OVER-estimates true held-out-foreign novelty (see
+                    # _multiclass_loco_novelty_auc docstring). Decision C: ranking
+                    # stays single-objective on NoveltyAUC; a quality-vs-
+                    # discrimination blend (e.g. NoveltyAUC·Efficiency**0.5)
+                    # remains an unimplemented alternative the user is undecided
+                    # on.
                     row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
                         _build, X_pp, y_np, cv_splits=cv_splits
                     )
@@ -7474,6 +7539,15 @@ def run_multiclass_simca_search(
                 df_results = add_result(df_results, row)
 
     if len(df_results) > 0:
+        # No-signal guard (Kimi H1/H2): if NOT ONE config produced a finite
+        # NoveltyAUC the leaderboard has no ranking signal (every row ties on
+        # NaN); warn loudly rather than return a clean-looking Rank=1 frame.
+        if df_results["NoveltyAUC"].isna().all():
+            logger.warning(
+                "Multi-class SIMCA search: NO configuration produced a finite "
+                "NoveltyAUC (every config failed or was unmodelable); the "
+                "leaderboard carries no ranking signal."
+            )
         df_results = compute_composite_score(
             df_results, "multiclass_simca", variable_penalty, gap_penalty
         )

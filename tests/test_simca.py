@@ -940,3 +940,60 @@ class TestPhaseAHardening:
         # class 1 column stays all-NaN (unmodelable)
         auc = novelty_tradeoff_auc(y, P, classes)
         assert 0.0 <= auc <= 1.0 and auc >= 0.8
+
+
+class TestFloatVarianceFractionNComponentsD1:
+    """T-31 Phase-C / Decision D: MultiClassClassModel accepts a FLOAT n_components
+    in (0, 1) as a per-class variance-explained fraction (novelty-oriented),
+    passed straight through to each class's PCASIMCA. The old code did int(nc) ->
+    0, silently killing the model (that's the bug this pins)."""
+
+    def test_float_ncomponents_resolves_variance_fraction_per_class(self):
+        from sklearn.decomposition import PCA
+        from sklearn.preprocessing import StandardScaler
+
+        X, y, _ = _graded([60, 60, 60], seed=2)
+        m = MultiClassClassModel(
+            engine="pca-simca", n_components=0.99, scaling="per_class"
+        ).fit(X, y)
+        # n_components_ records the RESOLVED int per class (NOT 0 from int(0.99)).
+        assert set(m.n_components_) == set(np.unique(y).tolist())
+        for c in np.unique(y):
+            assert isinstance(m.n_components_[c], (int, np.integer))
+            assert m.n_components_[c] >= 1
+            # matches an independent 99%-variance PCA on that class's scaled rows
+            Xc = X[y == c]
+            Xcs = StandardScaler().fit_transform(Xc)
+            expected = int(PCA(n_components=0.99).fit(Xcs).n_components_)
+            assert int(m.n_components_[c]) == expected
+
+    def test_float_ncomponents_decision_matrix_rejects_far_cluster(self):
+        X, y, _ = _graded([60, 60, 60], seed=5)
+        m = MultiClassClassModel(
+            engine="pca-simca", n_components=0.99, scaling="per_class"
+        ).fit(X, y)
+        rng = np.random.RandomState(11)
+        far = rng.normal(scale=0.3, size=(20, X.shape[1])) + 60.0
+        P, A = m.decision_matrix(far)
+        assert P.shape == (20, 3)
+        # a genuinely-foreign cluster is accepted by ~no class
+        assert A.sum(axis=1).mean() < 0.5
+
+
+class TestPCASIMCADeterminismB8:
+    """T-31 Phase-C gate (Kimi M6): PCASIMCA's internal PCA must be seeded so two
+    fits on the same >500-sample matrix (randomized-SVD regime) reproduce the
+    decision matrix exactly."""
+
+    def test_pcasimca_two_fits_identical_on_large_matrix(self):
+        rng = np.random.RandomState(0)
+        n, p = 600, 40
+        X = rng.normal(size=(n, p))
+        X[:, :5] += rng.normal(size=(n, 1)) * 3.0  # some low-rank structure
+        m1 = PCASIMCA(n_components=10, alpha=0.05).fit(X)
+        m2 = PCASIMCA(n_components=10, alpha=0.05).fit(X)
+        Xq = rng.normal(size=(30, p))
+        # the decision-matrix p-values must be bit-identical across fits
+        p1 = m1.p_joint(Xq)
+        p2 = m2.p_joint(Xq)
+        assert np.array_equal(p1, p2)

@@ -38,6 +38,103 @@ def _graded(sizes, n_features=24, n_relevant=6, seed=0, sep=14.0):
     return np.vstack(Xs), np.concatenate(ys), relevant
 
 
+class _FakeLOCOModel:
+    """Minimal stand-in for MultiClassClassModel used to drive
+    ``_multiclass_loco_novelty_auc`` with fully-controlled own-class OOF
+    p-values (via ``cross_validate``) and foreign p-values (via
+    ``fit``+``decision_matrix``). ``foreign_fn(X_held)`` returns the (n, K)
+    p-value matrix for a held-out class; the true class of each held row is
+    encoded in ``X_held[:, 0]`` so the fn can vary novelty per held class."""
+
+    def __init__(self, classes, own_p_fn, foreign_fn):
+        self.classes = list(classes)
+        self.own_p_fn = own_p_fn
+        self.foreign_fn = foreign_fn
+
+    def cross_validate(self, X, y, n_splits=5):
+        cl = list(self.classes)
+        col = {c: k for k, c in enumerate(cl)}
+        P = np.full((len(y), len(cl)), 0.5, dtype=np.float64)
+        own = self.own_p_fn(y)
+        for i in range(len(y)):
+            P[i, col[y[i]]] = own[i]
+        return {"decision_matrix": (P, P >= 0.05), "classes": cl}
+
+    def fit(self, X, y):
+        return self
+
+    def decision_matrix(self, X):
+        P = self.foreign_fn(np.asarray(X, dtype=np.float64), self.classes)
+        return P, P >= 0.05
+
+
+class TestLOCONoveltyAUCGateFixes:
+    """Phase-C gate fixes to ``_multiclass_loco_novelty_auc`` (B1/B4/B5)."""
+
+    def _auc(self, own_p_fn, foreign_fn, y, X=None):
+        from spectral_predict.search import _multiclass_loco_novelty_auc
+
+        classes = list(np.unique(y))
+        if X is None:
+            X = y.reshape(-1, 1).astype(np.float64)  # col0 encodes class
+        return _multiclass_loco_novelty_auc(
+            lambda: _FakeLOCOModel(classes, own_p_fn, foreign_fn),
+            X, y, cv_splits=3,
+        )
+
+    def test_b1_perfect_separator_not_zero(self):
+        # own-p all 1.0 (never falsely rejected) + foreign-p all 0.0 (always
+        # novel) is a PERFECT separator -> AUC must be high, not the 0.0 the
+        # endpoint-collapse bug produced.
+        y = np.array([0] * 20 + [1] * 20 + [2] * 20)
+
+        def foreign(X, classes):
+            return np.zeros((X.shape[0], len(classes)), dtype=np.float64)
+
+        auc = self._auc(lambda yy: np.ones(len(yy)), foreign, y)
+        assert auc >= 0.9
+
+    def test_b4_all_nan_foreign_rows_do_not_inflate_novelty(self):
+        # Real held rows are NOT novel (foreign p = 1.0); half the held rows are
+        # all-NaN. The all-NaN rows must be EXCLUDED (not counted -inf/novel), so
+        # novelty stays low and AUC stays low.
+        y = np.array([0] * 30 + [1] * 30 + [2] * 30)
+        own = lambda yy: np.linspace(0.01, 0.99, len(yy))
+
+        def foreign(X, classes):
+            n, K = X.shape[0], len(classes)
+            P = np.ones((n, K), dtype=np.float64)  # finite rows: NOT novel
+            P[::2, :] = np.nan                       # every other row all-NaN
+            return P
+
+        auc = self._auc(own, foreign, y)
+        assert auc < 0.2
+
+    def test_b5_novelty_rate_is_class_balanced(self):
+        # Imbalanced held-out classes {10, 100, 100}. Flipping ONLY the small
+        # class between novel and not-novel must move the (class-balanced) AUC
+        # substantially (~1/3), which a sample-weighted mean (~10/210) could not.
+        y = np.array([0] * 10 + [1] * 100 + [2] * 100)
+        own = lambda yy: np.linspace(0.01, 0.99, len(yy))
+
+        def make_foreign(small_novel):
+            def foreign(X, classes):
+                K = len(classes)
+                out = np.empty((X.shape[0], K), dtype=np.float64)
+                for i in range(X.shape[0]):
+                    c = int(round(X[i, 0]))
+                    if c == 0:
+                        out[i, :] = 0.0 if small_novel else 1.0
+                    else:
+                        out[i, :] = 0.0  # big classes always novel
+                return out
+            return foreign
+
+        auc_novel = self._auc(own, make_foreign(True), y)
+        auc_not = self._auc(own, make_foreign(False), y)
+        assert (auc_novel - auc_not) >= 0.25
+
+
 class TestTaskTypePlumbingC1:
     def test_multiclass_results_schema_is_distinct(self):
         df = create_results_dataframe("multiclass_simca")
@@ -222,3 +319,137 @@ class TestMulticlassSearchC2:
         assert int(row["MinClassN"]) == 40
         # the unmodelable class is recorded on the row (flagged, not dropped)
         assert str(row["unmodelable_classes"]) not in ("", "nan", "[]", "None")
+
+
+class TestLexicographicRankingB2:
+    """B2: multiclass ranking is lexicographic (NaN last -> NoveltyAUC desc ->
+    MinClassN desc), NOT the old additive ``-1e-9*MinClassN`` tiebreak that a
+    large MinClassN or a sub-1e-9 AUC gap could corrupt."""
+
+    def _score(self, rows):
+        df = create_results_dataframe("multiclass_simca")
+        for r in rows:
+            r.setdefault("n_vars", 20)
+            r.setdefault("full_vars", 20)
+        df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+        return compute_composite_score(df, "multiclass_simca")
+
+    def test_nan_auc_ranks_last_even_with_huge_min_class_n(self):
+        rows = [
+            {"Model": "nan_big", "NoveltyAUC": np.nan, "MinClassN": 999},
+            {"Model": "zero", "NoveltyAUC": 0.0, "MinClassN": 1},
+            {"Model": "tiny", "NoveltyAUC": 1e-12, "MinClassN": 1},
+        ]
+        scored = self._score(rows)
+        by_model = scored.set_index("Model")
+        assert by_model.loc["nan_big", "Rank"] == scored["Rank"].max()
+        # the NaN row is strictly worse than both finite rows
+        assert by_model.loc["nan_big", "Rank"] > by_model.loc["zero", "Rank"]
+        assert by_model.loc["nan_big", "Rank"] > by_model.loc["tiny", "Rank"]
+        # among finite rows the larger AUC wins
+        assert by_model.loc["tiny", "Rank"] < by_model.loc["zero", "Rank"]
+
+    def test_subepsilon_auc_gap_not_flipped_by_min_class_n(self):
+        rows = [
+            {"Model": "hi_auc", "NoveltyAUC": 0.80000001, "MinClassN": 1},
+            {"Model": "lo_auc", "NoveltyAUC": 0.80, "MinClassN": 10000},
+        ]
+        scored = self._score(rows).set_index("Model")
+        # higher AUC wins despite the other row's enormous MinClassN
+        assert scored.loc["hi_auc", "Rank"] < scored.loc["lo_auc", "Rank"]
+
+
+class TestSchemaAndSearchGuardsB3B6B7:
+    def _run(self, **kw):
+        from spectral_predict.search import run_multiclass_simca_search
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return run_multiclass_simca_search(**kw)
+
+    def test_b6_search_columns_are_declared_in_schema(self):
+        X, y, _ = _graded([40, 40, 40], seed=0)
+        df = self._run(
+            X=X, y=y, engines=["pca-simca"], varsel_paths=["none"],
+            preprocessing_methods=["raw"], cv_splits=3,
+        )
+        schema = set(create_results_dataframe("multiclass_simca").columns)
+        added_by_scoring = {
+            "CompositeScore", "Rank", "PerformanceScore",
+            "VarPenalty", "GapPenalty", "ComplexityScore",
+        }
+        assert set(df.columns) - schema <= added_by_scoring
+
+    def test_b3_all_nan_leaderboard_warns(self, monkeypatch, caplog):
+        import logging
+
+        import spectral_predict.simca as simca_mod
+
+        def _boom(self, *a, **k):
+            raise RuntimeError("forced fit failure")
+
+        monkeypatch.setattr(simca_mod.MultiClassClassModel, "fit", _boom)
+        X, y, _ = _graded([40, 40, 40], seed=1)
+        with caplog.at_level(logging.WARNING):
+            df = self._run(
+                X=X, y=y, engines=["pca-simca"], varsel_paths=["none"],
+                preprocessing_methods=["raw"], cv_splits=3,
+            )
+        assert df["NoveltyAUC"].isna().all()
+        assert any(
+            "no configuration" in rec.getMessage().lower()
+            and "noveltyauc" in rec.getMessage().lower()
+            for rec in caplog.records
+        )
+
+    def test_b7_malformed_preprocess_config_does_not_abort(self):
+        X, y, _ = _graded([40, 40, 40], seed=2)
+        good = {
+            "method": "raw", "name": "raw", "deriv": None, "window": None,
+            "polyorder": None,
+        }
+        bad = {  # a deriv config with an impossible (even, tiny) window
+            "method": "savgol", "name": "bad_deriv", "deriv": 1, "window": 2,
+            "polyorder": 9,
+        }
+        df = self._run(
+            X=X, y=y, engines=["pca-simca"], varsel_paths=["none"],
+            preprocess_configs=[good, bad], cv_splits=3,
+        )
+        assert len(df) == 2  # no raise; both configs recorded
+        by_prep = df.set_index("Preprocess")
+        assert np.isfinite(by_prep.loc["raw", "NoveltyAUC"])
+        assert pd.isna(by_prep.loc["bad_deriv", "NoveltyAUC"])
+        assert "preprocessing_failed" in str(by_prep.loc["bad_deriv", "reason"])
+
+
+class TestNoveltyOrientedNComponentsD2:
+    """D2: the search default n_components is a novelty-oriented variance
+    fraction (float), not the discrimination-oriented ``per_class_cv``."""
+
+    def _run(self, **kw):
+        from spectral_predict.search import run_multiclass_simca_search
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return run_multiclass_simca_search(**kw)
+
+    def test_default_uses_float_variance_fraction(self):
+        import inspect
+
+        from spectral_predict.search import run_multiclass_simca_search
+
+        sig = inspect.signature(run_multiclass_simca_search)
+        default = sig.parameters["n_components"].default
+        assert isinstance(default, float) and 0.0 < default < 1.0
+
+    def test_lvs_reflects_per_class_resolved_ints(self):
+        X, y, _ = _graded([60, 60, 60], seed=3)
+        df = self._run(
+            X=X, y=y, engines=["pca-simca"], varsel_paths=["none"],
+            preprocessing_methods=["raw"], cv_splits=4,
+        )
+        lvs = str(df.iloc[0]["LVs"])
+        assert "{" in lvs and "}" in lvs  # per-class {class: resolved int}
+        # resolved ints, not the raw fraction 0.99
+        assert "0.99" not in lvs
