@@ -579,7 +579,7 @@ def predict_with_model(
     X_new: Union[pd.DataFrame, np.ndarray],
     validate_wavelengths: bool = True,
     _internals: dict | None = None,
-) -> np.ndarray:
+) -> Union[np.ndarray, dict]:
     """
     Make predictions with a loaded model on new spectral data.
 
@@ -606,9 +606,16 @@ def predict_with_model(
 
     Returns
     -------
-    np.ndarray
-        Predicted values, shape (n_samples,) for regression or
-        (n_samples, n_classes) for classification
+    np.ndarray or dict
+        - For ``task_type`` in {``regression``, ``classification``, ``one_class``}:
+          an ``ndarray`` of predicted values, shape ``(n_samples,)`` for
+          regression / one-class or ``(n_samples, n_classes)`` for
+          classification.
+        - For ``task_type == "multiclass_simca"``: a ``dict`` with the schema
+          ``{"p_values": ndarray (n_samples, K) float, "decision_matrix":
+          ndarray (n_samples, K) bool, "summary_label": ndarray (n_samples,)
+          object of single-class-label / "multiple" / "novel",
+          "accepted_classes": list[list] of per-row accepted class labels}``.
 
     Raises
     ------

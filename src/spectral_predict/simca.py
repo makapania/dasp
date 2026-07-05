@@ -24,6 +24,8 @@ References
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
 from sklearn.model_selection import KFold, StratifiedKFold
@@ -206,11 +208,27 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
 
         for c in self.classes_:
             X_c = X[y == c]
-            if X_c.shape[0] < self.min_class_samples:
+            n_class = X_c.shape[0]
+            if n_class < self.min_class_samples:
                 # Too few rows for a reliable MoM chi^2 fit / cross-fit null:
                 # mark unmodelable, keep the decision-matrix column, fit no
                 # scaler/engine (spec section 8).
                 self.unmodelable_.add(c)
+                continue
+
+            # --- layered n_components-aware calibration floor (Phase-A fix 1) ---
+            # Non-SIMCA engines: the empirical p-value floor is 1/(m+1) with
+            # m ~= n_class; at m < 20 the floor exceeds alpha=0.05 so no sample
+            # can ever be rejected -> such a class is unmodelable for these
+            # engines (do not fit). SIMCA (DD-SIMCA): warn at small n but still
+            # model, since DD-SIMCA over-rejects rather than failing to reject.
+            if not is_simca and n_class < 20:
+                self.unmodelable_.add(c)
+                warnings.warn(
+                    f"class {c}: n={n_class} < 20; non-SIMCA empirical p-value "
+                    f"floor 1/(m+1) exceeds alpha={self.alpha} so no sample can "
+                    f"be rejected; marking this class unmodelable."
+                )
                 continue
 
             # Apply this class's scaling mode (train-only fit) before the engine.
@@ -236,24 +254,55 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                         X_s = X
                     y_oc = np.where(y == c, 1, -1)
                     n_components_c = self._tune_per_class_n_components(
-                        X_s, y_oc, X_c.shape[0], X.shape[1]
+                        X_s, y_oc, n_class, X.shape[1]
                     )
                 else:
                     n_components_c = self._n_components_for(c)
                 self.n_components_[c] = n_components_c
+
+                # DD-SIMCA small-n calibration warning (Phase-A fix 1): the MoM
+                # chi^2 fit is high-variance at small n, so the model may
+                # over-reject. Still model the class (do not mark unmodelable).
+                warn_floor = max(20, 5 * n_components_c)
+                if n_class < warn_floor:
+                    warnings.warn(
+                        f"class {c}: n={n_class} < {warn_floor}; DD-SIMCA "
+                        f"calibration may over-reject at small n"
+                    )
+
                 self.models_[c] = PCASIMCA(
                     n_components=n_components_c, alpha=self.alpha
                 ).fit(X_c_scaled)
             else:
                 builder_name, score_method = _NON_SIMCA_ENGINES[self.engine]
-                final_engine = get_one_class_model(builder_name)
+                # Forward user-supplied engine hyperparameters (Phase-A fix 2).
+                final_engine = get_one_class_model(
+                    builder_name, **(self.engine_params or {})
+                )
                 final_engine.fit(X_c_scaled)
                 self.models_[c] = final_engine
-                # Cross-fit null on this class's scaled rows (train-only) so the
-                # empirical p-value is a real level-alpha test (spec section 5.3).
+                # Cross-fit null on this class's rows so the empirical p-value
+                # is a real level-alpha test (spec section 5.3). Per-fold
+                # scaling for ``scaling="per_class"`` (Phase-A fix 6): pass the
+                # RAW class rows and the scaling mode so each null fold fits a
+                # fresh scaler on fold-train only (no leakage of the held-out
+                # null-fold row into the scaler that scores it). For
+                # ``scaling="global"`` reuse the already-fit global scaler; for
+                # ``scaling="none"`` no scaling is applied.
+                reuse_scaler = self.global_scaler_ if self.scaling == "global" else None
                 self.nulls_[c] = self._cross_fit_null(
-                    X_c_scaled, builder_name, score_method
+                    X_c, builder_name, score_method, self.scaling, reuse_scaler
                 )
+
+        # If every class was unmodelable, there is nothing to score with.
+        # Raise rather than silently produce an all-NaN decision matrix
+        # (Phase-A fix 1).
+        if not self.models_:
+            raise ValueError(
+                "no class had enough samples to model; every class was below "
+                "the calibration floor (min_class_samples="
+                f"{self.min_class_samples}, or <20 for non-SIMCA engines)."
+            )
 
         return self
 
@@ -379,6 +428,23 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         n = X.shape[0]
 
         min_class_count = int(min(np.sum(y == c) for c in classes))
+        # Phase-A fix 5: StratifiedKFold cannot split a singleton class. If any
+        # class has fewer than 2 rows, raise a clear error rather than letting
+        # sklearn emit an opaque "n_splits=1" message downstream.
+        if min_class_count < 2:
+            raise ValueError(
+                f"cross_validate needs at least 2 samples per class to split "
+                f"(StratifiedKFold); smallest class has {min_class_count}."
+            )
+        # If a class is smaller than the requested n_splits, OOF coverage is
+        # reduced (clamped below); warn so the user knows.
+        if min_class_count < n_splits:
+            warnings.warn(
+                f"cross_validate: smallest class has {min_class_count} samples "
+                f"< requested n_splits={n_splits}; reducing to "
+                f"{max(2, min(n_splits, min_class_count))} folds "
+                f"(OOF coverage reduced)."
+            )
         n_splits = max(2, min(n_splits, min_class_count))
         skf = StratifiedKFold(n_splits=n_splits, shuffle=False)
 
@@ -527,6 +593,11 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         """
         nc = self.n_components
         if isinstance(nc, dict):
+            if label not in nc:
+                raise ValueError(
+                    f"n_components dict missing key {label!r} "
+                    f"(have: {sorted(nc.keys())})"
+                )
             return int(nc[label])
         return int(nc)
 
@@ -610,43 +681,75 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         return best_nc
 
     def _cross_fit_null(
-        self, X_scaled: np.ndarray, builder_name: str, score_method: str
+        self,
+        X_raw: np.ndarray,
+        builder_name: str,
+        score_method: str,
+        scaling: str,
+        reuse_scaler=None,
     ) -> np.ndarray:
         """Build the cross-fit "normality" null array for one class (train-only).
 
-        K-fold (5-fold, or fewer if the class is small) on the class's *scaled*
+        K-fold (5-fold, or fewer if the class is small) on the class's RAW
         training rows; for each fold, fit a fresh engine (built via
-        :func:`~spectral_predict.contamination.get_one_class_model`) on the
-        other folds and score the held-out fold with the pinned
-        ``score_method``. Collects the out-of-fold "higher = more normal"
-        scores as the empirical null (spec section 5.3 / task A4). Failed fold
-        fits are silently skipped (spec).
+        :func:`~spectral_predict.contamination.get_one_class_model`, forwarding
+        ``self.engine_params``) on the other folds and score the held-out fold
+        with the pinned ``score_method``. Collects the out-of-fold "higher =
+        more normal" scores as the empirical null (spec section 5.3 / task A4).
+        Failed fold fits are silently skipped (spec).
+
+        Per-fold scaling (Phase-A fix 6, leakage fix for ``scaling="per_class"``)
+        is applied INSIDE each fold so a held-out null-fold row never influenced
+        the scaler that scores it:
+
+        - ``scaling="per_class"``: a fresh :class:`StandardScaler` is fit on the
+          fold-train rows only, then used to transform BOTH fold-train and
+          fold-test before the engine is fit / scores are computed.
+        - ``scaling="global"``: the already-fit ``reuse_scaler`` (the train-level
+          global scaler) is applied to both fold-train and fold-test.
+        - ``scaling="none"``: rows are passed through unscaled.
 
         Parameters
         ----------
-        X_scaled : ndarray of shape (n_class, n_features)
-            This class's already-scaled training rows (scaling was applied by
-            :meth:`fit` upstream, train-only).
+        X_raw : ndarray of shape (n_class, n_features)
+            This class's RAW (unscaled) training rows.
         builder_name : str
             One-class model name understood by ``get_one_class_model``.
         score_method : str
             sklearn method name returning the engine's "higher = more normal"
             score (pinned per engine in :data:`_NON_SIMCA_ENGINES`).
+        scaling : str
+            Scaling mode (``"per_class"`` / ``"global"`` / ``"none"``).
+        reuse_scaler : fitted StandardScaler, optional
+            The already-fit global scaler, used only when ``scaling="global"``;
+            ignored otherwise.
 
         Returns
         -------
         null : ndarray of shape (m,), sorted ascending
             Out-of-fold scores; ``m`` ~= ``n_class`` (fewer if folds failed).
         """
-        n = X_scaled.shape[0]
+        n = X_raw.shape[0]
         n_splits = min(5, n)
         kf = KFold(n_splits=n_splits, shuffle=False)
         scores_list = []
-        for train_idx, test_idx in kf.split(X_scaled):
+        for train_idx, test_idx in kf.split(X_raw):
+            X_tr, X_te = X_raw[train_idx], X_raw[test_idx]
             try:
-                fold_engine = get_one_class_model(builder_name)
-                fold_engine.fit(X_scaled[train_idx])
-                fold_scores = getattr(fold_engine, score_method)(X_scaled[test_idx])
+                if scaling == "per_class":
+                    fold_scaler = StandardScaler().fit(X_tr)
+                    X_tr_s = fold_scaler.transform(X_tr)
+                    X_te_s = fold_scaler.transform(X_te)
+                elif scaling == "global":
+                    X_tr_s = reuse_scaler.transform(X_tr)
+                    X_te_s = reuse_scaler.transform(X_te)
+                else:  # "none"
+                    X_tr_s, X_te_s = X_tr, X_te
+                fold_engine = get_one_class_model(
+                    builder_name, **(self.engine_params or {})
+                )
+                fold_engine.fit(X_tr_s)
+                fold_scores = getattr(fold_engine, score_method)(X_te_s)
             except Exception:
                 continue  # spec: skip failed folds
             scores_list.extend(np.asarray(fold_scores).ravel().tolist())
@@ -754,13 +857,16 @@ def multiclass_simca_metrics(y_true, A, classes) -> dict:
         exact_set_rate = float(np.mean(exact))
 
     # --- efficiency: geomean of mean sensitivity / mean specificity --------
-    sens_values = list(per_class_sensitivity.values())
-    spec_values = list(per_class_specificity.values())
-    if K == 0:
+    # Phase-A fix 3: use nanmean so an absent class (NaN sensitivity) does not
+    # collapse efficiency to NaN. Return NaN only if ALL sensitivities or ALL
+    # specificities are NaN.
+    sens_values = np.asarray(list(per_class_sensitivity.values()), dtype=np.float64)
+    spec_values = np.asarray(list(per_class_specificity.values()), dtype=np.float64)
+    if K == 0 or np.all(np.isnan(sens_values)) or np.all(np.isnan(spec_values)):
         efficiency = float("nan")
     else:
-        mean_sens = float(np.mean(sens_values))
-        mean_spec = float(np.mean(spec_values))
+        mean_sens = float(np.nanmean(sens_values))
+        mean_spec = float(np.nanmean(spec_values))
         if np.isfinite(mean_sens) and np.isfinite(mean_spec):
             efficiency = float(np.sqrt(mean_sens * mean_spec))
         else:
@@ -873,16 +979,36 @@ def novelty_tradeoff_auc(y_true, P, classes) -> float:
     own_cols = np.array([class_to_col[y_true[i]] for i in known_idx], dtype=int)
     known_own_p = P[known_idx, own_cols]
 
+    # Phase-A fix 4: exclude known samples whose own-class p-value is NaN
+    # (e.g. their own class is unmodelable) from the false-rejection rate —
+    # otherwise a NaN own-p would never count as a false rejection but would
+    # still inflate the denominator.
+    known_finite_mask = np.isfinite(known_own_p)
+    known_own_p_finite = known_own_p[known_finite_mask]
+
     novel_idx = np.where(novel_mask)[0]
     novel_P = P[novel_idx]
 
-    thresholds = np.unique(np.concatenate([P.ravel(), [0.0, 1.0]]))
+    # Build the threshold sweep from FINITE p-values only so an all-NaN
+    # (unmodelable) column does not pollute np.unique with a NaN threshold
+    # (which would never compare correctly and collapse the AUC to 0).
+    finite_p = P[np.isfinite(P)]
+    thresholds = np.unique(np.concatenate([finite_p.ravel(), [0.0, 1.0]]))
 
     false_rej_rates = np.empty(thresholds.shape[0], dtype=np.float64)
     novelty_rates = np.empty(thresholds.shape[0], dtype=np.float64)
     for t, alpha in enumerate(thresholds):
-        false_rej_rates[t] = float(np.mean(known_own_p < alpha))
-        novelty_rates[t] = float(np.mean(np.all(novel_P < alpha, axis=1)))
+        if known_own_p_finite.shape[0] == 0:
+            false_rej_rates[t] = 0.0
+        else:
+            false_rej_rates[t] = float(np.mean(known_own_p_finite < alpha))
+        # Treat NaN p-values as "never accept": a NaN is anomalous, so it
+        # contributes True to the per-sample "rejected by every class" novelty
+        # test. Without this an all-NaN unmodelable column forces all() to
+        # False and collapses the novelty rate to 0.
+        novelty_rates[t] = float(
+            np.mean(np.all(np.isnan(novel_P) | (novel_P < alpha), axis=1))
+        )
 
     order = np.argsort(false_rej_rates, kind="stable")
     fr = false_rej_rates[order]

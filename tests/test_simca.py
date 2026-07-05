@@ -416,3 +416,63 @@ class TestPersistenceA8:
         save_model(m, None, meta, fp)
         with pytest.raises(NotImplementedError):
             predict_with_model(load_model(fp), X, validate_wavelengths=False)
+
+
+class TestPhaseAHardening:
+    """Phase-A review-gate fixes (Codex + DeepSeek + Kimi 3-family panel):
+    layered n_components-aware calibration floor + NaN-metric bugs + engine_params.
+    """
+
+    def test_nonsimca_requires_20_to_reject(self):
+        # DeepSeek C1: empirical p floor is 1/(m+1); at m<20 it exceeds alpha=0.05
+        # so non-SIMCA engines can never reject -> such classes are unmodelable.
+        X, y = _blobs([15, 60, 60])
+        m = MultiClassClassModel(
+            engine="ocsvm", scaling="none", min_class_samples=10
+        ).fit(X, y)
+        assert 0 in m.unmodelable_          # n=15 < 20 -> can't reject -> unmodelable
+        assert 1 not in m.unmodelable_ and 2 not in m.unmodelable_
+
+    def test_simca_smalln_warns_but_models(self):
+        # DD-SIMCA over-rejects at small n: warn (n_components-aware) but still model.
+        X, y = _blobs([15, 60, 60])   # n=15 < max(20, 5*5=25)
+        with pytest.warns(UserWarning):
+            m = MultiClassClassModel(
+                engine="pca-simca", n_components=5, scaling="none", min_class_samples=10
+            ).fit(X, y)
+        assert 0 not in m.unmodelable_    # modeled, just warned
+
+    def test_all_unmodelable_raises(self):
+        X, y = _blobs([5, 6, 7])          # all below hard floor 10
+        with pytest.raises(ValueError):
+            MultiClassClassModel(engine="pca-simca", min_class_samples=10).fit(X, y)
+
+    def test_engine_params_forwarded(self):
+        X, y = _blobs([60, 60, 60])
+        m = MultiClassClassModel(
+            engine="isolation-forest", engine_params={"n_estimators": 37}, scaling="none"
+        ).fit(X, y)
+        assert m.models_[0].n_estimators == 37
+
+    def test_efficiency_ignores_absent_class(self):
+        # class 2 present in `classes` but absent from y_true -> its sensitivity is
+        # NaN; efficiency must stay finite (nanmean, not mean).
+        y = np.array([0, 0, 1, 1])
+        A = np.array(
+            [[True, False, False], [True, False, False],
+             [False, True, False], [False, True, False]]
+        )
+        met = multiclass_simca_metrics(y, A, [0, 1, 2])
+        assert np.isnan(met["per_class_sensitivity"][2])
+        assert np.isfinite(met["efficiency"])
+
+    def test_novelty_auc_with_unmodelable_nan_column(self):
+        # An all-NaN (unmodelable) class column must not collapse the AUC to 0.
+        classes = [0, 1]
+        y = np.array([0] * 50 + [9] * 50)
+        P = np.full((100, 2), np.nan)
+        P[:50, 0] = 0.9      # known-0 accepted by class 0
+        P[50:, 0] = 0.01     # novel low on class 0
+        # class 1 column stays all-NaN (unmodelable)
+        auc = novelty_tradeoff_auc(y, P, classes)
+        assert 0.0 <= auc <= 1.0 and auc >= 0.8
