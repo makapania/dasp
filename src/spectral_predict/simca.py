@@ -113,6 +113,31 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     engine_params : dict, optional
         Forward-compatibility hook for per-engine hyperparameters (unused by
         the ``"pca-simca"`` engine in A2).
+    variable_selection : str or None, default=None
+        Optional per-class prefilter computed TRAIN-ONLY inside :meth:`fit`
+        and applied to every per-class scaler / PCA / engine (task B3). When
+        ``None`` (default) no selection is applied and behavior is
+        byte-identical to the un-prefiltered model. Supported values:
+
+        - ``"wold_modeling"`` / ``"wold_discriminating"`` / ``"wold_balanced"``:
+          classical Wold (1976) modeling / discriminating / balanced power
+          (task B1) via :func:`wold_variable_selection`. Tagged
+          ``varsel_path_ = "wold"``.
+        - ``"importance"``: supervised per-feature importance from
+          :func:`~spectral_predict.unified_bayesian.compute_importances` on the
+          genuine multi-class label (``task_type="classification"``). Tagged
+          ``varsel_path_ = "supervised"``.
+        - Any other string raises :class:`NotImplementedError` at fit time
+          (the fuller supervised method set — spa/cars/ga/... — is enumerated
+          in the C search layer, not the model layer).
+    n_select : int or None, default=None
+        Number of variables to keep when ``variable_selection`` is set. If an
+        int, the top-``n_select`` variables are kept (by Wold score / by
+        importance). If ``None``, a variable is kept when its score is
+        ``>= mean(score)``.
+    varsel_model_name : str, default="RandomForest"
+        Model name forwarded to :func:`compute_importances` for the supervised
+        path (unused by the Wold modes).
 
     Attributes
     ----------
@@ -135,6 +160,16 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     global_scaler_ : StandardScaler or None
         Single scaler fit on all training rows. Populated only under
         ``scaling="global"``; ``None`` otherwise.
+    varsel_mask_ : ndarray or None
+        Boolean variable-selection mask of shape ``(n_features,)`` computed
+        train-only inside :meth:`fit` when ``variable_selection`` is set; the
+        per-class scalers / PCA / engines are fit on ``X[:, varsel_mask_]``
+        and :meth:`decision_matrix` masks its input the same way. ``None`` when
+        ``variable_selection is None`` (no prefiltering).
+    varsel_path_ : str
+        Tag identifying which variable-selection path ran at fit time:
+        ``"none"`` (no selection), ``"wold"`` (Wold MPOW/DPOW/Balanced), or
+        ``"supervised"`` (importance-based prefilter).
     """
 
     def __init__(
@@ -145,6 +180,9 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         scaling: str = "per_class",
         min_class_samples: int = 10,
         engine_params: dict | None = None,
+        variable_selection: str | None = None,
+        n_select: int | None = None,
+        varsel_model_name: str = "RandomForest",
     ):
         self.engine = engine
         self.alpha = alpha
@@ -152,6 +190,9 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         self.scaling = scaling
         self.min_class_samples = min_class_samples
         self.engine_params = engine_params
+        self.variable_selection = variable_selection
+        self.n_select = n_select
+        self.varsel_model_name = varsel_model_name
 
     def fit(self, X, y):
         """Fit one per-class membership model on each class's rows only.
@@ -185,13 +226,72 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 f"{sorted(_NON_SIMCA_ENGINES)}."
             )
 
+        # --- variable-selection prefilter (task B3, train-only) --------------
+        # Compute the mask on the FULL-width (X, y) BEFORE any per-class work;
+        # then every per-class scaler / PCA / engine / calibration below is fit
+        # on the SELECTED subspace (X_fit). mask=None means no selection and is
+        # byte-identical to the pre-B3 behavior.
+        self.varsel_mask_: np.ndarray | None = None
+        self.varsel_path_: str = "none"
+        if self.variable_selection is not None:
+            if self.variable_selection in (
+                "wold_modeling",
+                "wold_discriminating",
+                "wold_balanced",
+            ):
+                # Map "wold_<mode>" -> "<mode>".
+                wold_mode = self.variable_selection.split("_", 1)[1]
+                # Wold needs an int n_components; "per_class_cv" falls back to 5
+                # for the varsel PCA.
+                _varsel_nc = (
+                    self.n_components
+                    if isinstance(self.n_components, (int, np.integer))
+                    else 5
+                )
+                self.varsel_mask_ = wold_variable_selection(
+                    X,
+                    y,
+                    mode=wold_mode,
+                    n_components=_varsel_nc,
+                    n_select=self.n_select,
+                    scaling=self.scaling,
+                )
+                self.varsel_path_ = "wold"
+            elif self.variable_selection == "importance":
+                from spectral_predict.unified_bayesian import compute_importances
+
+                imp = compute_importances(
+                    X,
+                    y,
+                    "importance",
+                    self.varsel_model_name,
+                    task_type="classification",
+                )
+                if isinstance(self.n_select, (int, np.integer)):
+                    n_select = int(self.n_select)
+                    top_idx = np.argsort(imp, kind="stable")[-n_select:]
+                    mask = np.zeros(imp.shape[0], dtype=bool)
+                    mask[top_idx] = True
+                    self.varsel_mask_ = mask
+                else:
+                    self.varsel_mask_ = imp >= np.mean(imp)
+                self.varsel_path_ = "supervised"
+            else:
+                raise NotImplementedError(
+                    f"variable_selection={self.variable_selection!r} is not "
+                    "wired at the model layer yet; the full supervised method "
+                    "set is enumerated in the C search layer. Model-layer "
+                    "supervised currently supports 'importance'."
+                )
+        X_fit = X[:, self.varsel_mask_] if self.varsel_mask_ is not None else X
+
         # --- scaling setup (all scalers fit train-only inside fit) ------------
         # scalers_: {class_label: StandardScaler} populated only under per_class;
         # global_scaler_: single StandardScaler populated only under global.
         self.scalers_: dict = {}
         self.global_scaler_ = None
         if self.scaling == "global":
-            self.global_scaler_ = StandardScaler().fit(X)
+            self.global_scaler_ = StandardScaler().fit(X_fit)
 
         # --- class registry (sorted, dtype-preserving) -----------------------
         self.classes_ = np.unique(y)
@@ -208,7 +308,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         is_simca = self.engine == "pca-simca"
 
         for c in self.classes_:
-            X_c = X[y == c]
+            X_c = X_fit[y == c]
             n_class = X_c.shape[0]
             if n_class < self.min_class_samples:
                 # Too few rows for a reliable MoM chi^2 fit / cross-fit null:
@@ -248,14 +348,14 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                     # for class c: per_class -> transform ALL X by class c's
                     # scaler; global -> the global scaler; none -> raw X.
                     if self.scaling == "per_class":
-                        X_s = self.scalers_[c].transform(X)
+                        X_s = self.scalers_[c].transform(X_fit)
                     elif self.scaling == "global":
-                        X_s = self.global_scaler_.transform(X)
+                        X_s = self.global_scaler_.transform(X_fit)
                     else:  # "none"
-                        X_s = X
+                        X_s = X_fit
                     y_oc = np.where(y == c, 1, -1)
                     n_components_c = self._tune_per_class_n_components(
-                        X_s, y_oc, n_class, X.shape[1]
+                        X_s, y_oc, n_class, X_fit.shape[1]
                     )
                 else:
                     n_components_c = self._n_components_for(c)
@@ -326,6 +426,8 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             (``K = len(classes_)``).
         """
         X = np.asarray(X, dtype=np.float64)
+        if getattr(self, "varsel_mask_", None) is not None:
+            X = X[:, self.varsel_mask_]
         n_samples = X.shape[0]
         K = len(self.classes_)
         P = np.full((n_samples, K), np.nan, dtype=np.float64)
@@ -464,6 +566,9 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 scaling=self.scaling,
                 min_class_samples=self.min_class_samples,
                 engine_params=self.engine_params,
+                variable_selection=self.variable_selection,
+                n_select=self.n_select,
+                varsel_model_name=self.varsel_model_name,
             )
             fold_model.fit(X[train_idx], y[train_idx])
 
@@ -555,6 +660,9 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                     scaling=self.scaling,
                     min_class_samples=self.min_class_samples,
                     engine_params=self.engine_params,
+                    variable_selection=self.variable_selection,
+                    n_select=self.n_select,
+                    varsel_model_name=self.varsel_model_name,
                 )
                 held_out.fit(X[train_mask], y[train_mask])
                 preds = held_out.predict(X[y == c])
@@ -575,6 +683,9 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 scaling=self.scaling,
                 min_class_samples=self.min_class_samples,
                 engine_params=self.engine_params,
+                variable_selection=self.variable_selection,
+                n_select=self.n_select,
+                varsel_model_name=self.varsel_model_name,
             )
             model.fit(X, y)
             preds = model.predict(external_X)

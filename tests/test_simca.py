@@ -217,6 +217,129 @@ class TestWoldPlotDataB2:
         )
 
 
+def _novel_split(seed=0, n_features=30, sep=14.0, n_far=56, n_inlier=24):
+    """3 known graded classes (train) + an EXTERNAL novel set that is a mixture
+    of broadly-shifted far-novel samples and a minority of genuine class-2-like
+    inliers, so the external novelty rate is non-trivial (~0.73 baseline, not a
+    trivial 1.0) — making the supervised-varsel novelty guard discriminating."""
+    rng = np.random.RandomState(seed)
+    strength = np.geomspace(sep, sep / 8.0, n_features)
+    loading = rng.normal(size=n_features)
+    Xs, ys = [], []
+    for k in range(3):
+        X = (
+            rng.normal(scale=0.3, size=(80, n_features))
+            + rng.normal(size=(80, 1)) * loading
+            + (k + 1) * strength
+        )
+        Xs.append(X)
+        ys.append(np.full(80, k))
+    Xtr = np.vstack(Xs)
+    ytr = np.concatenate(ys)
+    far = (
+        rng.normal(scale=0.3, size=(n_far, n_features))
+        + rng.normal(size=(n_far, 1)) * loading
+        + 6.0 * strength
+    )
+    inl = (
+        rng.normal(scale=0.3, size=(n_inlier, n_features))
+        + rng.normal(size=(n_inlier, 1)) * loading
+        + 3.0 * strength
+    )
+    return Xtr, ytr, np.vstack([far, inl])
+
+
+class TestVarselIntegrationB3:
+    """B3: variable_selection integration on MultiClassClassModel — Wold modes
+    (from B1) and a supervised prefilter on the genuine multi-class label,
+    tagged varsel_path_, mask computed train-only at fit and applied before the
+    per-class models. The supervised path is gated by an external-novel-class
+    guard: it must NOT degrade novelty below the full-spectra baseline (spec §5
+    guardrail / §9.9).
+    """
+
+    def test_no_varsel_is_default_and_untagged(self):
+        X, y = _blobs([40, 40, 40])
+        m = MultiClassClassModel(n_components=3, scaling="none").fit(X, y)
+        assert m.varsel_path_ == "none"
+        assert m.varsel_mask_ is None
+
+    def test_wold_varsel_selects_subspace_and_predicts_on_full_width(self):
+        X, y, _ = _graded([60, 60, 60], seed=0)
+        m = MultiClassClassModel(
+            n_components=3,
+            scaling="none",
+            variable_selection="wold_balanced",
+            n_select=10,
+        ).fit(X, y)
+        assert m.varsel_path_ == "wold"
+        assert m.varsel_mask_.shape == (X.shape[1],)
+        assert m.varsel_mask_.dtype == bool
+        assert int(m.varsel_mask_.sum()) == 10
+        # per-class engines are fit on the 10-var subspace
+        for c in m.classes_:
+            if c not in m.unmodelable_:
+                assert m.models_[c].pca_.n_features_in_ == 10
+        # decision_matrix / predict accept FULL-width X and mask internally
+        P, A = m.decision_matrix(X)
+        assert P.shape == (len(X), 3)
+        assert len(m.predict(X)) == len(X)
+
+    def test_supervised_varsel_tagged_and_masked(self):
+        X, y, _ = _graded([60, 60, 60], seed=1)
+        m = MultiClassClassModel(
+            n_components=3,
+            scaling="none",
+            variable_selection="importance",
+            n_select=12,
+            varsel_model_name="RandomForest",
+        ).fit(X, y)
+        assert m.varsel_path_ == "supervised"
+        assert int(m.varsel_mask_.sum()) == 12
+        for c in m.classes_:
+            if c not in m.unmodelable_:
+                assert m.models_[c].pca_.n_features_in_ == 12
+        assert m.decision_matrix(X)[0].shape == (len(X), 3)
+
+    def test_supervised_prefilter_does_not_degrade_novelty(self):
+        # §9.9 guard (empirically probed: full~0.73, supervised~0.74, |gap|<0.03).
+        Xtr, ytr, Xnov = _novel_split(seed=0)
+        params = dict(engine="pca-simca", n_components=5, scaling="per_class")
+        full = MultiClassClassModel(**params).evaluate_novelty(
+            Xtr, ytr, mode="external", external_X=Xnov
+        )
+        sup = MultiClassClassModel(
+            variable_selection="importance",
+            n_select=12,
+            varsel_model_name="RandomForest",
+            **params,
+        ).evaluate_novelty(Xtr, ytr, mode="external", external_X=Xnov)
+        assert 0.5 <= full <= 0.95, f"baseline novelty {full:.3f} not a real test"
+        assert sup >= full - 0.10, f"supervised {sup:.3f} degraded vs full {full:.3f}"
+
+    def test_unimplemented_supervised_method_raises(self):
+        # Extensible dispatcher: model-layer supervised path ships "importance";
+        # the fuller method set (spa/cars/ga/...) is enumerated in the C search
+        # layer. An unwired name raises rather than silently mis-selecting.
+        X, y, _ = _graded([50, 50, 50], seed=4)
+        with pytest.raises((NotImplementedError, ValueError)):
+            MultiClassClassModel(
+                n_components=3, scaling="none", variable_selection="spa", n_select=10
+            ).fit(X, y)
+
+    def test_wold_varsel_recomputed_per_fold(self):
+        # cross_validate clones via constructor -> the mask is recomputed on each
+        # fold-train only (structural leakage safety); coverage is complete.
+        X, y, _ = _graded([60, 60, 60], seed=2)
+        res = MultiClassClassModel(
+            n_components=3,
+            scaling="none",
+            variable_selection="wold_balanced",
+            n_select=10,
+        ).cross_validate(X, y, n_splits=5)
+        assert len(res["labels"]) == len(X)
+
+
 class TestMultiClassCoreA2:
     def test_decision_matrix_shapes_and_bounds(self):
         X, y = _blobs([40, 40, 40])
