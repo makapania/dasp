@@ -5,11 +5,11 @@ models (SIMCA flagship) evaluated at a *global* level ``alpha``, producing a
 per-sample x per-class decision matrix and a single / multiple / novel summary
 label.
 
-This is task **A2** of the T-31 build: the core orchestrator with the SIMCA
-(``"pca-simca"``) engine and ``scaling="none"``. Per-class scaling modes (A3),
-non-SIMCA engines (A4), per-class CV ``n_components`` tuning (A5), novelty
-evaluation (A6), dedicated metrics (A7), and ``.dasp`` persistence (A8) arrive
-in subsequent tasks.
+This is task **A2 + A3** of the T-31 build: the core orchestrator with the
+SIMCA (``"pca-simca"``) engine and three column-scaling modes
+(``scaling="per_class"`` is the textbook default). Non-SIMCA engines (A4),
+per-class CV ``n_components`` tuning (A5), novelty evaluation (A6), dedicated
+metrics (A7), and ``.dasp`` persistence (A8) arrive in subsequent tasks.
 
 References
 ----------
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.preprocessing import StandardScaler
 
 from spectral_predict.contamination import PCASIMCA
 
@@ -50,11 +51,20 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         PCA components for the ``"pca-simca"`` engine — either one int applied
         to every class or a ``{class_label: int}`` mapping. The string
         ``"per_class_cv"`` (per-class CV tuning) lands in A5.
-    scaling : {"none", "per_class", "global"}, default="none"
-        Column-scaling mode. A2 implements only ``"none"`` (X is passed
-        through unchanged — :class:`PCASIMCA` does its own internal PCA, so no
-        column scaling is applied). ``"per_class"`` and ``"global"`` arrive in
-        A3, which also flips the constructor default to ``"per_class"``.
+    scaling : {"none", "per_class", "global"}, default="per_class"
+        Column-scaling mode (spec section 5.5). All scalers are
+        :class:`~sklearn.preprocessing.StandardScaler` instances fit train-only
+        inside :meth:`fit`.
+
+        - ``"per_class"`` (SIMCA-textbook default): one scaler per class, fit on
+          THAT class's rows only, then used to autoscale that class's rows
+          before the per-class PCA. At decision time, column ``k`` transforms X
+          with class ``k``'s scaler before scoring. Stored in ``scalers_``.
+        - ``"global"``: a single scaler fit on ALL training rows across classes
+          (same scaler applied to every class column — useful for cross-engine
+          comparability). Stored in ``global_scaler_``.
+        - ``"none"``: X is passed through unchanged (functionally identical to
+          a bare :class:`PCASIMCA` per class).
     min_class_samples : int, default=10
         Minimum training rows a class must have to be modeled (the MoM chi^2
         fit / calibration is brittle below this; spec section 5.1 / 8). Classes
@@ -74,6 +84,13 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         absent from this dict.
     unmodelable_ : set
         Class labels with fewer than ``min_class_samples`` training rows.
+    scalers_ : dict
+        Per-class :class:`~sklearn.preprocessing.StandardScaler` instances,
+        keyed by class label. Populated only under ``scaling="per_class"``;
+        empty dict otherwise.
+    global_scaler_ : StandardScaler or None
+        Single scaler fit on all training rows. Populated only under
+        ``scaling="global"``; ``None`` otherwise.
     """
 
     def __init__(
@@ -81,7 +98,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         engine: str = "pca-simca",
         alpha: float = 0.05,
         n_components: int | dict | str = 5,
-        scaling: str = "none",
+        scaling: str = "per_class",
         min_class_samples: int = 10,
         engine_params: dict | None = None,
     ):
@@ -112,12 +129,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         y = np.asarray(y)
 
         # --- validate constructor choices (sklearn-style: in fit) ------------
-        if self.scaling in ("per_class", "global"):
-            raise NotImplementedError(
-                f'scaling="{self.scaling}" is implemented in task A3 of T-31; '
-                'use scaling="none" for now.'
-            )
-        if self.scaling != "none":
+        if self.scaling not in ("none", "per_class", "global"):
             raise ValueError(
                 f"Unknown scaling={self.scaling!r}; "
                 'expected "none", "per_class", or "global".'
@@ -129,6 +141,14 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                 "of T-31; pass an int or a {class_label: int} dict for now."
             )
 
+        # --- scaling setup (all scalers fit train-only inside fit) ------------
+        # scalers_: {class_label: StandardScaler} populated only under per_class;
+        # global_scaler_: single StandardScaler populated only under global.
+        self.scalers_: dict = {}
+        self.global_scaler_ = None
+        if self.scaling == "global":
+            self.global_scaler_ = StandardScaler().fit(X)
+
         # --- class registry (sorted, dtype-preserving) -----------------------
         self.classes_ = np.unique(y)
         self.unmodelable_: set = set()
@@ -138,15 +158,24 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             X_c = X[y == c]
             if X_c.shape[0] < self.min_class_samples:
                 # Too few rows for a reliable MoM chi^2 fit: mark unmodelable,
-                # keep the decision-matrix column, fit no engine (spec section 8).
+                # keep the decision-matrix column, fit no scaler/engine (spec §8).
                 self.unmodelable_.add(c)
                 continue
+
+            # Apply this class's scaling mode (train-only fit) before PCA.
+            if self.scaling == "per_class":
+                self.scalers_[c] = StandardScaler().fit(X_c)
+                X_c_scaled = self.scalers_[c].transform(X_c)
+            elif self.scaling == "global":
+                X_c_scaled = self.global_scaler_.transform(X_c)
+            else:  # "none" — X passes through unchanged
+                X_c_scaled = X_c
 
             n_components_c = self._n_components_for(c)
             if self.engine == "pca-simca":
                 self.models_[c] = PCASIMCA(
                     n_components=n_components_c, alpha=self.alpha
-                ).fit(X_c)
+                ).fit(X_c_scaled)
             else:
                 raise NotImplementedError(
                     f"engine={self.engine!r} is implemented in task A4 of T-31; "
@@ -182,7 +211,14 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         for k, c in enumerate(self.classes_):
             if c in self.unmodelable_:
                 continue  # leave P[:, k] = NaN and A[:, k] = False
-            P[:, k] = self.models_[c].p_joint(X)
+            # Apply the same scaling mode used at fit time before scoring.
+            if self.scaling == "per_class":
+                X_eval = self.scalers_[c].transform(X)
+            elif self.scaling == "global":
+                X_eval = self.global_scaler_.transform(X)
+            else:  # "none"
+                X_eval = X
+            P[:, k] = self.models_[c].p_joint(X_eval)
             A[:, k] = P[:, k] >= self.alpha
 
         return P, A

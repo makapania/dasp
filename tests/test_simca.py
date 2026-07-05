@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from spectral_predict.contamination import PCASIMCA
 from spectral_predict.simca import MultiClassClassModel
 
 
@@ -106,3 +107,59 @@ class TestMultiClassCoreA2:
         assert rates[1] <= 0.15, f"n=30 class reject={rates[1]:.3f}"
         # and small-n over-rejects at least as much as well-sampled n
         assert rates[1] >= rates[2] - 0.02, f"{rates[1]:.3f} vs {rates[2]:.3f}"
+
+
+class TestScalingModesA3:
+    """A3: scaling modes (none / per_class / global), all fit train-only inside fit.
+
+    per_class is the SIMCA-textbook default (column-autoscale within each class);
+    none reproduces bare PCASIMCA exactly (the functional-equivalence anchor, §8/§9.3);
+    global fits one scaler across all classes for cross-engine comparability.
+    """
+
+    def test_default_scaling_is_per_class(self):
+        # A3 flips the constructor default from "none" (A2) to "per_class".
+        assert MultiClassClassModel().scaling == "per_class"
+
+    def test_functional_equivalence_scaling_none(self):
+        # A single-class model with scaling="none" is identical (accept/reject and
+        # p-value) to a bare PCASIMCA fit on the same rows.
+        rng = np.random.RandomState(5)
+        X = rng.normal(size=(60, 20)) + _center(0)
+        y = np.zeros(60, dtype=int)
+        m = MultiClassClassModel(
+            engine="pca-simca", alpha=0.05, n_components=3, scaling="none"
+        ).fit(X, y)
+        ref = PCASIMCA(n_components=3, alpha=0.05).fit(X)
+        X_test = rng.normal(size=(200, 20)) + _center(0)
+        P, A = m.decision_matrix(X_test)
+        np.testing.assert_array_equal(P[:, 0], ref.p_joint(X_test))
+        np.testing.assert_array_equal(A[:, 0], ref.predict(X_test) == 1)
+
+    def test_per_class_scaler_fit_on_class_rows_only(self):
+        # per_class: one StandardScaler per class, fit on that class's rows only.
+        X, y = _blobs([40, 40, 40])
+        m = MultiClassClassModel(n_components=3, scaling="per_class").fit(X, y)
+        for c in m.classes_:
+            assert c in m.scalers_
+            np.testing.assert_allclose(m.scalers_[c].mean_, X[y == c].mean(axis=0))
+
+    def test_global_scaler_fit_on_all_rows(self):
+        # global: one StandardScaler fit on all training rows across classes.
+        X, y = _blobs([40, 40, 40])
+        m = MultiClassClassModel(n_components=3, scaling="global").fit(X, y)
+        np.testing.assert_allclose(m.global_scaler_.mean_, X.mean(axis=0))
+
+    def test_per_class_scaling_changes_decisions(self):
+        # On features with wildly different scales, per_class autoscaling changes
+        # the decision vs no scaling — proving the scaler is actually applied.
+        rng = np.random.RandomState(6)
+        scale = np.geomspace(1.0, 1000.0, 20)
+        X = rng.normal(size=(80, 20)) * scale + _center(0)
+        y = np.zeros(80, dtype=int)
+        X_test = rng.normal(size=(200, 20)) * scale + _center(0)
+        none = MultiClassClassModel(n_components=3, scaling="none").fit(X, y)
+        perc = MultiClassClassModel(n_components=3, scaling="per_class").fit(X, y)
+        _, a_none = none.decision_matrix(X_test)
+        _, a_perc = perc.decision_matrix(X_test)
+        assert not np.array_equal(a_none[:, 0], a_perc[:, 0])
