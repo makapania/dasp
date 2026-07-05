@@ -234,23 +234,54 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         self.varsel_mask_: np.ndarray | None = None
         self.varsel_path_: str = "none"
         if self.variable_selection is not None:
-            if self.variable_selection in (
+            n_features = X.shape[1]
+            # n_select sanity (Phase-B gate, Kimi H1/L8) — an empty (n_select=0)
+            # or negative-slice mask would surface as a confusing 0-feature
+            # DD-SIMCA error deep downstream.
+            if self.n_select is not None and int(self.n_select) <= 0:
+                raise ValueError(
+                    f"n_select must be a positive int or None, got {self.n_select!r}."
+                )
+            if isinstance(self.variable_selection, np.ndarray):
+                # Precomputed boolean-mask hook (Phase-B gate): the C search layer
+                # can wire ANY supervised method by computing the mask externally
+                # (on fold-train) and passing it in.
+                mask = np.asarray(self.variable_selection)
+                if mask.dtype != bool or mask.shape != (n_features,):
+                    raise ValueError(
+                        "precomputed variable_selection must be a boolean array "
+                        f"of shape ({n_features},), got dtype={mask.dtype} "
+                        f"shape={mask.shape}."
+                    )
+                self.varsel_mask_ = mask.copy()
+                self.varsel_path_ = "precomputed"
+            elif self.variable_selection in (
                 "wold_modeling",
                 "wold_discriminating",
                 "wold_balanced",
             ):
-                # Map "wold_<mode>" -> "<mode>".
-                wold_mode = self.variable_selection.split("_", 1)[1]
-                # Wold needs an int n_components; "per_class_cv" falls back to 5
-                # for the varsel PCA.
+                # Wold needs an int n_components; "per_class_cv"/dict falls back to
+                # 5 for the varsel PCA (warn — that is not each class's tuned nk).
                 _varsel_nc = (
                     self.n_components
                     if isinstance(self.n_components, (int, np.integer))
                     else 5
                 )
+                if not isinstance(self.n_components, (int, np.integer)):
+                    warnings.warn(
+                        f"Wold varsel needs an int n_components; n_components="
+                        f"{self.n_components!r} -> using {_varsel_nc} for the "
+                        "varsel PCA (not each class's tuned value)."
+                    )
+                # Estimate Wold power on MODELABLE classes only (Phase-B gate:
+                # Codex HIGH / Kimi M3) — a below-floor class cannot be PCA/KFold
+                # modeled and would crash varsel; its decision-matrix column is
+                # still preserved as unmodelable in the per-class loop below.
+                X_vs, y_vs = self._varsel_modelable_subset(X, y, _varsel_nc + 1)
+                wold_mode = self.variable_selection.split("_", 1)[1]
                 self.varsel_mask_ = wold_variable_selection(
-                    X,
-                    y,
+                    X_vs,
+                    y_vs,
                     mode=wold_mode,
                     n_components=_varsel_nc,
                     n_select=self.n_select,
@@ -260,16 +291,27 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             elif self.variable_selection == "importance":
                 from spectral_predict.unified_bayesian import compute_importances
 
-                imp = compute_importances(
-                    X,
-                    y,
-                    "importance",
-                    self.varsel_model_name,
-                    task_type="classification",
+                X_vs, y_vs = self._varsel_modelable_subset(X, y, 2)
+                imp = np.asarray(
+                    compute_importances(
+                        X_vs,
+                        y_vs,
+                        "importance",
+                        self.varsel_model_name,
+                        task_type="classification",
+                    ),
+                    dtype=np.float64,
                 )
+                # Guard non-finite importances (Phase-B gate, Kimi #7) — a NaN
+                # would make `imp >= mean(imp)` produce an arbitrary mask.
+                if not np.all(np.isfinite(imp)):
+                    raise ValueError(
+                        "supervised variable_selection produced non-finite "
+                        f"importances (varsel_model_name={self.varsel_model_name!r})."
+                    )
                 if isinstance(self.n_select, (int, np.integer)):
-                    n_select = int(self.n_select)
-                    top_idx = np.argsort(imp, kind="stable")[-n_select:]
+                    n_sel = int(self.n_select)
+                    top_idx = np.argsort(imp, kind="stable")[-n_sel:]
                     mask = np.zeros(imp.shape[0], dtype=bool)
                     mask[top_idx] = True
                     self.varsel_mask_ = mask
@@ -281,7 +323,14 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
                     f"variable_selection={self.variable_selection!r} is not "
                     "wired at the model layer yet; the full supervised method "
                     "set is enumerated in the C search layer. Model-layer "
-                    "supervised currently supports 'importance'."
+                    "supervised currently supports 'importance' (or pass a "
+                    "precomputed boolean mask array)."
+                )
+            # Empty-mask guard (Phase-B gate, Kimi H1).
+            if self.varsel_mask_ is not None and not self.varsel_mask_.any():
+                raise ValueError(
+                    "variable_selection produced an empty mask (no variable "
+                    f"selected); check n_select={self.n_select!r}."
                 )
         X_fit = X[:, self.varsel_mask_] if self.varsel_mask_ is not None else X
 
@@ -694,6 +743,27 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         raise ValueError(
             f"Unknown mode={mode!r}; expected 'loco' or 'external'."
         )
+
+    def _varsel_modelable_subset(self, X, y, min_rows: int):
+        """Rows of classes with >= ``min_rows`` samples, for varsel estimation.
+
+        A below-floor class cannot be PCA/KFold-modeled, so Wold power estimation
+        (and, for symmetry, the supervised importance model) is computed on the
+        modelable classes only — its decision-matrix column is still preserved as
+        unmodelable in :meth:`fit`'s per-class loop (Phase-B gate: Codex HIGH /
+        Kimi M3). Raises if no class clears ``min_rows`` (the same degenerate case
+        the per-class loop would otherwise raise on, surfaced earlier and
+        clearer).
+        """
+        classes, counts = np.unique(y, return_counts=True)
+        modelable = classes[counts >= min_rows]
+        if modelable.size == 0:
+            raise ValueError(
+                "no class has enough samples for variable selection "
+                f"(need >= {min_rows} rows per class)."
+            )
+        keep = np.isin(y, modelable)
+        return X[keep], y[keep]
 
     def _n_components_for(self, label) -> int:
         """Resolve ``n_components`` for a single class label.
@@ -1157,6 +1227,16 @@ def wold_modeling_power(X, n_components: int) -> np.ndarray:
     from the DD-SIMCA per-variable :math:`T^2 / Q` decomposition used by
     :class:`~spectral_predict.contamination.PCASIMCA` (spec §5.6).
 
+    .. note::
+        ``ddof=0`` is used for both ``s_resid`` and ``s_total``. The residual has
+        fewer effective degrees of freedom (``n - n_components - 1``) than the
+        raw variable (``n - 1``), so the two do NOT fully cancel and MPOW is
+        biased slightly UPWARD at small ``n`` / large ``n_components`` (~5 pp at
+        n=30/J=2, larger below that). This affects the absolute MPOW level (a
+        diagnostic), not — to first order — the variable RANKING that drives
+        selection. A dof-corrected residual std is a deferred refinement (see
+        the Phase-B gate notes / SESSION_LOG).
+
     Zero-variance columns (``s_total == 0``) return ``MPOW = 0.0`` (no variance
     to model) -- never NaN/inf (``np.errstate`` + mask guarded).
 
@@ -1175,7 +1255,7 @@ def wold_modeling_power(X, n_components: int) -> np.ndarray:
     X = np.asarray(X, dtype=np.float64)
     n_samples, n_features = X.shape
     nc = max(1, min(int(n_components), n_samples - 1, n_features))
-    pca = PCA(n_components=nc).fit(X)
+    pca = PCA(n_components=nc, random_state=0).fit(X)
     Xhat = pca.inverse_transform(pca.transform(X))
     E = X - Xhat
     s_resid = E.std(axis=0, ddof=0)
@@ -1200,10 +1280,19 @@ def _wold_cross_fit_own_rms(
     train-only scaling under ``scaling="per_class"``) and reconstructs the
     fold-test rows. Out-of-fold residuals are collected into a full
     ``(n_class, n_features)`` array and reduced as
-    ``sqrt(mean(resid**2, axis=0))`` -- the RMS ABOUT ZERO, NOT ``std``. Keeping
-    the mean in the residual is CRITICAL: the between-class mean offset must
-    survive so the DPOW ratio (cross / own) is meaningful (using ``std`` would
-    center it out and collapse DPOW toward 1, breaking the stability test).
+    ``sqrt(mean(resid**2, axis=0))`` -- the RMS ABOUT ZERO, i.e. the SIMCA
+    "residual standard deviation" convention (RMS of residuals, dof aside), NOT
+    the statistical ``std`` about the residual's own mean. This matters only for
+    the DPOW cross term (own-model residuals are ~zero-mean by construction, so
+    RMS == std there): when class-``c`` rows are scored on a foreign class-``j``
+    model, the residual carries a constant between-class mean OFFSET per variable,
+    which is exactly the discriminating signal. Taking ``std`` would subtract
+    that offset out, leaving only within-class scatter (≈ the own-model residual)
+    so the cross/own ratio collapses toward 1 — empirically verified on
+    mean-separated synthetic data (Spearman rank-stability fell to ~0 with
+    ``std`` vs ~0.93 with RMS). (Phase-B gate note: this is the intended
+    resolution of the std-vs-RMS ambiguity in the classical Wold formula; it is
+    surfaced to the user as a methodology decision.)
 
     Parameters
     ----------
@@ -1226,6 +1315,12 @@ def _wold_cross_fit_own_rms(
         Per-variable cross-fit RMS residual about zero.
     """
     n, n_features = Xc_raw.shape
+    # A class with < 2 rows cannot be K-fold cross-fit (KFold needs n_splits >= 2)
+    # nor PCA-modeled; return a zero RMS (its DPOW ratio then guards to 0). The
+    # fit-path modelable filter normally prevents this; this guards direct calls
+    # (Phase-B gate: Kimi M3).
+    if n < 2:
+        return np.zeros(n_features, dtype=np.float64)
     n_splits = min(5, n)
     kf = KFold(n_splits=n_splits, shuffle=False)
     residuals = np.zeros((n, n_features), dtype=np.float64)
@@ -1245,7 +1340,7 @@ def _wold_cross_fit_own_rms(
             X_te = X_te_raw
         n_tr = X_tr.shape[0]
         nc_fold = max(1, min(int(n_components), n_tr - 1, n_features))
-        pca = PCA(n_components=nc_fold).fit(X_tr)
+        pca = PCA(n_components=nc_fold, random_state=0).fit(X_tr)
         recon = pca.inverse_transform(pca.transform(X_te))
         residuals[test_idx] = X_te - recon
         filled[test_idx] = True
@@ -1274,9 +1369,28 @@ def wold_variable_powers(
     and ``cross_rms[c->j]`` is the RMS residual of class-``c`` rows reconstructed
     by class-``j`` 's PCA model. The RMS is taken ABOUT ZERO
     (``sqrt(mean(resid**2))``) -- NOT ``std`` -- so the between-class mean offset
-    survives (using ``std`` would center it out and collapse DPOW toward 1).
-    Where ``own_rms == 0`` the ratio is set to 0.0 (finite guard); non-finite
-    values also map to 0.0.
+    survives (see :func:`_wold_cross_fit_own_rms` for the full rationale).
+
+    **Aggregation and asymmetry (Phase-B gate — documented per spec §5.6):**
+
+    - **K>2 = one-vs-rest, non-symmetric.** ``DPOW[c]`` is class ``c``'s residual
+      inflation averaged over the ``K-1`` foreign models; ``DPOW[c]`` and
+      ``DPOW[j]`` for a pair ``(c, j)`` are computed independently and are NOT
+      symmetrized. The reported per-class DPOW is therefore "how class ``c`` is
+      distinguished from the rest", and the macro-average across classes weights
+      each ordered pair once. A symmetric variant (geomean of the two directions)
+      is a possible future option.
+    - **own = cross-fit, cross = full model — deliberate.** ``own_rms`` is
+      out-of-fold (cross-fit) while ``cross_rms`` uses class ``j``'s full PCA. This
+      removes the LARGE in-sample optimism that a full own-model would give (own
+      residuals on the exact rows the PCA was fit on are artificially tiny, which
+      would inflate every ratio); the residual ``(n-fold)/n`` sample-size
+      asymmetry is small by comparison. This matches the spec §5.6 formula (own =
+      cross-fit) and is NOT the classical in-sample Wold ratio.
+    - Where ``own_rms == 0`` (a variable perfectly modeled within class ``c``) the
+      ratio is set to 0.0 to avoid ``inf``; a genuinely discriminating variable
+      that is also perfectly modeled within-class is therefore under-reported in
+      that degenerate case (rare; documented). Non-finite values also map to 0.0.
 
     Parameters
     ----------
@@ -1344,7 +1458,7 @@ def wold_variable_powers(
         Xc = X[y == c]
         Xc_s = _to_class_space(Xc, c)
         nc = max(1, min(int(n_components), Xc.shape[0] - 1, n_features))
-        models[c] = PCA(n_components=nc).fit(Xc_s)
+        models[c] = PCA(n_components=nc, random_state=0).fit(Xc_s)
         modeling_power_per_class[c] = wold_modeling_power(Xc_s, n_components)
 
     # --- per-class DPOW (one-vs-rest cross residual-RMS ratio) -------------
@@ -1433,6 +1547,10 @@ def wold_variable_selection(
         raise ValueError(
             f"Unknown mode={mode!r}; expected 'modeling', 'discriminating', "
             f"or 'balanced'."
+        )
+    if n_select is not None and int(n_select) <= 0:
+        raise ValueError(
+            f"n_select must be a positive int or None, got {n_select!r}."
         )
     powers = wold_variable_powers(X, y, n_components=n_components, scaling=scaling)
     if mode == "modeling":

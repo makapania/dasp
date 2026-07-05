@@ -10,6 +10,8 @@ constructor default to "per_class").
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -302,20 +304,52 @@ class TestVarselIntegrationB3:
         assert m.decision_matrix(X)[0].shape == (len(X), 3)
 
     def test_supervised_prefilter_does_not_degrade_novelty(self):
-        # §9.9 guard (empirically probed: full~0.73, supervised~0.74, |gap|<0.03).
-        Xtr, ytr, Xnov = _novel_split(seed=0)
+        # §9.9 guard, STRENGTHENED per the Phase-B gate (MiniMax H2 / Kimi M6):
+        # multi-seed PAIRED comparison across several n_select values, deterministic
+        # (RF importances are seeded via build_model random_state=42, and all data
+        # is seeded). Assert the MEAN over-seeds gap does not degrade novelty by
+        # more than 0.05 for any n_select. Empirically probed: mean gaps
+        # {n_select 5: -0.029, 12: -0.004, 20: +0.001}; worst single-seed -0.088.
         params = dict(engine="pca-simca", n_components=5, scaling="per_class")
-        full = MultiClassClassModel(**params).evaluate_novelty(
-            Xtr, ytr, mode="external", external_X=Xnov
-        )
-        sup = MultiClassClassModel(
-            variable_selection="importance",
-            n_select=12,
-            varsel_model_name="RandomForest",
-            **params,
-        ).evaluate_novelty(Xtr, ytr, mode="external", external_X=Xnov)
-        assert 0.5 <= full <= 0.95, f"baseline novelty {full:.3f} not a real test"
-        assert sup >= full - 0.10, f"supervised {sup:.3f} degraded vs full {full:.3f}"
+        for n_select in (5, 12, 20):
+            gaps, fulls = [], []
+            for seed in range(10):
+                Xtr, ytr, Xnov = _novel_split(seed=seed)
+                full = MultiClassClassModel(**params).evaluate_novelty(
+                    Xtr, ytr, mode="external", external_X=Xnov
+                )
+                sup = MultiClassClassModel(
+                    variable_selection="importance",
+                    n_select=n_select,
+                    varsel_model_name="RandomForest",
+                    **params,
+                ).evaluate_novelty(Xtr, ytr, mode="external", external_X=Xnov)
+                gaps.append(sup - full)
+                fulls.append(full)
+            assert 0.6 <= np.mean(fulls) <= 0.9, (
+                f"baseline novelty {np.mean(fulls):.3f} not a real test"
+            )
+            assert np.mean(gaps) >= -0.05, (
+                f"n_select={n_select}: supervised degraded novelty by "
+                f"{-np.mean(gaps):.3f} (mean over 10 seeds)"
+            )
+
+    def test_precomputed_mask_hook(self):
+        # A boolean array is accepted directly as the mask (varsel_path_ =
+        # "precomputed") — the extensibility hook so the C search layer can wire
+        # ANY supervised method by computing the mask externally and passing it in.
+        X, y, _ = _graded([60, 60, 60], seed=3)
+        mask = np.zeros(X.shape[1], dtype=bool)
+        mask[[0, 1, 2, 3, 4]] = True
+        m = MultiClassClassModel(
+            n_components=3, scaling="none", variable_selection=mask
+        ).fit(X, y)
+        assert m.varsel_path_ == "precomputed"
+        np.testing.assert_array_equal(m.varsel_mask_, mask)
+        for c in m.classes_:
+            if c not in m.unmodelable_:
+                assert m.models_[c].pca_.n_features_in_ == 5
+        assert m.decision_matrix(X)[0].shape == (len(X), 3)
 
     def test_unimplemented_supervised_method_raises(self):
         # Extensible dispatcher: model-layer supervised path ships "importance";
@@ -327,17 +361,123 @@ class TestVarselIntegrationB3:
                 n_components=3, scaling="none", variable_selection="spa", n_select=10
             ).fit(X, y)
 
-    def test_wold_varsel_recomputed_per_fold(self):
-        # cross_validate clones via constructor -> the mask is recomputed on each
-        # fold-train only (structural leakage safety); coverage is complete.
+    def test_wold_varsel_recomputed_on_fold_train_only(self):
+        # STRENGTHENED leakage pin (Codex LOW): spy on wold_variable_selection and
+        # assert it is called once per fold on FOLD-TRAIN rows only (row count <
+        # full n), never on the full dataset — catches a regression that cached a
+        # full-data mask on self and reused it across folds.
+        import spectral_predict.simca as simca_mod
+
         X, y, _ = _graded([60, 60, 60], seed=2)
-        res = MultiClassClassModel(
-            n_components=3,
-            scaling="none",
-            variable_selection="wold_balanced",
-            n_select=10,
-        ).cross_validate(X, y, n_splits=5)
-        assert len(res["labels"]) == len(X)
+        n_total = len(X)
+        seen_row_counts = []
+        orig = simca_mod.wold_variable_selection
+
+        def _spy(X_arg, *a, **k):
+            seen_row_counts.append(np.asarray(X_arg).shape[0])
+            return orig(X_arg, *a, **k)
+
+        simca_mod.wold_variable_selection = _spy
+        try:
+            res = MultiClassClassModel(
+                n_components=3,
+                scaling="none",
+                variable_selection="wold_balanced",
+                n_select=10,
+            ).cross_validate(X, y, n_splits=5)
+        finally:
+            simca_mod.wold_variable_selection = orig
+        assert len(res["labels"]) == n_total
+        assert len(seen_row_counts) == 5  # once per fold
+        assert all(rc < n_total for rc in seen_row_counts), seen_row_counts
+
+
+class TestPhaseBGateFoldins:
+    """Phase-B multi-family gate fold-ins (Codex + Kimi + MiniMax): varsel
+    robustness (below-floor class crash, empty/invalid n_select), reproducibility,
+    balanced-score normalization, and non-finite importance guarding.
+    """
+
+    def test_wold_varsel_below_floor_class_does_not_crash(self):
+        # Codex HIGH / Kimi M3: Wold power estimation ran on ALL classes before
+        # the unmodelable floor, so a below-floor class hit KFold(n_splits=1) and
+        # crashed. Varsel must use only modelable classes; the small class is still
+        # preserved as an unmodelable decision-matrix column.
+        rng = np.random.RandomState(0)
+        X = np.vstack(
+            [
+                rng.normal(size=(3, 24)),
+                rng.normal(size=(30, 24)) + 6,
+                rng.normal(size=(30, 24)) + 12,
+            ]
+        )
+        y = np.array([0] * 3 + [1] * 30 + [2] * 30)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            m = MultiClassClassModel(
+                n_components=3,
+                scaling="none",
+                min_class_samples=10,
+                variable_selection="wold_balanced",
+                n_select=8,
+            ).fit(X, y)
+        assert 0 in m.unmodelable_
+        assert list(m.classes_) == [0, 1, 2]
+        assert int(m.varsel_mask_.sum()) == 8
+        P, _ = m.decision_matrix(X)
+        assert P.shape[1] == 3 and np.all(np.isnan(P[:, 0]))
+
+    @pytest.mark.parametrize("bad", [0, -3])
+    def test_invalid_n_select_raises(self, bad):
+        # Kimi H1/L8: n_select <= 0 must raise a clear error, not silently produce
+        # an empty (n_select=0) or almost-all (negative slice) mask.
+        X, y, _ = _graded([40, 40, 40], seed=1)
+        with pytest.raises(ValueError):
+            MultiClassClassModel(
+                n_components=3,
+                scaling="none",
+                variable_selection="wold_balanced",
+                n_select=bad,
+            ).fit(X, y)
+
+    def test_non_finite_importances_raise(self):
+        # Kimi #7: a supervised model returning NaN/inf importances must raise,
+        # not build an arbitrary mask from `imp >= mean(imp)`.
+        import spectral_predict.unified_bayesian as ub
+
+        X, y, _ = _graded([40, 40, 40], seed=2)
+        orig = ub.compute_importances
+
+        def _bad(*a, **k):
+            out = np.ones(X.shape[1])
+            out[0] = np.nan
+            return out
+
+        ub.compute_importances = _bad
+        try:
+            with pytest.raises(ValueError):
+                MultiClassClassModel(
+                    n_components=3,
+                    scaling="none",
+                    variable_selection="importance",
+                    n_select=10,
+                ).fit(X, y)
+        finally:
+            ub.compute_importances = orig
+
+    def test_wold_pca_selection_is_deterministic(self):
+        # Kimi H2: Wold PCA calls must pin random_state so the mask is identical
+        # across runs even when sklearn would pick the randomized SVD solver.
+        from spectral_predict.simca import wold_variable_selection
+
+        rng = np.random.RandomState(0)
+        X = rng.normal(size=(650, 40))
+        X[:200, :6] += 8.0
+        X[200:400, :6] += 4.0
+        y = np.array([0] * 200 + [1] * 200 + [2] * 250)
+        m1 = wold_variable_selection(X, y, mode="balanced", n_components=3, n_select=10)
+        m2 = wold_variable_selection(X, y, mode="balanced", n_components=3, n_select=10)
+        np.testing.assert_array_equal(m1, m2)
 
 
 class TestMultiClassCoreA2:
