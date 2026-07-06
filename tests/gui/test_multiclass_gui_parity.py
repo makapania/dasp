@@ -132,3 +132,36 @@ def test_mc_reuses_topn_counts(app):
     # The shared Top-N vars exist and are the size-sweep source for multiclass.
     for v in ("var_10", "var_50", "var_100"):
         assert hasattr(app, v)
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — swept sizes + varsel-method collectors feed the search call
+# ---------------------------------------------------------------------------
+
+def test_mc_sizes_collector_returns_checked(app):
+    for v in ("var_10", "var_20", "var_50", "var_100",
+              "var_250", "var_500", "var_1000"):
+        getattr(app, v).set(False)
+    app.var_20.set(True)
+    app.var_250.set(True)
+    assert app._collect_mc_sizes() == [20, 250]
+
+
+def test_mc_sizes_collector_falls_back_to_default(app):
+    for v in ("var_10", "var_20", "var_50", "var_100",
+              "var_250", "var_500", "var_1000"):
+        getattr(app, v).set(False)
+    assert app._collect_mc_sizes() == [100]
+
+
+def test_mc_varsel_paths_collector_returns_checked(app):
+    for v in app.mc_varsel_vars.values():
+        v.set(False)
+    app.mc_varsel_vars["importance"].set(True)
+    assert app._collect_mc_varsel_paths() == ["importance"]
+
+
+def test_mc_varsel_paths_collector_falls_back_to_none(app):
+    for v in app.mc_varsel_vars.values():
+        v.set(False)
+    assert app._collect_mc_varsel_paths() == ["none"]

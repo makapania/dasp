@@ -3122,12 +3122,10 @@ class SpectralPredictApp:
         self.oc_n_components = tk.IntVar(value=10)        # PCA-SIMCA n_components
 
         # Multi-class SIMCA / class-modeling variables (T-31 Phase D)
-        self.mc_alpha = tk.DoubleVar(value=0.05)          # global significance level
-        # n_components as a string: float in (0,1) = per-class variance fraction
-        # (0.99 = novelty-oriented default per Decision D), or an int, or "per_class_cv"
-        self.mc_n_components = tk.StringVar(value="0.99")
+        # alpha / n_components / variable-selection Top-N are all SWEPT via the
+        # checkbox collectors (_collect_mc_alpha_list / _collect_mc_ncomp_list /
+        # _collect_mc_sizes), so no scalar vars for them (retired in Task 9).
         self.mc_min_class_samples = tk.IntVar(value=10)   # hard-block floor (n<10 unmodelable)
-        self.mc_varsel_n_select = tk.IntVar(value=100)    # top-N for variable selection
 
         # Multi-class SIMCA sweep vars (mirror one-class _collect_simca_overrides)
         self.mc_alpha_001 = tk.BooleanVar(value=False)
@@ -25890,6 +25888,25 @@ class SpectralPredictApp:
             vals.append("per_class_cv")
         return vals or [0.99]
 
+    def _collect_mc_sizes(self):
+        """Checked Top-N variable counts for the multi-class varsel sweep.
+
+        Reuses the shared Top-N Variable Counts row (var_10..var_1000).
+        Defaults to ``[100]`` when nothing is checked.
+        """
+        sizes = []
+        for flag, n in ((self.var_10, 10), (self.var_20, 20), (self.var_50, 50),
+                        (self.var_100, 100), (self.var_250, 250),
+                        (self.var_500, 500), (self.var_1000, 1000)):
+            if flag.get():
+                sizes.append(n)
+        return sizes or [100]
+
+    def _collect_mc_varsel_paths(self):
+        """Checked multi-class variable-selection paths; ``["none"]`` if none."""
+        paths = [k for k, v in self.mc_varsel_vars.items() if v.get()]
+        return paths or ["none"]
+
     def _collect_one_class_model_param_overrides(self):
         # Reset per-call so a previous run's errors don't bleed into this invocation.
         self._oc_param_collector_errors = []
@@ -28528,9 +28545,7 @@ class SpectralPredictApp:
                 selected_engines = [e for e, v in self.mc_engine_vars.items() if v.get()]
                 if not selected_engines:
                     selected_engines = ['pca-simca']
-                selected_varsel = [p for p, v in self.mc_varsel_vars.items() if v.get()]
-                if not selected_varsel:
-                    selected_varsel = ['none']
+                selected_varsel = self._collect_mc_varsel_paths()
 
                 # Preprocessing + window sizes reuse the Basic Settings checkboxes.
                 mc_preprocess = []
@@ -28558,33 +28573,14 @@ class SpectralPredictApp:
                 if not mc_windows:
                     mc_windows = [17]
 
-                # n_components: float in (0,1) = per-class variance frac; int; or
-                # the "per_class_cv" sentinel.
-                mc_ncomp_raw = str(self.mc_n_components.get()).strip()
-                if mc_ncomp_raw == "per_class_cv":
-                    mc_ncomp = "per_class_cv"
-                else:
-                    try:
-                        _f = float(mc_ncomp_raw)
-                    except ValueError:
-                        self._log_progress(
-                            f"  [Warning] Could not parse n_components '{mc_ncomp_raw}'; using 0.99"
-                        )
-                        _f = 0.99
-                    if 0.0 < _f < 1.0:
-                        mc_ncomp = _f
-                    elif _f >= 1.0:
-                        # >=1 means an integer component count. Guard the 1.0
-                        # boundary explicitly so a user who typed "1.0" meaning
-                        # "100% variance" does not silently get a 1-component
-                        # model.
-                        mc_ncomp = int(round(_f))
-                    else:  # _f <= 0 is nonsensical as a count OR a fraction
-                        self._log_progress(
-                            f"  [Warning] n_components '{mc_ncomp_raw}' is not a "
-                            f"valid fraction (0,1) or positive int; using 0.99"
-                        )
-                        mc_ncomp = 0.99
+                # Swept parameter lists (Task 9): the backend is list-capable and
+                # multiplies the grid over these. alpha / n_components come from
+                # the checkbox collectors; n_components may include the string
+                # "per_class_cv" sentinel — the backend's per-row _as_list + model
+                # handle it, so do NOT filter it out.
+                mc_alpha_list = self._collect_mc_alpha_list()
+                mc_ncomp_list = self._collect_mc_ncomp_list()
+                mc_sizes = self._collect_mc_sizes()
 
                 baseline_method_mc, baseline_params_mc = self._get_baseline_params()
 
@@ -28601,8 +28597,8 @@ class SpectralPredictApp:
                 self._log_progress(f"  Engines: {selected_engines}")
                 self._log_progress(f"  Variable-selection paths: {selected_varsel}")
                 self._log_progress(
-                    f"  alpha={self.mc_alpha.get()}, n_components={mc_ncomp}, "
-                    f"min_class_n={self.mc_min_class_samples.get()}"
+                    f"  alpha={mc_alpha_list}, n_components={mc_ncomp_list}, "
+                    f"sizes={mc_sizes}, min_class_n={self.mc_min_class_samples.get()}"
                 )
                 try:
                     results_df = run_multiclass_simca_search(
@@ -28611,10 +28607,10 @@ class SpectralPredictApp:
                         engines=selected_engines,
                         preprocessing_methods=mc_preprocess,
                         window_sizes=mc_windows,
-                        alpha=self.mc_alpha.get(),
-                        n_components=mc_ncomp,
+                        alpha=mc_alpha_list,
+                        n_components=mc_ncomp_list,
                         varsel_paths=selected_varsel,
-                        variable_selection_n_select=self.mc_varsel_n_select.get(),
+                        variable_selection_n_select=mc_sizes,
                         min_class_samples=self.mc_min_class_samples.get(),
                         cv_splits=self.folds.get(),
                         variable_penalty=self.variable_penalty.get(),
@@ -28655,10 +28651,10 @@ class SpectralPredictApp:
                     # when the user double-clicks it (per-row alpha/preprocess come
                     # from the row itself).
                     self._mc_run_config = {
-                        "alpha": self.mc_alpha.get(),
-                        "n_components": mc_ncomp,
+                        "alpha": mc_alpha_list,
+                        "n_components": mc_ncomp_list,
                         "min_class_samples": self.mc_min_class_samples.get(),
-                        "n_select": self.mc_varsel_n_select.get(),
+                        "n_select": mc_sizes,
                         "baseline_method": baseline_method_mc,
                         "baseline_params": baseline_params_mc,
                         "smoothing": self.enable_smoothing.get(),
@@ -30288,6 +30284,8 @@ For detailed documentation, see the User Guide.
         """
         import threading
 
+        import pandas as pd
+
         # A live search stashes _mc_export_data and _mc_run_config together
         # (atomic); require BOTH. Without the run-config we would silently
         # reconstruct the row's preprocessing with default (no) baseline/
@@ -30327,7 +30325,24 @@ For detailed documentation, see the User Guide.
         try:
             alpha = float(row.get("Alpha"))
         except (TypeError, ValueError):
-            alpha = float(run_cfg.get("alpha", 0.05))
+            alpha = 0.05
+        # n_components / n_select are PER-ROW (the search now sweeps them), so
+        # source them from the row itself — NOT from _mc_run_config, which stores
+        # the swept LISTS for reference. Mirror the backend's rebuild coercion.
+        n_components_row = row.get("NComponents")
+        if n_components_row is None or (
+            isinstance(n_components_row, float) and pd.isna(n_components_row)
+        ):
+            n_components_row = 0.99
+        n_select_raw = row.get("NSelect")
+        try:
+            n_select_row = (
+                int(n_select_raw)
+                if n_select_raw is not None and not pd.isna(n_select_raw)
+                else None
+            )
+        except (TypeError, ValueError):
+            n_select_row = None
         preprocess_cfg = self._reconstruct_mc_preprocess_cfg(row)
 
         self._log_progress(
@@ -30346,11 +30361,11 @@ For detailed documentation, see the User Guide.
                     engine=engine,
                     preprocess_cfg=preprocess_cfg,
                     alpha=alpha,
-                    n_components=run_cfg.get("n_components", 0.99),
+                    n_components=n_components_row,
                     scaling="per_class",
                     min_class_samples=run_cfg.get("min_class_samples", 10),
                     variable_selection=_MULTICLASS_VARSEL_PATHS[varsel_path],
-                    n_select=run_cfg.get("n_select"),
+                    n_select=n_select_row,
                     wavelengths=(
                         list(X_df.columns) if hasattr(X_df, "columns") else None
                     ),
