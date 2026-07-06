@@ -1537,6 +1537,18 @@ TOOLTIP_CONTENT = {
         'n_outliers': 'n_outliers (Outlier Sample Count)\n\nOne-class only. Number of samples held out as known contaminants / outliers used to score sensitivity.\nIf 0, sensitivity-style metrics are not meaningful and Specificitycv is the primary CV signal.',
         'inlier_class_label': 'inlier_class_label (Inlier Class Name)\n\nOne-class only. Label of the class designated as the inlier / target during one-class training\n(e.g., "pure", "Class A"). All other labels are treated as outliers / contaminants.',
 
+        # ===== Multi-class SIMCA (T-31) swept-config columns =====
+        # Display headers (Engine / VarSelMethod) and backend column IDs
+        # (engine_family / varsel_path) both key to the same text: the header
+        # renames the DISPLAY only, while the tooltip handler looks up the
+        # backend column ID, so both aliases are needed for the tooltip to fire.
+        'NComponents': 'NComponents (Per-Class PCA Size)\n\nMulti-class SIMCA only. Per-class PCA size for this row.\nFloat in (0,1) = variance fraction (e.g., 0.99 keeps 99% of each class\'s variance), int = fixed component count, per_class_cv = auto-tuned per class.',
+        'NSelect': 'NSelect (Selected Variable Count Requested)\n\nMulti-class SIMCA only. Number of wavelengths the variable-selection path was asked to keep for this row (the top-N target).\nSee n_vars for the count actually used after selection.',
+        'Engine': 'Engine (Per-Class Membership Engine)\n\nMulti-class SIMCA only. The one-class engine calibrated for each class to decide membership.\nValues: pca-simca (DD-SIMCA), ocsvm, isolation_forest, lof, elliptic_envelope.\nBacked by the engine_family column.',
+        'engine_family': 'Engine (Per-Class Membership Engine)\n\nMulti-class SIMCA only. The one-class engine calibrated for each class to decide membership.\nValues: pca-simca (DD-SIMCA), ocsvm, isolation_forest, lof, elliptic_envelope.',
+        'VarSelMethod': 'VarSelMethod (Variable-Selection Path)\n\nMulti-class SIMCA only. Which variable-selection path chose the wavelengths for this row.\nValues: none (full spectrum), importance, wold_modeling, wold_discriminating, wold_balanced.\nBacked by the varsel_path column.',
+        'varsel_path': 'VarSelMethod (Variable-Selection Path)\n\nMulti-class SIMCA only. Which variable-selection path chose the wavelengths for this row.\nValues: none (full spectrum), importance, wold_modeling, wold_discriminating, wold_balanced.',
+
         # ===== NSGA-II Pareto-front diagnostics =====
         'Preprocessing': 'Preprocessing (Non-dominated Sorting Genetic Algorithm II Preprocessing Name)\n\nNSGA-II (Non-dominated Sorting Genetic Algorithm II) rows only. Raw preprocessing label as encoded in the genome (e.g., snv_deriv1).\nThe Preprocess column carries the normalized name used by the validation rebuild.',
         'Variables': 'Variables (Non-dominated Sorting Genetic Algorithm II Wavelength Subset Tag)\n\nNSGA-II rows only. Tag of the form nsga2_<count> indicating how many wavelengths the genome selected.',
@@ -30108,6 +30120,19 @@ For detailed documentation, see the User Guide.
             rows.append(row)
         return pd.DataFrame(rows)
 
+    def _multiclass_decision_header(self, row):
+        """One-line config summary for the multi-class decision view.
+
+        ``row`` may be a dict or a pandas Series (a leaderboard row). Uses
+        ``.get`` throughout and tolerates missing keys — the label still renders
+        with whatever is present.
+        """
+        return (
+            f"Engine: {row.get('engine_family')}  |  alpha: {row.get('Alpha')}  |  "
+            f"n_components: {row.get('NComponents')}  |  "
+            f"varsel: {row.get('varsel_path')} (top-{row.get('n_vars')})"
+        )
+
     def _show_multiclass_decision_view(self, view):
         """Open a window with the per-sample decision matrix + Wold MPOW/DPOW plots.
 
@@ -30134,6 +30159,23 @@ For detailed documentation, see the User Guide.
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
+            # Self-describing config line. view['config'] carries the backend-
+            # canonical keys (engine / alpha / n_components / variable_selection
+            # / n_select); map them to the leaderboard-row schema the header
+            # builder reads so the window states exactly what config it shows.
+            _cfg = view.get('config') or {}
+            _header_row = {
+                'engine_family': _cfg.get('engine'),
+                'Alpha': _cfg.get('alpha'),
+                'NComponents': _cfg.get('n_components'),
+                'varsel_path': _cfg.get('variable_selection'),
+                'n_vars': _cfg.get('n_select'),
+            }
+            ttk.Label(
+                header,
+                text=self._multiclass_decision_header(_header_row),
+                style='Caption.TLabel',
+            ).pack(anchor='w')
             ttk.Label(
                 header,
                 text=f"Classes: {', '.join(str(c) for c in classes)}  |  "
@@ -30816,15 +30858,30 @@ For detailed documentation, see the User Guide.
         # Always update column headings (for multi-sort indicators and click bindings)
         superscripts = {1: '\u00b9', 2: '\u00b2', 3: '\u00b3'}
         sorted_col_names = {sc for sc, _ in self.results_sort_keys}
+        # T-31 multi-class: display-name the backend-canonical swept columns
+        # WITHOUT renaming the DataFrame columns (other code \u2014 export, run-
+        # selected, decision view \u2014 reads engine_family / varsel_path verbatim).
+        # This only relabels the visible header text; the Treeview column IDs
+        # stay the backend names (so tooltips + sorting still key off them).
+        mc_display_names = {}
+        if (
+            'Task' in results_df.columns
+            and (results_df['Task'] == 'multiclass_simca').any()
+        ):
+            mc_display_names = {
+                'engine_family': 'Engine',
+                'varsel_path': 'VarSelMethod',
+            }
         for col in columns:
-            header_text = col
+            base_label = mc_display_names.get(col, col)
+            header_text = base_label
             for i, (sort_col, asc) in enumerate(self.results_sort_keys):
                 if sort_col == col:
                     arrow = '\u25b2' if asc else '\u25bc'
                     if len(self.results_sort_keys) > 1:
-                        header_text = f"{col} {arrow}{superscripts[i + 1]}"
+                        header_text = f"{base_label} {arrow}{superscripts[i + 1]}"
                     else:
-                        header_text = f"{col} {arrow}"
+                        header_text = f"{base_label} {arrow}"
                     break
 
             self.results_tree.heading(col, text=header_text)

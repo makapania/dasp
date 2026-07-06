@@ -204,6 +204,30 @@ def test_task_type_toggle_resets_spxy_selection(app):
     assert "disabled" not in app.validation_spxy_radio.state()
 
 
+def test_decision_view_header_states_config(app):
+    # The one-line config header must name the engine, alpha, per-class PCA
+    # size, and variable-selection path + size so the decision view is
+    # self-describing. .get() tolerates a dict or a pandas row.
+    header = app._multiclass_decision_header({
+        "engine_family": "pca-simca",
+        "Alpha": 0.05,
+        "NComponents": 0.99,
+        "varsel_path": "importance",
+        "n_vars": 50,
+    })
+    assert "pca-simca" in header
+    assert "0.05" in header
+    assert "0.99" in header
+    assert "importance" in header
+    assert "50" in header
+
+
+def test_decision_view_header_tolerates_missing_keys(app):
+    # A missing key must not raise — the label renders with whatever is present.
+    header = app._multiclass_decision_header({"engine_family": "ocsvm"})
+    assert "ocsvm" in header
+
+
 def test_no_auto_decision_popup(app, tmp_path):
     import pandas as pd
 
