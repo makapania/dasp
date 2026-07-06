@@ -593,3 +593,23 @@ def test_varsel_mask_unsupported_skips_cleanly():
         assert m is None or getattr(m, "dtype", None) == bool
     except MulticlassVarselUnsupported:
         pass
+
+
+def test_multiclass_holdout_metrics_populate():
+    from spectral_predict.search import (
+        run_multiclass_simca_search, compute_validation_metrics_for_top_models,
+    )
+    import numpy as np
+    rng = np.random.RandomState(1)
+    X = rng.rand(90, 40); y = np.array(["A", "B", "C"] * 30)
+    idx = rng.permutation(90); tr, va = idx[:70], idx[70:]
+    df = run_multiclass_simca_search(
+        X[tr], y[tr], engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["none"],
+    )
+    out = compute_validation_metrics_for_top_models(
+        df, X[tr], y[tr], X[va], y[va],
+        task_type="multiclass_simca", wavelengths=np.arange(40), top_n=5,
+    )
+    assert "val_MeanSensitivity" in out.columns
+    assert out["val_MeanSensitivity"].notna().any()

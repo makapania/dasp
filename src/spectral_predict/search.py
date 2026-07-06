@@ -571,6 +571,157 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     return {}
 
 
+def _multiclass_row_to_preprocess_cfg(row) -> dict:
+    """Rebuild the per-spectrum ``preprocess_cfg`` dict for a multi-class
+    leaderboard row from its own columns.
+
+    Mirrors :func:`run_multiclass_simca_search`'s config builder: the pipeline
+    ``method`` is derived from the ``Preprocess`` name (stripping the ``_w<win>``
+    suffix + the derivative digit), while ``deriv``/``window``/``polyorder`` come
+    from the row's own columns.
+
+    NOTE: baseline / smoothing are GLOBAL search settings (not persisted per
+    row), so they default to off here. This matches the default multi-class
+    search (baseline/smoothing disabled) and the vast majority of runs. The GUI
+    double-click path (`_reconstruct_mc_preprocess_cfg`) recovers them from the
+    stashed `_mc_run_config`; a future refactor could thread that config into
+    this validation path if per-row baseline/smoothing fidelity is needed.
+    """
+    def _opt_int(v):
+        try:
+            if v is None or pd.isna(v):
+                return None
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    name = str(row.get("Preprocess", "raw") or "raw")
+    base = name.split("_w")[0]  # drop the "_w<window>" suffix if present
+    if base in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+        method = base.replace("1", "").replace("2", "")
+    else:
+        method = base
+
+    return {
+        "method": method,
+        "name": name,
+        "deriv": _opt_int(row.get("Deriv")),
+        "window": _opt_int(row.get("Window")),
+        "polyorder": _opt_int(row.get("Poly")),
+        "baseline_method": None,
+        "baseline_params": None,
+        "smoothing": False,
+        "smoothing_window": 17,
+        "smoothing_polyorder": 2,
+    }
+
+
+def _multiclass_holdout_metrics(
+    row, X_train, y_train, X_val, y_val, wavelengths
+) -> dict:
+    """Fit a leaderboard row's exact ``MultiClassClassModel`` on the calibration
+    split and score the holdout via its decision matrix.
+
+    Rebuilds the row's config (engine / alpha / n_components / variable
+    selection) from its columns, preprocesses each split's FULL spectrum with the
+    row's per-spectrum pipeline (SNV / SG derivative — leakage-safe convention),
+    fits on ``(X_train, y_train)``, and evaluates the holdout acceptance matrix
+    with :func:`~spectral_predict.simca.multiclass_simca_metrics`.
+
+    Returns a dict of the five ``val_*`` column values.
+    """
+    import warnings
+
+    from spectral_predict.simca import MultiClassClassModel, multiclass_simca_metrics
+
+    preprocess_cfg = _multiclass_row_to_preprocess_cfg(row)
+    wavelengths_full = np.asarray(wavelengths)
+
+    X_train_np = np.asarray(X_train, dtype=np.float64)
+    X_val_np = np.asarray(X_val, dtype=np.float64)
+    y_train_np = np.asarray(y_train)
+    y_val_np = np.asarray(y_val)
+
+    # Per-spectrum preprocessing on each split's FULL spectrum, then edge-mask —
+    # exactly how the search builds each row (the SG edge mask is deterministic
+    # in window + wavelengths, so train and val end up column-aligned).
+    X_tr_pp, _wl_tr, reason_tr = _multiclass_preprocess_matrix(
+        X_train_np, preprocess_cfg, wavelengths_full
+    )
+    if X_tr_pp is None:
+        raise ValueError(reason_tr or "preprocessing_failed (train)")
+    X_va_pp, _wl_va, reason_va = _multiclass_preprocess_matrix(
+        X_val_np, preprocess_cfg, wavelengths_full
+    )
+    if X_va_pp is None:
+        raise ValueError(reason_va or "preprocessing_failed (val)")
+
+    # Rebuild the row's variable_selection value from its path + NSelect. Same
+    # dispatch the search loop uses: "none" -> None; Wold -> string; a
+    # discrimination method -> a boolean mask (computed on the train matrix).
+    varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
+    n_select_raw = row.get("NSelect")
+    try:
+        n_select = (
+            int(n_select_raw)
+            if n_select_raw is not None and not pd.isna(n_select_raw)
+            else None
+        )
+    except (TypeError, ValueError):
+        n_select = None
+    varsel_value = _multiclass_varsel_mask(
+        X_tr_pp, y_train_np, wavelengths_full, varsel_path, n_select
+    )
+
+    engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
+    try:
+        alpha = float(row.get("Alpha"))
+    except (TypeError, ValueError):
+        alpha = 0.05
+    n_components = row.get("NComponents")
+    if n_components is None or (isinstance(n_components, float) and pd.isna(n_components)):
+        n_components = 0.99
+
+    model = MultiClassClassModel(
+        engine=engine,
+        alpha=alpha,
+        n_components=n_components,
+        scaling="per_class",
+        variable_selection=varsel_value,
+        n_select=n_select,
+    ).fit(X_tr_pp, y_train_np)
+
+    _, A_val = model.decision_matrix(X_va_pp)
+    metrics = multiclass_simca_metrics(y_val_np, A_val, list(model.classes_))
+
+    sens = np.asarray(
+        list(metrics["per_class_sensitivity"].values()), dtype=np.float64
+    )
+    spec = np.asarray(
+        list(metrics["per_class_specificity"].values()), dtype=np.float64
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean_sens = (
+            float(np.nanmean(sens))
+            if sens.size and not np.all(np.isnan(sens))
+            else np.nan
+        )
+        mean_spec = (
+            float(np.nanmean(spec))
+            if spec.size and not np.all(np.isnan(spec))
+            else np.nan
+        )
+
+    return {
+        "val_MeanSensitivity": mean_sens,
+        "val_MeanSpecificity": mean_spec,
+        "val_NoveltyRate": metrics["novelty_detection_rate"],
+        "val_AmbiguityRate": metrics["ambiguity_rate"],
+        "val_ExactSetRate": metrics["exact_set_rate"],
+    }
+
+
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -643,6 +794,15 @@ def compute_validation_metrics_for_top_models(
     if task_type == "regression":
         df_results["RMSEP"] = np.nan
         df_results["R2pred"] = np.nan
+    elif task_type == "multiclass_simca":
+        for _c in (
+            "val_MeanSensitivity",
+            "val_MeanSpecificity",
+            "val_NoveltyRate",
+            "val_AmbiguityRate",
+            "val_ExactSetRate",
+        ):
+            df_results[_c] = np.nan
     else:
         df_results["val_Accuracy"] = np.nan
         df_results["val_ROC_AUC"] = np.nan
@@ -703,6 +863,23 @@ def compute_validation_metrics_for_top_models(
 
     for i, idx in enumerate(top_indices):
         row = df_results.loc[idx]
+
+        # Multi-class SIMCA holdout metrics take an entirely separate path: each
+        # row is a MultiClassClassModel (decision matrix + class-modeling
+        # metrics), not a single-label predictor. Rebuild the row's exact config,
+        # fit on the calibration split, and score the holdout decision matrix.
+        if task_type == "multiclass_simca":
+            try:
+                mc_metrics = _multiclass_holdout_metrics(
+                    row, X_train, y_train, X_val, y_val, wavelengths
+                )
+                for _col, _val in mc_metrics.items():
+                    df_results.loc[idx, _col] = _val
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the rest
+                print(
+                    f"  [Warning] Failed multi-class holdout metrics for model {i+1}: {e}"
+                )
+            continue
 
         try:
             # === STEP 1: Get preprocessing config ===
