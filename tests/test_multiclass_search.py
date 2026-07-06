@@ -549,6 +549,38 @@ def test_list_n_select_expands_grid_and_records_nselect():
     assert set(df["NSelect"].unique()) == {10, 20}
 
 
+def test_n_select_axis_collapses_for_paths_that_ignore_it():
+    """A varsel path where n_select has no effect (Wold modes, ``none``) must
+    yield ONE row regardless of how many Top-N sizes are checked, while a
+    discrimination path (``importance``) expands one row per size."""
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y = _toy()
+    sizes = [10, 20, 30]
+
+    df_wold = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["wold_modeling"],
+        variable_selection_n_select=sizes,
+    )
+    assert len(df_wold) == 1, df_wold[["varsel_path", "NSelect"]]
+
+    df_none = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["none"],
+        variable_selection_n_select=sizes,
+    )
+    assert len(df_none) == 1, df_none[["varsel_path", "NSelect"]]
+
+    df_disc = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["importance"],
+        variable_selection_n_select=sizes,
+    )
+    assert len(df_disc) == 3, df_disc[["varsel_path", "NSelect"]]
+    assert set(df_disc["NSelect"].unique()) == {10, 20, 30}
+
+
 # ---------------------------------------------------------------------------
 # Task 4: _multiclass_varsel_mask — search-layer supervised varsel mask builder
 # ---------------------------------------------------------------------------

@@ -12472,9 +12472,22 @@ class SpectralPredictApp:
                   style='Caption.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(0, 8))
         mc_row = 2
         for group_title, methods in self.mc_varsel_groups.items():
-            ttk.Label(mc_group_frame, text=group_title,
+            # Split any trailing "(...)" honesty/guidance note off the bold group
+            # heading so it renders as a Caption (guidance) rather than as part of
+            # the Subheading. The group keys themselves are unchanged.
+            if group_title.endswith(")") and " (" in group_title:
+                _heading, _note = group_title.split(" (", 1)
+                _note = "(" + _note
+            else:
+                _heading, _note = group_title, ""
+            ttk.Label(mc_group_frame, text=_heading,
                       style='Subheading.TLabel').grid(row=mc_row, column=0, sticky=tk.W, pady=(10, 4))
             mc_row += 1
+            if _note:
+                ttk.Label(mc_group_frame, text=_note,
+                          style='Caption.TLabel').grid(row=mc_row, column=0, sticky=tk.W,
+                                                       padx=(4, 0), pady=(0, 4))
+                mc_row += 1
             for key, label in methods:
                 ttk.Checkbutton(mc_group_frame, text=label,
                                 variable=self.mc_varsel_vars[key]).grid(
@@ -17153,7 +17166,7 @@ class SpectralPredictApp:
                 self.varsel_card_outer.grid()
             if hasattr(self, 'varsel_frame'):
                 self.varsel_frame.pack_forget()
-            if hasattr(self, 'mc_varsel_group_frame'):
+            if hasattr(self, 'mc_varsel_group_frame') and not self.mc_varsel_group_frame.winfo_manager():
                 self.mc_varsel_group_frame.pack(fill='both', expand=True)
             if hasattr(self, 'imbalance_frame'):
                 self.imbalance_frame.grid_remove()
@@ -30130,7 +30143,7 @@ For detailed documentation, see the User Guide.
         return (
             f"Engine: {row.get('engine_family')}  |  alpha: {row.get('Alpha')}  |  "
             f"n_components: {row.get('NComponents')}  |  "
-            f"varsel: {row.get('varsel_path')} (top-{row.get('n_vars')})"
+            f"varsel: {row.get('varsel_path') or 'none'} (top-{row.get('n_vars')})"
         )
 
     def _show_multiclass_decision_view(self, view):

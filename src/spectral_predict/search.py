@@ -8069,13 +8069,24 @@ def run_multiclass_simca_search(
                     }
                 )
 
+    def _n_select_axis_for(vp):
+        """The n_select (Top-N size) axis for a given varsel path.
+
+        ``none`` and the Wold modes ignore ``n_select`` entirely (``none`` selects
+        nothing; Wold sets its own count on the model's native path), so sweeping
+        multiple Top-N sizes for them yields duplicate rows differing only in the
+        ``NSelect`` column. Collapse those paths to a single representative size.
+        """
+        if vp == "none" or vp in _WOLD_METHODS:
+            return n_select_list[:1]
+        return n_select_list
+
     total_configs = (
         len(preprocess_configs)
         * len(engines)
-        * len(varsel_paths)
         * len(alphas)
         * len(n_components_list)
-        * len(n_select_list)
+        * sum(len(_n_select_axis_for(vp)) for vp in varsel_paths)
     )
     current_config = 0
     n_total_classes = int(len(np.unique(y_np)))
@@ -8129,7 +8140,7 @@ def run_multiclass_simca_search(
 
                 for _alpha in alphas:
                     for _ncomp in n_components_list:
-                        for _n_select in n_select_list:
+                        for _n_select in _n_select_axis_for(varsel_path):
                             current_config += 1
                             prep_name = preprocess_cfg["name"]
                             progress_msg = f"Testing {engine} + {prep_name} + varsel={varsel_path}"
