@@ -28518,8 +28518,24 @@ class SpectralPredictApp:
                         results_df.insert(0, 'Select', False)
                     self._mc_decision_view = results_df.attrs.get('top_decision_view')
                     # Stash the training data so the decision-view window can embed
-                    # it in an exported reproduction script (Phase D3).
+                    # it in an exported reproduction script (Phase D3) and so a
+                    # double-clicked leaderboard row can be re-run + saved.
                     self._mc_export_data = (X_filtered, y_filtered)
+                    # Stash the search-global config (n_components policy, floors,
+                    # baseline/smoothing) needed to rebuild ANY row's exact config
+                    # when the user double-clicks it (per-row alpha/preprocess come
+                    # from the row itself).
+                    self._mc_run_config = {
+                        "alpha": self.mc_alpha.get(),
+                        "n_components": mc_ncomp,
+                        "min_class_samples": self.mc_min_class_samples.get(),
+                        "n_select": self.mc_varsel_n_select.get(),
+                        "baseline_method": baseline_method_mc,
+                        "baseline_params": baseline_params_mc,
+                        "smoothing": self.enable_smoothing.get(),
+                        "smoothing_window": self.smoothing_window.get(),
+                        "smoothing_polyorder": self.smoothing_polyorder.get(),
+                    }
                     self.root.after(0, lambda df=results_df: self._populate_results_table(df))
 
                     try:
@@ -30045,6 +30061,38 @@ For detailed documentation, see the User Guide.
                     self._log_progress(f"  [X] Failed to export {kind}: {exc}")
                     messagebox.showerror("Export failed", f"Could not export the {kind}:\n{exc}")
 
+            def _save_model():
+                # Fit + persist the config's MultiClassClassModel as a .dasp so
+                # the user can reload it and classify new specimens — the
+                # class-modeling analogue of saving a regression/classification
+                # model. Tk swallows callback exceptions, so surface them.
+                from tkinter import filedialog, messagebox
+                try:
+                    config = view.get('config')
+                    data = getattr(self, '_mc_export_data', None)
+                    if not config or not data or data[0] is None:
+                        messagebox.showwarning(
+                            "Save Model",
+                            "Model config or training data unavailable — "
+                            "re-run the search, then save.",
+                        )
+                        return
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.dasp',
+                        filetypes=[('DASP model', '*.dasp')],
+                        title='Save multi-class model',
+                    )
+                    if not path:
+                        return
+                    self._fit_and_save_multiclass_model(config, data[0], data[1], path)
+                    self._log_progress(f"> Model saved: {path}")
+                    messagebox.showinfo("Model Saved", f"Saved multi-class model to:\n{path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to save model: {exc}")
+                    messagebox.showerror("Save failed", f"Could not save the model:\n{exc}")
+
+            ttk.Button(btn_frame, text="Save Model (.dasp)",
+                       command=_save_model).pack(side='right', padx=(0, 6))
             ttk.Button(btn_frame, text="Save Decision Matrix CSV",
                        command=_save_decision_csv).pack(side='right')
             ttk.Button(btn_frame, text="Export Notebook",
@@ -30060,6 +30108,227 @@ For detailed documentation, see the User Guide.
                 win.destroy()
             except Exception:
                 pass
+
+    def _reconstruct_mc_preprocess_cfg(self, row):
+        """Rebuild the ``preprocess_cfg`` dict for a multi-class leaderboard row.
+
+        Mirrors ``run_multiclass_simca_search``'s config builder: the pipeline
+        ``method`` is derived from the ``Preprocess`` name (stripping any
+        ``_w<win>`` suffix + derivative digit), while ``deriv``/``window``/
+        ``polyorder`` come from the row's own columns. Baseline/smoothing come
+        from the stashed search config (``_mc_run_config``) since they are
+        global to the search, not per-row.
+        """
+        import pandas as pd
+
+        def _opt_int(v):
+            try:
+                if v is None or pd.isna(v):
+                    return None
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        name = str(row.get("Preprocess", "raw") or "raw")
+        base = name.split("_w")[0]  # drop the "_w<window>" suffix if present
+        if base in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+            method = base.replace("1", "").replace("2", "")
+        else:
+            method = base
+
+        run_cfg = getattr(self, "_mc_run_config", None) or {}
+        return {
+            "method": method,
+            "name": name,
+            "deriv": _opt_int(row.get("Deriv")),
+            "window": _opt_int(row.get("Window")),
+            "polyorder": _opt_int(row.get("Poly")),
+            "baseline_method": run_cfg.get("baseline_method"),
+            "baseline_params": run_cfg.get("baseline_params"),
+            "smoothing": run_cfg.get("smoothing", False),
+            "smoothing_window": run_cfg.get("smoothing_window", 17),
+            "smoothing_polyorder": run_cfg.get("smoothing_polyorder", 2),
+        }
+
+    def _run_selected_multiclass_result(self, row):
+        """Run a SELECTED multi-class leaderboard row: rebuild its exact config,
+        compute the in-sample decision view on a worker thread, and show it
+        (with a Save Model option). The class-modeling analogue of loading a
+        regression/classification result into Model Dev — but it produces a
+        decision matrix + a saveable .dasp, not an RMSE refit.
+        """
+        import threading
+
+        data = getattr(self, "_mc_export_data", None)
+        if not data or data[0] is None:
+            messagebox.showwarning(
+                "Run Selected Result",
+                "The multi-class training data is no longer available. "
+                "Re-run the multi-class search, then double-click a row.",
+            )
+            return
+
+        X_df, y_ser = data
+        engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
+        varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
+        try:
+            alpha = float(row.get("Alpha"))
+        except (TypeError, ValueError):
+            alpha = float((getattr(self, "_mc_run_config", None) or {}).get("alpha", 0.05))
+        preprocess_cfg = self._reconstruct_mc_preprocess_cfg(row)
+        run_cfg = getattr(self, "_mc_run_config", None) or {}
+
+        self._log_progress(
+            f"\n> Running selected multi-class result: {engine} + "
+            f"{preprocess_cfg['name']} (varsel={varsel_path})"
+        )
+
+        def _worker():
+            try:
+                from spectral_predict.search import (
+                    _MULTICLASS_VARSEL_PATHS,
+                    build_multiclass_decision_view,
+                )
+
+                view = build_multiclass_decision_view(
+                    X_df,
+                    y_ser,
+                    engine=engine,
+                    preprocess_cfg=preprocess_cfg,
+                    alpha=alpha,
+                    n_components=run_cfg.get("n_components", 0.99),
+                    scaling="per_class",
+                    min_class_samples=run_cfg.get("min_class_samples", 10),
+                    variable_selection=_MULTICLASS_VARSEL_PATHS.get(varsel_path),
+                    n_select=run_cfg.get("n_select"),
+                    wavelengths=(
+                        list(X_df.columns) if hasattr(X_df, "columns") else None
+                    ),
+                    sample_ids=(list(X_df.index) if hasattr(X_df, "index") else None),
+                )
+            except Exception as exc:  # noqa: BLE001 — surface, never crash Tk
+                import traceback
+
+                tb = traceback.format_exc()
+                self.root.after(
+                    0,
+                    lambda e=exc, t=tb: (
+                        self._log_progress(f"  [X] Failed to run selected result: {e}\n{t}"),
+                        messagebox.showerror(
+                            "Run Selected Result",
+                            f"Could not run the selected configuration:\n{e}",
+                        ),
+                    ),
+                )
+                return
+
+            reason = view.get("reason")
+            if reason:
+                self.root.after(
+                    0,
+                    lambda r=reason: (
+                        self._log_progress(f"  [Warning] Selected config did not build: {r}"),
+                        messagebox.showwarning(
+                            "Run Selected Result",
+                            f"The selected configuration could not be built:\n{r}",
+                        ),
+                    ),
+                )
+                return
+
+            self.root.after(0, lambda v=view: self._show_multiclass_decision_view(v))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _fit_and_save_multiclass_model(self, config, X, y, path):
+        """Fit a ``MultiClassClassModel`` for ``config`` on the training data and
+        persist it as a ``.dasp`` for later classification of new specimens.
+
+        The model is fit in the config's preprocessed feature space; the
+        per-spectrum preprocessing pipeline (SNV / SG derivative / baseline) is
+        stored as the model's preprocessor, and when a Savitzky-Golay edge mask
+        trims the axis the ``use_full_spectrum_preprocessing`` +
+        ``full_wavelengths`` handshake is recorded so ``predict_with_model``
+        reproduces the exact preprocessing + edge mask on raw new spectra.
+        Returns the fitted model.
+        """
+        import numpy as np
+        from sklearn.pipeline import Pipeline as SkPipeline
+
+        from spectral_predict import model_io
+        from spectral_predict.preprocess import build_preprocessing_pipeline
+        from spectral_predict.search import _multiclass_preprocess_matrix
+        from spectral_predict.simca import MultiClassClassModel
+
+        preprocess_cfg = dict(config["preprocess_cfg"])
+        X_np = X.values if hasattr(X, "values") else np.asarray(X)
+        X_np = np.asarray(X_np, dtype=np.float64)
+        y_np = y.values if hasattr(y, "values") else np.asarray(y)
+        wl_full = (
+            np.asarray(X.columns.values)
+            if hasattr(X, "columns")
+            else np.arange(X_np.shape[1])
+        )
+
+        # Preprocess identically to the search / decision view (per-spectrum ops
+        # + SG edge mask) → the exact matrix + wavelengths the model is fit on.
+        X_pp, wl_current, reason = _multiclass_preprocess_matrix(
+            X_np, preprocess_cfg, wl_full
+        )
+        if X_pp is None:
+            raise ValueError(f"Preprocessing failed: {reason}")
+
+        # A standalone fitted preprocessor so predict_with_model can reproduce
+        # the preprocessing on raw new spectra. Fit on the FULL raw matrix (the
+        # edge mask is applied afterward via the full-spectrum handshake below).
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["method"],
+            preprocess_cfg.get("deriv"),
+            preprocess_cfg.get("window"),
+            preprocess_cfg.get("polyorder"),
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+        preprocessor = None
+        if pipe_steps:
+            preprocessor = SkPipeline(pipe_steps)
+            preprocessor.fit(X_np)
+
+        model = MultiClassClassModel(
+            engine=config["engine"],
+            alpha=config.get("alpha", 0.05),
+            n_components=config.get("n_components", 0.99),
+            scaling=config.get("scaling", "per_class"),
+            min_class_samples=config.get("min_class_samples", 10),
+            variable_selection=config.get("variable_selection"),
+            n_select=config.get("n_select"),
+        ).fit(X_pp, y_np)
+
+        def _coerce(v):
+            return v.item() if hasattr(v, "item") else v
+
+        metadata = {
+            "model_name": "MultiClassSIMCA",
+            "task_type": "multiclass_simca",
+            "wavelengths": [_coerce(w) for w in wl_current],
+            "n_vars": int(X_pp.shape[1]),
+            "class_names": [_coerce(c) for c in model.classes_],
+            "engine_family": config["engine"],
+            "alpha": config.get("alpha", 0.05),
+            "scaling": config.get("scaling", "per_class"),
+            "preprocessing": preprocess_cfg.get("name", ""),
+        }
+        # SG derivative edge mask trimmed the axis → tell predict_with_model to
+        # preprocess on the full spectrum then subset to the trained wavelengths.
+        if len(wl_current) != len(wl_full):
+            metadata["use_full_spectrum_preprocessing"] = True
+            metadata["full_wavelengths"] = [_coerce(w) for w in wl_full]
+
+        model_io.save_model(model, preprocessor, metadata, path)
+        return model
 
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
@@ -31652,6 +31921,18 @@ For detailed documentation, see the User Guide.
                                        "Try re-running analysis or sorting again.")
                 return
             model_config = self.results_display_df.iloc[row_pos].to_dict()
+
+        # ── Multi-class SIMCA (T-31): class-modeling rows do NOT fit the
+        # regression/classification Refine tab (no get_model('pca-simca'), no
+        # RMSE/LV refit). Route to the dedicated run-selected handler that
+        # rebuilds THIS row's config, shows its decision matrix, and offers a
+        # Save Model (.dasp) option. Detect via the row's own Task column
+        # (robust to the task_type toggle having moved on).
+        row_task = str(model_config.get("Task", "") or "")
+        if row_task == "multiclass_simca" or self.task_type.get() == "multiclass_simca":
+            self.selected_model_config = model_config
+            self._run_selected_multiclass_result(model_config)
+            return
 
         # Attach training configuration if available (for validation checking)
         # This ensures Model Dev can verify it's using the same data configuration as Results tab

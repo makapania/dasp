@@ -205,3 +205,163 @@ def test_show_decision_view_opens_window(gui_app):
     assert len(after) == len(before) + 1
     # clean up the window we opened
     after[-1].destroy()
+
+
+# ---------------------------------------------------------------------------
+# Run-a-selected-leaderboard-result (double-click) + Save Model (.dasp)
+# ---------------------------------------------------------------------------
+
+def _mc_row(preprocess="raw", engine="pca-simca", deriv=None, window=None, poly=None):
+    """A synthetic multi-class leaderboard row (the subset of columns the
+    run-selected handler reconstructs a config from)."""
+    return {
+        "Task": "multiclass_simca",
+        "Model": engine,
+        "engine_family": engine,
+        "varsel_path": "none",
+        "SubsetTag": "none",
+        "Alpha": 0.05,
+        "Preprocess": preprocess,
+        "Deriv": deriv,
+        "Window": window,
+        "Poly": poly,
+        "reason": "",
+    }
+
+
+class _SyncThread:
+    """Thread stand-in that runs the target synchronously on .start()."""
+
+    def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+        self._t, self._a, self._k = target, args, (kwargs or {})
+
+    def start(self):
+        if self._t is not None:
+            self._t(*self._a, **self._k)
+
+
+def test_double_click_multiclass_routes_to_selected_result(gui_app):
+    """A double-click on a multi-class leaderboard row must route to the
+    dedicated run-selected handler, NOT the regression/classification Refine
+    tab (get_model('pca-simca') would fail there)."""
+    import pandas as pd
+    from unittest.mock import patch
+
+    app = gui_app
+    app.results_display_df = pd.DataFrame([_mc_row()])
+    app.task_type.set("multiclass_simca")
+    orig_sel = app.results_tree.selection
+    app.results_tree.selection = lambda: ("0",)
+    try:
+        with patch.object(app, "_run_selected_multiclass_result") as mc, \
+             patch.object(app, "_load_model_for_refinement") as refine:
+            app._on_result_double_click(None)
+        assert mc.called, "multiclass row did not route to run-selected handler"
+        assert not refine.called, "multiclass row leaked into the Refine path"
+    finally:
+        app.results_tree.selection = orig_sel
+
+
+def test_double_click_regression_untouched(gui_app):
+    """A double-click on a NON-multiclass row must still load into the Refine
+    tab exactly as before (single-Y path byte-identical)."""
+    import pandas as pd
+    from unittest.mock import patch
+
+    app = gui_app
+    app.results_display_df = pd.DataFrame(
+        [{"Task": "regression", "Model": "PLS", "R2cv": 0.9, "Rank": 1, "n_vars": 50}]
+    )
+    app.task_type.set("regression")
+    orig_sel = app.results_tree.selection
+    app.results_tree.selection = lambda: ("0",)
+    try:
+        with patch.object(app, "_run_selected_multiclass_result") as mc, \
+             patch.object(app, "_load_model_for_refinement") as refine, \
+             patch.object(app.notebook, "select"), \
+             patch.object(app.model_dev_notebook, "select"):
+            app._on_result_double_click(None)
+        assert refine.called, "regression row no longer loads into Refine"
+        assert not mc.called, "regression row wrongly hit the multiclass handler"
+    finally:
+        app.results_tree.selection = orig_sel
+
+
+def test_run_selected_multiclass_builds_view(gui_app):
+    """The run-selected handler rebuilds the row's config on a worker thread and
+    shows its decision view."""
+    import numpy as np
+    import pandas as pd
+    from unittest.mock import patch
+
+    app = gui_app
+    rng = np.random.default_rng(0)
+    blocks, labels = [], []
+    for k in range(3):
+        blocks.append(rng.normal(k * 4.0, 1.0, size=(30, 30)))
+        labels += [f"C{k}"] * 30
+    X = pd.DataFrame(np.vstack(blocks), columns=[f"{j}" for j in range(30)])
+    y = pd.Series(labels)
+    app._mc_export_data = (X, y)
+    app._mc_run_config = {
+        "n_components": 0.99, "min_class_samples": 10, "n_select": None,
+        "baseline_method": None, "baseline_params": None, "smoothing": False,
+        "smoothing_window": 17, "smoothing_polyorder": 2, "alpha": 0.05,
+    }
+    captured = {}
+    with patch("threading.Thread", _SyncThread), \
+         patch.object(app, "_show_multiclass_decision_view",
+                      side_effect=lambda v: captured.setdefault("v", v)):
+        app._run_selected_multiclass_result(_mc_row())
+        app.root.update()  # flush the root.after that schedules the view
+    v = captured.get("v")
+    assert v is not None, "decision view was never shown"
+    assert v["config"]["engine"] == "pca-simca"
+    assert not v.get("reason"), v.get("reason")
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"method": "raw", "name": "raw", "deriv": None, "window": None},
+        {"method": "snv", "name": "snv", "deriv": None, "window": None},
+        {"method": "deriv", "name": "deriv1_w7", "deriv": 1, "window": 7},
+    ],
+)
+def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg):
+    """Fitting + saving the selected config's model produces a loadable .dasp
+    whose predict_with_model reproduces the in-sample decision matrix when fed
+    the RAW spectra (preprocessing is applied on load, incl. SG edge mask)."""
+    import numpy as np
+    import pandas as pd
+    from spectral_predict.model_io import load_model, predict_with_model
+    from spectral_predict.search import build_multiclass_decision_view
+
+    app = gui_app
+    rng = np.random.default_rng(3)
+    blocks, labels = [], []
+    for k in range(3):
+        blocks.append(rng.normal(k * 5.0, 1.0, size=(40, 30)))
+        labels += [f"C{k}"] * 40
+    X = pd.DataFrame(np.vstack(blocks), columns=[float(j) for j in range(30)])
+    y = pd.Series(labels)
+    full_cfg = {
+        **cfg, "polyorder": None, "baseline_method": None, "baseline_params": None,
+        "smoothing": False, "smoothing_window": 17, "smoothing_polyorder": 2,
+    }
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=full_cfg, n_components=0.99
+    )
+    assert not view.get("reason"), view.get("reason")
+
+    path = tmp_path / "mc.dasp"
+    app._fit_and_save_multiclass_model(view["config"], X, y, str(path))
+    assert path.exists()
+
+    loaded = load_model(str(path))
+    out = predict_with_model(loaded, X, validate_wavelengths=True)
+    np.testing.assert_array_equal(out["decision_matrix"], view["accept"])
+    np.testing.assert_array_equal(
+        np.asarray(out["summary_label"], dtype=object),
+        np.asarray(view["labels"], dtype=object),
+    )
