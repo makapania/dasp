@@ -4,6 +4,51 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-06 — T-31 test-flake fix + cosmetic minors + Tab-9 scope (commits `ce96db5`, `afa02ea`)
+
+Fable session, branch `feat/T31-multiclass-simca` (NOT merged). Detail in
+`.superpowers/sdd/outstanding-report.md`.
+
+- **A — combined-run flake FIXED (`ce96db5`). The prior diagnosis was WRONG.**
+  It is NOT a `src.spectral_predict` dual-import class-identity clash. Real root
+  cause: `test_multiclass_gui_parity.py::_install_recording_thread` globally
+  monkeypatches `threading.Thread`. The `spa` run-selected path runs
+  `joblib.Parallel(backend="threading")`, whose `multiprocessing.dummy.ThreadPool`
+  calls the *unbound* `threading.Thread.start(self)` on its own `DummyProcess`
+  instances. With the patch active that resolves to `_RecordingThread.start` with
+  a non-`_RecordingThread` self, so `super().start()` raised the `super(type,
+  obj)` TypeError. Order dependency = joblib's cached ThreadPool (fresh pool only
+  re-created under the patch when the search file ran first). Fix: `_RecordingThread`
+  records + `super()`s only for genuine instances, delegates foreign DummyProcess
+  to the real bound `Thread.start`. **Also unified the namespace as requested**
+  (9 GUI + 3 backend `src.spectral_predict` sites → unprefixed): the launcher's own
+  comment already documented `src.spectral_predict` "silently failed in dev and
+  bundle", so these were latent frozen-bundle bugs; removing them kills the
+  dual-module hazard for good, but it was NOT what fixed the flake. Combined run
+  now 54 passed both orders (55 with the new collapse test), 132 across adjacent
+  multiclass suites.
+- **B — cosmetic minors DONE (`afa02ea`).** (1) decision header `varsel: None`
+  → `none`; (2) `_on_task_type_changed` guards `mc_varsel_group_frame.pack()` with
+  `winfo_manager()`; (3) discrimination-group honesty parenthetical split off the
+  Subheading into a Caption label; (4) `run_multiclass_simca_search` collapses the
+  Top-N size axis for paths that ignore n_select (`none` + 3 Wold modes) to one
+  representative size — new `test_n_select_axis_collapses_for_paths_that_ignore_it`
+  pins Wold/none×3 sizes → 1 row, discrimination×3 → 3 rows.
+- **C — Tab-9 multiclass side-by-side comparison: SCOPED, not built.** Exclusion
+  (`_comparison_reject_multiclass`) stays. A real view needs a new verdict-grid
+  data model (per-sample K-vector of p-values + accepted/multiple/novel verdict —
+  no scalar to average, consensus-by-R² spine inapplicable), decision-agreement
+  metrics (verdict concordance, Cohen's κ, per-class novelty deltas, class-set
+  alignment), and a new Tk sub-view (side-by-side verdict table + disagreement
+  filter). Backend material exists (`predict_with_model` returns the matrix). Effort
+  ≈ Phase D2. First settle whether the verdict-concordance use-case is real; else
+  keep the exclusion. Full note in the outstanding report.
+
+**Still owed:** live GUI `run`/`screenshot` pass (needs a display); user merge
+greenlight (do NOT auto-merge).
+
+---
+
 ## 2026-07-06 — T-31 saved-model consumers wired/verified (commit `cc0f486`)
 
 Closed the "owed next" from the parity feature: verify/wire the 3 saved-model
