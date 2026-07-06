@@ -692,12 +692,29 @@ def predict_with_model(
                 else:
                     X_processed = X_selected
         else:
-            X_selected = X_new.values
-            # Apply preprocessing if present
-            if preprocessor is not None:
-                X_processed = preprocessor.transform(X_selected)
+            # validate_wavelengths=False: trust the caller's column order. Still
+            # honor the full-spectrum edge-mask handshake (derivative + subset) —
+            # otherwise a model trained on the SG-edge-trimmed axis receives the
+            # full-width matrix and its per-class scaler/PCA get the wrong feature
+            # count (crashed the multiclass save -> predict-on-raw path).
+            if use_full_spectrum_preprocessing and full_wavelengths is not None:
+                X_full = X_new.values
+                X_full_preprocessed = (
+                    preprocessor.transform(X_full) if preprocessor is not None else X_full
+                )
+                wavelength_indices = []
+                for wl in required_wl:
+                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
-                X_processed = X_selected
+                X_selected = X_new.values
+                # Apply preprocessing if present
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X_selected)
+                else:
+                    X_processed = X_selected
     elif isinstance(X_new, np.ndarray):
         # Assume array is already in correct format
         if validate_wavelengths:

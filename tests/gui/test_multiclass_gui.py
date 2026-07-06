@@ -441,9 +441,18 @@ def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg, col_kind):
     assert path.exists()
 
     loaded = load_model(str(path))
-    out = predict_with_model(loaded, X, validate_wavelengths=True)
-    np.testing.assert_array_equal(out["decision_matrix"], view["accept"])
-    np.testing.assert_array_equal(
-        np.asarray(out["summary_label"], dtype=object),
-        np.asarray(view["labels"], dtype=object),
-    )
+    # Both wavelength-validation modes AND array input must reproduce the
+    # in-sample decision matrix on RAW spectra. validate_wavelengths=False was a
+    # real bug: it skipped the full-spectrum edge-mask handshake, so a derivative
+    # model (SG edge mask trims the axis) received the full width and its scaler
+    # crashed on the feature-count mismatch.
+    for validate in (True, False):
+        out = predict_with_model(loaded, X, validate_wavelengths=validate)
+        np.testing.assert_array_equal(out["decision_matrix"], view["accept"])
+        np.testing.assert_array_equal(
+            np.asarray(out["summary_label"], dtype=object),
+            np.asarray(view["labels"], dtype=object),
+        )
+    # ndarray input (validate_wavelengths=False path) must also reproduce it.
+    out_arr = predict_with_model(loaded, X.values, validate_wavelengths=False)
+    np.testing.assert_array_equal(out_arr["decision_matrix"], view["accept"])
