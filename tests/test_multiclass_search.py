@@ -453,3 +453,11 @@ class TestNoveltyOrientedNComponentsD2:
         assert "{" in lvs and "}" in lvs  # per-class {class: resolved int}
         # resolved ints, not the raw fraction 0.99
         assert "0.99" not in lvs
+
+
+def test_multiclass_schema_has_ncomponents_column():
+    df = create_results_dataframe(task_type="multiclass_simca")
+    assert "NComponents" in df.columns
+    # Ordered right after Alpha for readability
+    cols = list(df.columns)
+    assert cols.index("NComponents") == cols.index("Alpha") + 1
