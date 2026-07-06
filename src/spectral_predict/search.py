@@ -7005,6 +7005,119 @@ _MULTICLASS_VARSEL_PATHS: dict[str, str | None] = {
 }
 
 
+class MulticlassVarselUnsupported(Exception):
+    """Raised when a variable-selection method cannot produce a usable mask for a
+    >2-class label (either it is binary-only and fails, or the shared
+    ``compute_importances`` dispatch does not implement it and would silently
+    return uniform importances). The multi-class search loop catches this and
+    skips the row with a logged warning rather than crashing or emitting a
+    meaningless selection."""
+
+
+# Wold methods are handled INSIDE ``MultiClassClassModel`` via its string
+# dispatch (leakage-safe per-fold recompute); the mask builder returns the
+# string unchanged so the caller forwards it as-is.
+_WOLD_METHODS = frozenset(
+    {"wold_modeling", "wold_discriminating", "wold_balanced"}
+)
+
+# The discrimination-based methods that ``compute_importances`` genuinely
+# resolves to real per-feature scores (verified in unified_bayesian.py: every
+# other name falls through to uniform ``np.ones`` — an arbitrary top-k, NOT a
+# selection). Any method outside this set (spa/ipls/ga/region/uve_* combos)
+# raises MulticlassVarselUnsupported so the caller skips it cleanly.
+_MULTICLASS_MASK_METHODS = frozenset({"importance", "cars", "uve"})
+
+
+def _multiclass_varsel_mask(X, y, method, n_select, model_name):
+    """Boolean top-``n_select`` feature mask for a supervised varsel method on the
+    genuine multi-class label.
+
+    Wold methods are handled inside :class:`~spectral_predict.simca.MultiClassClassModel`
+    (return their string, not a mask); this covers the discrimination-based set
+    (``importance``/``cars``/``uve``) that ``compute_importances`` resolves.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_samples, n_features)
+        Preprocessed spectra.
+    y : array-like of shape (n_samples,)
+        Multi-class labels.
+    method : str
+        ``"none"`` -> ``None``; a Wold method -> that string; a supported
+        discrimination method -> a boolean mask; anything else -> raises.
+    n_select : int
+        Number of top-scoring features to keep.
+    model_name : str
+        Model name forwarded to ``compute_importances`` (e.g. ``"PLS-DA"``).
+
+    Returns
+    -------
+    None or str or ndarray of bool
+        ``None`` for ``"none"``; the method string for a Wold method; otherwise a
+        boolean mask of shape ``(n_features,)`` with exactly ``min(n_select,
+        n_features)`` True entries.
+
+    Raises
+    ------
+    MulticlassVarselUnsupported
+        For a method that is not resolvable on a >2-class label — either a
+        binary-only path that raises inside ``compute_importances``, a method
+        outside the supported discrimination set, or one that produces
+        non-finite importances.
+    """
+    import numpy as np
+
+    if method == "none":
+        return None
+    if method in _WOLD_METHODS:
+        # Handled natively by the model layer via its string dispatch.
+        return method
+    if method not in _MULTICLASS_MASK_METHODS:
+        raise MulticlassVarselUnsupported(
+            f"variable-selection method {method!r} is not resolvable for "
+            f"multi-class SIMCA (supported: {sorted(_MULTICLASS_MASK_METHODS)} "
+            f"+ Wold modes); compute_importances would return uniform scores."
+        )
+
+    n_features = X.shape[1]
+    from sklearn.preprocessing import LabelEncoder
+
+    from spectral_predict.unified_bayesian import compute_importances
+
+    # Encode labels to contiguous ints: PLS-based classification importance
+    # paths cast y to float, so raw string classes ("Site A", ...) would raise.
+    y_enc = LabelEncoder().fit_transform(np.asarray(y))
+    n_classes = int(len(np.unique(y_enc)))
+
+    try:
+        scores = compute_importances(
+            np.asarray(X),
+            y_enc,
+            method,
+            model_name,
+            task_type="classification",
+        )
+    except ValueError as exc:
+        # e.g. a binary-only coefficient path on a >2-class label.
+        raise MulticlassVarselUnsupported(
+            f"{method!r} does not support a {n_classes}-class label: {exc}"
+        ) from exc
+
+    scores = np.asarray(scores, dtype=float)
+    if scores.shape != (n_features,) or not np.all(np.isfinite(scores)):
+        raise MulticlassVarselUnsupported(
+            f"{method!r} produced unusable importances "
+            f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))}) "
+            "on this label."
+        )
+    k = int(min(max(int(n_select), 1), n_features))
+    top_idx = np.argsort(scores, kind="stable")[-k:]
+    mask = np.zeros(n_features, dtype=bool)
+    mask[top_idx] = True
+    return mask
+
+
 def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None):
     """Leave-one-class-out novelty-vs-false-rejection AUC (spec §7 ranking metric).
 
@@ -7512,11 +7625,12 @@ def run_multiclass_simca_search(
         engines = list(MULTICLASS_ENGINES)
     if varsel_paths is None:
         varsel_paths = ["none"]
+    _accepted_varsel_paths = set(_MULTICLASS_VARSEL_PATHS) | set(_MULTICLASS_MASK_METHODS)
     for vp in varsel_paths:
-        if vp not in _MULTICLASS_VARSEL_PATHS:
+        if vp not in _accepted_varsel_paths:
             raise ValueError(
                 f"Unknown varsel_path {vp!r}; expected one of "
-                f"{sorted(_MULTICLASS_VARSEL_PATHS)}."
+                f"{sorted(_accepted_varsel_paths)}."
             )
 
     # --- Build preprocessing configs (per-spectrum ops applied outside folds) --
@@ -7638,7 +7752,10 @@ def run_multiclass_simca_search(
                                     }
                                 )
 
-                            varsel_value = _MULTICLASS_VARSEL_PATHS[varsel_path]
+                            # Resolved below (after the X_pp None-guard) so the
+                            # external mask builder never runs on a failed
+                            # preprocessing matrix. Late-bound by _build().
+                            varsel_value = None
 
                             def _build():
                                 return MultiClassClassModel(
@@ -7693,6 +7810,19 @@ def run_multiclass_simca_search(
                                 row["reason"] = pp_reason or "preprocessing_failed"
                                 df_results = add_result(df_results, row)
                                 continue
+
+                            # Resolve the variable-selection value for this row.
+                            # none -> None; wold_* -> model-native string; the
+                            # discrimination set (importance/cars/uve) -> a
+                            # precomputed boolean mask (the Phase-B hook);
+                            # unsupported (spa/ipls/ga/...) -> skip with a warning.
+                            try:
+                                varsel_value = _multiclass_varsel_mask(
+                                    X_pp, y_np, varsel_path, _n_select, model_name="PLS-DA",
+                                )
+                            except MulticlassVarselUnsupported as exc:
+                                logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
+                                continue  # skip this row, do not crash the run
 
                             try:
                                 # Full fit -> per-class n_components, varsel mask, modeled set.
@@ -7789,6 +7919,19 @@ def run_multiclass_simca_search(
                 None,
             )
             if top_cfg is not None and not top.get("reason"):
+                # Resolve the top row's varsel value on ITS preprocessed matrix
+                # (mask methods need the preprocessed X; wold/none pass through).
+                _top_path = str(top["varsel_path"])
+                _top_nsel = top["NSelect"]
+                if _top_path in _WOLD_METHODS or _top_path == "none":
+                    _top_varsel = _MULTICLASS_VARSEL_PATHS.get(_top_path)
+                else:
+                    _top_Xpp, _, _ = _multiclass_preprocess_matrix(
+                        X_np, top_cfg, wavelengths_full
+                    )
+                    _top_varsel = _multiclass_varsel_mask(
+                        _top_Xpp, y_np, _top_path, _top_nsel, model_name="PLS-DA",
+                    )
                 df_results.attrs["top_decision_view"] = build_multiclass_decision_view(
                     X_np,
                     y_np,
@@ -7798,8 +7941,8 @@ def run_multiclass_simca_search(
                     n_components=top["NComponents"],
                     scaling="per_class",
                     min_class_samples=min_class_samples,
-                    variable_selection=_MULTICLASS_VARSEL_PATHS[str(top["varsel_path"])],
-                    n_select=top["NSelect"],
+                    variable_selection=_top_varsel,
+                    n_select=_top_nsel,
                     wavelengths=wavelengths_full,
                     sample_ids=(list(X.index) if hasattr(X, "index") else None),
                 )
