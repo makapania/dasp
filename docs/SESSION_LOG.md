@@ -4,6 +4,59 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-06 — T-31 saved-model consumers wired/verified (commit `cc0f486`)
+
+Closed the "owed next" from the parity feature: verify/wire the 3 saved-model
+consumers for a saved multiclass `.dasp`. Fable session, branch
+`feat/T31-multiclass-simca`, NOT merged/pushed. Full detail in
+`.superpowers/sdd/consumers-report.md`.
+
+- **Predict tab: worked already.** Backend `predict_with_uncertainty` multiclass
+  branch (model_io:915) + GUI `_display_uncertainty` `'p_values'` branch
+  (gui:43410) + `_display_predictions` string-label path already render the
+  decision matrix. Verified e2e via a real save→load→`predict_with_uncertainty`
+  round-trip. No code change.
+- **Tab 9 (Multi-Model comparison): scoped-and-excluded.** Tab 9 is entirely
+  scalar-prediction machinery (consensus by R², numeric/label flag rules,
+  applicability-domain distances). A decision matrix has no representation there,
+  and letting it flow mislabels the model "(Reg)" and silently drops per-class
+  p-values / the novelty decision. New `_comparison_reject_multiclass()` refuses
+  a `multiclass_simca` model at load (primary + auxiliary) with an explicit
+  "run it on the Predict tab" message. Prefer-exclusion-over-half-build per the
+  task guidance.
+- **Notebook export: worked already; test hardened.** `generate_multiclass_
+  reproduction_notebook` builds a valid v4 notebook; the GUI writes it via
+  `json.dumps`. Verified: JSON round-trips, nbformat-v4 structure valid, and the
+  concatenated code cells EXECUTE (subprocess) → `decision_matrix.csv`. Added a
+  test that executes the cells (prior test only checked the backend call string).
+  nbformat/jupyter are NOT installed and not a dep — validated structurally + by
+  execution, did not add a dependency.
+
+**Non-obvious findings:**
+- **Pre-existing dual-import test flake (NOT a product bug).** In the combined
+  pytest session, when `test_multiclass_search.py` runs before the parity file,
+  `test_run_selected_accepts_discrimination_varsel` fails with `TypeError:
+  super(type, obj): obj must be an instance or subtype of type` on the `spa`
+  run-selected path. Root cause = the GUI mixes `from src.spectral_predict ...`
+  (9 sites) and unprefixed `from spectral_predict ...` → two module objects, two
+  class definitions; test ordering poisons `sys.modules` so an instance from one
+  namespace hits `super()` referencing the other. Passes standalone (parity
+  20/20) AND in a fresh production-like process (imported `src.spectral_predict`,
+  ran `_multiclass_varsel_mask('spa',...)` → 5 vars, no error). Recommend a
+  separate test-infra ticket to unify the import namespace. Do NOT chase it as a
+  spa bug.
+- **Stale test from the parity refactor.** `test_multiclass_task_vars_exist`
+  still asserted scalar `mc_alpha`/`mc_n_components`, which `1359d22` replaced
+  with preset-checkbox + custom-list collectors → pre-existing red. Fixed to the
+  new `mc_alpha_005`/`mc_ncomp_099` vars + `_collect_mc_alpha_list`/
+  `_collect_mc_ncomp_list` (same 0.05/0.99/min-10 defaults).
+
+**Tests:** 194 passed (+3 new: Tab9 primary/aux exclusion, notebook exec-repro),
+1 pre-existing dual-import flake as above. **Still owed:** live GUI
+`run`/`screenshot` pass; user merge greenlight (do NOT auto-merge).
+
+---
+
 ## 2026-07-06 — T-31 Multi-Class SIMCA UX-parity feature (Tasks 1-12 + final-review fix)
 
 **User flagged that multi-class didn't behave like the other methods** (config on the Import page instead of the 4A/4B subtabs; variable-count a single spinbox not the multi-size sweep; most varsel methods missing; an auto-popup on run completion). Brainstormed → spec (A-J) → 13-task plan → subagent-driven execution (fresh Opus implementer + Opus reviewer per task, Fable final whole-feature review). Branch `feat/T31-multiclass-simca`, commits `4230fa6..4d0115d`, NOT merged.
