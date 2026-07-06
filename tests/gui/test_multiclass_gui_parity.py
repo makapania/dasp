@@ -73,3 +73,25 @@ def test_mc_ncomp_per_class_cv_toggle(app):
     app.mc_ncomp_099.set(False)
     app.mc_ncomp_per_class_cv.set(True)
     assert app._collect_mc_ncomp_list() == ["per_class_cv"]
+
+
+# ---------------------------------------------------------------------------
+# Task 7 — hyperparameters relocated from Import page to 4A Model Config
+# ---------------------------------------------------------------------------
+
+def test_import_page_has_no_mc_panel(app):
+    # The old import-page frame must be gone.
+    assert not hasattr(app, "mc_hyperparams_frame")
+
+
+def test_mc_model_config_card_exists(app):
+    assert hasattr(app, "mc_model_config_frame")
+
+
+def test_task_type_toggles_mc_card(app):
+    app.task_type.set("multiclass_simca")
+    app._on_task_type_changed()
+    assert app.mc_model_config_frame.winfo_manager() != ""   # mapped
+    app.task_type.set("regression")
+    app._on_task_type_changed()
+    assert app.mc_model_config_frame.winfo_manager() == ""    # unmapped

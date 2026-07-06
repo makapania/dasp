@@ -58,7 +58,7 @@ def test_multiclass_controls_shown_and_others_hidden(gui_app):
     app.task_type.set("multiclass_simca")
     app._on_task_type_changed()
 
-    assert _is_managed(app.mc_hyperparams_frame), "multiclass control panel not shown"
+    assert _is_managed(app.mc_model_config_frame), "multiclass control panel not shown"
     assert _is_managed(app.mc_models_frame), "engine picker not shown"
     # one-class controls hidden
     assert not _is_managed(app.inlier_class_frame)
@@ -75,7 +75,7 @@ def test_switching_away_restores_standard_path(gui_app):
     app.task_type.set("regression")
     app._on_task_type_changed()
 
-    assert not _is_managed(app.mc_hyperparams_frame)
+    assert not _is_managed(app.mc_model_config_frame)
     assert not _is_managed(app.mc_models_frame)
     assert _is_managed(app.standard_models_frame)
 

@@ -6554,63 +6554,10 @@ class SpectralPredictApp:
         self.oc_hyperparams_frame.grid_remove()  # Hidden by default
         cfg_row += 1
 
-        # Multi-class SIMCA / class-modeling controls (visible only for
-        # task_type == "multiclass_simca"). Distinct from the one-class
-        # PCA-SIMCA entry point above: here EVERY class gets its own model and a
-        # sample can be accepted by one / several / none ("novel") of them.
-        self.mc_hyperparams_frame = ttk.Frame(config_frame)
-        self.mc_hyperparams_frame.grid(row=cfg_row, column=0, columnspan=4, sticky=tk.W, pady=(5, 5))
-
-        # Row 0: alpha, n_components, min_class_samples
-        mc_row0 = ttk.Frame(self.mc_hyperparams_frame)
-        mc_row0.pack(side=tk.TOP, anchor=tk.W, pady=2)
-        ttk.Label(mc_row0, text="alpha (global):").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(mc_row0, textvariable=self.mc_alpha, from_=0.001, to=0.5,
-                    increment=0.01, width=6).pack(side=tk.LEFT, padx=(0, 12))
-        mc_ncomp_label = ttk.Label(mc_row0, text="n_components:")
-        mc_ncomp_label.pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Entry(mc_row0, textvariable=self.mc_n_components, width=12).pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Label(mc_row0, text="(0<f<1 = variance frac; int; or per_class_cv)",
-                  style='Caption.TLabel').pack(side=tk.LEFT, padx=(0, 12))
-        CreateToolTip(
-            mc_ncomp_label,
-            text="Per-class PCA size. A float in (0,1) keeps that fraction of variance "
-                 "per class (0.99 = novelty-oriented default). An integer fixes the "
-                 "component count. 'per_class_cv' tunes by one-vs-rest CV "
-                 "(discrimination-oriented; under-detects novelty).",
-            delay=500,
-        )
-        ttk.Label(mc_row0, text="min class n:").pack(side=tk.LEFT, padx=(0, 2))
-        ttk.Spinbox(mc_row0, textvariable=self.mc_min_class_samples, from_=3, to=1000,
-                    increment=1, width=5).pack(side=tk.LEFT, padx=(0, 4))
-
-        # Row 1: variable-selection path multi-select + top-N
-        mc_row1 = ttk.Frame(self.mc_hyperparams_frame)
-        mc_row1.pack(side=tk.TOP, anchor=tk.W, pady=2)
-        ttk.Label(mc_row1, text="Variable selection:").pack(side=tk.LEFT, padx=(0, 4))
-        _mc_varsel_labels = {
-            'none': 'None',
-            'wold_modeling': 'Wold modeling',
-            'wold_discriminating': 'Wold discriminating',
-            'wold_balanced': 'Wold balanced',
-            'importance': 'Importance',
-        }
-        for _path, _lbl in _mc_varsel_labels.items():
-            ttk.Checkbutton(mc_row1, text=_lbl,
-                            variable=self.mc_varsel_vars[_path]).pack(side=tk.LEFT, padx=3)
-        ttk.Label(mc_row1, text="top-N:").pack(side=tk.LEFT, padx=(10, 2))
-        ttk.Spinbox(mc_row1, textvariable=self.mc_varsel_n_select, from_=5, to=2151,
-                    increment=5, width=6).pack(side=tk.LEFT, padx=(0, 4))
-
-        # Row 2: honesty note on the LOCO ranking proxy
-        ttk.Label(
-            self.mc_hyperparams_frame,
-            text="Ranked by LOCO NoveltyAUC — an optimistic within-dataset proxy for "
-                 "held-out-class novelty; confirm on a true external class.",
-            style='Caption.TLabel',
-        ).pack(side=tk.TOP, anchor=tk.W, pady=(2, 0))
-        self.mc_hyperparams_frame.grid_remove()  # Hidden by default
-        cfg_row += 1
+        # Multi-class SIMCA / class-modeling hyperparameters live in the 4A
+        # Model Config subtab (self.mc_model_config_frame), mirroring the
+        # one-class PCA-SIMCA cards. The import page keeps only the task-type
+        # radio for multi-class. (T-31 Task 7 relocation.)
 
         # Wavelength/Wavenumber Range
         self.wl_range_label = ttk.Label(config_frame, text="Wavelength Range:")
@@ -14300,6 +14247,85 @@ class SpectralPredictApp:
         # Initially hidden — shown only when task_type == 'one_class'
         self.oc_model_config_container.grid_remove()
 
+        # ===================================================================
+        # MULTI-CLASS MODEL CONFIG CARD (shown only for multiclass_simca)
+        # Mirrors the one-class container above: relocated here from the import
+        # page (T-31 Task 7). Holds the alpha / n_components / min-class-n sweep
+        # controls; variable selection relocates separately (Task 8).
+        # ===================================================================
+        self._create_section_header(content_frame, "Multi-Class Model Configuration", row=row, columnspan=2)
+        row += 1
+
+        self.mc_model_config_frame = tk.Frame(content_frame, bg=self.colors['bg'])
+
+        mc_section, mc_content = self._create_collapsible_section(
+            self.mc_model_config_frame, "PCA-SIMCA (per-class) Hyperparameters", expanded=True,
+        )
+        mc_section.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        mc_card_outer, mc_frame = self._create_card(
+            mc_content, subtitle="Per-class components, significance level, and minimum class size"
+        )
+        mc_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        mc_inner = ttk.Frame(mc_frame)
+        mc_inner.pack(fill='both', expand=True)
+
+        mcr = 0
+        # --- n_components row ---
+        mc_ncomp_heading = ttk.Label(mc_inner, text="Number of Components (per class):",
+                                     style='Subheading.TLabel')
+        mc_ncomp_heading.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(
+            mc_ncomp_heading,
+            text="Per-class PCA size. A float in (0,1) keeps that fraction of variance "
+                 "per class (0.99 = novelty-oriented default). An integer fixes the "
+                 "component count. 'per_class_cv' tunes by one-vs-rest CV "
+                 "(discrimination-oriented; under-detects novelty).",
+            delay=500,
+        )
+        mcr += 1
+        mc_nc_frame = ttk.Frame(mc_inner)
+        mc_nc_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(mc_nc_frame, text="3", variable=self.mc_ncomp_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="5", variable=self.mc_ncomp_5).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="7", variable=self.mc_ncomp_7).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="0.95 (variance)", variable=self.mc_ncomp_095).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="0.99 ⭐", variable=self.mc_ncomp_099).grid(row=0, column=4, padx=5)
+        ttk.Label(mc_nc_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(mc_nc_frame, textvariable=self.mc_ncomp_custom, width=10).grid(row=0, column=6, padx=5)
+        mcr += 1
+        ttk.Checkbutton(mc_inner, text="per_class_cv (auto; discrimination-oriented)",
+                        variable=self.mc_ncomp_per_class_cv).grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        mcr += 1
+
+        # --- alpha row ---
+        ttk.Label(mc_inner, text="Alpha (significance level):", style='Subheading.TLabel').grid(
+            row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        mcr += 1
+        mc_al_frame = ttk.Frame(mc_inner)
+        mc_al_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(mc_al_frame, text="0.01", variable=self.mc_alpha_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mc_al_frame, text="0.05 ⭐", variable=self.mc_alpha_005).grid(row=0, column=1, padx=5)
+        ttk.Label(mc_al_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(mc_al_frame, textvariable=self.mc_alpha_custom, width=10).grid(row=0, column=3, padx=5)
+        mcr += 1
+
+        # --- min class n row ---
+        ttk.Label(mc_inner, text="Minimum class size:", style='Subheading.TLabel').grid(
+            row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        mcr += 1
+        mc_mn_frame = ttk.Frame(mc_inner)
+        mc_mn_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Label(mc_mn_frame, text="min class n:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(mc_mn_frame, textvariable=self.mc_min_class_samples, from_=3, to=1000,
+                    increment=1, width=5).grid(row=0, column=1, padx=5)
+        ttk.Label(mc_mn_frame, text="(classes with fewer samples are skipped as unmodelable)",
+                  style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        self.mc_model_config_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        row += 1
+        # Initially hidden — shown only when task_type == 'multiclass_simca'
+        self.mc_model_config_frame.grid_remove()
+
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
                        variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
@@ -16975,8 +17001,8 @@ class SpectralPredictApp:
         task_type = self.task_type.get()
         if task_type == "one_class":
             # Ensure the multi-class panels are hidden.
-            if hasattr(self, 'mc_hyperparams_frame'):
-                self.mc_hyperparams_frame.grid_remove()
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid_remove()
             if hasattr(self, 'mc_models_frame'):
                 self.mc_models_frame.pack_forget()
             self.inlier_class_frame.grid()
@@ -17028,8 +17054,8 @@ class SpectralPredictApp:
             self.oc_hyperparams_frame.grid_remove()
             if hasattr(self, 'oc_model_config_container'):
                 self.oc_model_config_container.grid_remove()
-            if hasattr(self, 'mc_hyperparams_frame'):
-                self.mc_hyperparams_frame.grid()
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid()
             # Swap model panels: hide standard + one-class, show engine picker
             if hasattr(self, 'standard_models_frame'):
                 self.standard_models_frame.pack_forget()
@@ -17045,8 +17071,8 @@ class SpectralPredictApp:
                 self.imbalance_section_heading.grid_remove()
         else:
             # Ensure the multi-class panels are hidden.
-            if hasattr(self, 'mc_hyperparams_frame'):
-                self.mc_hyperparams_frame.grid_remove()
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid_remove()
             if hasattr(self, 'mc_models_frame'):
                 self.mc_models_frame.pack_forget()
             self.inlier_class_frame.grid_remove()
