@@ -262,7 +262,7 @@ def save_model(
                 print(f"Applicability domain: storing all {n_samples} training spectra")
             else:
                 # Use Kennard-Stone to select ~150 representative samples for large datasets
-                from src.spectral_predict.sample_selection import kennard_stone
+                from spectral_predict.sample_selection import kennard_stone
                 n_representatives = min(150, n_samples)
                 representative_indices = kennard_stone(X_train, n_samples=n_representatives)
                 representative_spectra = X_train[representative_indices]

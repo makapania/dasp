@@ -261,14 +261,28 @@ def _install_recording_thread(monkeypatch, threading):
     started instance. Keeps genuine threading (spa/CARS spin up their own
     threads) while letting the test join the GUI worker thread deterministically.
     The GUI worker is the FIRST thread started (its inner selectors start later).
+
+    Note: ``multiprocessing.dummy`` (used by joblib's ``backend="threading"``
+    ThreadPool that spa/CARS spin up) calls the *unbound*
+    ``threading.Thread.start(self)`` on its own ``DummyProcess`` instances. With
+    the global patch in place that unbound call resolves to
+    ``_RecordingThread.start`` but ``self`` is a ``DummyProcess`` (not a
+    ``_RecordingThread``), so a bare ``super().start()`` raises
+    ``TypeError: super(type, obj): obj must be an instance or subtype of type``.
+    We therefore only record + ``super()`` for genuine ``_RecordingThread``
+    instances (the GUI worker) and delegate foreign instances straight to the
+    real ``Thread.start`` bound to ``self``.
     """
     real_thread = threading.Thread
     created = []
 
     class _RecordingThread(real_thread):
         def start(self):
-            created.append(self)
-            super().start()
+            if isinstance(self, _RecordingThread):
+                created.append(self)
+                super().start()
+            else:
+                real_thread.start(self)
 
     monkeypatch.setattr(threading, "Thread", _RecordingThread)
     return created

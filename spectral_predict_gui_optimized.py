@@ -16473,7 +16473,7 @@ class SpectralPredictApp:
             return
 
         # Check for combined format (single CSV/TXT/Excel with all data)
-        from src.spectral_predict.io import (
+        from spectral_predict.io import (
             detect_combined_format,
             detect_combined_excel_format,
             read_combined_csv,
@@ -31927,7 +31927,7 @@ For detailed documentation, see the User Guide.
         if not hasattr(self, 'results_df') or self.results_df is None or len(self.results_df) == 0:
             return
 
-        from src.spectral_predict.scoring import compute_composite_score
+        from spectral_predict.scoring import compute_composite_score
 
         task_type = "regression" if "R2cv" in self.results_df.columns else "classification"
 
@@ -51354,7 +51354,7 @@ External Validation Performance (n={n_val}):
         try:
             # Reuse existing model loading logic from Tab 8
             from pathlib import Path
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
             import zipfile
 
             # Check if this is an ensemble file
@@ -51424,7 +51424,7 @@ External Validation Performance (n={n_val}):
 
         try:
             from pathlib import Path
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
             import zipfile
 
             for filepath in filepaths:
@@ -52312,7 +52312,7 @@ External Validation Performance (n={n_val}):
             self.root.update()
 
             import pandas as pd
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
 
             # Apply transfer chain if enabled
             if self.apply_transfer.get() and self.transfer_models:
@@ -58483,7 +58483,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_epo_projection(self, X: np.ndarray) -> np.ndarray:
         """Apply EPO projection to remove contaminant signal."""
-        from src.spectral_predict.contaminant_analysis import EstimatedEPO
+        from spectral_predict.contaminant_analysis import EstimatedEPO
 
         n_components = self.contam_n_components.get()
 
@@ -58502,7 +58502,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_glsw_weighting(self, X: np.ndarray) -> np.ndarray:
         """Apply GLSW wavelength weighting."""
-        from src.spectral_predict.contaminant_analysis import ContaminantGLSW
+        from spectral_predict.contaminant_analysis import ContaminantGLSW
 
         X_contam = np.vstack(list(self.contam_groups.values()))
 
@@ -58515,7 +58515,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_opls_filter(self, X: np.ndarray) -> np.ndarray:
         """Apply OPLS orthogonal signal correction."""
-        from src.spectral_predict.contaminant_analysis import ContaminantOPLSDA
+        from spectral_predict.contaminant_analysis import ContaminantOPLSDA
 
         n_components = self.contam_n_components.get()
         X_contam = np.vstack(list(self.contam_groups.values()))
