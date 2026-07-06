@@ -127,6 +127,32 @@ self-describing or the "dig in and compare" workflow fails.
   size), so a saved/selected row is unambiguous.
 - All additive columns; consumers that don't reference them are unaffected.
 
+### I. Holdout Validation tab (4E) — wire multi-class in
+Currently multi-class is not linked into the Validation tab. The splitter UI is
+task-agnostic (it only picks indices), but
+`compute_validation_metrics_for_top_models` (`search.py`) has branches only for
+`regression` (RMSEP/R²pred) and `classification` (val_Accuracy) — there is **no
+`multiclass_simca` branch**, so a holdout set produces no metrics. That is the
+missing link.
+
+- **Splitters:** Kennard-Stone (X-only), Random, and Stratified apply directly.
+  **Exclude SPXY** for multi-class — its `d_SPXY = d_X + d_y` term is Euclidean
+  on the target, undefined for a categorical class label (same reason it is the
+  wrong choice for classification). Disable/hide the SPXY radio when task type is
+  `multiclass_simca`.
+- **Metrics:** add a `multiclass_simca` branch to
+  `compute_validation_metrics_for_top_models` that refits the
+  `MultiClassClassModel` on the calibration split and computes **decision-matrix
+  metrics** on the holdout (per-class sensitivity/specificity, novelty rate,
+  ambiguity, exact-set rate) via the same `multiclass_simca_metrics` backend the
+  search uses — NOT RMSEP or plain accuracy. Emit them as `val_*` columns
+  parallel to the existing validation columns.
+- **Honesty label (required):** a same-known-class holdout validates known-class
+  performance only. It does NOT test the "none of the above" novelty capability,
+  because every held-out sample belongs to a trained class. The tab must state
+  this plainly and point to LOCO / a true external class for novelty validation
+  (mirroring the existing optimistic-proxy note).
+
 ## Scope
 
 - **Multi-class only** this pass. One-class's import-page hyperparameters
@@ -157,6 +183,10 @@ configuration — the UX parity is a correctness enabler, not cosmetics.
   `display_cols` render; column tooltips resolve.
 - **GUI state:** multi-class shows the 4A/4B cards, import panel is gone, model
   swap still works; toggling task types leaves no orphaned/duplicated widgets.
+- **Validation tab:** a `multiclass_simca` holdout run reports `val_*`
+  decision-matrix metrics (not RMSEP/accuracy); SPXY is unavailable for
+  multi-class; KS/Random/Stratified splits produce a valid calibration/holdout
+  partition and the metrics populate the results table.
 - **Real-data e2e:** ORAU Excel (`Site`) — a multi-size / multi-alpha /
   multi-component leaderboard renders with self-describing rows; selecting a
   non-top row still saves → loads → predicts and reproduces its decision matrix.
