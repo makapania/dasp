@@ -228,6 +228,189 @@ def test_decision_view_header_tolerates_missing_keys(app):
     assert "ocsvm" in header
 
 
+# ---------------------------------------------------------------------------
+# Final-review regression — double-click Run Selected must accept the full
+# discrimination varsel set (cars/spa/uve/…), not just the SIMCA-native dict
+# paths. The old guard validated `varsel_path in _MULTICLASS_VARSEL_PATHS`
+# (only none/wold_*/importance) and rejected a #1-ranked `spa`/`cars` row with
+# an "unrecognized variable-selection path" warning — blocking view + Save.
+# ---------------------------------------------------------------------------
+
+def _make_multiclass_frame():
+    """Small, well-separated 3-class synthetic frame (30x20) a discrimination
+    selector can resolve a real mask on."""
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    wl = [float(w) for w in range(1000, 1200, 10)]  # 20 wavelengths
+    blocks = []
+    labels = []
+    for c, shift in enumerate((0.0, 5.0, 10.0)):
+        blk = rng.normal(loc=shift, scale=0.3, size=(10, len(wl)))
+        blk[:, c * 3 : c * 3 + 3] += 8.0  # class-specific discriminative bands
+        blocks.append(blk)
+        labels += [f"Class{c}"] * 10
+    X = pd.DataFrame(np.vstack(blocks), columns=wl)
+    y = pd.Series(labels, name="class")
+    return X, y
+
+
+def _install_recording_thread(monkeypatch, threading):
+    """Replace threading.Thread with a real Thread SUBCLASS that records each
+    started instance. Keeps genuine threading (spa/CARS spin up their own
+    threads) while letting the test join the GUI worker thread deterministically.
+    The GUI worker is the FIRST thread started (its inner selectors start later).
+    """
+    real_thread = threading.Thread
+    created = []
+
+    class _RecordingThread(real_thread):
+        def start(self):
+            created.append(self)
+            super().start()
+
+    monkeypatch.setattr(threading, "Thread", _RecordingThread)
+    return created
+
+
+def test_run_selected_accepts_discrimination_varsel(app, monkeypatch):
+    """A leaderboard row whose varsel_path is a discrimination method (`spa`)
+    must NOT be rejected by the guard, and its mask must resolve to a usable
+    boolean feature mask passed into build_multiclass_decision_view.
+
+    Genuinely fails against the pre-fix guard: with the old
+    `if varsel_path not in _MULTICLASS_VARSEL_PATHS` check, `spa` is absent from
+    that dict, so the function pops the "unrecognized variable-selection path"
+    warning and returns early — build is never called and captured stays empty.
+    """
+    import threading
+
+    import numpy as np
+    import pandas as pd
+
+    import spectral_predict.search as mc_search
+    import spectral_predict_gui_optimized as gui_mod
+
+    X_df, y_ser = _make_multiclass_frame()
+    app._mc_export_data = (X_df, y_ser)
+    app._mc_run_config = {"min_class_samples": 3}
+    app._mc_worker_running = False
+
+    row = pd.Series(
+        {
+            "engine_family": "pca-simca",
+            "Preprocess": "raw",
+            "Alpha": 0.05,
+            "NComponents": 0.99,
+            "NSelect": 5,
+            "varsel_path": "spa",
+        }
+    )
+
+    # Capture any warning/error dialogs (a rejection would fire showwarning).
+    warnings_seen = []
+    monkeypatch.setattr(
+        gui_mod.messagebox,
+        "showwarning",
+        lambda *a, **k: warnings_seen.append(a),
+    )
+    monkeypatch.setattr(
+        gui_mod.messagebox,
+        "showerror",
+        lambda *a, **k: warnings_seen.append(("ERROR",) + a),
+    )
+
+    # Capture the resolved variable_selection value handed to the builder.
+    captured = {}
+
+    def _fake_build(*a, **k):
+        captured["variable_selection"] = k.get("variable_selection")
+        return {"reason": "", "classes": [], "decision_matrix": []}
+
+    monkeypatch.setattr(mc_search, "build_multiclass_decision_view", _fake_build)
+    # Don't pop a real Tk decision window on the success path.
+    monkeypatch.setattr(app, "_show_multiclass_decision_view", lambda *a, **k: None)
+    # No mainloop runs in the test, so the worker's root.after() would raise
+    # "main thread is not in main loop"; run the scheduled callback inline.
+    monkeypatch.setattr(
+        app.root, "after", lambda _d, cb=None, *a, **k: (cb() if callable(cb) else None)
+    )
+
+    # Record the GUI worker thread WITHOUT breaking real threading (spa/CARS use
+    # threading internally, so we must NOT replace threading.Thread with a stub).
+    created = _install_recording_thread(monkeypatch, threading)
+
+    app._run_selected_multiclass_result(row)
+    # The guard passing means a worker thread was dispatched (old guard would
+    # have popped the warning and returned early, creating no thread).
+    assert created, ("guard rejected the row: no worker dispatched", warnings_seen)
+    created[0].join(timeout=60)
+    app.root.update()  # flush the root.after success callback
+
+    # 1) The guard did NOT reject the discrimination method.
+    joined = " ".join(str(w) for w in warnings_seen)
+    assert "unrecognized variable-selection path" not in joined, warnings_seen
+    assert not warnings_seen, warnings_seen
+
+    # 2) The builder received a genuine boolean feature mask (mask resolution
+    #    ran on the row's preprocessed calibration matrix), not a KeyError.
+    vs = captured.get("variable_selection")
+    assert isinstance(vs, np.ndarray), captured
+    assert vs.dtype == bool
+    assert vs.shape == (X_df.shape[1],)
+    assert vs.sum() == 5  # NSelect top-scoring bands
+
+
+def test_run_selected_accepts_wold_and_none_paths(app, monkeypatch):
+    """Existing dict paths (`none`, Wold) still pass through unchanged — the
+    widened guard must not regress the SIMCA-native double-click behavior."""
+    import threading
+
+    import pandas as pd
+
+    import spectral_predict.search as mc_search
+    import spectral_predict_gui_optimized as gui_mod
+
+    X_df, y_ser = _make_multiclass_frame()
+    app._mc_export_data = (X_df, y_ser)
+    app._mc_run_config = {"min_class_samples": 3}
+
+    monkeypatch.setattr(gui_mod.messagebox, "showwarning", lambda *a, **k: None)
+    monkeypatch.setattr(gui_mod.messagebox, "showerror", lambda *a, **k: None)
+    monkeypatch.setattr(app, "_show_multiclass_decision_view", lambda *a, **k: None)
+    monkeypatch.setattr(
+        app.root, "after", lambda _d, cb=None, *a, **k: (cb() if callable(cb) else None)
+    )
+
+    created = _install_recording_thread(monkeypatch, threading)
+
+    for path, expected in (("none", None), ("wold_modeling", "wold_modeling")):
+        app._mc_worker_running = False
+        created.clear()
+        captured = {}
+
+        def _fake_build(*a, _cap=captured, **k):
+            _cap["variable_selection"] = k.get("variable_selection")
+            return {"reason": "", "classes": [], "decision_matrix": []}
+
+        monkeypatch.setattr(mc_search, "build_multiclass_decision_view", _fake_build)
+        row = pd.Series(
+            {
+                "engine_family": "pca-simca",
+                "Preprocess": "raw",
+                "Alpha": 0.05,
+                "NComponents": 0.99,
+                "NSelect": None,
+                "varsel_path": path,
+            }
+        )
+        app._run_selected_multiclass_result(row)
+        created[0].join(timeout=60)
+        app.root.update()
+        assert captured.get("variable_selection") == expected
+
+
 def test_no_auto_decision_popup(app, tmp_path):
     import pandas as pd
 

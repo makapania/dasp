@@ -28734,7 +28734,7 @@ class SpectralPredictApp:
                                 y_val=y_val_mc,
                                 task_type="multiclass_simca",
                                 wavelengths=mc_wavelengths,
-                                top_n=100,
+                                top_n=self.validation_top_n.get(),
                                 baseline_method=baseline_method_mc,
                                 baseline_params=baseline_params_mc,
                                 enable_smoothing=self.enable_smoothing.get(),
@@ -30456,19 +30456,28 @@ For detailed documentation, see the User Guide.
             self._log_progress("  [Note] A selected-result run is already in progress.")
             return
 
-        from spectral_predict.search import _MULTICLASS_VARSEL_PATHS
+        from spectral_predict.search import (
+            _MULTICLASS_MASK_METHODS,
+            _MULTICLASS_VARSEL_PATHS,
+        )
 
         X_df, y_ser = data
         engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
         varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
-        # Strict validation (the backend indexes _MULTICLASS_VARSEL_PATHS
-        # strictly): a corrupted/unknown path must NOT be silently coerced to
-        # "no variable selection" and shown as if it were the row's setting.
-        if varsel_path not in _MULTICLASS_VARSEL_PATHS:
+        # Strict validation, but against the FULL accepted set the backend uses
+        # (Wold/none/importance dict paths UNION the resolvable discrimination
+        # mask methods — cars/spa/uve/ipls/…). This is exactly
+        # ``run_multiclass_simca_search``'s ``_accepted_varsel_paths``. A
+        # corrupted/unknown path must NOT be silently coerced to "no variable
+        # selection" and shown as if it were the row's setting.
+        _accepted_varsel_paths = set(_MULTICLASS_VARSEL_PATHS) | set(
+            _MULTICLASS_MASK_METHODS
+        )
+        if varsel_path not in _accepted_varsel_paths:
             messagebox.showwarning(
                 "Run Selected Result",
                 f"The selected row has an unrecognized variable-selection path "
-                f"'{varsel_path}'. Expected one of {sorted(_MULTICLASS_VARSEL_PATHS)}.",
+                f"'{varsel_path}'. Expected one of {sorted(_accepted_varsel_paths)}.",
             )
             return
         try:
@@ -30502,7 +30511,42 @@ For detailed documentation, see the User Guide.
 
         def _worker():
             try:
-                from spectral_predict.search import build_multiclass_decision_view
+                import numpy as _np
+
+                from spectral_predict.search import (
+                    _WOLD_METHODS,
+                    _multiclass_preprocess_matrix,
+                    _multiclass_varsel_mask,
+                    build_multiclass_decision_view,
+                )
+
+                # Resolve the row's varsel value the SAME way the search loop and
+                # the holdout rebuild do: Wold/none pass through the dict; a
+                # discrimination method (cars/spa/uve/ipls/…) is resolved to a
+                # boolean mask ON THE ROW'S PREPROCESSED CALIBRATION MATRIX so the
+                # double-click model is identical to the ranked row.
+                X_np = X_df.values if hasattr(X_df, "values") else _np.asarray(X_df)
+                X_np = _np.asarray(X_np, dtype=_np.float64)
+                y_np = y_ser.values if hasattr(y_ser, "values") else _np.asarray(y_ser)
+                wavelengths_full = _np.asarray(
+                    list(X_df.columns)
+                    if hasattr(X_df, "columns")
+                    else _np.arange(X_np.shape[1])
+                )
+                if varsel_path in _WOLD_METHODS or varsel_path == "none":
+                    variable_selection = _MULTICLASS_VARSEL_PATHS.get(varsel_path)
+                else:
+                    X_pp, _, _ = _multiclass_preprocess_matrix(
+                        X_np, preprocess_cfg, wavelengths_full
+                    )
+                    variable_selection = _multiclass_varsel_mask(
+                        X_pp,
+                        y_np,
+                        wavelengths_full,
+                        varsel_path,
+                        n_select_row,
+                        task_type="classification",
+                    )
 
                 view = build_multiclass_decision_view(
                     X_df,
@@ -30513,7 +30557,7 @@ For detailed documentation, see the User Guide.
                     n_components=n_components_row,
                     scaling="per_class",
                     min_class_samples=run_cfg.get("min_class_samples", 10),
-                    variable_selection=_MULTICLASS_VARSEL_PATHS[varsel_path],
+                    variable_selection=variable_selection,
                     n_select=n_select_row,
                     wavelengths=(
                         list(X_df.columns) if hasattr(X_df, "columns") else None
