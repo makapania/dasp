@@ -7021,50 +7021,97 @@ _WOLD_METHODS = frozenset(
     {"wold_modeling", "wold_discriminating", "wold_balanced"}
 )
 
-# The discrimination-based methods that ``compute_importances`` genuinely
-# resolves to real per-feature scores (verified in unified_bayesian.py: every
-# other name falls through to uniform ``np.ones`` — an arbitrary top-k, NOT a
-# selection). Any method outside this set (spa/ipls/ga/region/uve_* combos)
-# raises MulticlassVarselUnsupported so the caller skips it cleanly.
-_MULTICLASS_MASK_METHODS = frozenset({"importance", "cars", "uve"})
+# Discrimination-based methods whose real implementation in
+# ``variable_selection.py`` returns a PER-FEATURE importance/score array. We keep
+# the top-``n_select`` scoring indices -> boolean mask. ``importance`` routes
+# through ``compute_importances`` (fitted-model importances); every other name
+# below calls its dedicated selector with the same signature the STANDARD
+# dispatch uses (search.py:3300+).
+_MULTICLASS_IMPORTANCE_METHODS = frozenset(
+    {
+        "importance",
+        "spa",
+        "uve",
+        "cars",
+        "cars_tree",
+        "uve_spa",
+        "uve_cars",
+        "uve_cars_tree",
+        "uve_cars_spa",
+        "ipls",
+        "fipls_spa",
+        "fipls_cars",
+    }
+)
+
+# Interval-family methods return a LIST of interval-subset dicts (each with an
+# ``indices`` array + ``rmsecv``). We pick the best (lowest-RMSECV) subset and
+# turn its indices into a boolean mask; these methods define their own feature
+# count, so ``n_select`` does not apply (search.py:3145+).
+_MULTICLASS_INTERVAL_METHODS = frozenset(
+    {"ipls_forward", "ipls_backward", "mc_sipls", "mwpls"}
+)
+
+# Retained for the caller's accepted-path set (see run_multiclass_simca_search):
+# every method the mask dispatch can genuinely resolve.
+_MULTICLASS_MASK_METHODS = frozenset(
+    _MULTICLASS_IMPORTANCE_METHODS | _MULTICLASS_INTERVAL_METHODS
+)
 
 
-def _multiclass_varsel_mask(X, y, method, n_select, model_name):
-    """Boolean top-``n_select`` feature mask for a supervised varsel method on the
-    genuine multi-class label.
+def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="classification"):
+    """Boolean feature mask for a supervised variable-selection method on the
+    genuine multi-class label, computed ONCE on the passed calibration matrix.
 
-    Wold methods are handled inside :class:`~spectral_predict.simca.MultiClassClassModel`
-    (return their string, not a mask); this covers the discrimination-based set
-    (``importance``/``cars``/``uve``) that ``compute_importances`` resolves.
+    This is the chemometrics convention (PLS_Toolbox GA, mdatools iPLS, CARS all
+    select from the full calibration data using each method's own internal CV,
+    then validate externally). It is deliberately NOT nested per CV fold; the
+    external Validation tab is the honest held-out check.
+
+    Wold methods are handled inside
+    :class:`~spectral_predict.simca.MultiClassClassModel` via its string dispatch
+    (leakage-safe per-fold recompute); the helper returns their string unchanged.
+    Every other discrimination method is routed to its real implementation in
+    ``variable_selection.py`` (mirroring the STANDARD dispatch) and its output is
+    normalized to a mask:
+
+    - **Importance-array methods** (``importance``, ``spa``, ``uve``, ``cars``,
+      ``cars_tree``, ``uve_spa``, ``uve_cars``, ``uve_cars_tree``,
+      ``uve_cars_spa``, ``ipls``, ``fipls_spa``, ``fipls_cars``): keep the
+      top-``n_select`` scoring indices.
+    - **Interval-subset methods** (``ipls_forward``, ``ipls_backward``,
+      ``mc_sipls``, ``mwpls``): pick the best (lowest-RMSECV) interval subset and
+      use its indices (``n_select`` does not apply — the method sets its count).
 
     Parameters
     ----------
     X : ndarray of shape (n_samples, n_features)
-        Preprocessed spectra.
+        Preprocessed spectra (calibration matrix).
     y : array-like of shape (n_samples,)
         Multi-class labels.
+    wavelengths : array-like or None
+        Per-feature wavelength axis (needed by interval + fiPLS methods). When
+        ``None`` a positional index axis ``arange(n_features)`` is used.
     method : str
-        ``"none"`` -> ``None``; a Wold method -> that string; a supported
+        ``"none"`` -> ``None``; a Wold method -> that string; a resolvable
         discrimination method -> a boolean mask; anything else -> raises.
     n_select : int
-        Number of top-scoring features to keep.
-    model_name : str
-        Model name forwarded to ``compute_importances`` (e.g. ``"PLS-DA"``).
+        Number of top-scoring features to keep (importance-array methods only).
+    task_type : str
+        Passed through to selectors that take it (default ``"classification"``).
 
     Returns
     -------
     None or str or ndarray of bool
         ``None`` for ``"none"``; the method string for a Wold method; otherwise a
-        boolean mask of shape ``(n_features,)`` with exactly ``min(n_select,
-        n_features)`` True entries.
+        boolean mask of shape ``(n_features,)`` with at least one True entry.
 
     Raises
     ------
     MulticlassVarselUnsupported
-        For a method that is not resolvable on a >2-class label — either a
-        binary-only path that raises inside ``compute_importances``, a method
-        outside the supported discrimination set, or one that produces
-        non-finite importances.
+        For a method with no reachable real implementation, or one that errors /
+        produces an unusable selection on the >2-class label. Caught by the
+        caller, which skips the row with a logged warning.
     """
     import numpy as np
 
@@ -7073,49 +7120,167 @@ def _multiclass_varsel_mask(X, y, method, n_select, model_name):
     if method in _WOLD_METHODS:
         # Handled natively by the model layer via its string dispatch.
         return method
-    if method not in _MULTICLASS_MASK_METHODS:
-        raise MulticlassVarselUnsupported(
-            f"variable-selection method {method!r} is not resolvable for "
-            f"multi-class SIMCA (supported: {sorted(_MULTICLASS_MASK_METHODS)} "
-            f"+ Wold modes); compute_importances would return uniform scores."
-        )
 
-    n_features = X.shape[1]
+    n_features = int(X.shape[1])
+    X_np = np.asarray(X, dtype=float)
+    wl = np.asarray(wavelengths) if wavelengths is not None else np.arange(n_features)
+
     from sklearn.preprocessing import LabelEncoder
 
-    from spectral_predict.unified_bayesian import compute_importances
-
-    # Encode labels to contiguous ints: PLS-based classification importance
-    # paths cast y to float, so raw string classes ("Site A", ...) would raise.
+    # Encode labels to contiguous ints: the PLS-based selectors cast y to float,
+    # so raw string classes ("Site A", ...) would raise.
     y_enc = LabelEncoder().fit_transform(np.asarray(y))
     n_classes = int(len(np.unique(y_enc)))
 
+    folds = 5
+    random_state = RANDOM_STATE
+
+    def _mask_from_scores(scores) -> "np.ndarray":
+        scores = np.asarray(scores, dtype=float)
+        if scores.shape != (n_features,) or not np.all(np.isfinite(scores)):
+            raise MulticlassVarselUnsupported(
+                f"{method!r} produced unusable importances "
+                f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))})."
+            )
+        k = int(min(max(int(n_select), 1), n_features))
+        top_idx = np.argsort(scores, kind="stable")[-k:]
+        mask = np.zeros(n_features, dtype=bool)
+        mask[top_idx] = True
+        return mask
+
+    def _mask_from_subsets(subsets) -> "np.ndarray":
+        if not subsets:
+            raise MulticlassVarselUnsupported(f"{method!r} returned no interval subsets.")
+        best = min(subsets, key=lambda s: s.get("rmsecv", float("inf")))
+        idx = np.asarray(best["indices"], dtype=int)
+        mask = np.zeros(n_features, dtype=bool)
+        mask[idx] = True
+        if not mask.any():
+            raise MulticlassVarselUnsupported(f"{method!r} selected an empty interval subset.")
+        return mask
+
     try:
-        scores = compute_importances(
-            np.asarray(X),
-            y_enc,
-            method,
-            model_name,
-            task_type="classification",
-        )
-    except ValueError as exc:
-        # e.g. a binary-only coefficient path on a >2-class label.
+        if method == "importance":
+            from spectral_predict.unified_bayesian import compute_importances
+
+            scores = compute_importances(
+                X_np, y_enc, "importance", "PLS-DA", cv_folds=folds, task_type=task_type
+            )
+            return _mask_from_scores(scores)
+
+        if method == "spa":
+            k = int(min(max(int(n_select), 1), n_features))
+            scores = spa_selection(X_np, y_enc, n_features=k, cv_folds=folds)
+            return _mask_from_scores(scores)
+
+        if method == "uve":
+            scores, _thr, _sel = get_uve_threshold(
+                X_np, y_enc, cutoff_multiplier=1.0, n_components=None,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method in ("cars", "cars_tree"):
+            scores = cars_selection(
+                X_np, y_enc, n_iterations=50, pls_components=5, cv_folds=folds,
+                monte_carlo_samples=80, random_state=random_state,
+                use_hybrid_importance=(method == "cars_tree"),
+                task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "uve_spa":
+            k = int(min(max(int(n_select), 1), n_features))
+            scores = uve_spa_selection(
+                X_np, y_enc, n_features=k, cutoff_multiplier=1.0,
+                uve_n_components=None, uve_cv_folds=folds, spa_cv_folds=folds,
+                random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method in ("uve_cars", "uve_cars_tree"):
+            scores = uve_cars_selection(
+                X_np, y_enc, cutoff_multiplier=1.0, uve_n_components=None,
+                uve_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80,
+                random_state=random_state,
+                use_hybrid_importance=(method == "uve_cars_tree"),
+                task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "uve_cars_spa":
+            scores = uve_cars_spa_selection(
+                X_np, y_enc, cutoff_multiplier=1.0, uve_n_components=None,
+                uve_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80, spa_n_features=None,
+                spa_cv_folds=folds, random_state=random_state, task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "ipls":
+            scores = ipls_selection(
+                X_np, y_enc, n_intervals=20, n_components=None,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "fipls_spa":
+            scores = fipls_spa_selection(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                ipls_cv_folds=folds, spa_n_features=None, spa_cv_folds=folds,
+                random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "fipls_cars":
+            scores = fipls_cars_selection(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                ipls_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80,
+                random_state=random_state, task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "ipls_forward":
+            subsets = ipls_forward(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "ipls_backward":
+            subsets = ipls_backward(
+                X_np, y_enc, wavelengths=wl, n_intervals=20,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "mc_sipls":
+            subsets = mc_sipls(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, n_combinations=500,
+                max_combine=4, cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "mwpls":
+            subsets = mwpls(X_np, y_enc, wavelengths=wl, cv_folds=folds)
+            return _mask_from_subsets(subsets)
+
+    except MulticlassVarselUnsupported:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any per-method failure -> clean skip
         raise MulticlassVarselUnsupported(
-            f"{method!r} does not support a {n_classes}-class label: {exc}"
+            f"{method!r} failed on a {n_classes}-class label: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
 
-    scores = np.asarray(scores, dtype=float)
-    if scores.shape != (n_features,) or not np.all(np.isfinite(scores)):
-        raise MulticlassVarselUnsupported(
-            f"{method!r} produced unusable importances "
-            f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))}) "
-            "on this label."
-        )
-    k = int(min(max(int(n_select), 1), n_features))
-    top_idx = np.argsort(scores, kind="stable")[-k:]
-    mask = np.zeros(n_features, dtype=bool)
-    mask[top_idx] = True
-    return mask
+    # No reachable real implementation (e.g. vcpa, ga are intentionally not wired
+    # into the multi-class mask path — see Task-4 report resolve-vs-skip table).
+    raise MulticlassVarselUnsupported(
+        f"variable-selection method {method!r} has no reachable multi-class "
+        f"implementation; skipping."
+    )
 
 
 def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None):
@@ -7818,7 +7983,7 @@ def run_multiclass_simca_search(
                             # unsupported (spa/ipls/ga/...) -> skip with a warning.
                             try:
                                 varsel_value = _multiclass_varsel_mask(
-                                    X_pp, y_np, varsel_path, _n_select, model_name="PLS-DA",
+                                    X_pp, y_np, wavelengths_full, varsel_path, _n_select,
                                 )
                             except MulticlassVarselUnsupported as exc:
                                 logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
@@ -7930,7 +8095,7 @@ def run_multiclass_simca_search(
                         X_np, top_cfg, wavelengths_full
                     )
                     _top_varsel = _multiclass_varsel_mask(
-                        _top_Xpp, y_np, _top_path, _top_nsel, model_name="PLS-DA",
+                        _top_Xpp, y_np, wavelengths_full, _top_path, _top_nsel,
                     )
                 df_results.attrs["top_decision_view"] = build_multiclass_decision_view(
                     X_np,
