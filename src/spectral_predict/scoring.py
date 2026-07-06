@@ -646,7 +646,7 @@ def create_results_dataframe(task_type):
         metric_cols = [
             "NoveltyAUC", "Efficiency", "NoveltyRate", "NoClassRate",
             "AmbiguityRate", "ExactSetRate", "MeanSensitivity", "MeanSpecificity",
-            "Alpha", "NComponents", "MinClassN", "n_classes",
+            "Alpha", "NComponents", "NSelect", "MinClassN", "n_classes",
             "engine_family", "varsel_path",
             # Emitted by run_multiclass_simca_search; declared so downstream
             # consumers stay in sync (Kimi M3).

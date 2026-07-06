@@ -498,3 +498,20 @@ def test_list_alpha_expands_grid():
     assert len(df2) == 4 * len(df1)
     assert set(df2["Alpha"].unique()) == {0.01, 0.05}
     assert set(df2["NComponents"].astype(str).unique()) == {"0.95", "0.99"}
+
+
+def test_list_n_select_expands_grid_and_records_nselect():
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y = _toy()
+    df = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["importance"],
+        variable_selection_n_select=[10, 20],
+    )
+    # NSelect is a first-class schema column, ordered right after NComponents
+    cols = list(df.columns)
+    assert "NSelect" in cols
+    assert cols.index("NSelect") == cols.index("NComponents") + 1
+    # The list expanded the grid; rows carry the distinct per-config sizes
+    assert set(df["NSelect"].unique()) == {10, 20}

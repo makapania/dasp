@@ -7579,7 +7579,7 @@ def run_multiclass_simca_search(
     logger.info("=" * 70)
     logger.info("Classes: %d | Engines: %s", n_total_classes, engines)
     logger.info("Preprocessing configs: %d | Varsel paths: %s", len(preprocess_configs), varsel_paths)
-    logger.info("Total configurations: %d (alpha=%s)", total_configs, alpha)
+    logger.info("Total configurations: %d (alphas=%s)", total_configs, alphas)
 
     if progress_callback:
         progress_callback(
@@ -7678,6 +7678,7 @@ def run_multiclass_simca_search(
                                 "MeanSpecificity": np.nan,
                                 "Alpha": _alpha,
                                 "NComponents": _ncomp,
+                                "NSelect": _n_select,
                                 "MinClassN": np.nan,
                                 "n_classes": n_total_classes,
                                 "engine_family": engine,
@@ -7798,7 +7799,7 @@ def run_multiclass_simca_search(
                     scaling="per_class",
                     min_class_samples=min_class_samples,
                     variable_selection=_MULTICLASS_VARSEL_PATHS[str(top["varsel_path"])],
-                    n_select=variable_selection_n_select,
+                    n_select=top["NSelect"],
                     wavelengths=wavelengths_full,
                     sample_ids=(list(X.index) if hasattr(X, "index") else None),
                 )
