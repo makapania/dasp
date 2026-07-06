@@ -153,6 +153,19 @@ missing link.
   this plainly and point to LOCO / a true external class for novelty validation
   (mirroring the existing optimistic-proxy note).
 
+### J. No auto-popup on run completion — match the other methods
+On run completion the multi-class path auto-opens the decision-matrix window
+(`self.root.after(0, ... _show_multiclass_decision_view)` in the run handler).
+No other method pops up a window — they populate the leaderboard and the user
+double-clicks a row to inspect it. The multi-class double-click path already
+exists (`_on_result_double_click` → `_run_selected_multiclass_result` →
+`_show_multiclass_decision_view`).
+- **Remove the auto-open call** so a multi-class run finishes by populating the
+  leaderboard only, exactly like the others. Viewing a row's decision matrix is
+  the existing double-click action.
+- Auto CSV export of the top row's decision matrix may stay (it is a silent
+  artifact, not a popup) — but it must not open a window.
+
 ## Scope
 
 - **Multi-class only** this pass. One-class's import-page hyperparameters
