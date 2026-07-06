@@ -132,6 +132,43 @@ def test_generated_notebook_is_valid_nbformat():
     assert "build_multiclass_decision_view" in code
 
 
+def test_generated_notebook_executes_and_reproduces(tmp_path):
+    """The exported notebook must be JSON-serializable (as the GUI writes it),
+    structurally valid nbformat-v4, AND runnable: concatenating its code cells
+    (what Jupyter/Colab executes) reproduces the decision matrix on disk. The
+    looser sibling test only checks the backend call is present, not that the
+    notebook runs — this pins the runnable claim the T-31 consumer pass owes."""
+    X, y = _synthetic()
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=_CFG, n_components=0.99,
+        wavelengths=list(X.columns),
+    )
+    nb = generate_multiclass_reproduction_notebook(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns),
+    )
+    # Round-trips as JSON exactly as the GUI export writes it.
+    nb = json.loads(json.dumps(nb, indent=1))
+    # nbformat v4 top-level structure.
+    assert nb["nbformat"] == 4 and isinstance(nb["nbformat_minor"], int)
+    for cell in nb["cells"]:
+        assert cell["cell_type"] in ("markdown", "code")
+        assert "metadata" in cell and "source" in cell
+        if cell["cell_type"] == "code":
+            assert "outputs" in cell and "execution_count" in cell
+
+    code = "".join(
+        ("".join(c["source"]) if isinstance(c["source"], list) else c["source"])
+        for c in nb["cells"] if c["cell_type"] == "code"
+    )
+    (tmp_path / "nb_cells.py").write_text(code, encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "nb_cells.py")],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, f"notebook code failed:\n{proc.stderr}"
+    assert (tmp_path / "decision_matrix.csv").exists()
+
+
 def test_script_without_data_has_placeholder():
     X, y = _synthetic()
     view = build_multiclass_decision_view(

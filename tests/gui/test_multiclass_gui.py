@@ -28,12 +28,24 @@ def _is_managed(widget) -> bool:
 # ---------------------------------------------------------------------------
 
 def test_multiclass_task_vars_exist(gui_app):
-    """The multiclass control variables are created with spec defaults."""
+    """The multiclass control variables are created with spec defaults.
+
+    The UX-parity refactor (commit 1359d22) moved the multiclass hyperparameters
+    off the Import page into the 4A Model Config subtab and replaced the scalar
+    ``mc_alpha``/``mc_n_components`` with preset-checkbox + custom-list collectors
+    (mirroring the one-class ``_collect_simca_overrides``). Defaults: alpha 0.05
+    checked, n_components the novelty-oriented 0.99 per-class variance fraction,
+    min class n = 10.
+    """
     app = gui_app
-    assert hasattr(app, "mc_alpha")
-    assert abs(app.mc_alpha.get() - 0.05) < 1e-9
-    # n_components default is the novelty-oriented 0.99 per-class variance frac
-    assert str(app.mc_n_components.get()) == "0.99"
+    # alpha preset checkboxes: 0.05 on by default, 0.01 off, custom empty
+    assert app.mc_alpha_005.get() is True
+    assert app.mc_alpha_001.get() is False
+    assert app.mc_alpha_custom.get() == ""
+    assert abs(app._collect_mc_alpha_list()[0] - 0.05) < 1e-9
+    # n_components preset checkboxes: 0.99 on by default
+    assert app.mc_ncomp_099.get() is True
+    assert app._collect_mc_ncomp_list() == [0.99]
     assert app.mc_min_class_samples.get() == 10
 
 
@@ -456,3 +468,51 @@ def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg, col_kind):
     # ndarray input (validate_wavelengths=False path) must also reproduce it.
     out_arr = predict_with_model(loaded, X.values, validate_wavelengths=False)
     np.testing.assert_array_equal(out_arr["decision_matrix"], view["accept"])
+
+
+# ---------------------------------------------------------------------------
+# Tab 9 (Multi-Model comparison) — multiclass exclusion
+# ---------------------------------------------------------------------------
+
+def _multiclass_model_dict():
+    """A minimal loaded-model dict as model_io.load_model would return for a
+    saved multiclass_simca model."""
+    return {
+        "model": object(),
+        "metadata": {"task_type": "multiclass_simca", "model_name": "MultiClassSIMCA"},
+        "preprocessor": None,
+    }
+
+
+def test_tab9_rejects_multiclass_primary(gui_app):
+    """Loading a saved multiclass model as the Tab 9 PRIMARY is refused with an
+    explicit message — the decision-matrix paradigm has no home in the
+    R²/consensus-oriented comparison tab (predict it on the Predict tab)."""
+    from unittest.mock import patch
+    app = gui_app
+    app.comparison_primary_model = None
+    with patch("tkinter.filedialog.askopenfilename", return_value="fake.dasp"), \
+         patch("src.spectral_predict.model_io.load_model",
+               return_value=_multiclass_model_dict()), \
+         patch("tkinter.messagebox.showerror") as showerror, \
+         patch("zipfile.ZipFile", side_effect=Exception("not a zip")):
+        app._load_comparison_primary_model()
+    assert app.comparison_primary_model is None
+    assert showerror.called
+    assert "multi" in " ".join(str(a) for a in showerror.call_args[0]).lower()
+
+
+def test_tab9_rejects_multiclass_auxiliary(gui_app):
+    """Loading a saved multiclass model as a Tab 9 AUXILIARY is refused and not
+    appended to the auxiliary list."""
+    from unittest.mock import patch
+    app = gui_app
+    app.comparison_auxiliary_models = []
+    with patch("tkinter.filedialog.askopenfilenames", return_value=["fake.dasp"]), \
+         patch("src.spectral_predict.model_io.load_model",
+               return_value=_multiclass_model_dict()), \
+         patch("tkinter.messagebox.showerror") as showerror, \
+         patch("zipfile.ZipFile", side_effect=Exception("not a zip")):
+        app._load_comparison_auxiliary_models()
+    assert app.comparison_auxiliary_models == []
+    assert showerror.called

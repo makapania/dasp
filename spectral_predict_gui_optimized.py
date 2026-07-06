@@ -51308,6 +51308,36 @@ External Validation Performance (n={n_val}):
 
         self.comparison_rules_text.config(state='disabled')
 
+    def _comparison_reject_multiclass(self, model_dict, role):
+        """Return True (and warn) if a multiclass_simca model is loaded into the
+        Multi-Model comparison tab.
+
+        Tab 9 is built around scalar per-sample predictions (consensus by R²,
+        conditional numeric/label flagging, applicability-domain distances). A
+        multi-class SIMCA model instead outputs a decision MATRIX (each sample
+        accepted by 0/1/several class models, or flagged "novel") — a paradigm
+        this tab cannot represent. Exclude it cleanly with an explicit message
+        rather than mislabel it "(Reg)" and silently drop the per-class
+        p-values / novelty decision. Predict such models on the Predict tab.
+        """
+        try:
+            task_type = (model_dict.get("metadata") or {}).get("task_type")
+        except AttributeError:
+            task_type = None
+        if task_type == "multiclass_simca":
+            messagebox.showerror(
+                "Multi-Class Model Not Supported Here",
+                f"The {role} model is a multi-class SIMCA class-modeling model, "
+                "which produces a decision matrix (accepted / multiple / novel "
+                "per class), not a single prediction.\n\n"
+                "The Multi-Model comparison tab compares scalar predictions "
+                "(regression values / class labels / one-class inlier-outlier) "
+                "and cannot represent a decision matrix.\n\n"
+                "Load and run this model on the Predict tab instead.",
+            )
+            return True
+        return False
+
     def _load_comparison_primary_model(self):
         """Load a single primary model for comparison."""
         from tkinter import filedialog
@@ -51358,6 +51388,9 @@ External Validation Performance (n={n_val}):
                 model_dict = model_io.load_model(filepath)
                 model_dict['filepath'] = filepath
                 model_dict['filename'] = Path(filepath).name
+
+            if self._comparison_reject_multiclass(model_dict, "primary"):
+                return
 
             self.comparison_primary_model = model_dict
             self._update_comparison_primary_display()
@@ -51426,6 +51459,9 @@ External Validation Performance (n={n_val}):
                     model_dict = model_io.load_model(filepath)
                     model_dict['filepath'] = filepath
                     model_dict['filename'] = Path(filepath).name
+
+                if self._comparison_reject_multiclass(model_dict, "auxiliary"):
+                    continue
 
                 self.comparison_auxiliary_models.append(model_dict)
 
