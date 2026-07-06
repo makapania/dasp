@@ -231,9 +231,10 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
             display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
         elif task_type == "multiclass_simca":
-            display_cols = ["Rank", "Model", "NoveltyAUC", "Efficiency", "MinClassN",
-                           "n_vars", "PerformanceScore", "VarPenalty", "GapPenalty",
-                           "CompositeScore"]
+            display_cols = ["Rank", "Model", "NoveltyAUC", "Efficiency",
+                           "Alpha", "NComponents", "engine_family", "varsel_path",
+                           "MinClassN", "n_vars", "PerformanceScore",
+                           "VarPenalty", "GapPenalty", "CompositeScore"]
         else:
             display_cols = ["Rank", "Model", "Accuracy", "Accuracycv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]

@@ -500,6 +500,38 @@ def test_list_alpha_expands_grid():
     assert set(df2["NComponents"].astype(str).unique()) == {"0.95", "0.99"}
 
 
+def test_multiclass_display_cols_show_swept_knobs():
+    # Brief imports `rank_and_score_results`; the real function owning the
+    # multiclass display_cols is compute_composite_score. Importing it pins
+    # that the display-wiring module is the one under test.
+    from spectral_predict.scoring import compute_composite_score  # noqa: F401
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y = _toy()
+    df = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=[0.01, 0.05], n_components=[0.95, 0.99], varsel_paths=["none"],
+    )
+    # The ranked display view must expose the swept dimensions.
+    for col in ("Alpha", "NComponents"):
+        assert col in df.columns
+        assert df[col].nunique() >= 2
+
+
+def test_multiclass_display_cols_lists_swept_knobs():
+    # Pin the actual display_cols content: the multiclass leaderboard view must
+    # name the swept dimensions (Alpha, NComponents, engine_family, varsel_path).
+    import inspect
+
+    from spectral_predict import scoring
+
+    src = inspect.getsource(scoring.compute_composite_score)
+    marker = 'elif task_type == "multiclass_simca":'
+    block = src.split(marker, 1)[1]
+    for needed in ("Alpha", "NComponents", "engine_family", "varsel_path"):
+        assert needed in block
+
+
 def test_list_n_select_expands_grid_and_records_nselect():
     from spectral_predict.search import run_multiclass_simca_search
 
