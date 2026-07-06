@@ -3128,6 +3128,18 @@ class SpectralPredictApp:
         self.mc_n_components = tk.StringVar(value="0.99")
         self.mc_min_class_samples = tk.IntVar(value=10)   # hard-block floor (n<10 unmodelable)
         self.mc_varsel_n_select = tk.IntVar(value=100)    # top-N for variable selection
+
+        # Multi-class SIMCA sweep vars (mirror one-class _collect_simca_overrides)
+        self.mc_alpha_001 = tk.BooleanVar(value=False)
+        self.mc_alpha_005 = tk.BooleanVar(value=True)
+        self.mc_alpha_custom = tk.StringVar(value="")
+        self.mc_ncomp_3 = tk.BooleanVar(value=False)
+        self.mc_ncomp_5 = tk.BooleanVar(value=False)
+        self.mc_ncomp_7 = tk.BooleanVar(value=False)
+        self.mc_ncomp_095 = tk.BooleanVar(value=False)
+        self.mc_ncomp_099 = tk.BooleanVar(value=True)   # novelty-oriented default
+        self.mc_ncomp_custom = tk.StringVar(value="")
+        self.mc_ncomp_per_class_cv = tk.BooleanVar(value=False)  # unique toggle
         # Engine multi-select (one BooleanVar per MULTICLASS_ENGINES entry)
         self.mc_engine_vars = {
             'pca-simca': tk.BooleanVar(value=True),
@@ -25760,6 +25772,37 @@ class SpectralPredictApp:
             alphas = sorted(set(p['alpha'] for p in defaults))
 
         return {'n_components': n_comp, 'alpha': alphas}
+
+    def _collect_mc_alpha_list(self):
+        vals = []
+        if self.mc_alpha_001.get():
+            vals.append(0.01)
+        if self.mc_alpha_005.get():
+            vals.append(0.05)
+        custom = self.mc_alpha_custom.get().strip()
+        if custom:
+            parsed, _errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in parsed:
+                if v not in vals:
+                    vals.append(v)
+        return vals or [0.05]
+
+    def _collect_mc_ncomp_list(self):
+        vals = []
+        for flag, v in ((self.mc_ncomp_3, 3), (self.mc_ncomp_5, 5),
+                        (self.mc_ncomp_7, 7), (self.mc_ncomp_095, 0.95),
+                        (self.mc_ncomp_099, 0.99)):
+            if flag.get():
+                vals.append(v)
+        custom = self.mc_ncomp_custom.get().strip()
+        if custom:
+            parsed, _errs = self._parse_oc_n_components_list(custom)
+            for v in parsed:
+                if v not in vals:
+                    vals.append(v)
+        if self.mc_ncomp_per_class_cv.get():
+            vals.append("per_class_cv")
+        return vals or [0.99]
 
     def _collect_one_class_model_param_overrides(self):
         # Reset per-call so a previous run's errors don't bleed into this invocation.
