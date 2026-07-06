@@ -28661,43 +28661,7 @@ class SpectralPredictApp:
                         "smoothing_window": self.smoothing_window.get(),
                         "smoothing_polyorder": self.smoothing_polyorder.get(),
                     }
-                    self.root.after(0, lambda df=results_df: self._populate_results_table(df))
-
-                    try:
-                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        output_dir = Path(self.output_dir.get())
-                        output_dir.mkdir(parents=True, exist_ok=True)
-                        safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
-                        results_path = output_dir / f"multiclass_results_{safe_target}_{timestamp}.csv"
-                        results_df.drop(columns=['all_vars'], errors='ignore').to_csv(
-                            results_path, index=False
-                        )
-                        self._log_progress(f"\n> Results saved: {results_path}")
-                        if self._mc_decision_view and not self._mc_decision_view.get('reason'):
-                            dm_path = output_dir / f"multiclass_decision_matrix_{safe_target}_{timestamp}.csv"
-                            self._multiclass_decision_matrix_dataframe(
-                                self._mc_decision_view
-                            ).to_csv(dm_path, index=False)
-                            self._log_progress(f"> Decision matrix saved: {dm_path}")
-                    except Exception as exp_err:
-                        self._log_progress(f"  [Warning] Failed to save multi-class CSVs: {exp_err}")
-
-                    if self._mc_decision_view and not self._mc_decision_view.get('reason'):
-                        self.root.after(
-                            0, lambda v=self._mc_decision_view: self._show_multiclass_decision_view(v)
-                        )
-                    elif self._mc_decision_view and self._mc_decision_view.get('reason'):
-                        self._log_progress(
-                            f"  [Warning] Decision view unavailable: {self._mc_decision_view['reason']}"
-                        )
-                    else:
-                        # No decision view attached at all (top config had a
-                        # failure reason, or the winning preprocess_cfg lookup
-                        # missed). The leaderboard 'reason' column has the cause.
-                        self._log_progress(
-                            "  [Warning] No decision-matrix view for the top "
-                            "configuration — see the leaderboard 'reason' column."
-                        )
+                    self._finalize_multiclass_run_ui()
                 elif mc_failed:
                     self._log_progress("\n[X] Multi-class search FAILED — see the error above.")
                 else:
@@ -29970,6 +29934,61 @@ For detailed documentation, see the User Guide.
                 self.results_tree.column(col, width=width, stretch=False)
             except Exception:
                 pass
+
+    def _finalize_multiclass_run_ui(self):
+        """Finalize the UI after a successful multi-class run.
+
+        Populates the leaderboard, silently exports the results + decision-matrix
+        CSVs, and logs the decision-view status. Deliberately does NOT open the
+        decision-view window — parity with every other task type, which populate
+        the leaderboard and wait for the user to double-click a row to inspect.
+        The double-click path (``_on_result_double_click`` ->
+        ``_run_selected_multiclass_result`` -> ``_show_multiclass_decision_view``)
+        is how the window is reached.
+
+        Reads instance state set by the worker: ``self.results_df`` and
+        ``self._mc_decision_view``.
+        """
+        results_df = getattr(self, 'results_df', None)
+        if results_df is None or len(results_df) == 0:
+            return
+
+        self.root.after(0, lambda df=results_df: self._populate_results_table(df))
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = Path(self.output_dir.get())
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+            results_path = output_dir / f"multiclass_results_{safe_target}_{timestamp}.csv"
+            results_df.drop(columns=['all_vars'], errors='ignore').to_csv(
+                results_path, index=False
+            )
+            self._log_progress(f"\n> Results saved: {results_path}")
+            if self._mc_decision_view and not self._mc_decision_view.get('reason'):
+                dm_path = output_dir / f"multiclass_decision_matrix_{safe_target}_{timestamp}.csv"
+                self._multiclass_decision_matrix_dataframe(
+                    self._mc_decision_view
+                ).to_csv(dm_path, index=False)
+                self._log_progress(f"> Decision matrix saved: {dm_path}")
+        except Exception as exp_err:
+            self._log_progress(f"  [Warning] Failed to save multi-class CSVs: {exp_err}")
+
+        # No auto-open of the decision view — the user double-clicks a
+        # leaderboard row to inspect it (parity with other methods). Only log
+        # when a usable view is *absent* so the reason is visible.
+        if self._mc_decision_view and self._mc_decision_view.get('reason'):
+            self._log_progress(
+                f"  [Warning] Decision view unavailable: {self._mc_decision_view['reason']}"
+            )
+        elif not self._mc_decision_view:
+            # No decision view attached at all (top config had a failure reason,
+            # or the winning preprocess_cfg lookup missed). The leaderboard
+            # 'reason' column has the cause.
+            self._log_progress(
+                "  [Warning] No decision-matrix view for the top "
+                "configuration — see the leaderboard 'reason' column."
+            )
 
     def _multiclass_decision_matrix_dataframe(self, view):
         """Build a human-readable decision-matrix DataFrame from a decision view.

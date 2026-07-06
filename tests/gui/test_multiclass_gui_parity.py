@@ -165,3 +165,36 @@ def test_mc_varsel_paths_collector_falls_back_to_none(app):
     for v in app.mc_varsel_vars.values():
         v.set(False)
     assert app._collect_mc_varsel_paths() == ["none"]
+
+
+# ---------------------------------------------------------------------------
+# Task 10 — a completed multi-class run populates the leaderboard only; it
+# does NOT auto-open the decision-view window (parity with other methods).
+# ---------------------------------------------------------------------------
+
+def test_no_auto_decision_popup(app, tmp_path):
+    import pandas as pd
+
+    called = {"n": 0}
+    app._show_multiclass_decision_view = lambda *a, **k: called.__setitem__(
+        "n", called["n"] + 1
+    )
+    # Stub the populate so flushing the Tk event queue below can't crash on the
+    # minimal leaderboard; we only care that the popup opener is never invoked.
+    app._populate_results_table = lambda *a, **k: None
+
+    # A valid decision view (no 'reason') — the case that USED to auto-open.
+    app._mc_decision_view = {"decision_matrix": [], "classes": []}
+    # Minimal leaderboard so _finalize_multiclass_run_ui runs its full body.
+    app.results_df = pd.DataFrame({"Select": [False], "rank": [1]})
+    app.output_dir.set(str(tmp_path))
+    app.target_column.set("class")
+
+    app._finalize_multiclass_run_ui()
+    # The old auto-open scheduled the window via root.after(0, ...); flush the
+    # Tk event queue so any such callback would actually fire and be counted.
+    app.root.update()
+
+    assert called["n"] == 0
+    # The silent CSV export is a file artifact, not a popup — it must still run.
+    assert list(tmp_path.glob("multiclass_results_*.csv"))
