@@ -287,6 +287,34 @@ def test_double_click_regression_untouched(gui_app):
         app.results_tree.selection = orig_sel
 
 
+def test_double_click_regression_row_with_multiclass_radio_untouched(gui_app):
+    """Codex MEDIUM: a regression row must NOT route to the multiclass handler
+    just because the live task_type radio is set to multiclass (results table
+    still holds the old single-Y rows after a radio flip). Routing keys on the
+    ROW's Task, not the radio."""
+    import pandas as pd
+    from unittest.mock import patch
+
+    app = gui_app
+    app.results_display_df = pd.DataFrame(
+        [{"Task": "regression", "Model": "PLS", "R2cv": 0.9, "Rank": 1, "n_vars": 50}]
+    )
+    app.task_type.set("multiclass_simca")  # radio moved on, but row is regression
+    orig_sel = app.results_tree.selection
+    app.results_tree.selection = lambda: ("0",)
+    try:
+        with patch.object(app, "_run_selected_multiclass_result") as mc, \
+             patch.object(app, "_load_model_for_refinement") as refine, \
+             patch.object(app.notebook, "select"), \
+             patch.object(app.model_dev_notebook, "select"):
+            app._on_result_double_click(None)
+        assert refine.called, "regression row stolen by multiclass handler on radio flip"
+        assert not mc.called
+    finally:
+        app.results_tree.selection = orig_sel
+        app.task_type.set("regression")
+
+
 def test_run_selected_multiclass_builds_view(gui_app):
     """The run-selected handler rebuilds the row's config on a worker thread and
     shows its decision view."""
@@ -320,18 +348,70 @@ def test_run_selected_multiclass_builds_view(gui_app):
     assert not v.get("reason"), v.get("reason")
 
 
+def test_run_selected_requires_stashed_config(gui_app):
+    """Guard: without the atomic _mc_export_data/_mc_run_config stash the handler
+    must warn and NOT reconstruct a wrong (default-baseline) pipeline."""
+    from unittest.mock import patch
+
+    app = gui_app
+    for attr in ("_mc_export_data", "_mc_run_config"):
+        if hasattr(app, attr):
+            delattr(app, attr)
+    warned, shown = {}, {}
+    with patch("tkinter.messagebox.showwarning",
+               side_effect=lambda *a, **k: warned.setdefault("w", a)), \
+         patch.object(app, "_show_multiclass_decision_view",
+                      side_effect=lambda v: shown.setdefault("v", v)):
+        app._run_selected_multiclass_result(_mc_row())
+    assert warned.get("w") is not None
+    assert shown.get("v") is None
+
+
+def test_run_selected_rejects_unknown_varsel_path(gui_app):
+    """An unrecognized varsel_path must warn (not silently coerce to None) and
+    build no view."""
+    import numpy as np
+    import pandas as pd
+    from unittest.mock import patch
+
+    app = gui_app
+    X = pd.DataFrame(np.random.default_rng(0).normal(size=(30, 20)))
+    y = pd.Series(["C0"] * 15 + ["C1"] * 15)
+    app._mc_export_data = (X, y)
+    app._mc_run_config = {"n_components": 0.99, "min_class_samples": 10, "n_select": None,
+                          "baseline_method": None, "baseline_params": None, "smoothing": False,
+                          "smoothing_window": 17, "smoothing_polyorder": 2, "alpha": 0.05}
+    app._mc_worker_running = False
+    row = _mc_row()
+    row["varsel_path"] = "not_a_real_path"
+    warned, shown = {}, {}
+    with patch("tkinter.messagebox.showwarning",
+               side_effect=lambda *a, **k: warned.setdefault("w", a)), \
+         patch.object(app, "_show_multiclass_decision_view",
+                      side_effect=lambda v: shown.setdefault("v", v)):
+        app._run_selected_multiclass_result(row)
+    assert warned.get("w") is not None
+    assert shown.get("v") is None
+
+
 @pytest.mark.parametrize(
     "cfg",
     [
         {"method": "raw", "name": "raw", "deriv": None, "window": None},
         {"method": "snv", "name": "snv", "deriv": None, "window": None},
         {"method": "deriv", "name": "deriv1_w7", "deriv": 1, "window": 7},
+        {"method": "snv_deriv", "name": "snv_deriv1_w7", "deriv": 1, "window": 7},
     ],
 )
-def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg):
+@pytest.mark.parametrize("col_kind", ["float", "str"])
+def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg, col_kind):
     """Fitting + saving the selected config's model produces a loadable .dasp
     whose predict_with_model reproduces the in-sample decision matrix when fed
-    the RAW spectra (preprocessing is applied on load, incl. SG edge mask)."""
+    the RAW spectra (preprocessing is applied on load, incl. SG edge mask).
+
+    Covers numeric-STRING wavelength columns (Codex HIGH): CSV/Excel headers
+    often load as strings, which must be stored as floats so predict's
+    float-based wavelength matching does not treat them as missing."""
     import numpy as np
     import pandas as pd
     from spectral_predict.model_io import load_model, predict_with_model
@@ -343,7 +423,9 @@ def test_save_multiclass_model_roundtrip(gui_app, tmp_path, cfg):
     for k in range(3):
         blocks.append(rng.normal(k * 5.0, 1.0, size=(40, 30)))
         labels += [f"C{k}"] * 40
-    X = pd.DataFrame(np.vstack(blocks), columns=[float(j) for j in range(30)])
+    columns = ([float(j) for j in range(30)] if col_kind == "float"
+               else [str(float(j)) for j in range(30)])
+    X = pd.DataFrame(np.vstack(blocks), columns=columns)
     y = pd.Series(labels)
     full_cfg = {
         **cfg, "polyorder": None, "baseline_method": None, "baseline_params": None,

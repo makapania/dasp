@@ -30159,36 +30159,57 @@ For detailed documentation, see the User Guide.
         """
         import threading
 
+        # A live search stashes _mc_export_data and _mc_run_config together
+        # (atomic); require BOTH. Without the run-config we would silently
+        # reconstruct the row's preprocessing with default (no) baseline/
+        # smoothing — a different pipeline than the row was searched with — so
+        # bail with a clear message instead (Kimi cross-family review).
         data = getattr(self, "_mc_export_data", None)
-        if not data or data[0] is None:
+        run_cfg = getattr(self, "_mc_run_config", None)
+        if not data or data[0] is None or not run_cfg:
             messagebox.showwarning(
                 "Run Selected Result",
-                "The multi-class training data is no longer available. "
+                "The multi-class training data/config is no longer available. "
                 "Re-run the multi-class search, then double-click a row.",
             )
             return
 
+        # One run-selected worker at a time — repeated double-clicks would spawn
+        # overlapping workers + overlapping decision-view windows.
+        if getattr(self, "_mc_worker_running", False):
+            self._log_progress("  [Note] A selected-result run is already in progress.")
+            return
+
+        from spectral_predict.search import _MULTICLASS_VARSEL_PATHS
+
         X_df, y_ser = data
         engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
         varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
+        # Strict validation (the backend indexes _MULTICLASS_VARSEL_PATHS
+        # strictly): a corrupted/unknown path must NOT be silently coerced to
+        # "no variable selection" and shown as if it were the row's setting.
+        if varsel_path not in _MULTICLASS_VARSEL_PATHS:
+            messagebox.showwarning(
+                "Run Selected Result",
+                f"The selected row has an unrecognized variable-selection path "
+                f"'{varsel_path}'. Expected one of {sorted(_MULTICLASS_VARSEL_PATHS)}.",
+            )
+            return
         try:
             alpha = float(row.get("Alpha"))
         except (TypeError, ValueError):
-            alpha = float((getattr(self, "_mc_run_config", None) or {}).get("alpha", 0.05))
+            alpha = float(run_cfg.get("alpha", 0.05))
         preprocess_cfg = self._reconstruct_mc_preprocess_cfg(row)
-        run_cfg = getattr(self, "_mc_run_config", None) or {}
 
         self._log_progress(
             f"\n> Running selected multi-class result: {engine} + "
             f"{preprocess_cfg['name']} (varsel={varsel_path})"
         )
+        self._mc_worker_running = True
 
         def _worker():
             try:
-                from spectral_predict.search import (
-                    _MULTICLASS_VARSEL_PATHS,
-                    build_multiclass_decision_view,
-                )
+                from spectral_predict.search import build_multiclass_decision_view
 
                 view = build_multiclass_decision_view(
                     X_df,
@@ -30199,7 +30220,7 @@ For detailed documentation, see the User Guide.
                     n_components=run_cfg.get("n_components", 0.99),
                     scaling="per_class",
                     min_class_samples=run_cfg.get("min_class_samples", 10),
-                    variable_selection=_MULTICLASS_VARSEL_PATHS.get(varsel_path),
+                    variable_selection=_MULTICLASS_VARSEL_PATHS[varsel_path],
                     n_select=run_cfg.get("n_select"),
                     wavelengths=(
                         list(X_df.columns) if hasattr(X_df, "columns") else None
@@ -30213,6 +30234,7 @@ For detailed documentation, see the User Guide.
                 self.root.after(
                     0,
                     lambda e=exc, t=tb: (
+                        setattr(self, "_mc_worker_running", False),
                         self._log_progress(f"  [X] Failed to run selected result: {e}\n{t}"),
                         messagebox.showerror(
                             "Run Selected Result",
@@ -30227,6 +30249,7 @@ For detailed documentation, see the User Guide.
                 self.root.after(
                     0,
                     lambda r=reason: (
+                        setattr(self, "_mc_worker_running", False),
                         self._log_progress(f"  [Warning] Selected config did not build: {r}"),
                         messagebox.showwarning(
                             "Run Selected Result",
@@ -30236,7 +30259,13 @@ For detailed documentation, see the User Guide.
                 )
                 return
 
-            self.root.after(0, lambda v=view: self._show_multiclass_decision_view(v))
+            self.root.after(
+                0,
+                lambda v=view: (
+                    setattr(self, "_mc_worker_running", False),
+                    self._show_multiclass_decision_view(v),
+                ),
+            )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -30310,10 +30339,22 @@ For detailed documentation, see the User Guide.
         def _coerce(v):
             return v.item() if hasattr(v, "item") else v
 
+        def _coerce_wl(v):
+            # Wavelengths MUST be stored as floats: predict_with_model matches
+            # them against float-converted DataFrame columns, so a numeric-string
+            # label (e.g. "1000" from a CSV/Excel header) would be treated as a
+            # missing wavelength and break prediction on the very data the model
+            # was trained on. Non-numeric labels (rare) are left as-is.
+            v = v.item() if hasattr(v, "item") else v
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return v
+
         metadata = {
             "model_name": "MultiClassSIMCA",
             "task_type": "multiclass_simca",
-            "wavelengths": [_coerce(w) for w in wl_current],
+            "wavelengths": [_coerce_wl(w) for w in wl_current],
             "n_vars": int(X_pp.shape[1]),
             "class_names": [_coerce(c) for c in model.classes_],
             "engine_family": config["engine"],
@@ -30325,7 +30366,7 @@ For detailed documentation, see the User Guide.
         # preprocess on the full spectrum then subset to the trained wavelengths.
         if len(wl_current) != len(wl_full):
             metadata["use_full_spectrum_preprocessing"] = True
-            metadata["full_wavelengths"] = [_coerce(w) for w in wl_full]
+            metadata["full_wavelengths"] = [_coerce_wl(w) for w in wl_full]
 
         model_io.save_model(model, preprocessor, metadata, path)
         return model
@@ -31926,10 +31967,13 @@ For detailed documentation, see the User Guide.
         # regression/classification Refine tab (no get_model('pca-simca'), no
         # RMSE/LV refit). Route to the dedicated run-selected handler that
         # rebuilds THIS row's config, shows its decision matrix, and offers a
-        # Save Model (.dasp) option. Detect via the row's own Task column
-        # (robust to the task_type toggle having moved on).
+        # Save Model (.dasp) option. Detect via the ROW's own Task column only —
+        # NOT the live task_type radio: keying on the radio would steal a
+        # regression/classification/one-class row double-click whenever the user
+        # switched the radio to multiclass without re-running (the results table
+        # still holds the old single-Y rows). The row's Task is authoritative.
         row_task = str(model_config.get("Task", "") or "")
-        if row_task == "multiclass_simca" or self.task_type.get() == "multiclass_simca":
+        if row_task == "multiclass_simca":
             self.selected_model_config = model_config
             self._run_selected_multiclass_result(model_config)
             return
