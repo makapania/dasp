@@ -7497,6 +7497,17 @@ def run_multiclass_simca_search(
     else:
         wavelengths_full = np.arange(X_np.shape[1])
 
+    def _as_list(v):
+        if v is None:
+            return [None]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return [v]
+
+    alphas = _as_list(alpha)
+    n_components_list = _as_list(n_components)
+    n_select_list = _as_list(variable_selection_n_select)
+
     if engines is None:
         engines = list(MULTICLASS_ENGINES)
     if varsel_paths is None:
@@ -7552,7 +7563,14 @@ def run_multiclass_simca_search(
                     }
                 )
 
-    total_configs = len(preprocess_configs) * len(engines) * len(varsel_paths)
+    total_configs = (
+        len(preprocess_configs)
+        * len(engines)
+        * len(varsel_paths)
+        * len(alphas)
+        * len(n_components_list)
+        * len(n_select_list)
+    )
     current_config = 0
     n_total_classes = int(len(np.unique(y_np)))
 
@@ -7603,142 +7621,146 @@ def run_multiclass_simca_search(
                     _user_stopped = True
                     break
 
-                current_config += 1
-                prep_name = preprocess_cfg["name"]
-                progress_msg = f"Testing {engine} + {prep_name} + varsel={varsel_path}"
-                logger.info("[%d/%d] %s", current_config, total_configs, progress_msg)
-                if progress_callback:
-                    progress_callback(
-                        {
-                            "stage": "model_testing",
-                            "message": progress_msg,
-                            "current": current_config,
-                            "total": total_configs,
-                        }
-                    )
+                for _alpha in alphas:
+                    for _ncomp in n_components_list:
+                        for _n_select in n_select_list:
+                            current_config += 1
+                            prep_name = preprocess_cfg["name"]
+                            progress_msg = f"Testing {engine} + {prep_name} + varsel={varsel_path}"
+                            logger.info("[%d/%d] %s", current_config, total_configs, progress_msg)
+                            if progress_callback:
+                                progress_callback(
+                                    {
+                                        "stage": "model_testing",
+                                        "message": progress_msg,
+                                        "current": current_config,
+                                        "total": total_configs,
+                                    }
+                                )
 
-                varsel_value = _MULTICLASS_VARSEL_PATHS[varsel_path]
+                            varsel_value = _MULTICLASS_VARSEL_PATHS[varsel_path]
 
-                def _build():
-                    return MultiClassClassModel(
-                        engine=engine,
-                        alpha=alpha,
-                        n_components=n_components,
-                        scaling="per_class",
-                        min_class_samples=min_class_samples,
-                        variable_selection=varsel_value,
-                        n_select=variable_selection_n_select,
-                    )
+                            def _build():
+                                return MultiClassClassModel(
+                                    engine=engine,
+                                    alpha=_alpha,
+                                    n_components=_ncomp,
+                                    scaling="per_class",
+                                    min_class_samples=min_class_samples,
+                                    variable_selection=varsel_value,
+                                    n_select=_n_select,
+                                )
 
-                # Base row (common cols + tags); metrics start NaN and are
-                # filled on success. Any failure records the row with NaN
-                # metrics + a reason (never crashes the whole search; spec §8).
-                full_vars = int(X_pp.shape[1]) if X_pp is not None else int(len(wavelengths_current))
-                row = {
-                    "Task": "multiclass_simca",
-                    "Model": engine,
-                    "Params": f"alpha={alpha}, scaling=per_class",
-                    "Preprocess": prep_name,
-                    "Deriv": preprocess_cfg.get("deriv"),
-                    "Window": preprocess_cfg.get("window"),
-                    "Poly": preprocess_cfg.get("polyorder"),
-                    "LVs": "auto",
-                    "n_vars": full_vars,
-                    "full_vars": full_vars,
-                    "SubsetTag": varsel_path,
-                    "Imbalance": "—",
-                    "NoveltyAUC": np.nan,
-                    "Efficiency": np.nan,
-                    "NoveltyRate": np.nan,
-                    "NoClassRate": np.nan,
-                    "AmbiguityRate": np.nan,
-                    "ExactSetRate": np.nan,
-                    "MeanSensitivity": np.nan,
-                    "MeanSpecificity": np.nan,
-                    "Alpha": alpha,
-                    "MinClassN": np.nan,
-                    "n_classes": n_total_classes,
-                    "engine_family": engine,
-                    "varsel_path": varsel_path,
-                    "unmodelable_classes": "",
-                    "reason": "",
-                    "top_vars": "N/A",
-                    "all_vars": "",
-                }
+                            # Base row (common cols + tags); metrics start NaN and are
+                            # filled on success. Any failure records the row with NaN
+                            # metrics + a reason (never crashes the whole search; spec §8).
+                            full_vars = int(X_pp.shape[1]) if X_pp is not None else int(len(wavelengths_current))
+                            row = {
+                                "Task": "multiclass_simca",
+                                "Model": engine,
+                                "Params": f"alpha={_alpha}, scaling=per_class",
+                                "Preprocess": prep_name,
+                                "Deriv": preprocess_cfg.get("deriv"),
+                                "Window": preprocess_cfg.get("window"),
+                                "Poly": preprocess_cfg.get("polyorder"),
+                                "LVs": "auto",
+                                "n_vars": full_vars,
+                                "full_vars": full_vars,
+                                "SubsetTag": varsel_path,
+                                "Imbalance": "—",
+                                "NoveltyAUC": np.nan,
+                                "Efficiency": np.nan,
+                                "NoveltyRate": np.nan,
+                                "NoClassRate": np.nan,
+                                "AmbiguityRate": np.nan,
+                                "ExactSetRate": np.nan,
+                                "MeanSensitivity": np.nan,
+                                "MeanSpecificity": np.nan,
+                                "Alpha": _alpha,
+                                "NComponents": _ncomp,
+                                "MinClassN": np.nan,
+                                "n_classes": n_total_classes,
+                                "engine_family": engine,
+                                "varsel_path": varsel_path,
+                                "unmodelable_classes": "",
+                                "reason": "",
+                                "top_vars": "N/A",
+                                "all_vars": "",
+                            }
 
-                if X_pp is None:
-                    row["reason"] = pp_reason or "preprocessing_failed"
-                    df_results = add_result(df_results, row)
-                    continue
+                            if X_pp is None:
+                                row["reason"] = pp_reason or "preprocessing_failed"
+                                df_results = add_result(df_results, row)
+                                continue
 
-                try:
-                    # Full fit -> per-class n_components, varsel mask, modeled set.
-                    full_model = _build().fit(X_pp, y_np)
-                    modeled = list(full_model.models_.keys())
-                    if modeled:
-                        row["MinClassN"] = int(
-                            min(int(np.sum(y_np == c)) for c in modeled)
-                        )
-                    if full_model.n_components_:
-                        row["LVs"] = str(full_model.n_components_)
-                    if getattr(full_model, "varsel_mask_", None) is not None:
-                        row["n_vars"] = int(full_model.varsel_mask_.sum())
-                    if full_model.unmodelable_:
-                        row["unmodelable_classes"] = str(
-                            sorted(full_model.unmodelable_.tolist()
-                                   if hasattr(full_model.unmodelable_, "tolist")
-                                   else full_model.unmodelable_)
-                        )
+                            try:
+                                # Full fit -> per-class n_components, varsel mask, modeled set.
+                                full_model = _build().fit(X_pp, y_np)
+                                modeled = list(full_model.models_.keys())
+                                if modeled:
+                                    row["MinClassN"] = int(
+                                        min(int(np.sum(y_np == c)) for c in modeled)
+                                    )
+                                if full_model.n_components_:
+                                    row["LVs"] = str(full_model.n_components_)
+                                if getattr(full_model, "varsel_mask_", None) is not None:
+                                    row["n_vars"] = int(full_model.varsel_mask_.sum())
+                                if full_model.unmodelable_:
+                                    row["unmodelable_classes"] = str(
+                                        sorted(full_model.unmodelable_.tolist()
+                                               if hasattr(full_model.unmodelable_, "tolist")
+                                               else full_model.unmodelable_)
+                                    )
 
-                    # OOF class-modeling metrics.
-                    cv = _build().cross_validate(X_pp, y_np, n_splits=cv_splits)
-                    _, A_oof = cv["decision_matrix"]
-                    metrics = multiclass_simca_metrics(y_np, A_oof, list(cv["classes"]))
-                    sens = np.asarray(
-                        list(metrics["per_class_sensitivity"].values()), dtype=np.float64
-                    )
-                    spec = np.asarray(
-                        list(metrics["per_class_specificity"].values()), dtype=np.float64
-                    )
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", RuntimeWarning)
-                        mean_sens = (
-                            float(np.nanmean(sens))
-                            if sens.size and not np.all(np.isnan(sens))
-                            else np.nan
-                        )
-                        mean_spec = (
-                            float(np.nanmean(spec))
-                            if spec.size and not np.all(np.isnan(spec))
-                            else np.nan
-                        )
-                    row["Efficiency"] = metrics["efficiency"]
-                    row["NoveltyRate"] = metrics["novelty_detection_rate"]
-                    row["NoClassRate"] = metrics["no_class_rate"]
-                    row["AmbiguityRate"] = metrics["ambiguity_rate"]
-                    row["ExactSetRate"] = metrics["exact_set_rate"]
-                    row["MeanSensitivity"] = mean_sens
-                    row["MeanSpecificity"] = mean_spec
+                                # OOF class-modeling metrics.
+                                cv = _build().cross_validate(X_pp, y_np, n_splits=cv_splits)
+                                _, A_oof = cv["decision_matrix"]
+                                metrics = multiclass_simca_metrics(y_np, A_oof, list(cv["classes"]))
+                                sens = np.asarray(
+                                    list(metrics["per_class_sensitivity"].values()), dtype=np.float64
+                                )
+                                spec = np.asarray(
+                                    list(metrics["per_class_specificity"].values()), dtype=np.float64
+                                )
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter("ignore", RuntimeWarning)
+                                    mean_sens = (
+                                        float(np.nanmean(sens))
+                                        if sens.size and not np.all(np.isnan(sens))
+                                        else np.nan
+                                    )
+                                    mean_spec = (
+                                        float(np.nanmean(spec))
+                                        if spec.size and not np.all(np.isnan(spec))
+                                        else np.nan
+                                    )
+                                row["Efficiency"] = metrics["efficiency"]
+                                row["NoveltyRate"] = metrics["novelty_detection_rate"]
+                                row["NoClassRate"] = metrics["no_class_rate"]
+                                row["AmbiguityRate"] = metrics["ambiguity_rate"]
+                                row["ExactSetRate"] = metrics["exact_set_rate"]
+                                row["MeanSensitivity"] = mean_sens
+                                row["MeanSpecificity"] = mean_spec
 
-                    # LOCO NoveltyAUC (the single-objective ranking metric, spec
-                    # §7). Decision A: this is a within-dataset proxy that
-                    # OVER-estimates true held-out-foreign novelty (see
-                    # _multiclass_loco_novelty_auc docstring). Decision C: ranking
-                    # stays single-objective on NoveltyAUC; a quality-vs-
-                    # discrimination blend (e.g. NoveltyAUC·Efficiency**0.5)
-                    # remains an unimplemented alternative the user is undecided
-                    # on.
-                    row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
-                        _build, X_pp, y_np, cv_splits=cv_splits, oof_cv=cv
-                    )
-                except Exception as exc:  # noqa: BLE001 — NaN-safe per-config guard
-                    logger.warning(
-                        "Multi-class config %s + %s (varsel=%s) failed: %s",
-                        engine, prep_name, varsel_path, exc,
-                    )
-                    row["reason"] = f"{type(exc).__name__}: {exc}"
+                                # LOCO NoveltyAUC (the single-objective ranking metric, spec
+                                # §7). Decision A: this is a within-dataset proxy that
+                                # OVER-estimates true held-out-foreign novelty (see
+                                # _multiclass_loco_novelty_auc docstring). Decision C: ranking
+                                # stays single-objective on NoveltyAUC; a quality-vs-
+                                # discrimination blend (e.g. NoveltyAUC·Efficiency**0.5)
+                                # remains an unimplemented alternative the user is undecided
+                                # on.
+                                row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
+                                    _build, X_pp, y_np, cv_splits=cv_splits, oof_cv=cv
+                                )
+                            except Exception as exc:  # noqa: BLE001 — NaN-safe per-config guard
+                                logger.warning(
+                                    "Multi-class config %s + %s (varsel=%s) failed: %s",
+                                    engine, prep_name, varsel_path, exc,
+                                )
+                                row["reason"] = f"{type(exc).__name__}: {exc}"
 
-                df_results = add_result(df_results, row)
+                            df_results = add_result(df_results, row)
 
     if len(df_results) > 0:
         # No-signal guard (Kimi H1/H2): if NOT ONE config produced a finite
@@ -7771,8 +7793,8 @@ def run_multiclass_simca_search(
                     y_np,
                     engine=str(top["engine_family"]),
                     preprocess_cfg=top_cfg,
-                    alpha=alpha,
-                    n_components=n_components,
+                    alpha=top["Alpha"],
+                    n_components=top["NComponents"],
                     scaling="per_class",
                     min_class_samples=min_class_samples,
                     variable_selection=_MULTICLASS_VARSEL_PATHS[str(top["varsel_path"])],

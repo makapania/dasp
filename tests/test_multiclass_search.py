@@ -461,3 +461,40 @@ def test_multiclass_schema_has_ncomponents_column():
     # Ordered right after Alpha for readability
     cols = list(df.columns)
     assert cols.index("NComponents") == cols.index("Alpha") + 1
+
+
+def _toy():
+    rng = np.random.RandomState(0)
+    X = rng.rand(60, 40)
+    y = np.array(["A", "B", "C"] * 20)
+    return X, y
+
+
+def test_scalar_alpha_ncomp_matches_single_row_group():
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y = _toy()
+    df = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["none"],
+    )
+    assert (df["Alpha"] == 0.05).all()
+    assert (df["NComponents"].astype(str) == "0.99").all()
+
+
+def test_list_alpha_expands_grid():
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y = _toy()
+    df1 = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=0.05, n_components=0.99, varsel_paths=["none"],
+    )
+    df2 = run_multiclass_simca_search(
+        X, y, engines=["pca-simca"], preprocessing_methods=["raw"],
+        alpha=[0.01, 0.05], n_components=[0.95, 0.99], varsel_paths=["none"],
+    )
+    # 2 alphas x 2 n_components = 4x the single-value row count
+    assert len(df2) == 4 * len(df1)
+    assert set(df2["Alpha"].unique()) == {0.01, 0.05}
+    assert set(df2["NComponents"].astype(str).unique()) == {"0.95", "0.99"}
