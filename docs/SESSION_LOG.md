@@ -4,6 +4,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-05 — T-31 "run a selected multi-class leaderboard result" + Save Model (.dasp)
+
+**Follow-up gap the user hit on real use, now shipped on `feat/T31-multiclass-simca` (commits `e83f6f9` feature, `e8d2b46` review fold-in; pushed, NOT merged).** Double-clicking a `multiclass_simca` leaderboard row previously routed to the regression/classification Refine tab, where `get_model('pca-simca')` fails — "run selected result" was unimplemented for class-modeling.
+
+- **Interception point:** `_on_result_double_click` early-returns on `model_config["Task"] == "multiclass_simca"` (the ROW's own Task, NOT the live `task_type` radio — see the HIGH below) into a new `_run_selected_multiclass_result(row)`. Single-Y (regression/classification/one-class) Refine path is byte-identical below the branch.
+- **Run-selected handler** rebuilds THAT row's exact config: engine/alpha/varsel from the row; preprocessing from the row's Preprocess/Deriv/Window/Poly via `_reconstruct_mc_preprocess_cfg` (mirrors the search's config builder — `method` from the name split on `_w` + deriv-digit strip); n_components policy / floors / baseline / smoothing from a new `_mc_run_config` stash (set atomically with `_mc_export_data` at search dispatch). Builds the in-sample decision view on a worker thread (all Tk via `root.after`; no bare Tk off-thread — both reviewers confirmed clean) and reuses `_show_multiclass_decision_view`.
+- **Save Model (.dasp)** button added to the decision-view window → `_fit_and_save_multiclass_model(config, X, y, path)`: fits a `MultiClassClassModel` on the preprocessed matrix and `model_io.save_model(model, preprocessor, metadata, path)`. **Key correctness choice:** the per-spectrum preprocessing pipeline is stored as the model's `preprocessor`, and when an SG-derivative edge mask trims the axis the existing `use_full_spectrum_preprocessing` + `full_wavelengths` handshake is recorded — so `predict_with_model` reproduces preprocessing + edge mask on RAW new specimens (the user's stated goal), not just on pre-preprocessed input. Verified: `_apply_edge_mask_to_data` is a pure symmetric column-trim, so preprocess-full-then-subset is bit-exact vs the trimmed training matrix.
+- **Real-data e2e smoke (ORAU Excel, `Site`, 716×269 subsampled):** search → selected the NON-top row (snv) → rebuilt config → decision view (single=410, multiple=271, novel=35) → save→load→`predict_with_model` on RAW spectra reproduced the decision matrix + labels EXACTLY.
+
+**Review fold-in (Codex 5.5 + Kimi K2.7 cross-family, commit `e8d2b46`) — all findings verified before folding (this ticket's panels have produced empirically-wrong findings before):**
+- **HIGH (Codex + Kimi convergent):** the router keyed on the live `task_type` radio (`or self.task_type.get()==...`), hijacking a stale regression/classification/one-class row into the multiclass handler after a radio flip. Fixed: route on the row's Task only.
+- **HIGH (Codex):** numeric-STRING wavelength labels (common from CSV/Excel headers) were stored verbatim; `predict_with_model` matches wavelengths as floats, so `"1000" != 1000.0` → the saved model failed to predict on its own training data. Fixed: coerce numeric wavelengths + `full_wavelengths` to float on save. Regression test uses `X.columns=["0.0",...]`.
+- **MEDIUM (Kimi):** stash-absent silent fallback — reconstruction read baseline/smoothing only from `_mc_run_config`; if absent it would silently reconstruct a no-baseline pipeline. Fixed by enforcing the atomic invariant: require BOTH `_mc_export_data` and `_mc_run_config` (set together by a live search) or bail with a clear message. NOTE: not a backend schema change — the data + run-config are the atomic session artifacts; a future "reload leaderboard CSV then double-click" path would need baseline/smoothing persisted in the row schema (deferred, no such reload path exists today).
+- **MEDIUM (Kimi):** unknown `varsel_path` was silently coerced to `None` via `.get()`; backend indexes strictly. Fixed: validate up front + strict index.
+- **LOW (Kimi):** `_mc_worker_running` busy flag prevents overlapping workers/windows on repeated double-clicks.
+- **Both reviewers confirmed sound:** thread-safety, the save/predict preprocessing handshake, and the config reconstruction field-match vs `run_multiclass_simca_search`.
+
+**Tests (all green):** 23 multiclass-GUI (`tests/gui/test_multiclass_gui.py` — routing both ways, radio-flip untouched, run-selected builds view, missing-stash + unknown-varsel guards, save→load→predict roundtrip float+str × raw/snv/deriv/snv_deriv) + 120 adjacent (simca/model_io/decision_view/export/foldins). LF-clean, single-Y paths byte-identical. **STILL OWED: a live GUI `run`/`screenshot` pass (headless-verified only this session).**
+
+---
+
 ## 2026-07-05 — T-31 Phase D (GUI + export) built; deferred fold-ins closed; merge-gate pending
 
 **Phase D COMPLETE on `feat/T31-multiclass-simca` (commits `2819090` D1, `1c7c326` D2, `ff8875c` D3, `5af8ec8` fold-ins; pushed, NOT merged).** Built by Fable-5 directly (not delegated — the reconnaissance needed to write contract tests + review a delegate's GUI diff across a 40k-line drift-prone file exceeded the cost of implementing directly; single-Y paths verified untouched at each step).
