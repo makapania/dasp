@@ -3148,13 +3148,30 @@ class SpectralPredictApp:
             'lof': tk.BooleanVar(value=False),
             'elliptic-envelope': tk.BooleanVar(value=False),
         }
-        # Variable-selection path multi-select
+        # Variable-selection path multi-select (T-31 Task 8).
+        # Only methods the multiclass backend (_multiclass_varsel_mask) can
+        # actually resolve are offered; hyphen variants and no-op/redundant
+        # methods (cars_tree, uve_cars_tree, vcpa, ga) are deliberately excluded
+        # so no silently-skipped rows are produced.
+        self.mc_varsel_groups = {
+            "SIMCA-native (novelty-safe)": [
+                ("wold_modeling", "Wold modeling"),
+                ("wold_discriminating", "Wold discriminating"),
+                ("wold_balanced", "Wold balanced"),
+            ],
+            "Discrimination-based (confirm novelty on a true external class)": [
+                ("importance", "Importance"), ("cars", "CARS"),
+                ("spa", "SPA"), ("uve", "UVE"),
+                ("uve_spa", "UVE-SPA"), ("uve_cars", "UVE-CARS"),
+                ("uve_cars_spa", "UVE-CARS-SPA"), ("ipls", "iPLS"),
+                ("fipls_spa", "Forward iPLS-SPA"), ("fipls_cars", "Forward iPLS-CARS"),
+                ("ipls_forward", "Forward iPLS"), ("ipls_backward", "Backward iPLS"),
+                ("mc_sipls", "MC-siPLS"), ("mwpls", "MWPLS"),
+            ],
+        }
         self.mc_varsel_vars = {
-            'none': tk.BooleanVar(value=True),
-            'wold_modeling': tk.BooleanVar(value=False),
-            'wold_discriminating': tk.BooleanVar(value=False),
-            'wold_balanced': tk.BooleanVar(value=False),
-            'importance': tk.BooleanVar(value=False),
+            key: tk.BooleanVar(value=(key == "wold_modeling"))
+            for group in self.mc_varsel_groups.values() for key, _lbl in group
         }
 
         # One-class per-model config variables (Tab 4C cards)
@@ -12257,6 +12274,7 @@ class SpectralPredictApp:
         # Inner frame for grid layout within card
         varsel_frame = tk.Frame(varsel_card, bg=self.colors['card_bg'])
         varsel_frame.pack(fill='both', expand=True)
+        self.varsel_frame = varsel_frame  # standard-method frame (hidden in multiclass mode)
 
         # Method selection (checkboxes - multiple selection enabled)
         ttk.Label(varsel_frame, text="Selection Methods (select one or more):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
@@ -12428,6 +12446,30 @@ class SpectralPredictApp:
         ttk.Label(params_frame, text="GA Runs:").grid(row=10, column=0, sticky=tk.W, padx=(0, 5), pady=5)
         ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=10, column=2, sticky=tk.W, padx=10)
+
+        # === Multi-class SIMCA variable-selection picker (T-31 Task 8) ===
+        # Built hidden; shown only in multiclass mode (see
+        # _update_one_class_controls_visibility). Renders the two method groups
+        # from self.mc_varsel_groups as labeled sections of Checkbuttons bound
+        # to self.mc_varsel_vars. Reuses the shared Top-N Variable Counts row
+        # (var_10..var_1000) in the Subset Analysis card for the size sweep.
+        mc_group_frame = tk.Frame(varsel_card, bg=self.colors['card_bg'])
+        self.mc_varsel_group_frame = mc_group_frame
+        ttk.Label(mc_group_frame, text="Selection Methods (select one or more):",
+                  style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
+        ttk.Label(mc_group_frame,
+                  text="Top-N sizes reuse the Top-N Variable Counts row above.",
+                  style='Caption.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(0, 8))
+        mc_row = 2
+        for group_title, methods in self.mc_varsel_groups.items():
+            ttk.Label(mc_group_frame, text=group_title,
+                      style='Subheading.TLabel').grid(row=mc_row, column=0, sticky=tk.W, pady=(10, 4))
+            mc_row += 1
+            for key, label in methods:
+                ttk.Checkbutton(mc_group_frame, text=label,
+                                variable=self.mc_varsel_vars[key]).grid(
+                    row=mc_row, column=0, sticky=tk.W, padx=(20, 0))
+                mc_row += 1
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -17024,6 +17066,11 @@ class SpectralPredictApp:
             #   per Pomerantsev et al. 2025 LOVE / Forina modeling-power vs discrimination-power)
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
+            # Restore standard method frame; hide the multiclass grouped picker.
+            if hasattr(self, 'mc_varsel_group_frame'):
+                self.mc_varsel_group_frame.pack_forget()
+            if hasattr(self, 'varsel_frame') and not self.varsel_frame.winfo_manager():
+                self.varsel_frame.pack(fill='both', expand=True)
             disabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
                 '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
@@ -17063,8 +17110,16 @@ class SpectralPredictApp:
                 self.oc_models_frame.pack_forget()
             if hasattr(self, 'mc_models_frame'):
                 self.mc_models_frame.pack(fill='both', expand=True)
+            # Keep the Advanced Variable Selection card visible but swap the
+            # standard method frame for the multiclass grouped picker. The
+            # shared Top-N Variable Counts row lives in the separate Subset
+            # Analysis card and stays visible for the size sweep.
             if hasattr(self, 'varsel_card_outer'):
-                self.varsel_card_outer.grid_remove()
+                self.varsel_card_outer.grid()
+            if hasattr(self, 'varsel_frame'):
+                self.varsel_frame.pack_forget()
+            if hasattr(self, 'mc_varsel_group_frame'):
+                self.mc_varsel_group_frame.pack(fill='both', expand=True)
             if hasattr(self, 'imbalance_frame'):
                 self.imbalance_frame.grid_remove()
             if hasattr(self, 'imbalance_section_heading'):
@@ -17087,6 +17142,11 @@ class SpectralPredictApp:
             # Re-enable variable selection methods
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
+            # Restore standard method frame; hide the multiclass grouped picker.
+            if hasattr(self, 'mc_varsel_group_frame'):
+                self.mc_varsel_group_frame.pack_forget()
+            if hasattr(self, 'varsel_frame') and not self.varsel_frame.winfo_manager():
+                self.varsel_frame.pack(fill='both', expand=True)
             # Re-enable iPLS-family + UVE-family checkboxes (disabled in one-class mode only)
             re_enabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',

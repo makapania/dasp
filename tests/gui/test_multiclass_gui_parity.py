@@ -95,3 +95,40 @@ def test_task_type_toggles_mc_card(app):
     app.task_type.set("regression")
     app._on_task_type_changed()
     assert app.mc_model_config_frame.winfo_manager() == ""    # unmapped
+
+
+# ---------------------------------------------------------------------------
+# Task 8 — multi-class variable selection in tab 4B (grouped set + Top-N reuse)
+# ---------------------------------------------------------------------------
+
+def test_mc_varsel_card_visible_and_grouped(app):
+    app.task_type.set("multiclass_simca")
+    app._on_task_type_changed()
+    # The Advanced Variable Selection card stays visible in multiclass mode.
+    assert app.varsel_card_outer.winfo_manager() != ""
+    # Grouped multiclass picker exists and is shown; standard frame hidden.
+    assert hasattr(app, "mc_varsel_group_frame")
+    assert app.mc_varsel_group_frame.winfo_manager() != ""
+    assert app.varsel_frame.winfo_manager() == ""
+    # Offered method keys present (corrected backend-resolvable set).
+    for k in ("importance", "cars", "spa", "uve", "wold_modeling"):
+        assert k in app.mc_varsel_vars
+    # Excluded no-op / redundant methods must NOT be offered.
+    for k in ("cars_tree", "uve_cars_tree", "vcpa", "vcpa-iriv", "ga"):
+        assert k not in app.mc_varsel_vars
+    # Two labeled groups exist.
+    assert set(app.mc_varsel_groups) == {
+        "SIMCA-native (novelty-safe)",
+        "Discrimination-based (confirm novelty on a true external class)",
+    }
+    # Restore standard frame when leaving multiclass mode.
+    app.task_type.set("regression")
+    app._on_task_type_changed()
+    assert app.mc_varsel_group_frame.winfo_manager() == ""
+    assert app.varsel_frame.winfo_manager() != ""
+
+
+def test_mc_reuses_topn_counts(app):
+    # The shared Top-N vars exist and are the size-sweep source for multiclass.
+    for v in ("var_10", "var_50", "var_100"):
+        assert hasattr(app, v)
