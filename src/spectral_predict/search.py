@@ -571,7 +571,15 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     return {}
 
 
-def _multiclass_row_to_preprocess_cfg(row) -> dict:
+def _multiclass_row_to_preprocess_cfg(
+    row,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+) -> dict:
     """Rebuild the per-spectrum ``preprocess_cfg`` dict for a multi-class
     leaderboard row from its own columns.
 
@@ -580,12 +588,11 @@ def _multiclass_row_to_preprocess_cfg(row) -> dict:
     suffix + the derivative digit), while ``deriv``/``window``/``polyorder`` come
     from the row's own columns.
 
-    NOTE: baseline / smoothing are GLOBAL search settings (not persisted per
-    row), so they default to off here. This matches the default multi-class
-    search (baseline/smoothing disabled) and the vast majority of runs. The GUI
-    double-click path (`_reconstruct_mc_preprocess_cfg`) recovers them from the
-    stashed `_mc_run_config`; a future refactor could thread that config into
-    this validation path if per-row baseline/smoothing fidelity is needed.
+    Baseline / smoothing are GLOBAL search settings (not persisted per row), so
+    they default to off. Pass the run's actual settings via the keyword-only
+    ``baseline_*`` / ``*smoothing*`` params so the holdout is preprocessed with
+    the SAME pipeline as the ranked row (otherwise the calibration/holdout split
+    would be scored on a different pipeline than the one the search trained on).
     """
     def _opt_int(v):
         try:
@@ -608,16 +615,28 @@ def _multiclass_row_to_preprocess_cfg(row) -> dict:
         "deriv": _opt_int(row.get("Deriv")),
         "window": _opt_int(row.get("Window")),
         "polyorder": _opt_int(row.get("Poly")),
-        "baseline_method": None,
-        "baseline_params": None,
-        "smoothing": False,
-        "smoothing_window": 17,
-        "smoothing_polyorder": 2,
+        "baseline_method": baseline_method,
+        "baseline_params": baseline_params,
+        "smoothing": enable_smoothing,
+        "smoothing_window": smoothing_window,
+        "smoothing_polyorder": smoothing_polyorder,
     }
 
 
 def _multiclass_holdout_metrics(
-    row, X_train, y_train, X_val, y_val, wavelengths
+    row,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    wavelengths,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    min_class_samples: int = 10,
 ) -> dict:
     """Fit a leaderboard row's exact ``MultiClassClassModel`` on the calibration
     split and score the holdout via its decision matrix.
@@ -634,7 +653,14 @@ def _multiclass_holdout_metrics(
 
     from spectral_predict.simca import MultiClassClassModel, multiclass_simca_metrics
 
-    preprocess_cfg = _multiclass_row_to_preprocess_cfg(row)
+    preprocess_cfg = _multiclass_row_to_preprocess_cfg(
+        row,
+        baseline_method=baseline_method,
+        baseline_params=baseline_params,
+        enable_smoothing=enable_smoothing,
+        smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder,
+    )
     wavelengths_full = np.asarray(wavelengths)
 
     X_train_np = np.asarray(X_train, dtype=np.float64)
@@ -687,6 +713,7 @@ def _multiclass_holdout_metrics(
         alpha=alpha,
         n_components=n_components,
         scaling="per_class",
+        min_class_samples=min_class_samples,
         variable_selection=varsel_value,
         n_select=n_select,
     ).fit(X_tr_pp, y_train_np)
@@ -733,6 +760,13 @@ def compute_validation_metrics_for_top_models(
     top_n: int = 100,
     progress_callback=None,
     imbalance_method: Optional[str] = None,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    min_class_samples: int = 10,
 ) -> pd.DataFrame:
     """Compute validation metrics for top N models.
 
@@ -769,6 +803,16 @@ def compute_validation_metrics_for_top_models(
         UNWEIGHTED (its class_weight lives only in fit-time sample_weight)
         and PLS-DA retrains UNWEIGHTED (its LR sub-step's class_weight is
         not serialized into the result-row Params dict).
+    baseline_method, baseline_params, enable_smoothing, smoothing_window, \
+smoothing_polyorder, min_class_samples : optional (keyword-only)
+        Run-global preprocessing / floor settings for the ``multiclass_simca``
+        holdout rebuild. These are NOT persisted per leaderboard row (they are
+        search-global), so the holdout would otherwise be scored on a DIFFERENT
+        pipeline than the ranked row when a user enables baseline/smoothing.
+        Threaded through to :func:`_multiclass_holdout_metrics` so the
+        calibration/holdout preprocessing matches the search. Defaulted, so the
+        regression / classification / one-class branches ignore them entirely
+        and existing callers are byte-identical.
 
     Returns
     -------
@@ -871,7 +915,13 @@ def compute_validation_metrics_for_top_models(
         if task_type == "multiclass_simca":
             try:
                 mc_metrics = _multiclass_holdout_metrics(
-                    row, X_train, y_train, X_val, y_val, wavelengths
+                    row, X_train, y_train, X_val, y_val, wavelengths,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    enable_smoothing=enable_smoothing,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                    min_class_samples=min_class_samples,
                 )
                 for _col, _val in mc_metrics.items():
                     df_results.loc[idx, _col] = _val

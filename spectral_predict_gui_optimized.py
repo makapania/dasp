@@ -14594,8 +14594,9 @@ class SpectralPredictApp:
         ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
-        ttk.Radiobutton(algo_frame, text="SPXY ⭐",
-                       variable=self.validation_algorithm, value="SPXY").grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        self.validation_spxy_radio = ttk.Radiobutton(algo_frame, text="SPXY ⭐",
+                       variable=self.validation_algorithm, value="SPXY")
+        self.validation_spxy_radio.grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
         ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
@@ -16955,6 +16956,17 @@ class SpectralPredictApp:
         # Reset flag
         self._updating_from_tier = False
 
+    def _validation_algo_allowed(self, algo):
+        """Whether a holdout-selection algorithm is valid for the current task.
+
+        SPXY is disallowed for multi-class class modeling because its distance
+        combines a target-space term ``d_y`` that is undefined for a categorical
+        class label. Every other algorithm is allowed for every task type.
+        """
+        if self.task_type.get() == "multiclass_simca" and algo == "SPXY":
+            return False
+        return True
+
     def _on_task_type_changed(self):
         """Handle task type changes - filter models and update tier selection."""
         task_type = self.task_type.get()
@@ -17022,6 +17034,19 @@ class SpectralPredictApp:
 
         # Refresh imbalance method dropdown to match the new task type
         self._detect_and_display_imbalance()
+
+        # Multi-class class modeling cannot use SPXY (its d_y term is undefined
+        # for a categorical class label). Reset a stale SPXY selection to
+        # Kennard-Stone and disable the SPXY radio for multiclass; re-enable it
+        # for every other task type.
+        if actual_task == "multiclass_simca":
+            if self.validation_algorithm.get() == "SPXY":
+                self.validation_algorithm.set("Kennard-Stone")
+            if hasattr(self, "validation_spxy_radio"):
+                self.validation_spxy_radio.state(["disabled"])
+        else:
+            if hasattr(self, "validation_spxy_radio"):
+                self.validation_spxy_radio.state(["!disabled"])
 
         # Warn if task-type boundary changed with a non-null validation set
         prev = self._last_task_type
@@ -28585,15 +28610,6 @@ class SpectralPredictApp:
                 baseline_method_mc, baseline_params_mc = self._get_baseline_params()
 
                 self._log_progress("\nRunning Multi-Class Class Modeling (SIMCA)...")
-                # Be honest: the class-modeling search does not consume an
-                # external validation set (its ranking is LOCO NoveltyAUC on the
-                # training data). Tell the user rather than silently ignoring it.
-                if self.validation_enabled.get() and self.validation_indices:
-                    self._log_progress(
-                        "  [Note] A validation set is loaded but multi-class class "
-                        "modeling does not apply one — ranking uses LOCO NoveltyAUC "
-                        "on the training data. Confirm novelty on a true external class."
-                    )
                 self._log_progress(f"  Engines: {selected_engines}")
                 self._log_progress(f"  Variable-selection paths: {selected_varsel}")
                 self._log_progress(
@@ -28661,6 +28677,78 @@ class SpectralPredictApp:
                         "smoothing_window": self.smoothing_window.get(),
                         "smoothing_polyorder": self.smoothing_polyorder.get(),
                     }
+
+                    # Holdout validation for multi-class: rebuild each top row's
+                    # model on the calibration split and score the held-out
+                    # samples' decision matrix. Mirrors the regression/classification
+                    # call sites — X_val/y_val come straight from self.validation_X/_y
+                    # (full-spectrum, same columns as X_filtered), and the SAME
+                    # run-global baseline/smoothing/min_class_n settings thread
+                    # through so the holdout preprocessing matches the ranked row.
+                    if self.validation_enabled.get() and self.validation_indices:
+                        try:
+                            from spectral_predict.search import (
+                                compute_validation_metrics_for_top_models,
+                            )
+
+                            if hasattr(X_filtered, 'columns'):
+                                try:
+                                    mc_wavelengths = np.array(
+                                        [float(c) for c in X_filtered.columns]
+                                    )
+                                except (ValueError, TypeError):
+                                    mc_wavelengths = np.asarray(X_filtered.columns.values)
+                            else:
+                                mc_wavelengths = np.arange(X_filtered.shape[1])
+
+                            X_val_mc = (self.validation_X.values
+                                        if hasattr(self.validation_X, 'values')
+                                        else np.asarray(self.validation_X))
+                            y_val_mc = (self.validation_y.values
+                                        if hasattr(self.validation_y, 'values')
+                                        else np.asarray(self.validation_y))
+                            X_train_mc = (X_filtered.values
+                                          if hasattr(X_filtered, 'values')
+                                          else np.asarray(X_filtered))
+                            y_train_mc = (y_filtered.values
+                                          if hasattr(y_filtered, 'values')
+                                          else np.asarray(y_filtered))
+
+                            results_df = compute_validation_metrics_for_top_models(
+                                results_df,
+                                X_train=X_train_mc,
+                                y_train=y_train_mc,
+                                X_val=X_val_mc,
+                                y_val=y_val_mc,
+                                task_type="multiclass_simca",
+                                wavelengths=mc_wavelengths,
+                                top_n=100,
+                                baseline_method=baseline_method_mc,
+                                baseline_params=baseline_params_mc,
+                                enable_smoothing=self.enable_smoothing.get(),
+                                smoothing_window=self.smoothing_window.get(),
+                                smoothing_polyorder=self.smoothing_polyorder.get(),
+                                min_class_samples=self.mc_min_class_samples.get(),
+                            )
+                            self.results = results_df
+                            self.results_df = results_df
+                            self._log_progress(
+                                f"  Holdout validation: known-class val_* metrics "
+                                f"added for {len(self.validation_indices)} held-out "
+                                f"samples."
+                            )
+                            self._log_progress(
+                                "  [Note] A same-known-class holdout validates "
+                                "KNOWN-CLASS performance, NOT novelty detection. To "
+                                "test 'none of the above', hold out an entire class "
+                                "or score a true external contaminant."
+                            )
+                        except Exception as val_err:  # noqa: BLE001
+                            self._log_progress(
+                                f"  [Warning] Failed multi-class holdout "
+                                f"validation: {val_err}"
+                            )
+
                     self._finalize_multiclass_run_ui()
                 elif mc_failed:
                     self._log_progress("\n[X] Multi-class search FAILED — see the error above.")

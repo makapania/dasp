@@ -172,6 +172,38 @@ def test_mc_varsel_paths_collector_falls_back_to_none(app):
 # does NOT auto-open the decision-view window (parity with other methods).
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Task 11 — SPXY holdout selection is disallowed for multi-class class modeling
+# (its d_y distance term is undefined for a categorical class label).
+# ---------------------------------------------------------------------------
+
+def test_spxy_disabled_for_multiclass(app):
+    app.task_type.set("multiclass_simca")
+    app._on_task_type_changed()
+    assert app._validation_algo_allowed("SPXY") is False
+    assert app._validation_algo_allowed("Kennard-Stone") is True
+    assert app._validation_algo_allowed("Random") is True
+    # Non-multiclass task types allow SPXY again.
+    app.task_type.set("regression")
+    app._on_task_type_changed()
+    assert app._validation_algo_allowed("SPXY") is True
+
+
+def test_task_type_toggle_resets_spxy_selection(app):
+    # A stale SPXY selection is reset to Kennard-Stone when switching to
+    # multiclass, and the SPXY radio is disabled; leaving multiclass re-enables.
+    app.task_type.set("regression")
+    app._on_task_type_changed()
+    app.validation_algorithm.set("SPXY")
+    app.task_type.set("multiclass_simca")
+    app._on_task_type_changed()
+    assert app.validation_algorithm.get() == "Kennard-Stone"
+    assert "disabled" in app.validation_spxy_radio.state()
+    app.task_type.set("regression")
+    app._on_task_type_changed()
+    assert "disabled" not in app.validation_spxy_radio.state()
+
+
 def test_no_auto_decision_popup(app, tmp_path):
     import pandas as pd
 

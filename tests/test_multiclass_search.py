@@ -613,3 +613,144 @@ def test_multiclass_holdout_metrics_populate():
     )
     assert "val_MeanSensitivity" in out.columns
     assert out["val_MeanSensitivity"].notna().any()
+
+
+# ---------------------------------------------------------------------------
+# Task 11: run-global baseline/smoothing/min_class_n thread into the multiclass
+# holdout rebuild so the calibration/holdout pipeline matches the ranked row.
+# ---------------------------------------------------------------------------
+
+
+_MC_VAL_COLS = [
+    "val_MeanSensitivity",
+    "val_MeanSpecificity",
+    "val_NoveltyRate",
+    "val_AmbiguityRate",
+    "val_ExactSetRate",
+]
+
+
+def test_multiclass_holdout_honors_smoothing_setting():
+    """enable_smoothing=True must change the holdout preprocessing (a Savitzky-
+    Golay smoothing step is inserted before the per-class SIMCA models), so the
+    resulting val_* metrics DIFFER from enable_smoothing=False on the same data.
+    If the setting were ignored (the Task 5 defaulted-off behavior) the two runs
+    would be bit-identical."""
+    from spectral_predict.search import (
+        run_multiclass_simca_search,
+        compute_validation_metrics_for_top_models,
+    )
+
+    X, y, _ = _graded([50, 50, 50], seed=7)
+    rng = np.random.RandomState(7)
+    idx = rng.permutation(len(y))
+    tr, va = idx[:120], idx[120:]
+    wl = np.arange(X.shape[1], dtype=float)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = run_multiclass_simca_search(
+            X[tr], y[tr], engines=["pca-simca"], preprocessing_methods=["raw"],
+            alpha=0.05, n_components=0.99, varsel_paths=["none"], cv_splits=3,
+        )
+
+        off = compute_validation_metrics_for_top_models(
+            df.copy(), X[tr], y[tr], X[va], y[va],
+            task_type="multiclass_simca", wavelengths=wl, top_n=5,
+            enable_smoothing=False,
+        )
+        on = compute_validation_metrics_for_top_models(
+            df.copy(), X[tr], y[tr], X[va], y[va],
+            task_type="multiclass_simca", wavelengths=wl, top_n=5,
+            enable_smoothing=True, smoothing_window=17, smoothing_polyorder=2,
+        )
+
+    off_vals = off.loc[off.index[0], _MC_VAL_COLS].to_numpy(dtype=float)
+    on_vals = on.loc[on.index[0], _MC_VAL_COLS].to_numpy(dtype=float)
+    # At least one metric must differ — the smoothing setting was honored.
+    assert not np.allclose(off_vals, on_vals, equal_nan=True), (
+        "enable_smoothing had no effect on the multiclass holdout metrics — "
+        "the setting is not threading into the rebuild."
+    )
+
+
+def _regression_val_df():
+    rng = np.random.RandomState(3)
+    n_train, n_val, n_features = 30, 12, 20
+    X_train = rng.randn(n_train, n_features)
+    # y linearly related to a couple of features so PLS trains meaningfully
+    y_train = X_train[:, 0] * 2.0 + X_train[:, 5] - 0.5
+    X_val = rng.randn(n_val, n_features)
+    y_val = X_val[:, 0] * 2.0 + X_val[:, 5] - 0.5
+    wl = np.arange(n_features, dtype=float)
+    all_vars = ",".join(str(w) for w in wl)
+    df = pd.DataFrame([{
+        "Model": "PLS", "PreprocessBase": "raw", "Preprocess": "raw",
+        "Deriv": 0, "Window": 0, "Poly": 0, "LVs": 3, "n_vars": n_features,
+        "full_vars": n_features, "SubsetTag": "full", "Imbalance": 0.0,
+        "Task": "regression", "Params": "{}", "CompositeScore": 1.0,
+        "top_vars": "", "all_vars": all_vars, "Rank": 1,
+    }])
+    return df, X_train, y_train, X_val, y_val, wl
+
+
+def test_regression_branch_ignores_new_multiclass_kwargs():
+    """The regression branch must be byte-identical whether or not the new
+    keyword-only multiclass kwargs are supplied (even at non-default values)."""
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    df, X_tr, y_tr, X_va, y_va, wl = _regression_val_df()
+
+    base = compute_validation_metrics_for_top_models(
+        df.copy(), X_tr, y_tr, X_va, y_va,
+        task_type="regression", wavelengths=wl, top_n=1,
+    )
+    with_kwargs = compute_validation_metrics_for_top_models(
+        df.copy(), X_tr, y_tr, X_va, y_va,
+        task_type="regression", wavelengths=wl, top_n=1,
+        baseline_method="asls", enable_smoothing=True, smoothing_window=11,
+        smoothing_polyorder=3, min_class_samples=25,
+    )
+    for col in ("RMSEP", "R2pred"):
+        b = float(base.loc[base.index[0], col])
+        w = float(with_kwargs.loc[with_kwargs.index[0], col])
+        assert b == pytest.approx(w, nan_ok=True), (
+            f"regression {col} changed when new multiclass kwargs were passed"
+        )
+
+
+def test_classification_branch_ignores_new_multiclass_kwargs():
+    """The classification branch must ignore the new keyword-only multiclass
+    kwargs entirely (defaulted → existing callers unaffected)."""
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    rng = np.random.RandomState(5)
+    n_train, n_val, n_features = 40, 16, 20
+    X_train = rng.randn(n_train, n_features)
+    y_train = np.array(["A", "B"] * (n_train // 2), dtype=object)
+    X_val = rng.randn(n_val, n_features)
+    y_val = np.array(["A", "B"] * (n_val // 2), dtype=object)
+    wl = np.arange(n_features, dtype=float)
+    all_vars = ",".join(str(w) for w in wl)
+    df = pd.DataFrame([{
+        "Model": "PLS-DA", "PreprocessBase": "raw", "Preprocess": "raw",
+        "Deriv": 0, "Window": 0, "Poly": 0, "LVs": 2, "n_vars": n_features,
+        "full_vars": n_features, "SubsetTag": "full", "Imbalance": 0.0,
+        "Task": "classification", "Params": "{}", "CompositeScore": 1.0,
+        "top_vars": "", "all_vars": all_vars, "Rank": 1,
+    }])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        base = compute_validation_metrics_for_top_models(
+            df.copy(), X_train, y_train, X_val, y_val,
+            task_type="classification", wavelengths=wl, top_n=1,
+        )
+        with_kwargs = compute_validation_metrics_for_top_models(
+            df.copy(), X_train, y_train, X_val, y_val,
+            task_type="classification", wavelengths=wl, top_n=1,
+            baseline_method="asls", enable_smoothing=True, min_class_samples=25,
+        )
+    b = float(base.loc[base.index[0], "val_Accuracy"])
+    w = float(with_kwargs.loc[with_kwargs.index[0], "val_Accuracy"])
+    assert b == pytest.approx(w, nan_ok=True)
