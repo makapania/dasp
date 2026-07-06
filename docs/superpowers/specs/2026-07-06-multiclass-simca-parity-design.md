@@ -90,11 +90,34 @@ already run on classification targets. So wiring these is mostly plumbing.
   among *known* classes but can weaken novelty detection; carry a short
   "discrimination-oriented — confirm novelty on a true external class" note.
 
-Wired through the mask hook, computing masks via the standard varsel dispatch on
-the multi-class label. Methods that cannot handle >2 classes (binary-only PLS
-coefficient paths) get a **graceful skip with a logged note** rather than a
-crash; PLS-coefficient methods handle >2 classes via dummy-encoding where the
-existing classification path already does.
+**Selection is computed once on the calibration set, per chemometrics
+convention — this is deliberate, not a leakage bug.** The major packages
+(PLS_Toolbox/Eigenvector GA, mdatools iPLS, CARS) run each selection method's
+own internal CV to choose a wavelength set *from the full calibration data*,
+then build and validate a model on those wavelengths. "Selection bias" is
+recognized in the field (Andersen & Bro, *J. Chemometrics* 2010) but its
+answer is an **external test set or explicit double-CV**, NOT refitting
+selection inside every ordinary CV fold. dasp's honest-performance mechanism is
+therefore the external **Validation tab** (section I), not per-fold nesting.
+Wavelengths carry fixed chemical meaning, so a wavelength chosen on the full
+calibration set corresponds to a real absorption band — it is not the spurious
+feature-fitting that motivates per-fold nesting in generic ML.
+
+Implementation: a search-layer dispatch computes the selected-variable mask
+**once on the calibration matrix** for each discrimination-based method by
+calling `variable_selection.py`'s **real implementations** (`uve_selection`,
+`spa_selection`, `cars_selection` incl. its hybrid/tree mode, `ipls_selection`,
+`ipls_forward` / `ipls_backward` / `mc_sipls` / `mwpls`, `uve_spa_selection`,
+`uve_cars_selection`, `uve_cars_spa_selection`, `fipls_*`) — NOT
+`compute_importances`, which only implements importance/cars/uve. Each method's
+output (per-feature importance array vs. interval subset list) is normalized to
+a boolean mask; interval methods and those needing the wavelength axis receive
+`wavelengths`. The mask is passed to `MultiClassClassModel` via its precomputed
+boolean-mask hook. **Wold modes stay on the model's native per-class path**
+(they are intrinsic SIMCA modeling power, not discrimination selection — the
+correct treatment for that family, not an inconsistency). A method that genuinely
+errors on a >2-class label gets a **graceful skip with a logged note** rather
+than a crash.
 
 ### F. Backend — `run_multiclass_simca_search` accepts lists
 - `alpha`, `n_components`, `variable_selection_n_select` become **list-capable**.

@@ -256,119 +256,85 @@ git commit -m "feat(T31): surface swept alpha/n_components/engine/varsel in mult
 
 ## Phase 2 — Backend: wire the full variable-selection set (spec E)
 
-### Task 4: search-layer mask builder for supervised varsel methods
+> **Methodology (decided with user, 2026-07-06):** variable selection is
+> computed **once on the calibration set**, per chemometrics convention — this
+> is NOT an ML leakage bug. Major packages (PLS_Toolbox GA, mdatools iPLS,
+> CARS) select wavelengths from the full calibration data using each method's
+> own internal CV, then validate. Honest performance comes from the external
+> **Validation tab** (Task 11), not from refitting selection inside every CV
+> fold. Wold modes stay on the model's native per-class path (intrinsic SIMCA
+> modeling power, not discrimination selection). `compute_importances` only
+> implements importance/cars/uve, so the full set is wired by calling
+> `variable_selection.py`'s real implementations directly.
+
+### Task 4: full-set search-layer varsel-mask dispatch
 
 **Files:**
-- Modify: `src/spectral_predict/search.py` (add helper `_multiclass_varsel_mask`; call it where `varsel_paths` rows are built)
+- Modify: `src/spectral_predict/search.py` (helper `_multiclass_varsel_mask`; call site in the grid row builder). Builds on commit `8b82c73` (the narrow importance/cars/uve version) — broaden it to the full set.
 - Test: `tests/test_multiclass_search.py`
 
 **Interfaces:**
-- Consumes: `compute_importances(X, y, method, model_name, task_type="classification")` from `unified_bayesian.py`; the multiclass label `y`; the requested `n_select` size.
-- Produces: `_multiclass_varsel_mask(X, y, method, n_select, model_name) -> np.ndarray[bool] | None`. Returns a boolean mask of shape `(n_features,)` selecting the top-`n_select` features by the method's score; returns `None` for `method == "none"`; raises `MulticlassVarselUnsupported` (new, caught by caller) for binary-only methods on a >2-class label.
-- The caller passes the returned mask as `variable_selection=` to `MultiClassClassModel` (its existing precomputed-mask hook), tagging `varsel_path` with the method name.
+- Consumes: `variable_selection.py`'s real selectors (already imported into `search.py` at lines 91–104): `uve_selection`, `spa_selection`, `cars_selection`, `ipls_selection`, `ipls_forward`, `ipls_backward`, `mc_sipls`, `mwpls`, `uve_spa_selection`, `uve_cars_selection`, `uve_cars_spa_selection`, `fipls_spa_selection`, `fipls_cars_selection`. Reference the STANDARD dispatch at `search.py:3138–3510` for each function's exact call signature (which need `wavelengths`, which return an importance array vs. interval `subsets`, which take `task_type=`).
+- Produces: `_multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="classification") -> np.ndarray[bool] | str | None`. Returns `None` for `"none"`; the method **string** for Wold modes (model-native); a boolean mask of shape `(n_features,)` for every discrimination-based method by calling that method's real implementation on the calibration matrix and normalizing its output (top-`n_select` of an importance array, or the selected indices of the best interval subset) to a mask. Raises `MulticlassVarselUnsupported` (caught by caller → skip with log) only when a method genuinely errors on the >2-class label.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-def test_varsel_mask_importance_multiclass():
-    from spectral_predict.search import _multiclass_varsel_mask
-    X, y = _toy()  # 3 classes, 40 features
-    mask = _multiclass_varsel_mask(X, y, "importance", n_select=10, model_name="PLS-DA")
-    assert mask.dtype == bool
-    assert mask.shape == (40,)
-    assert mask.sum() == 10
+def _toy():
+    import numpy as np
+    rng = np.random.RandomState(0)
+    return rng.rand(60, 40), np.array(["A", "B", "C"] * 20)
 
-def test_varsel_mask_none_returns_none():
+def test_varsel_mask_none_and_wold():
     from spectral_predict.search import _multiclass_varsel_mask
-    X, y = _toy()
-    assert _multiclass_varsel_mask(X, y, "none", n_select=10, model_name="PLS-DA") is None
+    X, y = _toy(); wl = None
+    assert _multiclass_varsel_mask(X, y, wl, "none", 10) is None
+    assert _multiclass_varsel_mask(X, y, wl, "wold_modeling", 10) == "wold_modeling"
 
-def test_varsel_mask_cars_multiclass_runs_or_skips():
+def test_varsel_mask_importance_style_methods_return_masks():
+    import numpy as np
+    from spectral_predict.search import _multiclass_varsel_mask
+    X, y = _toy(); wl = np.arange(40)
+    for method in ("importance", "cars", "uve", "spa"):
+        m = _multiclass_varsel_mask(X, y, wl, method, 10)
+        assert isinstance(m, np.ndarray) and m.dtype == bool and m.shape == (40,)
+        assert 1 <= m.sum() <= 40
+
+def test_varsel_mask_interval_method_returns_mask():
+    import numpy as np
+    from spectral_predict.search import _multiclass_varsel_mask
+    X, y = _toy(); wl = np.arange(40)
+    m = _multiclass_varsel_mask(X, y, wl, "ipls_forward", 10)
+    assert isinstance(m, np.ndarray) and m.dtype == bool and m.shape == (40,) and m.sum() >= 1
+
+def test_varsel_mask_unsupported_skips_cleanly():
     from spectral_predict.search import _multiclass_varsel_mask, MulticlassVarselUnsupported
-    X, y = _toy()
+    X, y = _toy(); import numpy as np; wl = np.arange(40)
     try:
-        mask = _multiclass_varsel_mask(X, y, "cars", n_select=10, model_name="PLS-DA")
-        assert mask is None or (mask.dtype == bool and mask.sum() <= 40)
+        m = _multiclass_varsel_mask(X, y, wl, "definitely_not_a_method", 10)
+        assert m is None or getattr(m, "dtype", None) == bool
     except MulticlassVarselUnsupported:
-        pass  # graceful skip is acceptable for a binary-only path
+        pass
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `.venv312/Scripts/python -m pytest tests/test_multiclass_search.py -k varsel_mask -v`
-Expected: FAIL — `_multiclass_varsel_mask` undefined.
+Expected: FAIL — spa/ipls_forward not yet handled (current helper raises `MulticlassVarselUnsupported` for them).
 
-- [ ] **Step 3: Implement the helper**
+- [ ] **Step 3: Broaden the helper**
 
-Add near the other multiclass helpers in `search.py`:
+Replace the `_MULTICLASS_MASK_METHODS = frozenset({"importance","cars","uve"})` gate and the single `compute_importances` call with a dispatch that mirrors `search.py:3138–3510`. Two output shapes to normalize:
 
-```python
-class MulticlassVarselUnsupported(Exception):
-    """Raised when a variable-selection method cannot handle a >2-class label."""
+- **Importance-array methods** (`importance`→`compute_importances`; `spa`→`spa_selection(X,y,n_features=n_select)`; `uve`→`uve_selection`; `cars`→`cars_selection(...,task_type=)`; `uve_spa`/`uve_cars`/`uve_cars_spa`; `ipls`→`ipls_selection`; `fipls_spa`/`fipls_cars`): call the function exactly as the standard path does, take the returned per-feature score array, keep the top-`n_select` indices → boolean mask.
+- **Interval-subset methods** (`ipls_forward`/`ipls_backward`/`mc_sipls`/`mwpls`): call with `wavelengths=`; the return is a list of interval index groups — select the best/first group's indices → boolean mask (these define their own count; `n_select` does not apply, and that's expected).
+- `cars_tree` → `cars_selection(..., use_hybrid_importance=True)`; `vcpa`/`ga` → if no real implementation is reachable in `variable_selection.py`, `raise MulticlassVarselUnsupported` (caught → skip) and note it in the report so Task 8's GUI list can drop the genuinely-absent ones.
 
+Wrap each call in `try/except Exception` → `raise MulticlassVarselUnsupported(...)` so any per-method failure on the >2-class label degrades to a clean skip. Keep the label int-encoding the current helper already added. Selection runs **once on the passed calibration matrix** (chemometrics convention — document this in the docstring).
 
-_WOLD_METHODS = {"wold_modeling", "wold_discriminating", "wold_balanced"}
+- [ ] **Step 4: Update the caller to pass `wavelengths`**
 
-
-def _multiclass_varsel_mask(X, y, method, n_select, model_name):
-    """Boolean top-`n_select` feature mask for a supervised varsel method on the
-    genuine multi-class label. Wold methods are handled inside MultiClassClassModel
-    (return their string, not a mask); this covers the discrimination-based set.
-
-    Returns None for method == "none". Raises MulticlassVarselUnsupported for a
-    binary-only method applied to >2 classes.
-    """
-    import numpy as np
-    if method == "none":
-        return None
-    if method in _WOLD_METHODS:
-        # Handled natively by the model layer via its string dispatch.
-        return method
-    n_features = X.shape[1]
-    from spectral_predict.unified_bayesian import compute_importances
-    try:
-        scores = compute_importances(
-            np.asarray(X), np.asarray(y), method, model_name,
-            task_type="classification",
-        )
-    except ValueError as exc:
-        # e.g. a binary-only coefficient path on >2 classes
-        raise MulticlassVarselUnsupported(
-            f"{method!r} does not support a {len(set(y))}-class label: {exc}"
-        ) from exc
-    scores = np.asarray(scores, dtype=float)
-    if not np.all(np.isfinite(scores)):
-        raise MulticlassVarselUnsupported(
-            f"{method!r} produced non-finite importances on this label."
-        )
-    k = int(min(max(n_select, 1), n_features))
-    top_idx = np.argsort(scores)[-k:]
-    mask = np.zeros(n_features, dtype=bool)
-    mask[top_idx] = True
-    return mask
-```
-
-Note: when the helper returns a **string** (Wold method), the caller passes that string to `variable_selection=`; when it returns an **ndarray**, the caller passes the mask; when `None`, no selection.
-
-- [ ] **Step 4: Wire it into the row builder**
-
-Where the grid loop constructs each `(varsel_path, n_select)` row, replace the current Wold/importance-only branch with:
-
-```python
-                try:
-                    _vs = _multiclass_varsel_mask(
-                        X_pp, y, varsel_path, _n_select, model_name="PLS-DA",
-                    )
-                except MulticlassVarselUnsupported as exc:
-                    logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
-                    continue  # skip this row, do not crash the run
-                # _vs is None (no selection), a str (Wold, model-native), or a bool mask
-                model = MultiClassClassModel(
-                    ...,
-                    variable_selection=_vs,
-                    ...
-                )
-```
+At the call site, pass the run's `wavelengths` through and keep the existing `try/except MulticlassVarselUnsupported: continue` skip-with-warning. Confirm `varsel_path` is still tagged with the method name and that a genuinely-absent method skips rather than crashes the run.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -378,13 +344,13 @@ Expected: PASS.
 - [ ] **Step 6: Regression**
 
 Run: `.venv312/Scripts/python -m pytest tests/test_simca.py tests/test_multiclass_search.py -q`
-Expected: PASS; Wold-family + importance results unchanged.
+Expected: PASS; Wold-family results unchanged. Record in the report which method names genuinely resolve vs. skip (feeds Task 8's GUI group list — do not offer a method the backend can only skip).
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add src/spectral_predict/search.py tests/test_multiclass_search.py
-git commit -m "feat(T31): wire full varsel set into multiclass search via mask hook (graceful skip on binary-only)"
+git commit -m "feat(T31): wire full varsel set into multiclass search via variable_selection.py (select-on-calibration)"
 ```
 
 ---
