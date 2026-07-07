@@ -54,6 +54,40 @@ class TestMultiTargetTab:
         assert set(listed) == {"prop_0", "prop_1", "prop_2"}
         assert "spec_file" not in listed
 
+    def test_leaderboard_column_sort(self, gui_app):
+        """Clicking a header sorts the multi-target leaderboard (numeric + toggle)."""
+        from types import SimpleNamespace
+
+        def _res(model, jq2):
+            return SimpleNamespace(
+                preprocessing="SNV", varsel_method="uve", n_variables=10,
+                params={"n_components": 5}, model_name=model, mode="INDEPENDENT",
+                joint_q2=jq2,
+                metrics={"per_target": [{"target": "prop_0", "r2": jq2,
+                                         "rmse": 1.0, "rpd": 2.0, "rer": 3.0}]},
+            )
+
+        # Deliberately out-of-order joint_q2 so a correct sort is observable.
+        output = SimpleNamespace(
+            target_names=["prop_0"],
+            results=[_res("PLS", 0.30), _res("Ridge", 0.90), _res("LightGBM", 0.60)],
+        )
+        gui_app._populate_multitarget_results(output)
+        tree = gui_app.multitarget_tree
+
+        def _col(column):
+            return [tree.set(iid, column) for iid in tree.get_children("")]
+
+        # Ascending on Joint Q² (numeric).
+        gui_app._sort_multitarget_tree("joint_q2")
+        assert _col("joint_q2") == ["0.3000", "0.6000", "0.9000"]
+        # Same header again toggles to descending.
+        gui_app._sort_multitarget_tree("joint_q2")
+        assert _col("joint_q2") == ["0.9000", "0.6000", "0.3000"]
+        # Text column sorts case-insensitively.
+        gui_app._sort_multitarget_tree("model")
+        assert _col("model") == ["LightGBM", "PLS", "Ridge"]
+
     def test_multiselect_locks_1d_engines_and_forces_grid(self, gui_app):
         _load_multitarget_data(gui_app)
         gui_app._refresh_multitarget_columns()

@@ -14717,6 +14717,8 @@ class SpectralPredictApp:
 
         #: Last MultiTargetSearchOutput, retained for CSV export.
         self._multitarget_last_output = None
+        #: Per-column sort direction for the multi-target leaderboard (col -> reverse?).
+        self._multitarget_sort_state = {}
         #: Separate SearchController for the multi-target worker — a DISTINCT
         #: instance from ``self.search_controller`` so the single-Y stop/pause
         #: controls are never touched. ``_run_multitarget_search`` replaces it
@@ -16060,7 +16062,8 @@ class SpectralPredictApp:
             ("model", "Model", 110, tk.W), ("mode", "Mode", 100, tk.CENTER),
             ("joint_q2", "Joint Q²", 80, tk.E),
         ]:
-            tree.heading(cid, text=text)
+            tree.heading(cid, text=text,
+                         command=lambda c=cid: self._sort_multitarget_tree(c))
             # stretch=False keeps each column at its fixed width so a wide
             # per-target grid overflows the viewport horizontally (engaging the
             # x-scrollbar) instead of squishing every column to fit (FIX 2).
@@ -16068,7 +16071,8 @@ class SpectralPredictApp:
         for t in target_names:
             for key, lbl in self._MULTITARGET_METRIC_KEYS:
                 col = f"{t}__{key}"
-                tree.heading(col, text=f"{t} {lbl}")
+                tree.heading(col, text=f"{t} {lbl}",
+                             command=lambda c=col: self._sort_multitarget_tree(c))
                 tree.column(col, width=90, anchor=tk.E, stretch=False)
 
         for res in output.results:
@@ -16084,6 +16088,34 @@ class SpectralPredictApp:
                     val = d.get(key)
                     values.append(f"{val:.4f}" if isinstance(val, (int, float)) else "")
             tree.insert("", tk.END, values=values)
+
+    def _sort_multitarget_tree(self, col):
+        """Sort the multi-target leaderboard by a clicked column header.
+
+        Numeric columns (metrics, #Vars, Joint Q²) sort numerically; text
+        columns sort case-insensitively. Blank / NaN cells always sink to the
+        bottom regardless of direction. Clicking the same header toggles
+        ascending/descending.
+        """
+        tree = self.multitarget_tree
+        reverse = self._multitarget_sort_state.get(col, False)
+        rows = [(tree.set(iid, col), iid) for iid in tree.get_children("")]
+
+        def _as_float(raw):
+            try:
+                return float(raw)
+            except (ValueError, TypeError):
+                return None
+
+        blanks = [(v, iid) for v, iid in rows if v in ("", "NaN")]
+        rest = [(v, iid) for v, iid in rows if v not in ("", "NaN")]
+        if rest and all(_as_float(v) is not None for v, _ in rest):
+            rest.sort(key=lambda p: _as_float(p[0]), reverse=reverse)
+        else:
+            rest.sort(key=lambda p: str(p[0]).lower(), reverse=reverse)
+        for idx, (_v, iid) in enumerate(rest + blanks):
+            tree.move(iid, "", idx)
+        self._multitarget_sort_state[col] = not reverse
 
     def _export_multitarget_csv(self):
         """Export the last multi-target results (with mode + per-target metrics)."""
