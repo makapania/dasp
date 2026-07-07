@@ -408,17 +408,28 @@ def extract_pls_multi_y(pls: Any) -> np.ndarray:
 def aggregate_importance(matrix: Any, rule: str = "mean") -> np.ndarray:
     """Aggregate a per-target importance matrix to one score per feature.
 
-    Single home for cross-target aggregation rules. v1 supplies generic
-    reductions; v1.1 adds ``uve_stability`` / ``cars_scaled_coef`` with no
-    re-plumbing. The natural first non-PLS consumer is the display path for
-    ``MultiOutputRegressor``-wrapped tree models (mean of per-target
-    ``feature_importances_`` across ``mor.estimators_``).
+    Single home for cross-target aggregation rules. Generic reductions plus the
+    two method-specific T-17 rules:
+
+    - ``uve_stability`` (UVE multi-Y): mean across targets of the per-target
+      reliability ratio ``mean(|coef|)/std(coef)``. The ratio is already
+      scale-invariant per target, so the mean weights every target's stability
+      equally without any Y-scaling. (Methodology choice -- ``max`` / ``l2``
+      would instead reward variables reliable for a single target; flagged for
+      an A/B.)
+    - ``cars_scaled_coef`` (CARS multi-Y): l2-norm across targets of the
+      column-scaled PLS-2 ``|coef|`` matrix. Column scaling is load-bearing --
+      raw coefficient magnitudes across differently-scaled targets are
+      incomparable. l2 (vs ``mean``) lets a variable strongly informative for
+      one target survive the reweighting. (Methodology choice; flagged for an
+      A/B.)
 
     Args:
         matrix: Importance matrix, shape ``(n_features, n_targets)`` (a 1-D
             input is treated as a single target column).
         rule: One of ``'mean'``, ``'sum'``, ``'max'``, ``'l2'`` (root sum of
-            squares across targets).
+            squares across targets), ``'uve_stability'`` (== mean), or
+            ``'cars_scaled_coef'`` (== l2).
 
     Returns:
         Per-feature scores, shape ``(n_features,)``.
@@ -426,15 +437,18 @@ def aggregate_importance(matrix: Any, rule: str = "mean") -> np.ndarray:
     arr = np.asarray(matrix, dtype=float)
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
-    if rule == "mean":
+    if rule in ("mean", "uve_stability"):
         return arr.mean(axis=1)
     if rule == "sum":
         return arr.sum(axis=1)
     if rule == "max":
         return arr.max(axis=1)
-    if rule == "l2":
+    if rule in ("l2", "cars_scaled_coef"):
         return np.sqrt(np.sum(arr**2, axis=1))
-    raise ValueError(f"Unknown aggregate rule {rule!r}. Expected 'mean', 'sum', 'max', or 'l2'.")
+    raise ValueError(
+        f"Unknown aggregate rule {rule!r}. Expected 'mean', 'sum', 'max', 'l2', "
+        f"'uve_stability', or 'cars_scaled_coef'."
+    )
 
 
 def inter_target_correlation(Y: Any, weak_threshold: float = 0.35) -> dict[str, Any]:

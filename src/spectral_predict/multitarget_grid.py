@@ -211,7 +211,18 @@ def build_multitarget_preprocess_configs(
 _INTERVAL_METHODS = {"ipls_forward", "ipls_backward", "mc_sipls", "mwpls"}
 
 LINEAR_MODELS = {"PLS", "Ridge", "Lasso", "ElasticNet"}
-_IMPORTANCE_METHODS = {"spa", "ga", "importance", "fipls_spa"}
+_IMPORTANCE_METHODS = {
+    "spa", "ga", "importance", "fipls_spa",
+    # T-17 UVE/CARS family, now multi-Y-safe (PLS-2 coefficient tensor / joint
+    # criterion). cars-tree / uve_cars_tree remain skipped (per-target LightGBM).
+    "uve", "uve_spa", "cars", "uve_cars", "uve_cars_spa", "fipls_cars",
+    # T-17 legacy iPLS importance path: multi-Y via native multi-output r2.
+    "ipls",
+}
+
+# Methods whose internal chain runs SPA on 2-D Y -- gated on the same spa_ok
+# verification as bare ``spa`` (if SPA's 2-D criterion degenerates, skip these).
+_SPA_DEPENDENT_METHODS = {"spa", "fipls_spa", "uve_spa", "uve_cars_spa"}
 
 
 def _parse_ipls_subset_limit(limit: str) -> Optional[int]:
@@ -322,6 +333,41 @@ def _model_independent_importances(
                 f"expected ({X_pp.shape[1]},)"
             )
         return imp
+    # T-17 UVE/CARS family (multi-Y-safe). All return a full-length (n_features,)
+    # importance array, ranked into top-N subsets by _importances_to_subsets.
+    if method == "ipls":
+        from .variable_selection import ipls_selection
+        return np.asarray(ipls_selection(X_pp, Y), dtype=float)
+    if method == "uve":
+        from .variable_selection import uve_selection
+        return np.asarray(uve_selection(X_pp, Y), dtype=float)
+    if method == "cars":
+        from .variable_selection import cars_selection
+        return np.asarray(cars_selection(X_pp, Y), dtype=float)
+    if method == "uve_cars":
+        from .variable_selection import uve_cars_selection
+        return np.asarray(uve_cars_selection(X_pp, Y), dtype=float)
+    if method in ("uve_spa", "uve_cars_spa"):
+        n_target = max(5, X_pp.shape[1] // 10)
+        if method == "uve_spa":
+            from .variable_selection import uve_spa_selection
+            return np.asarray(uve_spa_selection(X_pp, Y, n_features=n_target), dtype=float)
+        from .variable_selection import uve_cars_spa_selection
+        return np.asarray(
+            uve_cars_spa_selection(X_pp, Y, spa_n_features=n_target), dtype=float
+        )
+    if method == "fipls_cars":
+        from .variable_selection import fipls_cars_selection
+
+        if wavelengths is None:
+            raise ValueError("fipls_cars requires wavelengths")
+        imp = np.asarray(fipls_cars_selection(X_pp, Y, wavelengths), dtype=float)
+        if imp.shape != (X_pp.shape[1],):
+            raise ValueError(
+                f"fipls_cars_selection returned importance with shape {imp.shape}; "
+                f"expected ({X_pp.shape[1]},)"
+            )
+        return imp
     return None
 
 
@@ -366,9 +412,10 @@ def _importance_reference_fit(
     return aggregate_importance(matrix, rule="mean")
 
 
+# Still deferred on 2-D Y: cars-tree / uve_cars_tree (per-target LightGBM is a
+# wall-clock explosion), vcpa-iriv (single-Y-only IRIV criterion).
 SKIP_WITH_NOTICE = {
-    "uve", "uve_spa", "cars", "cars-tree", "uve_cars", "uve_cars_tree",
-    "uve_cars_spa", "fipls_cars", "ipls", "vcpa-iriv",
+    "cars-tree", "uve_cars_tree", "vcpa-iriv",
 }
 
 
@@ -378,12 +425,12 @@ def classify_varsel_method(method: str, *, enabled_models, spa_ok: bool) -> str:
         return "skip"
     if method in _INTERVAL_METHODS:
         return "subset"
-    if method in ("spa", "fipls_spa"):
+    if method in _SPA_DEPENDENT_METHODS:
         return "importance" if spa_ok else "skip"
     if method == "ga":
         has_linear = any(m in LINEAR_MODELS for m in (enabled_models or []))
         return "importance" if has_linear else "skip"
-    if method == "importance":
+    if method in _IMPORTANCE_METHODS:
         return "importance"
     return "skip"
 
@@ -400,7 +447,29 @@ def build_multitarget_varsel_subsets(
     ]
     skipped: list[str] = []
     if apply_uve_prefilter:
-        skipped.append("apply_uve_prefilter")
+        # T-17: UVE is now multi-Y-safe, so the prefilter contributes its
+        # UVE-threshold-selected variable set as a standalone candidate subset
+        # (rather than being skipped). Cached per preprocess like other methods.
+        key = (preprocess_id, "apply_uve_prefilter")
+        if key not in cache:
+            try:
+                from .variable_selection import get_uve_threshold
+
+                _imp, _thr, mask = get_uve_threshold(X_pp, Y)
+                idx = np.where(np.asarray(mask, dtype=bool))[0]
+                # Only useful if UVE actually eliminated something (a keep-all or
+                # keep-none mask adds nothing over the always-present full subset).
+                if 0 < idx.size < n_features_sub:
+                    cache[key] = [{"indices": idx, "tag": "uve_prefilter",
+                                   "method": "apply_uve_prefilter"}]
+                else:
+                    cache[key] = []
+            except Exception:
+                cache[key] = []
+                skipped.append("apply_uve_prefilter")
+        subsets.extend(
+            {**d, "indices": np.array(d["indices"], copy=True)} for d in cache[key]
+        )
     for method in (methods or []):
         kind = classify_varsel_method(method, enabled_models=enabled_models, spa_ok=spa_ok)
         if kind == "skip":

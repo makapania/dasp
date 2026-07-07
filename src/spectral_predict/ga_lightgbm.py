@@ -36,6 +36,8 @@ from joblib import Parallel, delayed
 # LightGBM (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
 
+from .variable_selection import _prep_varsel_y
+
 
 # =============================================================================
 # Constants and Defaults
@@ -224,6 +226,35 @@ def _fitness_function_lgbm(
 
     try:
         if task_type == 'regression':
+            y_arr = np.asarray(y)
+            if y_arr.ndim > 1 and y_arr.shape[1] > 1:
+                # Multi-target (T-17): one single-output LightGBM PER TARGET
+                # (MultiOutputRegressor) scored by the pooled normalized joint
+                # RMSECV sqrt(mean_target(1 - Q2_s)) on the multi_y foundation.
+                # Higher fitness == higher joint Q2 (GA maximizes), matching the
+                # single-Y sign. Cost is n_targets x the single-Y fitness.
+                from sklearn.multioutput import MultiOutputRegressor
+
+                from .multi_y import multi_y_cv_pool, multi_y_metrics
+
+                base = LGBMRegressor(
+                    n_estimators=n_estimators,
+                    num_leaves=num_leaves,
+                    learning_rate=learning_rate,
+                    reg_lambda=reg_lambda,
+                    verbose=-1,
+                    n_jobs=1,
+                    force_col_wise=True,
+                )
+                mor = MultiOutputRegressor(base)
+                yt, yp = multi_y_cv_pool(mor, X_selected, y_arr, cv, scale_y=False)
+                m = multi_y_metrics(yt, yp)
+                joint_q2 = float(m["joint_q2"])
+                mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+                if not (np.isfinite(joint_q2) and np.isfinite(mean_nmse)):
+                    return -np.inf
+                rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
+                return -rmsecv
             model = LGBMRegressor(
                 n_estimators=n_estimators,
                 num_leaves=num_leaves,
@@ -632,9 +663,11 @@ def ga_lightgbm_selection(
     ...     n_runs=3
     ... )
     """
-    # Convert inputs
+    # Convert inputs. Multi-target (T-17): preserve a genuine (n, n_targets>=2)
+    # block 2-D so the per-target LightGBM joint-fitness branch fires; single/
+    # one-column y ravels to (n,) -- byte-identical to the pre-T-17 path.
     X = np.asarray(X)
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_wavelengths = X.shape
 

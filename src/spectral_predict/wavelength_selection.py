@@ -26,7 +26,11 @@ import numpy as np
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold
 
-from .variable_selection import _reject_multi_y
+from .variable_selection import (
+    _evaluate_interval_pls_multi,
+    _prep_varsel_y,
+    _reject_multi_y,
+)
 
 
 SelectionMethod = Literal["spa", "cars", "vcpa-iriv"]
@@ -456,11 +460,19 @@ def vcpa_iriv(
     # Validate inputs
     if X.shape[0] != y.shape[0]:
         raise ValueError("X and y must have same number of samples")
-    _reject_multi_y(y, "vcpa-iriv")
+    # Multi-target (T-17): preserve a genuine (n, n_targets>=2) block 2-D so the
+    # pooled-normalized joint-PLS RMSECV criterion fires in compute_rmsecv;
+    # single/one-column y ravels to (n,) -- byte-identical to the pre-T-17 path.
+    y = _prep_varsel_y(y)
+    _multi_y = np.asarray(y).ndim == 2 and np.asarray(y).shape[1] > 1
 
     # Determine which model to use for evaluation
     TREE_MODELS = {'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'}
     use_tree_model = model_type in TREE_MODELS if model_type else False
+    # IRIV tree-mode CV is single-output LightGBM; reject a 2-D Y block there so
+    # it can never be silently flattened (the routed multi-Y path is PLS-only).
+    if _multi_y and use_tree_model:
+        _reject_multi_y(y, "vcpa-iriv (tree mode)")
 
     # Initialize: all variables are candidates
     active_indices = np.arange(n_wavelengths)
@@ -472,6 +484,20 @@ def vcpa_iriv(
     def compute_rmsecv(X_subset: np.ndarray, y: np.ndarray) -> float:
         """Compute cross-validated RMSECV for a variable subset."""
         try:
+            if _multi_y:
+                # Multi-target (T-17): pooled normalized joint-PLS RMSECV
+                # sqrt(mean_target(1 - Q2_s)). Raw RMSE across divergent target
+                # units is meaningless, so the normalization is required. The
+                # IRIV include/exclude Mann-Whitney classifier below is
+                # criterion-agnostic and needs no change.
+                n_comp = min(pls_components, X_subset.shape[1] - 1, X_subset.shape[0] - 1)
+                if n_comp < 1:
+                    return np.inf
+                rmsecv, _joint_q2 = _evaluate_interval_pls_multi(
+                    X_subset, y, cv_folds, n_comp
+                )
+                return rmsecv
+
             kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
             cv_errors = []
 

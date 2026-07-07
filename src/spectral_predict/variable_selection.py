@@ -5,6 +5,8 @@ This module implements various variable selection algorithms to identify
 the most informative spectral variables for prediction.
 """
 
+from __future__ import annotations
+
 import os
 
 import numpy as np
@@ -81,6 +83,111 @@ def _evaluate_interval_pls_multi(X, Y, cv_folds, n_components):
         return rmsecv, joint_q2
     except Exception:
         return np.inf, -1.0
+
+
+def _pls_coef_2d(pls: PLSRegression, n_features: int, n_targets: int) -> np.ndarray:
+    """Return PLS coefficients oriented as ``(n_features, n_targets)`` (T-17).
+
+    sklearn >= 1.1 exposes ``coef_`` as ``(n_targets, n_features)``; older
+    releases used ``(n_features, n_targets)``. Detect the orientation from the
+    known shape so the multi-target UVE/CARS coefficient tensor is always
+    feature-major.
+
+    Args:
+        pls: A fitted :class:`~sklearn.cross_decomposition.PLSRegression`.
+        n_features: Expected feature count (rows of the returned matrix).
+        n_targets: Expected target count (columns of the returned matrix).
+
+    Returns:
+        Coefficient matrix, shape ``(n_features, n_targets)``.
+    """
+    coef = np.asarray(pls.coef_, dtype=float)
+    if coef.shape == (n_targets, n_features):
+        return coef.T
+    if coef.shape == (n_features, n_targets):
+        return coef
+    return coef.reshape(n_features, n_targets)
+
+
+def _uve_collect_coefficients(X_augmented, y, n_components, cv_folds, random_state):
+    """Collect per-fold PLS coefficients on the noise-augmented matrix (T-17).
+
+    Single home for the UVE fold loop shared by :func:`uve_selection` and
+    :func:`get_uve_threshold`. Preserves byte-identical single-target behaviour
+    (a ``(cv_folds, n_aug_features)`` matrix built from ``pls.coef_.ravel()``)
+    and adds a genuine multi-target branch that stores a
+    ``(cv_folds, n_aug_features, n_targets)`` tensor from the PLS-2 coefficient
+    matrix.
+
+    Args:
+        X_augmented: Noise-augmented spectra, shape ``(n_samples, n_aug)``.
+        y: Target values, ``(n_samples,)`` or ``(n_samples, n_targets>=2)``.
+        n_components: PLS component count.
+        cv_folds: Number of CV folds.
+        random_state: Seed for the shuffled ``KFold``.
+
+    Returns:
+        Coefficient array; ``(cv_folds, n_aug)`` for single-target ``y`` or
+        ``(cv_folds, n_aug, n_targets)`` for a multi-target block.
+    """
+    n_aug = X_augmented.shape[1]
+    y = np.asarray(y)
+    multi = y.ndim == 2 and y.shape[1] > 1
+    if multi:
+        n_targets = y.shape[1]
+        coefficients = np.zeros((cv_folds, n_aug, n_targets))
+    else:
+        coefficients = np.zeros((cv_folds, n_aug))
+
+    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    fold_idx = 0
+    for train_idx, _ in kfold.split(X_augmented):
+        X_train = X_augmented[train_idx]
+        y_train = y[train_idx]
+        try:
+            pls = PLSRegression(n_components=n_components, scale=False)
+            pls.fit(X_train, y_train)
+            if multi:
+                coefficients[fold_idx] = _pls_coef_2d(pls, n_aug, n_targets)
+            else:
+                coefficients[fold_idx] = pls.coef_.ravel()
+        except (np.linalg.LinAlgError, ValueError) as e:
+            print(f"Warning: PLS fitting failed for fold {fold_idx + 1}: {e}")
+            coefficients[fold_idx] = 0.0
+        fold_idx += 1
+    return coefficients
+
+
+def _uve_reliability(coefficients, n_features):
+    """Split per-fold coefficients into real/noise UVE reliability scores (T-17).
+
+    Reliability = ``mean(|coef|) / std(coef)`` over folds, computed per feature
+    (single-target) or per (feature, target) (multi-target). For a multi-target
+    tensor the per-target reliability matrix is aggregated across targets via
+    the scale-invariant ``uve_stability`` rule so the returned scores are 1-D.
+    Because the ratio is scale-invariant per target, no Y-scaling is required.
+
+    Args:
+        coefficients: ``(cv_folds, n_aug)`` or ``(cv_folds, n_aug, n_targets)``.
+        n_features: Number of real (non-noise) leading columns.
+
+    Returns:
+        ``(real_reliability, noise_reliability)`` -- both 1-D arrays of length
+        ``n_features`` and ``n_aug - n_features`` respectively.
+    """
+    mean_abs_coef = np.mean(np.abs(coefficients), axis=0)
+    std_coef = np.std(coefficients, axis=0)
+
+    reliability = np.zeros_like(mean_abs_coef)
+    non_zero_std = std_coef > 1e-10
+    reliability[non_zero_std] = mean_abs_coef[non_zero_std] / std_coef[non_zero_std]
+
+    if reliability.ndim == 2:
+        from .multi_y import aggregate_importance
+
+        reliability = aggregate_importance(reliability, rule="uve_stability")
+
+    return reliability[:n_features], reliability[n_features:]
 
 
 def _get_cv_n_jobs():
@@ -164,10 +271,12 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
     Elimination of uninformative variables for multivariate calibration.
     Analytical Chemistry, 68(21), 3851-3858.
     """
-    # Convert inputs to numpy arrays and ensure proper shapes
+    # Convert inputs to numpy arrays and ensure proper shapes.
+    # Multi-target (T-17): a genuine (n, n_targets>=2) block is preserved 2-D so
+    # the PLS-2 coefficient-tensor branch fires; single/one-column y ravels to
+    # (n,) -- byte-identical to the pre-T-17 path.
     X = np.asarray(X)
-    _reject_multi_y(y, "UVE")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_features = X.shape
 
@@ -197,51 +306,16 @@ def uve_selection(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5, ra
     noise_variables = rng.randn(n_samples, n_features)
     X_augmented = np.hstack([X, noise_variables])
 
-    # Step 2: Build PLS models across CV folds and collect coefficients
-    # Initialize array to store coefficients from each fold
-    n_augmented_features = X_augmented.shape[1]
-    coefficients = np.zeros((cv_folds, n_augmented_features))
+    # Step 2: Build PLS models across CV folds and collect coefficients.
+    # Step 3: Reliability = mean(|coef|) / std(coef) per (feature[, target]),
+    # aggregated across targets for a multi-target block (uve_stability rule).
+    coefficients = _uve_collect_coefficients(
+        X_augmented, y, n_components, cv_folds, random_state
+    )
+    real_reliability, noise_reliability = _uve_reliability(coefficients, n_features)
 
-    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    fold_idx = 0
-
-    for train_idx, _ in kfold.split(X_augmented):
-        # Get training data for this fold
-        X_train = X_augmented[train_idx]
-        y_train = y[train_idx]
-
-        # Fit PLS model
-        try:
-            pls = PLSRegression(n_components=n_components, scale=False)
-            pls.fit(X_train, y_train)
-
-            # Extract coefficients
-            coefficients[fold_idx] = pls.coef_.ravel()
-
-        except (np.linalg.LinAlgError, ValueError) as e:
-            # Handle singular matrices or other PLS fitting errors
-            # Leave coefficients as zeros for this fold
-            print(f"Warning: PLS fitting failed for fold {fold_idx + 1}: {e}")
-            coefficients[fold_idx] = 0.0
-
-        fold_idx += 1
-
-    # Step 3: Calculate reliability score for each variable
-    # Reliability = mean(abs(coef)) / std(coef)
-    mean_abs_coef = np.mean(np.abs(coefficients), axis=0)
-    std_coef = np.std(coefficients, axis=0)
-
-    # Handle division by zero: if std is 0, set reliability to 0
-    reliability = np.zeros(n_augmented_features)
-    non_zero_std = std_coef > 1e-10  # Use small threshold to avoid numerical issues
-    reliability[non_zero_std] = mean_abs_coef[non_zero_std] / std_coef[non_zero_std]
-
-    # Step 4: Compute noise threshold from noise variable scores
-    # Extract reliability scores for real variables and noise variables
-    real_reliability = reliability[:n_features]
-    noise_reliability = reliability[n_features:]
-
-    # Noise threshold is the maximum reliability among noise variables
+    # Step 4: Compute noise threshold from noise variable scores.
+    # (Retained for parity with get_uve_threshold; not used to mask here.)
     if len(noise_reliability) > 0 and np.max(noise_reliability) > 0:
         noise_threshold = np.max(noise_reliability) * cutoff_multiplier
     else:
@@ -305,10 +379,11 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     >>> X_selected = X[:, mask]
     >>> print(f"Selected {np.sum(mask)} out of {len(mask)} variables")
     """
-    # Convert inputs
+    # Convert inputs. Multi-target (T-17): a genuine (n, n_targets>=2) block is
+    # preserved 2-D for the PLS-2 coefficient-tensor branch; single/one-column y
+    # ravels to (n,) -- byte-identical to the pre-T-17 path.
     X = np.asarray(X)
-    _reject_multi_y(y, "UVE threshold")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_features = X.shape
 
@@ -326,40 +401,12 @@ def get_uve_threshold(X, y, cutoff_multiplier=1.0, n_components=None, cv_folds=5
     noise_variables = rng.randn(n_samples, n_features)
     X_augmented = np.hstack([X, noise_variables])
 
-    # Collect coefficients
-    n_augmented_features = X_augmented.shape[1]
-    coefficients = np.zeros((cv_folds, n_augmented_features))
-
-    kfold = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
-    fold_idx = 0
-
-    for train_idx, _ in kfold.split(X_augmented):
-        X_train = X_augmented[train_idx]
-        y_train = y[train_idx]
-
-        try:
-            pls = PLSRegression(n_components=n_components, scale=False)
-            pls.fit(X_train, y_train)
-
-            coefficients[fold_idx] = pls.coef_.ravel()
-
-        except (np.linalg.LinAlgError, ValueError) as e:
-            print(f"Warning: PLS fitting failed for fold {fold_idx + 1}: {e}")
-            coefficients[fold_idx] = 0.0
-
-        fold_idx += 1
-
-    # Calculate reliability
-    mean_abs_coef = np.mean(np.abs(coefficients), axis=0)
-    std_coef = np.std(coefficients, axis=0)
-
-    reliability = np.zeros(n_augmented_features)
-    non_zero_std = std_coef > 1e-10
-    reliability[non_zero_std] = mean_abs_coef[non_zero_std] / std_coef[non_zero_std]
-
-    # Split into real and noise
-    real_reliability = reliability[:n_features]
-    noise_reliability = reliability[n_features:]
+    # Collect coefficients and reduce to real/noise reliability (uve_stability
+    # aggregation across targets for a multi-target block).
+    coefficients = _uve_collect_coefficients(
+        X_augmented, y, n_components, cv_folds, random_state
+    )
+    real_reliability, noise_reliability = _uve_reliability(coefficients, n_features)
 
     # Calculate threshold
     if len(noise_reliability) > 0 and np.max(noise_reliability) > 0:
@@ -625,10 +672,14 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
     A comparative chemometric study with an example from near-infrared spectroscopy."
     Applied Spectroscopy 54.3 (2000): 413-419.
     """
-    # Convert inputs to numpy arrays and ensure proper shapes
+    # Convert inputs to numpy arrays and ensure proper shapes. Multi-target
+    # (T-17): a genuine (n, n_targets>=2) block is preserved 2-D and flows
+    # straight through -- each interval is scored by cross_val_score(..., 'r2'),
+    # whose multi-output r2 is a scale-invariant per-target uniform average, so
+    # no Y-scaling is needed. Single/one-column y ravels to (n,) -- byte-
+    # identical to the pre-T-17 path.
     X = np.asarray(X)
-    _reject_multi_y(y, "ipls (legacy importance path)")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_features = X.shape
 
@@ -819,10 +870,10 @@ def uve_spa_selection(X, y, n_features, cutoff_multiplier=1.0,
     - Centner et al. (1996) - UVE algorithm
     - Araújo et al. (2001) - SPA algorithm
     """
-    # Convert inputs to numpy arrays
+    # Convert inputs to numpy arrays. Multi-target (T-17): preserve a genuine
+    # (n, n_targets>=2) block 2-D -- both the UVE and SPA stages are multi-Y-safe.
     X = np.asarray(X)
-    _reject_multi_y(y, "UVE-SPA")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
 
     n_samples, n_vars = X.shape
 
@@ -935,9 +986,11 @@ def uve_cars_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, uve_c
     importances : np.ndarray
         Combined importance scores. Shape: (n_features,)
     """
+    # Multi-target (T-17): preserve a genuine (n, n_targets>=2) block 2-D -- the
+    # UVE and (PLS-mode) CARS stages are both multi-Y-safe. A tree-mode call on
+    # 2-D Y is rejected inside cars_selection.
     X = np.asarray(X)
-    _reject_multi_y(y, "UVE-CARS")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     n_samples, n_vars = X.shape
 
     variant = "UVE-CARS-Tree" if use_hybrid_importance else "UVE-CARS"
@@ -1037,9 +1090,10 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
     importances : np.ndarray
         Combined importance scores. Shape: (n_features,)
     """
+    # Multi-target (T-17): preserve a genuine (n, n_targets>=2) block 2-D -- the
+    # UVE, (PLS-mode) CARS, and SPA stages are all multi-Y-safe.
     X = np.asarray(X)
-    _reject_multi_y(y, "UVE-CARS-SPA")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     n_samples, n_vars = X.shape
 
     print(f"\n=== UVE-CARS-SPA 3-Stage Hybrid Selection ===")
@@ -1250,9 +1304,10 @@ def fipls_cars_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
     importances : np.ndarray
         Combined importance scores. Shape: (n_features,)
     """
+    # Multi-target (T-17): preserve a genuine (n, n_targets>=2) block 2-D -- the
+    # forward-iPLS and (PLS-mode) CARS stages are both multi-Y-safe.
     X = np.asarray(X)
-    _reject_multi_y(y, "fiPLS-CARS")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
     n_samples, n_vars = X.shape
 
     print(f"\n=== Forward iPLS-CARS Hybrid Selection ===")
@@ -1307,6 +1362,125 @@ def fipls_cars_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
     print(f"iPLS: {n_vars} → {n_ipls_selected} | CARS: → {n_final}")
 
     return combined_importances
+
+
+def _cars_lgbm_regressor(use_hybrid: bool, random_state: int):
+    """Build the per-iteration CARS LightGBM regressor (T-17 multi-target).
+
+    Mirrors the single-target tree configs: the CARS-Tree hybrid variant uses a
+    denser 100-tree config, plain CARS a lighter 50-tree config.
+
+    Args:
+        use_hybrid: True for the CARS-Tree (split+gain) hybrid config.
+        random_state: LightGBM seed.
+
+    Returns:
+        An unfitted ``LGBMRegressor``.
+    """
+    from lightgbm import LGBMRegressor
+
+    if use_hybrid:
+        return LGBMRegressor(
+            n_estimators=100, max_depth=-1, num_leaves=31, min_child_samples=5,
+            subsample=0.8, subsample_freq=1, colsample_bytree=0.8, reg_lambda=1.0,
+            random_state=random_state, verbose=-1, n_jobs=1,
+        )
+    return LGBMRegressor(
+        n_estimators=50, max_depth=5, random_state=random_state, verbose=-1, n_jobs=1,
+    )
+
+
+def _cars_multi_cell(
+    X_subset, y, kf, cv_folds, n_sample, pls_components,
+    *, use_tree_model, use_hybrid, hybrid_importance_weight, random_state,
+):
+    """Evaluate one CARS Monte-Carlo subset on multi-target Y (T-17).
+
+    Shared multi-target inner cell for :func:`cars_selection`, covering both the
+    PLS-2 path and the per-target LightGBM (CARS-Tree) path. The CV criterion is
+    always the pooled normalized joint RMSECV ``sqrt(mean_target(1 - Q2_s))`` --
+    scale-free and monotone in joint Q2, so ``argmin(RMSECV) == argmax(joint
+    Q2)`` (matches the single-Y sign). Feature weights aggregate the per-target
+    importance across targets via the ``cars_scaled_coef`` (l2) rule.
+
+    For tree models one single-output LightGBM is fit PER TARGET (via
+    :class:`~sklearn.multioutput.MultiOutputRegressor`), i.e. ``n_targets`` x the
+    single-Y cost -- surfaced honestly in the T-17 cost notice.
+
+    Args:
+        X_subset: Sampled spectra for this iteration, ``(n_samples, n_sel)``.
+        y: Multi-target block, ``(n_samples, n_targets>=2)``.
+        kf: A ``KFold`` splitter.
+        cv_folds: Fold count (unused directly; ``kf`` carries it).
+        n_sample: Number of sampled variables (PLS component cap).
+        pls_components: Requested PLS components (PLS path only).
+        use_tree_model: True for the LightGBM (CARS-Tree) path.
+        use_hybrid: True for the split+gain hybrid importance blend.
+        hybrid_importance_weight: Split-vs-gain blend weight.
+        random_state: Seed for the LightGBM models.
+
+    Returns:
+        ``(rmsecv, feature_weights)`` -- the pooled normalized RMSECV (``np.inf``
+        on a degenerate subset) and a per-selected-feature weight vector.
+    """
+    from sklearn.multioutput import MultiOutputRegressor
+
+    from .multi_y import aggregate_importance, multi_y_cv_pool, multi_y_metrics
+
+    y = np.asarray(y, dtype=float)
+    n_sel = X_subset.shape[1]
+    n_targets = y.shape[1]
+
+    if use_tree_model:
+        estimator = MultiOutputRegressor(_cars_lgbm_regressor(use_hybrid, random_state))
+        scale_y = False  # trees are scale-agnostic; the criterion is normalized
+    else:
+        n_comp = min(pls_components, n_sample - 1, X_subset.shape[0] - 1)
+        estimator = PLSRegression(n_components=n_comp, scale=False)
+        scale_y = True
+
+    yt, yp = multi_y_cv_pool(estimator, X_subset, y, kf, scale_y=scale_y)
+    m = multi_y_metrics(yt, yp)
+    joint_q2 = float(m["joint_q2"])
+    mean_nmse = float(np.mean(1.0 - np.asarray(m["q2"])))
+    if not (np.isfinite(joint_q2) and np.isfinite(mean_nmse)):
+        # Degenerate subset: sink it (a NaN would collapse the `> 0` guard to a
+        # spurious perfect 0.0 that would WIN the best-iteration argmin).
+        rmsecv = np.inf
+    else:
+        rmsecv = float(np.sqrt(mean_nmse)) if mean_nmse > 0.0 else 0.0
+
+    if use_tree_model:
+        mor = MultiOutputRegressor(_cars_lgbm_regressor(use_hybrid, random_state))
+        mor.fit(X_subset, y)
+        cols = []
+        for est in mor.estimators_:
+            if use_hybrid:
+                booster = est.booster_
+                split_imp = booster.feature_importance(importance_type="split").astype(float)
+                gain_imp = booster.feature_importance(importance_type="gain").astype(float)
+                split_norm = split_imp / (split_imp.sum() + 1e-10)
+                gain_norm = gain_imp / (gain_imp.sum() + 1e-10)
+                col = (hybrid_importance_weight * split_norm
+                       + (1 - hybrid_importance_weight) * gain_norm)
+            else:
+                col = est.feature_importances_.astype(float)
+            cols.append(np.asarray(col, dtype=float))
+        matrix = np.column_stack(cols)  # (n_sel, n_targets)
+        feature_imp = aggregate_importance(matrix, rule="cars_scaled_coef")
+        feature_imp = np.maximum(feature_imp, 1e-6)
+        feature_weights = feature_imp / (feature_imp.sum() + 1e-10)
+    else:
+        # PLS-2 |coef| on COLUMN-SCALED Y (scaling load-bearing: raw magnitudes
+        # across differently-scaled targets are incomparable).
+        n_comp = min(pls_components, n_sample - 1, X_subset.shape[0] - 1)
+        y_scaled = (y - y.mean(axis=0)) / (y.std(axis=0) + 1e-10)
+        pls_full = PLSRegression(n_components=n_comp, scale=False)
+        pls_full.fit(X_subset, y_scaled)
+        coef_mat = _pls_coef_2d(pls_full, n_sel, n_targets)
+        feature_weights = aggregate_importance(np.abs(coef_mat), rule="cars_scaled_coef")
+
+    return rmsecv, feature_weights
 
 
 def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
@@ -1400,10 +1574,18 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
     # Set random seed
     rng = np.random.RandomState(random_state)
 
-    # Convert inputs to numpy arrays
+    # Convert inputs to numpy arrays. Multi-target (T-17): a genuine
+    # (n, n_targets>=2) block is preserved 2-D so the JOINT-PLS criterion + the
+    # PLS-2 scaled-coefficient weighting fire; single/one-column y ravels to
+    # (n,) -- byte-identical to the pre-T-17 path.
     X = np.asarray(X)
-    _reject_multi_y(y, "CARS")
-    y = np.asarray(y).ravel()
+    y = _prep_varsel_y(y)
+    _multi_y = np.asarray(y).ndim == 2 and np.asarray(y).shape[1] > 1
+    # Multi-target CARS supports regression only (PLS-2 or per-target LightGBM).
+    # Multi-target classification has no coherent joint PLS-DA criterion here, so
+    # reject a 2-D Y block for it rather than silently flattening.
+    if _multi_y and task_type != "regression":
+        _reject_multi_y(y, "CARS (classification)")
 
     n_samples, n_variables = X.shape
 
@@ -1497,7 +1679,20 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
             kf = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
             cv_errors = []
 
-            if use_tree_model:
+            if _multi_y:
+                # Multi-target CARS (T-17): PLS-2 joint criterion + scaled-coef
+                # weights, or (tree models) one single-output LightGBM per
+                # target -- n_targets x the single-Y cost, surfaced in the T-17
+                # cost notice. See _cars_multi_cell.
+                rmsecv, _feature_weights = _cars_multi_cell(
+                    X_subset, y, kf, cv_folds, n_sample, pls_components,
+                    use_tree_model=use_tree_model, use_hybrid=use_hybrid,
+                    hybrid_importance_weight=hybrid_importance_weight,
+                    random_state=random_state,
+                )
+                weights[selected_vars] = _feature_weights
+
+            elif use_tree_model:
                 # LightGBM-based evaluation for tree models
                 # CARS-Tree uses enhanced config for more stable importance
                 if use_hybrid:
