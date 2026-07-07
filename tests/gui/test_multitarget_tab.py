@@ -204,6 +204,28 @@ class TestMultiTargetGridDispatch:
         # A SEPARATE controller instance is used, not the single-Y one.
         assert gui_app._multitarget_controller is not gui_app.search_controller
 
+    def test_collect_config_forwards_uve_params(self, gui_app):
+        _load_multitarget_data(gui_app)
+        gui_app._refresh_multitarget_columns()
+        gui_app.multitarget_listbox.selection_clear(0, "end")
+        gui_app.multitarget_listbox.selection_set(0, 2)
+        gui_app._on_multitarget_selection_changed()
+        gui_app.multitarget_model_vars["PLS"].set(True)
+        try:
+            gui_app.uve_cutoff_multiplier.set(1.3)
+            gui_app.uve_n_components.set("7")
+            cfg = gui_app._collect_multitarget_config()
+            assert cfg is not None
+            assert cfg["uve_cutoff_multiplier"] == 1.3
+            assert cfg["uve_n_components"] == 7
+            gui_app.uve_n_components.set("")
+            cfg2 = gui_app._collect_multitarget_config()
+            assert cfg2 is not None
+            assert cfg2["uve_n_components"] is None
+        finally:
+            gui_app.uve_cutoff_multiplier.set(1.0)
+            gui_app.uve_n_components.set("")
+
     def test_cancel_stops_multitarget_controller(self, gui_app):
         from spectral_predict.search_controller import SearchController
         gui_app._multitarget_controller = SearchController()

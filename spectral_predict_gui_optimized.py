@@ -15768,6 +15768,12 @@ class SpectralPredictApp:
         except (ValueError, TypeError):
             wavelengths = np.arange(self.X.shape[1], dtype=float)
 
+        uve_n_comp_raw = self.uve_n_components.get().strip()
+        try:
+            uve_n_comp = int(uve_n_comp_raw) if uve_n_comp_raw else None
+        except ValueError:
+            uve_n_comp = None
+
         return {
             "X": X_df.loc[mask].to_numpy(dtype=float),
             "Y": Ydf.loc[mask].to_numpy(dtype=float),
@@ -15785,6 +15791,8 @@ class SpectralPredictApp:
             "variable_selection_methods": self._collect_selected_varsel_methods(),
             "variable_counts": self._collect_variable_counts() or None,
             "apply_uve_prefilter": self.apply_uve_prefilter.get(),
+            "uve_cutoff_multiplier": self.uve_cutoff_multiplier.get(),
+            "uve_n_components": uve_n_comp,
             "ipls_subset_limit": self.ipls_subset_limit.get(),
             "tier": self._resolve_tier(),
             "model_grid_overrides": self._build_model_grid_overrides(),
