@@ -875,3 +875,129 @@ def test_multiclass_holdout_derivative_interval_method_builds_mask():
         if isinstance(v, (int, float)) and not np.isnan(v)
     ]
     assert finite, "holdout metrics were all NaN — the mask rebuild failed"
+
+
+# ============================================================================
+# GPT-5.5 review fold-ins (PR #64): label validation + n_select default
+# ============================================================================
+
+
+def test_multiclass_mixed_or_missing_labels_fail_cleanly():
+    """GPT-5.5 F1: a mixed-type or NaN-bearing target must raise a clear
+    ValueError at the multiclass entry point, NOT an opaque np.unique TypeError
+    that aborts the whole grid before the row-level guards run."""
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y, _ = _graded([20, 20, 20], n_features=24, seed=0)
+    Xdf = pd.DataFrame(X, columns=[float(i) for i in range(X.shape[1])])
+
+    # Mixed numeric/string object labels.
+    y_mixed = np.array([str(v) for v in y], dtype=object)
+    y_mixed[0] = 1  # int amid strings -> unorderable in np.unique
+    with pytest.raises(ValueError, match="same type"):
+        run_multiclass_simca_search(
+            Xdf, pd.Series(y_mixed), engines=["pca-simca"],
+            preprocessing_methods=["raw"], varsel_paths=["none"], cv_splits=3,
+        )
+
+    # Missing label.
+    y_nan = np.array([str(v) for v in y], dtype=object)
+    y_nan[5] = np.nan
+    with pytest.raises(ValueError, match="missing values"):
+        run_multiclass_simca_search(
+            Xdf, pd.Series(y_nan), engines=["pca-simca"],
+            preprocessing_methods=["raw"], varsel_paths=["none"], cv_splits=3,
+        )
+
+
+def test_importance_varsel_without_n_select_uses_default_not_empty():
+    """GPT-5.5 F2: requesting a mask varsel path (importance) without a Top-N
+    must NOT silently skip every row and return an empty frame — it defaults to
+    a backend Top-N so the search produces populated rows."""
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y, _ = _graded([30, 30, 30], n_features=40, seed=1)
+    Xdf = pd.DataFrame(X, columns=[float(i) for i in range(X.shape[1])])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = run_multiclass_simca_search(
+            Xdf, pd.Series(y), engines=["pca-simca"],
+            preprocessing_methods=["raw"], varsel_paths=["importance"],
+            variable_selection_n_select=None, cv_splits=3,
+        )
+
+    imp_rows = df[df["varsel_path"] == "importance"]
+    assert len(imp_rows) >= 1, "importance path produced no rows (was skipped)"
+    # The default keeps min(100, n_features) variables — here all 40.
+    assert int(imp_rows["n_vars"].iloc[0]) == 40
+
+
+def test_varsel_mask_none_n_select_defaults_instead_of_crashing():
+    """GPT-5.5 F2 (unit): _multiclass_varsel_mask with n_select=None resolves a
+    positive Top-N default rather than raising on int(None)."""
+    from spectral_predict.search import _multiclass_varsel_mask
+
+    X, y, _ = _graded([30, 30, 30], n_features=40, seed=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mask = _multiclass_varsel_mask(
+            X, y, np.arange(X.shape[1]), "importance", None,
+        )
+    assert isinstance(mask, np.ndarray) and mask.dtype == bool
+    assert mask.sum() == min(100, X.shape[1])
+
+
+def test_varsel_mask_nan_n_select_defaults_instead_of_crashing():
+    """Kimi M1: a NaN Top-N (leaderboard NSelect read back as float64) must also
+    fall through to the default, not crash on int(NaN)."""
+    from spectral_predict.search import _multiclass_varsel_mask
+
+    X, y, _ = _graded([30, 30, 30], n_features=40, seed=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mask = _multiclass_varsel_mask(
+            X, y, np.arange(X.shape[1]), "importance", float("nan"),
+        )
+    assert isinstance(mask, np.ndarray) and mask.dtype == bool
+    assert mask.sum() == min(100, X.shape[1])
+
+
+def test_top_decision_view_mask_varsel_without_n_select():
+    """Kimi LOW: the top-decision-view rebuild consumes _multiclass_varsel_mask
+    with the row's NSelect (NaN when omitted). It must build a usable view, not
+    silently fail."""
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y, _ = _graded([30, 30, 30], n_features=40, seed=5)
+    Xdf = pd.DataFrame(X, columns=[float(i) for i in range(X.shape[1])])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = run_multiclass_simca_search(
+            Xdf, pd.Series(y), engines=["pca-simca"],
+            preprocessing_methods=["raw"], varsel_paths=["importance"],
+            variable_selection_n_select=None, cv_splits=3,
+            compute_top_decision_view=True,
+        )
+    view = df.attrs.get("top_decision_view")
+    assert view is not None, "no top_decision_view attached"
+    assert not view.get("reason"), f"view failed to build: {view.get('reason')}"
+    assert view["p_values"].shape[0] == len(y)
+
+
+def test_validation_metrics_rejects_bad_labels():
+    """Kimi M2: compute_validation_metrics_for_top_models is a separate public
+    entry point and must also reject malformed labels cleanly."""
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    X, y, _ = _graded([20, 20, 20], n_features=24, seed=6)
+    Xdf = pd.DataFrame(X, columns=[float(i) for i in range(X.shape[1])])
+    df = create_results_dataframe("multiclass_simca")
+    y_bad = np.array([str(v) for v in y], dtype=object)
+    y_bad[0] = 1  # mixed type
+    with pytest.raises(ValueError, match="same type"):
+        compute_validation_metrics_for_top_models(
+            df, X_train=X, y_train=y_bad, X_val=X, y_val=y_bad,
+            task_type="multiclass_simca",
+            wavelengths=np.asarray(Xdf.columns, dtype=float),
+        )

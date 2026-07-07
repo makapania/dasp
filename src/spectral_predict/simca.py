@@ -56,6 +56,44 @@ _NON_SIMCA_ENGINES: dict[str, tuple[str, str]] = {
 }
 
 
+def check_multiclass_labels(y) -> None:
+    """Fail cleanly on missing or mixed-type multi-class labels (GPT-5.5 F1).
+
+    Every multi-class entry point derives its class set from ``np.unique(y)``.
+    On a raw object-dtype target that mixes types (e.g. ``1`` and ``"2"``) or
+    contains ``NaN``/``None``, ``np.unique`` raises an opaque ``TypeError`` that
+    aborts the whole search BEFORE any row-level failure guard runs. Validate up
+    front and raise an actionable :class:`ValueError` instead.
+
+    Parameters
+    ----------
+    y : array-like of shape (n_samples,)
+        Class labels (any dtype).
+
+    Raises
+    ------
+    ValueError
+        If any label is missing, or the labels are of mixed types that cannot
+        be ordered by :func:`numpy.unique`.
+    """
+    import pandas as pd
+
+    y_arr = np.asarray(y.values if hasattr(y, "values") else y)
+    if pd.isna(y_arr).any():
+        raise ValueError(
+            "multi-class labels contain missing values (NaN/None); drop or "
+            "fill those rows before running the multi-class search."
+        )
+    try:
+        np.unique(y_arr)
+    except TypeError as exc:
+        raise ValueError(
+            "multi-class labels must all be the same type (e.g. all strings or "
+            "all ints), but got a mix that cannot be ordered. Convert the target "
+            f"column to a single consistent type before running. ({exc})"
+        ) from exc
+
+
 class MultiClassClassModel(BaseEstimator, ClassifierMixin):
     """Multi-class class-modeling orchestrator.
 
@@ -222,6 +260,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         """
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y)
+        check_multiclass_labels(y)  # clean error on missing / mixed-type labels
 
         # --- validate constructor choices (sklearn-style: in fit) ------------
         if self.scaling not in ("none", "per_class", "global"):
@@ -603,6 +642,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         """
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y)
+        check_multiclass_labels(y)  # clean error on missing / mixed-type labels
         classes = np.unique(y)
         K = len(classes)
         n = X.shape[0]
@@ -724,6 +764,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
         """
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y)
+        check_multiclass_labels(y)  # clean error on missing / mixed-type labels
 
         if mode == "loco":
             classes = np.unique(y)

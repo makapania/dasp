@@ -4,6 +4,24 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 — T-31 PR #64 review fold-ins (GPT-5.5 F1/F2 + Kimi M1/M2)
+
+**Context:** PR review of #64 + Codex GPT-5.5 (medium) independent review, then Kimi K2.7 cross-family review of the resulting fixes.
+
+**GPT-5.5 F1 — malformed multiclass labels abort the whole run (root cause).** Every multiclass entry point derives its class set from `np.unique(y)` on the RAW target. An object-dtype target that mixes types (`1` and `"2"`) or contains `NaN`/`None` makes `np.unique` raise an opaque `TypeError` (unorderable / mixed) BEFORE any per-row failure guard runs — so one messy column kills the entire grid instead of failing one row. Fix: `simca.check_multiclass_labels(y)` — `pd.isna(y_arr).any()` → clear ValueError on missing; `try np.unique except TypeError` → clear ValueError on mixed types. Wired into `MultiClassClassModel.fit` / `.cross_validate` / `.evaluate_novelty` AND `run_multiclass_simca_search` (the last does its own `np.unique(y_np)` before any fit, so it needs its own guard, not just fit's).
+
+**GPT-5.5 F2 — importance varsel with omitted n_select returns an EMPTY leaderboard (root cause).** `variable_selection_n_select` is documented-optional and defaults to `None` → `n_select_list=[None]`. For a mask path (`importance`/`spa`/`uve`/…) `_multiclass_varsel_mask` does `int(n_select)` → `TypeError` → caught as `MulticlassVarselUnsupported` → the loop `continue`s → EVERY row skipped → empty DataFrame with a clean-looking return. GUI never hit this because `_collect_mc_sizes()` floors to `[100]`; it's a programmatic-API-only latent bug. Fix: default `n_select` to `min(100, n_features)` at the top of `_multiclass_varsel_mask` (covers the closure `_mask_from_scores` + the spa/uve_spa branches that also `int(n_select)` — all defined after the reassignment, so they capture the default).
+
+**Kimi M1 — the F2 default must also catch NaN.** The top-decision-view rebuild reads `top["NSelect"]` back from the DataFrame, where pandas has coerced a mixed int/missing column to float64 → an omitted Top-N is `NaN`, not `None`. `if n_select is None` skipped it → `int(NaN)` → ValueError. Fix: `_multiclass_varsel_mask` defaults on `None` OR `(isinstance(float) and np.isnan)`; the top-view path also coerces `NaN→None` before use (matching the run-selected / holdout rebuilds, which already did). NOTE for future: NSelect round-trips through float64 — always guard NaN, not just None, when reading it back.
+
+**Kimi M2 — second unguarded public entry point.** `compute_validation_metrics_for_top_models` (holdout metrics) is separate from `run_multiclass_simca_search` and its multiclass branch reaches `np.unique(y)` unvalidated. Added `check_multiclass_labels(y_train)`/`(y_val)` at its multiclass init.
+
+**GPT-5.5 F3 (deferred, not a bug):** `predict_with_model` + `build_multiclass_decision_view` call `decision_matrix()` then `predict()`, and `predict()` recomputes `decision_matrix()` — doubles scoring cost for wide spectra × multiple engines. Efficiency-only; deferred as a perf ticket (a `labels_from_acceptance(A, classes)` helper reused across `predict`/`predict_with_model`/decision-view).
+
+**Result:** 6 new regression tests in `test_multiclass_search.py`; targeted multiclass suites **116 passed**. Pre-existing unrelated failure `tests/gui/test_multiclass_gui.py::test_tab9_rejects_multiclass_primary` (patches `zipfile.ZipFile` but `load_model` raises `FileNotFoundError` first) — NOT in this diff. User confirmed the live GUI visual pass looked fine → merge cleared.
+
+---
+
 ## 2026-07-06 — Run-Selected multiclass: mask-based varsel rows opened NO decision view (Fable; Opus review of primary fix)
 
 User report: double-clicking a multi-class leaderboard row to "Run Selected

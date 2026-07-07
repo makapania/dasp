@@ -842,6 +842,14 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
         df_results["RMSEP"] = np.nan
         df_results["R2pred"] = np.nan
     elif task_type == "multiclass_simca":
+        # This is a separate public entry point from run_multiclass_simca_search,
+        # and its holdout rebuild reaches np.unique(y) — validate labels here too
+        # so a malformed target fails cleanly rather than with an opaque
+        # np.unique TypeError (Kimi M2).
+        from .simca import check_multiclass_labels
+
+        check_multiclass_labels(y_train)
+        check_multiclass_labels(y_val)
         for _c in (
             "val_MeanSensitivity",
             "val_MeanSpecificity",
@@ -7352,6 +7360,14 @@ def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="clas
         return method
 
     n_features = int(X.shape[1])
+    # Mask methods (importance/spa/uve/...) need a positive Top-N. n_select is
+    # documented optional and defaults to None at the public API; without this
+    # fallback int(None) raised, every requested row was skipped, and the search
+    # returned an empty frame (GPT-5.5 F2). Default to the GUI's Top-N default so
+    # the API behaves like the GUI. Interval methods ignore n_select entirely.
+    # NaN (a leaderboard NSelect read back as float64) is treated as omitted too.
+    if n_select is None or (isinstance(n_select, float) and np.isnan(n_select)):
+        n_select = min(100, n_features)
     X_np = np.asarray(X, dtype=float)
     wl = np.asarray(wavelengths) if wavelengths is not None else np.arange(n_features)
 
@@ -7993,11 +8009,18 @@ def run_multiclass_simca_search(
 
     from .model_registry import MULTICLASS_ENGINES
     from .scoring import add_result, compute_composite_score, create_results_dataframe
-    from .simca import MultiClassClassModel, multiclass_simca_metrics
+    from .simca import (
+        MultiClassClassModel,
+        check_multiclass_labels,
+        multiclass_simca_metrics,
+    )
 
     X_np = X.values if hasattr(X, "values") else np.asarray(X)
     X_np = np.asarray(X_np, dtype=np.float64)
     y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    # Fail fast (before the np.unique below) on missing / mixed-type labels
+    # rather than crashing mid-grid with an opaque TypeError (GPT-5.5 F1).
+    check_multiclass_labels(y_np)
     if wavelengths is not None:
         wavelengths_full = np.asarray(wavelengths)
     elif hasattr(X, "columns"):
@@ -8328,7 +8351,14 @@ def run_multiclass_simca_search(
                 # Resolve the top row's varsel value on ITS preprocessed matrix
                 # (mask methods need the preprocessed X; wold/none pass through).
                 _top_path = str(top["varsel_path"])
+                # NSelect comes back from the DataFrame as float64 (pandas
+                # coerces a mixed int/missing column), so an omitted Top-N reads
+                # as NaN, not None. Coerce NaN->None here — same guard the
+                # run-selected / holdout rebuilds use — so it flows through the
+                # None default rather than reaching int(NaN) (Kimi M1).
                 _top_nsel = top["NSelect"]
+                if _top_nsel is not None and pd.isna(_top_nsel):
+                    _top_nsel = None
                 if _top_path in _WOLD_METHODS or _top_path == "none":
                     _top_varsel = _MULTICLASS_VARSEL_PATHS.get(_top_path)
                 else:
