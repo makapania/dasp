@@ -4,6 +4,52 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 — T-31 derivative-varsel axis bug FIXED (Fable + Opus impl/review)
+
+Closed the open review finding from the Codex entry below. Commits `4c8ba73`
+(fix) + `b9e0c40` (test) on `feat/T31-multiclass-simca`.
+
+- **Root cause:** `_multiclass_preprocess_matrix` returns `(X_pp, wl_trimmed, ...)`;
+  after an SG derivative the wavelength axis is edge-trimmed (window 7 → trim
+  [3:-3] → 40 cols become 34). Four call sites discarded the trimmed axis and
+  passed the full `wavelengths_full` into `_multiclass_varsel_mask` alongside the
+  trimmed `X_pp`. Interval selectors that map wavelength indices to columns
+  (ipls_forward/backward, mc_sipls, mwpls, fipls_spa, fipls_cars) then produced
+  indices up to the full width and indexed past the trimmed matrix →
+  `IndexError: index 34 is out of bounds for axis 1 with size 34`. In the main
+  search this is caught as `MulticlassVarselUnsupported -> continue`, so the
+  derivative+interval rows were SILENTLY SKIPPED (never appeared on the
+  leaderboard); rebuild paths could raise. Non-interval methods
+  (importance/cars/spa/uve) never take the axis, which is why the existing
+  (non-trimming) tests missed it.
+- **Fix:** capture the 2nd return value of the SAME preprocess call at each site
+  and pass it instead of `wavelengths_full`: `_multiclass_holdout_metrics`
+  (`_wl_tr`, was captured then discarded), `run_multiclass_simca_search` main
+  loop (`wavelengths_current`, already captured per preprocessing config),
+  top-decision-view build (`_top_wl`, was `_`), GUI
+  `_run_selected_multiclass_result` (`wl_trimmed`, was `_`). Grep confirmed these
+  are the only 4 production `_multiclass_varsel_mask(` call sites. Mask width was
+  always `X.shape[1]` = trimmed; only the interval-index axis was wrong, so
+  save/reload/predict + `build_multiclass_decision_view` alignment are unchanged.
+- **Regression test gotcha (key):** the old failure mode is a caught exception →
+  silent skip, so a "does not raise" test PASSES against buggy code. The new
+  tests instead assert a leaderboard row IS produced for a deriv=1/window-7 +
+  interval-method config and that `full_vars == 34` (trimmed, not full). A third
+  test drives the `_multiclass_holdout_metrics` rebuild path. All three confirmed
+  RED against pre-fix code before the fix was applied.
+- **Review:** Opus implementer (TDD) + separate Opus reviewer (read-only,
+  APPROVE, no blocking findings; verified same-call axis/X pairing, no loop
+  staleness on `wavelengths_current`, downstream mask consistency). Targeted
+  suites `test_multiclass_search/simca/model_io/multiclass_export/
+  multiclass_decision_view/gui parity`: **174 passed**. Detail in
+  `.superpowers/sdd/varsel-axis-fix-report.md` (gitignored).
+- **Non-blocking observation (pre-existing, separate ticket):**
+  `variable_selection.py:1119` `fipls_spa_selection` uses a `print(... "→")`
+  that would raise `UnicodeEncodeError` on cp1252 Windows console; only surfaced
+  on the FULL-axis failure path, harmless on the correct trimmed path.
+
+---
+
 ## 2026-07-07 — T-31 review/live-test + merge-gate check (Codex)
 
 Reviewed `f4158d0..HEAD` on `feat/T31-multiclass-simca`, ran the requested
