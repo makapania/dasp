@@ -1905,4 +1905,26 @@ Fix commits: `3a4e502` + `ca987b4` (regression test addition per Codex review).
 
 ---
 
+## 2026-07-07 — Design note: alternative importance signals for CARS (VIP-CARS)
+
+Reviewing the recovered overnight T-17 multi-target CARS work led to a design question: CARS
+factors into (1) a per-variable importance signal and (2) a model-agnostic ARS loop; the PLS
+coefficient is only *one* choice of signal (CARS-Tree already swaps in LightGBM importances).
+
+Analysis + lit search captured in **[METHOD_DESIGN_vip_cars.md](METHOD_DESIGN_vip_cars.md)**. Key
+outcomes:
+- **VIP is the standout alternative signal** — near-zero extra cost (reuses the PLS fit already
+  computed for RMSECV), non-negative, better on collinear NIR, and the only candidate immune to the
+  select-by-X/score-by-PLS coupling problem. Permutation/SHAP/Lasso/MI are traps (cost, or
+  methodologically incoherent inside an elimination schedule).
+- **Novelty:** canonical CARS = `|PLS coef|` (Li 2009); VIP-CARS (VIP *inside* the reweighting loop)
+  appears unpublished, but the "swap the CARS signal" approach has clear precedent in **SCARS**
+  (Stability CARS, Zheng 2012).
+- **Design decision:** VIP-CARS to be added as a NEW, separately-named method (like CARS-Tree),
+  additive only — canonical CARS on PLS1 and CARS-Tree stay untouched. The VIP variant may be
+  offered for PLS1 / PLS-DA / PLS2 *as dasp's own named method*, never as a silent change to CARS.
+  Requires A/B incl. wall-clock + naming + lit due-diligence before shipping.
+
+---
+
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.
