@@ -4,6 +4,46 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 — T-31 review/live-test + merge-gate check (Codex)
+
+Reviewed `f4158d0..HEAD` on `feat/T31-multiclass-simca`, ran the requested
+targeted multiclass suites, drove the real ORAU contamination workbook through
+the multiclass run paths via the app/backend integration surface, and repeated
+the ex-GUI branch-vs-`origin/main` failure-set merge gate. Branch is NOT merged.
+
+- **Real code-review finding:** derivative-preprocessed multiclass rows can hand
+  the *full* wavelength axis to `_multiclass_varsel_mask` even after
+  `_multiclass_preprocess_matrix` has SG-edge-trimmed `X`. This affects the
+  search loop (`run_multiclass_simca_search`), holdout rebuild
+  (`_multiclass_holdout_metrics`), and double-click run-selected path
+  (`_run_selected_multiclass_result`). Interval/fiPLS selectors that use
+  wavelength-derived indices can then raise out-of-bounds on derivative rows
+  (`ipls_forward`, `ipls_backward`, `fipls_spa`, `fipls_cars` reproduced on a
+  40->34-column derivative probe). Raw rows and score-only methods like CARS/SPA
+  are unaffected. Fix should pass the trimmed `wavelengths_current`/`wlc` axis
+  into `_multiclass_varsel_mask` everywhere the preprocessed matrix is trimmed.
+- **Targeted tests:** requested multiclass command needed `--basetemp
+  .pytest-tmp-targeted` because Windows temp roots were access-denied; with that
+  equivalent scratch-dir override: **171 passed**.
+- **Live workbook exercise:** loaded `Contaminated Samples Raw_ORAU Added.xlsx`
+  with target `contamination` (757 rows, 2151 spectral columns; class counts:
+  Bone 328, Glyptol 286, PB72 53, PVA 34, Paraffin 29, Animal Glue 27). The
+  interactive screenshot API was unavailable in this execution session
+  (`CopyFromScreen` handle invalid), so screenshots could not be captured; the
+  app/backend paths were exercised with the real workbook and artifacts written
+  under `live_gui_artifacts/`. Minimal run produced 1 row; sweep produced 40
+  rows across 2 alphas x 2 n_components x 2 engines x CARS/SPA/Wold with Top-N
+  collapse; `per_class_cv` produced rows; CARS/SPA/Wold decision matrices,
+  non-top `.dasp` save->predict, validation `val_*` columns, CSV/script/notebook
+  exports, and Tab-9 rejection were verified.
+- **Merge gate:** branch ex-GUI = **5 failed / 2789 passed / 26 skipped**;
+  `origin/main` ex-GUI = **5 failed / 2673 passed / 26 skipped**. Failure sets
+  are identical (the known T-CI-3/T-CI-4 tests), so branch-minus-main is empty:
+  **PASS, zero new failures**. `gh pr view feat/T31-multiclass-simca` found no
+  PR for this branch.
+
+---
+
 ## 2026-07-06 — T-31 test-flake fix + cosmetic minors + Tab-9 scope (commits `ce96db5`, `afa02ea`)
 
 Fable session, branch `feat/T31-multiclass-simca` (NOT merged). Detail in
