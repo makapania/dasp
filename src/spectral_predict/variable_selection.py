@@ -1025,7 +1025,7 @@ def uve_cars_spa_selection(X, y, cutoff_multiplier=1.0, uve_n_components=None, u
 
     n_final = int(np.sum(combined_importances > 0))
     print(f"\n=== UVE-CARS-SPA Final Results ===")
-    print(f"UVE: {n_vars} → {n_uve_selected} | CARS: → {n_cars_survivors} | SPA: → {n_final}")
+    print(f"UVE: {n_vars} -> {n_uve_selected} | CARS: -> {n_cars_survivors} | SPA: -> {n_final}")
 
     return combined_importances
 
@@ -1116,7 +1116,7 @@ def fipls_spa_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
 
     n_final = int(np.sum(combined_importances > 0))
     print(f"\n=== Fwd iPLS-SPA Final Results ===")
-    print(f"iPLS: {n_vars} → {n_ipls_selected} | SPA: → {n_final}")
+    print(f"iPLS: {n_vars} -> {n_ipls_selected} | SPA: -> {n_final}")
 
     return combined_importances
 
@@ -1216,7 +1216,7 @@ def fipls_cars_selection(X, y, wavelengths, n_intervals=20, max_combine=5,
 
     n_final = int(np.sum(combined_importances > 0))
     print(f"\n=== Fwd iPLS-CARS Final Results ===")
-    print(f"iPLS: {n_vars} → {n_ipls_selected} | CARS: → {n_final}")
+    print(f"iPLS: {n_vars} -> {n_ipls_selected} | CARS: -> {n_final}")
 
     return combined_importances
 
