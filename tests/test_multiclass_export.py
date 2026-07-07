@@ -117,6 +117,67 @@ def test_generated_script_reproduces_deriv_config(tmp_path):
         produced[pcols].to_numpy(), inapp[pcols].to_numpy(), rtol=1e-6, atol=1e-9)
 
 
+def test_generated_script_reproduces_mask_varsel_config(tmp_path):
+    """Discrimination varsel (importance/cars/...) resolves variable_selection to
+    a boolean ndarray on the view config. The exported script must embed it as a
+    valid literal (not ``array([...])``, an undefined name) AND coerce it back to
+    a bool mask so the reproduction runs and reproduces the in-app matrix."""
+    from spectral_predict.search import (
+        _multiclass_preprocess_matrix,
+        _multiclass_varsel_mask,
+    )
+
+    X, y = _synthetic(K=3, n=25, p=40, seed=7)
+    X.columns = [1000.0 + j for j in range(X.shape[1])]
+    X_pp, wl_tr, _ = _multiclass_preprocess_matrix(
+        X.to_numpy(dtype=float), _CFG, np.asarray(list(X.columns))
+    )
+    mask = _multiclass_varsel_mask(X_pp, y.to_numpy(), wl_tr, "importance", 20)
+    assert isinstance(mask, np.ndarray) and mask.dtype == bool
+
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=_CFG, alpha=0.05, n_components=0.99,
+        variable_selection=mask, n_select=20, wavelengths=list(X.columns),
+    )
+    inapp = _inapp_decision_matrix(view)
+
+    script = generate_multiclass_reproduction_script(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns))
+    # The bug signature: a bare numpy repr leaks an undefined ``array([...])``
+    # literal into CONFIG (the coercion line uses ``np.array(CONFIG[...``, which
+    # is distinct from the ``array([`` numpy-repr form).
+    assert "array([" not in script
+    (tmp_path / "repro.py").write_text(script, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(tmp_path / "repro.py")],
+                          cwd=tmp_path, capture_output=True, text=True)
+    assert proc.returncode == 0, f"script failed:\n{proc.stderr}"
+    produced = pd.read_csv(tmp_path / "decision_matrix.csv")
+    produced["Accepted"] = produced["Accepted"].fillna("")
+    inapp["Accepted"] = inapp["Accepted"].fillna("")
+    assert list(produced["Decision"]) == list(inapp["Decision"])
+    pcols = [c for c in inapp.columns if c.startswith("p(")]
+    np.testing.assert_allclose(
+        produced[pcols].to_numpy(), inapp[pcols].to_numpy(), rtol=1e-6, atol=1e-9)
+
+    # The notebook shares the same BODY template + reprsafe helper: its executed
+    # code cells must also carry no bare ``array([`` literal and run to a matrix.
+    nb = generate_multiclass_reproduction_notebook(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns))
+    nb = json.loads(json.dumps(nb))
+    nb_code = "".join(
+        ("".join(c["source"]) if isinstance(c["source"], list) else c["source"])
+        for c in nb["cells"] if c["cell_type"] == "code"
+    )
+    assert "array([" not in nb_code
+    nbdir = tmp_path / "nb"
+    nbdir.mkdir()
+    (nbdir / "cells.py").write_text(nb_code, encoding="utf-8")
+    proc_nb = subprocess.run([sys.executable, str(nbdir / "cells.py")],
+                             cwd=nbdir, capture_output=True, text=True)
+    assert proc_nb.returncode == 0, f"notebook code failed:\n{proc_nb.stderr}"
+    assert (nbdir / "decision_matrix.csv").exists()
+
+
 def test_generated_notebook_is_valid_nbformat():
     X, y = _synthetic()
     view = build_multiclass_decision_view(

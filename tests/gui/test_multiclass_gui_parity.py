@@ -98,6 +98,101 @@ def test_task_type_toggles_mc_card(app):
 
 
 # ---------------------------------------------------------------------------
+# Run-Selected decision-view header must render for mask-based varsel methods
+# (importance / cars / spa / uve / ipls...). The resolved variable_selection on
+# the view's config is a boolean ndarray for these methods; the decision-view
+# header must not choke on it (regression: `ndarray or 'none'` raised
+# ValueError, the broad render except destroyed the window, and importance/cars
+# rows "did not run at all" while Wold/none rows opened fine).
+# ---------------------------------------------------------------------------
+
+def test_decision_header_survives_ndarray_varsel(app):
+    """CRASH-SITE regression: _show_multiclass_decision_view maps the view
+    config's resolved variable_selection (a boolean ndarray for mask-based
+    methods) into the header row. `ndarray or 'none'` raised
+    ValueError("truth value ... ambiguous"); the header must instead render a
+    mask summary without raising."""
+    import numpy as np
+
+    mask = np.zeros(80, dtype=bool)
+    mask[:40] = True
+    header_row = {
+        "engine_family": "pca-simca",
+        "Alpha": 0.05,
+        "NComponents": 0.99,
+        "varsel_path": mask,  # raw resolved mask, as the pre-fix GUI passed it
+        "n_vars": 40,
+    }
+    # Pre-fix: raises ValueError. Post-fix: renders a mask summary.
+    header = app._multiclass_decision_header(header_row)
+    assert "mask" in header and "40" in header
+
+
+@pytest.mark.parametrize("varsel_path", ["importance", "cars"])
+def test_run_selected_decision_view_and_header_for_mask_varsel(app, varsel_path):
+    """End-to-end: a run-selected importance/cars row resolves to a boolean mask,
+    builds a valid decision view, and the decision-view header (built the way
+    _show_multiclass_decision_view builds it) renders naming the method."""
+    import numpy as np
+    import pandas as pd
+
+    from spectral_predict.search import (
+        _multiclass_preprocess_matrix,
+        _multiclass_varsel_mask,
+        build_multiclass_decision_view,
+    )
+
+    rng = np.random.default_rng(0)
+    n_per, n_feat = 14, 40
+    wl = np.linspace(1000.0, 1800.0, n_feat)
+    classes = ["A", "B", "C"]
+    Xs, ys = [], []
+    for i, c in enumerate(classes):
+        peak = np.exp(-((wl - (1100 + i * 250)) ** 2) / (2 * 60.0**2))
+        Xs.append(0.4 + 1.5 * peak + 0.03 * rng.standard_normal((n_per, n_feat)))
+        ys.extend([c] * n_per)
+    X_df = pd.DataFrame(np.vstack(Xs), columns=[float(w) for w in wl])
+    y_ser = pd.Series(ys)
+
+    preprocess_cfg = {
+        "method": "snv", "name": "snv", "deriv": None, "window": None,
+        "polyorder": None, "baseline_method": None, "baseline_params": None,
+        "smoothing": False, "smoothing_window": 17, "smoothing_polyorder": 2,
+    }
+    X_np = np.asarray(X_df.values, dtype=np.float64)
+    wl_full = np.asarray(list(X_df.columns))
+    X_pp, wl_tr, _ = _multiclass_preprocess_matrix(X_np, preprocess_cfg, wl_full)
+    mask = _multiclass_varsel_mask(
+        X_pp, y_ser.values, wl_tr, varsel_path, 20, task_type="classification"
+    )
+    # The resolved selection is a boolean mask (the crash trigger), not a string.
+    assert isinstance(mask, np.ndarray) and mask.dtype == bool
+
+    view = build_multiclass_decision_view(
+        X_df, y_ser, engine="pca-simca", preprocess_cfg=preprocess_cfg,
+        alpha=0.05, n_components=0.99, scaling="per_class", min_class_samples=10,
+        variable_selection=mask, n_select=20, wavelengths=list(X_df.columns),
+        sample_ids=list(X_df.index),
+    )
+    assert not view.get("reason"), view.get("reason")
+
+    # Replicate _show_multiclass_decision_view's header-row construction: the
+    # worker stamps the method name onto the config; the header prefers it,
+    # falling back to the raw variable_selection.
+    view["config"]["varsel_path"] = varsel_path
+    _cfg = view["config"]
+    header_row = {
+        "engine_family": _cfg.get("engine"),
+        "Alpha": _cfg.get("alpha"),
+        "NComponents": _cfg.get("n_components"),
+        "varsel_path": _cfg.get("varsel_path", _cfg.get("variable_selection")),
+        "n_vars": _cfg.get("n_select"),
+    }
+    header = app._multiclass_decision_header(header_row)
+    assert varsel_path in header
+
+
+# ---------------------------------------------------------------------------
 # Task 8 — multi-class variable selection in tab 4B (grouped set + Top-N reuse)
 # ---------------------------------------------------------------------------
 

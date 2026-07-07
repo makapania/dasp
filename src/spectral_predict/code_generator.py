@@ -2232,6 +2232,10 @@ def _multiclass_data_section(data_X=None, data_y=None, wavelengths=None) -> str:
 _MULTICLASS_REPRODUCTION_BODY = '''
 CONFIG = {config_repr}
 PREPROCESS_CFG = CONFIG.pop("preprocess_cfg")
+# Discrimination varsel methods embed their selection as a plain list; the model
+# expects a boolean ndarray (a list is treated as an unknown string method).
+if isinstance(CONFIG.get("variable_selection"), list):
+    CONFIG["variable_selection"] = np.array(CONFIG["variable_selection"], dtype=bool)
 
 {data_section}
 view = build_multiclass_decision_view(
@@ -2273,6 +2277,25 @@ print("\\nDecision counts:",
 '''
 
 
+def _reprsafe_multiclass_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy ``config`` with any ndarray values coerced to plain lists so
+    ``repr(cfg)`` embeds valid Python literals.
+
+    Discrimination varsel methods (importance/cars/spa/uve/ipls...) resolve
+    ``variable_selection`` to a boolean ndarray. ``repr`` of an ndarray is
+    ``array([...])`` — an undefined name in the generated file (which imports
+    only ``numpy as np``), so the exported script/notebook raised ``NameError``
+    at its ``CONFIG = {...}`` line. Emit a list instead; the reproduction body
+    coerces it back to a bool ndarray before use (preserving the exact mask).
+    """
+    cfg = dict(config)
+    cfg["preprocess_cfg"] = dict(cfg.get("preprocess_cfg", {}))
+    vs = cfg.get("variable_selection")
+    if isinstance(vs, np.ndarray):
+        cfg["variable_selection"] = vs.tolist()
+    return cfg
+
+
 def generate_multiclass_reproduction_script(config: Dict[str, Any],
                                             data_X=None,
                                             data_y=None,
@@ -2289,8 +2312,7 @@ def generate_multiclass_reproduction_script(config: Dict[str, Any],
     data_X, data_y, wavelengths : optional
         Training data to embed; if omitted the script emits a load placeholder.
     """
-    cfg = dict(config)
-    cfg["preprocess_cfg"] = dict(cfg.get("preprocess_cfg", {}))
+    cfg = _reprsafe_multiclass_config(config)
     body = _MULTICLASS_REPRODUCTION_BODY.format(
         config_repr=repr(cfg),
         data_section=_multiclass_data_section(data_X, data_y, wavelengths),
@@ -2303,8 +2325,7 @@ def generate_multiclass_reproduction_notebook(config: Dict[str, Any],
                                               data_y=None,
                                               wavelengths=None) -> dict:
     """Generate a Jupyter notebook reproducing a multi-class decision matrix."""
-    cfg = dict(config)
-    cfg["preprocess_cfg"] = dict(cfg.get("preprocess_cfg", {}))
+    cfg = _reprsafe_multiclass_config(config)
     setup = _MULTICLASS_REPRODUCTION_HEADER
     body = _MULTICLASS_REPRODUCTION_BODY.format(
         config_repr=repr(cfg),

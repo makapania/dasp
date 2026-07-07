@@ -30139,11 +30139,25 @@ For detailed documentation, see the User Guide.
         ``row`` may be a dict or a pandas Series (a leaderboard row). Uses
         ``.get`` throughout and tolerates missing keys — the label still renders
         with whatever is present.
+
+        ``varsel_path`` may be a *resolved* boolean mask (a numpy array) for
+        discrimination methods (importance/cars/spa/uve/ipls...): the run-selected
+        decision view carries the resolved ``variable_selection`` on its config.
+        A raw ``ndarray or 'none'`` raised ``ValueError`` ("ambiguous truth
+        value"), which the caller's broad render-except swallowed — so
+        mask-based rows silently opened no window. Render a mask summary instead.
         """
+        import numpy as np
+
+        vs = row.get('varsel_path')
+        if isinstance(vs, np.ndarray):
+            vs_label = f"mask ({int(vs.sum())} vars)"
+        else:
+            vs_label = vs if vs else 'none'
         return (
             f"Engine: {row.get('engine_family')}  |  alpha: {row.get('Alpha')}  |  "
             f"n_components: {row.get('NComponents')}  |  "
-            f"varsel: {row.get('varsel_path') or 'none'} (top-{row.get('n_vars')})"
+            f"varsel: {vs_label} (top-{row.get('n_vars')})"
         )
 
     def _show_multiclass_decision_view(self, view):
@@ -30177,11 +30191,15 @@ For detailed documentation, see the User Guide.
             # / n_select); map them to the leaderboard-row schema the header
             # builder reads so the window states exactly what config it shows.
             _cfg = view.get('config') or {}
+            # Prefer the human-readable varsel method name the run-selected worker
+            # stamps onto the config ('importance'/'cars'/...); fall back to the
+            # resolved ``variable_selection`` (a boolean mask for discrimination
+            # methods — the header summarizes it rather than choking on it).
             _header_row = {
                 'engine_family': _cfg.get('engine'),
                 'Alpha': _cfg.get('alpha'),
                 'NComponents': _cfg.get('n_components'),
-                'varsel_path': _cfg.get('variable_selection'),
+                'varsel_path': _cfg.get('varsel_path', _cfg.get('variable_selection')),
                 'n_vars': _cfg.get('n_select'),
             }
             ttk.Label(
@@ -30577,6 +30595,12 @@ For detailed documentation, see the User Guide.
                     ),
                     sample_ids=(list(X_df.index) if hasattr(X_df, "index") else None),
                 )
+                # The view config stores the *resolved* variable_selection (a
+                # boolean mask for discrimination methods). Stamp the readable
+                # method name so the decision-view header shows "importance"/
+                # "cars"/... instead of a raw ndarray (which it must not choke on).
+                if isinstance(view, dict) and isinstance(view.get("config"), dict):
+                    view["config"]["varsel_path"] = varsel_path
             except Exception as exc:  # noqa: BLE001 — surface, never crash Tk
                 import traceback
 
