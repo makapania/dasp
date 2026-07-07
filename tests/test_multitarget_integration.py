@@ -86,9 +86,9 @@ def test_multitarget_grid_end_to_end_real_data():
     assert out.results[0].joint_q2 == max(finite_q2s)
     assert all(finite_q2s[i] >= finite_q2s[i + 1] for i in range(len(finite_q2s) - 1))
 
-    # JOINT (PLS-2) and INDEPENDENT (Ridge) couplings both appear.
+    # Default coupling is Independent-only (user-confirmed 2026-07-04).
     modes = {r.mode for r in out.results}
-    assert "JOINT" in modes and "INDEPENDENT" in modes
+    assert modes == {"INDEPENDENT"}
 
     # A varsel cell that actually narrowed the spectrum (n_variables < full width)
     # is present, and it is the ipls_forward method we requested.
@@ -98,6 +98,28 @@ def test_multitarget_grid_end_to_end_real_data():
         and r.n_variables < full_width
         for r in out.results
     ), "no ipls_forward varsel cell narrower than full width"
+
+
+def test_multitarget_grid_both_coupling_yields_both_modes():
+    """Same grid as the end-to-end smoke but with coupling_mode="both":
+
+    PLS is joint-capable so emits both JOINT (PLS-2) and INDEPENDENT cells;
+    Ridge is independent-only. Together they cover both coupling modes.
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = _load_example()
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS", "Ridge"], target_names=["collagen", "synthetic"],
+        wavelengths=wl, preprocessing_methods={"raw": True, "snv": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[10],
+        ipls_subset_limit="Top 3", tier="quick", cv="kfold", n_folds=3, n_repeats=1,
+        coupling_mode="both",
+    )
+
+    assert out.results, "no cells produced"
+    modes = {r.mode for r in out.results}
+    assert "JOINT" in modes and "INDEPENDENT" in modes
 
 
 def test_multitarget_save_reload_predict_roundtrip(tmp_path):

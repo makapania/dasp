@@ -388,8 +388,9 @@ def vcpa_iriv(
     ----------
     X : np.ndarray, shape (n_samples, n_wavelengths)
         Spectral data matrix.
-    y : np.ndarray, shape (n_samples,)
-        Target values (required).
+    y : np.ndarray, shape (n_samples,) or (n_samples, n_targets)
+        Target values (required). PLS-mode accepts a 2-D block and scores it
+        with the pooled normalized joint RMSECV; tree-mode rejects 2-D Y.
     n_outer_iterations : int, default=10
         Maximum number of IRIV outer iterations (variable elimination rounds).
     n_inner_iterations : int, default=50

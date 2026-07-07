@@ -892,9 +892,10 @@ class TestMultiYVarsel:
         assert freq.max() <= 1.0
 
 
-class TestMultiYRejectGuards:
-    """UVE/CARS and their hybrids are greyed out in multi-target v1; the
-    function-level guard must raise (never silently flatten 2-D Y)."""
+class TestMultiYSupport:
+    """UVE/CARS and their hybrids support multi-target (2-D Y) regression in
+    T-17; each must return a full-width (n_features,) finite importance vector
+    on a genuine (n, n_targets>=2) Y block (never silently flatten or raise)."""
 
     @pytest.fixture
     def XY(self):
@@ -903,30 +904,44 @@ class TestMultiYRejectGuards:
         Y = rng.standard_normal((40, 3))
         return X, Y
 
-    def test_uve_rejects_multi_y(self, XY):
+    def test_uve_multi_y(self, XY):
         X, Y = XY
-        with pytest.raises(NotImplementedError):
-            uve_selection(X, Y)
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = uve_selection(X, Y)
+        assert imp.shape == (X.shape[1],)
+        assert np.all(np.isfinite(imp))
 
-    def test_cars_rejects_multi_y(self, XY):
+    def test_cars_multi_y(self, XY):
         X, Y = XY
-        with pytest.raises(NotImplementedError):
-            cars_selection(X, Y)
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = cars_selection(X, Y, n_iterations=10, monte_carlo_samples=20)
+        assert imp.shape == (X.shape[1],)
+        assert np.all(np.isfinite(imp))
 
-    def test_uve_spa_rejects_multi_y(self, XY):
+    def test_uve_spa_multi_y(self, XY):
         X, Y = XY
-        with pytest.raises(NotImplementedError):
-            uve_spa_selection(X, Y, n_features=5)
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = uve_spa_selection(X, Y, n_features=5)
+        assert imp.shape == (X.shape[1],)
+        assert np.all(np.isfinite(imp))
 
-    def test_uve_cars_rejects_multi_y(self, XY):
+    def test_uve_cars_multi_y(self, XY):
         X, Y = XY
-        with pytest.raises(NotImplementedError):
-            uve_cars_selection(X, Y)
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = uve_cars_selection(
+                X, Y, n_iterations=10, monte_carlo_samples=20
+            )
+        assert imp.shape == (X.shape[1],)
+        assert np.all(np.isfinite(imp))
 
-    def test_uve_cars_spa_rejects_multi_y(self, XY):
+    def test_uve_cars_spa_multi_y(self, XY):
         X, Y = XY
-        with pytest.raises(NotImplementedError):
-            uve_cars_spa_selection(X, Y)
+        with contextlib.redirect_stdout(io.StringIO()):
+            imp = uve_cars_spa_selection(
+                X, Y, n_iterations=10, monte_carlo_samples=20
+            )
+        assert imp.shape == (X.shape[1],)
+        assert np.all(np.isfinite(imp))
 
     def test_reject_helper_passes_single_y(self):
         _reject_multi_y(np.arange(10.0), "X")

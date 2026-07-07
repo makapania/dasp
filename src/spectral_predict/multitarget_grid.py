@@ -304,18 +304,28 @@ def _importances_to_subsets(
 
 def _model_independent_importances(
     method: str, X_pp: np.ndarray, Y: np.ndarray, wavelengths: Optional[np.ndarray] = None,
+    *,
+    uve_cutoff_multiplier: float = 1.0, uve_n_components: Optional[int] = None,
 ):
     """spa / ga / fipls_spa importance arrays (model-independent, cached per preprocess).
 
     ``wavelengths`` is required by the ``fipls_spa`` branch (forward-iPLS needs
     wavelength positions to build intervals); it is otherwise unused. Kept
     optional/keyword so existing 3-positional-arg callers keep working.
+
+    ``uve_cutoff_multiplier`` / ``uve_n_components`` are forwarded to the UVE
+    family (T-17 W2). Note the param-name asymmetry: ``uve_selection`` takes
+    ``n_components``; ``uve_spa_selection`` / ``uve_cars_selection`` /
+    ``uve_cars_spa_selection`` take ``uve_n_components``.
     """
     if method == "spa":
         from .variable_selection import spa_selection
         return np.asarray(spa_selection(X_pp, Y, n_features=max(5, X_pp.shape[1] // 10)),
                           dtype=float)
     if method == "ga":
+        # T-17 W7a: the multi-target grid intentionally routes linear GA only
+        # (ga_pls_selection). ga_lightgbm_selection's multi-Y fitness branch is
+        # exercised solely by the single-Y search.py path; it is not wired here.
         from .ga_pls import ga_pls_selection
         return np.asarray(ga_pls_selection(X_pp, Y, task_type="regression", verbose=0),
                           dtype=float)
@@ -340,21 +350,40 @@ def _model_independent_importances(
         return np.asarray(ipls_selection(X_pp, Y), dtype=float)
     if method == "uve":
         from .variable_selection import uve_selection
-        return np.asarray(uve_selection(X_pp, Y), dtype=float)
+        return np.asarray(
+            uve_selection(
+                X_pp, Y, cutoff_multiplier=uve_cutoff_multiplier,
+                n_components=uve_n_components,
+            ), dtype=float,
+        )
     if method == "cars":
         from .variable_selection import cars_selection
         return np.asarray(cars_selection(X_pp, Y), dtype=float)
     if method == "uve_cars":
         from .variable_selection import uve_cars_selection
-        return np.asarray(uve_cars_selection(X_pp, Y), dtype=float)
+        return np.asarray(
+            uve_cars_selection(
+                X_pp, Y, cutoff_multiplier=uve_cutoff_multiplier,
+                uve_n_components=uve_n_components,
+            ), dtype=float,
+        )
     if method in ("uve_spa", "uve_cars_spa"):
         n_target = max(5, X_pp.shape[1] // 10)
         if method == "uve_spa":
             from .variable_selection import uve_spa_selection
-            return np.asarray(uve_spa_selection(X_pp, Y, n_features=n_target), dtype=float)
+            return np.asarray(
+                uve_spa_selection(
+                    X_pp, Y, n_features=n_target,
+                    cutoff_multiplier=uve_cutoff_multiplier,
+                    uve_n_components=uve_n_components,
+                ), dtype=float,
+            )
         from .variable_selection import uve_cars_spa_selection
         return np.asarray(
-            uve_cars_spa_selection(X_pp, Y, spa_n_features=n_target), dtype=float
+            uve_cars_spa_selection(
+                X_pp, Y, cutoff_multiplier=uve_cutoff_multiplier,
+                uve_n_components=uve_n_components, spa_n_features=n_target,
+            ), dtype=float,
         )
     if method == "fipls_cars":
         from .variable_selection import fipls_cars_selection
@@ -412,8 +441,11 @@ def _importance_reference_fit(
     return aggregate_importance(matrix, rule="mean")
 
 
-# Still deferred on 2-D Y: cars-tree / uve_cars_tree (per-target LightGBM is a
-# wall-clock explosion), vcpa-iriv (single-Y-only IRIV criterion).
+# T-17 W6a: still skip-with-notice on 2-D Y. cars-tree / uve_cars_tree run a
+# per-target LightGBM (wall-clock explosion). vcpa-iriv's leaf has a multi-Y
+# PLS criterion but is NOT wired into the interval/importance routes here --
+# the grid never reaches it, so it stays a skip-with-notice (NOT because it is
+# "single-Y-only" -- the leaf does support 2-D PLS mode).
 SKIP_WITH_NOTICE = {
     "cars-tree", "uve_cars_tree", "vcpa-iriv",
 }
@@ -439,8 +471,14 @@ def build_multitarget_varsel_subsets(
     methods, X_pp, Y, wavelengths, *, enabled_models, variable_counts,
     ipls_subset_limit, spa_ok, cache, preprocess_id,
     apply_uve_prefilter: bool = False,
+    uve_cutoff_multiplier: float = 1.0, uve_n_components: Optional[int] = None,
 ):
-    """Return (subsets_incl_full, skipped_notices), caching per (preprocess, method)."""
+    """Return (subsets_incl_full, skipped_notices), caching per (preprocess, method).
+
+    ``uve_cutoff_multiplier`` / ``uve_n_components`` are forwarded to the UVE
+    family (T-17 W2): the prefilter ``get_uve_threshold`` (via ``n_components``)
+    and the UVE importance producers in ``_model_independent_importances``.
+    """
     n_features_sub = int(X_pp.shape[1])
     subsets: list[dict[str, Any]] = [
         {"indices": np.arange(n_features_sub), "tag": "full", "method": "full"}
@@ -455,7 +493,10 @@ def build_multitarget_varsel_subsets(
             try:
                 from .variable_selection import get_uve_threshold
 
-                _imp, _thr, mask = get_uve_threshold(X_pp, Y)
+                _imp, _thr, mask = get_uve_threshold(
+                    X_pp, Y, cutoff_multiplier=uve_cutoff_multiplier,
+                    n_components=uve_n_components,
+                )
                 idx = np.where(np.asarray(mask, dtype=bool))[0]
                 # Only useful if UVE actually eliminated something (a keep-all or
                 # keep-none mask adds nothing over the always-present full subset).
@@ -500,7 +541,11 @@ def build_multitarget_varsel_subsets(
                 continue
             if key not in cache:
                 try:
-                    imp = _model_independent_importances(method, X_pp, Y, wavelengths=wavelengths)
+                    imp = _model_independent_importances(
+                        method, X_pp, Y, wavelengths=wavelengths,
+                        uve_cutoff_multiplier=uve_cutoff_multiplier,
+                        uve_n_components=uve_n_components,
+                    )
                     cache[key] = _importances_to_subsets(
                         imp, method, variable_counts=variable_counts,
                         n_features_sub=n_features_sub,
@@ -570,6 +615,7 @@ def run_multitarget_grid_search(
     interference_to_add=None, wavelength_restriction=None,
     variable_selection_methods, variable_counts=None,
     apply_uve_prefilter: bool = False,
+    uve_cutoff_multiplier: float = 1.0, uve_n_components: Optional[int] = None,
     ipls_subset_limit="Top 10", tier="standard", model_grid_overrides=None,
     max_n_components=10, max_iter=500, window_sizes=None,
     cv="kfold", n_folds=5, n_repeats=5, random_state=42,
@@ -607,7 +653,15 @@ def run_multitarget_grid_search(
     correlation = inter_target_correlation(Y_arr)
 
     # Grid-only gate for spa/fipls_spa inclusion (verified once on the raw block).
-    spa_ok = verify_spa_multi_y_safe(X_arr, Y_arr)
+    # T-17 W1: only run the SPA preflight when the user actually selected a
+    # SPA-dependent method; otherwise short-circuit to spa_ok=True (the check is
+    # expensive and irrelevant when no SPA chain is in play).
+    requested_methods = set(variable_selection_methods or [])
+    spa_ok = (
+        verify_spa_multi_y_safe(X_arr, Y_arr)
+        if requested_methods & _SPA_DEPENDENT_METHODS
+        else True
+    )
 
     preprocess_configs = build_multitarget_preprocess_configs(
         preprocessing_methods, window_sizes=window_sizes, autoscale=autoscale,
@@ -685,6 +739,8 @@ def run_multitarget_grid_search(
             cache=varsel_cache,
             preprocess_id=_preprocess_fingerprint(pc),
             apply_uve_prefilter=apply_uve_prefilter,
+            uve_cutoff_multiplier=uve_cutoff_multiplier,
+            uve_n_components=uve_n_components,
         )
         for s in skipped:
             if s not in skipped_all:

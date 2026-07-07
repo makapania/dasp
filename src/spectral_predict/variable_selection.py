@@ -1404,8 +1404,8 @@ def _cars_multi_cell(
     importance across targets via the ``cars_scaled_coef`` (l2) rule.
 
     For tree models one single-output LightGBM is fit PER TARGET (via
-    :class:`~sklearn.multioutput.MultiOutputRegressor`), i.e. ``n_targets`` x the
-    single-Y cost -- surfaced honestly in the T-17 cost notice.
+    :class:`~sklearn.multioutput.MultiOutputRegressor`), so the CV cost scales
+    linearly as ``n_targets`` x the single-Y CV cost.
 
     Args:
         X_subset: Sampled spectra for this iteration, ``(n_samples, n_sel)``.
@@ -1682,8 +1682,8 @@ def cars_selection(X, y, n_iterations=50, pls_components=5, cv_folds=5,
             if _multi_y:
                 # Multi-target CARS (T-17): PLS-2 joint criterion + scaled-coef
                 # weights, or (tree models) one single-output LightGBM per
-                # target -- n_targets x the single-Y cost, surfaced in the T-17
-                # cost notice. See _cars_multi_cell.
+                # target -- CV cost scales linearly as n_targets x the single-Y
+                # CV cost. See _cars_multi_cell.
                 rmsecv, _feature_weights = _cars_multi_cell(
                     X_subset, y, kf, cv_folds, n_sample, pls_components,
                     use_tree_model=use_tree_model, use_hybrid=use_hybrid,

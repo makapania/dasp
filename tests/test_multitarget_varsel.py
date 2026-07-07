@@ -21,11 +21,15 @@ def xy_multi(rng):
 
 
 def test_ipls_selection_rejects_2d_y(xy_multi):
+    """T-17 W6b flip: ipls_selection now supports 2-D Y (it is in
+    _IMPORTANCE_METHODS via the 'ipls' route in _model_independent_importances).
+    Assert it returns a finite (n_features,) importance instead of raising."""
     from spectral_predict.variable_selection import ipls_selection
 
     X, Y, _wl = xy_multi
-    with pytest.raises(NotImplementedError):
-        ipls_selection(X, Y)
+    imp = np.asarray(ipls_selection(X, Y), dtype=float)
+    assert imp.shape == (X.shape[1],)
+    assert np.all(np.isfinite(imp))
 
 
 def test_ipls_selection_single_y_still_works(xy_multi):
@@ -40,11 +44,24 @@ def test_ipls_selection_single_y_still_works(xy_multi):
 
 
 def test_vcpa_iriv_rejects_2d_y(xy_multi):
+    """T-17 W6b flip: vcpa_iriv's PLS-mode now supports 2-D Y (pooled normalized
+    joint RMSECV). PLS-mode 2-D returns a dict with `selected_indices`; tree-mode
+    2-D (model_type='RandomForest') still raises NotImplementedError."""
     from spectral_predict.wavelength_selection import vcpa_iriv
 
     X, Y, _wl = xy_multi
+    # PLS-mode (default): 2-D Y is supported -> returns a dict.
+    result = vcpa_iriv(
+        X, Y, n_outer_iterations=1, n_inner_iterations=2, binary_matrix_samples=4,
+    )
+    assert isinstance(result, dict)
+    assert "selected_indices" in result
+    # Tree-mode 2-D: still rejected (single-output LightGBM CV cannot pool targets).
     with pytest.raises(NotImplementedError):
-        vcpa_iriv(X, Y, n_outer_iterations=1, n_inner_iterations=2, binary_matrix_samples=4)
+        vcpa_iriv(
+            X, Y, n_outer_iterations=1, n_inner_iterations=2, binary_matrix_samples=4,
+            model_type="RandomForest",
+        )
 
 
 def test_parse_ipls_subset_limit():
@@ -281,9 +298,17 @@ def test_classify_varsel_method():
     # ga is linear-only: present linear model -> importance; tree-only -> skip.
     assert classify_varsel_method("ga", enabled_models=["PLS"], spa_ok=True) == "importance"
     assert classify_varsel_method("ga", enabled_models=["RandomForest"], spa_ok=True) == "skip"
-    # UVE/CARS/legacy always skip.
-    for m in ["uve", "cars", "cars-tree", "uve_cars", "ipls", "vcpa-iriv", "fipls_cars"]:
-        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=True) == "skip"
+    # T-17 W3b: UVE/CARS family + ipls-legacy are now multi-Y importance methods.
+    for m in ["uve", "cars", "uve_cars", "fipls_cars", "ipls"]:
+        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=True) == "importance", m
+    # SPA-dependent UVE hybrids require spa_ok=True.
+    for m in ["uve_spa", "uve_cars_spa"]:
+        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=True) == "importance", m
+        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=False) == "skip", m
+    # Still skip-with-notice: tree variants (per-target LightGBM) + unrouted
+    # vcpa-iriv.
+    for m in ["cars-tree", "uve_cars_tree", "vcpa-iriv"]:
+        assert classify_varsel_method(m, enabled_models=["PLS"], spa_ok=True) == "skip", m
 
 
 def test_build_varsel_subsets_full_plus_interval_and_skips(xy_multi):
@@ -302,7 +327,11 @@ def test_build_varsel_subsets_full_plus_interval_and_skips(xy_multi):
     assert "full" in tags
     assert subs[0]["method"] == "full"
     assert any(s["method"] == "ipls_forward" for s in subs)
-    assert set(skipped) == {"uve", "cars"}
+    # T-17 W3b: uve/cars now produce importance subsets instead of skip notices.
+    assert any(s["method"] == "uve" for s in subs)
+    assert any(s["method"] == "cars" for s in subs)
+    assert "uve" not in skipped
+    assert "cars" not in skipped
 
 
 def test_build_varsel_subsets_cache_hit(xy_multi):
@@ -586,3 +615,164 @@ def test_importance_reference_fit_mlp_delegates_to_get_feature_importances(monke
     expected = np.linspace(1, 2, p)
     assert imp.shape == expected.shape
     assert not np.allclose(imp, imp[0])
+
+
+# --------------------------------------------------------------------------- #
+# T-17 W2: UVE params (uve_cutoff_multiplier, uve_n_components) forwarding
+# --------------------------------------------------------------------------- #
+def test_uve_params_reach_get_uve_threshold(xy_multi, monkeypatch):
+    """W2: build_multitarget_varsel_subsets must forward uve_cutoff_multiplier
+    and uve_n_components to variable_selection.get_uve_threshold (via its
+    `n_components` kwarg, per the param-name asymmetry)."""
+    import spectral_predict.variable_selection as vs
+    from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+    captured = {}
+
+    def spy(X, y, cutoff_multiplier=1.0, n_components=None, **kw):
+        captured["cutoff_multiplier"] = cutoff_multiplier
+        captured["n_components"] = n_components
+        # Return (importance, threshold, keep_mask). Keep only first half of
+        # features so a non-empty subset is produced.
+        mask = np.zeros(X.shape[1], dtype=bool)
+        mask[: X.shape[1] // 2] = True
+        return np.zeros(X.shape[1]), 0.0, mask
+
+    monkeypatch.setattr(vs, "get_uve_threshold", spy)
+
+    X, Y, wl = xy_multi
+    build_multitarget_varsel_subsets(
+        [], X, Y, wl,
+        enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="All", spa_ok=True,
+        cache={}, preprocess_id="raw",
+        apply_uve_prefilter=True,
+        uve_cutoff_multiplier=1.3, uve_n_components=7,
+    )
+    assert captured["cutoff_multiplier"] == 1.3, captured
+    assert captured["n_components"] == 7, captured
+
+
+def test_uve_params_reach_uve_family(xy_multi, monkeypatch):
+    """W2: uve_selection must be forwarded cutoff_multiplier (1.3) and
+    n_components (7) by _model_independent_importances (via build_multitarget_varsel_subsets)."""
+    import spectral_predict.variable_selection as vs
+    from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+    captured = {}
+
+    def spy(X, y, cutoff_multiplier=1.0, n_components=None, **kw):
+        captured["cutoff_multiplier"] = cutoff_multiplier
+        captured["n_components"] = n_components
+        # Return a full-width importance so _importances_to_subsets produces a
+        # non-empty subset list.
+        return np.arange(X.shape[1], dtype=float)
+
+    monkeypatch.setattr(vs, "uve_selection", spy)
+
+    X, Y, wl = xy_multi
+    subs, skipped = build_multitarget_varsel_subsets(
+        ["uve"], X, Y, wl,
+        enabled_models=["PLS"], variable_counts=[5],
+        ipls_subset_limit="All", spa_ok=True,
+        cache={}, preprocess_id="raw",
+        uve_cutoff_multiplier=1.3, uve_n_components=7,
+    )
+    assert captured["cutoff_multiplier"] == 1.3, captured
+    assert captured["n_components"] == 7, captured
+    # Sanity: uve produced subsets and was not skipped.
+    assert "uve" not in skipped
+    assert any(s["method"] == "uve" for s in subs)
+
+
+# --------------------------------------------------------------------------- #
+# T-17 W3d: positive multi-Y UVE/CARS coverage through build_multitarget_varsel_subsets
+# --------------------------------------------------------------------------- #
+class TestMultiYUveCarsSupport:
+    """Positive multi-Y coverage for the UVE/CARS family. Each drives
+    build_multitarget_varsel_subsets with the named method and asserts >=1
+    non-full subset with finite indices < n_features."""
+
+    def test_uve_multi_y_produces_subsets(self, xy_multi):
+        from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+        X, Y, wl = xy_multi
+        subs, skipped = build_multitarget_varsel_subsets(
+            ["uve"], X, Y, wl,
+            enabled_models=["PLS"], variable_counts=[5, 10],
+            ipls_subset_limit="All", spa_ok=True,
+            cache={}, preprocess_id="raw",
+        )
+        assert "uve" not in skipped
+        uve_subs = [s for s in subs if s["method"] == "uve"]
+        assert uve_subs, "expected at least one non-full uve subset"
+        n_features = X.shape[1]
+        for s in uve_subs:
+            idx = np.asarray(s["indices"], dtype=int)
+            assert idx.size >= 1
+            assert idx.size < n_features, "subset must be narrower than full"
+            assert np.all((idx >= 0) & (idx < n_features))
+            assert np.all(np.isfinite(idx.astype(float)))
+
+    def test_cars_multi_y_produces_subsets(self, xy_multi):
+        from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+        X, Y, wl = xy_multi
+        subs, skipped = build_multitarget_varsel_subsets(
+            ["cars"], X, Y, wl,
+            enabled_models=["PLS"], variable_counts=[5, 10],
+            ipls_subset_limit="All", spa_ok=True,
+            cache={}, preprocess_id="raw",
+        )
+        assert "cars" not in skipped
+        cars_subs = [s for s in subs if s["method"] == "cars"]
+        assert cars_subs, "expected at least one non-full cars subset"
+        n_features = X.shape[1]
+        for s in cars_subs:
+            idx = np.asarray(s["indices"], dtype=int)
+            assert idx.size >= 1
+            assert idx.size < n_features, "subset must be narrower than full"
+            assert np.all((idx >= 0) & (idx < n_features))
+            assert np.all(np.isfinite(idx.astype(float)))
+
+    def test_uve_cars_hybrid_multi_y(self, xy_multi):
+        from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+        X, Y, wl = xy_multi
+        subs, skipped = build_multitarget_varsel_subsets(
+            ["uve_cars"], X, Y, wl,
+            enabled_models=["PLS"], variable_counts=[5, 10],
+            ipls_subset_limit="All", spa_ok=True,
+            cache={}, preprocess_id="raw",
+        )
+        assert "uve_cars" not in skipped
+        hybrid_subs = [s for s in subs if s["method"] == "uve_cars"]
+        assert hybrid_subs, "expected at least one non-full uve_cars subset"
+        n_features = X.shape[1]
+        for s in hybrid_subs:
+            idx = np.asarray(s["indices"], dtype=int)
+            assert idx.size >= 1
+            assert idx.size < n_features, "subset must be narrower than full"
+            assert np.all((idx >= 0) & (idx < n_features))
+            assert np.all(np.isfinite(idx.astype(float)))
+
+    def test_fipls_cars_multi_y(self, xy_multi):
+        from spectral_predict.multitarget_grid import build_multitarget_varsel_subsets
+
+        X, Y, wl = xy_multi
+        subs, skipped = build_multitarget_varsel_subsets(
+            ["fipls_cars"], X, Y, wl,
+            enabled_models=["PLS"], variable_counts=[5, 10],
+            ipls_subset_limit="All", spa_ok=True,
+            cache={}, preprocess_id="raw",
+        )
+        assert "fipls_cars" not in skipped
+        fc_subs = [s for s in subs if s["method"] == "fipls_cars"]
+        assert fc_subs, "expected at least one non-full fipls_cars subset"
+        n_features = X.shape[1]
+        for s in fc_subs:
+            idx = np.asarray(s["indices"], dtype=int)
+            assert idx.size >= 1
+            assert idx.size < n_features, "subset must be narrower than full"
+            assert np.all((idx >= 0) & (idx < n_features))
+            assert np.all(np.isfinite(idx.astype(float)))

@@ -123,18 +123,21 @@ def test_grid_search_end_to_end_ranks_and_skips(grid_xy):
     assert {r.preprocessing for r in out.results} >= {"raw", "snv"}
     assert any(r.varsel_method == "ipls_forward" for r in out.results)
     assert any(r.varsel_method == "full" for r in out.results)
-    # UVE skip surfaced.
-    assert "uve" in out.skipped
+    # T-17 W3c: UVE is now multi-Y-safe and produces importance cells, so it
+    # must NOT appear in out.skipped; UVE-tagged cells should appear in results.
+    assert "uve" not in out.skipped
+    assert any(r.varsel_method == "uve" for r in out.results)
 
 
-def test_grid_search_apply_uve_prefilter_surfaces_skip(grid_xy):
-    """FIX A: apply_uve_prefilter=True must flow from run_multitarget_grid_search
-    into build_multitarget_varsel_subsets so the skip-notice branch fires and
-    'apply_uve_prefilter' appears in out.skipped (UVE-on-y is a discrimination
-    method, not a multi-Y method -- greyed out, surfaced as a skip notice).
+def test_grid_search_apply_uve_prefilter_contributes_subset(grid_xy):
+    """T-17 W3c: apply_uve_prefilter=True flows from run_multitarget_grid_search
+    into build_multitarget_varsel_subsets where UVE-on-multi-Y now contributes
+    a `uve_prefilter` subset (rather than surfacing as a skip-notice, as it did
+    when UVE was single-Y-only).
 
-    On unfixed code the run function has no apply_uve_prefilter param -> the call
-    raises TypeError and this test fails.
+    The skip-notice branch fires only if the UVE prefilter itself raises; the
+    keep-all / keep-none corner case contributes no subset but still no notice.
+    Either way the run completes and ranks.
     """
     from spectral_predict.multitarget_grid import run_multitarget_grid_search
 
@@ -146,8 +149,9 @@ def test_grid_search_apply_uve_prefilter_surfaces_skip(grid_xy):
         ipls_subset_limit="Top 3", tier="quick",
         cv="kfold", n_folds=3, n_repeats=1, apply_uve_prefilter=True,
     )
-    assert "apply_uve_prefilter" in out.skipped
-    # The run still completes and ranks (the skip notice does not abort search).
+    # T-17: 'apply_uve_prefilter' must NOT be in out.skipped (UVE is multi-Y-safe).
+    assert "apply_uve_prefilter" not in out.skipped
+    # The run still completes and ranks (the prefilter path is non-fatal).
     assert out.results
     assert np.isfinite(out.results[0].joint_q2)
 
@@ -560,3 +564,68 @@ def test_grid_controller_running_completes(grid_xy):
         cv="kfold", n_folds=3, n_repeats=1, controller=ctrl,
     )
     assert out.results  # non-empty
+
+
+# --------------------------------------------------------------------------- #
+# T-17 W1: SPA preflight must only run when a SPA-dependent method is selected
+# --------------------------------------------------------------------------- #
+def test_no_spa_preflight_when_no_spa_method(grid_xy, monkeypatch):
+    """W1: verify_spa_multi_y_safe must NOT be called when the user did not
+    request any SPA-dependent method (SPA gate is gated on the requested-method
+    set intersecting _SPA_DEPENDENT_METHODS). A spy on the verifier records
+    zero calls."""
+    import spectral_predict.multitarget_grid as mtg
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    calls = []
+
+    def spy(*a, **k):
+        calls.append((a, k))
+        return True
+
+    monkeypatch.setattr(mtg, "verify_spa_multi_y_safe", spy)
+
+    X, Y, wl = grid_xy
+    # Empty method list: no SPA chain -> no preflight.
+    run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=[], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    # A non-SPA method (ipls_forward) is also NOT SPA-dependent -> no preflight.
+    run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    assert len(calls) == 0, (
+        f"verify_spa_multi_y_safe should not have been called; got {calls}"
+    )
+
+
+def test_spa_preflight_runs_when_spa_selected(grid_xy, monkeypatch):
+    """W1 companion: when the user selects a SPA-dependent method ('spa'), the
+    verifier runs exactly once on the raw block."""
+    import spectral_predict.multitarget_grid as mtg
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    calls = []
+
+    def spy(*a, **k):
+        calls.append((a, k))
+        return True
+
+    monkeypatch.setattr(mtg, "verify_spa_multi_y_safe", spy)
+
+    X, Y, wl = grid_xy
+    run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True}, autoscale=False,
+        variable_selection_methods=["spa"], tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1,
+    )
+    assert len(calls) == 1, (
+        f"verify_spa_multi_y_safe should have been called exactly once; got {calls}"
+    )
