@@ -4,6 +4,35 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 — cp1252 UnicodeEncodeError in fiPLS/interval varsel prints (Fable + Opus impl/review)
+
+Commit `e57b8f4` on `feat/T31-multiclass-simca`. The axis fix below made
+fiPLS/interval selectors actually RUN on derivative configs, which exposed latent
+U+2192 arrows in `print()` f-strings in `variable_selection.py` lines 1028
+(`uve_cars_spa_selection`), 1119 (`fipls_spa_selection`), 1219
+(`fipls_cars_selection`) — `UnicodeEncodeError: 'charmap' codec can't encode
+character '→'` on cp1252 stdout (Windows console default). Same recurring bug
+class as the `.sco`/`.asd` import emoji prints.
+
+- **Encoding gotcha:** R² (U+00B2), ø, ×, • ARE cp1252-encodable — do not "fix"
+  those. →, ✓, ✗, ⚠ are NOT. Test with `'ch'.encode('cp1252')` before touching.
+- Fix: arrows -> ASCII `->`; display strings only, zero logic/index changes.
+- Sweep: search.py multiclass fiPLS dispatch already ASCII; preprocess.py arrows are
+  docstring-only; `wavelength_selection.py` ✓/✗ (lines 746/754) live in a
+  never-called benchmark helper and `io.py` ⚠️ prints are off the varsel path —
+  both left alone (same bug class if those paths ever go live on Windows).
+- Regression guard `tests/test_cp1252_prints.py`: AST scan of print/logging string
+  literals (incl. `ast.JoinedStr` f-string parts) asserting strict-cp1252
+  encodability, PLUS runtime fipls_spa/fipls_cars calls on a 24x50 synthetic set
+  under `redirect_stdout` to a strict-cp1252 `TextIOWrapper`. Confirmed RED
+  pre-fix (both prongs), green post-fix. cp1252 codec ships with CPython
+  everywhere, so it runs on Linux CI too.
+- Targeted `test_multiclass_search.py + test_simca.py + new` = 100 passed on a
+  FRESH `--basetemp` (reused basetemp gave 2 spurious `TestPersistenceA8` tmp-dir
+  collision errors — Windows testing gotcha, not a product bug).
+
+Detail: `.superpowers/sdd/cp1252-print-fix-report.md`.
+
 ## 2026-07-07 — T-31 derivative-varsel axis bug FIXED (Fable + Opus impl/review)
 
 Closed the open review finding from the Codex entry below. Commits `4c8ba73`
