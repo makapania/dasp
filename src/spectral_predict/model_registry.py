@@ -46,6 +46,17 @@ ONE_CLASS_MODELS = [
     'LOF',               # Local Outlier Factor (density-based)
 ]
 
+# T-31 multi-class class-modeling engines. These are the MultiClassClassModel
+# engine identifiers (lowercase-hyphenated), NOT the one-class registry names —
+# each per-class membership model is calibrated to a level-alpha p-value.
+MULTICLASS_ENGINES = [
+    'pca-simca',           # DD-SIMCA per class (flagship)
+    'ocsvm',               # OneClassSVM per class (~SVDD)
+    'isolation-forest',    # IsolationForest per class
+    'lof',                 # LocalOutlierFactor per class
+    'elliptic-envelope',   # EllipticEnvelope per class (~UNEQ)
+]
+
 # All unique models (union of regression, classification, and one-class)
 ALL_MODELS = sorted(list(set(REGRESSION_MODELS + CLASSIFICATION_MODELS + ONE_CLASS_MODELS)))
 
@@ -99,8 +110,13 @@ def get_supported_models(task_type='regression'):
         return CLASSIFICATION_MODELS.copy()
     elif task_type == 'one_class':
         return ONE_CLASS_MODELS.copy()
+    elif task_type == 'multiclass_simca':
+        return MULTICLASS_ENGINES.copy()
     else:
-        raise ValueError(f"Unknown task_type: {task_type}. Must be 'regression', 'classification', or 'one_class'")
+        raise ValueError(
+            f"Unknown task_type: {task_type}. Must be 'regression', "
+            "'classification', 'one_class', or 'multiclass_simca'"
+        )
 
 
 def supports_feature_importance(model_name):

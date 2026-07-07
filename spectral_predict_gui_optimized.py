@@ -1537,6 +1537,18 @@ TOOLTIP_CONTENT = {
         'n_outliers': 'n_outliers (Outlier Sample Count)\n\nOne-class only. Number of samples held out as known contaminants / outliers used to score sensitivity.\nIf 0, sensitivity-style metrics are not meaningful and Specificitycv is the primary CV signal.',
         'inlier_class_label': 'inlier_class_label (Inlier Class Name)\n\nOne-class only. Label of the class designated as the inlier / target during one-class training\n(e.g., "pure", "Class A"). All other labels are treated as outliers / contaminants.',
 
+        # ===== Multi-class SIMCA (T-31) swept-config columns =====
+        # Display headers (Engine / VarSelMethod) and backend column IDs
+        # (engine_family / varsel_path) both key to the same text: the header
+        # renames the DISPLAY only, while the tooltip handler looks up the
+        # backend column ID, so both aliases are needed for the tooltip to fire.
+        'NComponents': 'NComponents (Per-Class PCA Size)\n\nMulti-class SIMCA only. Per-class PCA size for this row.\nFloat in (0,1) = variance fraction (e.g., 0.99 keeps 99% of each class\'s variance), int = fixed component count, per_class_cv = auto-tuned per class.',
+        'NSelect': 'NSelect (Selected Variable Count Requested)\n\nMulti-class SIMCA only. Number of wavelengths the variable-selection path was asked to keep for this row (the top-N target).\nSee n_vars for the count actually used after selection.',
+        'Engine': 'Engine (Per-Class Membership Engine)\n\nMulti-class SIMCA only. The one-class engine calibrated for each class to decide membership.\nValues: pca-simca (DD-SIMCA), ocsvm, isolation_forest, lof, elliptic_envelope.\nBacked by the engine_family column.',
+        'engine_family': 'Engine (Per-Class Membership Engine)\n\nMulti-class SIMCA only. The one-class engine calibrated for each class to decide membership.\nValues: pca-simca (DD-SIMCA), ocsvm, isolation_forest, lof, elliptic_envelope.',
+        'VarSelMethod': 'VarSelMethod (Variable-Selection Path)\n\nMulti-class SIMCA only. Which variable-selection path chose the wavelengths for this row.\nValues: none (full spectrum), importance, wold_modeling, wold_discriminating, wold_balanced.\nBacked by the varsel_path column.',
+        'varsel_path': 'VarSelMethod (Variable-Selection Path)\n\nMulti-class SIMCA only. Which variable-selection path chose the wavelengths for this row.\nValues: none (full spectrum), importance, wold_modeling, wold_discriminating, wold_balanced.',
+
         # ===== NSGA-II Pareto-front diagnostics =====
         'Preprocessing': 'Preprocessing (Non-dominated Sorting Genetic Algorithm II Preprocessing Name)\n\nNSGA-II (Non-dominated Sorting Genetic Algorithm II) rows only. Raw preprocessing label as encoded in the genome (e.g., snv_deriv1).\nThe Preprocess column carries the normalized name used by the validation rebuild.',
         'Variables': 'Variables (Non-dominated Sorting Genetic Algorithm II Wavelength Subset Tag)\n\nNSGA-II rows only. Tag of the form nsga2_<count> indicating how many wavelengths the genome selected.',
@@ -3120,6 +3132,57 @@ class SpectralPredictApp:
         self.oc_contamination = tk.DoubleVar(value=0.05)  # IsolationForest/EllipticEnvelope/LOF
         self.oc_alpha = tk.DoubleVar(value=0.05)         # PCA-SIMCA (DD-SIMCA) alpha
         self.oc_n_components = tk.IntVar(value=10)        # PCA-SIMCA n_components
+
+        # Multi-class SIMCA / class-modeling variables (T-31 Phase D)
+        # alpha / n_components / variable-selection Top-N are all SWEPT via the
+        # checkbox collectors (_collect_mc_alpha_list / _collect_mc_ncomp_list /
+        # _collect_mc_sizes), so no scalar vars for them (retired in Task 9).
+        self.mc_min_class_samples = tk.IntVar(value=10)   # hard-block floor (n<10 unmodelable)
+
+        # Multi-class SIMCA sweep vars (mirror one-class _collect_simca_overrides)
+        self.mc_alpha_001 = tk.BooleanVar(value=False)
+        self.mc_alpha_005 = tk.BooleanVar(value=True)
+        self.mc_alpha_custom = tk.StringVar(value="")
+        self.mc_ncomp_3 = tk.BooleanVar(value=False)
+        self.mc_ncomp_5 = tk.BooleanVar(value=False)
+        self.mc_ncomp_7 = tk.BooleanVar(value=False)
+        self.mc_ncomp_095 = tk.BooleanVar(value=False)
+        self.mc_ncomp_099 = tk.BooleanVar(value=True)   # novelty-oriented default
+        self.mc_ncomp_custom = tk.StringVar(value="")
+        self.mc_ncomp_per_class_cv = tk.BooleanVar(value=False)  # unique toggle
+        # Engine multi-select (one BooleanVar per MULTICLASS_ENGINES entry)
+        self.mc_engine_vars = {
+            'pca-simca': tk.BooleanVar(value=True),
+            'ocsvm': tk.BooleanVar(value=False),
+            'isolation-forest': tk.BooleanVar(value=False),
+            'lof': tk.BooleanVar(value=False),
+            'elliptic-envelope': tk.BooleanVar(value=False),
+        }
+        # Variable-selection path multi-select (T-31 Task 8).
+        # Only methods the multiclass backend (_multiclass_varsel_mask) can
+        # actually resolve are offered; hyphen variants and no-op/redundant
+        # methods (cars_tree, uve_cars_tree, vcpa, ga) are deliberately excluded
+        # so no silently-skipped rows are produced.
+        self.mc_varsel_groups = {
+            "SIMCA-native (novelty-safe)": [
+                ("wold_modeling", "Wold modeling"),
+                ("wold_discriminating", "Wold discriminating"),
+                ("wold_balanced", "Wold balanced"),
+            ],
+            "Discrimination-based (confirm novelty on a true external class)": [
+                ("importance", "Importance"), ("cars", "CARS"),
+                ("spa", "SPA"), ("uve", "UVE"),
+                ("uve_spa", "UVE-SPA"), ("uve_cars", "UVE-CARS"),
+                ("uve_cars_spa", "UVE-CARS-SPA"), ("ipls", "iPLS"),
+                ("fipls_spa", "Forward iPLS-SPA"), ("fipls_cars", "Forward iPLS-CARS"),
+                ("ipls_forward", "Forward iPLS"), ("ipls_backward", "Backward iPLS"),
+                ("mc_sipls", "MC-siPLS"), ("mwpls", "MWPLS"),
+            ],
+        }
+        self.mc_varsel_vars = {
+            key: tk.BooleanVar(value=(key == "wold_modeling"))
+            for group in self.mc_varsel_groups.values() for key, _lbl in group
+        }
 
         # One-class per-model config variables (Tab 4C cards)
         # OneClassSVM
@@ -6463,6 +6526,7 @@ class SpectralPredictApp:
         ttk.Radiobutton(task_type_subframe, text="Regression", variable=self.task_type, value="regression").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="Classification", variable=self.task_type, value="classification").pack(side=tk.LEFT, padx=5)
         ttk.Radiobutton(task_type_subframe, text="One-Class", variable=self.task_type, value="one_class").pack(side=tk.LEFT, padx=5)
+        ttk.Radiobutton(task_type_subframe, text="Multi-Class Class Modeling", variable=self.task_type, value="multiclass_simca").pack(side=tk.LEFT, padx=5)
         self.task_type_detection_label = ttk.Label(task_type_subframe, text="", style='Caption.TLabel')
         self.task_type_detection_label.pack(side=tk.LEFT, padx=10)
         cfg_row += 1
@@ -6516,6 +6580,11 @@ class SpectralPredictApp:
         CreateToolTip(oc_ncomp_spinbox, text=TOOLTIP_CONTENT['one_class']['n_components'], delay=500)
         self.oc_hyperparams_frame.grid_remove()  # Hidden by default
         cfg_row += 1
+
+        # Multi-class SIMCA / class-modeling hyperparameters live in the 4A
+        # Model Config subtab (self.mc_model_config_frame), mirroring the
+        # one-class PCA-SIMCA cards. The import page keeps only the task-type
+        # radio for multi-class. (T-31 Task 7 relocation.)
 
         # Wavelength/Wavenumber Range
         self.wl_range_label = ttk.Label(config_frame, text="Wavelength Range:")
@@ -12215,6 +12284,7 @@ class SpectralPredictApp:
         # Inner frame for grid layout within card
         varsel_frame = tk.Frame(varsel_card, bg=self.colors['card_bg'])
         varsel_frame.pack(fill='both', expand=True)
+        self.varsel_frame = varsel_frame  # standard-method frame (hidden in multiclass mode)
 
         # Method selection (checkboxes - multiple selection enabled)
         ttk.Label(varsel_frame, text="Selection Methods (select one or more):", style='Subheading.TLabel').grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 8))
@@ -12386,6 +12456,43 @@ class SpectralPredictApp:
         ttk.Label(params_frame, text="GA Runs:").grid(row=10, column=0, sticky=tk.W, padx=(0, 5), pady=5)
         ttk.Spinbox(params_frame, from_=1, to=20, textvariable=self.ga_n_runs, width=8).grid(row=10, column=1, sticky=tk.W, padx=5, pady=5)
         ttk.Label(params_frame, text="(default: 5, aggregates for stability)", style='Caption.TLabel').grid(row=10, column=2, sticky=tk.W, padx=10)
+
+        # === Multi-class SIMCA variable-selection picker (T-31 Task 8) ===
+        # Built hidden; shown only in multiclass mode (see
+        # _update_one_class_controls_visibility). Renders the two method groups
+        # from self.mc_varsel_groups as labeled sections of Checkbuttons bound
+        # to self.mc_varsel_vars. Reuses the shared Top-N Variable Counts row
+        # (var_10..var_1000) in the Subset Analysis card for the size sweep.
+        mc_group_frame = tk.Frame(varsel_card, bg=self.colors['card_bg'])
+        self.mc_varsel_group_frame = mc_group_frame
+        ttk.Label(mc_group_frame, text="Selection Methods (select one or more):",
+                  style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 8))
+        ttk.Label(mc_group_frame,
+                  text="Top-N sizes reuse the Top-N Variable Counts row above.",
+                  style='Caption.TLabel').grid(row=1, column=0, sticky=tk.W, pady=(0, 8))
+        mc_row = 2
+        for group_title, methods in self.mc_varsel_groups.items():
+            # Split any trailing "(...)" honesty/guidance note off the bold group
+            # heading so it renders as a Caption (guidance) rather than as part of
+            # the Subheading. The group keys themselves are unchanged.
+            if group_title.endswith(")") and " (" in group_title:
+                _heading, _note = group_title.split(" (", 1)
+                _note = "(" + _note
+            else:
+                _heading, _note = group_title, ""
+            ttk.Label(mc_group_frame, text=_heading,
+                      style='Subheading.TLabel').grid(row=mc_row, column=0, sticky=tk.W, pady=(10, 4))
+            mc_row += 1
+            if _note:
+                ttk.Label(mc_group_frame, text=_note,
+                          style='Caption.TLabel').grid(row=mc_row, column=0, sticky=tk.W,
+                                                       padx=(4, 0), pady=(0, 4))
+                mc_row += 1
+            for key, label in methods:
+                ttk.Checkbutton(mc_group_frame, text=label,
+                                variable=self.mc_varsel_vars[key]).grid(
+                    row=mc_row, column=0, sticky=tk.W, padx=(20, 0))
+                mc_row += 1
 
     def _create_tab4c_model_configuration(self):
         """Subtab 4C: Model Configuration - Model selection and advanced model options."""
@@ -12690,6 +12797,30 @@ class SpectralPredictApp:
             self.oc_model_checkbox_widgets[name] = cb
             CreateToolTip(cb, text=TOOLTIP_CONTENT['one_class'][tooltip_key], delay=500)
             oc_row += 1
+
+        # Multi-Class per-class engine picker (hidden; shown for multiclass_simca).
+        # One row per MULTICLASS_ENGINES entry — the per-class membership engine
+        # applied to every class model in the decision matrix.
+        self.mc_models_frame = tk.Frame(models_card, bg=self.colors['card_bg'])
+        ttk.Label(self.mc_models_frame, text="Per-Class Engine (Multi-Class)",
+                  style='Subheading.TLabel').grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+        mc_engine_info = [
+            ('pca-simca', "PCA-SIMCA", "DD-SIMCA per class (recommended)"),
+            ('ocsvm', "OneClassSVM", "Kernel boundary per class"),
+            ('isolation-forest', "IsolationForest", "Isolation-based per class"),
+            ('elliptic-envelope', "EllipticEnvelope", "Mahalanobis / Gaussian per class"),
+            ('lof', "LOF", "Local Outlier Factor per class"),
+        ]
+        self.mc_engine_checkbox_widgets = {}
+        mc_erow = 1
+        for engine_key, name, desc in mc_engine_info:
+            cb = ttk.Checkbutton(self.mc_models_frame, text=name,
+                                 variable=self.mc_engine_vars[engine_key])
+            cb.grid(row=mc_erow, column=0, sticky=tk.W, pady=5)
+            ttk.Label(self.mc_models_frame, text=desc, style='Caption.TLabel').grid(
+                row=mc_erow, column=1, sticky=tk.W, padx=15)
+            self.mc_engine_checkbox_widgets[engine_key] = cb
+            mc_erow += 1
 
         # === Advanced Model Options ===
         self._create_section_header(content_frame, "Advanced Model Options", row=row, columnspan=2)
@@ -14181,6 +14312,85 @@ class SpectralPredictApp:
         # Initially hidden — shown only when task_type == 'one_class'
         self.oc_model_config_container.grid_remove()
 
+        # ===================================================================
+        # MULTI-CLASS MODEL CONFIG CARD (shown only for multiclass_simca)
+        # Mirrors the one-class container above: relocated here from the import
+        # page (T-31 Task 7). Holds the alpha / n_components / min-class-n sweep
+        # controls; variable selection relocates separately (Task 8).
+        # ===================================================================
+        self._create_section_header(content_frame, "Multi-Class Model Configuration", row=row, columnspan=2)
+        row += 1
+
+        self.mc_model_config_frame = tk.Frame(content_frame, bg=self.colors['bg'])
+
+        mc_section, mc_content = self._create_collapsible_section(
+            self.mc_model_config_frame, "PCA-SIMCA (per-class) Hyperparameters", expanded=True,
+        )
+        mc_section.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5, padx=5)
+        mc_card_outer, mc_frame = self._create_card(
+            mc_content, subtitle="Per-class components, significance level, and minimum class size"
+        )
+        mc_card_outer.pack(fill='both', expand=True, padx=5, pady=5)
+        mc_inner = ttk.Frame(mc_frame)
+        mc_inner.pack(fill='both', expand=True)
+
+        mcr = 0
+        # --- n_components row ---
+        mc_ncomp_heading = ttk.Label(mc_inner, text="Number of Components (per class):",
+                                     style='Subheading.TLabel')
+        mc_ncomp_heading.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        CreateToolTip(
+            mc_ncomp_heading,
+            text="Per-class PCA size. A float in (0,1) keeps that fraction of variance "
+                 "per class (0.99 = novelty-oriented default). An integer fixes the "
+                 "component count. 'per_class_cv' tunes by one-vs-rest CV "
+                 "(discrimination-oriented; under-detects novelty).",
+            delay=500,
+        )
+        mcr += 1
+        mc_nc_frame = ttk.Frame(mc_inner)
+        mc_nc_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(mc_nc_frame, text="3", variable=self.mc_ncomp_3).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="5", variable=self.mc_ncomp_5).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="7", variable=self.mc_ncomp_7).grid(row=0, column=2, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="0.95 (variance)", variable=self.mc_ncomp_095).grid(row=0, column=3, padx=5)
+        ttk.Checkbutton(mc_nc_frame, text="0.99 ⭐", variable=self.mc_ncomp_099).grid(row=0, column=4, padx=5)
+        ttk.Label(mc_nc_frame, text="Custom:", style='TLabel').grid(row=0, column=5, padx=(15, 5))
+        ttk.Entry(mc_nc_frame, textvariable=self.mc_ncomp_custom, width=10).grid(row=0, column=6, padx=5)
+        mcr += 1
+        ttk.Checkbutton(mc_inner, text="per_class_cv (auto; discrimination-oriented)",
+                        variable=self.mc_ncomp_per_class_cv).grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(0, 5))
+        mcr += 1
+
+        # --- alpha row ---
+        ttk.Label(mc_inner, text="Alpha (significance level):", style='Subheading.TLabel').grid(
+            row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        mcr += 1
+        mc_al_frame = ttk.Frame(mc_inner)
+        mc_al_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Checkbutton(mc_al_frame, text="0.01", variable=self.mc_alpha_001).grid(row=0, column=0, padx=5)
+        ttk.Checkbutton(mc_al_frame, text="0.05 ⭐", variable=self.mc_alpha_005).grid(row=0, column=1, padx=5)
+        ttk.Label(mc_al_frame, text="Custom:", style='TLabel').grid(row=0, column=2, padx=(15, 5))
+        ttk.Entry(mc_al_frame, textvariable=self.mc_alpha_custom, width=10).grid(row=0, column=3, padx=5)
+        mcr += 1
+
+        # --- min class n row ---
+        ttk.Label(mc_inner, text="Minimum class size:", style='Subheading.TLabel').grid(
+            row=mcr, column=0, columnspan=8, sticky=tk.W, pady=(10, 5))
+        mcr += 1
+        mc_mn_frame = ttk.Frame(mc_inner)
+        mc_mn_frame.grid(row=mcr, column=0, columnspan=8, sticky=tk.W, pady=5)
+        ttk.Label(mc_mn_frame, text="min class n:", style='TLabel').grid(row=0, column=0, padx=(0, 5))
+        ttk.Spinbox(mc_mn_frame, textvariable=self.mc_min_class_samples, from_=3, to=1000,
+                    increment=1, width=5).grid(row=0, column=1, padx=5)
+        ttk.Label(mc_mn_frame, text="(classes with fewer samples are skipped as unmodelable)",
+                  style='Caption.TLabel').grid(row=0, column=2, padx=10)
+
+        self.mc_model_config_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        row += 1
+        # Initially hidden — shown only when task_type == 'multiclass_simca'
+        self.mc_model_config_frame.grid_remove()
+
         # CSV export checkbox
         ttk.Checkbutton(content_frame, text="Export preprocessed data CSV (2nd derivative)",
                        variable=self.export_preprocessed_csv).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(20, 5))
@@ -14409,8 +14619,9 @@ class SpectralPredictApp:
         ttk.Label(algo_frame, text="Maximizes spectral diversity only (ignores y distribution)",
                  style='Caption.TLabel').grid(row=0, column=1, sticky=tk.W)
 
-        ttk.Radiobutton(algo_frame, text="SPXY ⭐",
-                       variable=self.validation_algorithm, value="SPXY").grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
+        self.validation_spxy_radio = ttk.Radiobutton(algo_frame, text="SPXY ⭐",
+                       variable=self.validation_algorithm, value="SPXY")
+        self.validation_spxy_radio.grid(row=1, column=0, sticky=tk.W, padx=(0, 15), pady=3)
         ttk.Label(algo_frame, text="Balances spectral and target diversity (recommended)",
                  style='Caption.TLabel').grid(row=1, column=1, sticky=tk.W, pady=3)
 
@@ -16275,7 +16486,7 @@ class SpectralPredictApp:
             return
 
         # Check for combined format (single CSV/TXT/Excel with all data)
-        from src.spectral_predict.io import (
+        from spectral_predict.io import (
             detect_combined_format,
             detect_combined_excel_format,
             read_combined_csv,
@@ -16770,6 +16981,17 @@ class SpectralPredictApp:
         # Reset flag
         self._updating_from_tier = False
 
+    def _validation_algo_allowed(self, algo):
+        """Whether a holdout-selection algorithm is valid for the current task.
+
+        SPXY is disallowed for multi-class class modeling because its distance
+        combines a target-space term ``d_y`` that is undefined for a categorical
+        class label. Every other algorithm is allowed for every task type.
+        """
+        if self.task_type.get() == "multiclass_simca" and algo == "SPXY":
+            return False
+        return True
+
     def _on_task_type_changed(self):
         """Handle task type changes - filter models and update tier selection."""
         task_type = self.task_type.get()
@@ -16838,6 +17060,19 @@ class SpectralPredictApp:
         # Refresh imbalance method dropdown to match the new task type
         self._detect_and_display_imbalance()
 
+        # Multi-class class modeling cannot use SPXY (its d_y term is undefined
+        # for a categorical class label). Reset a stale SPXY selection to
+        # Kennard-Stone and disable the SPXY radio for multiclass; re-enable it
+        # for every other task type.
+        if actual_task == "multiclass_simca":
+            if self.validation_algorithm.get() == "SPXY":
+                self.validation_algorithm.set("Kennard-Stone")
+            if hasattr(self, "validation_spxy_radio"):
+                self.validation_spxy_radio.state(["disabled"])
+        else:
+            if hasattr(self, "validation_spxy_radio"):
+                self.validation_spxy_radio.state(["!disabled"])
+
         # Warn if task-type boundary changed with a non-null validation set
         prev = self._last_task_type
         if prev is not None and self.validation_y is not None and len(self.validation_y) > 0:
@@ -16855,6 +17090,11 @@ class SpectralPredictApp:
         """Show/hide one-class specific controls based on task type."""
         task_type = self.task_type.get()
         if task_type == "one_class":
+            # Ensure the multi-class panels are hidden.
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid_remove()
+            if hasattr(self, 'mc_models_frame'):
+                self.mc_models_frame.pack_forget()
             self.inlier_class_frame.grid()
             self.oc_hyperparams_frame.grid()
             if hasattr(self, 'oc_model_config_container'):
@@ -16874,6 +17114,11 @@ class SpectralPredictApp:
             #   per Pomerantsev et al. 2025 LOVE / Forina modeling-power vs discrimination-power)
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
+            # Restore standard method frame; hide the multiclass grouped picker.
+            if hasattr(self, 'mc_varsel_group_frame'):
+                self.mc_varsel_group_frame.pack_forget()
+            if hasattr(self, 'varsel_frame') and not self.varsel_frame.winfo_manager():
+                self.varsel_frame.pack(fill='both', expand=True)
             disabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
                 '_cb_mc_sipls', '_cb_mwpls', '_cb_fipls_spa', '_cb_fipls_cars',
@@ -16895,7 +17140,44 @@ class SpectralPredictApp:
                 self.imbalance_frame.grid_remove()
             if hasattr(self, 'imbalance_section_heading'):
                 self.imbalance_section_heading.grid_remove()
+        elif task_type == "multiclass_simca":
+            # Multi-class class-modeling: show the mc control panel + engine
+            # picker; hide one-class, standard, and imbalance widgets. The mc
+            # panel carries its own variable-selection picker, so hide the
+            # standard varsel card to avoid a conflicting control surface.
+            self.inlier_class_frame.grid_remove()
+            self.oc_hyperparams_frame.grid_remove()
+            if hasattr(self, 'oc_model_config_container'):
+                self.oc_model_config_container.grid_remove()
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid()
+            # Swap model panels: hide standard + one-class, show engine picker
+            if hasattr(self, 'standard_models_frame'):
+                self.standard_models_frame.pack_forget()
+            if hasattr(self, 'oc_models_frame'):
+                self.oc_models_frame.pack_forget()
+            if hasattr(self, 'mc_models_frame'):
+                self.mc_models_frame.pack(fill='both', expand=True)
+            # Keep the Advanced Variable Selection card visible but swap the
+            # standard method frame for the multiclass grouped picker. The
+            # shared Top-N Variable Counts row lives in the separate Subset
+            # Analysis card and stays visible for the size sweep.
+            if hasattr(self, 'varsel_card_outer'):
+                self.varsel_card_outer.grid()
+            if hasattr(self, 'varsel_frame'):
+                self.varsel_frame.pack_forget()
+            if hasattr(self, 'mc_varsel_group_frame') and not self.mc_varsel_group_frame.winfo_manager():
+                self.mc_varsel_group_frame.pack(fill='both', expand=True)
+            if hasattr(self, 'imbalance_frame'):
+                self.imbalance_frame.grid_remove()
+            if hasattr(self, 'imbalance_section_heading'):
+                self.imbalance_section_heading.grid_remove()
         else:
+            # Ensure the multi-class panels are hidden.
+            if hasattr(self, 'mc_model_config_frame'):
+                self.mc_model_config_frame.grid_remove()
+            if hasattr(self, 'mc_models_frame'):
+                self.mc_models_frame.pack_forget()
             self.inlier_class_frame.grid_remove()
             self.oc_hyperparams_frame.grid_remove()
             if hasattr(self, 'oc_model_config_container'):
@@ -16908,6 +17190,11 @@ class SpectralPredictApp:
             # Re-enable variable selection methods
             if hasattr(self, 'varsel_card_outer'):
                 self.varsel_card_outer.grid()
+            # Restore standard method frame; hide the multiclass grouped picker.
+            if hasattr(self, 'mc_varsel_group_frame'):
+                self.mc_varsel_group_frame.pack_forget()
+            if hasattr(self, 'varsel_frame') and not self.varsel_frame.winfo_manager():
+                self.varsel_frame.pack(fill='both', expand=True)
             # Re-enable iPLS-family + UVE-family checkboxes (disabled in one-class mode only)
             re_enabled_checkboxes = [
                 '_cb_ipls', '_cb_ipls_forward', '_cb_ipls_backward',
@@ -23770,6 +24057,13 @@ class SpectralPredictApp:
                 name for name, var in self.one_class_model_checkboxes.items()
                 if var.get()
             ]
+        elif task_type_check == "multiclass_simca":
+            # Multi-class class modeling selects per-class ENGINES, not the
+            # standard model checkboxes. The dispatch re-collects them from
+            # mc_engine_vars; this guard just needs a non-empty list.
+            selected_models = [
+                engine for engine, var in self.mc_engine_vars.items() if var.get()
+            ]
         else:
             selected_models = []
             if self.use_pls.get():
@@ -25612,6 +25906,56 @@ class SpectralPredictApp:
             alphas = sorted(set(p['alpha'] for p in defaults))
 
         return {'n_components': n_comp, 'alpha': alphas}
+
+    def _collect_mc_alpha_list(self):
+        vals = []
+        if self.mc_alpha_001.get():
+            vals.append(0.01)
+        if self.mc_alpha_005.get():
+            vals.append(0.05)
+        custom = self.mc_alpha_custom.get().strip()
+        if custom:
+            parsed, _errs = self._parse_oc_float_list(custom, 0.0, 1.0)
+            for v in parsed:
+                if v not in vals:
+                    vals.append(v)
+        return vals or [0.05]
+
+    def _collect_mc_ncomp_list(self):
+        vals = []
+        for flag, v in ((self.mc_ncomp_3, 3), (self.mc_ncomp_5, 5),
+                        (self.mc_ncomp_7, 7), (self.mc_ncomp_095, 0.95),
+                        (self.mc_ncomp_099, 0.99)):
+            if flag.get():
+                vals.append(v)
+        custom = self.mc_ncomp_custom.get().strip()
+        if custom:
+            parsed, _errs = self._parse_oc_n_components_list(custom)
+            for v in parsed:
+                if v not in vals:
+                    vals.append(v)
+        if self.mc_ncomp_per_class_cv.get():
+            vals.append("per_class_cv")
+        return vals or [0.99]
+
+    def _collect_mc_sizes(self):
+        """Checked Top-N variable counts for the multi-class varsel sweep.
+
+        Reuses the shared Top-N Variable Counts row (var_10..var_1000).
+        Defaults to ``[100]`` when nothing is checked.
+        """
+        sizes = []
+        for flag, n in ((self.var_10, 10), (self.var_20, 20), (self.var_50, 50),
+                        (self.var_100, 100), (self.var_250, 250),
+                        (self.var_500, 500), (self.var_1000, 1000)):
+            if flag.get():
+                sizes.append(n)
+        return sizes or [100]
+
+    def _collect_mc_varsel_paths(self):
+        """Checked multi-class variable-selection paths; ``["none"]`` if none."""
+        paths = [k for k, v in self.mc_varsel_vars.items() if v.get()]
+        return paths or ["none"]
 
     def _collect_one_class_model_param_overrides(self):
         # Reset per-call so a previous run's errors don't bleed into this invocation.
@@ -28242,6 +28586,218 @@ class SpectralPredictApp:
                 self.root.after(0, lambda: self._update_search_buttons('idle'))
                 return
 
+            # ═══════════════════════════════════════════════════════════════════
+            # MULTI-CLASS CLASS MODELING (SIMCA) — separate pipeline (T-31 Phase D)
+            # ═══════════════════════════════════════════════════════════════════
+            if task_type == "multiclass_simca":
+                from spectral_predict.search import run_multiclass_simca_search
+
+                selected_engines = [e for e, v in self.mc_engine_vars.items() if v.get()]
+                if not selected_engines:
+                    selected_engines = ['pca-simca']
+                selected_varsel = self._collect_mc_varsel_paths()
+
+                # Preprocessing + window sizes reuse the Basic Settings checkboxes.
+                mc_preprocess = []
+                if self.use_raw.get():
+                    mc_preprocess.append('raw')
+                if self.use_snv.get():
+                    mc_preprocess.append('snv')
+                if self.use_sg1.get():
+                    mc_preprocess.append('deriv1')
+                if self.use_sg2.get():
+                    mc_preprocess.append('deriv2')
+                if not mc_preprocess:
+                    mc_preprocess = ['raw', 'snv', 'deriv1']
+                mc_windows = []
+                if self.window_7.get():
+                    mc_windows.append(7)
+                if self.window_11.get():
+                    mc_windows.append(11)
+                if self.window_17.get():
+                    mc_windows.append(17)
+                if self.window_23.get():
+                    mc_windows.append(23)
+                if self.window_31.get():
+                    mc_windows.append(31)
+                if not mc_windows:
+                    mc_windows = [17]
+
+                # Swept parameter lists (Task 9): the backend is list-capable and
+                # multiplies the grid over these. alpha / n_components come from
+                # the checkbox collectors; n_components may include the string
+                # "per_class_cv" sentinel — the backend's per-row _as_list + model
+                # handle it, so do NOT filter it out.
+                mc_alpha_list = self._collect_mc_alpha_list()
+                mc_ncomp_list = self._collect_mc_ncomp_list()
+                mc_sizes = self._collect_mc_sizes()
+
+                baseline_method_mc, baseline_params_mc = self._get_baseline_params()
+
+                self._log_progress("\nRunning Multi-Class Class Modeling (SIMCA)...")
+                self._log_progress(f"  Engines: {selected_engines}")
+                self._log_progress(f"  Variable-selection paths: {selected_varsel}")
+                self._log_progress(
+                    f"  alpha={mc_alpha_list}, n_components={mc_ncomp_list}, "
+                    f"sizes={mc_sizes}, min_class_n={self.mc_min_class_samples.get()}"
+                )
+                try:
+                    results_df = run_multiclass_simca_search(
+                        X=X_filtered,
+                        y=y_filtered,
+                        engines=selected_engines,
+                        preprocessing_methods=mc_preprocess,
+                        window_sizes=mc_windows,
+                        alpha=mc_alpha_list,
+                        n_components=mc_ncomp_list,
+                        varsel_paths=selected_varsel,
+                        variable_selection_n_select=mc_sizes,
+                        min_class_samples=self.mc_min_class_samples.get(),
+                        cv_splits=self.folds.get(),
+                        variable_penalty=self.variable_penalty.get(),
+                        gap_penalty=self.gap_penalty.get(),
+                        baseline_method=baseline_method_mc,
+                        baseline_params=baseline_params_mc,
+                        enable_smoothing=self.enable_smoothing.get(),
+                        smoothing_window=self.smoothing_window.get(),
+                        smoothing_polyorder=self.smoothing_polyorder.get(),
+                        progress_callback=self._progress_callback,
+                        controller=self.search_controller,
+                        compute_top_decision_view=True,
+                    )
+                    mc_failed = False
+                except Exception as mc_err:
+                    self._log_progress(f"  Error in multi-class search: {mc_err}")
+                    import traceback
+                    self._log_progress(traceback.format_exc())
+                    results_df = None
+                    mc_failed = True
+
+                self._mc_decision_view = None
+                if results_df is not None and len(results_df) > 0:
+                    self._log_progress(
+                        f"\nMulti-class search complete: {len(results_df)} configurations tested"
+                    )
+                    self.results = results_df
+                    self.results_df = results_df
+                    if 'Select' not in results_df.columns:
+                        results_df.insert(0, 'Select', False)
+                    self._mc_decision_view = results_df.attrs.get('top_decision_view')
+                    # Stash the training data so the decision-view window can embed
+                    # it in an exported reproduction script (Phase D3) and so a
+                    # double-clicked leaderboard row can be re-run + saved.
+                    self._mc_export_data = (X_filtered, y_filtered)
+                    # Stash the search-global config (n_components policy, floors,
+                    # baseline/smoothing) needed to rebuild ANY row's exact config
+                    # when the user double-clicks it (per-row alpha/preprocess come
+                    # from the row itself).
+                    self._mc_run_config = {
+                        "alpha": mc_alpha_list,
+                        "n_components": mc_ncomp_list,
+                        "min_class_samples": self.mc_min_class_samples.get(),
+                        "n_select": mc_sizes,
+                        "baseline_method": baseline_method_mc,
+                        "baseline_params": baseline_params_mc,
+                        "smoothing": self.enable_smoothing.get(),
+                        "smoothing_window": self.smoothing_window.get(),
+                        "smoothing_polyorder": self.smoothing_polyorder.get(),
+                    }
+
+                    # Holdout validation for multi-class: rebuild each top row's
+                    # model on the calibration split and score the held-out
+                    # samples' decision matrix. Mirrors the regression/classification
+                    # call sites — X_val/y_val come straight from self.validation_X/_y
+                    # (full-spectrum, same columns as X_filtered), and the SAME
+                    # run-global baseline/smoothing/min_class_n settings thread
+                    # through so the holdout preprocessing matches the ranked row.
+                    if self.validation_enabled.get() and self.validation_indices:
+                        try:
+                            from spectral_predict.search import (
+                                compute_validation_metrics_for_top_models,
+                            )
+
+                            if hasattr(X_filtered, 'columns'):
+                                try:
+                                    mc_wavelengths = np.array(
+                                        [float(c) for c in X_filtered.columns]
+                                    )
+                                except (ValueError, TypeError):
+                                    mc_wavelengths = np.asarray(X_filtered.columns.values)
+                            else:
+                                mc_wavelengths = np.arange(X_filtered.shape[1])
+
+                            X_val_mc = (self.validation_X.values
+                                        if hasattr(self.validation_X, 'values')
+                                        else np.asarray(self.validation_X))
+                            y_val_mc = (self.validation_y.values
+                                        if hasattr(self.validation_y, 'values')
+                                        else np.asarray(self.validation_y))
+                            X_train_mc = (X_filtered.values
+                                          if hasattr(X_filtered, 'values')
+                                          else np.asarray(X_filtered))
+                            y_train_mc = (y_filtered.values
+                                          if hasattr(y_filtered, 'values')
+                                          else np.asarray(y_filtered))
+
+                            results_df = compute_validation_metrics_for_top_models(
+                                results_df,
+                                X_train=X_train_mc,
+                                y_train=y_train_mc,
+                                X_val=X_val_mc,
+                                y_val=y_val_mc,
+                                task_type="multiclass_simca",
+                                wavelengths=mc_wavelengths,
+                                top_n=self.validation_top_n.get(),
+                                baseline_method=baseline_method_mc,
+                                baseline_params=baseline_params_mc,
+                                enable_smoothing=self.enable_smoothing.get(),
+                                smoothing_window=self.smoothing_window.get(),
+                                smoothing_polyorder=self.smoothing_polyorder.get(),
+                                min_class_samples=self.mc_min_class_samples.get(),
+                            )
+                            self.results = results_df
+                            self.results_df = results_df
+                            self._log_progress(
+                                f"  Holdout validation: known-class val_* metrics "
+                                f"added for {len(self.validation_indices)} held-out "
+                                f"samples."
+                            )
+                            self._log_progress(
+                                "  [Note] A same-known-class holdout validates "
+                                "KNOWN-CLASS performance, NOT novelty detection. To "
+                                "test 'none of the above', hold out an entire class "
+                                "or score a true external contaminant."
+                            )
+                        except Exception as val_err:  # noqa: BLE001
+                            self._log_progress(
+                                f"  [Warning] Failed multi-class holdout "
+                                f"validation: {val_err}"
+                            )
+
+                    self._finalize_multiclass_run_ui()
+                elif mc_failed:
+                    self._log_progress("\n[X] Multi-class search FAILED — see the error above.")
+                else:
+                    self._log_progress("\nMulti-class search returned no results.")
+
+                if mc_failed:
+                    self._log_progress("\n[X] Analysis failed.")
+                    self.root.after(0, lambda: self.progress_status.config(text="[X] Analysis failed"))
+                    self.root.after(0, lambda: self.progress_info.config(text="Analysis Failed"))
+                    if hasattr(self, 'running_figure'):
+                        self.root.after(0, lambda: self.running_figure.stop_animation())
+                    self.root.after(0, lambda: self._update_search_buttons('idle'))
+                    return
+
+                self._log_progress("\n> Analysis complete!")
+                self.root.after(0, lambda: self.progress_status.config(text="Analysis complete!"))
+                self.root.after(0, lambda: self.progress_info.config(text="Analysis Complete"))
+                if hasattr(self, 'running_figure'):
+                    self.root.after(0, lambda: self.running_figure.stop_animation())
+                self.root.after(0, self._play_completion_chime)
+                self.root.after(0, lambda: self._update_search_buttons('idle'))
+                return
+
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
             optimization_method = self.optimization_method.get()
 
@@ -29492,6 +30048,703 @@ For detailed documentation, see the User Guide.
             except Exception:
                 pass
 
+    def _finalize_multiclass_run_ui(self):
+        """Finalize the UI after a successful multi-class run.
+
+        Populates the leaderboard, silently exports the results + decision-matrix
+        CSVs, and logs the decision-view status. Deliberately does NOT open the
+        decision-view window — parity with every other task type, which populate
+        the leaderboard and wait for the user to double-click a row to inspect.
+        The double-click path (``_on_result_double_click`` ->
+        ``_run_selected_multiclass_result`` -> ``_show_multiclass_decision_view``)
+        is how the window is reached.
+
+        Reads instance state set by the worker: ``self.results_df`` and
+        ``self._mc_decision_view``.
+        """
+        results_df = getattr(self, 'results_df', None)
+        if results_df is None or len(results_df) == 0:
+            return
+
+        self.root.after(0, lambda df=results_df: self._populate_results_table(df))
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = Path(self.output_dir.get())
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe_target = re.sub(r'[\\/:*?"<>|]', '_', self.target_column.get())
+            results_path = output_dir / f"multiclass_results_{safe_target}_{timestamp}.csv"
+            results_df.drop(columns=['all_vars'], errors='ignore').to_csv(
+                results_path, index=False
+            )
+            self._log_progress(f"\n> Results saved: {results_path}")
+            if self._mc_decision_view and not self._mc_decision_view.get('reason'):
+                dm_path = output_dir / f"multiclass_decision_matrix_{safe_target}_{timestamp}.csv"
+                self._multiclass_decision_matrix_dataframe(
+                    self._mc_decision_view
+                ).to_csv(dm_path, index=False)
+                self._log_progress(f"> Decision matrix saved: {dm_path}")
+        except Exception as exp_err:
+            self._log_progress(f"  [Warning] Failed to save multi-class CSVs: {exp_err}")
+
+        # No auto-open of the decision view — the user double-clicks a
+        # leaderboard row to inspect it (parity with other methods). Only log
+        # when a usable view is *absent* so the reason is visible.
+        if self._mc_decision_view and self._mc_decision_view.get('reason'):
+            self._log_progress(
+                f"  [Warning] Decision view unavailable: {self._mc_decision_view['reason']}"
+            )
+        elif not self._mc_decision_view:
+            # No decision view attached at all (top config had a failure reason,
+            # or the winning preprocess_cfg lookup missed). The leaderboard
+            # 'reason' column has the cause.
+            self._log_progress(
+                "  [Warning] No decision-matrix view for the top "
+                "configuration — see the leaderboard 'reason' column."
+            )
+
+    def _multiclass_decision_matrix_dataframe(self, view):
+        """Build a human-readable decision-matrix DataFrame from a decision view.
+
+        Columns: Sample, TrueClass, Decision, p(<class>) per class, Accepted
+        (comma-joined accepted class names). Used for CSV export and the
+        in-app table (T-31 Phase D2).
+        """
+        import pandas as pd
+
+        classes = list(view['classes'])
+        P = view['p_values']
+        A = view['accept']
+        sample_ids = view['sample_ids']
+        true_labels = view['true_labels']
+        labels = view['labels']
+
+        rows = []
+        for i in range(len(sample_ids)):
+            accepted = [classes[j] for j in range(len(classes)) if bool(A[i, j])]
+            row = {
+                'Sample': sample_ids[i],
+                'TrueClass': true_labels[i] if i < len(true_labels) else '',
+                'Decision': labels[i] if i < len(labels) else '',
+            }
+            for j, c in enumerate(classes):
+                row[f'p({c})'] = float(P[i, j])
+            row['Accepted'] = ', '.join(str(a) for a in accepted)
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    def _multiclass_decision_header(self, row):
+        """One-line config summary for the multi-class decision view.
+
+        ``row`` may be a dict or a pandas Series (a leaderboard row). Uses
+        ``.get`` throughout and tolerates missing keys — the label still renders
+        with whatever is present.
+
+        ``varsel_path`` may be a *resolved* boolean mask (a numpy array) for
+        discrimination methods (importance/cars/spa/uve/ipls...): the run-selected
+        decision view carries the resolved ``variable_selection`` on its config.
+        A raw ``ndarray or 'none'`` raised ``ValueError`` ("ambiguous truth
+        value"), which the caller's broad render-except swallowed — so
+        mask-based rows silently opened no window. Render a mask summary instead.
+        """
+        import numpy as np
+
+        vs = row.get('varsel_path')
+        if isinstance(vs, np.ndarray):
+            vs_label = f"mask ({int(vs.sum())} vars)"
+        else:
+            vs_label = vs if vs else 'none'
+        return (
+            f"Engine: {row.get('engine_family')}  |  alpha: {row.get('Alpha')}  |  "
+            f"n_components: {row.get('NComponents')}  |  "
+            f"varsel: {vs_label} (top-{row.get('n_vars')})"
+        )
+
+    def _show_multiclass_decision_view(self, view):
+        """Open a window with the per-sample decision matrix + Wold MPOW/DPOW plots.
+
+        Runs on the Tk main thread (scheduled via root.after from the worker).
+        The decision matrix is the IN-SAMPLE view (every trained class model's
+        verdict on every sample); leakage-safe ranking lives in the leaderboard.
+        """
+        try:
+            import numpy as np
+            import pandas as pd
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+            classes = list(view['classes'])
+            labels = list(view['labels'])
+            n = len(labels)
+            n_single = sum(1 for x in labels if x in classes)
+            n_multi = sum(1 for x in labels if x == 'multiple')
+            n_novel = sum(1 for x in labels if x == 'novel')
+
+            win = tk.Toplevel(self.root)
+            win.title("Multi-Class Decision Matrix")
+            win.geometry("980x720")
+
+            header = ttk.Frame(win)
+            header.pack(fill='x', padx=10, pady=(10, 4))
+            # Self-describing config line. view['config'] carries the backend-
+            # canonical keys (engine / alpha / n_components / variable_selection
+            # / n_select); map them to the leaderboard-row schema the header
+            # builder reads so the window states exactly what config it shows.
+            _cfg = view.get('config') or {}
+            # Prefer the human-readable varsel method name the run-selected worker
+            # stamps onto the config ('importance'/'cars'/...); fall back to the
+            # resolved ``variable_selection`` (a boolean mask for discrimination
+            # methods — the header summarizes it rather than choking on it).
+            _header_row = {
+                'engine_family': _cfg.get('engine'),
+                'Alpha': _cfg.get('alpha'),
+                'NComponents': _cfg.get('n_components'),
+                'varsel_path': _cfg.get('varsel_path', _cfg.get('variable_selection')),
+                'n_vars': _cfg.get('n_select'),
+            }
+            ttk.Label(
+                header,
+                text=self._multiclass_decision_header(_header_row),
+                style='Caption.TLabel',
+            ).pack(anchor='w')
+            ttk.Label(
+                header,
+                text=f"Classes: {', '.join(str(c) for c in classes)}  |  "
+                     f"Samples: {n}  —  single-class: {n_single}, "
+                     f"multiple: {n_multi}, novel: {n_novel}",
+                style='Subheading.TLabel',
+            ).pack(anchor='w')
+            unmodelable = view.get('unmodelable_classes') or []
+            if unmodelable:
+                ttk.Label(
+                    header,
+                    text=f"Unmodelable classes (too few samples): {unmodelable}",
+                    style='Caption.TLabel',
+                ).pack(anchor='w')
+            ttk.Label(
+                header,
+                text="Decision matrix is IN-SAMPLE (every class model's verdict on "
+                     "every sample). A sample accepted by no class is 'novel'; by "
+                     "several is 'multiple'.",
+                style='Caption.TLabel',
+            ).pack(anchor='w')
+
+            dm_df = self._multiclass_decision_matrix_dataframe(view)
+
+            # --- Decision matrix table ---
+            table_frame = ttk.Frame(win)
+            table_frame.pack(fill='both', expand=True, padx=10, pady=4)
+            cols = list(dm_df.columns)
+            tree = ttk.Treeview(table_frame, columns=cols, show='headings', height=14)
+            for c in cols:
+                tree.heading(c, text=c)
+                width = 150 if c in ('Sample', 'Accepted') else 90
+                tree.column(c, width=width, anchor='center', stretch=False)
+            for _, r in dm_df.iterrows():
+                vals = []
+                for c in cols:
+                    v = r[c]
+                    if isinstance(v, float):
+                        vals.append(f"{v:.4f}")
+                    else:
+                        vals.append(str(v))
+                tag = ''
+                if r['Decision'] == 'novel':
+                    tag = 'novel'
+                elif r['Decision'] == 'multiple':
+                    tag = 'multiple'
+                tree.insert('', 'end', values=vals, tags=(tag,))
+            tree.tag_configure('novel', background='#fdecea')
+            tree.tag_configure('multiple', background='#fff8e1')
+            vsb = ttk.Scrollbar(table_frame, orient='vertical', command=tree.yview)
+            hsb = ttk.Scrollbar(table_frame, orient='horizontal', command=tree.xview)
+            tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            tree.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            table_frame.rowconfigure(0, weight=1)
+            table_frame.columnconfigure(0, weight=1)
+
+            # --- Wold MPOW / DPOW diagnostic plots ---
+            wold = view.get('wold')
+            if wold is None and view.get('wold_error'):
+                ttk.Label(
+                    win,
+                    text=f"Wold diagnostics unavailable: {view['wold_error']}",
+                    style='Caption.TLabel',
+                ).pack(anchor='w', padx=10, pady=(2, 0))
+            if wold is not None:
+                plot_frame = ttk.Frame(win)
+                plot_frame.pack(fill='both', expand=True, padx=10, pady=4)
+                fig = Figure(figsize=(9, 2.6), dpi=100)
+                mpow = np.asarray(wold['modeling_power_agg'])
+                dpow = np.asarray(wold['discriminating_power_agg'])
+                # Wavelengths may be string labels (e.g. CSV headers); matplotlib
+                # would treat them as categorical or raise. Coerce to numeric,
+                # falling back to a plain index.
+                try:
+                    variables = np.asarray(wold.get('variables'), dtype=float)
+                    if variables.shape != mpow.shape:
+                        variables = np.arange(len(mpow))
+                except (TypeError, ValueError):
+                    variables = np.arange(len(mpow))
+                ax1 = fig.add_subplot(1, 2, 1)
+                ax1.plot(variables, mpow, color='#1f77b4', lw=0.9)
+                ax1.set_title('Wold Modeling Power (agg)', fontsize=9)
+                ax1.set_xlabel('Variable', fontsize=8)
+                ax1.tick_params(labelsize=7)
+                ax2 = fig.add_subplot(1, 2, 2)
+                ax2.plot(variables, dpow, color='#d62728', lw=0.9)
+                ax2.set_title('Wold Discriminating Power (agg)', fontsize=9)
+                ax2.set_xlabel('Variable', fontsize=8)
+                ax2.tick_params(labelsize=7)
+                fig.tight_layout()
+                canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+                canvas.draw()
+                canvas.get_tk_widget().pack(fill='both', expand=True)
+
+            # --- Save button ---
+            btn_frame = ttk.Frame(win)
+            btn_frame.pack(fill='x', padx=10, pady=(4, 10))
+
+            def _save_decision_csv():
+                # Button callbacks run on the Tk main loop; an unhandled
+                # exception (file locked by Excel, permission denied) would be
+                # swallowed by Tk's default handler and the user would see
+                # nothing. Surface it in the log AND a dialog.
+                from tkinter import filedialog, messagebox
+                try:
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.csv',
+                        filetypes=[('CSV', '*.csv')],
+                        title='Save decision matrix',
+                    )
+                    if path:
+                        dm_df.to_csv(path, index=False)
+                        self._log_progress(f"> Decision matrix saved: {path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to save decision matrix: {exc}")
+                    messagebox.showerror("Save failed", f"Could not save the CSV:\n{exc}")
+
+            def _export_repro(kind):
+                from tkinter import filedialog, messagebox
+                try:
+                    from spectral_predict.code_generator import (
+                        generate_multiclass_reproduction_notebook,
+                        generate_multiclass_reproduction_script,
+                    )
+                    config = view.get('config')
+                    if not config:
+                        self._log_progress("  [Warning] No config on decision view; cannot export.")
+                        return
+                    data = getattr(self, '_mc_export_data', None)
+                    data_X, data_y = (data if data else (None, None))
+                    wl = list(data_X.columns) if data_X is not None and hasattr(data_X, 'columns') else None
+                    if kind == 'script':
+                        path = filedialog.asksaveasfilename(
+                            defaultextension='.py', filetypes=[('Python Script', '*.py')],
+                            title='Export reproduction script',
+                        )
+                        if not path:
+                            return
+                        code = generate_multiclass_reproduction_script(
+                            config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                        Path(path).write_text(code, encoding='utf-8')
+                    else:
+                        import json as _json
+                        path = filedialog.asksaveasfilename(
+                            defaultextension='.ipynb', filetypes=[('Jupyter Notebook', '*.ipynb')],
+                            title='Export reproduction notebook',
+                        )
+                        if not path:
+                            return
+                        nb = generate_multiclass_reproduction_notebook(
+                            config, data_X=data_X, data_y=data_y, wavelengths=wl)
+                        Path(path).write_text(_json.dumps(nb, indent=1), encoding='utf-8')
+                    self._log_progress(f"> Reproduction {kind} saved: {path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to export {kind}: {exc}")
+                    messagebox.showerror("Export failed", f"Could not export the {kind}:\n{exc}")
+
+            def _save_model():
+                # Fit + persist the config's MultiClassClassModel as a .dasp so
+                # the user can reload it and classify new specimens — the
+                # class-modeling analogue of saving a regression/classification
+                # model. Tk swallows callback exceptions, so surface them.
+                from tkinter import filedialog, messagebox
+                try:
+                    config = view.get('config')
+                    data = getattr(self, '_mc_export_data', None)
+                    if not config or not data or data[0] is None:
+                        messagebox.showwarning(
+                            "Save Model",
+                            "Model config or training data unavailable — "
+                            "re-run the search, then save.",
+                        )
+                        return
+                    path = filedialog.asksaveasfilename(
+                        defaultextension='.dasp',
+                        filetypes=[('DASP model', '*.dasp')],
+                        title='Save multi-class model',
+                    )
+                    if not path:
+                        return
+                    self._fit_and_save_multiclass_model(config, data[0], data[1], path)
+                    self._log_progress(f"> Model saved: {path}")
+                    messagebox.showinfo("Model Saved", f"Saved multi-class model to:\n{path}")
+                except Exception as exc:
+                    self._log_progress(f"  [X] Failed to save model: {exc}")
+                    messagebox.showerror("Save failed", f"Could not save the model:\n{exc}")
+
+            ttk.Button(btn_frame, text="Save Model (.dasp)",
+                       command=_save_model).pack(side='right', padx=(0, 6))
+            ttk.Button(btn_frame, text="Save Decision Matrix CSV",
+                       command=_save_decision_csv).pack(side='right')
+            ttk.Button(btn_frame, text="Export Notebook",
+                       command=lambda: _export_repro('notebook')).pack(side='right', padx=(0, 6))
+            ttk.Button(btn_frame, text="Export Repro Script",
+                       command=lambda: _export_repro('script')).pack(side='right', padx=(0, 6))
+        except Exception as exc:
+            self._log_progress(f"  [X] Could not render decision view: {exc}")
+            import traceback
+            self._log_progress(traceback.format_exc())
+            # Don't strand a half-built, button-less window.
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+    def _reconstruct_mc_preprocess_cfg(self, row):
+        """Rebuild the ``preprocess_cfg`` dict for a multi-class leaderboard row.
+
+        Mirrors ``run_multiclass_simca_search``'s config builder: the pipeline
+        ``method`` is derived from the ``Preprocess`` name (stripping any
+        ``_w<win>`` suffix + derivative digit), while ``deriv``/``window``/
+        ``polyorder`` come from the row's own columns. Baseline/smoothing come
+        from the stashed search config (``_mc_run_config``) since they are
+        global to the search, not per-row.
+        """
+        import pandas as pd
+
+        def _opt_int(v):
+            try:
+                if v is None or pd.isna(v):
+                    return None
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+
+        name = str(row.get("Preprocess", "raw") or "raw")
+        base = name.split("_w")[0]  # drop the "_w<window>" suffix if present
+        if base in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+            method = base.replace("1", "").replace("2", "")
+        else:
+            method = base
+
+        run_cfg = getattr(self, "_mc_run_config", None) or {}
+        return {
+            "method": method,
+            "name": name,
+            "deriv": _opt_int(row.get("Deriv")),
+            "window": _opt_int(row.get("Window")),
+            "polyorder": _opt_int(row.get("Poly")),
+            "baseline_method": run_cfg.get("baseline_method"),
+            "baseline_params": run_cfg.get("baseline_params"),
+            "smoothing": run_cfg.get("smoothing", False),
+            "smoothing_window": run_cfg.get("smoothing_window", 17),
+            "smoothing_polyorder": run_cfg.get("smoothing_polyorder", 2),
+        }
+
+    def _run_selected_multiclass_result(self, row):
+        """Run a SELECTED multi-class leaderboard row: rebuild its exact config,
+        compute the in-sample decision view on a worker thread, and show it
+        (with a Save Model option). The class-modeling analogue of loading a
+        regression/classification result into Model Dev — but it produces a
+        decision matrix + a saveable .dasp, not an RMSE refit.
+        """
+        import threading
+
+        import pandas as pd
+
+        # A live search stashes _mc_export_data and _mc_run_config together
+        # (atomic); require BOTH. Without the run-config we would silently
+        # reconstruct the row's preprocessing with default (no) baseline/
+        # smoothing — a different pipeline than the row was searched with — so
+        # bail with a clear message instead (Kimi cross-family review).
+        data = getattr(self, "_mc_export_data", None)
+        run_cfg = getattr(self, "_mc_run_config", None)
+        if not data or data[0] is None or not run_cfg:
+            messagebox.showwarning(
+                "Run Selected Result",
+                "The multi-class training data/config is no longer available. "
+                "Re-run the multi-class search, then double-click a row.",
+            )
+            return
+
+        # One run-selected worker at a time — repeated double-clicks would spawn
+        # overlapping workers + overlapping decision-view windows.
+        if getattr(self, "_mc_worker_running", False):
+            self._log_progress("  [Note] A selected-result run is already in progress.")
+            return
+
+        from spectral_predict.search import (
+            _MULTICLASS_MASK_METHODS,
+            _MULTICLASS_VARSEL_PATHS,
+        )
+
+        X_df, y_ser = data
+        engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
+        varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
+        # Strict validation, but against the FULL accepted set the backend uses
+        # (Wold/none/importance dict paths UNION the resolvable discrimination
+        # mask methods — cars/spa/uve/ipls/…). This is exactly
+        # ``run_multiclass_simca_search``'s ``_accepted_varsel_paths``. A
+        # corrupted/unknown path must NOT be silently coerced to "no variable
+        # selection" and shown as if it were the row's setting.
+        _accepted_varsel_paths = set(_MULTICLASS_VARSEL_PATHS) | set(
+            _MULTICLASS_MASK_METHODS
+        )
+        if varsel_path not in _accepted_varsel_paths:
+            messagebox.showwarning(
+                "Run Selected Result",
+                f"The selected row has an unrecognized variable-selection path "
+                f"'{varsel_path}'. Expected one of {sorted(_accepted_varsel_paths)}.",
+            )
+            return
+        try:
+            alpha = float(row.get("Alpha"))
+        except (TypeError, ValueError):
+            alpha = 0.05
+        # n_components / n_select are PER-ROW (the search now sweeps them), so
+        # source them from the row itself — NOT from _mc_run_config, which stores
+        # the swept LISTS for reference. Mirror the backend's rebuild coercion.
+        n_components_row = row.get("NComponents")
+        if n_components_row is None or (
+            isinstance(n_components_row, float) and pd.isna(n_components_row)
+        ):
+            n_components_row = 0.99
+        n_select_raw = row.get("NSelect")
+        try:
+            n_select_row = (
+                int(n_select_raw)
+                if n_select_raw is not None and not pd.isna(n_select_raw)
+                else None
+            )
+        except (TypeError, ValueError):
+            n_select_row = None
+        preprocess_cfg = self._reconstruct_mc_preprocess_cfg(row)
+
+        self._log_progress(
+            f"\n> Running selected multi-class result: {engine} + "
+            f"{preprocess_cfg['name']} (varsel={varsel_path})"
+        )
+        self._mc_worker_running = True
+
+        def _worker():
+            try:
+                import numpy as _np
+
+                from spectral_predict.search import (
+                    _WOLD_METHODS,
+                    _multiclass_preprocess_matrix,
+                    _multiclass_varsel_mask,
+                    build_multiclass_decision_view,
+                )
+
+                # Resolve the row's varsel value the SAME way the search loop and
+                # the holdout rebuild do: Wold/none pass through the dict; a
+                # discrimination method (cars/spa/uve/ipls/…) is resolved to a
+                # boolean mask ON THE ROW'S PREPROCESSED CALIBRATION MATRIX so the
+                # double-click model is identical to the ranked row.
+                X_np = X_df.values if hasattr(X_df, "values") else _np.asarray(X_df)
+                X_np = _np.asarray(X_np, dtype=_np.float64)
+                y_np = y_ser.values if hasattr(y_ser, "values") else _np.asarray(y_ser)
+                wavelengths_full = _np.asarray(
+                    list(X_df.columns)
+                    if hasattr(X_df, "columns")
+                    else _np.arange(X_np.shape[1])
+                )
+                if varsel_path in _WOLD_METHODS or varsel_path == "none":
+                    variable_selection = _MULTICLASS_VARSEL_PATHS.get(varsel_path)
+                else:
+                    X_pp, wl_trimmed, _ = _multiclass_preprocess_matrix(
+                        X_np, preprocess_cfg, wavelengths_full
+                    )
+                    variable_selection = _multiclass_varsel_mask(
+                        X_pp,
+                        y_np,
+                        wl_trimmed,
+                        varsel_path,
+                        n_select_row,
+                        task_type="classification",
+                    )
+
+                view = build_multiclass_decision_view(
+                    X_df,
+                    y_ser,
+                    engine=engine,
+                    preprocess_cfg=preprocess_cfg,
+                    alpha=alpha,
+                    n_components=n_components_row,
+                    scaling="per_class",
+                    min_class_samples=run_cfg.get("min_class_samples", 10),
+                    variable_selection=variable_selection,
+                    n_select=n_select_row,
+                    wavelengths=(
+                        list(X_df.columns) if hasattr(X_df, "columns") else None
+                    ),
+                    sample_ids=(list(X_df.index) if hasattr(X_df, "index") else None),
+                )
+                # The view config stores the *resolved* variable_selection (a
+                # boolean mask for discrimination methods). Stamp the readable
+                # method name so the decision-view header shows "importance"/
+                # "cars"/... instead of a raw ndarray (which it must not choke on).
+                if isinstance(view, dict) and isinstance(view.get("config"), dict):
+                    view["config"]["varsel_path"] = varsel_path
+            except Exception as exc:  # noqa: BLE001 — surface, never crash Tk
+                import traceback
+
+                tb = traceback.format_exc()
+                self.root.after(
+                    0,
+                    lambda e=exc, t=tb: (
+                        setattr(self, "_mc_worker_running", False),
+                        self._log_progress(f"  [X] Failed to run selected result: {e}\n{t}"),
+                        messagebox.showerror(
+                            "Run Selected Result",
+                            f"Could not run the selected configuration:\n{e}",
+                        ),
+                    ),
+                )
+                return
+
+            reason = view.get("reason")
+            if reason:
+                self.root.after(
+                    0,
+                    lambda r=reason: (
+                        setattr(self, "_mc_worker_running", False),
+                        self._log_progress(f"  [Warning] Selected config did not build: {r}"),
+                        messagebox.showwarning(
+                            "Run Selected Result",
+                            f"The selected configuration could not be built:\n{r}",
+                        ),
+                    ),
+                )
+                return
+
+            self.root.after(
+                0,
+                lambda v=view: (
+                    setattr(self, "_mc_worker_running", False),
+                    self._show_multiclass_decision_view(v),
+                ),
+            )
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _fit_and_save_multiclass_model(self, config, X, y, path):
+        """Fit a ``MultiClassClassModel`` for ``config`` on the training data and
+        persist it as a ``.dasp`` for later classification of new specimens.
+
+        The model is fit in the config's preprocessed feature space; the
+        per-spectrum preprocessing pipeline (SNV / SG derivative / baseline) is
+        stored as the model's preprocessor, and when a Savitzky-Golay edge mask
+        trims the axis the ``use_full_spectrum_preprocessing`` +
+        ``full_wavelengths`` handshake is recorded so ``predict_with_model``
+        reproduces the exact preprocessing + edge mask on raw new spectra.
+        Returns the fitted model.
+        """
+        import numpy as np
+        from sklearn.pipeline import Pipeline as SkPipeline
+
+        from spectral_predict import model_io
+        from spectral_predict.preprocess import build_preprocessing_pipeline
+        from spectral_predict.search import _multiclass_preprocess_matrix
+        from spectral_predict.simca import MultiClassClassModel
+
+        preprocess_cfg = dict(config["preprocess_cfg"])
+        X_np = X.values if hasattr(X, "values") else np.asarray(X)
+        X_np = np.asarray(X_np, dtype=np.float64)
+        y_np = y.values if hasattr(y, "values") else np.asarray(y)
+        wl_full = (
+            np.asarray(X.columns.values)
+            if hasattr(X, "columns")
+            else np.arange(X_np.shape[1])
+        )
+
+        # Preprocess identically to the search / decision view (per-spectrum ops
+        # + SG edge mask) → the exact matrix + wavelengths the model is fit on.
+        X_pp, wl_current, reason = _multiclass_preprocess_matrix(
+            X_np, preprocess_cfg, wl_full
+        )
+        if X_pp is None:
+            raise ValueError(f"Preprocessing failed: {reason}")
+
+        # A standalone fitted preprocessor so predict_with_model can reproduce
+        # the preprocessing on raw new spectra. Fit on the FULL raw matrix (the
+        # edge mask is applied afterward via the full-spectrum handshake below).
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["method"],
+            preprocess_cfg.get("deriv"),
+            preprocess_cfg.get("window"),
+            preprocess_cfg.get("polyorder"),
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+        preprocessor = None
+        if pipe_steps:
+            preprocessor = SkPipeline(pipe_steps)
+            preprocessor.fit(X_np)
+
+        model = MultiClassClassModel(
+            engine=config["engine"],
+            alpha=config.get("alpha", 0.05),
+            n_components=config.get("n_components", 0.99),
+            scaling=config.get("scaling", "per_class"),
+            min_class_samples=config.get("min_class_samples", 10),
+            variable_selection=config.get("variable_selection"),
+            n_select=config.get("n_select"),
+        ).fit(X_pp, y_np)
+
+        def _coerce(v):
+            return v.item() if hasattr(v, "item") else v
+
+        def _coerce_wl(v):
+            # Wavelengths MUST be stored as floats: predict_with_model matches
+            # them against float-converted DataFrame columns, so a numeric-string
+            # label (e.g. "1000" from a CSV/Excel header) would be treated as a
+            # missing wavelength and break prediction on the very data the model
+            # was trained on. Non-numeric labels (rare) are left as-is.
+            v = v.item() if hasattr(v, "item") else v
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return v
+
+        metadata = {
+            "model_name": "MultiClassSIMCA",
+            "task_type": "multiclass_simca",
+            "wavelengths": [_coerce_wl(w) for w in wl_current],
+            "n_vars": int(X_pp.shape[1]),
+            "class_names": [_coerce(c) for c in model.classes_],
+            "engine_family": config["engine"],
+            "alpha": config.get("alpha", 0.05),
+            "scaling": config.get("scaling", "per_class"),
+            "preprocessing": preprocess_cfg.get("name", ""),
+        }
+        # SG derivative edge mask trimmed the axis → tell predict_with_model to
+        # preprocess on the full spectrum then subset to the trained wavelengths.
+        if len(wl_current) != len(wl_full):
+            metadata["use_full_spectrum_preprocessing"] = True
+            metadata["full_wavelengths"] = [_coerce_wl(w) for w in wl_full]
+
+        model_io.save_model(model, preprocessor, metadata, path)
+        return model
+
     def _populate_results_table(self, results_df, is_sorted=False):
         """Populate the results table with analysis results."""
         if results_df is None or len(results_df) == 0:
@@ -29651,6 +30904,8 @@ For detailed documentation, see the User Guide.
             'preprocess_chromosome',
             'smart_selected_wavelengths', 'smart_n_wavelengths',
             'smart_score', 'smart_importance_method', 'smart_model_name',
+            # T-31 multi-class: the full variable list is not human-readable.
+            'all_vars',
         }
         columns = [c for c in results_df.columns if c not in INTERNAL_COLUMNS]
 
@@ -29684,15 +30939,30 @@ For detailed documentation, see the User Guide.
         # Always update column headings (for multi-sort indicators and click bindings)
         superscripts = {1: '\u00b9', 2: '\u00b2', 3: '\u00b3'}
         sorted_col_names = {sc for sc, _ in self.results_sort_keys}
+        # T-31 multi-class: display-name the backend-canonical swept columns
+        # WITHOUT renaming the DataFrame columns (other code \u2014 export, run-
+        # selected, decision view \u2014 reads engine_family / varsel_path verbatim).
+        # This only relabels the visible header text; the Treeview column IDs
+        # stay the backend names (so tooltips + sorting still key off them).
+        mc_display_names = {}
+        if (
+            'Task' in results_df.columns
+            and (results_df['Task'] == 'multiclass_simca').any()
+        ):
+            mc_display_names = {
+                'engine_family': 'Engine',
+                'varsel_path': 'VarSelMethod',
+            }
         for col in columns:
-            header_text = col
+            base_label = mc_display_names.get(col, col)
+            header_text = base_label
             for i, (sort_col, asc) in enumerate(self.results_sort_keys):
                 if sort_col == col:
                     arrow = '\u25b2' if asc else '\u25bc'
                     if len(self.results_sort_keys) > 1:
-                        header_text = f"{col} {arrow}{superscripts[i + 1]}"
+                        header_text = f"{base_label} {arrow}{superscripts[i + 1]}"
                     else:
-                        header_text = f"{col} {arrow}"
+                        header_text = f"{base_label} {arrow}"
                     break
 
             self.results_tree.heading(col, text=header_text)
@@ -29952,7 +31222,11 @@ For detailed documentation, see the User Guide.
 
         # --- LVs ≤ spinbox (only if column exists) ---
         if 'LVs' in df.columns:
-            max_lvs = int(pd.to_numeric(df['LVs'], errors='coerce').dropna().max()) if df['LVs'].notna().any() else 30
+            # Guard on the COERCED values, not the raw column: multiclass SIMCA
+            # writes LVs="auto" (or a per-class dict string), which is notna() but
+            # coerces to all-NaN -> int(NaN) crashed the whole leaderboard render.
+            _lvs_numeric = pd.to_numeric(df['LVs'], errors='coerce').dropna()
+            max_lvs = int(_lvs_numeric.max()) if len(_lvs_numeric) else 30
             self.filter_max_lvs_var.set(max_lvs)
             self._filter_max_lvs_default = max_lvs
             ttk.Label(self.active_filter_frame, text="LVs ≤").pack(side='left')
@@ -29968,7 +31242,8 @@ For detailed documentation, see the User Guide.
 
         # --- n_vars ≤ spinbox (only if column exists) ---
         if 'n_vars' in df.columns:
-            max_nvars = int(pd.to_numeric(df['n_vars'], errors='coerce').dropna().max()) if df['n_vars'].notna().any() else 9999
+            _nvars_numeric = pd.to_numeric(df['n_vars'], errors='coerce').dropna()
+            max_nvars = int(_nvars_numeric.max()) if len(_nvars_numeric) else 9999
             self.filter_max_nvars_var.set(max_nvars)
             self._filter_max_nvars_default = max_nvars
             ttk.Label(self.active_filter_frame, text="n_vars ≤").pack(side='left')
@@ -30689,7 +31964,7 @@ For detailed documentation, see the User Guide.
         if not hasattr(self, 'results_df') or self.results_df is None or len(self.results_df) == 0:
             return
 
-        from src.spectral_predict.scoring import compute_composite_score
+        from spectral_predict.scoring import compute_composite_score
 
         task_type = "regression" if "R2cv" in self.results_df.columns else "classification"
 
@@ -31076,6 +32351,21 @@ For detailed documentation, see the User Guide.
                                        "Try re-running analysis or sorting again.")
                 return
             model_config = self.results_display_df.iloc[row_pos].to_dict()
+
+        # ── Multi-class SIMCA (T-31): class-modeling rows do NOT fit the
+        # regression/classification Refine tab (no get_model('pca-simca'), no
+        # RMSE/LV refit). Route to the dedicated run-selected handler that
+        # rebuilds THIS row's config, shows its decision matrix, and offers a
+        # Save Model (.dasp) option. Detect via the ROW's own Task column only —
+        # NOT the live task_type radio: keying on the radio would steal a
+        # regression/classification/one-class row double-click whenever the user
+        # switched the radio to multiclass without re-running (the results table
+        # still holds the old single-Y rows). The row's Task is authoritative.
+        row_task = str(model_config.get("Task", "") or "")
+        if row_task == "multiclass_simca":
+            self.selected_model_config = model_config
+            self._run_selected_multiclass_result(model_config)
+            return
 
         # Attach training configuration if available (for validation checking)
         # This ensures Model Dev can verify it's using the same data configuration as Results tab
@@ -42154,6 +43444,50 @@ External Validation Performance (n={n_val}):
             self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
             self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')
 
+        elif 'p_values' in first_uncertainty:
+            # === MULTI-CLASS CLASS MODELING: per-class p-values + decision ===
+            # predict_with_uncertainty returns predictions=summary labels and
+            # uncertainty={p_values, decision_matrix, accepted_classes,
+            # class_names}. Without this branch the multiclass dict falls through
+            # to the regression formatter and f"{pred:.4f}" raises on a string.
+            class_names = list(first_uncertainty.get('class_names', []))
+            columns = ['Sample', 'Model', 'Decision', 'Accepted'] + [f'p({c})' for c in class_names]
+            self.uncertainty_tree['columns'] = columns
+            for col in columns:
+                self.uncertainty_tree.heading(col, text=col)
+                if col == 'Sample':
+                    self.uncertainty_tree.column(col, width=150, anchor='w')
+                elif col == 'Model':
+                    self.uncertainty_tree.column(col, width=160, anchor='w')
+                elif col in ('Decision', 'Accepted'):
+                    self.uncertainty_tree.column(col, width=130, anchor='center')
+                else:
+                    self.uncertainty_tree.column(col, width=90, anchor='e')
+
+            for model_name, uncertainty in self.predictions_uncertainty.items():
+                if 'p_values' not in uncertainty:
+                    continue
+                P = np.asarray(uncertainty['p_values'])
+                accepted = uncertainty.get('accepted_classes') or []
+                mc_classes = list(uncertainty.get('class_names', class_names))
+                predictions = self.predictions_df[model_name].values
+                for i, sample in enumerate(sample_names):
+                    acc = ', '.join(str(a) for a in accepted[i]) if i < len(accepted) else ''
+                    row_values = [str(sample), model_name, str(predictions[i]), acc]
+                    for j in range(len(mc_classes)):
+                        row_values.append(f"{P[i, j]:.4f}" if not np.isnan(P[i, j]) else "N/A")
+                    item_id = self.uncertainty_tree.insert('', 'end', values=row_values)
+                    decision = str(predictions[i])
+                    if decision == 'novel':
+                        self.uncertainty_tree.item(item_id, tags=('low_conf',))
+                    elif decision == 'multiple':
+                        self.uncertainty_tree.item(item_id, tags=('med_conf',))
+                    else:
+                        self.uncertainty_tree.item(item_id, tags=('high_conf',))
+            self.uncertainty_tree.tag_configure('high_conf', foreground='#2ecc71')
+            self.uncertainty_tree.tag_configure('med_conf', foreground='#f39c12')
+            self.uncertainty_tree.tag_configure('low_conf', foreground='#e74c3c')
+
         else:
             # === REGRESSION: Show RMSECV and applicability domain ===
             print("DEBUG: Displaying regression uncertainty table")
@@ -50011,6 +51345,36 @@ External Validation Performance (n={n_val}):
 
         self.comparison_rules_text.config(state='disabled')
 
+    def _comparison_reject_multiclass(self, model_dict, role):
+        """Return True (and warn) if a multiclass_simca model is loaded into the
+        Multi-Model comparison tab.
+
+        Tab 9 is built around scalar per-sample predictions (consensus by R²,
+        conditional numeric/label flagging, applicability-domain distances). A
+        multi-class SIMCA model instead outputs a decision MATRIX (each sample
+        accepted by 0/1/several class models, or flagged "novel") — a paradigm
+        this tab cannot represent. Exclude it cleanly with an explicit message
+        rather than mislabel it "(Reg)" and silently drop the per-class
+        p-values / novelty decision. Predict such models on the Predict tab.
+        """
+        try:
+            task_type = (model_dict.get("metadata") or {}).get("task_type")
+        except AttributeError:
+            task_type = None
+        if task_type == "multiclass_simca":
+            messagebox.showerror(
+                "Multi-Class Model Not Supported Here",
+                f"The {role} model is a multi-class SIMCA class-modeling model, "
+                "which produces a decision matrix (accepted / multiple / novel "
+                "per class), not a single prediction.\n\n"
+                "The Multi-Model comparison tab compares scalar predictions "
+                "(regression values / class labels / one-class inlier-outlier) "
+                "and cannot represent a decision matrix.\n\n"
+                "Load and run this model on the Predict tab instead.",
+            )
+            return True
+        return False
+
     def _load_comparison_primary_model(self):
         """Load a single primary model for comparison."""
         from tkinter import filedialog
@@ -50027,7 +51391,7 @@ External Validation Performance (n={n_val}):
         try:
             # Reuse existing model loading logic from Tab 8
             from pathlib import Path
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
             import zipfile
 
             # Check if this is an ensemble file
@@ -50062,6 +51426,9 @@ External Validation Performance (n={n_val}):
                 model_dict['filepath'] = filepath
                 model_dict['filename'] = Path(filepath).name
 
+            if self._comparison_reject_multiclass(model_dict, "primary"):
+                return
+
             self.comparison_primary_model = model_dict
             self._update_comparison_primary_display()
 
@@ -50094,7 +51461,7 @@ External Validation Performance (n={n_val}):
 
         try:
             from pathlib import Path
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
             import zipfile
 
             for filepath in filepaths:
@@ -50129,6 +51496,9 @@ External Validation Performance (n={n_val}):
                     model_dict = model_io.load_model(filepath)
                     model_dict['filepath'] = filepath
                     model_dict['filename'] = Path(filepath).name
+
+                if self._comparison_reject_multiclass(model_dict, "auxiliary"):
+                    continue
 
                 self.comparison_auxiliary_models.append(model_dict)
 
@@ -50979,7 +52349,7 @@ External Validation Performance (n={n_val}):
             self.root.update()
 
             import pandas as pd
-            from src.spectral_predict import model_io
+            from spectral_predict import model_io
 
             # Apply transfer chain if enabled
             if self.apply_transfer.get() and self.transfer_models:
@@ -57150,7 +58520,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_epo_projection(self, X: np.ndarray) -> np.ndarray:
         """Apply EPO projection to remove contaminant signal."""
-        from src.spectral_predict.contaminant_analysis import EstimatedEPO
+        from spectral_predict.contaminant_analysis import EstimatedEPO
 
         n_components = self.contam_n_components.get()
 
@@ -57169,7 +58539,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_glsw_weighting(self, X: np.ndarray) -> np.ndarray:
         """Apply GLSW wavelength weighting."""
-        from src.spectral_predict.contaminant_analysis import ContaminantGLSW
+        from spectral_predict.contaminant_analysis import ContaminantGLSW
 
         X_contam = np.vstack(list(self.contam_groups.values()))
 
@@ -57182,7 +58552,7 @@ External Validation Performance (n={n_val}):
 
     def _apply_opls_filter(self, X: np.ndarray) -> np.ndarray:
         """Apply OPLS orthogonal signal correction."""
-        from src.spectral_predict.contaminant_analysis import ContaminantOPLSDA
+        from spectral_predict.contaminant_analysis import ContaminantOPLSDA
 
         n_components = self.contam_n_components.get()
         X_contam = np.vstack(list(self.contam_groups.values()))

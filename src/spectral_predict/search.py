@@ -571,6 +571,187 @@ def _apply_class_weight_discriminator_for_rebuilt_model(
     return {}
 
 
+def _multiclass_row_to_preprocess_cfg(
+    row,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+) -> dict:
+    """Rebuild the per-spectrum ``preprocess_cfg`` dict for a multi-class
+    leaderboard row from its own columns.
+
+    Mirrors :func:`run_multiclass_simca_search`'s config builder: the pipeline
+    ``method`` is derived from the ``Preprocess`` name (stripping the ``_w<win>``
+    suffix + the derivative digit), while ``deriv``/``window``/``polyorder`` come
+    from the row's own columns.
+
+    Baseline / smoothing are GLOBAL search settings (not persisted per row), so
+    they default to off. Pass the run's actual settings via the keyword-only
+    ``baseline_*`` / ``*smoothing*`` params so the holdout is preprocessed with
+    the SAME pipeline as the ranked row (otherwise the calibration/holdout split
+    would be scored on a different pipeline than the one the search trained on).
+    """
+    def _opt_int(v):
+        try:
+            if v is None or pd.isna(v):
+                return None
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    name = str(row.get("Preprocess", "raw") or "raw")
+    base = name.split("_w")[0]  # drop the "_w<window>" suffix if present
+    if base in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+        method = base.replace("1", "").replace("2", "")
+    else:
+        method = base
+
+    return {
+        "method": method,
+        "name": name,
+        "deriv": _opt_int(row.get("Deriv")),
+        "window": _opt_int(row.get("Window")),
+        "polyorder": _opt_int(row.get("Poly")),
+        "baseline_method": baseline_method,
+        "baseline_params": baseline_params,
+        "smoothing": enable_smoothing,
+        "smoothing_window": smoothing_window,
+        "smoothing_polyorder": smoothing_polyorder,
+    }
+
+
+def _multiclass_holdout_metrics(
+    row,
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    wavelengths,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    min_class_samples: int = 10,
+) -> dict:
+    """Fit a leaderboard row's exact ``MultiClassClassModel`` on the calibration
+    split and score the holdout via its decision matrix.
+
+    Rebuilds the row's config (engine / alpha / n_components / variable
+    selection) from its columns, preprocesses each split's FULL spectrum with the
+    row's per-spectrum pipeline (SNV / SG derivative — leakage-safe convention),
+    fits on ``(X_train, y_train)``, and evaluates the holdout acceptance matrix
+    with :func:`~spectral_predict.simca.multiclass_simca_metrics`.
+
+    Returns a dict of the five ``val_*`` column values.
+    """
+    import warnings
+
+    from spectral_predict.simca import MultiClassClassModel, multiclass_simca_metrics
+
+    preprocess_cfg = _multiclass_row_to_preprocess_cfg(
+        row,
+        baseline_method=baseline_method,
+        baseline_params=baseline_params,
+        enable_smoothing=enable_smoothing,
+        smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder,
+    )
+    wavelengths_full = np.asarray(wavelengths)
+
+    X_train_np = np.asarray(X_train, dtype=np.float64)
+    X_val_np = np.asarray(X_val, dtype=np.float64)
+    y_train_np = np.asarray(y_train)
+    y_val_np = np.asarray(y_val)
+
+    # Per-spectrum preprocessing on each split's FULL spectrum, then edge-mask —
+    # exactly how the search builds each row (the SG edge mask is deterministic
+    # in window + wavelengths, so train and val end up column-aligned).
+    X_tr_pp, _wl_tr, reason_tr = _multiclass_preprocess_matrix(
+        X_train_np, preprocess_cfg, wavelengths_full
+    )
+    if X_tr_pp is None:
+        raise ValueError(reason_tr or "preprocessing_failed (train)")
+    X_va_pp, _wl_va, reason_va = _multiclass_preprocess_matrix(
+        X_val_np, preprocess_cfg, wavelengths_full
+    )
+    if X_va_pp is None:
+        raise ValueError(reason_va or "preprocessing_failed (val)")
+
+    # Rebuild the row's variable_selection value from its path + NSelect. Same
+    # dispatch the search loop uses: "none" -> None; Wold -> string; a
+    # discrimination method -> a boolean mask (computed on the train matrix).
+    varsel_path = str(row.get("varsel_path") or row.get("SubsetTag") or "none")
+    n_select_raw = row.get("NSelect")
+    try:
+        n_select = (
+            int(n_select_raw)
+            if n_select_raw is not None and not pd.isna(n_select_raw)
+            else None
+        )
+    except (TypeError, ValueError):
+        n_select = None
+    # Use the TRIMMED train axis (_wl_tr) returned alongside X_tr_pp: an SG
+    # derivative edge-masks the wavelength axis, so the full axis would push
+    # interval-method indices past the trimmed matrix (out-of-bounds).
+    varsel_value = _multiclass_varsel_mask(
+        X_tr_pp, y_train_np, _wl_tr, varsel_path, n_select
+    )
+
+    engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
+    try:
+        alpha = float(row.get("Alpha"))
+    except (TypeError, ValueError):
+        alpha = 0.05
+    n_components = row.get("NComponents")
+    if n_components is None or (isinstance(n_components, float) and pd.isna(n_components)):
+        n_components = 0.99
+
+    model = MultiClassClassModel(
+        engine=engine,
+        alpha=alpha,
+        n_components=n_components,
+        scaling="per_class",
+        min_class_samples=min_class_samples,
+        variable_selection=varsel_value,
+        n_select=n_select,
+    ).fit(X_tr_pp, y_train_np)
+
+    _, A_val = model.decision_matrix(X_va_pp)
+    metrics = multiclass_simca_metrics(y_val_np, A_val, list(model.classes_))
+
+    sens = np.asarray(
+        list(metrics["per_class_sensitivity"].values()), dtype=np.float64
+    )
+    spec = np.asarray(
+        list(metrics["per_class_specificity"].values()), dtype=np.float64
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean_sens = (
+            float(np.nanmean(sens))
+            if sens.size and not np.all(np.isnan(sens))
+            else np.nan
+        )
+        mean_spec = (
+            float(np.nanmean(spec))
+            if spec.size and not np.all(np.isnan(spec))
+            else np.nan
+        )
+
+    return {
+        "val_MeanSensitivity": mean_sens,
+        "val_MeanSpecificity": mean_spec,
+        "val_NoveltyRate": metrics["novelty_detection_rate"],
+        "val_AmbiguityRate": metrics["ambiguity_rate"],
+        "val_ExactSetRate": metrics["exact_set_rate"],
+    }
+
+
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -582,6 +763,13 @@ def compute_validation_metrics_for_top_models(
     top_n: int = 100,
     progress_callback=None,
     imbalance_method: Optional[str] = None,
+    *,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    min_class_samples: int = 10,
 ) -> pd.DataFrame:
     """Compute validation metrics for top N models.
 
@@ -618,6 +806,16 @@ def compute_validation_metrics_for_top_models(
         UNWEIGHTED (its class_weight lives only in fit-time sample_weight)
         and PLS-DA retrains UNWEIGHTED (its LR sub-step's class_weight is
         not serialized into the result-row Params dict).
+    baseline_method, baseline_params, enable_smoothing, smoothing_window, \
+smoothing_polyorder, min_class_samples : optional (keyword-only)
+        Run-global preprocessing / floor settings for the ``multiclass_simca``
+        holdout rebuild. These are NOT persisted per leaderboard row (they are
+        search-global), so the holdout would otherwise be scored on a DIFFERENT
+        pipeline than the ranked row when a user enables baseline/smoothing.
+        Threaded through to :func:`_multiclass_holdout_metrics` so the
+        calibration/holdout preprocessing matches the search. Defaulted, so the
+        regression / classification / one-class branches ignore them entirely
+        and existing callers are byte-identical.
 
     Returns
     -------
@@ -643,6 +841,23 @@ def compute_validation_metrics_for_top_models(
     if task_type == "regression":
         df_results["RMSEP"] = np.nan
         df_results["R2pred"] = np.nan
+    elif task_type == "multiclass_simca":
+        # This is a separate public entry point from run_multiclass_simca_search,
+        # and its holdout rebuild reaches np.unique(y) — validate labels here too
+        # so a malformed target fails cleanly rather than with an opaque
+        # np.unique TypeError (Kimi M2).
+        from .simca import check_multiclass_labels
+
+        check_multiclass_labels(y_train)
+        check_multiclass_labels(y_val)
+        for _c in (
+            "val_MeanSensitivity",
+            "val_MeanSpecificity",
+            "val_NoveltyRate",
+            "val_AmbiguityRate",
+            "val_ExactSetRate",
+        ):
+            df_results[_c] = np.nan
     else:
         df_results["val_Accuracy"] = np.nan
         df_results["val_ROC_AUC"] = np.nan
@@ -703,6 +918,29 @@ def compute_validation_metrics_for_top_models(
 
     for i, idx in enumerate(top_indices):
         row = df_results.loc[idx]
+
+        # Multi-class SIMCA holdout metrics take an entirely separate path: each
+        # row is a MultiClassClassModel (decision matrix + class-modeling
+        # metrics), not a single-label predictor. Rebuild the row's exact config,
+        # fit on the calibration split, and score the holdout decision matrix.
+        if task_type == "multiclass_simca":
+            try:
+                mc_metrics = _multiclass_holdout_metrics(
+                    row, X_train, y_train, X_val, y_val, wavelengths,
+                    baseline_method=baseline_method,
+                    baseline_params=baseline_params,
+                    enable_smoothing=enable_smoothing,
+                    smoothing_window=smoothing_window,
+                    smoothing_polyorder=smoothing_polyorder,
+                    min_class_samples=min_class_samples,
+                )
+                for _col, _val in mc_metrics.items():
+                    df_results.loc[idx, _col] = _val
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the rest
+                print(
+                    f"  [Warning] Failed multi-class holdout metrics for model {i+1}: {e}"
+                )
+            continue
 
         try:
             # === STEP 1: Get preprocessing config ===
@@ -6981,6 +7219,1181 @@ def run_one_class_search(
                     f"One-class search complete: {len(df_results)} results, "
                     f"{skipped_configs} skipped"
                 ),
+                "current": total_configs,
+                "total": total_configs,
+            }
+        )
+
+    return df_results
+
+
+# ============================================================================
+# T-31 Phase C / task C2: run_multiclass_simca_search
+# ============================================================================
+
+# Maps a search-layer varsel_path token to the MultiClassClassModel
+# variable_selection constructor value (spec §7 / Phase-B guardrail #7). "none"
+# -> no prefilter; the wold_* / importance strings pass straight through.
+_MULTICLASS_VARSEL_PATHS: dict[str, str | None] = {
+    "none": None,
+    "wold_modeling": "wold_modeling",
+    "wold_discriminating": "wold_discriminating",
+    "wold_balanced": "wold_balanced",
+    "importance": "importance",
+}
+
+
+class MulticlassVarselUnsupported(Exception):
+    """Raised when a variable-selection method cannot produce a usable mask for a
+    >2-class label (either it is binary-only and fails, or the shared
+    ``compute_importances`` dispatch does not implement it and would silently
+    return uniform importances). The multi-class search loop catches this and
+    skips the row with a logged warning rather than crashing or emitting a
+    meaningless selection."""
+
+
+# Wold methods are handled INSIDE ``MultiClassClassModel`` via its string
+# dispatch (leakage-safe per-fold recompute); the mask builder returns the
+# string unchanged so the caller forwards it as-is.
+_WOLD_METHODS = frozenset(
+    {"wold_modeling", "wold_discriminating", "wold_balanced"}
+)
+
+# Discrimination-based methods whose real implementation in
+# ``variable_selection.py`` returns a PER-FEATURE importance/score array. We keep
+# the top-``n_select`` scoring indices -> boolean mask. ``importance`` routes
+# through ``compute_importances`` (fitted-model importances); every other name
+# below calls its dedicated selector with the same signature the STANDARD
+# dispatch uses (search.py:3300+).
+_MULTICLASS_IMPORTANCE_METHODS = frozenset(
+    {
+        "importance",
+        "spa",
+        "uve",
+        "cars",
+        "cars_tree",
+        "uve_spa",
+        "uve_cars",
+        "uve_cars_tree",
+        "uve_cars_spa",
+        "ipls",
+        "fipls_spa",
+        "fipls_cars",
+    }
+)
+
+# Interval-family methods return a LIST of interval-subset dicts (each with an
+# ``indices`` array + ``rmsecv``). We pick the best (lowest-RMSECV) subset and
+# turn its indices into a boolean mask; these methods define their own feature
+# count, so ``n_select`` does not apply (search.py:3145+).
+_MULTICLASS_INTERVAL_METHODS = frozenset(
+    {"ipls_forward", "ipls_backward", "mc_sipls", "mwpls"}
+)
+
+# Retained for the caller's accepted-path set (see run_multiclass_simca_search):
+# every method the mask dispatch can genuinely resolve.
+_MULTICLASS_MASK_METHODS = frozenset(
+    _MULTICLASS_IMPORTANCE_METHODS | _MULTICLASS_INTERVAL_METHODS
+)
+
+
+def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="classification"):
+    """Boolean feature mask for a supervised variable-selection method on the
+    genuine multi-class label, computed ONCE on the passed calibration matrix.
+
+    This is the chemometrics convention (PLS_Toolbox GA, mdatools iPLS, CARS all
+    select from the full calibration data using each method's own internal CV,
+    then validate externally). It is deliberately NOT nested per CV fold; the
+    external Validation tab is the honest held-out check.
+
+    Wold methods are handled inside
+    :class:`~spectral_predict.simca.MultiClassClassModel` via its string dispatch
+    (leakage-safe per-fold recompute); the helper returns their string unchanged.
+    Every other discrimination method is routed to its real implementation in
+    ``variable_selection.py`` (mirroring the STANDARD dispatch) and its output is
+    normalized to a mask:
+
+    - **Importance-array methods** (``importance``, ``spa``, ``uve``, ``cars``,
+      ``cars_tree``, ``uve_spa``, ``uve_cars``, ``uve_cars_tree``,
+      ``uve_cars_spa``, ``ipls``, ``fipls_spa``, ``fipls_cars``): keep the
+      top-``n_select`` scoring indices.
+    - **Interval-subset methods** (``ipls_forward``, ``ipls_backward``,
+      ``mc_sipls``, ``mwpls``): pick the best (lowest-RMSECV) interval subset and
+      use its indices (``n_select`` does not apply — the method sets its count).
+
+    Parameters
+    ----------
+    X : ndarray of shape (n_samples, n_features)
+        Preprocessed spectra (calibration matrix).
+    y : array-like of shape (n_samples,)
+        Multi-class labels.
+    wavelengths : array-like or None
+        Per-feature wavelength axis (needed by interval + fiPLS methods). When
+        ``None`` a positional index axis ``arange(n_features)`` is used.
+    method : str
+        ``"none"`` -> ``None``; a Wold method -> that string; a resolvable
+        discrimination method -> a boolean mask; anything else -> raises.
+    n_select : int
+        Number of top-scoring features to keep (importance-array methods only).
+    task_type : str
+        Passed through to selectors that take it (default ``"classification"``).
+
+    Returns
+    -------
+    None or str or ndarray of bool
+        ``None`` for ``"none"``; the method string for a Wold method; otherwise a
+        boolean mask of shape ``(n_features,)`` with at least one True entry.
+
+    Raises
+    ------
+    MulticlassVarselUnsupported
+        For a method with no reachable real implementation, or one that errors /
+        produces an unusable selection on the >2-class label. Caught by the
+        caller, which skips the row with a logged warning.
+    """
+    import numpy as np
+
+    if method == "none":
+        return None
+    if method in _WOLD_METHODS:
+        # Handled natively by the model layer via its string dispatch.
+        return method
+
+    n_features = int(X.shape[1])
+    # Mask methods (importance/spa/uve/...) need a positive Top-N. n_select is
+    # documented optional and defaults to None at the public API; without this
+    # fallback int(None) raised, every requested row was skipped, and the search
+    # returned an empty frame (GPT-5.5 F2). Default to the GUI's Top-N default so
+    # the API behaves like the GUI. Interval methods ignore n_select entirely.
+    # NaN (a leaderboard NSelect read back as float64) is treated as omitted too.
+    if n_select is None or (isinstance(n_select, float) and np.isnan(n_select)):
+        n_select = min(100, n_features)
+    X_np = np.asarray(X, dtype=float)
+    wl = np.asarray(wavelengths) if wavelengths is not None else np.arange(n_features)
+
+    from sklearn.preprocessing import LabelEncoder
+
+    # Encode labels to contiguous ints: the PLS-based selectors cast y to float,
+    # so raw string classes ("Site A", ...) would raise.
+    y_enc = LabelEncoder().fit_transform(np.asarray(y))
+    n_classes = int(len(np.unique(y_enc)))
+
+    folds = 5
+    random_state = RANDOM_STATE
+
+    def _mask_from_scores(scores) -> "np.ndarray":
+        scores = np.asarray(scores, dtype=float)
+        if scores.shape != (n_features,) or not np.all(np.isfinite(scores)):
+            raise MulticlassVarselUnsupported(
+                f"{method!r} produced unusable importances "
+                f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))})."
+            )
+        k = int(min(max(int(n_select), 1), n_features))
+        top_idx = np.argsort(scores, kind="stable")[-k:]
+        mask = np.zeros(n_features, dtype=bool)
+        mask[top_idx] = True
+        return mask
+
+    def _mask_from_subsets(subsets) -> "np.ndarray":
+        if not subsets:
+            raise MulticlassVarselUnsupported(f"{method!r} returned no interval subsets.")
+        best = min(subsets, key=lambda s: s.get("rmsecv", float("inf")))
+        idx = np.asarray(best["indices"], dtype=int)
+        mask = np.zeros(n_features, dtype=bool)
+        mask[idx] = True
+        if not mask.any():
+            raise MulticlassVarselUnsupported(f"{method!r} selected an empty interval subset.")
+        return mask
+
+    try:
+        if method == "importance":
+            from spectral_predict.unified_bayesian import compute_importances
+
+            scores = compute_importances(
+                X_np, y_enc, "importance", "PLS-DA", cv_folds=folds, task_type=task_type
+            )
+            return _mask_from_scores(scores)
+
+        if method == "spa":
+            k = int(min(max(int(n_select), 1), n_features))
+            scores = spa_selection(X_np, y_enc, n_features=k, cv_folds=folds)
+            return _mask_from_scores(scores)
+
+        if method == "uve":
+            scores, _thr, _sel = get_uve_threshold(
+                X_np, y_enc, cutoff_multiplier=1.0, n_components=None,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method in ("cars", "cars_tree"):
+            scores = cars_selection(
+                X_np, y_enc, n_iterations=50, pls_components=5, cv_folds=folds,
+                monte_carlo_samples=80, random_state=random_state,
+                use_hybrid_importance=(method == "cars_tree"),
+                task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "uve_spa":
+            k = int(min(max(int(n_select), 1), n_features))
+            scores = uve_spa_selection(
+                X_np, y_enc, n_features=k, cutoff_multiplier=1.0,
+                uve_n_components=None, uve_cv_folds=folds, spa_cv_folds=folds,
+                random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method in ("uve_cars", "uve_cars_tree"):
+            scores = uve_cars_selection(
+                X_np, y_enc, cutoff_multiplier=1.0, uve_n_components=None,
+                uve_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80,
+                random_state=random_state,
+                use_hybrid_importance=(method == "uve_cars_tree"),
+                task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "uve_cars_spa":
+            scores = uve_cars_spa_selection(
+                X_np, y_enc, cutoff_multiplier=1.0, uve_n_components=None,
+                uve_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80, spa_n_features=None,
+                spa_cv_folds=folds, random_state=random_state, task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "ipls":
+            scores = ipls_selection(
+                X_np, y_enc, n_intervals=20, n_components=None,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "fipls_spa":
+            scores = fipls_spa_selection(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                ipls_cv_folds=folds, spa_n_features=None, spa_cv_folds=folds,
+                random_state=random_state,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "fipls_cars":
+            scores = fipls_cars_selection(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                ipls_cv_folds=folds, n_iterations=50, pls_components=5,
+                cars_cv_folds=folds, monte_carlo_samples=80,
+                random_state=random_state, task_type=task_type,
+            )
+            return _mask_from_scores(scores)
+
+        if method == "ipls_forward":
+            subsets = ipls_forward(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, max_combine=5,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "ipls_backward":
+            subsets = ipls_backward(
+                X_np, y_enc, wavelengths=wl, n_intervals=20,
+                cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "mc_sipls":
+            subsets = mc_sipls(
+                X_np, y_enc, wavelengths=wl, n_intervals=20, n_combinations=500,
+                max_combine=4, cv_folds=folds, random_state=random_state,
+            )
+            return _mask_from_subsets(subsets)
+
+        if method == "mwpls":
+            subsets = mwpls(X_np, y_enc, wavelengths=wl, cv_folds=folds)
+            return _mask_from_subsets(subsets)
+
+    except MulticlassVarselUnsupported:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any per-method failure -> clean skip
+        raise MulticlassVarselUnsupported(
+            f"{method!r} failed on a {n_classes}-class label: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    # No reachable real implementation (e.g. vcpa, ga are intentionally not wired
+    # into the multi-class mask path — see Task-4 report resolve-vs-skip table).
+    raise MulticlassVarselUnsupported(
+        f"variable-selection method {method!r} has no reachable multi-class "
+        f"implementation; skipping."
+    )
+
+
+def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None):
+    """Leave-one-class-out novelty-vs-false-rejection AUC (spec §7 ranking metric).
+
+    A training set has NO truly-novel samples, so
+    :func:`~spectral_predict.simca.novelty_tradeoff_auc` on the in-sample OOF
+    decision matrix returns NaN (its novel-sample denominator is zero). This
+    helper synthesizes the novel population by leave-one-class-out (LOCO): each
+    class in turn is treated as "novel" against a model fit on the remaining
+    ``K-1`` classes, while the false-rejection axis comes from the in-sample OOF
+    own-class p-values. The α-sweep AUC of ``novelty_rate`` vs
+    ``false_rejection_rate`` is the ranking metric.
+
+    Parameters
+    ----------
+    build_model_fn : callable
+        Zero-arg factory returning a FRESH (unfitted)
+        :class:`~spectral_predict.simca.MultiClassClassModel` configured exactly
+        as the row under test (engine / alpha / scaling / varsel / ...). Called
+        once for the OOF CV and once per held-out class.
+    X : ndarray of shape (n_samples, n_features)
+        Preprocessed spectra (per-spectrum ops already applied outside folds).
+    y : array-like of shape (n_samples,)
+        Class labels.
+    cv_splits : int, default=5
+        Outer folds for the OOF own-class p-values. IGNORED when ``oof_cv`` is
+        supplied (the caller's precomputed CV is reused verbatim).
+    oof_cv : dict, optional
+        A precomputed ``MultiClassClassModel.cross_validate`` result (with keys
+        ``decision_matrix`` and ``classes``). When given, step (1)'s OOF CV is
+        reused instead of recomputed — the search loop already computes it for
+        the leaderboard metrics, so passing it halves the per-config OOF CV cost.
+        Must correspond to the SAME config ``build_model_fn`` produces.
+
+    Returns
+    -------
+    float
+        AUC in ``[0, 1]``; ``float("nan")`` if it cannot be computed (no finite
+        own-class p-values, or every LOCO fit failed).
+
+    The curve plots ``novelty_rate`` (y) against ``false_rejection_rate`` (x)
+    over an α-sweep; equivalently novelty vs ``1 - correct-acceptance``. The
+    trapezoidal AUC is direction-invariant (``trapz`` integrates whichever way
+    the x-values are ordered), so the exact axis label does not affect ranking.
+
+    LOCO is a WITHIN-DATASET novelty PROXY that OVER-estimates the spec §1
+    held-out-foreign-class target: each held-out class is ruled on by only
+    ``K-1`` models and is itself in-distribution, whereas a truly foreign class
+    faces all ``K`` ruling models. Treat ``NoveltyAUC`` as an optimistic upper
+    bound and verify on a genuine held-out novel class (Decision A).
+
+    Notes
+    -----
+    - ``false_rejection_rate(α)`` = fraction of known rows whose OWN-class OOF
+      p-value ``< α`` (rows with a NaN own-p — e.g. their class was unmodelable
+      in every fold — are excluded from the denominator).
+    - ``novelty_rate(α)`` is CLASS-BALANCED (Decision B, spec §7
+      "small-class-robust"): per held-out class ``c`` it is the fraction of
+      class-``c`` rows flagged novel (``max(finite foreign p) < α``); the overall
+      rate is the mean over classes, so each class weighs equally regardless of
+      size. A held row whose foreign p-values are ALL NaN (every ``K-1`` class
+      unmodelable in that LOCO fit) is EXCLUDED from both numerator and
+      denominator (B4 — it must not be treated as vacuously novel).
+    - Threshold sweep = the sorted unique finite p-values (own + foreign) plus
+      ``{0, 1, 2}`` (the ``2`` guarantees the false-rejection axis reaches 1 so a
+      perfect separator does not collapse to AUC 0 — B1), downsampled to ≤2000
+      thresholds for real-data scale; duplicate false-rejection x-values are
+      deduped (max novelty kept) before the trapezoid.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    y = np.asarray(y)
+    classes = np.unique(y)
+
+    # (1) In-sample OOF own-class p-values -> false-rejection axis. Reuse the
+    # caller's already-computed OOF CV when provided (the search loop computes it
+    # for the leaderboard metrics), halving the per-config CV cost at real-data
+    # scale (757x2151, K=10) instead of running cross_validate twice.
+    if oof_cv is not None:
+        cv = oof_cv
+    else:
+        try:
+            cv = build_model_fn().cross_validate(X, y, n_splits=cv_splits)
+        except Exception as exc:  # noqa: BLE001 — NaN-safe: any CV failure -> NaN AUC
+            logger.warning("multiclass LOCO AUC: OOF cross_validate failed: %s", exc)
+            return float("nan")
+    P_oof, _ = cv["decision_matrix"]
+    col_of = {c: k for k, c in enumerate(list(cv["classes"]))}
+    own_p = np.array(
+        [P_oof[i, col_of[y[i]]] if y[i] in col_of else np.nan for i in range(len(y))],
+        dtype=np.float64,
+    )
+    own_p_finite = own_p[np.isfinite(own_p)]
+
+    # (2) LOCO -> novelty axis. Each class held out as the novel population.
+    # Per-class novelty statistics (max finite foreign p per row, or NaN if a row
+    # has NO finite foreign p — B4: excluded from num+denom, never vacuously
+    # novel). Kept per class so novelty_rate can be CLASS-BALANCED (B5).
+    nov_by_class: dict = {}
+    for c in classes:
+        held_mask = y == c
+        if not np.any(held_mask):
+            continue
+        try:
+            m = build_model_fn()
+            m.fit(X[y != c], y[y != c])
+            P_c, _ = m.decision_matrix(X[held_mask])
+        except Exception as exc:  # noqa: BLE001 — skip a failed LOCO fold, NaN-safe
+            logger.warning("multiclass LOCO AUC: LOCO fit for class %r failed: %s", c, exc)
+            continue
+        stats_c = []
+        for row in P_c:
+            finite = row[np.isfinite(row)]
+            stats_c.append(np.nan if finite.size == 0 else float(np.max(finite)))
+        nov_by_class[c] = np.asarray(stats_c, dtype=np.float64)
+
+    # Drop classes with no valid (finite) held rows; if none remain there is no
+    # novel population to score.
+    valid_by_class = [
+        arr[np.isfinite(arr)] for arr in nov_by_class.values()
+    ]
+    valid_by_class = [arr for arr in valid_by_class if arr.size > 0]
+    if own_p_finite.size == 0 or len(valid_by_class) == 0:
+        return float("nan")
+
+    # (3) Threshold sweep + trapezoid AUC.
+    all_foreign = np.concatenate(valid_by_class)
+    # The 2.0 anchor forces false_rej to reach 1.0 (B1: a perfect separator whose
+    # own-p are all 1.0 otherwise never leaves x=0 -> AUC 0).
+    thresholds = np.unique(
+        np.concatenate([own_p_finite, all_foreign, [0.0, 1.0, 2.0]])
+    )
+    if thresholds.size > 2000:
+        logger.info(
+            "multiclass LOCO AUC: downsampling %d thresholds to 2000",
+            thresholds.size,
+        )
+        idx = np.unique(np.linspace(0, thresholds.size - 1, 2000).astype(int))
+        thresholds = thresholds[idx]
+
+    def _class_balanced_novelty(a: float) -> float:
+        # Mean over classes of each class's own-row novel fraction (B5).
+        rates = [float(np.mean(arr < a)) for arr in valid_by_class]
+        return float(np.mean(rates))
+
+    false_rej = np.array([float(np.mean(own_p_finite < a)) for a in thresholds])
+    novelty = np.array([_class_balanced_novelty(a) for a in thresholds])
+
+    # Dedupe duplicate false_rej x-values keeping the MAX novelty (B1), then
+    # trapezoid over the (sorted-unique) x.
+    uniq_fr, inv = np.unique(false_rej, return_inverse=True)
+    max_nov = np.full(uniq_fr.shape, -np.inf, dtype=np.float64)
+    np.maximum.at(max_nov, inv, novelty)
+    trapz = getattr(np, "trapezoid", None) or np.trapz
+    auc = float(trapz(max_nov, uniq_fr))
+    return float(min(1.0, max(0.0, auc)))
+
+
+def _multiclass_preprocess_matrix(X_np, preprocess_cfg, wavelengths_full):
+    """Apply one multi-class preprocessing config to the FULL matrix.
+
+    Per-spectrum ops (SNV / SG derivatives / baseline) are applied outside folds
+    (chemometrics convention — NOT leakage); column-autoscale / calibration /
+    varsel stay train-only inside the model. A malformed config returns
+    ``(None, wavelengths, reason)`` instead of raising, so one bad config never
+    aborts the whole search (spec §8 / Codex M2). Shared by the search loop and
+    :func:`build_multiclass_decision_view` so both preprocess identically.
+
+    Returns ``(X_pp | None, wavelengths_current, reason)``.
+    """
+    wavelengths_current = np.asarray(wavelengths_full).copy()
+    try:
+        pipe_steps = build_preprocessing_pipeline(
+            preprocess_cfg["method"],
+            preprocess_cfg["deriv"],
+            preprocess_cfg["window"],
+            preprocess_cfg["polyorder"],
+            baseline_method=preprocess_cfg.get("baseline_method"),
+            baseline_params=preprocess_cfg.get("baseline_params"),
+            smoothing=preprocess_cfg.get("smoothing", False),
+            smoothing_window=preprocess_cfg.get("smoothing_window", 17),
+            smoothing_polyorder=preprocess_cfg.get("smoothing_polyorder", 2),
+        )
+        if pipe_steps:
+            from sklearn.pipeline import Pipeline as SkPipeline
+
+            prep_pipe = SkPipeline(pipe_steps)
+            prep_pipe.fit(X_np)
+            X_pp = prep_pipe.transform(X_np)
+        else:
+            X_pp = X_np.copy()
+
+        if preprocess_cfg.get("deriv") and preprocess_cfg.get("window"):
+            X_pp, wavelengths_current, _ = _apply_edge_mask_to_data(
+                X_pp, wavelengths_current, preprocess_cfg
+            )
+        return X_pp, wavelengths_current, ""
+    except Exception as exc:  # noqa: BLE001 — one bad config must not abort
+        return (
+            None,
+            wavelengths_current,
+            f"preprocessing_failed: {type(exc).__name__}: {exc}",
+        )
+
+
+def build_multiclass_decision_view(
+    X,
+    y,
+    *,
+    engine,
+    preprocess_cfg,
+    alpha=0.05,
+    n_components=0.99,
+    scaling="per_class",
+    min_class_samples=10,
+    variable_selection=None,
+    n_select=None,
+    wavelengths=None,
+    sample_ids=None,
+):
+    """Fit ONE multi-class config on the full data and return its per-sample
+    decision view (T-31 Phase D2 data provider; the GUI renders it).
+
+    The model is fit on the full (preprocessed) training matrix and evaluated on
+    it — this is the in-sample decision matrix shown to the user, NOT a
+    leakage-safe estimate (those are the leaderboard's OOF/LOCO metrics). It is
+    the "here is what every trained class model says about every sample" view.
+
+    Returns a dict with keys:
+        ``classes`` (list), ``p_values`` (n, K float), ``accept`` (n, K bool),
+        ``labels`` (n,) single-class / ``"multiple"`` / ``"novel"``,
+        ``true_labels`` (n,), ``sample_ids`` (n,), ``resolved_n_components``
+        (dict class -> int), ``unmodelable_classes`` (list),
+        ``wold`` (:func:`wold_diagnostic_plot_data` dict, or ``None`` if it
+        could not be computed), ``preprocess_name`` (str), ``reason`` (str;
+        non-empty only on preprocessing/fit failure).
+    """
+    from .simca import MultiClassClassModel, wold_diagnostic_plot_data
+
+    X_np = X.values if hasattr(X, "values") else np.asarray(X)
+    X_np = np.asarray(X_np, dtype=np.float64)
+    y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    if wavelengths is not None:
+        wavelengths_full = np.asarray(wavelengths)
+    elif hasattr(X, "columns"):
+        wavelengths_full = np.asarray(X.columns.values)
+    else:
+        wavelengths_full = np.arange(X_np.shape[1])
+    if sample_ids is None:
+        sample_ids = (
+            list(X.index) if hasattr(X, "index") else list(range(X_np.shape[0]))
+        )
+
+    # Full config echoed back so the view is self-describing (Phase D3 export can
+    # regenerate the exact decision matrix from it).
+    config = {
+        "engine": engine,
+        "alpha": alpha,
+        "n_components": n_components,
+        "scaling": scaling,
+        "min_class_samples": min_class_samples,
+        "variable_selection": variable_selection,
+        "n_select": n_select,
+        "preprocess_cfg": dict(preprocess_cfg),
+    }
+
+    empty = {
+        "classes": [],
+        "p_values": np.empty((0, 0)),
+        "accept": np.empty((0, 0), dtype=bool),
+        "labels": [],
+        "true_labels": list(y_np),
+        "sample_ids": list(sample_ids),
+        "resolved_n_components": {},
+        "unmodelable_classes": [],
+        "wold": None,
+        "wold_error": "",
+        "preprocess_name": preprocess_cfg.get("name", ""),
+        "config": config,
+        "reason": "",
+    }
+
+    X_pp, wl_current, reason = _multiclass_preprocess_matrix(
+        X_np, preprocess_cfg, wavelengths_full
+    )
+    if X_pp is None:
+        empty["reason"] = reason or "preprocessing_failed"
+        return empty
+
+    try:
+        model = MultiClassClassModel(
+            engine=engine,
+            alpha=alpha,
+            n_components=n_components,
+            scaling=scaling,
+            min_class_samples=min_class_samples,
+            variable_selection=variable_selection,
+            n_select=n_select,
+        ).fit(X_pp, y_np)
+        P, A = model.decision_matrix(X_pp)
+        labels = list(model.predict(X_pp))
+    except Exception as exc:  # noqa: BLE001 — surface as a reason, never crash the GUI
+        empty["reason"] = f"{type(exc).__name__}: {exc}"
+        return empty
+
+    unmodelable = getattr(model, "unmodelable_", None)
+    if unmodelable is not None and hasattr(unmodelable, "tolist"):
+        unmodelable = unmodelable.tolist()
+    unmodelable = sorted(unmodelable) if unmodelable else []
+
+    # Wold MPOW/DPOW is a variable-space diagnostic (its own per-class PCA), so
+    # it is meaningful regardless of the membership engine. Compute defensively.
+    # wold_diagnostic_plot_data's per-class PCA is INT-ONLY: passing the model's
+    # n_components verbatim would break it — a variance fraction like the 0.99
+    # default int()s to 0 -> max(1,0)=1 PCA component (Wold computed on a 1-D
+    # subspace, not the ~99%-variance one the models use), and "per_class_cv"
+    # raises. Resolve to a representative int matching the fitted models.
+    wold_nc = _resolve_wold_n_components(n_components, model, X_pp)
+    wold_error = ""
+    try:
+        wold = wold_diagnostic_plot_data(
+            X_pp, y_np, n_components=wold_nc, scaling=scaling,
+            wavelengths=wl_current,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wold diagnostic plot data failed: %s", exc)
+        wold = None
+        wold_error = f"{type(exc).__name__}: {exc}"
+
+    return {
+        "classes": list(model.classes_),
+        "p_values": np.asarray(P, dtype=np.float64),
+        "accept": np.asarray(A, dtype=bool),
+        "labels": labels,
+        "true_labels": list(y_np),
+        "sample_ids": list(sample_ids),
+        "resolved_n_components": dict(getattr(model, "n_components_", {}) or {}),
+        "unmodelable_classes": unmodelable,
+        "wold": wold,
+        "wold_error": wold_error,
+        "preprocess_name": preprocess_cfg.get("name", ""),
+        "config": config,
+        "reason": "",
+    }
+
+
+def _resolve_wold_n_components(n_components, model, X_pp):
+    """Resolve the model's ``n_components`` policy to a concrete int for the
+    INT-ONLY Wold diagnostic PCA, matching the fitted models as closely as
+    possible.
+
+    - Prefer the model's RESOLVED per-class component counts (SIMCA populates
+      ``n_components_``); use their max so the diagnostic subspace is at least as
+      rich as any class model.
+    - Else (non-SIMCA engines, empty ``n_components_``): resolve a variance
+      fraction against pooled data via PCA; the ``"per_class_cv"`` sentinel and
+      any non-fraction fall back to a bounded default.
+    """
+    resolved = getattr(model, "n_components_", {}) or {}
+    max_pc = min(X_pp.shape[0] - 1, X_pp.shape[1])
+    if resolved:
+        return int(max(1, min(max(resolved.values()), max_pc)))
+    if isinstance(n_components, str):  # "per_class_cv"
+        return int(max(1, min(10, max_pc)))
+    if isinstance(n_components, float) and 0.0 < n_components < 1.0:
+        from sklearn.decomposition import PCA
+
+        pca = PCA(random_state=0).fit(X_pp)
+        cum = np.cumsum(pca.explained_variance_ratio_)
+        return int(max(1, min(int(np.searchsorted(cum, n_components)) + 1, max_pc)))
+    return int(max(1, min(int(n_components), max_pc)))
+
+
+def run_multiclass_simca_search(
+    X,
+    y,
+    wavelengths=None,
+    engines=None,
+    preprocess_configs=None,
+    preprocessing_methods=None,
+    window_sizes=None,
+    alpha=0.05,
+    n_components=0.99,
+    varsel_paths=None,
+    variable_selection_n_select=None,
+    min_class_samples=10,
+    cv_splits=5,
+    variable_penalty=0,
+    gap_penalty=0,
+    baseline_method=None,
+    baseline_params=None,
+    enable_smoothing=False,
+    smoothing_window=17,
+    smoothing_polyorder=2,
+    progress_callback=None,
+    controller=None,
+    compute_top_decision_view=False,
+):
+    """T-31 multi-class SIMCA / class-modeling search (spec §7).
+
+    Grid = ``preprocessing_configs × engines × varsel_paths`` (NO ``G^K``
+    per-class ``n_components`` product — every row shares the single
+    ``n_components`` policy, resolved per class INSIDE the row; the default is a
+    novelty-oriented variance fraction, see the ``n_components`` param). Each
+    row fits a :class:`~spectral_predict.simca.MultiClassClassModel`, computes
+    OOF class-modeling metrics via ``cross_validate`` +
+    :func:`~spectral_predict.simca.multiclass_simca_metrics`, and a
+    leave-one-class-out ``NoveltyAUC`` (:func:`_multiclass_loco_novelty_auc`)
+    that drives ranking (higher = better).
+
+    Per-spectrum preprocessing (SNV / SG derivatives / baseline) is applied to
+    ``X`` OUTSIDE the folds per chemometrics convention; column-autoscale,
+    per-class calibration, and variable selection are fit train-only INSIDE
+    ``MultiClassClassModel.fit`` / ``cross_validate`` (never re-fit here).
+
+    Parameters
+    ----------
+    X : array-like or DataFrame of shape (n_samples, n_features)
+        Spectra.
+    y : array-like of shape (n_samples,)
+        Class labels.
+    wavelengths : array-like, optional
+        Feature axis; inferred from ``X.columns`` when ``X`` is a DataFrame,
+        else ``arange(n_features)``.
+    engines : list of str, optional
+        MultiClassClassModel engine names; defaults to
+        :data:`~spectral_predict.model_registry.MULTICLASS_ENGINES`.
+    preprocess_configs : list of dict, optional
+        Explicit preprocessing configs (each: ``method``/``name``/``deriv``/
+        ``window``/``polyorder`` + optional baseline/smoothing). If omitted they
+        are built from ``preprocessing_methods`` × ``window_sizes``.
+    preprocessing_methods : list of str, optional
+        Preprocessing method names (default ``["raw", "snv", "deriv1",
+        "deriv2", "snv_deriv1", "snv_deriv2"]``) when ``preprocess_configs`` is
+        None.
+    window_sizes : list of int, optional
+        Savitzky-Golay windows for derivative methods (default ``[7, 19]``).
+    alpha : float, default=0.05
+        Global significance level (never per-class; spec decision #6).
+    n_components : float, int, dict, or "per_class_cv", default=0.99
+        Per-class PCA components forwarded to each row's
+        :class:`~spectral_predict.simca.MultiClassClassModel`. The default FLOAT
+        ``0.99`` is a per-class variance-explained fraction — the
+        NOVELTY-oriented choice (T-31 Decision D): on real held-out sites a
+        99%-variance model flagged 100% of a foreign site novel at ~8% in-sample
+        false-novel, versus only ~17% for ``"per_class_cv"``. ``"per_class_cv"``
+        (one-vs-rest balanced-accuracy tuning) optimizes within-known
+        DISCRIMINATION, not novelty, and under-detects held-out foreign classes;
+        it remains selectable but is not the default.
+    varsel_paths : list of str, optional
+        Variable-selection paths to enumerate; each maps via
+        :data:`_MULTICLASS_VARSEL_PATHS` to a ``variable_selection`` value.
+        Default ``["none"]``.
+    variable_selection_n_select : int, optional
+        ``n_select`` forwarded to the model's variable selection (top-N).
+    min_class_samples : int, default=10
+        Hard modeling floor (spec §5.1 / §8); classes below it are flagged
+        unmodelable, never dropped.
+    cv_splits : int, default=5
+        Outer CV folds for the OOF decision matrix + own-class p-values.
+    variable_penalty, gap_penalty : int, default=0
+        Forwarded to :func:`~spectral_predict.scoring.compute_composite_score`
+        (gap penalty is a no-op for this task).
+    baseline_method, baseline_params : optional
+        Baseline correction forwarded to the preprocessing pipeline.
+    enable_smoothing, smoothing_window, smoothing_polyorder : optional
+        Savitzky-Golay pre-smoothing forwarded to the preprocessing pipeline.
+    progress_callback : callable, optional
+        Receives ``{stage, message, current, total}`` dicts.
+    controller : object, optional
+        Optional pause/stop controller with ``check_and_wait()``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Results (schema of ``create_results_dataframe("multiclass_simca")``)
+        ranked by :func:`~spectral_predict.scoring.compute_composite_score`.
+    """
+    import warnings
+
+    from .model_registry import MULTICLASS_ENGINES
+    from .scoring import add_result, compute_composite_score, create_results_dataframe
+    from .simca import (
+        MultiClassClassModel,
+        check_multiclass_labels,
+        multiclass_simca_metrics,
+    )
+
+    X_np = X.values if hasattr(X, "values") else np.asarray(X)
+    X_np = np.asarray(X_np, dtype=np.float64)
+    y_np = y.values if hasattr(y, "values") else np.asarray(y)
+    # Fail fast (before the np.unique below) on missing / mixed-type labels
+    # rather than crashing mid-grid with an opaque TypeError (GPT-5.5 F1).
+    check_multiclass_labels(y_np)
+    if wavelengths is not None:
+        wavelengths_full = np.asarray(wavelengths)
+    elif hasattr(X, "columns"):
+        wavelengths_full = np.asarray(X.columns.values)
+    else:
+        wavelengths_full = np.arange(X_np.shape[1])
+
+    def _as_list(v):
+        if v is None:
+            return [None]
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return [v]
+
+    alphas = _as_list(alpha)
+    n_components_list = _as_list(n_components)
+    n_select_list = _as_list(variable_selection_n_select)
+
+    if engines is None:
+        engines = list(MULTICLASS_ENGINES)
+    if varsel_paths is None:
+        varsel_paths = ["none"]
+    _accepted_varsel_paths = set(_MULTICLASS_VARSEL_PATHS) | set(_MULTICLASS_MASK_METHODS)
+    for vp in varsel_paths:
+        if vp not in _accepted_varsel_paths:
+            raise ValueError(
+                f"Unknown varsel_path {vp!r}; expected one of "
+                f"{sorted(_accepted_varsel_paths)}."
+            )
+
+    # --- Build preprocessing configs (per-spectrum ops applied outside folds) --
+    if preprocess_configs is None:
+        if preprocessing_methods is None:
+            preprocessing_methods = [
+                "raw", "snv", "deriv1", "deriv2", "snv_deriv1", "snv_deriv2",
+            ]
+        if window_sizes is None:
+            window_sizes = [7, 19]
+        preprocess_configs = []
+        for method in preprocessing_methods:
+            if method in ("deriv1", "deriv2", "snv_deriv1", "snv_deriv2"):
+                deriv_order = 1 if method.endswith("1") else 2
+                pipeline_method = method.replace("1", "").replace("2", "")
+                for ws in window_sizes:
+                    preprocess_configs.append(
+                        {
+                            "method": pipeline_method,
+                            "name": f"{method}_w{ws}",
+                            "deriv": deriv_order,
+                            "window": ws,
+                            "polyorder": None,
+                            "baseline_method": baseline_method,
+                            "baseline_params": baseline_params,
+                            "smoothing": enable_smoothing,
+                            "smoothing_window": smoothing_window,
+                            "smoothing_polyorder": smoothing_polyorder,
+                        }
+                    )
+            else:
+                preprocess_configs.append(
+                    {
+                        "method": method,
+                        "name": method,
+                        "deriv": None,
+                        "window": None,
+                        "polyorder": None,
+                        "baseline_method": baseline_method,
+                        "baseline_params": baseline_params,
+                        "smoothing": enable_smoothing,
+                        "smoothing_window": smoothing_window,
+                        "smoothing_polyorder": smoothing_polyorder,
+                    }
+                )
+
+    def _n_select_axis_for(vp):
+        """The n_select (Top-N size) axis for a given varsel path.
+
+        ``none`` and the Wold modes ignore ``n_select`` entirely (``none`` selects
+        nothing; Wold sets its own count on the model's native path), so sweeping
+        multiple Top-N sizes for them yields duplicate rows differing only in the
+        ``NSelect`` column. Collapse those paths to a single representative size.
+        """
+        if vp == "none" or vp in _WOLD_METHODS:
+            return n_select_list[:1]
+        return n_select_list
+
+    total_configs = (
+        len(preprocess_configs)
+        * len(engines)
+        * len(alphas)
+        * len(n_components_list)
+        * sum(len(_n_select_axis_for(vp)) for vp in varsel_paths)
+    )
+    current_config = 0
+    n_total_classes = int(len(np.unique(y_np)))
+
+    logger.info("=" * 70)
+    logger.info("MULTI-CLASS SIMCA SEARCH")
+    logger.info("=" * 70)
+    logger.info("Classes: %d | Engines: %s", n_total_classes, engines)
+    logger.info("Preprocessing configs: %d | Varsel paths: %s", len(preprocess_configs), varsel_paths)
+    logger.info("Total configurations: %d (alphas=%s)", total_configs, alphas)
+
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "info",
+                "message": f"Starting multi-class SIMCA search: {total_configs} configurations",
+                "current": 0,
+                "total": total_configs,
+            }
+        )
+
+    df_results = create_results_dataframe("multiclass_simca")
+    _user_stopped = False
+
+    for preprocess_cfg in preprocess_configs:
+        if _user_stopped:
+            break
+        # Per-spectrum preprocessing on ALL rows (chemometrics convention: NOT
+        # leakage). Column-autoscale/calibration/varsel stay train-only inside
+        # the model. Build the pipeline and fit/transform the full matrix.
+        # Build + fit/transform + edge-mask are ALL inside one guard (Codex M2):
+        # a single malformed config (e.g. build_preprocessing_pipeline raising on
+        # a bad window/polyorder) must NOT abort the whole search — it emits NaN
+        # rows with a reason instead.
+        X_pp, wavelengths_current, pp_reason = _multiclass_preprocess_matrix(
+            X_np, preprocess_cfg, wavelengths_full
+        )
+        if X_pp is None:
+            logger.warning(
+                "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
+                preprocess_cfg["name"], pp_reason,
+            )
+
+        for engine in engines:
+            if _user_stopped:
+                break
+            for varsel_path in varsel_paths:
+                if controller and not controller.check_and_wait():
+                    _user_stopped = True
+                    break
+
+                for _alpha in alphas:
+                    for _ncomp in n_components_list:
+                        for _n_select in _n_select_axis_for(varsel_path):
+                            current_config += 1
+                            prep_name = preprocess_cfg["name"]
+                            progress_msg = f"Testing {engine} + {prep_name} + varsel={varsel_path}"
+                            logger.info("[%d/%d] %s", current_config, total_configs, progress_msg)
+                            if progress_callback:
+                                progress_callback(
+                                    {
+                                        "stage": "model_testing",
+                                        "message": progress_msg,
+                                        "current": current_config,
+                                        "total": total_configs,
+                                    }
+                                )
+
+                            # Resolved below (after the X_pp None-guard) so the
+                            # external mask builder never runs on a failed
+                            # preprocessing matrix. Late-bound by _build().
+                            varsel_value = None
+
+                            def _build():
+                                return MultiClassClassModel(
+                                    engine=engine,
+                                    alpha=_alpha,
+                                    n_components=_ncomp,
+                                    scaling="per_class",
+                                    min_class_samples=min_class_samples,
+                                    variable_selection=varsel_value,
+                                    n_select=_n_select,
+                                )
+
+                            # Base row (common cols + tags); metrics start NaN and are
+                            # filled on success. Any failure records the row with NaN
+                            # metrics + a reason (never crashes the whole search; spec §8).
+                            full_vars = int(X_pp.shape[1]) if X_pp is not None else int(len(wavelengths_current))
+                            row = {
+                                "Task": "multiclass_simca",
+                                "Model": engine,
+                                "Params": f"alpha={_alpha}, scaling=per_class",
+                                "Preprocess": prep_name,
+                                "Deriv": preprocess_cfg.get("deriv"),
+                                "Window": preprocess_cfg.get("window"),
+                                "Poly": preprocess_cfg.get("polyorder"),
+                                "LVs": "auto",
+                                "n_vars": full_vars,
+                                "full_vars": full_vars,
+                                "SubsetTag": varsel_path,
+                                "Imbalance": "—",
+                                "NoveltyAUC": np.nan,
+                                "Efficiency": np.nan,
+                                "NoveltyRate": np.nan,
+                                "NoClassRate": np.nan,
+                                "AmbiguityRate": np.nan,
+                                "ExactSetRate": np.nan,
+                                "MeanSensitivity": np.nan,
+                                "MeanSpecificity": np.nan,
+                                "Alpha": _alpha,
+                                "NComponents": _ncomp,
+                                "NSelect": _n_select,
+                                "MinClassN": np.nan,
+                                "n_classes": n_total_classes,
+                                "engine_family": engine,
+                                "varsel_path": varsel_path,
+                                "unmodelable_classes": "",
+                                "reason": "",
+                                "top_vars": "N/A",
+                                "all_vars": "",
+                            }
+
+                            if X_pp is None:
+                                row["reason"] = pp_reason or "preprocessing_failed"
+                                df_results = add_result(df_results, row)
+                                continue
+
+                            # Resolve the variable-selection value for this row.
+                            # none -> None; wold_* -> model-native string; the
+                            # discrimination set (importance/cars/uve) -> a
+                            # precomputed boolean mask (the Phase-B hook);
+                            # unsupported (spa/ipls/ga/...) -> skip with a warning.
+                            try:
+                                varsel_value = _multiclass_varsel_mask(
+                                    X_pp, y_np, wavelengths_current, varsel_path, _n_select,
+                                )
+                            except MulticlassVarselUnsupported as exc:
+                                logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
+                                continue  # skip this row, do not crash the run
+
+                            try:
+                                # Full fit -> per-class n_components, varsel mask, modeled set.
+                                full_model = _build().fit(X_pp, y_np)
+                                modeled = list(full_model.models_.keys())
+                                if modeled:
+                                    row["MinClassN"] = int(
+                                        min(int(np.sum(y_np == c)) for c in modeled)
+                                    )
+                                if full_model.n_components_:
+                                    row["LVs"] = str(full_model.n_components_)
+                                if getattr(full_model, "varsel_mask_", None) is not None:
+                                    row["n_vars"] = int(full_model.varsel_mask_.sum())
+                                if full_model.unmodelable_:
+                                    row["unmodelable_classes"] = str(
+                                        sorted(full_model.unmodelable_.tolist()
+                                               if hasattr(full_model.unmodelable_, "tolist")
+                                               else full_model.unmodelable_)
+                                    )
+
+                                # OOF class-modeling metrics.
+                                cv = _build().cross_validate(X_pp, y_np, n_splits=cv_splits)
+                                _, A_oof = cv["decision_matrix"]
+                                metrics = multiclass_simca_metrics(y_np, A_oof, list(cv["classes"]))
+                                sens = np.asarray(
+                                    list(metrics["per_class_sensitivity"].values()), dtype=np.float64
+                                )
+                                spec = np.asarray(
+                                    list(metrics["per_class_specificity"].values()), dtype=np.float64
+                                )
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter("ignore", RuntimeWarning)
+                                    mean_sens = (
+                                        float(np.nanmean(sens))
+                                        if sens.size and not np.all(np.isnan(sens))
+                                        else np.nan
+                                    )
+                                    mean_spec = (
+                                        float(np.nanmean(spec))
+                                        if spec.size and not np.all(np.isnan(spec))
+                                        else np.nan
+                                    )
+                                row["Efficiency"] = metrics["efficiency"]
+                                row["NoveltyRate"] = metrics["novelty_detection_rate"]
+                                row["NoClassRate"] = metrics["no_class_rate"]
+                                row["AmbiguityRate"] = metrics["ambiguity_rate"]
+                                row["ExactSetRate"] = metrics["exact_set_rate"]
+                                row["MeanSensitivity"] = mean_sens
+                                row["MeanSpecificity"] = mean_spec
+
+                                # LOCO NoveltyAUC (the single-objective ranking metric, spec
+                                # §7). Decision A: this is a within-dataset proxy that
+                                # OVER-estimates true held-out-foreign novelty (see
+                                # _multiclass_loco_novelty_auc docstring). Decision C: ranking
+                                # stays single-objective on NoveltyAUC; a quality-vs-
+                                # discrimination blend (e.g. NoveltyAUC·Efficiency**0.5)
+                                # remains an unimplemented alternative the user is undecided
+                                # on.
+                                row["NoveltyAUC"] = _multiclass_loco_novelty_auc(
+                                    _build, X_pp, y_np, cv_splits=cv_splits, oof_cv=cv
+                                )
+                            except Exception as exc:  # noqa: BLE001 — NaN-safe per-config guard
+                                logger.warning(
+                                    "Multi-class config %s + %s (varsel=%s) failed: %s",
+                                    engine, prep_name, varsel_path, exc,
+                                )
+                                row["reason"] = f"{type(exc).__name__}: {exc}"
+
+                            df_results = add_result(df_results, row)
+
+    if len(df_results) > 0:
+        # No-signal guard (Kimi H1/H2): if NOT ONE config produced a finite
+        # NoveltyAUC the leaderboard has no ranking signal (every row ties on
+        # NaN); warn loudly rather than return a clean-looking Rank=1 frame.
+        if df_results["NoveltyAUC"].isna().all():
+            logger.warning(
+                "Multi-class SIMCA search: NO configuration produced a finite "
+                "NoveltyAUC (every config failed or was unmodelable); the "
+                "leaderboard carries no ranking signal."
+            )
+        df_results = compute_composite_score(
+            df_results, "multiclass_simca", variable_penalty, gap_penalty
+        )
+
+    # Optionally build the per-sample decision view for the top-ranked config
+    # (Phase D2). Attached via df.attrs so the return type stays a DataFrame for
+    # every existing caller. The winning preprocess_cfg is looked up by name from
+    # the authoritative in-scope list (no fragile name parsing).
+    if compute_top_decision_view and len(df_results) > 0:
+        try:
+            top = df_results.iloc[0]
+            top_cfg = next(
+                (c for c in preprocess_configs if c["name"] == top["Preprocess"]),
+                None,
+            )
+            if top_cfg is not None and not top.get("reason"):
+                # Resolve the top row's varsel value on ITS preprocessed matrix
+                # (mask methods need the preprocessed X; wold/none pass through).
+                _top_path = str(top["varsel_path"])
+                # NSelect comes back from the DataFrame as float64 (pandas
+                # coerces a mixed int/missing column), so an omitted Top-N reads
+                # as NaN, not None. Coerce NaN->None here — same guard the
+                # run-selected / holdout rebuilds use — so it flows through the
+                # None default rather than reaching int(NaN) (Kimi M1).
+                _top_nsel = top["NSelect"]
+                if _top_nsel is not None and pd.isna(_top_nsel):
+                    _top_nsel = None
+                if _top_path in _WOLD_METHODS or _top_path == "none":
+                    _top_varsel = _MULTICLASS_VARSEL_PATHS.get(_top_path)
+                else:
+                    _top_Xpp, _top_wl, _ = _multiclass_preprocess_matrix(
+                        X_np, top_cfg, wavelengths_full
+                    )
+                    _top_varsel = _multiclass_varsel_mask(
+                        _top_Xpp, y_np, _top_wl, _top_path, _top_nsel,
+                    )
+                df_results.attrs["top_decision_view"] = build_multiclass_decision_view(
+                    X_np,
+                    y_np,
+                    engine=str(top["engine_family"]),
+                    preprocess_cfg=top_cfg,
+                    alpha=top["Alpha"],
+                    n_components=top["NComponents"],
+                    scaling="per_class",
+                    min_class_samples=min_class_samples,
+                    variable_selection=_top_varsel,
+                    n_select=_top_nsel,
+                    wavelengths=wavelengths_full,
+                    sample_ids=(list(X.index) if hasattr(X, "index") else None),
+                )
+        except Exception as exc:  # noqa: BLE001 — the leaderboard still returns
+            logger.warning("Top decision-view build failed: %s", exc)
+
+    logger.info("=" * 70)
+    logger.info("MULTI-CLASS SIMCA SEARCH COMPLETE")
+    logger.info("Total configurations: %d", len(df_results))
+    logger.info("=" * 70)
+    if progress_callback:
+        progress_callback(
+            {
+                "stage": "info",
+                "message": f"Multi-class SIMCA search complete: {len(df_results)} results",
                 "current": total_configs,
                 "total": total_configs,
             }

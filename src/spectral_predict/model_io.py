@@ -262,7 +262,7 @@ def save_model(
                 print(f"Applicability domain: storing all {n_samples} training spectra")
             else:
                 # Use Kennard-Stone to select ~150 representative samples for large datasets
-                from src.spectral_predict.sample_selection import kennard_stone
+                from spectral_predict.sample_selection import kennard_stone
                 n_representatives = min(150, n_samples)
                 representative_indices = kennard_stone(X_train, n_samples=n_representatives)
                 representative_spectra = X_train[representative_indices]
@@ -566,12 +566,20 @@ def _compute_reliability_scores(
     return np.clip(np.round(scores), 5, 95).astype(int)
 
 
+# Recognized metadata["task_type"] values (spec §6). An explicit value outside
+# this set is rejected by ``predict_with_model`` as a forward-compat gate; a
+# missing or null task_type is treated as a legacy model (no gate).
+_SUPPORTED_TASK_TYPES = frozenset(
+    {"regression", "classification", "one_class", "multiclass_simca"}
+)
+
+
 def predict_with_model(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
     validate_wavelengths: bool = True,
     _internals: dict | None = None,
-) -> np.ndarray:
+) -> Union[np.ndarray, dict]:
     """
     Make predictions with a loaded model on new spectral data.
 
@@ -598,9 +606,16 @@ def predict_with_model(
 
     Returns
     -------
-    np.ndarray
-        Predicted values, shape (n_samples,) for regression or
-        (n_samples, n_classes) for classification
+    np.ndarray or dict
+        - For ``task_type`` in {``regression``, ``classification``, ``one_class``}:
+          an ``ndarray`` of predicted values, shape ``(n_samples,)`` for
+          regression / one-class or ``(n_samples, n_classes)`` for
+          classification.
+        - For ``task_type == "multiclass_simca"``: a ``dict`` with the schema
+          ``{"p_values": ndarray (n_samples, K) float, "decision_matrix":
+          ndarray (n_samples, K) bool, "summary_label": ndarray (n_samples,)
+          object of single-class-label / "multiple" / "novel",
+          "accepted_classes": list[list] of per-row accepted class labels}``.
 
     Raises
     ------
@@ -677,12 +692,29 @@ def predict_with_model(
                 else:
                     X_processed = X_selected
         else:
-            X_selected = X_new.values
-            # Apply preprocessing if present
-            if preprocessor is not None:
-                X_processed = preprocessor.transform(X_selected)
+            # validate_wavelengths=False: trust the caller's column order. Still
+            # honor the full-spectrum edge-mask handshake (derivative + subset) —
+            # otherwise a model trained on the SG-edge-trimmed axis receives the
+            # full-width matrix and its per-class scaler/PCA get the wrong feature
+            # count (crashed the multiclass save -> predict-on-raw path).
+            if use_full_spectrum_preprocessing and full_wavelengths is not None:
+                X_full = X_new.values
+                X_full_preprocessed = (
+                    preprocessor.transform(X_full) if preprocessor is not None else X_full
+                )
+                wavelength_indices = []
+                for wl in required_wl:
+                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
+                    if len(idx) > 0:
+                        wavelength_indices.append(idx[0])
+                X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
-                X_processed = X_selected
+                X_selected = X_new.values
+                # Apply preprocessing if present
+                if preprocessor is not None:
+                    X_processed = preprocessor.transform(X_selected)
+                else:
+                    X_processed = X_selected
     elif isinstance(X_new, np.ndarray):
         # Assume array is already in correct format
         if validate_wavelengths:
@@ -718,8 +750,39 @@ def predict_with_model(
     else:
         raise TypeError(f"X_new must be DataFrame or ndarray, got {type(X_new)}")
 
-    # One-class prediction branch
+    # --- task-type dispatch (spec §6) -----------------------------------------
     task_type = metadata.get("task_type", "regression")
+
+    # Forward-compat gate: reject genuinely-unknown task types. A missing
+    # task_type defaults to "regression" above (legacy regression models) and an
+    # explicit null is also left alone (legacy); only an explicit value outside
+    # the recognized set raises. This must NOT fire for any of the four
+    # recognized values or for absent/null task_type.
+    if task_type is not None and task_type not in _SUPPORTED_TASK_TYPES:
+        raise NotImplementedError(
+            f"task_type={task_type!r} is not supported by this build "
+            f"(expected one of {sorted(_SUPPORTED_TASK_TYPES)} or absent)."
+        )
+
+    # Multi-class SIMCA (task A8, spec §6): the model is a MultiClassClassModel
+    # orchestrator that owns all per-class state. Return its decision matrix,
+    # per-row summary label, and per-row accepted-class lists as a dict — NOT
+    # the ndarray that regression / classification / one_class return.
+    if task_type == "multiclass_simca":
+        P, A = model.decision_matrix(X_processed)
+        labels = model.predict(X_processed)
+        accepted_classes = [
+            [c for c, accepted in zip(model.classes_, A[i]) if accepted]
+            for i in range(A.shape[0])
+        ]
+        return {
+            "p_values": P,
+            "decision_matrix": A,
+            "summary_label": labels,
+            "accepted_classes": accepted_classes,
+        }
+
+    # One-class prediction branch
     if task_type == "one_class":
         # Apply one-class scaler if present
         oc_scaler = model_dict.get("scaler")
@@ -842,6 +905,28 @@ def predict_with_uncertainty(
                 f"Model trained on {model_data_type.upper()} data, "
                 f"but prediction data is {prediction_data_type.upper()}."
             )
+
+    # Multi-class class-modeling (SIMCA): predict_with_model already returns the
+    # per-sample decision schema (p-values + accept matrix + accepted class sets
+    # + summary labels). Surface it through the uncertainty envelope so the GUI
+    # predict path gets a well-formed result instead of an ndarray-shaped one
+    # (T-31 Phase D fold-in). Applicability domain is not defined per-model here
+    # (each class has its own model), so it is left empty.
+    if task_type == 'multiclass_simca':
+        pred = predict_with_model(model_dict, X_new, validate_wavelengths)
+        return {
+            'predictions': pred['summary_label'],
+            'uncertainty': {
+                'p_values': pred['p_values'],
+                'decision_matrix': pred['decision_matrix'],
+                'accepted_classes': pred['accepted_classes'],
+                'class_names': list(getattr(model, 'classes_', [])),
+            },
+            'applicability_domain': {},
+            'has_uncertainty': True,
+            'has_applicability_domain': False,
+            'data_type_warning': data_type_warning,
+        }
 
     # One-class models: extract decision scores for uncertainty/applicability domain
     if task_type == 'one_class':

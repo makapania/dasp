@@ -2,6 +2,7 @@
 
 import ast
 import logging
+from bisect import bisect_left
 
 import numpy as np
 import pandas as pd
@@ -63,6 +64,12 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     elif task_type == "one_class":
         bal_acc_cv = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
         performance_score = -bal_acc_cv - 0.0001 * df["Sensitivitycv"].fillna(0)
+    elif task_type == "multiclass_simca":
+        # Rank by the alpha-sweep NoveltyAUC (higher = better -> lower score).
+        # NaN AUC is preserved here (not fillna'd) so the lexicographic Rank
+        # override below can force it LAST; the MinClassN tie-break is applied
+        # there too (NOT via a fragile additive 1e-9 term — Codex H2/M1, Kimi M5).
+        performance_score = -df["NoveltyAUC"].astype(np.float64)
     else:  # classification
         performance_score = -df["Accuracycv"] - 0.0001 * df["F1cv"]
 
@@ -73,6 +80,9 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     elif task_type == "one_class":
         bal_acc_cv_range = df["BalancedAcccv"].fillna(df.get("Specificitycv", 0))
         perf_range = bal_acc_cv_range.max() - bal_acc_cv_range.min()
+    elif task_type == "multiclass_simca":
+        auc = df["NoveltyAUC"].astype(np.float64)
+        perf_range = auc.max() - auc.min()
     else:
         perf_range = df["Accuracycv"].max() - df["Accuracycv"].min()
 
@@ -126,6 +136,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
             gap_ratio = np.where(bal_acc_cv > 1e-10, bal_acc / bal_acc_cv, 1.0)
             gap_fraction = np.where(both_nan, 1.0, np.clip((gap_ratio - 1.0) / 0.2, 0.0, 1.0))
 
+        elif task_type == "multiclass_simca":
+            # No calibration-vs-CV gap concept for class modeling (metrics come
+            # from a single OOF decision matrix); the gap penalty is a no-op.
+            gap_fraction = 0.0
+
         else:  # classification
             acc = df["Accuracy"].astype(np.float64)
             acc_cv_col = "Accuracycv" if "Accuracycv" in df.columns else "AccuracyCV"
@@ -159,8 +174,27 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
     # Composite score (lower is better)
     df["CompositeScore"] = performance_score + var_penalty_term + gap_penalty_term
 
-    # Rank (1 = best)
-    df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
+    if task_type == "multiclass_simca":
+        # Lexicographic ranking (Codex H2/M1 + Kimi M5): NaN NoveltyAUC always
+        # LAST; among finite rows lower CompositeScore (= higher penalty-adjusted
+        # NoveltyAUC) wins; EXACT ties broken by the larger smallest-class n.
+        # Encoded as a (CompositeScore, -MinClassN) sort key so a huge MinClassN
+        # can never outweigh a real AUC gap, and a sub-1e-9 gap never flips.
+        auc = df["NoveltyAUC"].astype(np.float64)
+        nan_mask = auc.isna()
+        df.loc[nan_mask, "CompositeScore"] = np.inf  # NaN rows sort last
+        min_class_n = (
+            df.get("MinClassN", pd.Series(0.0, index=df.index))
+            .astype(np.float64)
+            .fillna(0.0)
+        )
+        keys = list(zip(df["CompositeScore"].to_numpy(), (-min_class_n).to_numpy()))
+        sorted_keys = sorted(keys)
+        ranks = [bisect_left(sorted_keys, k) + 1 for k in keys]  # method="min"
+        df["Rank"] = np.asarray(ranks, dtype=int)
+    else:
+        # Rank (1 = best)
+        df["Rank"] = df["CompositeScore"].rank(method="min").astype(int)
 
     # Sort by rank and reset index to ensure sequential IDs for GUI display
     df = df.sort_values("Rank").reset_index(drop=True)
@@ -196,6 +230,11 @@ def compute_composite_score(df_results, task_type, variable_penalty=0, gap_penal
         if task_type == "regression":
             display_cols = ["Rank", "Model", "R2", "RMSE", "R2cv", "RMSEcv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
+        elif task_type == "multiclass_simca":
+            display_cols = ["Rank", "Model", "NoveltyAUC", "Efficiency",
+                           "Alpha", "NComponents", "engine_family", "varsel_path",
+                           "MinClassN", "n_vars", "PerformanceScore",
+                           "VarPenalty", "GapPenalty", "CompositeScore"]
         else:
             display_cols = ["Rank", "Model", "Accuracy", "Accuracycv", "n_vars",
                            "PerformanceScore", "VarPenalty", "GapPenalty", "CompositeScore"]
@@ -254,6 +293,15 @@ def _compute_unified_complexity(row):
 
     # 3. Latent Variable Complexity (25% weight) - for PLS models
     lvs = row.get("LVs", np.nan)
+    # Multi-class SIMCA writes a non-numeric LVs ("auto" or a per-class dict
+    # string like "{'A': 7, 'B': 9}"), which would blow up (lvs - 2) below with
+    # a str - int TypeError. Coerce anything non-numeric to NaN so it falls to
+    # the median-complexity default rather than aborting the whole column.
+    if not isinstance(lvs, (int, float)):
+        try:
+            lvs = float(lvs)
+        except (TypeError, ValueError):
+            lvs = np.nan
     # PCA-SIMCA stores dimensionality as n_components in Params; LVs may be 0 or missing
     if (pd.isna(lvs) or lvs == 0) and model == "PCA-SIMCA":
         try:
@@ -590,6 +638,20 @@ def create_results_dataframe(task_type):
             # Cross-validation metrics
             "Sensitivitycv", "Specificitycv", "Precisioncv", "F1cv",
             "Accuracycv", "BalancedAcccv", "AUCcv",
+        ]
+    elif task_type == "multiclass_simca":
+        # T-31 multi-class class-modeling metrics (NOT single-label — a sample
+        # may be accepted by 0 / 1 / >=2 classes). Ranked by NoveltyAUC (the
+        # alpha-sweep AUC of novelty-vs-false-rejection, spec §7). engine_family
+        # + varsel_path are per-row tags (spec decision #3 / #5).
+        metric_cols = [
+            "NoveltyAUC", "Efficiency", "NoveltyRate", "NoClassRate",
+            "AmbiguityRate", "ExactSetRate", "MeanSensitivity", "MeanSpecificity",
+            "Alpha", "NComponents", "NSelect", "MinClassN", "n_classes",
+            "engine_family", "varsel_path",
+            # Emitted by run_multiclass_simca_search; declared so downstream
+            # consumers stay in sync (Kimi M3).
+            "unmodelable_classes", "reason",
         ]
     else:
         # Calibration metrics first, then CV metrics, then advanced metrics

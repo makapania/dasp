@@ -145,7 +145,10 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
             n_comp = min(int(self.n_components), max_components)
 
         self.n_components_ = n_comp
-        self.pca_ = PCA(n_components=n_comp)
+        # random_state=0: pin randomized-SVD nondeterminism for >500-sample
+        # classes so two fits reproduce the decision matrix exactly (T-31
+        # Phase-C gate, Kimi M6; extends the Phase-B Wold pinning).
+        self.pca_ = PCA(n_components=n_comp, random_state=0)
         self.scores_ = self.pca_.fit_transform(X)
         self.n_train_ = n_samples
 
@@ -184,7 +187,8 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
     def _fit_chi2(self, values: np.ndarray, label: str) -> tuple[float, float, float]:
         """Fit a scaled chi-squared distribution to positive sample statistics.
 
-        Tries scipy MLE first; falls back to method-of-moments if MLE raises.
+        Fits via scipy method-of-moments (``method='mm'``) first; falls back to
+        a manual method-of-moments if scipy raises.
 
         Parameters
         ----------
@@ -253,6 +257,15 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         scores : ndarray of shape (n_samples,)
             Anomaly scores. Positive = inlier, negative = outlier.
         """
+        # Score: positive = inside acceptance, negative = outside
+        return self.joint_threshold_ - self._fisher_stat(X)
+
+    def _fisher_stat(self, X):
+        """Fisher-combined statistic ``-2*(ln p_T2 + ln p_Q) ~ chi2(4)``.
+
+        Shared by ``decision_function`` (margin) and ``p_joint`` (p-value) so the
+        two never diverge.
+        """
         X = np.asarray(X, dtype=np.float64)
         pc_scores = self.pca_.transform(X)
 
@@ -268,10 +281,17 @@ class PCASIMCA(BaseEstimator, ClassifierMixin):
         p_q = np.clip(p_q, 1e-300, 1.0)
 
         # Fisher's method: combine independent p-values → chi2(4)
-        fisher_stat = -2.0 * (np.log(p_t2) + np.log(p_q))
+        return -2.0 * (np.log(p_t2) + np.log(p_q))
 
-        # Score: positive = inside acceptance, negative = outside
-        return self.joint_threshold_ - fisher_stat
+    def p_joint(self, X):
+        """Joint DD-SIMCA p-value ``P(chi2(4) >= fisher_stat)`` per sample.
+
+        The calibrated joint p-value used by the multi-class SIMCA decision
+        matrix (T-31). A sample is in-class iff ``p_joint >= alpha``, which is
+        exactly equivalent to ``decision_function(X) >= 0``. Returns values in
+        [0, 1].
+        """
+        return stats.chi2.sf(self._fisher_stat(X), 4)
 
     def score_samples(self, X):
         """Alias for decision_function (sklearn convention)."""

@@ -16,6 +16,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import roc_auc_score
 
@@ -131,6 +132,71 @@ class TestPCASIMCA:
         model.fit(X[:n_clean])
         predictions = model.predict(X)
         assert predictions.shape == (len(X),)
+
+
+class TestPCASIMCAPJoint:
+    """T-31 A1: PCASIMCA.p_joint joint p-value accessor + Fisher-vs-Bonferroni calibration.
+
+    p_joint(X) = chi2(4).sf(fisher_stat) exposes the DD-SIMCA joint p-value used
+    by the multi-class decision matrix. accept (predict == +1) iff p_joint >= alpha.
+    """
+
+    @staticmethod
+    def _fixture_model():
+        # Deterministic hardcoded input so the numeric fixture is reproducible.
+        X = np.random.RandomState(0).rand(12, 5)
+        model = PCASIMCA(n_components=2, alpha=0.05)
+        model.fit(X)
+        return model, X
+
+    def test_p_joint_in_unit_interval(self):
+        model, X = self._fixture_model()
+        pj = model.p_joint(X)
+        assert pj.shape == (len(X),)
+        assert np.all(pj >= 0.0) and np.all(pj <= 1.0)
+
+    def test_p_joint_accept_matches_predict(self):
+        # accept (predict == +1) iff p_joint >= alpha
+        model, X = self._fixture_model()
+        pj = model.p_joint(X)
+        np.testing.assert_array_equal(pj >= model.alpha, model.predict(X) == 1)
+
+    def test_p_joint_numeric_fixture(self):
+        # Frozen from the reference PCASIMCA on the first green run (revert-and-fail guard).
+        model, X = self._fixture_model()
+        pj = model.p_joint(X)
+        expected = np.array(_P_JOINT_FIXTURE)
+        np.testing.assert_allclose(pj, expected, atol=1e-9)
+
+    def test_fisher_vs_bonferroni_calibration(self):
+        # The Fisher-combined acceptance region and the per-axis Bonferroni (alpha/2
+        # each) region should accept held-out inliers at close-to-equal rates,
+        # validating the Fisher T2-Q independence approximation (spec 5.1/9.6).
+        rng = np.random.RandomState(1)
+        alpha = 0.05
+        model = PCASIMCA(n_components=3, alpha=alpha)
+        model.fit(rng.normal(size=(200, 8)))
+        X_test = rng.normal(size=(4000, 8))
+
+        fisher_accept = (model.predict(X_test) == 1).mean()
+
+        pc = model.pca_.transform(X_test)
+        t2 = model._compute_t2(pc)
+        q = model._compute_q_residuals_from_scores(X_test, pc)
+        p_t2 = 1.0 - stats.chi2.cdf(t2, model.t2_dof_, loc=0, scale=model.t2_scale_)
+        p_q = 1.0 - stats.chi2.cdf(q, model.q_dof_, loc=0, scale=model.q_scale_)
+        bonf_accept = ((p_t2 >= alpha / 2) & (p_q >= alpha / 2)).mean()
+
+        assert abs(fisher_accept - bonf_accept) < 0.05
+
+
+# Frozen reference values for TestPCASIMCAPJoint.test_p_joint_numeric_fixture.
+# Captured from the reference PCASIMCA implementation (see A1). Do not hand-edit.
+_P_JOINT_FIXTURE = [
+    0.975930326781, 0.676325780774, 0.693804967353, 0.055766676661,
+    0.417310257163, 0.661851188667, 0.485379519843, 0.603469835626,
+    0.405838481054, 0.145086632425, 0.168370652333, 0.379629849331,
+]
 
 
 # ============================================================================

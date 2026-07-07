@@ -151,13 +151,13 @@ class PreprocessorConfig(BaseEstimator, TransformerMixin):
 
     def _apply_snv(self, X):
         """Apply Standard Normal Variate transformation."""
-        from src.spectral_predict.preprocess import SNV
+        from spectral_predict.preprocess import SNV
         snv = SNV()
         return snv.fit_transform(X)
 
     def _apply_derivative(self, X, deriv_order):
         """Apply Savitzky-Golay derivative."""
-        from src.spectral_predict.preprocess import SavgolDerivative
+        from spectral_predict.preprocess import SavgolDerivative
         sg = SavgolDerivative(
             deriv=deriv_order,
             window=self.window,

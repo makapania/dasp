@@ -408,12 +408,18 @@ class TestCallerThreading:
                         break
                 i += 1
             call_block = gui_source[idx:end + 1]
+            cursor = end + 1
+            # The multi-class SIMCA validation call (T-31 Task 11) is exempt:
+            # class-modeling is per-class unsupervised (no class_weight /
+            # sample_weight), so imbalance_method has no meaning and is not in
+            # scope on that path.
+            if 'task_type="multiclass_simca"' in call_block:
+                continue
             assert "imbalance_method=imbalance_method" in call_block, (
                 f"GUI call to compute_validation_metrics_for_top_models at offset "
                 f"{idx} does not pass imbalance_method=imbalance_method. The "
                 f"validation rebuild for that path will silently produce unweighted "
                 f"XGBoost / PLS-DA validation models."
             )
-            cursor = end + 1
             checked += 1
         assert checked >= 2, f"Expected to check at least 2 call sites, checked {checked}."
