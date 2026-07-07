@@ -30549,13 +30549,13 @@ For detailed documentation, see the User Guide.
                 if varsel_path in _WOLD_METHODS or varsel_path == "none":
                     variable_selection = _MULTICLASS_VARSEL_PATHS.get(varsel_path)
                 else:
-                    X_pp, _, _ = _multiclass_preprocess_matrix(
+                    X_pp, wl_trimmed, _ = _multiclass_preprocess_matrix(
                         X_np, preprocess_cfg, wavelengths_full
                     )
                     variable_selection = _multiclass_varsel_mask(
                         X_pp,
                         y_np,
-                        wavelengths_full,
+                        wl_trimmed,
                         varsel_path,
                         n_select_row,
                         task_type="classification",

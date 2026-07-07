@@ -695,8 +695,11 @@ def _multiclass_holdout_metrics(
         )
     except (TypeError, ValueError):
         n_select = None
+    # Use the TRIMMED train axis (_wl_tr) returned alongside X_tr_pp: an SG
+    # derivative edge-masks the wavelength axis, so the full axis would push
+    # interval-method indices past the trimmed matrix (out-of-bounds).
     varsel_value = _multiclass_varsel_mask(
-        X_tr_pp, y_train_np, wavelengths_full, varsel_path, n_select
+        X_tr_pp, y_train_np, _wl_tr, varsel_path, n_select
     )
 
     engine = str(row.get("engine_family") or row.get("Model") or "pca-simca")
@@ -8221,7 +8224,7 @@ def run_multiclass_simca_search(
                             # unsupported (spa/ipls/ga/...) -> skip with a warning.
                             try:
                                 varsel_value = _multiclass_varsel_mask(
-                                    X_pp, y_np, wavelengths_full, varsel_path, _n_select,
+                                    X_pp, y_np, wavelengths_current, varsel_path, _n_select,
                                 )
                             except MulticlassVarselUnsupported as exc:
                                 logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
@@ -8329,11 +8332,11 @@ def run_multiclass_simca_search(
                 if _top_path in _WOLD_METHODS or _top_path == "none":
                     _top_varsel = _MULTICLASS_VARSEL_PATHS.get(_top_path)
                 else:
-                    _top_Xpp, _, _ = _multiclass_preprocess_matrix(
+                    _top_Xpp, _top_wl, _ = _multiclass_preprocess_matrix(
                         X_np, top_cfg, wavelengths_full
                     )
                     _top_varsel = _multiclass_varsel_mask(
-                        _top_Xpp, y_np, wavelengths_full, _top_path, _top_nsel,
+                        _top_Xpp, y_np, _top_wl, _top_path, _top_nsel,
                     )
                 df_results.attrs["top_decision_view"] = build_multiclass_decision_view(
                     X_np,
