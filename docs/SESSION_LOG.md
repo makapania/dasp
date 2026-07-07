@@ -4,6 +4,47 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-06 — Run-Selected multiclass: mask-based varsel rows opened NO decision view (Fable; Opus review of primary fix)
+
+User report: double-clicking a multi-class leaderboard row to "Run Selected
+Result" opened a decision view for Wold/none rows but importance rows "did not
+run at all"; suspected broader. **Confirmed broader — ALL discrimination
+(mask-based) methods** (importance/cars/spa/uve/uve_*/ipls/fipls_*/ipls_forward/
+ipls_backward/mc_sipls/mwpls).
+
+- **Localization was a red herring.** Headless repro on synthetic AND the real
+  ORAU workbook (raw + snv_deriv1) showed the mask branch — `_multiclass_varsel_mask`
+  + `build_multiclass_decision_view` — SUCCEEDS for every path. The bug is in the
+  GUI RENDER, not the resolution.
+- **Root cause:** `build_multiclass_decision_view` stores the *resolved*
+  `variable_selection` on `view['config']` — a **boolean ndarray** for
+  discrimination methods (None for `none`, a string for `wold_*`).
+  `_show_multiclass_decision_view` fed that into the header row, and
+  `_multiclass_decision_header` did `f"{row.get('varsel_path') or 'none'}"` →
+  `ndarray or 'none'` raises `ValueError: ambiguous truth value`. The broad
+  render-`except` swallowed it and DESTROYED the half-built Toplevel → user saw
+  nothing. Wold/none survive because their config value is truthy-safe.
+- **`_mc_worker_running` is NOT stuck** — reset in the success `root.after` lambda
+  (setattr before the show call), so the flag is already False when the render
+  fails; repeated double-clicks aren't blocked, they just fail identically.
+- **Gotcha for future:** any `<value> or default` where `<value>` might be a numpy
+  array raises. The config carries the resolved selection (array), not the method
+  name — stash the readable name separately if a label needs it.
+- **Second defect (Opus review, newly reachable):** the now-openable window hosts
+  "Export Repro Script/Notebook", which embed `repr(view['config'])`. For mask
+  methods that leaks a bare `array([...])` literal — an undefined name in the
+  generated file (imports only `numpy as np`) → `NameError` when the user runs it.
+  Latent-but-unreachable before (window never opened for mask methods).
+- **Fix:** (GUI) header renders an ndarray as `"mask (N vars)"`; worker stamps the
+  method name onto `view['config']['varsel_path']`; header-builder prefers it.
+  (code_generator) `_reprsafe_multiclass_config` `.tolist()`s the mask; shared BODY
+  template coerces the list back to a bool ndarray (a plain list would be treated
+  as an unknown string method by `MultiClassClassModel`). Both script + notebook
+  covered. Detail: `.superpowers/sdd/run-selected-varsel-investigation.md`.
+- Tests (all red-first): crash-site header test, importance/cars end-to-end
+  view+header, generated script/notebook mask reproduction (no `array([`, executes,
+  bit-exact). 134 targeted passed.
+
 ## 2026-07-07 — cp1252 UnicodeEncodeError in fiPLS/interval varsel prints (Fable + Opus impl/review)
 
 Commit `e57b8f4` on `feat/T31-multiclass-simca`. The axis fix below made
