@@ -786,3 +786,92 @@ def test_classification_branch_ignores_new_multiclass_kwargs():
     b = float(base.loc[base.index[0], "val_Accuracy"])
     w = float(with_kwargs.loc[with_kwargs.index[0], "val_Accuracy"])
     assert b == pytest.approx(w, nan_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Regression: SG-derivative edge-trim vs interval variable-selection methods.
+#
+# After a Savitzky-Golay derivative, _multiclass_preprocess_matrix trims the
+# wavelength axis (edge mask, e.g. 40 -> 34). Interval methods (ipls_forward,
+# fipls_spa, ...) compute variable indices over the wavelength axis, so passing
+# the FULL untrimmed axis against the TRIMMED matrix produces out-of-bounds
+# indices. In the search loop this was caught (MulticlassVarselUnsupported ->
+# continue) and the row SILENTLY SKIPPED; in the holdout rebuild it raised. The
+# fix passes the trimmed axis returned by the same preprocess call.
+# ---------------------------------------------------------------------------
+
+# SG window 7 -> edge_zone = window // 2 = 3 per side -> 40 features become 34.
+_SG_WINDOW = 7
+_TRIMMED_WIDTH = 40 - 2 * (_SG_WINDOW // 2)
+
+
+@pytest.mark.parametrize("method", ["ipls_forward", "fipls_spa"])
+def test_multiclass_search_derivative_interval_method_produces_row(method):
+    """An interval varsel method combined with an SG-derivative preprocessing
+    must PRODUCE a leaderboard row (not be silently skipped), and its selection
+    width must match the TRIMMED matrix, not the full wavelength axis."""
+    from spectral_predict.search import run_multiclass_simca_search
+
+    X, y, _ = _graded([20, 20, 20], n_features=40, seed=0)
+    wl = np.arange(40, dtype=float)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        df = run_multiclass_simca_search(
+            X, y, engines=["pca-simca"], preprocessing_methods=["deriv1"],
+            window_sizes=[_SG_WINDOW], varsel_paths=[method],
+            alpha=0.05, n_components=0.99, wavelengths=wl,
+            variable_selection_n_select=[10],
+        )
+
+    rows = df[df["varsel_path"] == method]
+    # Pre-fix: the row was silently skipped (0 rows). Post-fix: a real row exists.
+    assert len(rows) >= 1, (
+        f"interval method {method!r} row was silently skipped after the SG-"
+        f"derivative trimmed the wavelength axis"
+    )
+    r = rows.iloc[0]
+    # The full/selected widths must be the TRIMMED width (34), never the full 40.
+    assert int(r["full_vars"]) == _TRIMMED_WIDTH
+    assert 1 <= int(r["n_vars"]) <= _TRIMMED_WIDTH
+
+
+def test_multiclass_holdout_derivative_interval_method_builds_mask():
+    """The holdout rebuild path (_multiclass_holdout_metrics) must build a usable
+    variable-selection mask for a derivative + interval-method row: the trimmed
+    train axis is passed to the mask builder, so no out-of-bounds occurs and the
+    validation metrics populate. Pre-fix this raised MulticlassVarselUnsupported."""
+    from spectral_predict.search import _multiclass_holdout_metrics
+
+    X, y, _ = _graded([25, 25, 25], n_features=40, seed=1)
+    rng = np.random.RandomState(1)
+    idx = rng.permutation(len(y))
+    tr, va = idx[:60], idx[60:]
+    wl = np.arange(40, dtype=float)
+
+    row = {
+        "Preprocess": f"deriv1_w{_SG_WINDOW}",
+        "Deriv": 1,
+        "Window": _SG_WINDOW,
+        "Poly": None,
+        "varsel_path": "ipls_forward",
+        "NSelect": 10,
+        "engine_family": "pca-simca",
+        "Alpha": 0.05,
+        "NComponents": 0.99,
+    }
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        metrics = _multiclass_holdout_metrics(
+            row, X[tr], y[tr], X[va], y[va], wl, min_class_samples=5,
+        )
+
+    # A usable mask was built on the trimmed axis and the model scored the
+    # holdout: at least one class-modeling metric is finite (not all NaN).
+    assert isinstance(metrics, dict)
+    finite = [
+        v for v in metrics.values()
+        if isinstance(v, (int, float)) and not np.isnan(v)
+    ]
+    assert finite, "holdout metrics were all NaN — the mask rebuild failed"
