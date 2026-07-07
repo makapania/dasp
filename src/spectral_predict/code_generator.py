@@ -2234,8 +2234,12 @@ CONFIG = {config_repr}
 PREPROCESS_CFG = CONFIG.pop("preprocess_cfg")
 # Discrimination varsel methods embed their selection as a plain list; the model
 # expects a boolean ndarray (a list is treated as an unknown string method).
-if isinstance(CONFIG.get("variable_selection"), list):
-    CONFIG["variable_selection"] = np.array(CONFIG["variable_selection"], dtype=bool)
+# Invariant: _reprsafe_multiclass_config only list-embeds bool masks, so coerce
+# ONLY all-bool lists. A hypothetical int-index list (e.g. [0, 5, 7]) must NOT be
+# coerced -- np.array(..., dtype=bool) would silently corrupt it into a mask.
+_vs = CONFIG.get("variable_selection")
+if isinstance(_vs, list) and all(isinstance(v, bool) for v in _vs):
+    CONFIG["variable_selection"] = np.array(_vs, dtype=bool)
 
 {data_section}
 view = build_multiclass_decision_view(

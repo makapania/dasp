@@ -87,9 +87,9 @@ def test_generated_script_reproduces_decision_matrix(tmp_path):
 
 
 def test_generated_script_reproduces_deriv_config(tmp_path):
-    """Edge-mask (deriv+window) config must reproduce identically — the export
-    embeds raw X and re-runs the same preprocessing, so the mask is re-derived
-    inside the same function both times."""
+    """Edge-mask (deriv+window) config must reproduce the decision matrix within
+    rtol=1e-6 — the export embeds raw X and re-runs the same preprocessing, so the
+    mask is re-derived inside the same function both times."""
     X, y = _synthetic(K=3, n=25, p=40, seed=4)
     # real float wavelengths so the edge mask has meaningful columns to drop
     X.columns = [1000.0 + j for j in range(X.shape[1])]
@@ -176,6 +176,49 @@ def test_generated_script_reproduces_mask_varsel_config(tmp_path):
                              cwd=nbdir, capture_output=True, text=True)
     assert proc_nb.returncode == 0, f"notebook code failed:\n{proc_nb.stderr}"
     assert (nbdir / "decision_matrix.csv").exists()
+
+
+def _coercion_lines_from_script(script: str) -> str:
+    """Pull the variable_selection list->mask coercion block out of a generated
+    reproduction script so its behavior can be exercised in isolation."""
+    lines = script.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("_vs = CONFIG.get("))
+    end = next(i for i in range(start, len(lines)) if "np.array(_vs, dtype=bool)" in lines[i])
+    return "\n".join(lines[start : end + 1])
+
+
+def test_bool_mask_list_coerces_to_bool_ndarray():
+    """A bool-mask list (how _reprsafe_multiclass_config embeds masks) round-trips
+    to a bool-dtype ndarray with the same values via the generated coercion."""
+    X, y = _synthetic()
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=_CFG, n_components=0.99,
+        wavelengths=list(X.columns),
+    )
+    script = generate_multiclass_reproduction_script(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns))
+    ns = {"np": np, "CONFIG": {"variable_selection": [True, False, True]}}
+    exec(_coercion_lines_from_script(script), ns)
+    vs = ns["CONFIG"]["variable_selection"]
+    assert isinstance(vs, np.ndarray) and vs.dtype == bool
+    assert list(vs) == [True, False, True]
+
+
+def test_int_index_list_is_not_coerced_to_mask():
+    """A hypothetical int-index list (not something _reprsafe embeds today) must
+    NOT be silently corrupted into a bool mask by the coercion guard."""
+    X, y = _synthetic()
+    view = build_multiclass_decision_view(
+        X, y, engine="pca-simca", preprocess_cfg=_CFG, n_components=0.99,
+        wavelengths=list(X.columns),
+    )
+    script = generate_multiclass_reproduction_script(
+        view["config"], data_X=X, data_y=y, wavelengths=list(X.columns))
+    ns = {"np": np, "CONFIG": {"variable_selection": [0, 5, 7]}}
+    exec(_coercion_lines_from_script(script), ns)
+    vs = ns["CONFIG"]["variable_selection"]
+    assert vs == [0, 5, 7]
+    assert not isinstance(vs, np.ndarray)
 
 
 def test_generated_notebook_is_valid_nbformat():
