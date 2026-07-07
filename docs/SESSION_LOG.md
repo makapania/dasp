@@ -4,6 +4,25 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 — T-17 UVE/CARS multi-Y landed ("ship, not revert") + recovered from Windows-update crash
+
+**Recovery context.** An overnight run implementing multi-target UVE/CARS varsel was cut off by a Windows update. Nothing was lost — the work survived on disk as uncommitted changes in worktree `dasp-t17-uve-cars`; snapshotted as `bc750d9` (5 files, +456/−119). A separate overnight codebase-eval run also survived intact as `docs/PRODUCTION_READINESS_REVIEW.md` (committed to `main`).
+
+**Decision: SHIP, not revert.** The recovered WIP had UVE/CARS multi-Y enabled in code (`_IMPORTANCE_METHODS` at `multitarget_grid.py:214`) while tests/docs still asserted reject/skip. Rather than revert to the v1.1-deferred contract, we completed it — because the next feature (VIP-CARS) depends on multi-target CARS machinery.
+
+**Non-obvious findings (from Codex + two Fable reviews):**
+- **SPA preflight ran unconditionally** — `verify_spa_multi_y_safe` fired on every multi-target run (observed "Running canonical SPA over 2151 candidate seeds" with `variable_selection_methods=[]`). Now gated on SPA-dependent method selection. Real user-visible wasted time.
+- **UVE GUI params were dead** — `uve_cutoff_multiplier`/`uve_n_components` existed as Tk vars and widgets but `_collect_multitarget_config` never passed them and the backend signature had no slots. Threaded end-to-end.
+- **12 real test failures, not 11** — Codex's list missed 2 in `test_multitarget_grid.py`. Fable's baseline caught them; the "1 failed io" Codex saw did not reproduce.
+- **vcpa-iriv half-upgrade** — the leaf `wavelength_selection.py` got a multi-Y PLS criterion but the grid never routes vcpa-iriv (it's in neither `_INTERVAL_METHODS` nor `_IMPORTANCE_METHODS`), so that branch is dead code reachable only by a direct call. Kept skip-with-notice; fixed the contradictory comment/docstring rather than wiring unneeded surface.
+- **ga_lightgbm multi-Y fitness unreachable** — the grid's `ga` route calls `ga_pls_selection` only. Documented as intentionally-unrouted (the code is live in single-Y `search.py`), not wired.
+
+**Orchestration note (process):** `opencode-call` runs GLM in a headless worktree with a wrapper that auto-`git add -A`+commits an "opencode draft" snapshot. With multiple concurrent GLM agents in ONE shared worktree, those snapshots intermingle disjoint files. Non-destructive to reconcile: `git reset --soft <base>` folds all drafts back to the working tree, then rebuild clean per-wave commits. GUI-file (`spectral_predict_gui_optimized.py`) edits verified drift-free via CRLF byte-count (60552/0 lone-LF) per `feedback_edit_tool_line_endings.md`.
+
+**Result:** `ad92cc1` (Wave 1: backend + test contract), `9841d0f` (Wave 2: GUI wiring). Gate: 294 passed / 0 failed across the 10-file multitarget+varsel suite. Remaining before merge: full-suite failure-diff vs `origin/main` + manual GUI smoke. Blueprint: `docs/T17_LANDING_BLUEPRINT.md`.
+
+---
+
 ## 2026-07-04 — T-17 coupling-mode-choice feature shipped (default Independent)
 
 Coupling is now a user choice — **Independent / Joint / Both, default Independent**. Previously coupling was a fixed model attribute (a JOINT-capable model like PLS could only run JOINT), which denied the common separate-model-per-property workflow. Key points:
