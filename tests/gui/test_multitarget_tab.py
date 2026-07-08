@@ -1015,3 +1015,219 @@ class TestMultiTargetDetailDialog:
             # added to these trees is _on_multitarget_result_double_click.
             assert tree.bind("<Double-1>"), \
                 f"<Double-1> not bound on {tree!r}"
+
+
+def _build_multitarget_run(n=30, p=12, seed=1):
+    """Run a tiny real multi-target grid search (JOINT PLS, raw, full-spectrum)
+    and return ``(output, cfg)`` where ``cfg`` mirrors the shape
+    ``_collect_multitarget_config`` produces (X/Y/wavelengths + backend kwargs).
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(n, p))
+    latent = rng.normal(size=(n, 2))
+    y0 = 2.0 * latent[:, 0] + 0.1 * rng.normal(size=n)
+    y1 = 3.0 * latent[:, 0] + latent[:, 1] + 0.1 * rng.normal(size=n)
+    Y = np.column_stack([y0, y1])
+    wl = np.arange(p, dtype=float)
+    targets = ["A", "B"]
+    cfg = {
+        "X": X, "Y": Y, "wavelengths": wl,
+        "model_names": ["PLS"], "target_names": targets,
+        "preprocessing_methods": {"raw": True, "snv": False},
+        "autoscale": False, "baseline_method": None, "baseline_params": None,
+        "smoothing": False, "smoothing_window": 17, "smoothing_polyorder": 2,
+        "window_sizes": [11], "wavelength_restriction": None,
+        "variable_selection_methods": [], "variable_counts": None,
+        "apply_uve_prefilter": False, "uve_cutoff_multiplier": 1.0,
+        "uve_n_components": None, "ipls_subset_limit": "Top 10",
+        "tier": "quick", "model_grid_overrides": {},
+        "max_n_components": 4, "max_iter": 500,
+        "cv": "kfold", "n_folds": 3, "n_repeats": 2,
+        "coupling_mode": "joint",
+        "effective_n_notice": "using 30 complete samples",
+    }
+    run_kwargs = {k: v for k, v in cfg.items() if k != "effective_n_notice"}
+    output = run_multitarget_grid_search(optimization_method="grid", **run_kwargs)
+    return output, cfg
+
+
+@pytest.mark.gui
+class TestMultiTargetSaveModel:
+    """T-17 W3-1: the detail-dialog 'Save Model (.dasp)' button refits the
+    selected leaderboard row via ``refit_multitarget_final`` and persists a
+    reload-and-predict ``.dasp`` (JOINT y_scaler included)."""
+
+    def test_save_writes_reloadable_multitarget_dasp(self, gui_app, monkeypatch, tmp_path):
+        import time
+
+        from spectral_predict.model_io import load_model, predict_with_model
+
+        output, cfg = _build_multitarget_run()
+        assert output.results, "grid produced no cells"
+        result = output.results[0]
+
+        gui_app._multitarget_last_config = cfg
+        path = tmp_path / "mt_model.dasp"
+        monkeypatch.setattr(
+            "tkinter.filedialog.asksaveasfilename", lambda **kw: str(path))
+
+        gui_app._save_multitarget_model(result, output)
+
+        # Refit + save run on a worker thread; pump the loop until written.
+        deadline = time.time() + 30
+        while time.time() < deadline and not (
+                path.exists() and path.stat().st_size > 0):
+            try:
+                gui_app.root.update()
+            except Exception:
+                pass
+            time.sleep(0.02)
+        assert path.exists() and path.stat().st_size > 0, "no .dasp was written"
+
+        loaded = load_model(str(path))
+        meta = loaded["metadata"]
+        assert meta.get("n_targets") == 2
+        assert list(meta.get("target_names")) == ["A", "B"]
+        preds = predict_with_model(loaded, pd.DataFrame(cfg["X"], columns=cfg["wavelengths"]))
+        preds = np.asarray(preds)
+        assert preds.shape == (cfg["X"].shape[0], 2)
+
+    def test_save_no_run_shows_info_and_returns(self, gui_app, monkeypatch):
+        """With no stashed config, Save is a guarded no-op (no file dialog)."""
+        from types import SimpleNamespace
+
+        gui_app._multitarget_last_config = None
+        called = {"dialog": 0}
+        monkeypatch.setattr(
+            "tkinter.filedialog.asksaveasfilename",
+            lambda **kw: called.__setitem__("dialog", called["dialog"] + 1) or "")
+        result = SimpleNamespace(model_name="PLS", mode="JOINT", error=None)
+        output = SimpleNamespace(target_names=["A", "B"])
+        gui_app._save_multitarget_model(result, output)
+        assert called["dialog"] == 0, "file dialog opened despite no stashed config"
+
+
+@pytest.mark.gui
+class TestMultiTargetExportCode:
+    """T-17 W2-2 wiring: the 'Export Code…' button refits the row to recover the
+    final block and drives the multi-target CodeGenerator (script / notebook)."""
+
+    def test_export_script_reproduces_shape(self, gui_app, monkeypatch, tmp_path):
+        import time
+
+        output, cfg = _build_multitarget_run()
+        result = output.results[0]
+        gui_app._multitarget_last_config = cfg
+        path = tmp_path / "mt_export.py"
+        monkeypatch.setattr(
+            "tkinter.filedialog.asksaveasfilename", lambda **kw: str(path))
+
+        # Open the format chooser, force 'script', click Export.
+        gui_app._export_multitarget_code(result, output)
+        dialogs = [w for w in gui_app.root.winfo_children()
+                   if w.winfo_class() == "Toplevel"]
+        assert dialogs, "export format dialog was not created"
+        dialog = dialogs[-1]
+        export_btn = _find_widget_by_text(dialog, "  Export  ")
+        assert export_btn is not None, "Export button not found"
+        # The radiobutton var default is 'colab'; switch to script by invoking.
+        script_rb = _find_widget_by_text(
+            dialog, "Python Script (.py) — embedded data")
+        assert script_rb is not None
+        script_rb.invoke()
+        export_btn.invoke()
+
+        deadline = time.time() + 30
+        while time.time() < deadline and not (
+                path.exists() and path.stat().st_size > 0):
+            try:
+                gui_app.root.update()
+            except Exception:
+                pass
+            time.sleep(0.02)
+        assert path.exists() and path.stat().st_size > 0, "no script was written"
+        text = path.read_text(encoding="utf-8")
+        assert "MultiTarget Mode: JOINT" in text
+        assert "Y_pred_cv" in text
+        try:
+            dialog.destroy()
+        except Exception:
+            pass
+
+
+@pytest.mark.gui
+class TestMultiTargetPredictionFanOut:
+    """T-17 W3-2: a multi-target .dasp predicts (n, n_targets); _run_predictions
+    fans that out into one column per target. Single-Y / one-class stay a single
+    column (the unchanged path)."""
+
+    def _prime_prediction(self, app, n=8, p=6):
+        rng = np.random.default_rng(0)
+        idx = [f"S{i}" for i in range(n)]
+        cols = [float(w) for w in range(p)]
+        app.prediction_data = pd.DataFrame(
+            rng.normal(size=(n, p)), index=idx, columns=cols)
+        app.prediction_data_type = None
+        app.ref = None
+        app.pred_data_source.set("directory")
+        return n
+
+    def _fake_predict(self, arr):
+        def _f(model_dict, data, **kwargs):
+            return {
+                "predictions": arr,
+                "uncertainty": {},
+                "has_uncertainty": False,
+                "applicability_domain": {},
+                "has_applicability_domain": False,
+                "decision_score_error": None,
+            }
+        return _f
+
+    def test_multitarget_prediction_fans_out_per_target(self, gui_app, monkeypatch):
+        n = self._prime_prediction(gui_app)
+        preds = np.column_stack([np.arange(n), np.arange(n) + 100.0])
+        gui_app.loaded_models = [{
+            "metadata": {
+                "model_name": "PLS", "preprocessing": "snv",
+                "task_type": "regression", "n_targets": 2,
+                "target_names": ["A", "B"],
+            },
+            "filename": "mt.dasp",
+        }]
+        import spectral_predict.model_io as mio
+        monkeypatch.setattr(mio, "predict_with_uncertainty", self._fake_predict(preds))
+
+        gui_app._run_predictions()
+
+        cols = list(gui_app.predictions_df.columns)
+        assert "PLS_snv_A" in cols
+        assert "PLS_snv_B" in cols
+        assert "PLS_snv" not in cols  # base name never used alone
+        assert "PLS_snv_A" in gui_app.predictions_model_map
+        assert "PLS_snv_B" in gui_app.predictions_model_map
+        np.testing.assert_allclose(
+            gui_app.predictions_df["PLS_snv_B"].to_numpy(), np.arange(n) + 100.0)
+
+    def test_single_target_prediction_stays_one_column(self, gui_app, monkeypatch):
+        n = self._prime_prediction(gui_app)
+        preds = np.arange(n, dtype=float)  # 1-D single-Y predictions
+        gui_app.loaded_models = [{
+            "metadata": {
+                "model_name": "Ridge", "preprocessing": "raw",
+                "task_type": "regression",
+            },
+            "filename": "sy.dasp",
+        }]
+        import spectral_predict.model_io as mio
+        monkeypatch.setattr(mio, "predict_with_uncertainty", self._fake_predict(preds))
+
+        gui_app._run_predictions()
+
+        cols = list(gui_app.predictions_df.columns)
+        pred_cols = [c for c in cols if c != "Sample"]
+        assert pred_cols == ["Ridge"], f"expected exactly one column, got {pred_cols}"
+        np.testing.assert_allclose(
+            gui_app.predictions_df["Ridge"].to_numpy(), np.arange(n, dtype=float))

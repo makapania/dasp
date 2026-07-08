@@ -14838,6 +14838,11 @@ class SpectralPredictApp:
 
         #: Last MultiTargetSearchOutput, retained for CSV export.
         self._multitarget_last_output = None
+        #: The EXACT run config the last multi-target search ran with (a copy
+        #: snapshotted at dispatch, before the worker pops X/Y). Save/Export
+        #: replay it so a refit reproduces the searched cell even if the UI has
+        #: changed since. ``None`` until the first run.
+        self._multitarget_last_config = None
         #: Per-column sort direction for the multi-target leaderboard (col -> reverse?).
         self._multitarget_sort_state = {}
         #: Separate SearchController for the multi-target worker — a DISTINCT
@@ -15986,6 +15991,11 @@ class SpectralPredictApp:
         cfg = self._collect_multitarget_config()
         if cfg is None:
             return
+        # T-17 W3: snapshot the EXACT config this run dispatches with (a shallow
+        # copy taken BEFORE the worker pops X/Y) so Save Model / Export Code can
+        # replay the searched cell via refit_multitarget_final — not a fresh
+        # _collect_multitarget_config() (the UI may have changed since the run).
+        self._multitarget_last_config = dict(cfg)
         # FIX 4: pop the effective-N heads-up (not a backend kwarg) and show it.
         effective_n_notice = cfg.pop("effective_n_notice", "")
         # Force Grid engine at dispatch (belt-and-braces with the greyed radios).
@@ -16894,10 +16904,10 @@ class SpectralPredictApp:
         button_frame = ttk.Frame(dialog)
         button_frame.pack(fill='x', padx=12, pady=(6, 12))
         ttk.Button(button_frame, text="💾 Save Model (.dasp)",
-                   command=lambda: self._multitarget_detail_stub("save_model"),
+                   command=lambda: self._save_multitarget_model(result, output),
                    style='Modern.TButton').pack(side='left', padx=(0, 6))
         ttk.Button(button_frame, text="📄 Export Code…",
-                   command=lambda: self._multitarget_detail_stub("export_code"),
+                   command=lambda: self._export_multitarget_code(result, output),
                    style='Modern.TButton').pack(side='left', padx=(0, 6))
         if fig is not None:
             default_name = (f"multitarget_{result.model_name}_{result.mode}"
@@ -16914,25 +16924,298 @@ class SpectralPredictApp:
         dialog.lift()
         dialog.focus_force()
 
-    def _multitarget_detail_stub(self, what):
-        """T-17 W2-3 placeholder for the detail-dialog action buttons.
+    def _multitarget_refit_config(self, output):
+        """Build the kwargs for :func:`refit_multitarget_final` from the stashed
+        run config, or return ``None`` (after an info dialog) if no run exists.
 
-        ``save_model`` is wired in W3-1 (``refit_multitarget_final`` + the
-        Save-Model GUI trigger); ``export_code`` is wired in W2-2 (the
-        CodeGenerator multi-target trigger). Both are additive future work;
-        until then they surface an honest "coming in a later step" info dialog
-        so the buttons aren't silently dead.
+        Splats the EXACT stored run config (``_multitarget_last_config``) minus
+        the two keys the refit takes explicitly / cannot accept: ``target_names``
+        (passed positionally from ``output`` to avoid a duplicate-keyword clash)
+        and the UI-only ``effective_n_notice``. Every remaining key (``X``/``Y``/
+        ``wavelengths``/preprocessing/varsel/uve/cv…) is a refit kwarg or is
+        absorbed by its ``**_ignored`` (e.g. ``coupling_mode``, ``tier``).
         """
-        labels = {
-            "save_model": "Saving a multi-target .dasp model",
-            "export_code": ("Exporting multi-target code "
-                            "(script / Colab notebook)"),
+        cfg = getattr(self, "_multitarget_last_config", None)
+        if cfg is None:
+            messagebox.showinfo(
+                "Multi-Target",
+                "Run a multi-target search first, then save/export from its "
+                "results.")
+            return None
+        refit_kwargs = {
+            k: v for k, v in cfg.items()
+            if k not in ("target_names", "effective_n_notice")
         }
-        messagebox.showinfo(
-            "Coming in a later step",
-            f"{labels.get(what, 'This action')} is coming in a later step of "
-            "the multi-target integration (see W2-2 / W3-1 in the T-17 "
-            "blueprint).")
+        return refit_kwargs
+
+    def _save_multitarget_model(self, result, output):
+        """Refit + persist the selected multi-target leaderboard row as a ``.dasp``.
+
+        Replays the searched cell via :func:`refit_multitarget_final` on the FULL
+        calibration set (re-runs varsel + fits the final estimator, which can take
+        several seconds) and writes it with :meth:`RefitMultiTargetModel.save`.
+        Because the refit is non-trivial it runs on a daemon worker thread; the
+        worker NEVER touches Tk — it drops a ``("ok"|"err", payload)`` tuple on a
+        queue that a ``root.after`` poller drains on the main thread to show the
+        result dialog. A busy cursor + status label cover the wait.
+        """
+        import queue as _q
+        import threading
+
+        if getattr(result, "error", None):
+            messagebox.showinfo(
+                "Save Model",
+                "This result is a failed search cell and has no reproducible "
+                "model to save.")
+            return
+        refit_kwargs = self._multitarget_refit_config(output)
+        if refit_kwargs is None:
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".dasp",
+            filetypes=[("DASP model", "*.dasp"), ("All files", "*.*")],
+            title="Save Multi-Target Model",
+            initialfile=(
+                f"multitarget_{result.model_name}_{result.mode}").replace(" ", "_"))
+        if not path:
+            return
+
+        target_names = list(getattr(output, "target_names", []) or [])
+        q: "_q.Queue" = _q.Queue()
+        try:
+            self.root.config(cursor="watch")
+        except Exception:
+            pass
+        try:
+            self.multitarget_status_label.config(text="Refitting + saving model…")
+        except Exception:
+            pass
+
+        def _worker():
+            try:
+                from spectral_predict.multitarget_grid import refit_multitarget_final
+
+                model = refit_multitarget_final(
+                    result, target_names=target_names, **refit_kwargs)
+                model.save(path)
+                q.put(("ok", path))
+            except Exception as exc:  # noqa: BLE001 — surfaced to the user below
+                q.put(("err", str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+        def _poll():
+            try:
+                kind, payload = q.get_nowait()
+            except Exception:
+                try:
+                    self.root.after(120, _poll)
+                except Exception:
+                    pass
+                return
+            try:
+                self.root.config(cursor="")
+            except Exception:
+                pass
+            if kind == "ok":
+                try:
+                    self.multitarget_status_label.config(
+                        text=f"Saved model: {payload}")
+                except Exception:
+                    pass
+                messagebox.showinfo(
+                    "Save Model", f"Saved multi-target model:\n{payload}")
+            else:
+                try:
+                    self.multitarget_status_label.config(text="Save failed.")
+                except Exception:
+                    pass
+                messagebox.showerror("Save Model Failed", payload)
+
+        try:
+            self.root.after(120, _poll)
+        except Exception:
+            pass
+
+    def _export_multitarget_code(self, result, output):
+        """Export the selected multi-target row as a standalone script / notebook.
+
+        Refits the cell (shared :func:`refit_multitarget_final`) to recover the
+        FINAL preprocessed + variable-selected block (``X_final``), the selected
+        column indices, and the subset wavelengths, then hands them to the
+        multi-target :class:`~spectral_predict.code_generator.CodeGenerator`
+        (``is_multitarget`` auto-activates on >1 target). The embedded-data
+        convention treats ``data_X`` as that final block, so the generated script
+        skips preprocessing/varsel APPLICATION and reproduces the in-app pooled CV
+        exactly — the contract pinned by ``tests/test_multitarget_export.py``.
+
+        A NEW method — it does not touch the single-Y ``_export_for_publication``.
+        The refit + generation run on a worker thread (busy cursor + status);
+        results marshal back through a ``root.after`` queue poller.
+        """
+        import queue as _q
+        import threading
+
+        if getattr(result, "error", None):
+            messagebox.showinfo(
+                "Export Code",
+                "This result is a failed search cell and has no reproducible "
+                "model to export.")
+            return
+        refit_kwargs = self._multitarget_refit_config(output)
+        if refit_kwargs is None:
+            return
+
+        # Small format chooser (mirrors the single-Y colab/script branches).
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Export Multi-Target Code")
+        dialog.configure(bg=self.colors['bg'])
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        tk.Label(
+            dialog, text="Export Multi-Target Analysis Code",
+            font=('Arial', 13, 'bold'), bg=self.colors['bg'],
+            fg=self.colors['text']).pack(padx=20, pady=(16, 4))
+        tk.Label(
+            dialog,
+            text=(f"Model: {result.model_name} ({result.mode})  ·  "
+                  f"Preprocess: {result.preprocessing}"),
+            font=('Arial', 9), bg=self.colors['bg'],
+            fg=self.colors.get('text_secondary', self.colors['text'])).pack(
+            padx=20, pady=(0, 10))
+        fmt_var = tk.StringVar(value='colab')
+        fmt_frame = tk.LabelFrame(
+            dialog, text="Format", bg=self.colors['bg'], fg=self.colors['text'],
+            padx=12, pady=8)
+        fmt_frame.pack(fill='x', padx=20, pady=6)
+        for value, text in (
+            ('colab', 'Jupyter Notebook (.ipynb) — embedded data'),
+            ('script', 'Python Script (.py) — embedded data'),
+        ):
+            tk.Radiobutton(
+                fmt_frame, text=text, variable=fmt_var, value=value,
+                bg=self.colors['bg'], fg=self.colors['text'], anchor='w',
+                selectcolor=self.colors['bg'], font=('Arial', 10)).pack(
+                fill='x', pady=2)
+        status_var = tk.StringVar(value="Choose a format and click Export.")
+        tk.Label(
+            dialog, textvariable=status_var, font=('Arial', 9),
+            bg=self.colors['bg'],
+            fg=self.colors.get('text_secondary', self.colors['text'])).pack(
+            padx=20, pady=(4, 8))
+
+        target_names = list(getattr(output, "target_names", []) or [])
+        n_folds = int(refit_kwargs.get("n_folds", 5) or 5)
+        cv_strategy = refit_kwargs.get("cv", "kfold") or "kfold"
+        n_repeats = int(refit_kwargs.get("n_repeats", 5) or 5)
+        data_y = refit_kwargs.get("Y")
+
+        def _do_export():
+            fmt = fmt_var.get()
+            is_notebook = fmt == 'colab'
+            ext = '.ipynb' if is_notebook else '.py'
+            ftypes = ([("Jupyter Notebook", "*.ipynb")] if is_notebook
+                      else [("Python Script", "*.py")])
+            path = filedialog.asksaveasfilename(
+                defaultextension=ext, filetypes=ftypes,
+                title="Export Multi-Target Code",
+                initialfile=(
+                    f"multitarget_{result.model_name}_{result.mode}{ext}"
+                ).replace(" ", "_"))
+            if not path:
+                return
+            status_var.set("Refitting + generating…")
+            try:
+                dialog.config(cursor="watch")
+            except Exception:
+                pass
+            q: "_q.Queue" = _q.Queue()
+
+            def _worker():
+                try:
+                    from spectral_predict.code_generator import (
+                        CodeGenerator, ExportOptions)
+                    from spectral_predict.multitarget_grid import (
+                        refit_multitarget_final)
+
+                    model = refit_multitarget_final(
+                        result, target_names=target_names, **refit_kwargs)
+                    vs_method = (result.varsel_method
+                                 if result.varsel_method not in (None, "full")
+                                 else None)
+                    config = {
+                        "model_name": result.model_name,
+                        "preprocessing": result.preprocessing,
+                        "task_type": "regression",
+                        "params": dict(result.params),
+                        "cv_folds": n_folds,
+                        "cv_strategy": cv_strategy,
+                        "cv_n_repeats": n_repeats,
+                        "target_names": target_names,
+                        "multitarget_mode": result.mode,
+                        "wavelengths": list(model.subset_wavelengths),
+                        "variable_selection_method": vs_method,
+                        "variable_indices": [int(i) for i in model.variable_indices],
+                    }
+                    opts = ExportOptions(
+                        format=('notebook' if is_notebook else 'script'),
+                        include_data=True,
+                        data_X=model.X_final,
+                        data_y=np.asarray(data_y, dtype=float),
+                        wavelengths=np.asarray(model.subset_wavelengths, dtype=float),
+                        include_visualization=False,
+                        include_prediction_template=False,
+                        include_cross_validation=True,
+                        colab_ready=is_notebook)
+                    gen = CodeGenerator(config, opts)
+                    if is_notebook:
+                        gen.save_notebook(path)
+                    else:
+                        gen.save_script(path)
+                    q.put(("ok", path))
+                except Exception as exc:  # noqa: BLE001 — surfaced below
+                    q.put(("err", str(exc)))
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+            def _poll():
+                try:
+                    kind, payload = q.get_nowait()
+                except Exception:
+                    try:
+                        dialog.after(120, _poll)
+                    except Exception:
+                        pass
+                    return
+                try:
+                    dialog.config(cursor="")
+                except Exception:
+                    pass
+                if kind == "ok":
+                    status_var.set(f"Saved: {payload}")
+                    messagebox.showinfo(
+                        "Export Code", f"Exported multi-target code:\n{payload}")
+                else:
+                    status_var.set("Export failed.")
+                    messagebox.showerror("Export Code Failed", payload)
+
+            try:
+                dialog.after(120, _poll)
+            except Exception:
+                pass
+
+        btn_frame = tk.Frame(dialog, bg=self.colors['bg'])
+        btn_frame.pack(pady=(6, 16))
+        tk.Button(
+            btn_frame, text="  Export  ", command=_do_export,
+            font=('Arial', 11, 'bold'), padx=16, pady=6).pack(side='left', padx=10)
+        tk.Button(
+            btn_frame, text="  Close  ", command=dialog.destroy,
+            font=('Arial', 10), padx=12, pady=6).pack(side='left', padx=10)
+        dialog.update()
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
 
     def _create_tab5_progress(self):
         """Tab 5: Analysis Progress - Live progress monitor."""
@@ -44216,24 +44499,59 @@ External Validation Performance (n={n_val}):
                             "Outlier"
                         )
 
-                    results[col_name] = predictions
+                    # T-17 W3-2: a multi-target .dasp predicts an
+                    # (n_samples, n_targets) block. Fan it out into one column
+                    # PER target (each name-suffixed, each with the same dedup
+                    # discipline the single-column path uses) and register each
+                    # in predictions_model_map. Single-Y and one-class stay a
+                    # single 1-D column via the unchanged ``else`` branch below.
+                    mt_n_targets = int(metadata.get('n_targets', 1) or 1)
+                    pred_arr = np.asarray(predictions)
+                    is_multitarget_pred = (
+                        mt_n_targets > 1
+                        and pred_arr.ndim == 2
+                        and pred_arr.shape[1] == mt_n_targets
+                    )
+                    if is_multitarget_pred:
+                        mt_names = (metadata.get('target_names')
+                                    or [f"target_{j}" for j in range(mt_n_targets)])
+                        for j in range(mt_n_targets):
+                            tgt = (mt_names[j] if j < len(mt_names)
+                                   else f"target_{j}")
+                            tcol = f"{col_name}_{tgt}"
+                            # Same duplicate-name discipline as the single column.
+                            t_counter = 1
+                            t_original = tcol
+                            while tcol in results.columns:
+                                tcol = f"{t_original}_{t_counter}"
+                                t_counter += 1
+                            results[tcol] = pred_arr[:, j]
+                            self.predictions_model_map[tcol] = metadata
+                            if has_uncertainty:
+                                self.predictions_uncertainty[tcol] = uncertainty
+                            if has_applicability_domain:
+                                self.predictions_applicability[tcol] = applicability_domain
+                            if decision_score_error:
+                                self.predictions_decision_errors[tcol] = decision_score_error
+                    else:
+                        results[col_name] = predictions
 
-                    # Store mapping to model metadata
-                    self.predictions_model_map[col_name] = metadata
+                        # Store mapping to model metadata
+                        self.predictions_model_map[col_name] = metadata
 
-                    # Store uncertainty data if available
-                    if has_uncertainty:
-                        self.predictions_uncertainty[col_name] = uncertainty
+                        # Store uncertainty data if available
+                        if has_uncertainty:
+                            self.predictions_uncertainty[col_name] = uncertainty
 
-                    # Store applicability domain data if available
-                    if has_applicability_domain:
-                        self.predictions_applicability[col_name] = applicability_domain
+                        # Store applicability domain data if available
+                        if has_applicability_domain:
+                            self.predictions_applicability[col_name] = applicability_domain
 
-                    # Surface OC decision-score extraction failures so the
-                    # user sees that uncertainty / AD silently no-op'd rather
-                    # than assuming the empty placeholder means "no error."
-                    if decision_score_error:
-                        self.predictions_decision_errors[col_name] = decision_score_error
+                        # Surface OC decision-score extraction failures so the
+                        # user sees that uncertainty / AD silently no-op'd rather
+                        # than assuming the empty placeholder means "no error."
+                        if decision_score_error:
+                            self.predictions_decision_errors[col_name] = decision_score_error
 
                     successful_models += 1
 

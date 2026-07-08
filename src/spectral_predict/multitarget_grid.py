@@ -7,6 +7,7 @@ run_search's single-Y path. Grid engine ONLY.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
@@ -607,6 +608,64 @@ def _cap_and_dedup_pls_for_subset(
     return out
 
 
+def _apply_preprocess_and_restrict(
+    pc: dict, X_arr: np.ndarray, Y_arr: np.ndarray, wl: np.ndarray, *,
+    wl_min, wl_max, wl_regions, restriction_active: bool,
+):
+    """Build one cell's preprocessed X block (the deterministic first-pass step).
+
+    Reproduces the exact preprocessing + wavelength-restriction / edge-mask
+    transform that :func:`run_multitarget_grid_search` applies per preprocess
+    config, and additionally returns the FITTED preprocessing ``Pipeline`` (or
+    ``None`` for raw). The grid's search loop discards the pipeline (it only
+    needs ``X_pp``); :func:`refit_multitarget_final` keeps it to persist a
+    reload-capable ``.dasp``. Single source of truth so the refit block can
+    never drift from what the search evaluated.
+
+    Returns ``(X_pp, wl_pp, preprocessor)``.
+    """
+    from sklearn.pipeline import Pipeline
+
+    from .preprocess import build_preprocessing_pipeline
+    from .search import _apply_edge_mask_to_data
+
+    name = pc.get("base_name", pc["name"])
+    steps = build_preprocessing_pipeline(
+        name, pc["deriv"], pc["window"], pc["polyorder"],
+        task_type="regression", interference=pc.get("interference"), wavelengths=wl,
+        baseline_method=pc.get("baseline_method"), baseline_params=pc.get("baseline_params"),
+        smoothing=pc.get("smoothing", False), smoothing_window=pc.get("smoothing_window", 17),
+        smoothing_polyorder=pc.get("smoothing_polyorder", 2), autoscale=pc.get("autoscale", False),
+    )
+    preprocessor = None
+    X_pp = X_arr.copy()
+    if steps:
+        preprocessor = Pipeline(steps)
+        X_pp = preprocessor.fit_transform(X_pp, Y_arr)
+    wl_pp = wl
+    # Wavelength restriction (search.py:2777) then edge-mask if unrestricted (search.py:2876).
+    if restriction_active:
+        if wl_regions:
+            mask = np.zeros(wl_pp.shape[0], dtype=bool)
+            for lo, hi in wl_regions:
+                mask |= (wl_pp >= lo) & (wl_pp <= hi)
+        else:
+            mask = np.ones(wl_pp.shape[0], dtype=bool)
+            if wl_min is not None:
+                mask &= wl_pp >= wl_min
+            if wl_max is not None:
+                mask &= wl_pp <= wl_max
+        X_pp, wl_pp = X_pp[:, mask], wl_pp[mask]
+        if X_pp.shape[1] == 0:
+            raise ValueError(
+                "Wavelength restriction excludes all wavelengths; "
+                "no spectral columns remain."
+            )
+    elif pc.get("deriv") and pc.get("window"):
+        X_pp, wl_pp, _ = _apply_edge_mask_to_data(X_pp, wl_pp, pc)
+    return X_pp, wl_pp, preprocessor
+
+
 def run_multitarget_grid_search(
     X, Y, *, model_names, target_names, wavelengths,
     preprocessing_methods, autoscale,
@@ -622,14 +681,10 @@ def run_multitarget_grid_search(
     optimization_method="grid", controller=None, progress_callback=None, n_jobs=-1,
     coupling_mode: str = "independent",
 ):
-    from sklearn.pipeline import Pipeline
-
     from .cv_utils import build_cv_splitter
     from .models import get_model_grids
     from .multi_y import inter_target_correlation
     from .multitarget_search import MultiTargetSearchOutput, _evaluate_multitarget_cell
-    from .preprocess import build_preprocessing_pipeline
-    from .search import _apply_edge_mask_to_data
 
     if optimization_method != "grid":
         raise ValueError(
@@ -713,37 +768,11 @@ def run_multitarget_grid_search(
                 "message": f"Variable selection: preprocessing '{name}' ...",
                 "current": 0, "total": 0, "best_model": None,
             })
-        steps = build_preprocessing_pipeline(
-            name, pc["deriv"], pc["window"], pc["polyorder"],
-            task_type="regression", interference=pc.get("interference"), wavelengths=wl,
-            baseline_method=pc.get("baseline_method"), baseline_params=pc.get("baseline_params"),
-            smoothing=pc.get("smoothing", False), smoothing_window=pc.get("smoothing_window", 17),
-            smoothing_polyorder=pc.get("smoothing_polyorder", 2), autoscale=pc.get("autoscale", False),
+        X_pp, wl_pp, _ = _apply_preprocess_and_restrict(
+            pc, X_arr, Y_arr, wl,
+            wl_min=wl_min, wl_max=wl_max, wl_regions=wl_regions,
+            restriction_active=restriction_active,
         )
-        X_pp = X_arr.copy()
-        if steps:
-            X_pp = Pipeline(steps).fit_transform(X_pp, Y_arr)
-        wl_pp = wl
-        # Wavelength restriction (search.py:2777) then edge-mask if unrestricted (search.py:2876).
-        if restriction_active:
-            if wl_regions:
-                mask = np.zeros(wl_pp.shape[0], dtype=bool)
-                for lo, hi in wl_regions:
-                    mask |= (wl_pp >= lo) & (wl_pp <= hi)
-            else:
-                mask = np.ones(wl_pp.shape[0], dtype=bool)
-                if wl_min is not None:
-                    mask &= wl_pp >= wl_min
-                if wl_max is not None:
-                    mask &= wl_pp <= wl_max
-            X_pp, wl_pp = X_pp[:, mask], wl_pp[mask]
-            if X_pp.shape[1] == 0:
-                raise ValueError(
-                    "Wavelength restriction excludes all wavelengths; "
-                    "no spectral columns remain."
-                )
-        elif pc.get("deriv") and pc.get("window"):
-            X_pp, wl_pp, _ = _apply_edge_mask_to_data(X_pp, wl_pp, pc)
 
         subsets, skipped = build_multitarget_varsel_subsets(
             variable_selection_methods, X_pp, Y_arr, wl_pp,
@@ -834,4 +863,341 @@ def run_multitarget_grid_search(
     return MultiTargetSearchOutput(
         results=results, target_names=target_names, correlation=correlation,
         n_targets=Y_arr.shape[1], skipped=skipped_all,
+    )
+
+
+@dataclass
+class RefitMultiTargetModel:
+    """A fully-fitted multi-target model reconstructed from a search result.
+
+    Holds everything :mod:`spectral_predict.model_io` needs to persist a
+    reload-and-predict ``.dasp`` for a multi-target leaderboard row. Produced by
+    :func:`refit_multitarget_final`.
+
+    Attributes:
+        estimator: The fitted estimator (native 2-D JOINT model, native 2-D
+            Ridge, or a fitted ``MultiOutputRegressor`` for INDEPENDENT models).
+            For a JOINT model it was fit on Y-scaled targets, so its raw
+            ``predict`` output is in scaled units — use :meth:`predict` (or the
+            persisted ``y_scaler``) to recover RAW target units.
+        preprocessor: The fitted preprocessing ``Pipeline`` (or ``None`` for a
+            raw-spectra model). Persisted so a reloaded model reproduces the
+            preprocessed block from raw spectra.
+        y_scaler: The full-calibration :class:`~spectral_predict.multi_y.FoldYScaler`
+            for a JOINT model, or ``None`` for INDEPENDENT / single-target.
+        variable_indices: Column indices (into the preprocessed block) selected
+            by variable selection for this cell; ``arange`` when full-spectrum.
+        X_final: The exact preprocessed + subset block the estimator was fit on,
+            shape ``(n_samples, n_selected)``.
+        mode: ``"JOINT"`` or ``"INDEPENDENT"`` (the honest coupling label).
+        model_name: Canonical model name.
+        params: The (post-cap) hyperparameters used.
+        target_names: Per-target labels, in prediction order.
+        preprocessing: The compact preprocessing label
+            (``_describe_preprocess_config`` output).
+        varsel_method / varsel_tag: The variable-selection method + subset tag.
+        subset_wavelengths: Wavelength values of the selected columns
+            (``wl_pp[variable_indices]``) — the predict-time required set.
+        full_wavelengths: The full (raw) wavelength axis — the predict-time
+            full-spectrum reference used to re-subset after preprocessing.
+        per_target_metrics: The result's per-target RAW-unit metrics, in order.
+    """
+
+    estimator: Any
+    preprocessor: Any
+    y_scaler: Optional[Any]
+    variable_indices: np.ndarray
+    X_final: np.ndarray
+    mode: str
+    model_name: str
+    params: dict
+    target_names: list[str]
+    preprocessing: str
+    varsel_method: str
+    varsel_tag: str
+    subset_wavelengths: list[float]
+    full_wavelengths: list[float]
+    per_target_metrics: list[dict] = field(default_factory=list)
+
+    def predict(self, X_block: Any) -> np.ndarray:
+        """Predict RAW target units from an already-preprocessed+subset block.
+
+        ``X_block`` must be the preprocessed, variable-selected block (i.e. the
+        same shape/order as :attr:`X_final`). For a JOINT model the persisted
+        Y-scaler is applied so the returned ``(n, n_targets)`` array is in RAW
+        target units; INDEPENDENT models already predict raw units.
+        """
+        pred = np.asarray(self.estimator.predict(X_block), dtype=float)
+        if pred.ndim == 1:
+            pred = pred.reshape(-1, 1)
+        if self.y_scaler is not None:
+            pred = self.y_scaler.inverse_transform(pred)
+        return pred
+
+    def build_metadata(self, *, performance: Optional[dict] = None) -> dict:
+        """Assemble the :func:`spectral_predict.model_io.save_model` metadata dict.
+
+        Uses full-spectrum-preprocessing bookkeeping (``full_wavelengths`` +
+        subset ``wavelengths``) so a reloaded model re-applies preprocessing to
+        raw spectra then re-selects the chosen columns by wavelength value —
+        the same convention the single-Y save path uses for preprocessed+subset
+        models.
+        """
+        if performance is None:
+            q2s = [m.get("q2") for m in self.per_target_metrics if m.get("q2") is not None]
+            performance = {"joint_q2": float(np.mean(q2s))} if q2s else {}
+        return {
+            "model_name": self.model_name,
+            "task_type": "regression",
+            "preprocessing": self.preprocessing,
+            "wavelengths": list(self.subset_wavelengths),
+            "n_vars": len(self.subset_wavelengths),
+            "n_samples": int(self.X_final.shape[0]),
+            "performance": performance,
+            "params": dict(self.params),
+            "multitarget_mode": self.mode,
+            "n_targets": len(self.target_names),
+            "target_names": list(self.target_names),
+            "prediction_columns": [f"{t}_pred" for t in self.target_names],
+            "per_target_metrics": list(self.per_target_metrics),
+            "use_full_spectrum_preprocessing": True,
+            "full_wavelengths": list(self.full_wavelengths),
+        }
+
+    def save(self, filepath, *, performance: Optional[dict] = None) -> None:
+        """Persist this refit as a ``.dasp`` via :func:`model_io.save_model`.
+
+        Passes the JOINT ``y_scaler`` through so reloaded predictions come back
+        in RAW target units. Single-Y save/load is untouched (this only ever
+        writes multi-target metadata keys).
+        """
+        from .model_io import save_model
+
+        save_model(
+            model=self.estimator,
+            preprocessor=self.preprocessor,
+            metadata=self.build_metadata(performance=performance),
+            filepath=filepath,
+            y_scaler=self.y_scaler,
+        )
+
+
+def refit_multitarget_final(
+    result: Any,
+    X: Any,
+    Y: Any,
+    target_names: Sequence[str],
+    *,
+    wavelengths: Any,
+    model_names: Optional[Sequence[str]] = None,
+    preprocessing_methods: dict,
+    autoscale: bool = False,
+    baseline_method=None,
+    baseline_params=None,
+    smoothing: bool = False,
+    smoothing_window: int = 17,
+    smoothing_polyorder: int = 2,
+    interference_to_add: Any = None,
+    wavelength_restriction=None,
+    variable_selection_methods: Optional[Sequence[str]] = None,
+    variable_counts=None,
+    apply_uve_prefilter: bool = False,
+    uve_cutoff_multiplier: float = 1.0,
+    uve_n_components: Optional[int] = None,
+    ipls_subset_limit: str = "Top 10",
+    window_sizes=None,
+    cv: Any = "kfold",
+    n_folds: int = 5,
+    n_repeats: int = 5,
+    random_state: int = 42,
+    **_ignored,
+) -> RefitMultiTargetModel:
+    """Reconstruct a fully-fitted multi-target model from a ``MultiTargetResult``.
+
+    A search :class:`~spectral_predict.multitarget_search.MultiTargetResult`
+    retains the metadata needed to *identify* a cell (``preprocessing`` label,
+    ``varsel_method`` / ``varsel_tag``, ``params``, ``mode``) but NOT the fitted
+    estimator or the selected variable indices. This helper REPLAYS the exact
+    deterministic cell pipeline on the FULL calibration set to reproduce the
+    cell, then fits the final model:
+
+    1. **Preprocessing** — rebuild the preprocess-config grid from the run
+       config, find the config whose compact label matches
+       ``result.preprocessing``, and apply it via the shared
+       :func:`_apply_preprocess_and_restrict` (same code the search runs), which
+       also yields the fitted preprocessing ``Pipeline`` to persist.
+    2. **Variable selection** — this project selects variables on the full
+       calibration set (not per fold), so re-running the exact varsel method
+       (via the shared :func:`build_multitarget_varsel_subsets` /
+       :func:`_importance_reference_fit` primitives) is deterministic and
+       reproduces the cell's column subset. The subset whose ``method``/``tag``
+       matches the result is selected.
+    3. **Fitting** — resolve the identical strategy
+       (``resolve_multitarget_strategy(model_name, mode)``), build the estimator
+       with :func:`build_multitarget_estimator`, and fit exactly as
+       :func:`~spectral_predict.multi_y.multi_y_cv_pool` does: JOINT models fit
+       on Y scaled by a full-calibration ``FoldYScaler`` (persisted);
+       INDEPENDENT models fit on RAW per-target Y (no scaler). No fitting logic
+       is forked — the same builders/strategy resolver are reused.
+
+    Args:
+        result: The :class:`MultiTargetResult` leaderboard row to refit.
+        X: Raw feature matrix ``(n_samples, n_features)`` (pre-preprocessing).
+        Y: Target block ``(n_samples,)`` or ``(n_samples, n_targets)``.
+        target_names: Per-target labels, in order.
+        wavelengths: Full raw wavelength axis (length ``n_features``).
+        model_names: Enabled models for the run (needed to reproduce GA-gated
+            varsel routing); defaults to ``[result.model_name]``.
+        The remaining keyword args mirror :func:`run_multitarget_grid_search`
+        and MUST match the values the search was run with so reconstruction is
+        exact. Unrecognized kwargs (e.g. ``coupling_mode``, ``optimization_method``)
+        are ignored so a full run-config dict can be splatted in.
+
+    Returns:
+        A :class:`RefitMultiTargetModel` holding the fitted estimator, the
+        variable indices, the final preprocessed+subset block, the JOINT
+        ``y_scaler`` (or ``None``), and the metadata needed to save/predict.
+
+    Raises:
+        ValueError: If the result's preprocessing label matches no config, if
+            the varsel subset cannot be reconstructed, or if the reconstructed
+            strategy's coupling mode/scaling disagrees with the stored result
+            (a loud drift guard).
+    """
+    from .cv_utils import build_cv_splitter
+    from .multi_y import FoldYScaler
+    from .multitarget_search import (
+        build_multitarget_estimator,
+        resolve_multitarget_strategy,
+    )
+
+    if getattr(result, "error", None):
+        raise ValueError(
+            f"Cannot refit a failed search result (error={result.error!r}); "
+            "it has no reproducible model."
+        )
+
+    X_arr = np.asarray(X, dtype=float)
+    Y_arr = np.asarray(Y, dtype=float)
+    if Y_arr.ndim == 1:
+        Y_arr = Y_arr.reshape(-1, 1)
+    wl = np.asarray(wavelengths, dtype=float)
+    target_names = list(target_names)
+    enabled_models = list(model_names) if model_names else [result.model_name]
+
+    # --- 1. Rebuild the preprocess config that produced result.preprocessing ---
+    preprocess_configs = build_multitarget_preprocess_configs(
+        preprocessing_methods, window_sizes=window_sizes, autoscale=autoscale,
+        baseline_method=baseline_method, baseline_params=baseline_params,
+        smoothing=smoothing, smoothing_window=smoothing_window,
+        smoothing_polyorder=smoothing_polyorder, interference_to_add=interference_to_add,
+    )
+    matches = [
+        pc for pc in preprocess_configs
+        if _describe_preprocess_config(pc) == result.preprocessing
+    ]
+    if not matches:
+        raise ValueError(
+            f"No preprocessing config reproduces label {result.preprocessing!r}; "
+            "the run config passed to refit_multitarget_final does not match the "
+            "search that produced this result."
+        )
+    pc = matches[0]
+
+    wl_min = wl_max = wl_regions = None
+    if wavelength_restriction:
+        wl_min = wavelength_restriction.get("min")
+        wl_max = wavelength_restriction.get("max")
+        wl_regions = wavelength_restriction.get("regions")
+    restriction_active = bool(wl_regions or wl_min is not None or wl_max is not None)
+
+    X_pp, wl_pp, preprocessor = _apply_preprocess_and_restrict(
+        pc, X_arr, Y_arr, wl,
+        wl_min=wl_min, wl_max=wl_max, wl_regions=wl_regions,
+        restriction_active=restriction_active,
+    )
+
+    # --- 2. Reconstruct the variable-selection subset (deterministic) ---
+    splitter = build_cv_splitter(
+        cv, n_folds, "regression", n_repeats=n_repeats, random_state=random_state, y=None,
+    ) if isinstance(cv, str) else cv
+    min_fold_train = min(len(tr) for tr, _ in splitter.split(X_arr, Y_arr))
+
+    requested_methods = set(variable_selection_methods or [])
+    spa_ok = (
+        verify_spa_multi_y_safe(X_arr, Y_arr)
+        if requested_methods & _SPA_DEPENDENT_METHODS
+        else True
+    )
+
+    idx = None
+    if result.varsel_method == "importance":
+        # Model-specific importances (not emitted by build_multitarget_varsel_subsets).
+        imp = _importance_reference_fit(result.model_name, X_pp, Y_arr, min_fold_train)
+        for sub in _importances_to_subsets(
+            imp, "importance", variable_counts=variable_counts,
+            n_features_sub=X_pp.shape[1],
+        ):
+            if sub["tag"] == result.varsel_tag:
+                idx = np.asarray(sub["indices"])
+                break
+    else:
+        subsets, _skipped = build_multitarget_varsel_subsets(
+            variable_selection_methods, X_pp, Y_arr, wl_pp,
+            enabled_models=enabled_models, variable_counts=variable_counts,
+            ipls_subset_limit=ipls_subset_limit, spa_ok=spa_ok, cache={},
+            preprocess_id=_preprocess_fingerprint(pc),
+            apply_uve_prefilter=apply_uve_prefilter,
+            uve_cutoff_multiplier=uve_cutoff_multiplier, uve_n_components=uve_n_components,
+        )
+        for s in subsets:
+            if s.get("model_specific"):
+                continue
+            if s.get("method") == result.varsel_method and s.get("tag") == result.varsel_tag:
+                idx = np.asarray(s["indices"])
+                break
+    if idx is None:
+        raise ValueError(
+            f"Could not reconstruct varsel subset (method={result.varsel_method!r}, "
+            f"tag={result.varsel_tag!r}) for preprocessing {result.preprocessing!r}. "
+            "The run config passed to refit_multitarget_final must match the search."
+        )
+
+    X_sub = X_pp[:, idx]
+
+    # --- 3. Fit the final model (identical strategy/scaling as the cell) ---
+    strategy = resolve_multitarget_strategy(result.model_name, mode=result.mode.lower())
+    if strategy.mode != result.mode or strategy.scale_y != result.scale_y:
+        raise ValueError(
+            "Reconstructed strategy drifted from the stored result "
+            f"(mode {strategy.mode!r} vs {result.mode!r}, scale_y "
+            f"{strategy.scale_y} vs {result.scale_y}); refusing to save a model "
+            "whose coupling/scaling would not reproduce the search."
+        )
+    estimator = build_multitarget_estimator(
+        strategy, result.params, X_sub.shape[0], X_sub.shape[1]
+    )
+    if strategy.scale_y:
+        y_scaler = FoldYScaler().fit(Y_arr)
+        estimator.fit(X_sub, y_scaler.transform(Y_arr))
+    else:
+        y_scaler = None
+        estimator.fit(X_sub, Y_arr)
+
+    return RefitMultiTargetModel(
+        estimator=estimator,
+        preprocessor=preprocessor,
+        y_scaler=y_scaler,
+        variable_indices=np.asarray(idx),
+        X_final=X_sub,
+        mode=result.mode,
+        model_name=result.model_name,
+        params=dict(result.params),
+        target_names=target_names,
+        preprocessing=result.preprocessing,
+        varsel_method=result.varsel_method,
+        varsel_tag=result.varsel_tag,
+        subset_wavelengths=[float(v) for v in np.asarray(wl_pp)[idx]],
+        full_wavelengths=[float(v) for v in wl],
+        per_target_metrics=list(result.metrics.get("per_target", [])),
     )
