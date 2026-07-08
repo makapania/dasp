@@ -4,6 +4,20 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 (latest) — BUG found via user validation: INDEPENDENT-mode varsel is coupled
+
+User pushed back that multi-target R² was much worse than single-Y per target on real data (Norway leaf, N+ADF: single-Y N≈0.85 with CARS, multi-target N capped ~0.71). Investigated empirically with the REAL backend (`run_search` / `run_multitarget_grid_search`), not hand-rolled CV.
+
+**Root cause (genuine bug):** in INDEPENDENT coupling mode, variable selection still runs once on the stacked multi-column `Y` (`multitarget_grid.py:360-362` `cars_selection(X_pp, Y)`, and the whole UVE/iPLS/SPA family), and the single subset is shared by every target's separately-fit model. So the strong target is forced onto variables chosen to also satisfy the other target. Decomposition (matched preprocessing deriv_snv d2, same CV, top-100): CARS-on-N = 0.859 vs CARS-on-joint = 0.712 (byte-match to the real multi-target run). Preprocessing and joint-mean ranking are NOT the cause — the shared subset is the entire ~0.15 R² gap.
+
+**Why it slipped through:** the recovered-WIP multi-Y varsel was validated that it RUNS + returns finite importances, never that it SELECTS per-target-appropriate variables. Classic "ML-flavored search machinery shipped without the chemometrics gate" (cf. `feedback_preprocessing_refactor_postmortem`). Codex + Fable + 3 QA passes all missed it because none ran a per-target selection-quality check on real data.
+
+**Lesson:** for any varsel/search-machinery change, the acceptance gate MUST include a chemometrics quality check on real data (does it select good variables / recover known bands), not just "runs + finite + tests green".
+
+**Decision:** fix before merge (per-target varsel under INDEPENDENT coupling); documented now, build 2026-07-08. Ticket: `docs/CONTINUATION_PROMPT_2026-07-08_T17-independent-varsel-fix.md`. T-17 / PR #63 NOT merge-ready until fixed.
+
+---
+
 ## 2026-07-07 (later) — T-17 multi-target GUI integration (3 waves, Fable-orchestrated GLM team)
 
 After the UVE/CARS landing, user smoke-tested the multi-target tab and found it poorly integrated with the rest of the program. Rather than patch symptoms, ran a Fable investigator → integration blueprint (`docs/T17_INTEGRATION_BLUEPRINT.md`) → Fable orchestrator driving GLM-5.2 workers per wave, Opus for the hard/shared-path items + git + gates.
