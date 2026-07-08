@@ -14630,14 +14630,17 @@ class SpectralPredictApp:
         tgt_frame = tk.Frame(tgt_card, bg=self.colors['card_bg'])
         tgt_frame.pack(fill='both', expand=True)
 
-        # T-17 W2-1 (Gap 1c): theme the raw tk.Listbox from self.colors so it
-        # matches the ttk widgets everywhere else (dark-mode friendly). Mirrors
-        # the theming already applied to the multi-target progress log Text
-        # widget (bg/fg/selectbackground/selectforeground).
+        # White field + thin border so it reads as an INPUT that needs a
+        # selection (matches the app's other Listboxes, which are plain white).
+        # The earlier W2-1 grey theming blended into the card. Border turns the
+        # accent colour on focus as an affordance; accent selection highlight.
         self.multitarget_listbox = tk.Listbox(
             tgt_frame, selectmode=tk.EXTENDED, height=7, exportselection=False, width=40,
-            bg=self.colors['panel'], fg=self.colors['text'], relief='flat', borderwidth=0,
-            highlightthickness=0, selectbackground=self.colors['accent'],
+            bg='white', fg=self.colors['text'], relief='solid', borderwidth=1,
+            highlightthickness=1,
+            highlightbackground=self.colors.get('border', '#CCCCCC'),
+            highlightcolor=self.colors['accent'],
+            selectbackground=self.colors['accent'],
             selectforeground=self.colors['text_inverse'])
         self.multitarget_listbox.grid(row=0, column=0, rowspan=3, sticky=(tk.W, tk.N, tk.S), padx=(0, 10), pady=2)
         self.multitarget_listbox.bind('<<ListboxSelect>>', self._on_multitarget_selection_changed)
