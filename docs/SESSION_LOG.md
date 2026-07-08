@@ -4,6 +4,21 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-07-07 (later) — T-17 multi-target GUI integration (3 waves, Fable-orchestrated GLM team)
+
+After the UVE/CARS landing, user smoke-tested the multi-target tab and found it poorly integrated with the rest of the program. Rather than patch symptoms, ran a Fable investigator → integration blueprint (`docs/T17_INTEGRATION_BLUEPRINT.md`) → Fable orchestrator driving GLM-5.2 workers per wave, Opus for the hard/shared-path items + git + gates.
+
+**Execution model that worked:** Fable orchestrator (DISPATCH mode) spawned GLM workers, QA'd each; Opus (main) owned git reconciliation (single owner — GLM `opencode-call` wrappers auto-snapshot with `git add -A`, so `git reset --soft <base>` folds drafts back cleanly), the verification gate, and the correctness-critical items (`refit_multitarget_final`, the shared prediction-tab touch). Two review layers every wave: Opus gate + Fable adversarial.
+
+**Non-obvious findings:**
+- **pyplot in a Tk dialog is a latent flake.** The detail dialog built plots via `plt.subplots`, which spins up a SECOND Tk backend manager → intermittent `TclError: Can't find a usable init.tcl`. It flaked GREEN through the worker's QA; the Opus verification gate caught it. Fix: OO `Figure()` + `FigureCanvasTkAgg` (the app's established pattern), and the test was pinning the bug (asserted `plt.get_fignums()` incremented). Rule now in every GLM dialog prompt: no pyplot in Tk; assert no-leak deterministically.
+- **Refit-from-result is exact.** `refit_multitarget_final` reconstructs a fitted model by replaying preprocess→varsel→fit on the FULL calibration set — deterministic because this project selects varsel on full calibration. Save→reload→predict round-trips at exact 0.00e+00 (not just <1e-9). An extracted `_apply_preprocess_and_restrict` helper makes search + refit share the preprocessing path so they can't drift; a strategy-drift guard refuses to save if reconstructed mode/scale_y disagree.
+- **GUI import resolution:** the editable `spectral_predict` install points at the MAIN repo src; the GUI's own `sys.path.insert(0, <worktree>/src)` (line 147) makes a worktree-launched GUI import worktree backend first (verified `refit_multitarget_final` resolves to the worktree file). Ad-hoc scripts skip that bootstrap and silently import main-branch code — force PYTHONPATH for manual verification. pytest is fine (rootdir insertion).
+
+**Commits:** `9222e63` (sortable cols), `3e9f092` (W1 progress/sub-notebook/pause-resume), `35cdcfc` (W2 leaderboard parity + detail dialog + tab-6 mirror), `ea01936` (W3 save/.dasp + export + prediction-tab). Zero regression to single-Y/classification (model_io unchanged; prediction-tab single-Y branch byte-identical per `git diff --ignore-all-space`). Model-Dev interactive multi-target refinement deferred to its own ticket.
+
+---
+
 ## 2026-07-07 — T-17 UVE/CARS multi-Y landed ("ship, not revert") + recovered from Windows-update crash
 
 **Recovery context.** An overnight run implementing multi-target UVE/CARS varsel was cut off by a Windows update. Nothing was lost — the work survived on disk as uncommitted changes in worktree `dasp-t17-uve-cars`; snapshotted as `bc750d9` (5 files, +456/−119). A separate overnight codebase-eval run also survived intact as `docs/PRODUCTION_READINESS_REVIEW.md` (committed to `main`).
