@@ -700,6 +700,19 @@ def run_multitarget_grid_search(
         if controller is not None and not controller.check_and_wait():
             break
         name = pc.get("base_name", pc["name"])
+        # T-17 W1-2: the first/varsel pass (this loop) is the expensive part on
+        # real configs (UVE/CARS/iPLS dominate wall-clock), but it emitted NO
+        # progress, so a consumer saw "nothing happens" before the modeling
+        # pass. Emit through the SAME callback + payload shape the modeling pass
+        # uses below (message/current/total/best_model). current/total are 0/0
+        # because the honest cell total is unknown until this pass finishes.
+        # Placed AFTER check_and_wait so a stop suppresses the emission and a
+        # pause blocks before it -- no new pause point, no resume disruption.
+        if progress_callback is not None:
+            progress_callback({
+                "message": f"Variable selection: preprocessing '{name}' ...",
+                "current": 0, "total": 0, "best_model": None,
+            })
         steps = build_preprocessing_pipeline(
             name, pc["deriv"], pc["window"], pc["polyorder"],
             task_type="regression", interference=pc.get("interference"), wavelengths=wl,

@@ -14559,29 +14559,47 @@ class SpectralPredictApp:
         # to the viewport and scrolls horizontally INSIDE res_frame.
         content_frame.columnconfigure(0, weight=1)
 
-        row = 0
-
         ttk.Label(
             content_frame,
             text="Multi-Target Regression (joint / batched multi-output)",
             style='Subheading.TLabel',
-        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
-        row += 1
+        ).grid(row=0, column=0, columnspan=2, sticky=tk.W, pady=(0, 4))
         ttk.Label(
             content_frame,
             text=("Model several correlated numeric properties at once. Grid engine ONLY — "
                   "Bayesian/NSGA-II are 1-D-only and are disabled while >1 target is selected. "
                   "Single-target modelling is unaffected (use the normal search)."),
             style='Caption.TLabel', wraplength=680,
-        ).grid(row=row, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
-        row += 1
+        ).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(0, 12))
 
+        # --- Inner sub-notebook: Setup / Progress / Results (T-17 W1-1) ---
+        # The config controls, the live progress surface, and the leaderboard
+        # each get their own sub-tab. The backend already emits a progress
+        # payload shaped to match ``_progress_callback_impl`` (current/total/
+        # best_model); the Progress sub-tab + the updated poller consume it
+        # instead of discarding everything but ``message``. All existing
+        # ``self.multitarget_*`` widget attribute names are preserved so the
+        # existing handlers and the 26 GUI tests are untouched.
+        self.multitarget_subnotebook = ttk.Notebook(content_frame)
+        setup_tab = ttk.Frame(self.multitarget_subnotebook, style='TFrame', padding="10")
+        progress_tab = ttk.Frame(self.multitarget_subnotebook, style='TFrame', padding="20")
+        results_tab = ttk.Frame(self.multitarget_subnotebook, style='TFrame', padding="10")
+        self.multitarget_subnotebook.add(setup_tab, text="Setup")
+        self.multitarget_subnotebook.add(progress_tab, text="Progress")
+        self.multitarget_subnotebook.add(results_tab, text="Results")
+        self.multitarget_subnotebook.grid(row=2, column=0, columnspan=2, sticky='nsew', pady=(0, 8))
+        content_frame.rowconfigure(2, weight=1)
+        setup_tab.columnconfigure(0, weight=1)
+        results_tab.columnconfigure(0, weight=1)
+
+        # ==================== SETUP SUB-TAB ====================
         # --- Target multi-select ---
+        setup_row = 0
         tgt_outer, tgt_card = self._create_card(
-            content_frame, title="Select Targets",
+            setup_tab, title="Select Targets",
             subtitle="Choose 2+ numeric columns (Ctrl/Shift-click for multi-select)")
-        tgt_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
+        tgt_outer.grid(row=setup_row, column=0, sticky=(tk.W, tk.E), pady=10, padx=5)
+        setup_row += 1
         tgt_frame = tk.Frame(tgt_card, bg=self.colors['card_bg'])
         tgt_frame.pack(fill='both', expand=True)
 
@@ -14599,10 +14617,10 @@ class SpectralPredictApp:
 
         # --- Model picker with JOINT/INDEPENDENT tags ---
         mdl_outer, mdl_card = self._create_card(
-            content_frame, title="Select Models",
+            setup_tab, title="Select Models",
             subtitle="Each model is tagged by its true multi-output coupling")
-        mdl_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
+        mdl_outer.grid(row=setup_row, column=0, sticky=(tk.W, tk.E), pady=10, padx=5)
+        setup_row += 1
         mdl_frame = tk.Frame(mdl_card, bg=self.colors['card_bg'])
         mdl_frame.pack(fill='both', expand=True)
 
@@ -14654,10 +14672,10 @@ class SpectralPredictApp:
         # leaderboard for capable models.
         self.multitarget_coupling = tk.StringVar(value="independent")
         cpl_outer, cpl_card = self._create_card(
-            content_frame, title="Coupling Mode",
+            setup_tab, title="Coupling Mode",
             subtitle="How to model the selected targets together (default: Independent)")
-        cpl_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
+        cpl_outer.grid(row=setup_row, column=0, sticky=(tk.W, tk.E), pady=10, padx=5)
+        setup_row += 1
         cpl_frame = tk.Frame(cpl_card, bg=self.colors['card_bg'])
         cpl_frame.pack(fill='both', expand=True)
         for val, text in [
@@ -14669,9 +14687,9 @@ class SpectralPredictApp:
                             variable=self.multitarget_coupling).pack(anchor=tk.W, pady=1)
 
         # --- Run + export controls ---
-        ctl_frame = tk.Frame(content_frame, bg=self.colors['bg'])
-        ctl_frame.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(6, 10))
-        row += 1
+        ctl_frame = tk.Frame(setup_tab, bg=self.colors['bg'])
+        ctl_frame.grid(row=setup_row, column=0, sticky='ew', pady=(6, 10))
+        setup_row += 1
         self.multitarget_run_button = self._create_accent_button(
             ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search)
         self.multitarget_run_button.pack(side='left')
@@ -14687,12 +14705,76 @@ class SpectralPredictApp:
             ctl_frame, text="", style='Caption.TLabel')
         self.multitarget_status_label.pack(side='left', padx=10)
 
+        # ==================== PROGRESS SUB-TAB (T-17 W1-1) ====================
+        # Live progress surface mirroring the single-Y "Analysis Progress" tab:
+        # determinate bar + %/ETA + best-model + capped log + Pause/Resume/Stop.
+        # All widgets live on the multi-target tab and operate ONLY on the
+        # multi-target controller — the single-Y code path is untouched.
+        mt_best_frame = ttk.Frame(progress_tab)
+        mt_best_frame.pack(fill='x', pady=(0, 12))
+        ttk.Label(mt_best_frame, text="Best Model So Far:",
+                  style='Heading.TLabel').pack(anchor=tk.W)
+        self.multitarget_best_model_info = ttk.Label(
+            mt_best_frame, text="(none yet)", style='Caption.TLabel',
+            foreground=self.colors['success'])
+        self.multitarget_best_model_info.pack(anchor=tk.W)
+
+        mt_prog_frame = ttk.Frame(progress_tab)
+        mt_prog_frame.pack(fill='x', pady=10)
+        self.multitarget_progress_info = ttk.Label(
+            mt_prog_frame, text="No multi-target search running",
+            style='Heading.TLabel')
+        self.multitarget_progress_info.pack(side='left', anchor=tk.W)
+        self.multitarget_time_estimate = ttk.Label(
+            mt_prog_frame, text="", style='Caption.TLabel')
+        self.multitarget_time_estimate.pack(side='right', anchor=tk.E)
+
+        self.multitarget_progress_bar = ttk.Progressbar(
+            progress_tab, orient='horizontal', mode='determinate', maximum=100, value=0)
+        self.multitarget_progress_bar.pack(fill='x', pady=(0, 10))
+
+        # Pause/Resume/Stop — multi-target-only buttons (zero single-Y coupling).
+        # These drive ``self._multitarget_controller`` exclusively; the single-Y
+        # ``self.pause_btn`` / ``self.resume_btn`` / ``self.stop_btn`` are
+        # untouched (zero-regression guard).
+        mt_ctl_frame = ttk.Frame(progress_tab)
+        mt_ctl_frame.pack(fill='x', pady=(0, 10))
+        self.multitarget_pause_btn = ttk.Button(
+            mt_ctl_frame, text="⏸ Pause", command=self._pause_multitarget_search,
+            state='disabled')
+        self.multitarget_pause_btn.pack(side='left', padx=2)
+        self.multitarget_resume_btn = ttk.Button(
+            mt_ctl_frame, text="▶ Resume", command=self._resume_multitarget_search,
+            state='disabled')
+        self.multitarget_resume_btn.pack(side='left', padx=2)
+        self.multitarget_stop_btn = ttk.Button(
+            mt_ctl_frame, text="⏹ Stop", command=self._cancel_multitarget_search,
+            state='disabled')
+        self.multitarget_stop_btn.pack(side='left', padx=2)
+
+        # Live log — mirrors single-Y ``progress_text`` (2000-line cap).
+        self.multitarget_progress_log = tk.Text(
+            progress_tab, height=20, width=120, font=('Consolas', 10),
+            bg=self.colors['panel'], fg=self.colors['text'],
+            relief='flat', borderwidth=0,
+            selectbackground=self.colors['accent'],
+            selectforeground=self.colors['text_inverse'])
+        self.multitarget_progress_log.pack(fill='both', expand=True, pady=10)
+        mt_log_scroll = ttk.Scrollbar(
+            progress_tab, command=self.multitarget_progress_log.yview)
+        mt_log_scroll.pack(side='right', fill='y')
+        self.multitarget_progress_log.config(yscrollcommand=mt_log_scroll.set)
+
+        #: Run start timestamp for ETA computation (set on dispatch).
+        self.multitarget_analysis_start_time = None
+
+        # ==================== RESULTS SUB-TAB ====================
         # --- Results grid ---
         res_outer, res_card = self._create_card(
-            content_frame, title="Results",
+            results_tab, title="Results",
             subtitle="Ranked by joint Q² (= mean per-target raw-unit Q²)")
-        res_outer.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=10, padx=5)
-        row += 1
+        res_outer.grid(row=0, column=0, sticky='nsew', pady=10, padx=5)
+        results_tab.rowconfigure(0, weight=1)
         res_frame = tk.Frame(res_card, bg=self.colors['card_bg'])
         res_frame.pack(fill='both', expand=True)
 
@@ -15886,6 +15968,34 @@ class SpectralPredictApp:
         # Disable Run while active; re-enabled in done/failed/cancel.
         self._set_multitarget_running(True)
 
+        # T-17 W1-1: switch to the Progress sub-tab and reset its widgets so the
+        # user sees a fresh progress surface for this run. Mirrors the single-Y
+        # preamble (gui ~25476-25492): clear log, reset bar/info/ETA/best-model,
+        # set the start timestamp for ETA computation, enable Pause/Stop.
+        if hasattr(self, "multitarget_subnotebook"):
+            try:
+                self.multitarget_subnotebook.select(1)  # Progress sub-tab
+            except Exception:
+                pass
+        if hasattr(self, "multitarget_progress_bar"):
+            try:
+                self.multitarget_progress_bar.config(value=0, maximum=100)
+            except Exception:
+                pass
+        if hasattr(self, "multitarget_progress_info"):
+            self.multitarget_progress_info.config(text="Starting multi-target search…")
+        if hasattr(self, "multitarget_time_estimate"):
+            self.multitarget_time_estimate.config(text="")
+        if hasattr(self, "multitarget_best_model_info"):
+            self.multitarget_best_model_info.config(text="(none yet)")
+        if hasattr(self, "multitarget_progress_log"):
+            try:
+                self.multitarget_progress_log.delete("1.0", tk.END)
+            except Exception:
+                pass
+        self.multitarget_analysis_start_time = datetime.now()
+        self._update_multitarget_buttons("running")
+
         # Honest pre-run heads-up: n_preprocess x n_model_configs is a LOWER
         # bound (varsel subsets multiply it further). Cheap — no varsel runs here.
         try:
@@ -15934,8 +16044,27 @@ class SpectralPredictApp:
         and NEVER calls ``root.after`` (Tcl rejects cross-thread command
         registration on Win32) — all UI writes happen in
         ``_poll_multitarget_queue`` on the main thread.
+
+        W1-3: spins up the shared per-run disk logger at search start
+        (``setup_run_logger(label="multitarget")``) so logs survive process
+        death exactly like the single-Y sweep (gui:27407). Idempotent across
+        threads; safe to call when a single-Y run already set it up.
         """
         from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+        # W1-3: disk-mirrored run log. Best-effort — never block the run.
+        try:
+            from spectral_predict.run_logging import setup_run_logger
+            _, mt_run_log_path = setup_run_logger(label="multitarget")
+            self._multitarget_queue.put(("progress", {
+                "message": f"[LOG] Run log: {mt_run_log_path}",
+                "current": 0, "total": 0, "best_model": None,
+            }))
+        except Exception as log_err:
+            self._multitarget_queue.put(("progress", {
+                "message": f"[LOG] Disk log unavailable: {log_err}",
+                "current": 0, "total": 0, "best_model": None,
+            }))
 
         X = cfg.pop("X")
         Y = cfg.pop("Y")
@@ -15967,6 +16096,11 @@ class SpectralPredictApp:
         """Drain worker events ON THE MAIN THREAD and update the UI. Scheduled
         via ``root.after`` from the main thread (reliable). Re-schedules itself
         until the worker has finished AND the queue is empty.
+
+        T-17 W1-1: the progress payload carries ``current``/``total``/
+        ``best_model`` (same shape ``_progress_callback_impl`` consumes) —
+        feed them into the Progress sub-tab's bar/ETA/best-model widgets
+        instead of discarding everything but ``message``.
         """
         while True:
             try:
@@ -15975,8 +16109,7 @@ class SpectralPredictApp:
                 break  # queue empty for now
             try:
                 if kind == "progress":
-                    msg = (payload or {}).get("message", "Running…")
-                    self.multitarget_status_label.config(text=msg)
+                    self._handle_multitarget_progress(payload or {})
                 elif kind == "done":
                     self._multitarget_done(payload)
                 elif kind == "failed":
@@ -15986,6 +16119,7 @@ class SpectralPredictApp:
                 # swallowed — the run is over and the user has to know it failed.
                 self._multitarget_terminal_seen = True
                 self._set_multitarget_running(False)
+                self._update_multitarget_buttons("idle")
                 try:
                     self.multitarget_status_label.config(text="Failed.")
                 except Exception:
@@ -16020,12 +16154,15 @@ class SpectralPredictApp:
     def _multitarget_failed(self, msg):
         self._multitarget_terminal_seen = True
         self._set_multitarget_running(False)
+        self._update_multitarget_buttons("idle")
         self.multitarget_status_label.config(text="Failed.")
+        self._multitarget_log_progress(f"[FAILED] {msg}")
         messagebox.showerror("Multi-Target Search Failed", msg)
 
     def _multitarget_done(self, output):
         self._multitarget_terminal_seen = True
         self._set_multitarget_running(False)
+        self._update_multitarget_buttons("idle")
         self._multitarget_last_output = output
         self._populate_multitarget_results(output)
         warn = ""
@@ -16035,15 +16172,232 @@ class SpectralPredictApp:
         note = ("  Skipped: " + ", ".join(output.skipped)) if output.skipped else ""
         self.multitarget_status_label.config(
             text=f"Done: {len(output.results)} cell(s), {output.n_targets} targets.{note}{warn}")
+        # T-17 W1-1: mark the Progress sub-tab complete + auto-switch to Results.
+        if hasattr(self, "multitarget_progress_info"):
+            try:
+                self.multitarget_progress_info.config(text="Search complete.")
+            except Exception:
+                pass
+        if hasattr(self, "multitarget_time_estimate"):
+            try:
+                self.multitarget_time_estimate.config(text="")
+            except Exception:
+                pass
+        if hasattr(self, "multitarget_progress_bar"):
+            try:
+                # Snap the bar to 100% so the user sees a finished state.
+                cur_max = float(self.multitarget_progress_bar.cget("maximum") or 100)
+                self.multitarget_progress_bar.config(value=cur_max)
+            except Exception:
+                pass
+        self._multitarget_log_progress(
+            f"[DONE] {len(output.results)} cell(s), {output.n_targets} targets.{note}{warn}")
+        if hasattr(self, "multitarget_subnotebook"):
+            try:
+                self.multitarget_subnotebook.select(2)  # Results sub-tab
+            except Exception:
+                pass
 
     def _cancel_multitarget_search(self):
-        """Stop the multi-target worker via its OWN controller (never the single-Y one)."""
+        """Stop the multi-target worker via its OWN controller (never the single-Y one).
+
+        Wired to both the Setup-tab ``⏹ Cancel`` button and the Progress-tab
+        ``⏹ Stop`` button — both drive only ``self._multitarget_controller``.
+        """
         ctrl = getattr(self, "_multitarget_controller", None)
         if ctrl is not None:
             ctrl.stop()
         self._set_multitarget_running(False)
+        self._update_multitarget_buttons("idle")
         if hasattr(self, "multitarget_status_label"):
             self.multitarget_status_label.config(text="Cancelling…")
+        self._multitarget_log_progress("[STOPPED] Search stopped by user")
+
+    # ------------------------------------------------------------------
+    # T-17 W1-1 / W1-3: Progress-surface helpers (mirrors single-Y
+    # ``_progress_callback_impl`` / ``_log_progress`` / Pause-Resume-Stop).
+    # All operate ONLY on multi-target attributes — single-Y is untouched.
+    # ------------------------------------------------------------------
+
+    def _handle_multitarget_progress(self, payload):
+        """Consume a progress payload on the main thread.
+
+        Mirrors ``_progress_callback_impl`` (gui ~30756) but writes to the
+        multi-target Progress sub-tab widgets. ``payload`` carries ``message``,
+        ``current``, ``total``, and ``best_model`` (dict or None) — the same
+        shape the backend's ``progress_callback`` emits.
+        """
+        msg = payload.get("message", "Running…")
+        self.multitarget_status_label.config(text=msg)
+        current = payload.get("current") or 0
+        total = payload.get("total") or 0
+        if total > 0:
+            try:
+                self.multitarget_progress_bar.config(maximum=total, value=current)
+            except Exception:
+                pass
+            try:
+                self.multitarget_progress_info.config(
+                    text=f"Progress: {current}/{total} configurations")
+            except Exception:
+                pass
+            start = getattr(self, "multitarget_analysis_start_time", None)
+            if start is not None and current > 0:
+                elapsed = (datetime.now() - start).total_seconds()
+                remaining = (elapsed / current) * max(0, total - current)
+                try:
+                    self.multitarget_time_estimate.config(
+                        text=self._format_multitarget_time_estimate(elapsed, remaining))
+                except Exception:
+                    pass
+        best = payload.get("best_model")
+        if best:
+            try:
+                self.multitarget_best_model_info.config(
+                    text=self._format_multitarget_best_model(best))
+            except Exception:
+                pass
+        self._multitarget_log_progress(msg)
+
+    def _format_multitarget_time_estimate(self, elapsed, remaining):
+        """Format elapsed/remaining seconds — mirrors single-Y ETA arithmetic."""
+        def _fmt(secs):
+            secs = max(0.0, float(secs))
+            if secs < 60:
+                return f"{int(secs)}s"
+            if secs < 3600:
+                return f"{int(secs / 60)}m {int(secs % 60)}s"
+            return f"{int(secs / 3600)}h {int((secs % 3600) / 60)}m"
+        return f"Elapsed: {_fmt(elapsed)} | Remaining: ~{_fmt(remaining)}"
+
+    def _format_multitarget_best_model(self, best):
+        """Format the best-model-so-far dict for the multi-target Progress surface."""
+        model_text = f"{best.get('Model', '?')} | {best.get('Preprocess', '?')}"
+        rmse = best.get("RMSEcv")
+        r2 = best.get("R2cv")
+        if isinstance(rmse, (int, float)) and isinstance(r2, (int, float)):
+            model_text += f"\nRMSEcv: {rmse:.4f} | R²cv: {r2:.4f}"
+        n_vars = best.get("top_vars")
+        if n_vars not in (None, "N/A", ""):
+            model_text += f"\n#Vars: {n_vars}"
+        return model_text
+
+    def _multitarget_log_progress(self, message):
+        """Log message to the multi-target progress widget AND mirror to disk (W1-3).
+
+        Disk mirror is best-effort via the shared per-run ``log_event`` — the
+        logger is set up by ``setup_run_logger(label="multitarget")`` in the
+        worker thread (idempotent with the single-Y logger). The widget update
+        is synchronous because callers run on the main thread (poller/handlers).
+
+        Matches the single-Y ``_log_progress`` shape (gui ~30845): writes to
+        disk first (so it survives even if Tk is dying), then to the widget
+        with a 2000-line cap to prevent performance degradation.
+        """
+        try:
+            from spectral_predict.run_logging import log_event
+            log_event(message)
+        except Exception:
+            pass
+        try:
+            self.multitarget_progress_log.insert(tk.END, message + "\n")
+            self.multitarget_progress_log.see(tk.END)
+            # 2000-line cap mirrors ``_append_progress`` (gui ~30875).
+            line_count = int(self.multitarget_progress_log.index("end-1c").split(".")[0])
+            if line_count > 2000:
+                self.multitarget_progress_log.delete("1.0", f"{line_count - 2000}.0")
+        except Exception:
+            pass
+
+    def _update_multitarget_buttons(self, state):
+        """Update multi-target Pause/Resume/Stop button states.
+
+        Mirrors the single-Y ``_update_search_buttons`` state machine but
+        operates ONLY on the multi-target buttons — never the single-Y
+        ``self.pause_btn`` / ``self.resume_btn`` / ``self.stop_btn``.
+        """
+        if not all(hasattr(self, b) for b in (
+            "multitarget_pause_btn", "multitarget_resume_btn", "multitarget_stop_btn")):
+            return
+        if state == "idle":
+            self.multitarget_pause_btn.config(state="disabled")
+            self.multitarget_resume_btn.config(state="disabled")
+            self.multitarget_stop_btn.config(state="disabled")
+        elif state == "running":
+            self.multitarget_pause_btn.config(state="normal")
+            self.multitarget_resume_btn.config(state="disabled")
+            self.multitarget_stop_btn.config(state="normal")
+        elif state == "pausing":
+            self.multitarget_pause_btn.config(state="disabled")
+            self.multitarget_resume_btn.config(state="disabled")
+            self.multitarget_stop_btn.config(state="normal")
+        elif state == "paused":
+            self.multitarget_pause_btn.config(state="disabled")
+            self.multitarget_resume_btn.config(state="normal")
+            self.multitarget_stop_btn.config(state="normal")
+
+    def _pause_multitarget_search(self):
+        """Pause the multi-target worker via its OWN controller (never single-Y).
+
+        Mirrors single-Y ``_pause_search`` (gui ~25023) but drives only
+        ``self._multitarget_controller``. Pause is asynchronous — the worker
+        only sees it at the next ``check_and_wait()`` checkpoint (between
+        preprocessing configs / cells in ``multitarget_grid``).
+        """
+        ctrl = getattr(self, "_multitarget_controller", None)
+        if ctrl is None:
+            return
+        ctrl.pause()
+        self._multitarget_log_progress(
+            "[PAUSE REQUESTED] Waiting for current cell to finish…")
+        self._update_multitarget_buttons("pausing")
+        self._poll_multitarget_actually_paused(elapsed_ms=0)
+
+    def _poll_multitarget_actually_paused(self, elapsed_ms=0):
+        """Tk-after-driven 500ms-interval poll until the worker acknowledges pause.
+
+        Mirrors single-Y ``_poll_actually_paused`` (gui ~25040) but operates
+        on the multi-target controller.
+        """
+        ctrl = getattr(self, "_multitarget_controller", None)
+        if ctrl is None or ctrl.is_ended():
+            return
+        if not ctrl.is_paused:
+            # User resumed before the worker acked — stay in 'running'.
+            return
+        if ctrl.is_actually_paused:
+            self._multitarget_log_progress(
+                "[PAUSED] Search paused — worker acknowledged.")
+            self._update_multitarget_buttons("paused")
+            return
+        if elapsed_ms == 30_000:
+            self._multitarget_log_progress(
+                "[PAUSE PENDING] Cell still running. Pause takes effect "
+                "between cells; the current cell may be slow.")
+        try:
+            self.root.after(500, lambda: self._poll_multitarget_actually_paused(elapsed_ms + 500))
+        except Exception:
+            pass
+
+    def _resume_multitarget_search(self):
+        """Resume a paused multi-target worker; refuse if the worker has died.
+
+        Mirrors single-Y ``_resume_search`` (gui ~25067) but operates on the
+        multi-target controller + thread.
+        """
+        ctrl = getattr(self, "_multitarget_controller", None)
+        if ctrl is None:
+            return
+        thread = getattr(self, "_multitarget_thread", None)
+        if thread is None or not thread.is_alive():
+            self._multitarget_log_progress(
+                "[X] Worker thread is no longer alive — cannot resume. "
+                "Start a new search.")
+            self._update_multitarget_buttons("idle")
+            return
+        ctrl.resume()
+        self._multitarget_log_progress("[RESUMED] Search resumed")
+        self._update_multitarget_buttons("running")
 
     def _populate_multitarget_results(self, output):
         """Render a :class:`MultiTargetSearchOutput` into the results grid."""

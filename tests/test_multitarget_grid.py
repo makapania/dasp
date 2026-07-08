@@ -190,6 +190,103 @@ def test_grid_search_progress_callback_dict_shape(grid_xy):
     assert "best_model" in last
 
 
+def test_grid_first_pass_emits_progress_callbacks(grid_xy):
+    """W1-2: the first/varsel pass (preprocessing + variable selection) is the
+    expensive part on real configs but historically emitted ZERO progress
+    callbacks, so a consumer saw "nothing happens" before the modeling pass.
+    The fix emits through the SAME callback + payload shape the modeling pass
+    uses. This test spies on the callback and proves:
+
+      (a) at least one first-pass callback fires (varsel activity is visible),
+      (b) the first-pass payload matches the modeling-pass shape
+          (message/current/total/best_model keys; best_model is None pre-model),
+      (c) EVERY first-pass callback precedes EVERY modeling-pass callback
+          (ordering -- activity is seen before cell evaluation starts).
+
+    Uses a varsel method (ipls_forward) so the first pass is genuinely
+    exercised; 'full' cells still feed the modeling pass.
+    """
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    seen = []
+
+    def spy(info):
+        # Copy so later consumer mutations cannot rewrite history.
+        seen.append(dict(info))
+
+    run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True, "snv": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, random_state=42,
+        progress_callback=spy,
+    )
+    assert seen, "no progress callbacks emitted at all"
+
+    first_pass = [s for s in seen if s["message"].startswith("Variable selection")]
+    modeling_pass = [s for s in seen if s["message"].startswith("Multi-target cell")]
+
+    # (a) the varsel/first pass is no longer silent.
+    assert first_pass, (
+        "expected >=1 first-pass (varsel) progress callback; saw messages: "
+        + repr([s["message"] for s in seen])
+    )
+    # Modeling pass still fires (guards against an over-fix that silenced it).
+    assert modeling_pass, "modeling-pass callbacks disappeared"
+
+    # Two preprocessing configs -> at least two first-pass callbacks.
+    assert len(first_pass) >= 2
+
+    # (b) first-pass payload matches the modeling-pass shape EXACTLY (additive:
+    # no new key introduced, no existing key dropped). best_model is None
+    # pre-modeling because no cell has been evaluated yet.
+    for s in first_pass:
+        assert set(["message", "current", "total"]).issubset(s.keys())
+        assert "best_model" in s
+        assert s["best_model"] is None
+
+    # (c) ordering: the LAST first-pass callback must come BEFORE the FIRST
+    # modeling-pass callback -- a consumer sees varsel activity before cell
+    # evaluation starts.
+    last_first_idx = max(
+        i for i, s in enumerate(seen) if s["message"].startswith("Variable selection")
+    )
+    first_modeling_idx = next(
+        i for i, s in enumerate(seen) if s["message"].startswith("Multi-target cell")
+    )
+    assert last_first_idx < first_modeling_idx, (
+        f"first-pass callbacks must fire before modeling-pass callbacks; "
+        f"last first-pass at index {last_first_idx}, first modeling at {first_modeling_idx}"
+    )
+
+
+def test_grid_first_pass_callback_respects_stop(grid_xy):
+    """W1-2 guard: the new first-pass emission must NOT break the existing
+    pause/stop contract. A pre-stopped controller (check_and_wait()->False)
+    must suppress first-pass callbacks exactly as it already suppresses
+    modeling-pass callbacks -- the emission sits AFTER check_and_wait, so a
+    stop breaks the loop before any callback fires."""
+    from spectral_predict.multitarget_grid import run_multitarget_grid_search
+
+    X, Y, wl = grid_xy
+    seen = []
+    ctrl = _Stopped()
+    out = run_multitarget_grid_search(
+        X, Y, model_names=["PLS"], target_names=["a", "b"], wavelengths=wl,
+        preprocessing_methods={"raw": True, "snv": True}, autoscale=False,
+        variable_selection_methods=["ipls_forward"], variable_counts=[5],
+        ipls_subset_limit="Top 3", tier="quick",
+        cv="kfold", n_folds=3, n_repeats=1, controller=ctrl,
+        progress_callback=lambda info: seen.append(info),
+    )
+    # Stop suppresses BOTH passes: no first-pass callback, no modeling-pass
+    # callback, no results.
+    assert seen == [], f"expected zero callbacks on a stopped run; got {seen}"
+    assert out.results == []
+
+
 def test_grid_varsel_producer_failure_is_skipped_not_fatal(grid_xy, monkeypatch):
     """FIX C: one raising varsel producer must NOT abort the whole search.
 

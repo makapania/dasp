@@ -47,6 +47,34 @@ class TestMultiTargetTab:
         assert "PLS" in gui_app.multitarget_model_vars
         assert "LightGBM" in gui_app.multitarget_model_vars
 
+    def test_inner_subnotebook_has_three_tabs(self, gui_app):
+        """T-17 W1-1: the multi-target tab is restructured into an inner
+        ttk.Notebook with Setup / Progress / Results sub-tabs."""
+        assert hasattr(gui_app, "multitarget_subnotebook"), \
+            "inner sub-notebook attribute missing"
+        nb = gui_app.multitarget_subnotebook
+        tabs = [nb.tab(i, "text") for i in nb.tabs()]
+        # The three sub-tabs exist; whitespace styling differences tolerated.
+        assert any("Setup" in t for t in tabs), f"Setup sub-tab missing: {tabs}"
+        assert any("Progress" in t for t in tabs), f"Progress sub-tab missing: {tabs}"
+        assert any("Results" in t for t in tabs), f"Results sub-tab missing: {tabs}"
+
+    def test_progress_surface_widgets_exist(self, gui_app):
+        """T-17 W1-1: the Progress sub-tab owns a determinate bar + info +
+        ETA + best-model + capped log + Pause/Resume/Stop buttons."""
+        for attr in (
+            "multitarget_progress_bar", "multitarget_progress_info",
+            "multitarget_time_estimate", "multitarget_best_model_info",
+            "multitarget_progress_log", "multitarget_pause_btn",
+            "multitarget_resume_btn", "multitarget_stop_btn",
+            "multitarget_analysis_start_time",
+        ):
+            assert hasattr(gui_app, attr), f"missing progress widget: {attr}"
+        # Pause/Resume/Start disabled at idle (mirrors single-Y state machine).
+        assert str(gui_app.multitarget_pause_btn.cget("state")) == "disabled"
+        assert str(gui_app.multitarget_resume_btn.cget("state")) == "disabled"
+        assert str(gui_app.multitarget_stop_btn.cget("state")) == "disabled"
+
     def test_refresh_lists_numeric_targets_only(self, gui_app):
         _load_multitarget_data(gui_app)
         gui_app._refresh_multitarget_columns()
@@ -462,6 +490,175 @@ class TestMultiTargetPollerErrorSurfacing:
         gui_app._poll_multitarget_queue()  # messagebox.showerror suppressed by fixture
         assert "Fail" in gui_app.multitarget_status_label.cget("text"), \
             "terminal-handler error was silently swallowed (status stuck)"
+
+
+@pytest.mark.gui
+class TestMultiTargetProgressSurface:
+    """T-17 W1-1 / W1-3: the poller now consumes the full progress payload
+    (current/total/best_model) into the Progress sub-tab widgets instead of
+    discarding everything but the message string. Mirrors single-Y
+    ``_progress_callback_impl`` / ``_log_progress``."""
+
+    def test_progress_payload_updates_bar_info_and_best_model(self, gui_app):
+        """A fake ``('progress', payload)`` tuple drives the bar + info +
+        best-model line — the load-bearing fix for ``_poll_multitarget_queue``
+        (was: discarded everything but ``message``)."""
+        from datetime import datetime, timedelta
+        gui_app._multitarget_analysis_start_time = datetime.now() - timedelta(seconds=10)
+        payload = {
+            "message": "Multi-target cell 3/10",
+            "current": 3, "total": 10,
+            "best_model": {
+                "Model": "PLS", "Preprocess": "snv", "Deriv": None,
+                "RMSEcv": 0.12, "R2cv": 0.87, "top_vars": "42",
+            },
+        }
+        gui_app._multitarget_queue.put(("progress", payload))
+        gui_app._poll_multitarget_queue()
+
+        # Status label still shows the message.
+        assert gui_app.multitarget_status_label.cget("text") == "Multi-target cell 3/10"
+        # Bar + info now reflect the new payload.
+        assert float(gui_app.multitarget_progress_bar.cget("value")) == 3.0
+        assert float(gui_app.multitarget_progress_bar.cget("maximum")) == 10.0
+        assert "3/10" in gui_app.multitarget_progress_info.cget("text")
+        # Best-model line shows PLS + snv + the CV metrics.
+        best_txt = gui_app.multitarget_best_model_info.cget("text")
+        assert "PLS" in best_txt and "snv" in best_txt
+        assert "0.1200" in best_txt and "0.8700" in best_txt
+        # ETA label is populated (start time was set).
+        assert gui_app.multitarget_time_estimate.cget("text") != ""
+
+    def test_progress_payload_zero_total_does_not_divide_by_zero(self, gui_app):
+        """A 0/0 payload (e.g. the W1-3 ``[LOG] Run log:`` line emitted before
+        any cell runs) must not crash the poller or stomp the bar."""
+        # Reset the best-model line (session-scoped app may carry state from
+        # earlier tests).
+        gui_app.multitarget_best_model_info.config(text="(none yet)")
+        gui_app._multitarget_queue.put(("progress", {
+            "message": "[LOG] Run log: /tmp/x.log", "current": 0, "total": 0,
+            "best_model": None,
+        }))
+        gui_app._poll_multitarget_queue()  # must not raise
+        assert "[LOG]" in gui_app.multitarget_status_label.cget("text")
+        # Best-model line untouched (None payload).
+        assert gui_app.multitarget_best_model_info.cget("text") == "(none yet)"
+
+    def test_progress_log_appends_and_caps(self, gui_app):
+        """``_multitarget_log_progress`` writes to the log Text widget AND caps
+        at 2000 lines (mirrors single-Y ``_append_progress``)."""
+        gui_app.multitarget_progress_log.delete("1.0", "end")
+        for i in range(50):
+            gui_app._multitarget_log_progress(f"line {i}")
+        contents = gui_app.multitarget_progress_log.get("1.0", "end")
+        assert "line 0" in contents and "line 49" in contents
+        # Cap: force well past 2000 lines and confirm the head is dropped.
+        gui_app.multitarget_progress_log.delete("1.0", "end")
+        for i in range(2500):
+            gui_app._multitarget_log_progress(f"line {i}")
+        # The oldest lines must have been evicted; only the tail survives.
+        surviving = gui_app.multitarget_progress_log.get("1.0", "end-1c").splitlines()
+        assert len(surviving) <= 2001  # 2000 lines + trailing-empty from index()
+        assert "line 0" not in surviving
+        assert "line 2499" in surviving
+
+
+@pytest.mark.gui
+class TestMultiTargetPauseResumeWiring:
+    """T-17 W1-1: Pause/Resume/Stop buttons drive the multi-target controller
+    ONLY — never ``self.search_controller`` (zero-regression guard)."""
+
+    def test_pause_button_drives_multitarget_controller_only(self, gui_app):
+        from spectral_predict.search_controller import SearchController
+        gui_app._multitarget_controller = SearchController()
+        # Provide a real single-Y controller sentinel so we can prove it's
+        # untouched by the multi-target pause path (zero-regression guard).
+        single_y_sentinel = SearchController()
+        original_single_y = gui_app.search_controller
+        gui_app.search_controller = single_y_sentinel
+        try:
+            gui_app._pause_multitarget_search()
+            # Multi-target controller is paused.
+            assert gui_app._multitarget_controller.is_paused
+            # Single-Y controller is untouched (zero-regression guard).
+            assert not single_y_sentinel.is_paused
+            # Button state machine: pausing → both Pause and Resume disabled.
+            assert str(gui_app.multitarget_pause_btn.cget("state")) == "disabled"
+            assert str(gui_app.multitarget_resume_btn.cget("state")) == "disabled"
+            assert str(gui_app.multitarget_stop_btn.cget("state")) == "normal"
+        finally:
+            gui_app.search_controller = original_single_y
+
+    def test_resume_button_drives_multitarget_controller_only(self, gui_app):
+        from spectral_predict.search_controller import SearchController
+        import threading
+        # A LIVE worker thread is required for resume to actually flip state —
+        # use a blocking thread so it's still alive when resume is called.
+        release = threading.Event()
+        def _block():
+            release.wait(5)
+        t = threading.Thread(target=_block)
+        t.start()
+        gui_app._multitarget_thread = t
+        try:
+            gui_app._multitarget_controller = SearchController()
+            gui_app._multitarget_controller.pause()
+            assert gui_app._multitarget_controller.is_paused
+            gui_app._resume_multitarget_search()
+            # Multi-target controller resumed.
+            assert not gui_app._multitarget_controller.is_paused
+            # Button state machine: running → Pause enabled, Resume disabled.
+            assert str(gui_app.multitarget_pause_btn.cget("state")) == "normal"
+            assert str(gui_app.multitarget_resume_btn.cget("state")) == "disabled"
+        finally:
+            release.set()
+            t.join(timeout=2)
+
+    def test_stop_button_drives_multitarget_controller_only(self, gui_app):
+        from spectral_predict.search_controller import SearchController
+        single_y_ctrl = SearchController()
+        gui_app._multitarget_controller = SearchController()
+        # Stash a sentinel single-Y controller so we can prove it's untouched.
+        original_single_y = gui_app.search_controller
+        gui_app.search_controller = single_y_ctrl
+        try:
+            gui_app._cancel_multitarget_search()
+            assert gui_app._multitarget_controller.is_ended()
+            # The single-Y controller is COMPLETELY unaffected.
+            assert not single_y_ctrl.is_ended()
+            assert not single_y_ctrl.is_paused
+        finally:
+            gui_app.search_controller = original_single_y
+
+    def test_update_multitarget_buttons_state_machine(self, gui_app):
+        """All four states of ``_update_multitarget_buttons`` produce the
+        expected enabled/disabled trio (mirrors single-Y
+        ``_update_search_buttons``)."""
+        for state, expected in {
+            "idle":     ("disabled", "disabled", "disabled"),
+            "running":  ("normal",   "disabled", "normal"),
+            "pausing":  ("disabled", "disabled", "normal"),
+            "paused":   ("disabled", "normal",   "normal"),
+        }.items():
+            gui_app._update_multitarget_buttons(state)
+            got = (
+                str(gui_app.multitarget_pause_btn.cget("state")),
+                str(gui_app.multitarget_resume_btn.cget("state")),
+                str(gui_app.multitarget_stop_btn.cget("state")),
+            )
+            assert got == expected, f"state={state!r} got={got!r} expected={expected!r}"
+
+
+@pytest.mark.gui
+def test_multitarget_disk_log_mirror_invokes_log_event(gui_app, monkeypatch):
+    """T-17 W1-3: ``_multitarget_log_progress`` mirrors to disk via
+    ``run_logging.log_event`` so logs survive process death (matching the
+    single-Y ``_log_progress`` disk mirror)."""
+    import spectral_predict.run_logging as rl
+    calls = []
+    monkeypatch.setattr(rl, "log_event", lambda msg: calls.append(msg))
+    gui_app._multitarget_log_progress("disk-mirror test line")
+    assert "disk-mirror test line" in calls, "log_event was not invoked"
 
 
 @pytest.mark.gui
