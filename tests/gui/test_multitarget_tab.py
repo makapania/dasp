@@ -8,6 +8,8 @@ when >1 target is selected). Single-Y UI is untouched.
 
 from __future__ import annotations
 
+import tkinter as tk
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -860,3 +862,156 @@ def test_leaderboard_shows_preprocess_varsel_nvars_columns(gui_app):
     assert "snv" in values
     assert "ipls_forward" in values
     assert "25" in values
+
+
+def _find_widget_by_text(parent, text, class_=None):
+    """Recursively find the first descendant widget whose cget('text') matches."""
+    for child in parent.winfo_children():
+        try:
+            if (str(child.cget("text")) == text
+                    and (class_ is None or child.winfo_class() == class_)):
+                return child
+        except (tk.TclError, AttributeError):
+            pass
+        found = _find_widget_by_text(child, text, class_)
+        if found is not None:
+            return found
+    return None
+
+
+@pytest.mark.gui
+class TestMultiTargetDetailDialog:
+    """T-17 W2-3 (Gap 4): double-click a multi-target leaderboard row (in
+    EITHER tree — the 4F Results sub-tab or the tab-6 co-location mirror)
+    opens a Multi-Target Model Detail dialog. The iid→result mapping is stable
+    across sorts (iids tie to ``output.results`` indices)."""
+
+    def _make_output(self):
+        from spectral_predict.multitarget_search import (
+            MultiTargetResult, MultiTargetSearchOutput)
+        targets = ["prop_0", "prop_1"]
+        n = 12
+        rng = np.random.default_rng(0)
+        y_true = rng.normal(size=(n, 2))
+        y_pred = y_true + rng.normal(scale=0.1, size=(n, 2))
+        per = [{"target": t, "r2": 0.9, "rmse": 0.1, "rpd": 3.0,
+                "rer": 5.0, "ccc": 0.88, "bias": 0.0} for t in targets]
+        res_a = MultiTargetResult(
+            model_name="PLS", mode="JOINT", params={"n_components": 3},
+            joint_q2=0.85, metrics={"per_target": per}, precise_note="",
+            scale_y=True, mechanism="x", preprocessing="snv",
+            varsel_method="full", n_variables=24,
+            y_true_pooled=y_true, y_pred_pooled=y_pred)
+        res_b = MultiTargetResult(
+            model_name="Ridge", mode="INDEPENDENT", params={"alpha": 1.0},
+            joint_q2=0.70, metrics={"per_target": per}, precise_note="ind",
+            scale_y=False, mechanism="n fits", preprocessing="raw",
+            varsel_method="full", n_variables=24,
+            y_true_pooled=y_true, y_pred_pooled=y_pred)
+        corr = {"corr_matrix": np.eye(2), "mean_abs_corr": 0.0,
+                "is_weak": True}
+        return MultiTargetSearchOutput(
+            results=[res_a, res_b], target_names=targets,
+            correlation=corr, n_targets=2, skipped=[])
+
+    def test_double_click_resolves_iid_to_result(self, gui_app, monkeypatch):
+        """The handler maps the clicked row iid (stable index into
+        output.results) to the right MultiTargetResult, then opens the dialog."""
+        import tkinter as tk
+        out = self._make_output()
+        gui_app._populate_multitarget_results(out)
+        gui_app._multitarget_last_output = out
+        captured = {}
+        monkeypatch.setattr(
+            gui_app, "_show_multitarget_detail_dialog",
+            lambda res, o: captured.update(result=res, output=o))
+
+        class _Evt:
+            y = 0  # headless: identify_row won't resolve; exercise the fallback.
+            widget = gui_app.multitarget_tree
+        # Focus iid="1" (Ridge) so the focus-fallback path resolves it.
+        gui_app.multitarget_tree.focus("1")
+        gui_app._on_multitarget_result_double_click(_Evt)
+        assert captured.get("result") is out.results[1]
+        assert captured.get("output") is out
+
+    def test_double_click_stale_output_is_noop(self, gui_app, monkeypatch):
+        """A stale/None _multitarget_last_output does NOT open the dialog."""
+        out = self._make_output()
+        gui_app._populate_multitarget_results(out)  # tree has iids 0, 1
+        gui_app._multitarget_last_output = None  # but retained output is gone
+        called = {"n": 0}
+        monkeypatch.setattr(
+            gui_app, "_show_multitarget_detail_dialog",
+            lambda *a, **k: called.update(n=called["n"] + 1))
+
+        class _Evt:
+            y = 0
+            widget = gui_app.multitarget_tree
+        gui_app.multitarget_tree.focus("1")
+        gui_app._on_multitarget_result_double_click(_Evt)
+        assert called["n"] == 0  # None output → guard fired before dialog
+
+    def test_double_click_no_row_is_noop(self, gui_app, monkeypatch):
+        """A click that resolves to no iid (empty tree / header) is silent."""
+        called = {"n": 0}
+        monkeypatch.setattr(
+            gui_app, "_show_multitarget_detail_dialog",
+            lambda *a, **k: called.update(n=called["n"] + 1))
+
+        class _Evt:
+            y = 0
+            widget = gui_app.multitarget_tree
+        # No rows populated, no focus, no selection → no iid.
+        gui_app._on_multitarget_result_double_click(_Evt)
+        assert called["n"] == 0
+
+    def test_detail_dialog_opens_and_disposes_cleanly(self, gui_app):
+        """The dialog builds a per-target scatter figure using the OO Figure
+        API (NOT pyplot) + correlation panel, and closes cleanly. The old bug:
+        pyplot spun up a second Tk backend manager that intermittently raised
+        a TclError; the OO figure registers nothing with pyplot."""
+        import matplotlib.pyplot as plt
+        out = self._make_output()
+        before = len(plt.get_fignums())
+        gui_app._show_multitarget_detail_dialog(out.results[0], out)
+        # OO Figure => the dialog must NOT register a pyplot-managed figure.
+        assert len(plt.get_fignums()) == before
+        # A Toplevel dialog exists as a child of root.
+        dialogs = [w for w in gui_app.root.winfo_children()
+                   if w.winfo_class() == "Toplevel"]
+        assert dialogs, "detail dialog Toplevel was not created"
+        dialog = dialogs[-1]
+        # The embedded matplotlib canvas was actually rendered.
+        def _has_canvas(w):
+            if w.winfo_class() == "Canvas":
+                return True
+            return any(_has_canvas(c) for c in w.winfo_children())
+        assert _has_canvas(dialog), "embedded matplotlib canvas not found"
+        # The correlation panel is present (the "why joint?" context).
+        assert _find_widget_by_text(
+            dialog, "Inter-target correlation (the 'why joint?' context)") \
+            is not None
+        # Invoke the Close button → _on_close (fig.clear + destroy).
+        close_btn = _find_widget_by_text(dialog, "Close", class_="TButton")
+        assert close_btn is not None, "Close button not found in dialog"
+        close_btn.invoke()
+        try:
+            gui_app.root.update()
+        except Exception:
+            pass
+        # Still no pyplot leak after close.
+        assert len(plt.get_fignums()) == before
+
+    def test_both_trees_bound_to_double_click(self, gui_app):
+        """Both self.multitarget_tree (4F) and self.multitarget_tree_tab6
+        (tab-6 mirror) carry a registered <Double-1> binding. The functional
+        routing (iid → result → dialog) is covered by
+        test_double_click_resolves_iid_to_result above."""
+        for tree in (gui_app.multitarget_tree,
+                     gui_app.multitarget_tree_tab6):
+            # A <Double-1> binding is registered (non-empty Tcl script). This
+            # is the reliable headless assertion: the only <Double-1> binding
+            # added to these trees is _on_multitarget_result_double_click.
+            assert tree.bind("<Double-1>"), \
+                f"<Double-1> not bound on {tree!r}"

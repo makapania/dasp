@@ -14593,8 +14593,35 @@ class SpectralPredictApp:
         results_tab.columnconfigure(0, weight=1)
 
         # ==================== SETUP SUB-TAB ====================
-        # --- Target multi-select ---
+        # T-17 W2-1 (Gap 1a): Run/Cancel/Export controls live at the TOP of the
+        # Setup sub-tab, matching every sibling config sub-tab (4A/4B/4C/4D/4E).
+        # PLACEMENT ONLY — run dispatch logic, controller, and engine unchanged.
         setup_row = 0
+        ctl_frame = tk.Frame(setup_tab, bg=self.colors['bg'])
+        ctl_frame.grid(row=setup_row, column=0, sticky='ew', pady=(0, 10))
+        setup_row += 1
+        self.multitarget_run_button = self._create_accent_button(
+            ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search)
+        self.multitarget_run_button.pack(side='left')
+        # Separate controller + worker thread: Cancel stops ONLY the multi-target
+        # search, never the single-Y ``self.search_controller``.
+        ttk.Button(ctl_frame, text="⏹ Cancel",
+                   command=self._cancel_multitarget_search,
+                   style='Modern.TButton').pack(side='left', padx=(10, 0))
+        # T-17 W2-1 (Section 4 item 3): store the Export button so
+        # ``_set_multitarget_running`` can disable it while a run is active
+        # (prevents exporting the PREVIOUS run's ``_multitarget_last_output``
+        # mid-run) and re-enable it on done/failed/cancel.
+        self.multitarget_export_button = ttk.Button(
+            ctl_frame, text="💾 Export CSV",
+            command=self._export_multitarget_csv,
+            style='Modern.TButton')
+        self.multitarget_export_button.pack(side='left', padx=10)
+        self.multitarget_status_label = ttk.Label(
+            ctl_frame, text="", style='Caption.TLabel')
+        self.multitarget_status_label.pack(side='left', padx=10)
+
+        # --- Target multi-select ---
         tgt_outer, tgt_card = self._create_card(
             setup_tab, title="Select Targets",
             subtitle="Choose 2+ numeric columns (Ctrl/Shift-click for multi-select)")
@@ -14603,8 +14630,15 @@ class SpectralPredictApp:
         tgt_frame = tk.Frame(tgt_card, bg=self.colors['card_bg'])
         tgt_frame.pack(fill='both', expand=True)
 
+        # T-17 W2-1 (Gap 1c): theme the raw tk.Listbox from self.colors so it
+        # matches the ttk widgets everywhere else (dark-mode friendly). Mirrors
+        # the theming already applied to the multi-target progress log Text
+        # widget (bg/fg/selectbackground/selectforeground).
         self.multitarget_listbox = tk.Listbox(
-            tgt_frame, selectmode=tk.EXTENDED, height=7, exportselection=False, width=40)
+            tgt_frame, selectmode=tk.EXTENDED, height=7, exportselection=False, width=40,
+            bg=self.colors['panel'], fg=self.colors['text'], relief='flat', borderwidth=0,
+            highlightthickness=0, selectbackground=self.colors['accent'],
+            selectforeground=self.colors['text_inverse'])
         self.multitarget_listbox.grid(row=0, column=0, rowspan=3, sticky=(tk.W, tk.N, tk.S), padx=(0, 10), pady=2)
         self.multitarget_listbox.bind('<<ListboxSelect>>', self._on_multitarget_selection_changed)
 
@@ -14686,24 +14720,9 @@ class SpectralPredictApp:
             ttk.Radiobutton(cpl_frame, text=text, value=val,
                             variable=self.multitarget_coupling).pack(anchor=tk.W, pady=1)
 
-        # --- Run + export controls ---
-        ctl_frame = tk.Frame(setup_tab, bg=self.colors['bg'])
-        ctl_frame.grid(row=setup_row, column=0, sticky='ew', pady=(6, 10))
-        setup_row += 1
-        self.multitarget_run_button = self._create_accent_button(
-            ctl_frame, "▶ Run Multi-Target Search", self._run_multitarget_search)
-        self.multitarget_run_button.pack(side='left')
-        # Separate controller + worker thread: Cancel stops ONLY the multi-target
-        # search, never the single-Y ``self.search_controller``.
-        ttk.Button(ctl_frame, text="⏹ Cancel",
-                   command=self._cancel_multitarget_search,
-                   style='Modern.TButton').pack(side='left', padx=(10, 0))
-        ttk.Button(ctl_frame, text="💾 Export CSV",
-                   command=self._export_multitarget_csv,
-                   style='Modern.TButton').pack(side='left', padx=10)
-        self.multitarget_status_label = ttk.Label(
-            ctl_frame, text="", style='Caption.TLabel')
-        self.multitarget_status_label.pack(side='left', padx=10)
+        # --- Run + export controls moved to the TOP of the Setup sub-tab
+        # (T-17 W2-1 / Gap 1a). The block above (ctl_frame, run/cancel/export
+        # buttons, status label) is the canonical home; this slot is retired. ---
 
         # ==================== PROGRESS SUB-TAB (T-17 W1-1) ====================
         # Live progress surface mirroring the single-Y "Analysis Progress" tab:
@@ -14796,6 +14815,26 @@ class SpectralPredictApp:
         mt_xscroll.grid(row=1, column=0, sticky='ew')
         res_frame.rowconfigure(0, weight=1)
         res_frame.columnconfigure(0, weight=1)
+
+        # T-17 W2-1 (Gap 1d): header tooltips on the multi-target tree, keyed on
+        # the DYNAMIC per-target column ids built in ``_populate_multitarget_results``
+        # (``"<target>__<key>"``). The dict is refreshed there on every populate;
+        # at creation we seed it with the fixed-column explanations so hovering
+        # before any run still works. Pattern follows the single-Y results tree
+        # (``TreeviewHeaderTooltip`` + ``TOOLTIP_CONTENT['metrics']``).
+        self.multitarget_header_tooltips = TreeviewHeaderTooltip(
+            self.multitarget_tree,
+            self._multitarget_tooltip_dict(),
+            delay=400,
+        )
+
+        # T-17 W2-3 (Gap 4): double-click a leaderboard row to open the
+        # Multi-Target Model Detail dialog (per-target plots + correlation
+        # context). The handler resolves the row iid → output.results index
+        # (iids are stable across sorts — see _populate_multitarget_results).
+        # Does NOT touch the single-Y _on_result_double_click handler.
+        self.multitarget_tree.bind(
+            "<Double-1>", self._on_multitarget_result_double_click)
 
         #: Last MultiTargetSearchOutput, retained for CSV export.
         self._multitarget_last_output = None
@@ -16030,11 +16069,24 @@ class SpectralPredictApp:
         self._multitarget_after_id = self.root.after(100, self._poll_multitarget_queue)
 
     def _set_multitarget_running(self, running: bool) -> None:
-        """Enable/disable the Run button for the multi-target run lifecycle."""
+        """Enable/disable the Run button for the multi-target run lifecycle.
+
+        T-17 W2-1 (Section 4 item 3): also disables the Export CSV button while
+        a run is active (so it cannot export the PREVIOUS run's
+        ``_multitarget_last_output`` mid-run) and re-enables it on
+        done/failed/cancel. Additive — the existing Run-button toggle is
+        unchanged.
+        """
         btn = getattr(self, "multitarget_run_button", None)
         if btn is not None:
             try:
                 btn.config(state="disabled" if running else "normal")
+            except Exception:
+                pass
+        export_btn = getattr(self, "multitarget_export_button", None)
+        if export_btn is not None:
+            try:
+                export_btn.config(state="disabled" if running else "normal")
             except Exception:
                 pass
 
@@ -16400,17 +16452,32 @@ class SpectralPredictApp:
         self._update_multitarget_buttons("running")
 
     def _populate_multitarget_results(self, output):
-        """Render a :class:`MultiTargetSearchOutput` into the results grid."""
+        """Render a :class:`MultiTargetSearchOutput` into the results grid.
+
+        T-17 W2-1 additive changes:
+          * Gap 1e — a leading ``Rank`` column (1-based, display order).
+          * Section 4 item 2 — rows are inserted with ``iid=str(result_index)``
+            tied to the ``output.results`` index so double-click lookup and
+            column sorting survive a reorder (the iids stay attached to the
+            data even as ``move`` reorders their display position).
+          * Gap 1d — the header-tooltip dict is refreshed here so it keys on
+            the DYNAMIC per-target column ids built just below.
+          * Gap 3 — the rendered grid is mirrored into the tab-6 co-location
+            tree (if built) via ``_mirror_multitarget_to_tab6``.
+        """
         tree = self.multitarget_tree
         tree.delete(*tree.get_children())
 
         target_names = list(output.target_names)
-        columns = ["preprocessing", "varsel", "nvars", "key_hp", "model", "mode", "joint_q2"]
+        self._multitarget_last_target_names = target_names
+        # Gap 1e: leading "rank" column.
+        columns = ["rank", "preprocessing", "varsel", "nvars", "key_hp", "model", "mode", "joint_q2"]
         for t in target_names:
             for key, _lbl in self._MULTITARGET_METRIC_KEYS:
                 columns.append(f"{t}__{key}")
         tree.configure(columns=columns)
         for cid, text, w, anchor in [
+            ("rank", "Rank", 50, tk.E),
             ("preprocessing", "Preprocess", 110, tk.W), ("varsel", "Varsel", 110, tk.W),
             ("nvars", "#Vars", 60, tk.E), ("key_hp", "Key HP", 140, tk.W),
             ("model", "Model", 110, tk.W), ("mode", "Mode", 100, tk.CENTER),
@@ -16429,11 +16496,19 @@ class SpectralPredictApp:
                              command=lambda c=col: self._sort_multitarget_tree(c))
                 tree.column(col, width=90, anchor=tk.E, stretch=False)
 
-        for res in output.results:
+        # Gap 1d: refresh the header tooltips to key on the DYNAMIC per-target
+        # column ids built above (not hardcoded ones). No-op before the tooltip
+        # is attached (tree-creation seeds a fixed-only dict as a fallback).
+        if hasattr(self, "multitarget_header_tooltips"):
+            self.multitarget_header_tooltips.tooltips = self._multitarget_tooltip_dict(target_names)
+
+        # Section 4 item 2: stable iids tied to output.results index.
+        for idx, res in enumerate(output.results):
             per = {d["target"]: d for d in res.metrics.get("per_target", [])}
             key_hp = ", ".join(f"{k}={v}" for k, v in list(res.params.items())[:3])
             jq = f"{res.joint_q2:.4f}" if np.isfinite(res.joint_q2) else "NaN"
-            values = [res.preprocessing, res.varsel_method,
+            # Gap 1e: rank is 1-based, following the display order.
+            values = [str(idx + 1), res.preprocessing, res.varsel_method,
                       "" if res.n_variables is None else str(res.n_variables),
                       key_hp, res.model_name, res.mode, jq]
             for t in target_names:
@@ -16441,7 +16516,77 @@ class SpectralPredictApp:
                 for key, _lbl in self._MULTITARGET_METRIC_KEYS:
                     val = d.get(key)
                     values.append(f"{val:.4f}" if isinstance(val, (int, float)) else "")
-            tree.insert("", tk.END, values=values)
+            tree.insert("", tk.END, iid=str(idx), values=values)
+
+        # Gap 3: mirror into the tab-6 co-location view (no-op until built).
+        self._mirror_multitarget_to_tab6(target_names)
+
+    def _multitarget_tooltip_dict(self, target_names=None):
+        """Build the header-tooltip dict for a multi-target results tree.
+
+        Fixed columns always get an entry; per-target columns (ids of the form
+        ``"<target>__<key>"`` built DYNAMICALLY in ``_populate_multitarget_results``)
+        are added when ``target_names`` is provided so the tooltip keys match
+        the live column ids exactly (Gap 1d: key on dynamic ids, not hardcoded).
+        """
+        tips = {
+            "rank": ("Rank\n\nLeaderboard position (1 = best), following the display "
+                     "order at populate time (the backend ranks results by joint Q²)."),
+            "preprocessing": ("Preprocess\n\nSpectra preprocessing pipeline applied before "
+                              "modelling (e.g. SNV, Savitzky-Golay derivatives, baseline)."),
+            "varsel": ("Varsel\n\nVariable-selection method used to pick the wavelength "
+                       "subset (e.g. UVE, CARS, SPA, iPLS)."),
+            "nvars": "#Vars\n\nNumber of wavelengths/variables retained after variable selection.",
+            "key_hp": "Key HP\n\nFirst few model hyperparameters used in this cell.",
+            "model": "Model\n\nModel family used for this cell (PLS, Ridge, LightGBM, ...).",
+            "mode": ("Mode\n\nJOINT = one coupled multi-output model (uses inter-target "
+                     "correlation).\nINDEPENDENT = separate per-target estimators under one "
+                     "shared searched configuration (no coupling; for exact equivalence to "
+                     "N independent searches, run separate single-target searches)."),
+            "joint_q2": ("Joint Q²\n\nMean of per-target raw-unit Q² across all targets — "
+                         "the leaderboard ranking metric (higher is better)."),
+        }
+        if target_names:
+            # Map the short metric keys to the TOOLTIP_CONTENT['metrics'] keys
+            # (which use 'R2' rather than 'R²').
+            _tip_key = {"r2": "R2", "rmse": "RMSE", "rpd": "RPD",
+                        "rer": "RER", "ccc": "CCCcv", "bias": "Bias"}
+            metrics = TOOLTIP_CONTENT.get("metrics", {})
+            for t in target_names:
+                for key, lbl in self._MULTITARGET_METRIC_KEYS:
+                    base = metrics.get(_tip_key.get(key, lbl), "")
+                    # Drop the leading "Label (..." header so the per-target
+                    # framing is unambiguous, but keep the body explanation.
+                    body = base.split("\n\n", 1)[1] if "\n\n" in base else base
+                    tips[f"{t}__{key}"] = f"{lbl} for target '{t}'\n\n{body}"
+        return tips
+
+    def _mirror_multitarget_to_tab6(self, target_names):
+        """Copy the 4F leaderboard into the tab-6 co-location tree (T-17 W2-1).
+
+        A Tk widget cannot be mapped into two parents, so the tab-6 multi-target
+        view hosts its OWN Treeview; this helper keeps it byte-for-byte in sync
+        with ``self.multitarget_tree`` (same columns, headings, widths, stable
+        iids, and values) whenever results are rendered or re-sorted. No-op
+        until tab 6 builds the mirror tree (``self.multitarget_tree_tab6``).
+        """
+        tab6 = getattr(self, "multitarget_tree_tab6", None)
+        if tab6 is None:
+            return
+        src = self.multitarget_tree
+        tab6.delete(*tab6.get_children())
+        src_cols = list(src["columns"])
+        tab6.configure(columns=src_cols)
+        for col in src_cols:
+            tab6.heading(col, text=src.heading(col)["text"],
+                         command=lambda c=col: self._sort_multitarget_tree(c))
+            cfg = src.column(col)
+            # stretch=False preserves the horizontal-scroll behaviour (FIX 2).
+            tab6.column(col, width=int(cfg["width"]), anchor=cfg["anchor"], stretch=False)
+        for iid in src.get_children(""):
+            tab6.insert("", tk.END, iid=iid, values=src.item(iid, "values"))
+        if hasattr(self, "multitarget_tab6_header_tooltips"):
+            self.multitarget_tab6_header_tooltips.tooltips = self._multitarget_tooltip_dict(target_names)
 
     def _sort_multitarget_tree(self, col):
         """Sort the multi-target leaderboard by a clicked column header.
@@ -16470,6 +16615,11 @@ class SpectralPredictApp:
         for idx, (_v, iid) in enumerate(rest + blanks):
             tree.move(iid, "", idx)
         self._multitarget_sort_state[col] = not reverse
+        # T-17 W2-1 (Gap 3): keep the tab-6 co-location mirror in the same
+        # sorted order. ``_mirror_multitarget_to_tab6`` copies the (now
+        # reordered) source children, so both views stay in sync. It is a
+        # no-op until tab 6 builds ``self.multitarget_tree_tab6``.
+        self._mirror_multitarget_to_tab6(getattr(self, "_multitarget_last_target_names", []))
 
     def _export_multitarget_csv(self):
         """Export the last multi-target results (with mode + per-target metrics)."""
@@ -16509,6 +16659,280 @@ class SpectralPredictApp:
             messagebox.showerror("Export CSV Failed", str(exc))
             return
         self.multitarget_status_label.config(text=f"Exported: {path}")
+
+    def _on_multitarget_result_double_click(self, event):
+        """T-17 W2-3 (Gap 4): double-click a multi-target leaderboard row to
+        open the Multi-Target Model Detail dialog.
+
+        Bound on BOTH ``self.multitarget_tree`` (4F Results sub-tab) and
+        ``self.multitarget_tree_tab6`` (tab-6 co-location mirror), which share
+        stable iids (``str(idx)`` into ``output.results`` — see
+        ``_populate_multitarget_results``). The iid → result mapping therefore
+        survives column sorting (iids stay attached to their data through
+        ``treemove``). Does NOT touch the single-Y ``_on_result_double_click``
+        (which feeds ``_load_model_for_refinement`` and is single-Y-schema-bound).
+        """
+        tree = event.widget
+        # Prefer the row actually under the cursor; fall back to focus /
+        # selection so keyboard activation still works and headless tests can
+        # drive the handler without real pointer geometry.
+        iid = ""
+        try:
+            iid = tree.identify_row(event.y) or ""
+        except (AttributeError, tk.TclError):
+            iid = ""
+        if not iid:
+            try:
+                iid = tree.focus() or ""
+            except (AttributeError, tk.TclError):
+                iid = ""
+        if not iid:
+            sel = tree.selection()
+            if sel:
+                iid = sel[0]
+        if not iid:
+            return
+        try:
+            idx = int(iid)
+        except (TypeError, ValueError):
+            return
+        output = getattr(self, "_multitarget_last_output", None)
+        if output is None or not getattr(output, "results", None):
+            messagebox.showinfo(
+                "Multi-Target Detail",
+                "No multi-target results are available. Run a search first.")
+            return
+        if idx < 0 or idx >= len(output.results):
+            return
+        self._show_multitarget_detail_dialog(output.results[idx], output)
+
+    def _show_multitarget_detail_dialog(self, result, output):
+        """Build the Multi-Target Model Detail dialog (T-17 W2-3, Gap 4).
+
+        A themed ``Toplevel`` showing:
+          * a per-target predicted-vs-actual scatter grid (one matplotlib
+            subplot per target), drawn from ``result.y_true_pooled`` /
+            ``result.y_pred_pooled`` with ZERO recompute, each subplot
+            annotated with that target's R²/RMSE/RPD/RER/CCCcv/Bias from
+            ``result.metrics["per_target"]``;
+          * a correlation-context panel (the inter-target correlation matrix
+            from ``output.correlation`` — the "why joint?" context);
+          * a button row: "Save Model (.dasp)" + "Export Code…" stubs (W3-1 /
+            W2-2) and a functional "Export Plot (300 DPI)" via the shared
+            ``_add_plot_export_button`` helper.
+
+        Mirrors the visual style of ``_export_for_publication``'s dialog (themed
+        Toplevel, transient to ``self.root``) but is a NEW window — does not
+        touch that method. Uses the OO ``Figure`` API (not pyplot) like the rest
+        of the app, so no competing Tk backend manager is created; disposes
+        cleanly by clearing the figure + ``destroy`` on close.
+        """
+        from matplotlib.figure import Figure
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(
+            f"Multi-Target Model Detail — {result.model_name} ({result.mode})")
+        dialog.configure(bg=self.colors['bg'])
+        dialog.transient(self.root)
+        dialog.resizable(True, True)
+
+        # Header card: model / mode / preprocessing / varsel summary.
+        header = tk.Frame(dialog, bg=self.colors['card_bg'])
+        header.pack(fill='x', padx=12, pady=(12, 6))
+        tk.Label(
+            header, text=f"{result.model_name}  ·  {result.mode}",
+            font=('Arial', 14, 'bold'), bg=self.colors['card_bg'],
+            fg=self.colors['text']).pack(anchor='w', padx=10, pady=(8, 2))
+        varsel_bit = result.varsel_method or "full"
+        nvars_bit = ("" if result.n_variables is None
+                     else f"  ·  #vars={result.n_variables}")
+        jq = result.joint_q2
+        jq_txt = (f"{jq:.4f}" if isinstance(jq, (int, float))
+                  and np.isfinite(jq) else "NaN")
+        sub = (f"Preprocess: {result.preprocessing}  ·  Varsel: "
+               f"{varsel_bit}{nvars_bit}  ·  Joint Q² = {jq_txt}")
+        tk.Label(
+            header, text=sub, font=('Arial', 10), bg=self.colors['card_bg'],
+            fg=self.colors.get('text_secondary', self.colors['text'])).pack(
+            anchor='w', padx=10, pady=(0, 8))
+
+        # Per-target predicted-vs-actual scatter grid (ZERO recompute).
+        target_names = list(getattr(output, "target_names", []) or [])
+        n_targets = len(target_names)
+        y_true = getattr(result, "y_true_pooled", None)
+        y_pred = getattr(result, "y_pred_pooled", None)
+        per_target = {d["target"]: d
+                      for d in result.metrics.get("per_target", [])}
+
+        plot_frame = tk.Frame(dialog, bg=self.colors['bg'])
+        plot_frame.pack(fill='both', expand=True, padx=12, pady=6)
+
+        fig = None
+        if (HAS_MATPLOTLIB and n_targets >= 1 and y_true is not None
+                and y_pred is not None):
+            y_true_arr = np.asarray(y_true)
+            y_pred_arr = np.asarray(y_pred)
+            # Layout: up to 3 scatter subplots per row.
+            n_cols = min(3, max(1, n_targets))
+            n_rows = (n_targets + n_cols - 1) // n_cols
+            fig = Figure(figsize=(4.2 * n_cols, 3.6 * n_rows))
+            # OO Figure (never pyplot) => no second Tk backend manager.
+            # squeeze=False always yields a 2-D array; flatten for indexing.
+            axes_list = np.array(
+                fig.subplots(n_rows, n_cols, squeeze=False)).reshape(-1).tolist()
+            accent = self.colors.get('accent', '#0078D7')
+            text_inv = self.colors.get('text_inverse', '#FFFFFF')
+            for i, name in enumerate(target_names):
+                ax = axes_list[i]
+                if y_true_arr.ndim == 2 and y_true_arr.shape[1] == n_targets:
+                    xt = y_true_arr[:, i]
+                else:
+                    xt = y_true_arr
+                if y_pred_arr.ndim == 2 and y_pred_arr.shape[1] == n_targets:
+                    yp = y_pred_arr[:, i]
+                else:
+                    yp = y_pred_arr
+                ax.scatter(xt, yp, c=accent, alpha=0.7,
+                           edgecolors='none', s=28)
+                # 1:1 reference line spanning the data range.
+                try:
+                    lo = float(min(np.nanmin(xt), np.nanmin(yp)))
+                    hi = float(max(np.nanmax(xt), np.nanmax(yp)))
+                    if np.isfinite(lo) and np.isfinite(hi) and hi > lo:
+                        ax.plot([lo, hi], [lo, hi], 'k--',
+                                linewidth=1.0, alpha=0.6)
+                except (ValueError, TypeError):
+                    pass
+                ax.set_title(name, fontsize=10)
+                ax.set_xlabel("Actual", fontsize=8)
+                ax.set_ylabel("Predicted", fontsize=8)
+                ax.tick_params(labelsize=7)
+                ax.grid(True, alpha=0.25)
+                # Per-target metric annotation.
+                m = per_target.get(name, {})
+
+                def _fmt(key, prec=4):
+                    v = m.get(key)
+                    if isinstance(v, (int, float)) and np.isfinite(v):
+                        return f"{v:.{prec}f}"
+                    return "—"
+
+                annot = (f"R²={_fmt('r2')}  RMSE={_fmt('rmse')}\n"
+                         f"RPD={_fmt('rpd')}  RER={_fmt('rer')}\n"
+                         f"CCC={_fmt('ccc')}  Bias={_fmt('bias')}")
+                ax.text(0.05, 0.95, annot, transform=ax.transAxes,
+                        fontsize=7, verticalalignment='top',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor=text_inv,
+                                  edgecolor=accent, alpha=0.85))
+            # Hide any unused subplots.
+            for j in range(n_targets, len(axes_list)):
+                axes_list[j].set_visible(False)
+            try:
+                fig.tight_layout()
+            except Exception:
+                pass
+            canvas = FigureCanvasTkAgg(fig, master=plot_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill='both', expand=True)
+        else:
+            tk.Label(plot_frame,
+                     text="(no pooled predictions available for this cell)",
+                     bg=self.colors['bg'],
+                     fg=self.colors['text']).pack(padx=20, pady=40)
+
+        # Correlation-context panel: inter-target correlation matrix + advisory.
+        corr = getattr(output, "correlation", None) or {}
+        corr_matrix = corr.get("corr_matrix") if isinstance(corr, dict) else None
+        mean_abs = corr.get("mean_abs_corr") if isinstance(corr, dict) else None
+        is_weak = corr.get("is_weak") if isinstance(corr, dict) else None
+        corr_card = tk.Frame(dialog, bg=self.colors['card_bg'])
+        corr_card.pack(fill='x', padx=12, pady=(0, 6))
+        tk.Label(corr_card,
+                 text="Inter-target correlation (the 'why joint?' context)",
+                 font=('Arial', 11, 'bold'), bg=self.colors['card_bg'],
+                 fg=self.colors['text']).pack(anchor='w', padx=10, pady=(8, 2))
+        if corr_matrix is None or n_targets < 2:
+            body_txt = "(single target — no inter-target correlation)"
+        else:
+            cm = np.asarray(corr_matrix)
+            header_row = "        " + "  ".join(
+                f"{t[:8]:>8}" for t in target_names)
+            rows = [header_row]
+            for i, t in enumerate(target_names):
+                cells = "  ".join(
+                    f"{cm[i, j]:>8.3f}" for j in range(n_targets))
+                rows.append(f"{t[:8]:>8} {cells}")
+            mean_txt = (f"{mean_abs:.3f}"
+                        if isinstance(mean_abs, (int, float))
+                        and np.isfinite(mean_abs) else "—")
+            advisory = ("weak — separate single-target models may be "
+                        "preferable" if is_weak
+                        else "non-weak — joint modelling is reasonable")
+            body_txt = "\n".join(rows) + \
+                f"\n\nMean |r| = {mean_txt}  ({advisory})"
+        tk.Label(corr_card, text=body_txt, font=('Consolas', 9),
+                 bg=self.colors['card_bg'], fg=self.colors['text'],
+                 justify='left').pack(anchor='w', padx=10, pady=(0, 8))
+
+        # Dispose cleanly: clear the OO figure (not pyplot-managed, so nothing
+        # to close) + destroy the dialog. Defined before the button row so the
+        # Close button can reference it.
+        def _on_close():
+            try:
+                if fig is not None:
+                    fig.clear()
+            except Exception:
+                pass
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
+
+        # Button row: Save Model + Export Code STUBS, functional Export Plot
+        # via the shared helper (no single-Y state coupling — it only consumes
+        # ``figure`` + ``default_filename``), and Close → _on_close.
+        button_frame = ttk.Frame(dialog)
+        button_frame.pack(fill='x', padx=12, pady=(6, 12))
+        ttk.Button(button_frame, text="💾 Save Model (.dasp)",
+                   command=lambda: self._multitarget_detail_stub("save_model"),
+                   style='Modern.TButton').pack(side='left', padx=(0, 6))
+        ttk.Button(button_frame, text="📄 Export Code…",
+                   command=lambda: self._multitarget_detail_stub("export_code"),
+                   style='Modern.TButton').pack(side='left', padx=(0, 6))
+        if fig is not None:
+            default_name = (f"multitarget_{result.model_name}_{result.mode}"
+                            ).replace(" ", "_")
+            self._add_plot_export_button(plot_frame, fig, default_name)
+        ttk.Button(button_frame, text="Close", command=_on_close,
+                   style='Modern.TButton').pack(side='right')
+
+        dialog.protocol("WM_DELETE_WINDOW", _on_close)
+
+        # Force visible + on top (mirrors _export_for_publication's dialog).
+        dialog.update()
+        dialog.deiconify()
+        dialog.lift()
+        dialog.focus_force()
+
+    def _multitarget_detail_stub(self, what):
+        """T-17 W2-3 placeholder for the detail-dialog action buttons.
+
+        ``save_model`` is wired in W3-1 (``refit_multitarget_final`` + the
+        Save-Model GUI trigger); ``export_code`` is wired in W2-2 (the
+        CodeGenerator multi-target trigger). Both are additive future work;
+        until then they surface an honest "coming in a later step" info dialog
+        so the buttons aren't silently dead.
+        """
+        labels = {
+            "save_model": "Saving a multi-target .dasp model",
+            "export_code": ("Exporting multi-target code "
+                            "(script / Colab notebook)"),
+        }
+        messagebox.showinfo(
+            "Coming in a later step",
+            f"{labels.get(what, 'This action')} is coming in a later step of "
+            "the multi-target integration (see W2-2 / W3-1 in the T-17 "
+            "blueprint).")
 
     def _create_tab5_progress(self):
         """Tab 5: Analysis Progress - Live progress monitor."""
@@ -16847,6 +17271,146 @@ class SpectralPredictApp:
         # Initialize ensemble storage
         self.ensemble_results = None
         self.trained_ensembles = None
+
+        # ==================================================================
+        # T-17 W2-1 (Gap 3, approved): Single-target / Multi-target co-location
+        # toggle. A segmented control at the TOP of tab 6 swaps which frame is
+        # packed — the single-Y results view (everything built above) or a
+        # multi-target results view. PACK/UNPACK ONLY: the single-Y widgets are
+        # captured and hidden/shown as a unit via pack_forget()/pack(); ZERO
+        # single-Y render code (_populate_results_table_inner, etc.) is touched.
+        #
+        # A Tk widget cannot be mapped into two parents, so the multi-target
+        # view hosts its OWN Treeview mirror (``self.multitarget_tree_tab6``),
+        # kept byte-for-byte in sync with ``self.multitarget_tree`` (4F) by
+        # ``_mirror_multitarget_to_tab6`` (called from populate + sort).
+        # ==================================================================
+
+        # Capture the single-Y top-level widgets currently packed in
+        # content_frame (results card, ensemble separator, ensemble card) along
+        # with their pack options so the toggle can hide/show them as a unit
+        # and restore them verbatim. Only geometry options are kept (after/
+        # before/in are dropped — they reference siblings/master that are
+        # stable across the swap and would be stale after forget/repack).
+        self._tab6_single_children = []
+        for _child in content_frame.winfo_children():
+            try:
+                _info = _child.pack_info()
+            except Exception:
+                _info = {}
+            _safe = {k: _info[k] for k in (
+                "side", "fill", "expand", "padx", "pady",
+                "anchor", "ipadx", "ipady") if k in _info}
+            self._tab6_single_children.append((_child, _safe))
+
+        # Segmented toggle (Single-target is the default, matching the
+        # long-standing tab-6 behaviour).
+        self.results_view_mode = tk.StringVar(value="single")
+        self.results_view_toggle_frame = ttk.Frame(content_frame, style='TFrame')
+        # Pack at the very top — ``before=`` the first captured child keeps the
+        # toggle above the single-Y content regardless of creation order.
+        self.results_view_toggle_frame.pack(
+            side='top', fill='x',
+            before=self._tab6_single_children[0][0],
+            pady=(0, 8))
+        ttk.Label(self.results_view_toggle_frame, text="Results view:",
+                  style='Caption.TLabel').pack(side='left', padx=(0, 8))
+        for _val, _text in (("single", "Single-target"),
+                            ("multitarget", "Multi-target")):
+            ttk.Radiobutton(
+                self.results_view_toggle_frame, text=_text, value=_val,
+                variable=self.results_view_mode,
+                command=self._toggle_results_view,
+            ).pack(side='left', padx=4)
+
+        # Multi-target results view frame (hidden initially; shown on toggle).
+        # Built additively — does not alter any single-Y widget.
+        self.results_multitarget_view = ttk.Frame(content_frame, style='TFrame')
+        _mt6_outer, _mt6_card = self._create_card(
+            self.results_multitarget_view,
+            title="Multi-Target Results",
+            subtitle=("Ranked by joint Q² (= mean per-target raw-unit Q²). "
+                      "Mirror of the Multi-Target tab leaderboard — sort/export "
+                      "live on the Multi-Target tab."))
+        _mt6_outer.pack(fill='both', expand=True, pady=5, padx=5)
+        _mt6_frame = tk.Frame(_mt6_card, bg=self.colors['card_bg'])
+        _mt6_frame.pack(fill='both', expand=True)
+        self.multitarget_tree_tab6 = ttk.Treeview(
+            _mt6_frame, show='headings', height=10)
+        _mt6_yscroll = ttk.Scrollbar(
+            _mt6_frame, orient="vertical",
+            command=self.multitarget_tree_tab6.yview)
+        _mt6_xscroll = ttk.Scrollbar(
+            _mt6_frame, orient="horizontal",
+            command=self.multitarget_tree_tab6.xview)
+        self.multitarget_tree_tab6.configure(
+            yscrollcommand=_mt6_yscroll.set, xscrollcommand=_mt6_xscroll.set)
+        self.multitarget_tree_tab6.grid(row=0, column=0, sticky='nsew')
+        _mt6_yscroll.grid(row=0, column=1, sticky='ns')
+        _mt6_xscroll.grid(row=1, column=0, sticky='ew')
+        _mt6_frame.rowconfigure(0, weight=1)
+        _mt6_frame.columnconfigure(0, weight=1)
+        # Header tooltips keyed on dynamic per-target column ids (refreshed in
+        # _mirror_multitarget_to_tab6). Seeded with the fixed-column dict so
+        # hovering before any run still produces an explanation.
+        self.multitarget_tab6_header_tooltips = TreeviewHeaderTooltip(
+            self.multitarget_tree_tab6,
+            self._multitarget_tooltip_dict(),
+            delay=400,
+        )
+        # T-17 W2-3 (Gap 4): the tab-6 co-location mirror also opens the
+        # detail dialog on double-click. Same handler — both trees share the
+        # same stable iids, so the iid → output.results lookup is identical.
+        self.multitarget_tree_tab6.bind(
+            "<Double-1>", self._on_multitarget_result_double_click)
+        # If a multi-target run already produced output (e.g. app re-init),
+        # mirror it into the new view now; otherwise this is a harmless no-op
+        # copy of the 4F tree's default empty column set.
+        self._mirror_multitarget_to_tab6(
+            getattr(self, "_multitarget_last_target_names", []))
+
+    def _toggle_results_view(self):
+        """Swap tab 6 between the single-Y view and the multi-target view.
+
+        T-17 W2-1 (Gap 3): pack/unpack ONLY. In "single" mode (default) the
+        captured single-Y top-level widgets are packed in their original
+        geometry and the multi-target frame is unpacked. In "multi-target" mode
+        the single-Y widgets are ``pack_forget``-ed and the multi-target view is
+        packed in their place. No single-Y widget is recreated, reparented, or
+        re-rendered — only its pack mapping changes.
+        """
+        if not hasattr(self, "results_view_mode"):
+            return
+        if self.results_view_mode.get() == "multitarget":
+            # Hide the single-Y content as a unit.
+            for _child, _info in self._tab6_single_children:
+                try:
+                    _child.pack_forget()
+                except Exception:
+                    pass
+            # Show the multi-target view below the toggle.
+            try:
+                self.results_multitarget_view.pack(
+                    fill='both', expand=True, padx=5, pady=5)
+            except Exception:
+                pass
+        else:
+            # Hide the multi-target view.
+            try:
+                self.results_multitarget_view.pack_forget()
+            except Exception:
+                pass
+            # Re-pack the single-Y widgets in their original order and geometry.
+            # The toggle frame stays packed at the top, so these stack below it
+            # in capture order (results card → ensemble separator → ensemble card).
+            for _child, _info in self._tab6_single_children:
+                try:
+                    _child.pack(**_info)
+                except Exception:
+                    try:
+                        _child.pack()
+                    except Exception:
+                        pass
 
     def _create_tab7_refine_model(self):
         """Tab 7: Model Development - Interactive model parameter refinement with subtabs."""

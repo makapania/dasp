@@ -112,6 +112,104 @@ def test_exported_script_reproduces_inapp_pooled_predictions(model_name, params,
             )
 
 
+def test_exported_script_reproduces_inapp_predictions_with_snv_and_varselselection():
+    """W2-2 pin: a multi-target export carrying BOTH a non-raw preprocessing
+    label (SNV) AND a variable-selection subset still reproduces the in-app
+    pooled CV predictions.
+
+    The existing reproduce-predictions tests pin only preprocessing='raw' +
+    full-spectrum. This covers the "generated-yet-unpinned" case called out in
+    T17_INTEGRATION_BLUEPRINT §2 / §5(a): a preprocessed + subset multi-Y export.
+
+    The embedded-data convention (shared with the single-Y path — see the
+    ``include_data`` early-returns in ``_render_preprocessing_application`` and
+    ``_render_variable_selection_application``) treats ``data_X`` as the FINAL
+    (already-preprocessed + already-subset) block, so the generator skips
+    preprocessing/varsel APPLICATION and runs CV on the embedded block directly.
+    This test pins that path for a preprocessed+subset result, which is exactly
+    what the GUI export from a leaderboard row (e.g. SNV + CARS) will produce.
+    """
+    X_raw, Y = _correlated_multi_y()
+    target_names = ["A", "B"]
+
+    # Apply SNV (the in-app preprocessing) — per-row (x - mean) / std, matching
+    # spectral_predict.preprocess.SNV.transform so the in-app run and the
+    # embedded block see identical X.
+    means = X_raw.mean(axis=1, keepdims=True)
+    stds = X_raw.std(axis=1, keepdims=True)
+    stds[stds == 0] = 1.0
+    X_snv = (X_raw - means) / stds
+
+    # Fixed variable-selection subset (mirrors a CARS/UVE selection result).
+    selected_indices = [0, 2, 3, 5, 7, 8, 10, 12]
+    X_sub = X_snv[:, selected_indices]
+
+    # In-app run operates on the preprocessed + subset block, matching how the
+    # exported script will see the embedded data.
+    out = run_multitarget_search(
+        X_sub, Y, [{"model_name": "PLS", "params": {"n_components": 3}}],
+        cv="kfold", n_folds=5, n_repeats=5, target_names=target_names,
+        optimization_method="grid",
+    )
+    res = out.results[0]
+    assert res.mode == "JOINT"
+
+    # Build the export config carrying BOTH a non-raw preprocessing label and a
+    # variable-selection subset. preprocessing='snv' is exactly what
+    # _describe_preprocess_config emits for an SNV-only cell (no deriv/window/
+    # poly suffix appended because those keys are absent for SNV).
+    config = {
+        "model_name": "PLS",
+        "preprocessing": "snv",
+        "task_type": "regression",
+        "params": {"n_components": 3},
+        "cv_folds": 5,
+        "cv_strategy": "kfold",
+        "cv_n_repeats": 5,
+        "target_names": target_names,
+        "wavelengths": list(selected_indices),
+        "variable_selection_method": "cars",
+        "variable_indices": list(selected_indices),
+    }
+    opts = ExportOptions(
+        format="script",
+        include_data=True,
+        data_X=X_sub,  # FINAL (SNV + subset) block per embedded-data convention
+        data_y=Y,
+        wavelengths=np.asarray(selected_indices),
+        include_visualization=False,
+        include_prediction_template=False,
+        include_cross_validation=True,
+    )
+    gen = CodeGenerator(config, opts)
+    assert gen.is_multitarget
+    script = gen.generate_script()
+    # The export carries the non-raw preprocessing label and the subset size.
+    assert "Preprocessing applied: snv" in script
+    assert "Variable Selection: cars" in script
+    ns: dict = {}
+    exec(compile(script, "<multitarget_export_snv_varselsect>", "exec"), ns)
+
+    # Pooled RAW-unit CV predictions reproduce the in-app run bit-for-bit.
+    np.testing.assert_allclose(
+        ns["Y_pred_cv"], res.y_pred_pooled, rtol=0, atol=1e-9,
+        err_msg="exported multi-Y (SNV+varsel) pooled predictions diverge from in-app run",
+    )
+    np.testing.assert_allclose(ns["Y_true_cv"], res.y_true_pooled, rtol=0, atol=1e-9)
+    # Shape respects the subset width.
+    assert ns["Y_pred_cv"].shape == (X_sub.shape[0], 2)
+    # Joint Q² and per-target metrics reproduce the in-app metrics.
+    np.testing.assert_allclose(ns["joint_q2"], res.joint_q2, rtol=0, atol=1e-9)
+    export_per = {m["target"]: m for m in ns["per_target_metrics"]}
+    for tgt in target_names:
+        for key in ("r2", "rmse", "rpd", "rer", "ccc", "bias"):
+            in_app = next(d for d in res.metrics["per_target"] if d["target"] == tgt)[key]
+            np.testing.assert_allclose(
+                export_per[tgt][key], in_app, rtol=0, atol=1e-9,
+                err_msg=f"{tgt} {key} diverges (SNV+varsel)",
+            )
+
+
 def test_joint_scale_y_true_independent_false_in_emitted_source():
     """JOINT emits SCALE_Y=True (fold Y-scaling); INDEPENDENT emits SCALE_Y=False."""
     X, Y = _correlated_multi_y()
