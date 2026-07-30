@@ -1971,6 +1971,32 @@ installer/.spec/CI/GUI, and the `run_search` 2-tuple docstring is true
 bone collagen dataset (UVE kept 142/2151 vars; save/load round-tripped 49
 predictions). `tests/test_agent_composition_api.py` 53 passed.
 
+## 2026-07-30 - GOTCHA: verifying from a git worktree silently tests main's src
+
+`.venv312` has an editable install of `spectral-predict` that resolves the package
+to a FIXED path: `C:\Users\mspon\git\dasp\src`. Running `python script.py` from a
+git worktree therefore imports the MAIN checkout's source, not the worktree's -
+silently, with no error.
+
+This produced a false negative during the agent-composition review: a check that
+exported a bundle and scanned it for a placeholder URL "failed" after the fix was
+applied, because it was exercising main's `export_bundle.py`, not the worktree's.
+
+Confusingly, `pytest` run from the worktree DOES pick up the worktree source (the
+rootdir/conftest path insertion puts `src/` first), so tests can pass against branch
+code while a plain script in the same directory silently tests main. Do not infer
+from "pytest passed" that an ad-hoc script tested the same tree.
+
+**When verifying branch code from a worktree, do one of:**
+- `sys.path.insert(0, os.path.join(os.getcwd(), "src"))` at the top of the script, and
+  assert the resolved module path contains the worktree directory before trusting the
+  result - e.g. `assert "wt-name" in spectral_predict.__file__`
+- or set `PYTHONPATH` to the worktree `src/`
+- or re-run `pip install -e .` from the worktree (pollutes the shared venv - avoid)
+
+Cheap habit that would have caught it immediately: print `module.__file__` and assert
+on it as the first line of any verification script.
+
 ---
 
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.
