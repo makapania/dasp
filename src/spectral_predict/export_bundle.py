@@ -242,7 +242,7 @@ If you use this analysis in a publication, please cite:
 ```
 Spectral Predict - Automated NIR/IR Spectroscopy Modeling
 Version: {__version__}
-https://github.com/yourusername/spectral-predict
+https://github.com/makapania/dasp
 ```
 
 ## Support
