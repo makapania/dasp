@@ -349,11 +349,15 @@ metadata = {
     "wavelengths": [float(c) for c in X_aligned.columns],
     "n_vars": X_aligned.shape[1],          # required
     "target_name": "%Collagen",
-    "preprocess": "raw",
+    "preprocessing": "raw",                # note: "preprocessing", not "preprocess"
 }
-# preprocessor=None matches "preprocess": "raw" above. If you fit a preprocessing
+# preprocessor=None matches "preprocessing": "raw" above. If you fit a preprocessing
 # Pipeline (§2), pass that fitted pipeline here instead of None and name it in
-# "preprocess" — predict_with_model re-applies whatever you stored.
+# "preprocessing" — predict_with_model re-applies whatever you stored.
+#
+# The key is spelled "preprocessing". The GUI reads metadata["preprocessing"] when
+# it displays a loaded model, and the code generator treats it as required — spell
+# it "preprocess" and your model loads but reports its preprocessing as "Unknown".
 save_model(model, None, metadata, "my_model.dasp")
 
 loaded = load_model("my_model.dasp")
@@ -362,8 +366,10 @@ predictions = predict_with_model(loaded, X_new)
 ```
 
 `predict_with_model` validates that `X_new` carries the model's wavelengths and
-re-applies the stored preprocessor, scaler, and PCA. For multi-class models it
-returns a dict (`p_values`, `decision_matrix`, …) rather than an array.
+re-applies the stored preprocessor. For one-class models it additionally re-applies
+the stored scaler and PCA reducer; the regression path above uses the preprocessor
+only. For multi-class models it returns a dict (`p_values`, `decision_matrix`, …)
+rather than an array.
 
 ---
 
