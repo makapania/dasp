@@ -27,31 +27,37 @@ pip install -e .[dev]
 pip install specdal  # For binary ASD files
 ```
 
-### 2. Run the Example
-
-Use the included bone collagen dataset (37 real ASD files):
+### 2. Launch the app
 
 ```bash
-spectral-predict \
-  --asd-dir example/ \
-  --reference example/BoneCollagen.csv \
-  --id-column "File Number" \
-  --target "%Collagen"
+python spectral_predict_gui_optimized.py
 ```
 
-**Takes 3-5 minutes.** See `example/README.md` for a 30-second quick test with 10 samples.
+The GUI is the primary interface: load spectra, configure preprocessing and models,
+run the search, and inspect ranked results across its tabs.
 
-### 3. Check Results
+Use the included bone collagen dataset to try it — `example/` holds 49 real ASD
+files plus `example/BoneCollagen.csv` (ID column `File Number`, target `%Collagen`).
 
-```bash
-# Ranked model table
-cat outputs/results.csv
+### 3. Scripting it instead
 
-# Top 5 models with details
-cat reports/%Collagen.md
+There is no command-line runner. A CLI can only encode a fixed analysis shape, and
+there is no standard spectral analysis — every dataset needs its own preprocessing,
+model set, and variable selection.
+
+To drive an analysis from Python, compose the backend primitives directly:
+
+```python
+from spectral_predict.io import read_spectra
+from spectral_predict.preprocess import build_preprocessing_pipeline
+from spectral_predict.variable_selection import cars_selection
+
+X, metadata = read_spectra("example/")   # note: returns (DataFrame, dict)
 ```
 
-Done! You now have a ranked list of models with cross-validated performance metrics.
+**See [`docs/AGENT_COMPOSITION.md`](docs/AGENT_COMPOSITION.md)** for the full guide —
+which primitives are stable, how to build your own cross-validation (including
+grouped CV for replicate-bearing data), and the gotchas worth knowing up front.
 
 ---
 
@@ -182,11 +188,12 @@ S001,0.123,0.125,0.127,...,0.456
 S002,0.134,0.136,0.138,...,0.467
 ```
 
-```bash
-spectral-predict --spectra data/spectra.csv \
-                 --reference data/ref.csv \
-                 --id-column sample_id \
-                 --target nitrogen
+```python
+from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy
+
+X, meta = read_csv_spectra("data/spectra.csv")
+ref = read_reference_csv("data/ref.csv", "sample_id")
+X_aligned, y = align_xy(X, ref, "sample_id", "nitrogen")
 ```
 
 ### CSV Long Format (Single Spectrum)
@@ -271,20 +278,15 @@ write_spectra(df, 'output.xlsx', format='excel',
 ### ASD Format
 
 **ASCII ASD** (.sig, ASCII .asd):
-```bash
-spectral-predict --asd-dir data/asd_files/ \
-                 --reference data/ref.csv \
-                 --id-column filename \
-                 --target protein
+```python
+from spectral_predict.io import read_asd_dir
+
+X, meta = read_asd_dir("data/asd_files/")
 ```
 
-**Binary ASD** (requires SpecDAL):
-```bash
-pip install specdal
-spectral-predict --asd-dir data/binary_asd/ \
-                 --reference data/ref.csv \
-                 --id-column filename \
-                 --target "%collagen"
+**Binary ASD** (requires SpecDAL — `pip install specdal`):
+```python
+X, meta = read_asd_dir("data/binary_asd/")   # reader_mode="auto" tries SpecDAL
 ```
 
 ### SPC Format (GRAMS/Thermo Galactic)
@@ -393,73 +395,17 @@ Markdown report with:
 
 ---
 
-## 🎛️ Options
+## 🎛️ Configuring a run
 
-```bash
-spectral-predict --spectra <CSV> | --asd-dir <DIR> \
-                 --reference <CSV> \
-                 --id-column <COL> \
-                 --target <COL> \
-                 [--folds 5] \
-                 [--lambda-penalty 0.15] \
-                 [--outdir outputs] \
-                 [--asd-reader auto] \
-                 [--interactive] \
-                 [--no-interactive]
-```
+All analysis options — preprocessing, model selection, variable selection,
+cross-validation strategy, optimization method — are configured in the GUI's
+Analysis Configuration tab. Tier (Quick/Standard/Comprehensive) controls which
+models are tested; every hyperparameter is exposed and editable.
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--folds` | 5 | Cross-validation folds |
-| `--lambda-penalty` | 0.15 | Complexity penalty weight (higher = prefer simpler models) |
-| `--outdir` | outputs | Output directory |
-| `--asd-reader` | auto | ASD reader mode (auto tries SpecDAL if installed) |
-| `--interactive` | True | Enable interactive loading phase |
-| `--no-interactive` | - | Skip interactive loading phase |
-
----
-
-## 🔍 Interactive Loading Phase
-
-By default, Spectral Predict includes an interactive loading phase that helps you verify your data before modeling:
-
-### 1. Spectral Plots
-Three plots are automatically generated:
-- **Raw spectra**: Verify reflectance values look correct
-- **1st derivative**: Check for spectral features
-- **2nd derivative**: Identify fine spectral details
-
-### 2. Data Preview
-A table showing:
-- Sample IDs
-- Target values (if available)
-- First few wavelengths
-- Quick verification that files loaded correctly
-
-### 3. Data Range Check
-Automatic detection of data format:
-- Reflectance (0-1)
-- Percent reflectance (0-100)
-- Other formats
-
-### 4. Absorbance Conversion
-Option to convert reflectance → absorbance using `log10(1/R)`:
-```
-Convert to absorbance? [y/N]:
-```
-
-### 5. Predictor Screening
-JMP-style variable screening showing:
-- Top 20 most correlated wavelengths with target
-- Correlation plot across all wavelengths
-- Immediate feedback on whether target is predictable
-
-**Skip Interactive Mode:**
-```bash
-spectral-predict --asd-dir data/ --reference ref.csv \
-                 --id-column sample --target nitrogen \
-                 --no-interactive
-```
+For programmatic runs the same knobs are keyword arguments on the search entry
+points (`run_search` alone takes ~140), but for anything non-standard it is usually
+better to compose the primitives yourself and own your own search loop. See
+[`docs/AGENT_COMPOSITION.md`](docs/AGENT_COMPOSITION.md).
 
 ---
 
@@ -467,28 +413,23 @@ spectral-predict --asd-dir data/ --reference ref.csv \
 
 The `example/` directory contains real data:
 
-**Dataset:** 37 bone samples with measured collagen content (0.9-22.1%)
+**Dataset:** 49 bone samples with measured collagen content (0.9-22.1%)
 **Task:** Predict %collagen from VIS-NIR spectra (350-2500 nm)
-**Files:** Binary ASD format + CSV reference
+**Files:** ASD spectra + CSV reference (`BoneCollagen.csv`, ID column `File Number`,
+target `%Collagen`)
 
-```bash
-# Full analysis (3-5 min)
-spectral-predict --asd-dir example/ \
-                 --reference example/BoneCollagen.csv \
-                 --id-column "File Number" \
-                 --target "%Collagen"
+Load it in the GUI, or from Python:
 
-# Quick test with 10 samples (30 sec)
-spectral-predict --asd-dir example/quick_start/ \
-                 --reference example/quick_start/reference.csv \
-                 --id-column "File Number" \
-                 --target "%Collagen"
+```python
+from spectral_predict.io import read_asd_dir, read_reference_csv, align_xy
+
+X, meta = read_asd_dir("example/")            # returns (DataFrame, dict)
+ref = read_reference_csv("example/BoneCollagen.csv", "File Number")
+X_aligned, y = align_xy(X, ref, "File Number", "%Collagen")
 ```
 
-**Expected Results:**
-- RMSE: 2.5-4.5% collagen
-- R²: 0.70-0.85
-- Top models: PLS or Random Forest with SNV preprocessing
+**Typical results:** RMSE 2.5-4.5% collagen, R² 0.70-0.85, with PLS or Random Forest
+on SNV preprocessing among the stronger models.
 
 See `example/README.md` for details.
 
@@ -566,7 +507,7 @@ pip install specdal
 ### "No matching IDs"
 
 The software tries flexible matching, but if it fails:
-1. Check `--id-column` matches your CSV column name exactly
+1. Check the ID column name matches your CSV column name exactly
 2. Verify CSV IDs roughly match filenames (software handles extensions/spaces)
 3. Look at debug output showing normalized IDs
 
@@ -630,9 +571,9 @@ Contributions welcome! Please:
 
 ## 📞 Support
 
-- **Documentation:** `example/README.md`, `PROJECT_STATUS.md`
+- **Documentation:** `example/README.md`, `docs/PROJECT_STATUS.md`
+- **Scripting / agents:** [`docs/AGENT_COMPOSITION.md`](docs/AGENT_COMPOSITION.md)
 - **Issues:** https://github.com/yourusername/deepspec/issues
-- **Help:** `spectral-predict --help`
 
 ---
 

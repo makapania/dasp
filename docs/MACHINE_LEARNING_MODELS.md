@@ -1306,50 +1306,39 @@ ensemble_r2 = r2_score(y_test, ensemble_pred)
 print(f"\nEnsemble: RMSE={ensemble_rmse:.4f}, R²={ensemble_r2:.4f}")
 ```
 
-### Example 4: CLI Usage
+### Example 4: Tier and model selection from Python
 
-**Basic analysis with standard tier:**
-```bash
-spectral-predict \
-  --spectra data/spectra.csv \
-  --reference data/reference.csv \
-  --id-column sample_id \
-  --target nitrogen \
-  --tier standard
+There is no command-line runner (the `spectral-predict` CLI was retired — a command
+line can only encode a fixed analysis shape). Pass `tier` and `models_to_test`
+directly to `run_search` instead:
+
+```python
+from spectral_predict.io import read_csv_spectra, read_reference_csv, align_xy
+from spectral_predict.search import run_search
+
+X, _meta = read_csv_spectra("data/spectra.csv")
+ref = read_reference_csv("data/reference.csv", "sample_id")
+X_aligned, y = align_xy(X, ref, "sample_id", "nitrogen")
+
+# Quick screen
+df = run_search(X_aligned, y, "regression", tier="quick", folds=5)
+
+# Comprehensive, 10-fold
+df = run_search(X_aligned, y, "regression", tier="comprehensive", folds=10)
+
+# Explicit model set (takes precedence over tier)
+df = run_search(
+    X_aligned, y, "regression",
+    models_to_test=["PLS", "XGBoost", "NeuralBoosted"],
+)
 ```
 
-**Quick analysis (testing):**
-```bash
-spectral-predict \
-  --spectra data/spectra.csv \
-  --reference data/reference.csv \
-  --id-column sample_id \
-  --target nitrogen \
-  --tier quick
-```
+Note the score-penalty keyword is `variable_penalty`, not `lambda_penalty`.
 
-**Comprehensive analysis for publication:**
-```bash
-spectral-predict \
-  --spectra data/spectra.csv \
-  --reference data/reference.csv \
-  --id-column sample_id \
-  --target nitrogen \
-  --tier comprehensive \
-  --folds 10 \
-  --outdir outputs/comprehensive_analysis
-```
-
-**Custom model selection:**
-```bash
-spectral-predict \
-  --spectra data/spectra.csv \
-  --reference data/reference.csv \
-  --id-column sample_id \
-  --target nitrogen \
-  --tier standard \
-  --models PLS XGBoost NeuralBoosted
-```
+For analyses that need their own cross-validation scheme — grouped CV for
+replicate-bearing samples, locked holdouts, custom ranking — compose the primitives
+directly rather than calling `run_search`. See
+[`AGENT_COMPOSITION.md`](AGENT_COMPOSITION.md).
 
 ---
 
@@ -1507,7 +1496,7 @@ Spectral Predict provides **11 machine learning algorithms** organized into a **
 **Questions or issues?**
 - Documentation: `/docs/` directory
 - Issues: GitHub repository
-- CLI help: `spectral-predict --help`
+- Scripting / agents: [`AGENT_COMPOSITION.md`](AGENT_COMPOSITION.md)
 
 ---
 
