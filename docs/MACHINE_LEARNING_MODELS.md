@@ -1320,20 +1320,22 @@ X, _meta = read_csv_spectra("data/spectra.csv")
 ref = read_reference_csv("data/reference.csv", "sample_id")
 X_aligned, y = align_xy(X, ref, "sample_id", "nitrogen")
 
-# Quick screen
-df = run_search(X_aligned, y, "regression", tier="quick", folds=5)
+# Quick screen. NOTE: run_search returns a 2-tuple, not a DataFrame.
+df, label_encoder = run_search(X_aligned, y, "regression", tier="quick", folds=5)
 
 # Comprehensive, 10-fold
-df = run_search(X_aligned, y, "regression", tier="comprehensive", folds=10)
+df, _ = run_search(X_aligned, y, "regression", tier="comprehensive", folds=10)
 
 # Explicit model set (takes precedence over tier)
-df = run_search(
+df, _ = run_search(
     X_aligned, y, "regression",
     models_to_test=["PLS", "XGBoost", "NeuralBoosted"],
 )
 ```
 
-Note the score-penalty keyword is `variable_penalty`, not `lambda_penalty`.
+`label_encoder` is the fitted encoder for classification with text labels, and
+`None` for regression. Note the score-penalty keyword is `variable_penalty`, not
+`lambda_penalty`.
 
 For analyses that need their own cross-validation scheme — grouped CV for
 replicate-bearing samples, locked holdouts, custom ranking — compose the primitives

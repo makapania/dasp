@@ -41,10 +41,16 @@ PRIMITIVES: dict[str, list[str]] = {
     "preprocess": ["build_preprocessing_pipeline"],
     "unified_bayesian": ["apply_preprocessing", "run_unified_bayesian"],
     "variable_selection": [
+        # score-array family: (X, y, ...) -> ndarray of shape (n_features,)
         "cars_selection",
         "ipls_selection",
         "spa_selection",
         "uve_selection",
+        # interval-subset family: (X, y, wavelengths, ...) -> list[dict]
+        "ipls_forward",
+        "ipls_backward",
+        "mc_sipls",
+        "mwpls",
     ],
     "simca": ["MultiClassClassModel"],
     "contamination": ["PCASIMCA"],
@@ -158,6 +164,55 @@ class TestMulticlassVarselMaskContract:
             multiclass_varsel_mask(
                 X, y, np.arange(X.shape[1]), "definitely_not_a_method", 10
             )
+
+
+class TestVariableSelectorFamilies:
+    """The two selector families return different shapes — the guide splits them.
+
+    Codex review of this change caught the guide originally claiming *all*
+    selectors return importance arrays. They do not: the interval-subset family
+    takes ``wavelengths`` as a required third positional argument and returns a
+    list of candidate-subset dicts. Pin both shapes so the guide cannot drift.
+    """
+
+    @staticmethod
+    def _regression_data(n_features=120, seed=0):
+        rng = np.random.default_rng(seed)
+        X = rng.normal(0.5, 0.05, (40, n_features))
+        y = X[:, 10] * 3 + rng.normal(0, 0.05, 40)
+        wavelengths = np.linspace(1000.0, 2500.0, n_features)
+        return X, y, wavelengths
+
+    @pytest.mark.parametrize("name", ["ipls_selection", "spa_selection", "uve_selection"])
+    def test_score_array_family_returns_per_feature_array(self, name: str) -> None:
+        import spectral_predict.variable_selection as vs
+
+        X, y, _ = self._regression_data()
+        kwargs = {"n_features": 10} if name == "spa_selection" else {}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = getattr(vs, name)(X, y, cv_folds=3, **kwargs)
+
+        assert isinstance(out, np.ndarray), f"{name} documented to return an ndarray"
+        assert out.shape == (X.shape[1],), f"{name} must be one score per feature"
+
+    @pytest.mark.parametrize(
+        "name", ["ipls_forward", "ipls_backward", "mc_sipls", "mwpls"]
+    )
+    def test_interval_family_returns_subset_dicts(self, name: str) -> None:
+        import spectral_predict.variable_selection as vs
+
+        X, y, wavelengths = self._regression_data()
+        kwargs = {} if name == "mwpls" else {"n_intervals": 5}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = getattr(vs, name)(X, y, wavelengths, cv_folds=3, **kwargs)
+
+        assert isinstance(out, list) and out, f"{name} documented to return a list"
+        first = out[0]
+        assert isinstance(first, dict), f"{name} elements documented as dicts"
+        for key in ("indices", "interval_ids", "rmsecv", "r2"):
+            assert key in first, f"{name} subset dicts must carry '{key}'"
 
 
 def test_importing_package_stays_headless() -> None:

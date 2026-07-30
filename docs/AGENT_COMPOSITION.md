@@ -97,15 +97,40 @@ the same call.
 
 > **Fit preprocessing inside your CV folds** if you want a leakage-free performance
 > estimate. Variable *selection* is conventionally run once on the full calibration
-> set (see §5).
+> set (see §3).
+
+To fit preprocessing per fold, put it in the same `Pipeline` as the model so
+`fit` only ever sees training rows:
+
+```python
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.pipeline import Pipeline
+
+def make_pipeline():
+    steps = build_preprocessing_pipeline("snv_deriv", deriv=1, window=17, polyorder=2)
+    return Pipeline(steps + [("model", PLSRegression(n_components=5))])
+
+# inside each CV fold, on the RAW matrix (not the pre-transformed X_pp):
+X_raw = X_aligned.to_numpy(dtype=float)
+pipe = make_pipeline().fit(X_raw[train_idx], y_vals[train_idx])
+pred = pipe.predict(X_raw[test_idx]).ravel()
+```
+
+The §4 example below uses a pre-transformed `X_pp` for brevity; prefer this form
+when you are reporting a performance estimate.
 
 ---
 
 ## 3. Select variables
 
-All selectors take `(X, y, ...)` and return an importance array of shape
-`(n_features,)`. Higher is more important; CARS returns a sparse array where
-non-zero entries are the selected variables.
+There are **two families with different signatures and different return types**.
+Mixing them up is easy — check which family you are calling.
+
+### 3a. Score-array selectors
+
+Signature `(X, y, ...)`; return an importance array of shape `(n_features,)`, higher
+= more important. You choose the cutoff. CARS returns a sparse array where the
+non-zero entries are its selection.
 
 ```python
 import numpy as np
@@ -121,9 +146,32 @@ keep = np.argsort(importances)[::-1][:top_n]      # you choose the cutoff
 X_sel = X_pp[:, np.sort(keep)]
 ```
 
-Also available: `uve_spa_selection`, `uve_cars_selection`, `ipls_forward`,
-`ipls_backward`, `fipls_spa_selection`, `fipls_cars_selection`, `mc_sipls`, `mwpls`,
+Also in this family: `uve_spa_selection`, `uve_cars_selection`,
+`fipls_spa_selection`, `fipls_cars_selection`, and the helper
 `get_uve_threshold`.
+
+### 3b. Interval-subset selectors
+
+`ipls_forward`, `ipls_backward`, `mc_sipls`, and `mwpls` take **`wavelengths` as a
+required third positional argument** and return a **list of candidate-subset dicts**
+— *not* an importance array. Each dict carries `indices`, `interval_ids`,
+`n_intervals`, `rmsecv`, `r2`, and a `rank` (or `is_optimal` for `ipls_backward`).
+You pick a subset, typically the lowest `rmsecv`.
+
+```python
+import numpy as np
+from spectral_predict.variable_selection import ipls_forward
+
+wavelengths = np.asarray([float(c) for c in X_aligned.columns])
+subsets = ipls_forward(X_pp, y.to_numpy(dtype=float), wavelengths,
+                       n_intervals=20, cv_folds=5)
+
+best = min(subsets, key=lambda s: s["rmsecv"])
+X_sel = X_pp[:, np.sort(best["indices"])]
+```
+
+If you would rather not handle both shapes yourself, `multiclass_varsel_mask` (§5)
+normalises either family into a single boolean mask.
 
 **Why selection runs once on the full calibration set, not per fold:** stability of
 the chosen wavelengths across resamples is itself the evidence that the selection
@@ -296,12 +344,15 @@ listed is an internal implementation detail that may change without notice.
 | `io` | `read_spectra`, `read_asd_dir`, `read_csv_spectra`, `read_reference_csv`, `align_xy` |
 | `preprocess` | `build_preprocessing_pipeline` |
 | `unified_bayesian` | `apply_preprocessing`, `run_unified_bayesian` |
-| `variable_selection` | `cars_selection`, `ipls_selection`, `spa_selection`, `uve_selection` |
+| `variable_selection` | score-array: `cars_selection`, `ipls_selection`, `spa_selection`, `uve_selection`; interval-subset: `ipls_forward`, `ipls_backward`, `mc_sipls`, `mwpls` |
 | `simca` | `MultiClassClassModel` |
 | `contamination` | `PCASIMCA` |
 | `models` | `PLSTransformer` |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
-| `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask` |
+| `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
+
+`search.__all__` is the authoritative list for that module and matches the row
+above.
 
 Import from the module, not the package root — `import spectral_predict` is kept
 free of matplotlib and tkinter so it stays usable headlessly, and top-level
