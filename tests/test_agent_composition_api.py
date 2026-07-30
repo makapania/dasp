@@ -61,8 +61,67 @@ PRIMITIVES: dict[str, list[str]] = {
         "run_one_class_search",
         "run_multiclass_simca_search",
         "multiclass_varsel_mask",
+        "build_multiclass_decision_view",
+        "compute_validation_metrics_for_top_models",
     ],
 }
+
+# Positional-argument contracts the guide's §3 split depends on. If someone makes
+# `wavelengths` optional on an interval selector, or reorders these, the two-family
+# distinction the guide teaches silently becomes wrong — plain importability checks
+# would not notice. (GLM 5.2 review.)
+POSITIONAL_CONTRACTS: dict[tuple[str, str], list[str]] = {
+    ("variable_selection", "ipls_forward"): ["X", "y", "wavelengths"],
+    ("variable_selection", "ipls_backward"): ["X", "y", "wavelengths"],
+    ("variable_selection", "mc_sipls"): ["X", "y", "wavelengths"],
+    ("variable_selection", "mwpls"): ["X", "y", "wavelengths"],
+    ("variable_selection", "cars_selection"): ["X", "y"],
+    ("variable_selection", "uve_selection"): ["X", "y"],
+    ("variable_selection", "ipls_selection"): ["X", "y"],
+    ("variable_selection", "spa_selection"): ["X", "y", "n_features"],
+    ("io", "align_xy"): ["X", "ref", "id_column", "target"],
+    ("io", "read_reference_csv"): ["path", "id_column"],
+    ("search", "multiclass_varsel_mask"): ["X", "y", "wavelengths", "method"],
+}
+
+
+@pytest.mark.parametrize(
+    "module_name,symbol,expected", [(m, s, e) for (m, s), e in POSITIONAL_CONTRACTS.items()]
+)
+def test_required_positional_arguments_are_stable(
+    module_name: str, symbol: str, expected: list[str]
+) -> None:
+    """The leading positional parameters must keep their names and order."""
+    import inspect
+
+    module = importlib.import_module(f"spectral_predict.{module_name}")
+    params = list(inspect.signature(getattr(module, symbol)).parameters)
+    assert params[: len(expected)] == expected, (
+        f"spectral_predict.{module_name}.{symbol} leading positionals changed: "
+        f"expected {expected}, got {params[: len(expected)]}"
+    )
+
+
+def test_multiclass_varsel_mask_n_select_is_optional() -> None:
+    """The guide states n_select may be omitted — the signature must allow it.
+
+    GLM 5.2 review caught the guide promising this while `n_select` was a
+    required positional, so following the doc raised TypeError.
+    """
+    import inspect
+
+    from spectral_predict.search import multiclass_varsel_mask
+
+    sig = inspect.signature(multiclass_varsel_mask)
+    assert sig.parameters["n_select"].default is None, (
+        "n_select must default to None so the documented 'omit it' path works"
+    )
+
+    X, y = _graded_multiclass(n_features=40, seed=7)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        mask = multiclass_varsel_mask(X, y, np.arange(X.shape[1]), "importance")
+    assert mask.sum() == min(100, X.shape[1]), "omitted n_select must use the default"
 
 
 @pytest.mark.parametrize(

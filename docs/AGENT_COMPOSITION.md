@@ -49,9 +49,9 @@ That is the intended and supported path, not a workaround.
 
 5. **The score-penalty keyword is `variable_penalty`, not `lambda_penalty`.**
 
-Two smaller ones: `read_csv_spectra` enforces a **minimum of 100 wavelengths**
-(`io.py`), and `save_model` requires the metadata keys `model_name`, `task_type`,
-`wavelengths`, and `n_vars`.
+Two smaller ones: the **readers enforce a minimum of 100 wavelengths** (every reader
+in `io.py`, not just the CSV one), and `save_model` requires the metadata keys
+`model_name`, `task_type`, `wavelengths`, and `n_vars`.
 
 ---
 
@@ -154,9 +154,13 @@ Also in this family: `uve_spa_selection`, `uve_cars_selection`,
 
 `ipls_forward`, `ipls_backward`, `mc_sipls`, and `mwpls` take **`wavelengths` as a
 required third positional argument** and return a **list of candidate-subset dicts**
-— *not* an importance array. Each dict carries `indices`, `interval_ids`,
-`n_intervals`, `rmsecv`, `r2`, and a `rank` (or `is_optimal` for `ipls_backward`).
-You pick a subset, typically the lowest `rmsecv`.
+— *not* an importance array. You pick a subset, typically the lowest `rmsecv`.
+
+Keys present on **every** entry: `indices`, `tag`, `interval_ids`, `n_intervals`,
+`rmsecv`, `r2`. Conditional keys — do not rely on them: `rank` appears on
+`mc_sipls`/`mwpls` entries and on `ipls_forward`'s single-interval entries but
+**not** its combined-interval entries; `is_optimal` appears only on
+`ipls_backward`. Selecting on `rmsecv` (as below) is always safe.
 
 ```python
 import numpy as np
@@ -239,8 +243,8 @@ Three possible returns:
 | any other supported method | a boolean mask, shape `(n_features,)` |
 
 Unsupported methods raise `MulticlassVarselUnsupported` — it fails loudly rather
-than silently returning nothing. If `n_select` is omitted it defaults to
-`min(100, n_features)`.
+than silently returning nothing. `n_select` is optional: omitted, `None`, or `NaN`
+all fall back to `min(100, n_features)`.
 
 ---
 
@@ -261,7 +265,8 @@ print(model.classes_)
 ```
 
 `n_components` accepts an int, a per-class dict, or `"per_class_cv"`. Other engines:
-`ocsvm`, `isolation-forest`, `lof`, `elliptic-envelope`.
+`ocsvm`, `isolation-forest`, `lof`, `elliptic-envelope`. Note `min_class_samples`
+defaults to **10** — the `5` above is only to keep this example small, not a floor.
 
 For a single-class membership model:
 
@@ -351,8 +356,9 @@ listed is an internal implementation detail that may change without notice.
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 
-`search.__all__` is the authoritative list for that module and matches the row
-above.
+**This table is the contract.** Only `search` declares an `__all__` enforcing it (it
+matches the row above exactly); the other modules do not, so the absence of an
+`__all__` elsewhere does not mean everything in them is public.
 
 Import from the module, not the package root — `import spectral_predict` is kept
 free of matplotlib and tkinter so it stays usable headlessly, and top-level

@@ -7317,7 +7317,9 @@ _MULTICLASS_MASK_METHODS = frozenset(
 )
 
 
-def multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="classification"):
+def multiclass_varsel_mask(
+    X, y, wavelengths, method, n_select=None, task_type="classification"
+):
     """Boolean feature mask for a supervised variable-selection method on the
     genuine multi-class label, computed ONCE on the passed calibration matrix.
 
@@ -7359,8 +7361,10 @@ def multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="class
     method : str
         ``"none"`` -> ``None``; a Wold method -> that string; a resolvable
         discrimination method -> a boolean mask; anything else -> raises.
-    n_select : int
+    n_select : int, optional
         Number of top-scoring features to keep (importance-array methods only).
+        Omitted / ``None`` / ``NaN`` all fall back to ``min(100, n_features)``,
+        matching the GUI's Top-N default. Interval methods ignore it entirely.
     task_type : str
         Passed through to selectors that take it (default ``"classification"``).
 
