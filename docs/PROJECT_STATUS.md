@@ -1,5 +1,65 @@
 # Project Status
 
+## ⚠ FIRST PULL ON A NEW MACHINE (added 2026-07-30) — DO THIS BEFORE ANYTHING ELSE
+
+If this checkout is the first one on this machine to see commit `763c4ed` or later,
+**run this before running or testing anything:**
+
+```bash
+# from the repo root, with .venv312 active (project is Python 3.12 only)
+pip install -e .
+```
+
+**Why it is mandatory, not housekeeping.** The `spectral-predict` console script was
+retired and `src/spectral_predict/cli.py` deleted. A `git pull` removes the source but
+**leaves the installed launcher behind**: `.venv312/Scripts/spectral-predict.exe`
+survives and fails with
+
+```
+ModuleNotFoundError: No module named 'spectral_predict.cli'
+```
+
+Re-running `pip install -e .` removes the stale shim. Verified on the primary machine
+2026-07-30: present and broken before, gone after.
+
+### The other three things to know on first pull
+
+1. **There is no CLI. It is not coming back.** Retired 2026-07-29, abandonment
+   confirmed by the user 2026-07-30 — Codex proposed a one-release deprecation stub and
+   the user declined. Do not add one, and do not re-add a console script "for
+   convenience". Humans use the GUI (`python spectral_predict_gui_optimized.py`);
+   scripts and agents compose backend primitives directly.
+
+2. **Read `docs/AGENT_COMPOSITION.md` before writing any script that calls the
+   backend.** `CLAUDE.md` makes this a MUST. It documents the stable surface and the
+   traps that otherwise cost a turn each — readers and `run_search` both return
+   **tuples**, selectors return **score arrays not masks**, `preprocessing_methods` is a
+   **dict of bools not a list of strings**, and the saved-model metadata key is
+   **`"preprocessing"`, not `"preprocess"`**. Every example in it has been executed
+   against the repo's own `example/` data.
+
+3. **`main`'s CI is red, and has been since ≈June 2026.** That is the pre-existing
+   T-CI-1 rot, NOT this merge. Do not treat a red check as a signal about your own
+   branch — until T-CI-1 closes, diff your failure set against `origin/main` and
+   confirm you add zero NEW failures. Current known-red on `main`:
+   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2).
+
+### If you are verifying branch code from a git worktree
+
+The editable install pins `spectral_predict` to a **fixed path under the main
+checkout**, so `python script.py` run from a worktree silently imports `main`'s source.
+`pytest` from a worktree does NOT have this problem, which makes the mismatch easy to
+miss. Assert on the resolved path first:
+
+```python
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), "src"))
+import spectral_predict
+assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
+```
+
+---
+
 > ## ▶ ACTIVE DIRECTION (2026-07-30) — Agent-facing API work **MERGED to `main`** (merge commit `763c4ed`), CLI abandoned
 > **Second review round before merge (Codex + GLM 5.2 + Qwen 3.8) found the guide itself shipped broken examples** — the very failure the guide exists to prevent. Do not treat a prior in-branch review claim as sufficient; the branch's own log already claimed a clean Codex + GLM round.
 >

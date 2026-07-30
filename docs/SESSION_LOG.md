@@ -2019,6 +2019,47 @@ outcomes:
   offered for PLS1 / PLS-DA / PLS2 *as dasp's own named method*, never as a silent change to CARS.
   Requires A/B incl. wall-clock + naming + lit due-diligence before shipping.
 
+## 2026-07-30 - Agent-composition branch reviewed, fixed, and MERGED to main (`763c4ed`)
+
+**What happened this session.** Reviewed `feat/agent-composition-guide` (CLI retirement +
+`docs/AGENT_COMPOSITION.md` + public `multiclass_varsel_mask`), found and fixed real
+defects, merged to `main`, pushed.
+
+**Sequence:**
+1. Independent second-round review dispatched: Codex, GLM 5.2, Qwen 3.8. The branch's own
+   commit log already claimed a passing Codex + GLM round - it was not sufficient.
+   GLM's first dispatch stalled (opencode-go subscription at limit) and was surgically
+   re-routed to `glm-alibaba` (Alibaba Token Plan); Qwen ran on the same plan.
+2. Fixed 2 real regressions the branch introduced, both in the new guide (`29adaf3`).
+3. Fixed 2 Qwen nits (`2a170bb`) - one of which was under-rated as cosmetic and was
+   actually consumer-visible (the `"preprocessing"` metadata key).
+4. Fixed pre-existing placeholder repo URLs incl. live code in `export_bundle.py`
+   (`e36a579`), closing the tracked QUICK_WINS P2.
+5. Recorded the worktree/editable-install gotcha (`2c52a48`).
+6. Merged `--no-ff` to `main`, pushed, re-ran `pip install -e .` to clear the stale shim.
+
+**CLI: abandoned, user decision 2026-07-30.** Codex recommended keeping `cli.py` for one
+release as a deprecation stub printing a migration path; the user declined outright
+("we are abandoning cli for now"). Clean removal stands. Do not re-add a console script.
+
+**ACTION REQUIRED ON EVERY OTHER MACHINE** on first pull of `763c4ed` or later: run
+`pip install -e .`. `git pull` deletes `cli.py` but leaves
+`.venv312/Scripts/spectral-predict.exe` behind, which then raises
+`ModuleNotFoundError: No module named 'spectral_predict.cli'`. Full first-pull checklist
+is now at the TOP of `docs/PROJECT_STATUS.md`.
+
+**Merge-safety basis.** `main`'s CI is red and has been since ~June 2026 (T-CI-1 rot), so
+a green check was not available. Merged on failure-set-diff instead: ran
+`test_export_code.py` on the branch AND on the untouched `main` checkout and got an
+IDENTICAL 2-failure set. Targeted suites 75 passed. Both corrected doc examples executed
+end-to-end against the 49-sample bone collagen dataset; export bundle generated and
+scanned for the placeholder URL (zero hits).
+
+**Post-merge check that caught my own sloppiness:** I first reported a matplotlib leak on
+`import spectral_predict`. Wrong - my check had also imported `spectral_predict.search`,
+which legitimately pulls matplotlib. The bare-import guarantee is intact. Test the exact
+claim, not a superset of it.
+
 ---
 
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.
