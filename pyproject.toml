@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
-    {name = "deepspec contributors"}
+    {name = "Spectral Predict contributors"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -75,8 +75,11 @@ agilent = [
     "agilent-ir-formats",  # Only available on Python 3.10
 ]
 
-[project.scripts]
-spectral-predict = "spectral_predict.cli:main"
+# No console scripts. The `spectral-predict` CLI was retired: a command line can
+# only encode a fixed analysis shape, and there is no standard spectral analysis —
+# every dataset needs its own preprocessing, model set, and variable selection.
+# Humans use the GUI (`python spectral_predict_gui_optimized.py`); scripts and
+# agents compose the backend primitives directly (see docs/AGENT_COMPOSITION.md).
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

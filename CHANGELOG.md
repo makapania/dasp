@@ -180,4 +180,4 @@ Second beta of the 0.5.0 cycle. Bug-fix-and-observability batch on top of
 
 - **0.1.0** (2025-01-27) - Initial release with CSV and ASCII ASD support
 
-[0.1.0]: https://github.com/yourusername/deepspec/releases/tag/v0.1.0
+[0.1.0]: https://github.com/makapania/dasp/releases/tag/v0.1.0

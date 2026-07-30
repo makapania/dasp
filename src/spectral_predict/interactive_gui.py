@@ -1,4 +1,16 @@
-"""GUI-based interactive loading phase using matplotlib and tkinter."""
+"""GUI-based interactive loading phase using matplotlib and tkinter.
+
+ORPHANED — retained pending a deletion decision. Its only importer was the
+``spectral-predict`` CLI (``cli.py``), which was retired. Nothing in the repo imports
+this module now; the main Tkinter GUI has its own loading flow.
+
+Note the module-level ``matplotlib.use('TkAgg')`` below: importing this module has a
+side effect that fails on headless systems. That is why the retired CLI imported it
+lazily, and why ``import spectral_predict`` must never reach it — a guarantee now
+pinned by ``tests/test_agent_composition_api.py``.
+
+This is NOT part of the supported surface.
+"""
 
 import numpy as np
 import pandas as pd

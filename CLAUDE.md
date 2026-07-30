@@ -35,6 +35,23 @@ Spectral Predict automates spectral modeling: load spectra, test preprocessing x
 |---------|-------------|-----------|----------|
 | **V1** | `python spectral_predict_gui_optimized.py` | Tkinter | `src/spectral_predict/` |
 
+There is **no CLI**. The `spectral-predict` console script was retired: a command
+line can only encode a fixed analysis shape, and there is no standard spectral
+analysis. Humans use the GUI above.
+
+### Driving an analysis from Python
+
+**MUST read `docs/AGENT_COMPOSITION.md` before writing any script that calls the
+backend.** It documents the stable composition primitives, how to own your own
+cross-validation (including grouped CV, which no search entry point supports), and
+the gotchas that otherwise cost a turn each — readers and `run_search` both return
+tuples, selectors return score arrays rather than masks, and
+`preprocessing_methods` is a dict of bools rather than a list of strings.
+
+Do **not** import underscore-prefixed names. If a needed primitive is not on the
+declared surface, say so rather than reaching into internals — a private name can be
+renamed without warning and silently break callers outside this repo.
+
 ## Directory Structure
 
 ```

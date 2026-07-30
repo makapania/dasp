@@ -120,6 +120,22 @@ from .nsga2_search import run_nsga2_search, convert_nsga2_to_v1_format
 
 logger = logging.getLogger(__name__)
 
+# Declared public surface of this module. These are the names research scripts and
+# agents may depend on; see ``docs/AGENT_COMPOSITION.md``. Anything not listed here
+# is an internal implementation detail and may change without notice.
+#
+# Deliberately narrow: this is not a sweep of every module in the package. It
+# declares the primitives that are actually documented and contract-tested.
+__all__ = [
+    "run_search",
+    "run_one_class_search",
+    "run_multiclass_simca_search",
+    "multiclass_varsel_mask",
+    "build_multiclass_decision_view",
+    "compute_validation_metrics_for_top_models",
+    "MulticlassVarselUnsupported",
+]
+
 # Model categories for GA preprocessing (4 specialized groups)
 # Each group uses a fitness model that best represents its characteristics
 
@@ -698,7 +714,7 @@ def _multiclass_holdout_metrics(
     # Use the TRIMMED train axis (_wl_tr) returned alongside X_tr_pp: an SG
     # derivative edge-masks the wavelength axis, so the full axis would push
     # interval-method indices past the trimmed matrix (out-of-bounds).
-    varsel_value = _multiclass_varsel_mask(
+    varsel_value = multiclass_varsel_mask(
         X_tr_pp, y_train_np, _wl_tr, varsel_path, n_select
     )
 
@@ -1641,8 +1657,12 @@ def run_search(
 
     Returns
     -------
-    df_ranked : pd.DataFrame
-        Ranked results with all model runs
+    tuple of (pd.DataFrame, LabelEncoder or None)
+        ``df_ranked`` — ranked results with all model runs — and the fitted
+        ``label_encoder`` used for classification with text labels (``None`` for
+        regression). **This is a 2-tuple, not a bare DataFrame**; unpack it as
+        ``df_ranked, label_encoder = run_search(...)``. Treating the result as a
+        DataFrame raises ``AttributeError: 'tuple' object has no attribute ...``.
     """
     # Fixed random state used throughout codebase
     random_state = RANDOM_STATE
@@ -7297,9 +7317,17 @@ _MULTICLASS_MASK_METHODS = frozenset(
 )
 
 
-def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="classification"):
+def multiclass_varsel_mask(
+    X, y, wavelengths, method, n_select=None, task_type="classification"
+):
     """Boolean feature mask for a supervised variable-selection method on the
     genuine multi-class label, computed ONCE on the passed calibration matrix.
+
+    Public composition primitive — see ``docs/AGENT_COMPOSITION.md``. Scripts that
+    build their own search loop (their own CV splitter, ranking objective, and
+    reporting) call this to resolve a variable-selection method name into a mask
+    they can apply themselves. The private alias ``_multiclass_varsel_mask`` is
+    retained below for backward compatibility with existing callers.
 
     This is the chemometrics convention (PLS_Toolbox GA, mdatools iPLS, CARS all
     select from the full calibration data using each method's own internal CV,
@@ -7333,8 +7361,10 @@ def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="clas
     method : str
         ``"none"`` -> ``None``; a Wold method -> that string; a resolvable
         discrimination method -> a boolean mask; anything else -> raises.
-    n_select : int
+    n_select : int, optional
         Number of top-scoring features to keep (importance-array methods only).
+        Omitted / ``None`` / ``NaN`` all fall back to ``min(100, n_features)``,
+        matching the GUI's Top-N default. Interval methods ignore it entirely.
     task_type : str
         Passed through to selectors that take it (default ``"classification"``).
 
@@ -7527,6 +7557,13 @@ def _multiclass_varsel_mask(X, y, wavelengths, method, n_select, task_type="clas
         f"variable-selection method {method!r} has no reachable multi-class "
         f"implementation; skipping."
     )
+
+
+# Backward-compatible private alias. External research scripts imported the
+# underscore name before this became public API; keep it working so a rename here
+# cannot silently break a caller living outside this repo. Prefer the public
+# ``multiclass_varsel_mask`` in new code.
+_multiclass_varsel_mask = multiclass_varsel_mask
 
 
 def _multiclass_loco_novelty_auc(build_model_fn, X, y, cv_splits=5, oof_cv=None):
@@ -8246,7 +8283,7 @@ def run_multiclass_simca_search(
                             # precomputed boolean mask (the Phase-B hook);
                             # unsupported (spa/ipls/ga/...) -> skip with a warning.
                             try:
-                                varsel_value = _multiclass_varsel_mask(
+                                varsel_value = multiclass_varsel_mask(
                                     X_pp, y_np, wavelengths_current, varsel_path, _n_select,
                                 )
                             except MulticlassVarselUnsupported as exc:
@@ -8365,7 +8402,7 @@ def run_multiclass_simca_search(
                     _top_Xpp, _top_wl, _ = _multiclass_preprocess_matrix(
                         X_np, top_cfg, wavelengths_full
                     )
-                    _top_varsel = _multiclass_varsel_mask(
+                    _top_varsel = multiclass_varsel_mask(
                         _top_Xpp, y_np, _top_wl, _top_path, _top_nsel,
                     )
                 df_results.attrs["top_decision_view"] = build_multiclass_decision_view(

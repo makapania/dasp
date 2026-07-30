@@ -1,4 +1,14 @@
-"""Interactive loading and data exploration module."""
+"""Interactive loading and data exploration module.
+
+ORPHANED — retained pending a deletion decision. Its only importer was the
+``spectral-predict`` CLI (``cli.py``), which was retired because a command line can
+only encode a fixed analysis shape. Nothing in the repo imports this module now: the
+Tkinter GUI (``spectral_predict_gui_optimized.py``) has its own loading flow, and
+scripts compose primitives directly (see ``docs/AGENT_COMPOSITION.md``).
+
+This is NOT part of the supported surface. Do not build on it without first deciding
+whether it should be revived or deleted.
+"""
 
 import numpy as np
 import pandas as pd

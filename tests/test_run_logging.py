@@ -347,48 +347,10 @@ def test_setup_app_logger_dedups_after_module_reload(fresh_logging):
     )
 
 
-def test_cli_main_calls_setup_app_logger(fresh_logging, monkeypatch):
-    """T-45 fix-of-fixes (Codex HIGH): the `spectral-predict` console
-    script is a third Tk-launching path (interactive_gui.py creates a
-    Tk root). Without setup_app_logger called from cli.main, console-
-    script users got the same /dev/null stderr the bundled GUI used to
-    have — defeating T-45's stated goal that "no startup path leaves
-    the user without diagnostics".
-
-    Verify cli.main calls setup_app_logger before doing anything else
-    that could raise (argparse error, missing file, etc.). Use a sentinel
-    sys.argv that triggers --version exit so we don't actually run a
-    full pipeline — just need to confirm the import-and-call happened.
-
-    PR #56 review (Codex STRONG #2): previously skipped on headless
-    Linux because cli.main forced ``matplotlib.use('TkAgg')`` via an
-    eager top-of-module import of ``interactive_gui``. cli.py was
-    refactored to lazy-import GUI modules; ``--version`` now runs
-    without any Tk/matplotlib import side-effects, so the skip is gone.
-    The monkeypatch now targets ``run_logging.setup_app_logger``
-    directly (the lazy import inside ``main`` resolves to that name)
-    rather than the cli module's own attribute — there isn't one any
-    more after the refactor.
-    """
-    rl, _, _ = fresh_logging
-
-    called: list[bool] = []
-    monkeypatch.setattr(rl, "setup_app_logger", lambda: called.append(True) or None)
-
-    # Re-import cli with the patched run_logging in place so cli's
-    # `from .run_logging import setup_app_logger` (now lazy, inside
-    # main()) picks up the monkeypatch.
-    sys.modules.pop("spectral_predict.cli", None)
-    cli = importlib.import_module("spectral_predict.cli")
-
-    monkeypatch.setattr(sys, "argv", ["spectral-predict", "--version"])
-    with pytest.raises(SystemExit):
-        cli.main()
-
-    assert called, (
-        "cli.main must call setup_app_logger so console-script users "
-        "get the same observability the bundled GUI gets"
-    )
+# NOTE: test_cli_main_calls_setup_app_logger was removed when the
+# `spectral-predict` console script was retired. It asserted that cli.main
+# called setup_app_logger so console-script users got diagnostics (T-45).
+# That startup path no longer exists; the GUI path is covered above.
 
 
 def test_setup_app_logger_swallows_setup_failure(fresh_logging, monkeypatch):

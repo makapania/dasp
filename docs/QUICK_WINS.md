@@ -18,7 +18,7 @@
 | **P1** | Error Handling | `scoring.py`, `regions.py`, `search.py` | Bare `except:` blocks at lines 509, 517, 535 (scoring), line 69 (regions), line 4637 (search) | 10 min | **MED** — silent failures mask real bugs |
 | **P2** | Dead Code | `interference.py` | Duplicate `EPO` class — placeholder at line 564 ("TO BE IMPLEMENTED IN PHASE 2") and real implementation at line 820 | 5 min | **MED** — confusing to maintainers |
 | **P2** | Config Hygiene | `code_generator.py` | Hardcodes `'version': '3.9.0'` at line 373 | 5 min | **MED** — generated scripts claim wrong Python version |
-| **P2** | Branding/Trust | `export_bundle.py` | Placeholder citation URL `https://github.com/yourusername/spectral-predict` at line 244 | 5 min | **MED** — looks unprofessional in exported bundles |
+| ~~**P2**~~ | ~~Branding/Trust~~ | `export_bundle.py` | ~~Placeholder citation URL at line 244~~ **FIXED 2026-07-30** — now `https://github.com/makapania/dasp`; verified by generating a bundle and scanning every file for the placeholder | done | — |
 | **P2** | Documentation Drift | `templates/header.py`, `baseline.py`, `preprocess.py`, `variable_selection.py` | Header claims "Spectral Predict v3"; ALS `p` default mismatch (0.001 vs 0.01); UVE docstring is self-contradictory | 15 min | **LOW-MED** — erodes trust in generated scripts |
 | **P3** | API Polish | `models.py`, `search.py`, `ensemble.py`, `scoring.py`, etc. | Missing `__all__` in ~10 public modules | 20 min | **LOW-MED** — affects IDE autocomplete and `from x import *` |
 | **P3** | Debug Hygiene | `ensemble.py` | Diagnostic env-var prints (`SPECTRAL_PREDICT_DEBUG`) at lines 1871-1893 | 5 min | **LOW** — harmless but unprofessional |
@@ -96,9 +96,9 @@ where `ss = explained_variance_per_component`.
 - `PYTHON_VERSION = '3.9.0'` hardcoded
 - Fix: Use `f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"` or at least `3.x`.
 
-**`export_bundle.py:244`**
-- `https://github.com/yourusername/spectral-predict`
-- Fix: Replace with real repo URL or company homepage.
+**`export_bundle.py:244`** — **FIXED 2026-07-30**
+- Was `https://github.com/yourusername/spectral-predict`; now `https://github.com/makapania/dasp`.
+- Fixed alongside the same placeholder in `CHANGELOG.md` and the `deepspec contributors` author string in `pyproject.toml`.
 
 ### P2 — Documentation Drift (15 min)
 
