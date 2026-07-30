@@ -1,5 +1,22 @@
 # Project Status
 
+> ## ▶ ACTIVE DIRECTION (2026-07-30) — Agent-facing API work **MERGED to `main`** (merge commit `763c4ed`), CLI abandoned
+> **Second review round before merge (Codex + GLM 5.2 + Qwen 3.8) found the guide itself shipped broken examples** — the very failure the guide exists to prevent. Do not treat a prior in-branch review claim as sufficient; the branch's own log already claimed a clean Codex + GLM round.
+>
+> **Real regressions introduced by the branch (both fixed, commit `29adaf3`):** (1) `AGENT_COMPOSITION.md` listed `get_uve_threshold` in the score-array family, whose documented return is a single `(n_features,)` array — it returns a 3-tuple `(importances, threshold, selected_mask)`. (2) §8's save/load example saved the `MultiClassClassModel` bound in §6 under `"model_name": "PLS", "task_type": "regression"` and never defined `X_new` — a false schema loads fine, then predicts down the wrong dispatch path. §8 is now self-contained.
+>
+> **Also fixed (`2a170bb`, from Qwen's nits):** the §8 metadata key was `"preprocess"`; the real key is `"preprocessing"` — the GUI reads `metadata.get('preprocessing', ...)` in 5 places and `model_io.py:1592` marks it REQUIRED, so a model saved per the old example reported its preprocessing as "Unknown" in the GUI. Qwen rated this cosmetic because `save_model` doesn't validate it; that stopped one layer short of the consumers. Prose claiming `predict_with_model` re-applies "preprocessor, scaler, and PCA" now notes scaler/PCA are gated on `task_type == "one_class"`.
+>
+> **Pre-existing doc rot fixed opportunistically (NOT regressions — verified against `origin/main` before accepting):** README `SubsetTag` claimed a fixed enum (`all, top-20, top-5, top-3`); real tags are method-dependent (`full`, `top{n}_{method}`, `{method}_top{n}`, interval tags) — match by prefix. `MACHINE_LEARNING_MODELS.md` called `get_model('NeuralBoosted', learning_rate=0.2)`; `get_model` takes no per-model hyperparameters and raises `TypeError`. Placeholder repo URLs `yourusername/deepspec` → `makapania/dasp` across README, `CHANGELOG.md`, `pyproject.toml` author, and **`export_bundle.py:245` — live code, so every exported bundle shipped a dead citation URL** (`e36a579`; closes the tracked QUICK_WINS P2).
+>
+> **CLI: abandoned outright (user decision 2026-07-30).** Codex proposed keeping `cli.py` one release as a deprecation stub; user declined — clean removal stands. **Existing editable installs keep a stale `spectral-predict.exe` that raises `ModuleNotFoundError: No module named 'spectral_predict.cli'` until `pip install -e .` is re-run** (done on this machine; other machines must re-run it).
+>
+> **Review-method lesson:** Codex labelled 8 findings MERGE BLOCKER including items it itself filed under MEDIUM/LOW, and flagged two pre-existing errors as introduced by the PR. GLM 5.2 declared `AGENT_COMPOSITION.md` clean and missed both real bugs in it. Qwen 3.8 was the only one to audit every code block in the guide and returned no blockers. **Always diff a claimed blocker against `origin/main` before accepting it as a regression.**
+>
+> **Verification:** both corrected examples executed end-to-end against the 49-sample bone collagen dataset; export bundle generated and scanned (zero placeholder hits); `test_agent_composition_api.py` + `test_run_logging.py` **75 passed**; `test_export_code.py` failure set **identical to `origin/main`** (2 pre-existing, zero new). Bare `import spectral_predict` still leaks no matplotlib/tkinter. **CI on `main` remains red from the pre-existing T-CI-1 rot — unrelated to this merge.**
+>
+> **GOTCHA recorded in SESSION_LOG:** verifying from a git worktree silently tests `main`'s src, because the editable install pins the package to the main checkout. A check of the `export_bundle` fix falsely failed for this reason. `pytest` from a worktree DOES use worktree src — so "pytest passed" does not imply an ad-hoc script tested the same tree.
+>
 > ## ▶ ACTIVE DIRECTION (2026-07-29) — Agent-facing API: **CLI retired**, `docs/AGENT_COMPOSITION.md` added, `multiclass_varsel_mask` made public — **PUSHED to `origin/feat/agent-composition-guide` (4 commits `440c79f`..`2c1d448`), NOT merged, no PR opened**
 > **Question asked:** is the repo in a good state for AI agents to run analyses headlessly? **Answer: the Python composition path already works and is the right pattern; the CLI was dead and actively misleading.**
 >
