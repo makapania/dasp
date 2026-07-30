@@ -30,7 +30,9 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 **Pre-existing unrelated failure:** `tests/test_cv_strategy.py::TestPostMergeReviewFixes::test_classification_metrics_template_has_no_nameerror` fails with `NameError: name '_fit_fold' is not defined` — verified identical on `main`, so not from this work.
 
-**GUI tests spawn Tk windows and closing them kills the run.** A full `pytest tests/` background run died at 36% with exit 127 when the user manually closed stuck analysis windows. Run `pytest tests/ --ignore=tests/gui` for background/unattended verification (this is also what the repo's Linux CI does); run `tests/gui` only when someone is expecting windows to appear.
+**GUI tests spawn Tk windows and closing them kills the run.** A full `pytest tests/` background run died at 36% with exit 127 when the user manually closed stuck analysis windows. Run `pytest tests/ --ignore=tests/gui` for background/unattended verification (this is also what the repo's Linux CI does); run `tests/gui` only when someone is expecting windows to appear. Also: don't run the GUI suite at all for a change that touches no GUI code — that was needless here and cost the user manual cleanup.
+
+**"We didn't touch the GUI" is a claim to CHECK, not assume — the GUI imports PRIVATE backend names.** `spectral_predict_gui_optimized.py:30550` does `from spectral_predict.search import _WOLD_METHODS, _multiclass_preprocess_matrix, _multiclass_varsel_mask, build_multiclass_decision_view` and calls `_multiclass_varsel_mask` at `gui:30573` in the decision-view rebuild. A hard rename of that private function would have broken the GUI silently — the back-compat alias added for the off-repo research pipeline is what saved it. Before claiming a backend change is GUI-safe, grep the GUI for the symbol; it reaches past the public surface.
 
 ## 2026-07-07 — T-31 PR #64 review fold-ins (GPT-5.5 F1/F2 + Kimi M1/M2)
 
