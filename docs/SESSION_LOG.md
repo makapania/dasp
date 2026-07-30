@@ -18,7 +18,19 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 **Grouped CV remains a real backend gap (T-15), deliberately not closed.** No search entry point accepts `groups`, and `cv_utils.py` raises `NotImplementedError` for `group_kfold`/`leave_one_group_out`. Agents compose around it with their own splitter, so it is documented in `AGENT_COMPOSITION.md` rather than plumbed — closing it would make `run_search` usable for grouped designs but buys no flexibility that scripts don't already have.
 
-**`interactive.py` / `interactive_gui.py` are now orphaned** — they were imported only by the retired `cli.py`. Left in place (deleting needs explicit permission); flagged for a future cleanup decision.
+**`interactive.py` / `interactive_gui.py` are now orphaned** — they were imported only by the retired `cli.py`. Left in place (deleting needs explicit permission); their docstrings now say so, since they otherwise read as live API.
+
+**Review lesson — executing examples and reading source catch DIFFERENT classes of doc error. Do both.** Every example in `AGENT_COMPOSITION.md` was executed (17/17 green) and two reviewers still found real inaccuracies that execution structurally could not catch:
+- **Codex:** the guide said "all selectors take `(X, y, ...)` and return an `(n_features,)` importance array", then listed `ipls_forward`/`ipls_backward`/`mc_sipls`/`mwpls` among them. Those are a *different family* — `wavelengths` is a required THIRD POSITIONAL arg and they return a **list of subset dicts**. Cause: I verified the four selectors I exercised and generalised the claim to the ones I had only checked were importable. Codex found it by reading `variable_selection.py`.
+- **GLM 5.2:** the guide promised `n_select` could be omitted while the signature made it a required positional — following the doc raised `TypeError`. Fixed by making the signature match the doc (`n_select=None`); the body already handled `None`.
+- **GLM 5.2 (subtler):** the guide listed `rank` as an always-present key on interval-subset dicts. It is absent on `ipls_forward`'s *combined-interval* entries (`variable_selection.py` ~1855-1862) — my test run stopped early and produced only single-interval entries, so **execution reported the key as always present**. Also `tag` was undocumented. Only source-reading catches a conditional key that a given run happens not to exercise.
+- **I also reintroduced the very trap the guide exists to prevent:** my rewrite of `docs/MACHINE_LEARNING_MODELS.md` wrote `df = run_search(...)` three times, right after discovering `run_search` returns a 2-tuple. Caught by Codex.
+
+**Reviewers disagreed on the back-compat alias.** GLM wanted a `DeprecationWarning` wrapper on `_multiclass_varsel_mask`; Codex explicitly argued against (would break warning-strict callers, adds noise). Kept it a silent alias — its whole purpose is to not disturb a live off-repo research pipeline. Revisit only if the private name is actually being retired.
+
+**Pre-existing unrelated failure:** `tests/test_cv_strategy.py::TestPostMergeReviewFixes::test_classification_metrics_template_has_no_nameerror` fails with `NameError: name '_fit_fold' is not defined` — verified identical on `main`, so not from this work.
+
+**GUI tests spawn Tk windows and closing them kills the run.** A full `pytest tests/` background run died at 36% with exit 127 when the user manually closed stuck analysis windows. Run `pytest tests/ --ignore=tests/gui` for background/unattended verification (this is also what the repo's Linux CI does); run `tests/gui` only when someone is expecting windows to appear.
 
 ## 2026-07-07 — T-31 PR #64 review fold-ins (GPT-5.5 F1/F2 + Kimi M1/M2)
 
