@@ -1933,6 +1933,44 @@ Fix commits: `3a4e502` + `ca987b4` (regression test addition per Codex review).
 
 **Self-rebuke**: in the initial pitch I framed this as a methodology change requiring user confirmation ("GA fitness rankings will shift if we move autoscale to fold-local"). User correctly pushed back — full-X autoscale before CV is chemometrics-acceptable per the field convention; only the train/val asymmetry was a real bug. Don't extend bug fixes into methodology overhauls when chemometrics convention already covers the broader pattern. See memory `feedback_chemometrics_conventions` section 2-3.
 
+## 2026-07-30 - Second-round review of feat/agent-composition-guide: doc examples were wrong
+
+**Context**: the branch's own commit log claimed a Codex + GLM 5.2 round had already
+passed. A fresh independent round (Codex + GLM 5.2 via the Alibaba Token Plan route)
+found the *guide itself* - the branch's headline deliverable - contained examples that
+fail on first use. Do not treat a prior in-branch review claim as sufficient.
+
+**Real, introduced by the branch** (both fixed here):
+- `docs/AGENT_COMPOSITION.md` listed `get_uve_threshold` in the score-array family,
+  whose documented return is a single `(n_features,)` array. It actually returns a
+  3-tuple `(importances, threshold, selected_mask)` (`variable_selection.py:306`).
+- `AGENT_COMPOSITION.md` section 8 saved the `MultiClassClassModel` bound in section 6
+  under `"model_name": "PLS", "task_type": "regression"`, and never defined `X_new`.
+  A false schema loads fine and then predicts down the wrong dispatch path.
+
+**Real but PRE-EXISTING on main** (fixed opportunistically, not regressions):
+- `README.md` `SubsetTag` claimed a fixed enum `all, top-20, top-5, top-3`. Actual
+  tags are method-dependent: `full`, `top{n}_{method}`, `{method}_top{n}`, interval
+  tags. Match by prefix, not equality.
+- `docs/MACHINE_LEARNING_MODELS.md` had `get_model('NeuralBoosted', learning_rate=0.2)`
+  - `get_model` takes no per-model hyperparameters; this raises `TypeError`.
+- `README.md` clone/issues/citation URLs said `yourusername/deepspec`; repo is
+  `makapania/dasp`.
+
+**Review-method note**: Codex labelled 8 findings MERGE BLOCKER including items it
+itself filed under MEDIUM/LOW, and flagged two pre-existing README/doc errors as
+blockers introduced by the PR. GLM declared `AGENT_COMPOSITION.md` clean and missed
+both real bugs in it, and flagged its own pre-existing find as a blocker without
+checking it against main. **Always diff a claimed blocker against `origin/main`
+before accepting it as introduced by the branch.** Both reviewers independently
+confirmed the genuinely load-bearing facts: no live reference to the deleted CLI in
+installer/.spec/CI/GUI, and the `run_search` 2-tuple docstring is true
+(`search.py:4405`).
+
+**Verification**: both fixed examples executed end-to-end against the real 49-sample
+bone collagen dataset (UVE kept 142/2151 vars; save/load round-tripped 49
+predictions). `tests/test_agent_composition_api.py` 53 passed.
+
 ---
 
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — second archive batch on 2026-05-02 moved 2026-05-01 and earlier entries out. First batch (2026-04-29) moved entries before 2026-04-15. Grep the archive when you need historical context on a closed bug, decision, or PR.

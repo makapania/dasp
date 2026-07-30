@@ -147,8 +147,22 @@ X_sel = X_pp[:, np.sort(keep)]
 ```
 
 Also in this family: `uve_spa_selection`, `uve_cars_selection`,
-`fipls_spa_selection`, `fipls_cars_selection`, and the helper
-`get_uve_threshold`.
+`fipls_spa_selection`, and `fipls_cars_selection`.
+
+`get_uve_threshold` is **not** in this family despite the name — it returns a
+**3-tuple** `(importances, threshold, selected_mask)`, not a bare score array. It
+does the cutoff for you, so unpack it rather than calling `np.argsort` on the
+result:
+
+```python
+from spectral_predict.variable_selection import get_uve_threshold
+
+importances, threshold, mask = get_uve_threshold(
+    X_pp, y.to_numpy(dtype=float), cutoff_multiplier=1.0, cv_folds=5,
+)
+X_sel = X_pp[:, mask]          # mask is already boolean, shape (n_features,)
+print(f"kept {mask.sum()} of {mask.size} variables (threshold {threshold:.3f})")
+```
 
 ### 3b. Interval-subset selectors
 
@@ -316,8 +330,18 @@ you want.
 
 ## 8. Save and reuse a model
 
+This example is **self-contained** — it fits its own regression model rather than
+reusing the class model from §6. The `metadata` you write must describe the object
+you actually pass to `save_model`; saving a `MultiClassClassModel` under
+`"task_type": "regression"` will load fine and then predict down the wrong dispatch
+path.
+
 ```python
+from sklearn.cross_decomposition import PLSRegression
 from spectral_predict.model_io import save_model, load_model, predict_with_model
+
+X_raw = X_aligned.to_numpy(dtype=float)
+model = PLSRegression(n_components=5).fit(X_raw, y.to_numpy(dtype=float))
 
 metadata = {
     "model_name": "PLS",
@@ -327,9 +351,13 @@ metadata = {
     "target_name": "%Collagen",
     "preprocess": "raw",
 }
+# preprocessor=None matches "preprocess": "raw" above. If you fit a preprocessing
+# Pipeline (§2), pass that fitted pipeline here instead of None and name it in
+# "preprocess" — predict_with_model re-applies whatever you stored.
 save_model(model, None, metadata, "my_model.dasp")
 
 loaded = load_model("my_model.dasp")
+X_new = X_aligned                          # stand-in: same wavelength columns
 predictions = predict_with_model(loaded, X_new)
 ```
 

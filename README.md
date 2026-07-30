@@ -19,8 +19,8 @@ Stop manually testing preprocessing pipelines. Get a ranked list of candidate mo
 ### 1. Install
 
 ```bash
-git clone https://github.com/yourusername/deepspec.git
-cd deepspec
+git clone https://github.com/makapania/dasp.git
+cd dasp
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -e .[dev]
@@ -378,7 +378,10 @@ The software intelligently matches IDs even if:
 All model runs with columns:
 - **Model**: PLS, RandomForest, MLP (with hyperparameters)
 - **Preprocess**: raw, snv, deriv1, snv_deriv1, etc.
-- **SubsetTag**: all, top-20, top-5, top-3 variables
+- **SubsetTag**: which variable subset the run used. Values are method-dependent,
+  not a fixed enum — `full` (no selection), `top100_cars` / `top50_uve`
+  (`top{n}_{method}`), `cars_top50` (`{method}_top{n}`, one-class path), interval
+  tags from iPLS/SiPLS, or a bare method name. Match by prefix, not equality.
 - **RMSE, R²** (regression) or **Accuracy, ROC_AUC** (classification)
 - **CompositeScore**: Lower = better (balances performance + simplicity)
 - **Rank**: 1 = best model
@@ -573,7 +576,7 @@ Contributions welcome! Please:
 
 - **Documentation:** `example/README.md`, `docs/PROJECT_STATUS.md`
 - **Scripting / agents:** [`docs/AGENT_COMPOSITION.md`](docs/AGENT_COMPOSITION.md)
-- **Issues:** https://github.com/yourusername/deepspec/issues
+- **Issues:** https://github.com/makapania/dasp/issues
 
 ---
 
@@ -584,10 +587,10 @@ If you use this software in your research:
 ```bibtex
 @software{spectral_predict_2025,
   title = {Spectral Predict: Automated Spectral Analysis Software},
-  author = {deepspec contributors},
+  author = {Spectral Predict contributors},
   year = {2025},
   version = {0.1.0},
-  url = {https://github.com/yourusername/deepspec}
+  url = {https://github.com/makapania/dasp}
 }
 ```
 

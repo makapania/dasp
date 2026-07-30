@@ -1270,7 +1270,9 @@ pls.fit(X_train, y_train)
 xgb = get_model('XGBoost')
 xgb.fit(X_train, y_train)
 
-nb = get_model('NeuralBoosted', learning_rate=0.2)
+# get_model() takes no per-model hyperparameters; for a custom learning_rate
+# construct the estimator directly: NeuralBoostedRegressor(learning_rate=0.2)
+nb = get_model('NeuralBoosted')
 nb.fit(X_train, y_train)
 
 models = [pls, xgb, nb]
