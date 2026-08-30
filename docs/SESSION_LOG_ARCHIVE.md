@@ -2,7 +2,7 @@
 
 Archived entries from `SESSION_LOG.md`. Older sessions, kept here for reference but moved out of the active log to keep it lean. Most recent active entries live in `SESSION_LOG.md`. Grep this file when you need historical context on a closed bug, decision, or PR.
 
-Archive batches: **1st** 2026-04-29 (entries before 2026-04-15), **2nd** 2026-05-02 (2026-05-01 and earlier), **3rd** 2026-07-30 (before 2026-06-01 — see the batch header partway down this file). The active `SESSION_LOG.md` keeps roughly the last two months.
+Archive batches: **1st** 2026-04-29 (entries before 2026-04-15), **2nd** 2026-05-02 (2026-05-01 and earlier), **3rd** 2026-07-30 (before 2026-06-01 — see the batch header partway down this file), **4th** 2026-08-30 (before 2026-07-01 — the four June 2026 entries; batch header at the end of this file). The active `SESSION_LOG.md` keeps roughly the last two months.
 
 **File order is NOT chronological.** Entries were appended in batches, and several were already out of order in the active log at split time (e.g. 2026-04-16/19/21 in batch 1; a 2026-07-07 design note sitting among 2026-05 entries in batch 3). **Always find entries by date with grep, never by position in the file.**
 
@@ -3563,3 +3563,155 @@ Fix commits: `3a4e502` + `ca987b4` (regression test addition per Codex review).
 **User-visible impact**: R²pred for `autoscale=True` rows changes — the new numbers are the honest ones the column was supposed to report. CV/RMSEcv numbers and GA fitness rankings are unchanged. Old saved CSVs continue to load; rebuilding them produces correct R²pred (different from what was originally written, because that was wrong).
 
 **Self-rebuke**: in the initial pitch I framed this as a methodology change requiring user confirmation ("GA fitness rankings will shift if we move autoscale to fold-local"). User correctly pushed back — full-X autoscale before CV is chemometrics-acceptable per the field convention; only the train/val asymmetry was a real bug. Don't extend bug fixes into methodology overhauls when chemometrics convention already covers the broader pattern. See memory `feedback_chemometrics_conventions` section 2-3.
+
+---
+
+## ▶ Fourth archive batch — moved 2026-08-30
+
+On 2026-08-30 the active SESSION_LOG.md had grown to 839 lines. Moved everything dated
+before 2026-07-01 into this archive — the four June 2026 entries (x-unit relabel/plot
+regeneration, Wavelength Importance hardcoded "nm", legacy float32 ASD-v1 `.sco` NaN
+reads, and the stale `use_absorbance` radio-button log-transform bug). The active log
+now keeps 2026-07-01 onward.
+
+## 2026-06-19 — Radio-button data-type toggle silently log-transforms plots (stale `use_absorbance`)
+
+**Symptom.** User imports a (CSV/XLS) reflectance file; the Import & Preview plots look like
+**absorbance** even though the radio reads **Reflectance**. Clicking the **Absorbance** radio makes
+the plot snap to a reflectance shape — i.e. the radio appears to *convert* the data, which it must
+never do (radios are relabel-only).
+
+**Root cause.** Not the importer — `read_combined_csv`/`read_combined_excel` and
+`detect_spectral_data_type` never touch the values; detection only sets a *label*. The transform
+lives in the hidden legacy `use_absorbance` flag. Every plot generator runs the data through
+`_apply_transformation()` (`spectral_predict_gui_optimized.py:20820`), which applies
+`A = log10(1/R)` iff `use_absorbance` is True AND `data_has_been_converted` is False AND
+`current_data_type != "absorbance"`. `use_absorbance` is set True only by clicking **Convert to
+Absorbance** (`:19588`), but it was **never reset on a new file load** — `_apply_data_type_metadata`
+reset `data_has_been_converted` but not `use_absorbance`, and the `_update_data_type_status_ui`
+reflectance branch (`:19829`) enabled the legacy checkbox without resetting the flag (only the
+`else` branch reset it — an asymmetry). So after any prior conversion, the next import kept
+`use_absorbance=True` → phantom log transform in plots while the radio still says Reflectance.
+Toggling to the Absorbance radio short-circuits at `:20831` (`current_data_type=="absorbance"` →
+return raw), revealing the true reflectance shape. The shape-change-on-toggle is the tell that it's
+this flag, not a detection mislabel (a mislabel changes only the y-axis text, not the curve).
+
+**Fix.** Reset `self.use_absorbance.set(False)` in `_apply_data_type_metadata` (canonical
+load-reset point, alongside `data_has_been_converted = False`), and made the `:19829` reflectance
+branch reset the flag too so the invariant "fresh unconverted load ⇒ `use_absorbance` False" holds
+locally. The legacy checkbox is created but never `.pack`ed (hidden), so this only clears stale
+cross-load state — no user-facing workflow changes.
+
+---
+
+## 2026-06-19 — Legacy float32 ASD-v1 (.sco) files read as all-NaN because SpecDAL assumes float64
+
+**Root cause.** A user's `.sco` / numbered `.000` FieldSpec files wouldn't import; renaming to
+`.asd` made them load but every value came back NaN. These are the *oldest* ASD binary format —
+version string `b"ASD\x00"` — which stores the spectrum as **float32** at offset 484
+(file size == `484 + channels*4`; 9088 bytes for 2151 bands). The app reads binary ASD via
+**SpecDAL**, which assumes the modern layout (float64 at the same offset), so it reads past the
+data into garbage → all-NaN. Two independent failures stacked: (1) `read_asd_dir()` only globbed
+`*.sig`/`*.asd`, so `.sco` was never picked up at all; (2) even renamed, SpecDAL mis-decoded it.
+
+**Gotcha — `raw[:3] == b"ASD"` is NOT a safe binary discriminator.** ASCII `.asd`/`.sig` files
+start with literal text `ASD Field Spec Pro`, so their first 3 bytes are also `ASD`. The binary
+magic is 4 bytes `ASD\x00` (`_is_binary_asd` checks 4). Header fields (little-endian): first
+wavelength `float@191`, nm/channel `float@195`, channel count `uint16@204`, dataType `byte@186`
+(1 = reflectance).
+
+**Fix.** New `readers/asd_native.py::read_legacy_asd()` decodes the float32 layout natively and
+is tried *before* SpecDAL in `_handle_binary_asd()`. Discriminator is exact file size:
+`484 + channels*4` → decode float32; `484 + channels*8` → return `None` (modern, hand to SpecDAL);
+neither → raise `ValueError` (corrupt/truncated, so real corruption isn't silently treated as
+"modern, try SpecDAL"). `.sco` added to the glob, `format_map`, `detect_format` magic branch, and
+`_detect_directory_format`. One-off converter at `scripts/convert_old_asd.py` reuses the decoder.
+
+**GUI gate gotcha (caught by Kimi cross-family review).** The backend fix alone is NOT enough:
+the Tkinter GUI does its *own* directory globbing to decide "Detected N ASD files" at six sites
+(`spectral_predict_gui_optimized.py` ~16072 Import-tab auto-detect, ~17663 load path, ~41276
+prediction tab, ~44994 sample-ID ext list, ~45612 + ~45685 dir-load helpers) and gates on that
+*before* `read_asd_dir` runs. All six globbed `*.asd`/`*.sig` only, so a `.sco` folder showed
+"No supported spectral files found" and never reached the backend. Added `.sco` to all six.
+Lesson: format support in `io.py` is necessary but not sufficient — the GUI has parallel
+detection logic that must be updated in lockstep.
+
+**Variant decision.** `.sco` and the bare `.000` companions decode to near-identical reflectance
+(differ ~0.001–0.003) — duplicate measurements of the same scan, not distinct types. Standardized
+on `.sco`-only import: stems (`italy.000`, `italy.001`…) are unique, whereas every bare
+`italy.000…029` has stem `italy` and would collapse 30 spectra into 1 row. Bare numeric files
+still classify as OPUS in `detect_format` (intentionally untouched). Real-folder result:
+30 files × 2151 bands, 0 NaN, reflectance 0.06–0.97, 100% reflectance confidence.
+
+---
+
+## 2026-06-16 — X-unit radio is relabel-only, so it now relabels plots in place instead of full-regenerating them
+
+**Perf fix.** The Import-tab nm/cm⁻¹ radios are *declarative* (`_on_x_unit_override`) — they
+correct a mis-detected unit and never convert values (the 1e7/x converter lives behind the
+hidden `Convert to…` button, disabled in T-21 because reciprocal regrid breaks SG derivatives).
+The handler nonetheless called `_generate_plots()` + `_generate_explore_plots()`, tearing down
+and rebuilding ~11 figures (re-running SG 1st/2nd-deriv transforms + one Line2D per spectrum
+across 3 Import tabs + 8 Explore plots) on every click. Since a relabel changes no data/geometry,
+all that was wasted — only the x-axis label text needs to change.
+
+**Mechanism.** Added `self._spectral_x_canvases` registry; spectral creators register their
+canvas (`_create_plot_tab`, `_create_explore_plot_in_frame`, `_init_manual_baseline_plot`).
+`_relabel_spectral_x_axes()` swaps the xlabel in place on every registered live canvas (axes
+self-identify by current label ∈ {"Wavelength (nm)","Wavenumber (cm⁻¹)"}), then `draw_idle()`.
+`_on_x_unit_override` calls that instead of the two `_generate_*`.
+
+**Gotchas / lessons.**
+- `ax.set_xlabel(text)` with no fontdict/kwargs preserves existing font size/color — so the
+  in-place relabel keeps per-axis styling (Import/Explore 12pt, manual baseline 10pt). Verified
+  against mpl 3.10.8.
+- **Registry liveness (Codex gpt-5.5-high MEDIUM, fixed before commit):** pruning only inside
+  the relabel method leaks destroyed `FigureCanvasTkAgg`/figures when the user regenerates plots
+  *without* toggling units (filter/exclude/reload register fresh canvases, dead ones linger).
+  Fix: `_register_spectral_canvas()` prunes dead canvases (via `winfo_exists()`) and dedups on
+  every call, keeping the registry bounded to live canvases. `_canvas_is_alive()` shared helper.
+- Exact-string label matching is internally consistent with `_get_spectral_xlabel()` today but is
+  fragile if the wording/superscript ever changes — a future axis-metadata flag would be sturdier.
+- Scope matches the old behavior exactly: only Import + Explore plots refresh on toggle. Other
+  tabs (Model Dev / Contaminant / CT) were never refreshed by the override and still aren't —
+  widening registration app-wide is a noted optional follow-up.
+
+---
+
+## 2026-06-16 — Wavelength Importance click-popup hardcoded "nm" unit (ignored cm⁻¹ x-unit)
+
+**Bug.** Model Development → Results → Wavelength Importance figure: clicking a point opens an
+annotation whose first line was `f"Wavelength: {wl:.1f} nm"` (hardcoded). The figure axis itself
+already routes through the unit-aware helpers, so in cm⁻¹ mode the axis read "Wavenumber (cm⁻¹)"
+while the popup still said "Wavelength … nm". Value was correct (the `wavelengths` array is stored
+in display units and feeds both `ax1.stem(...)` and the popup `wl`); only the label was wrong.
+
+**Fix.** `spectral_predict_gui_optimized.py`, `on_importance_click` in `_plot_wavelength_importance()`
+(~line 34987): use `self._get_x_axis_name()` + `self._get_x_unit_short()` instead of the literal
+"Wavelength … nm". Helpers defined at lines 19628–19647, driven by `self.current_x_unit`.
+
+**Audit — same bug class found in 3 more places (all fixed same commit).** Grepped the GUI for
+`nm` and cross-checked each against whether its plot's `set_xlabel` already routes through
+`_get_spectral_xlabel()` (i.e. is unit-toggle-aware). Confirmed siblings, all now using the helpers:
+- **Predictor-screening listbox** (`_update_screening_info_panel`, ~line 22388/22390): rows read
+  `{wl} nm -> r/imp`; the screening plot axis (22350) is already unit-aware. → use `_get_x_unit_short()`.
+- **Contaminant plot click-popup** (`_contam_create_wavelength_click_handler`, ~line 56452): shared by
+  4 contaminant plots (group spectra / clean overview / influence / exclusion — all use
+  `_get_spectral_xlabel()`). One fix corrects all four popups. → `_get_x_axis_name()` + `_get_x_unit_short()`.
+- **Diagnostics "Wavelength Contribution" plot** (~line 58499/58501/58540): main axis (58477) is
+  unit-aware, but the top-20 barh y-tick labels, the `ax2` ylabel, and the "Top 3 wavelengths" metrics
+  label hardcoded "nm". → helpers.
+
+**Lesson / pin candidate.** The unit helpers (`_get_spectral_xlabel` / `_get_x_unit_short` /
+`_get_x_axis_name`) are the single source of truth for nm-vs-cm⁻¹, but they were added after some
+click-handler annotations / listboxes / tick labels were already written with literal "nm". The
+file's 40+ `set_xlabel` call sites were all swept to the helper; the *satellite* text (popups,
+tooltips, listbox rows, barh tick labels, summary labels) was not. **Audit rule:** when a plot's
+axis is unit-aware, every other piece of text in/around that plot that prints a wavelength value
+must also use the helper. The remaining literal-"nm" hits in the file are legitimate (input-field
+labels, file-I/O metadata, calibration-transfer which always operates in nm, synthetic-data
+generation) and were intentionally left alone.
+
+---
+
+
