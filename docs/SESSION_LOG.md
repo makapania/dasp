@@ -4,6 +4,53 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-08-30 - T-51 design: two non-obvious constraints on widening the Bayesian search space
+
+**Context**: a downstream contamination project asked for a way to widen DASP's Optuna
+search space (`HANDOFF_2026-08-29_DASP_SEARCH_SPACE.md`). Design work only - no code.
+Ticket at `docs/plans/2026-08-30-T51-bayesian-opt-in-search-axes.md`.
+
+**1. You cannot additively widen an axis the base sampler already suggests.**
+Optuna raises if the same parameter name is suggested twice in one trial with a
+different distribution. So an "add axes after the untouched sampler" design can ONLY
+open hyperparameters that `suggest_model_params` pins as constants. Audit:
+- Openable (pinned constants): XGBoost `reg_alpha`/`reg_lambda`/`colsample_bytree`
+  (`unified_bayesian.py:765-767`), `gamma`/`min_child_weight` (absent); LightGBM
+  `min_child_samples`/`subsample`/`colsample_bytree`/`reg_alpha`/`reg_lambda`
+  (`:748-753`); RandomForest `max_features` (`:724`); SVM `gamma='scale'` - assigned,
+  not suggested (`:788`); PLS-DA logistic head `C` (absent).
+- NOT openable (already suggested): Ridge/Lasso/ElasticNet `alpha` (`:698`, `:706`,
+  `:713`); MLP `alpha` (`:804`); OneClassSVM `gamma` - `suggest_categorical` (`:843`);
+  PCA-SIMCA `n_components` (`:837`).
+This killed a planned `linear_alpha_wide` bundle. Found by DeepSeek in peer review.
+
+**2. Clamping a value AFTER `trial.suggest_*` does not change what TPE learns.**
+Optuna stores whatever `suggest_*` returned in `trial.params`. Mutating the value
+afterwards changes the fingerprint and the reported value, but TPE's KDE is still built
+from the original suggestion. So the one-class `n_components` fix splits in two:
+- clamp-before-fingerprint + record resolved value -> buys dedup and an honest `LVs`
+  column, but does NOT change the search trajectory;
+- deriving the ceiling and passing it INTO `suggest_int` is the only thing that changes
+  what TPE sees, and that requires editing the sampler body.
+An earlier draft of the ticket asserted the first would fix the trajectory. It would not.
+
+**3. `_dasp_version` is already in the Optuna study-identity hash** (`:2563`), so a
+version bump already orphans persisted studies. Two reviewers independently proposed
+adding a new unconditional schema version for resume safety; unnecessary. The real
+requirement is just that behaviour-changing PRs bump `__version__`.
+
+**Also confirmed (not yet fixed)**: `SCALE_SENSITIVE_MODELS` contains `'SVC'` but the
+registered classifier family is `'SVM'` (`models.py:281,498`; `model_registry.py:32`),
+so classification SVM is fit with no StandardScaler. Sites: `search.py:156` (used
+`:464`, `:4962`), `unified_bayesian.py:1534` (used `:1605`), `nsga2_search.py:1388`
+(omits both), GUI `:40481`. Prerequisite for any SVM `gamma` tuning.
+
+**Tooling note**: `gpt-5.6` is not reachable from a ChatGPT-account Codex login - it
+hard-errors "not supported when using Codex with a ChatGPT account". `gpt-5.5` is the
+only model that auth mode can reach. Switching would require API-key auth.
+
+---
+
 ## 2026-07-30 - Second-round review of feat/agent-composition-guide: doc examples were wrong
 
 **Context**: the branch's own commit log claimed a Codex + GLM 5.2 round had already
