@@ -44,6 +44,30 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
    confirm you add zero NEW failures. Current known-red on `main`:
    `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2).
 
+### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
+
+`pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end
+up on different versions of numpy/pandas/sklearn and disagree about results. The pinned
+set actually verified on the primary machine lives in **`requirements-lock.txt`** at the
+repo root (Python **3.12.10**).
+
+On a new or drifting machine:
+
+```bash
+py -3.12 -m venv .venv312
+.venv312\Scriptsctivate
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+```
+
+After any intentional upgrade, regenerate and commit it:
+
+```bash
+.venv312\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
+```
+
+(then restore the comment header at the top of the file).
+
 ### If you are verifying branch code from a git worktree
 
 The editable install pins `spectral_predict` to a **fixed path under the main
