@@ -55,7 +55,7 @@ On a new or drifting machine:
 
 ```bash
 py -3.12 -m venv .venv312
-.venv312\Scriptsctivate
+.venv312\Scripts\activate
 pip install -r requirements-lock.txt
 pip install -e . --no-deps
 ```
@@ -67,6 +67,24 @@ After any intentional upgrade, regenerate and commit it:
 ```
 
 (then restore the comment header at the top of the file).
+
+**Verified on a second machine 2026-09-11.** The recreate procedure above was run
+end-to-end on a clean Windows box with no prior Python: all pins resolved with no
+conflicts, `spectral_predict` imports from `src/`, and no stale `spectral-predict.exe`
+shim appears in a fresh venv. Two fixes came out of that run:
+
+- `pytest-timeout` was **missing from the lock** — `pyproject.toml` declares it in the
+  dev extra and `.github/workflows/ci.yml` needs it for the T-CI-1 timeout flags, but
+  the original `pip freeze` did not capture it, so a machine following this procedure
+  got a venv that could not run CI's test invocation (`--no-deps` backfills nothing).
+  Now pinned at `pytest-timeout==2.4.0`; it adds no transitive deps.
+- The activate line above contained a raw `0x07` (BEL) byte instead of `\a`, so it read
+  `.venv312\Scriptsctivate` and could not be copy-pasted.
+
+Note that "Python 3.12 only" is a **convention enforced only in docs**. `pyproject.toml`
+still declares `requires-python = ">=3.10"` and advertises 3.10/3.11/3.12 classifiers,
+so nothing stops an install on 3.10. Left as-is deliberately; tighten it only if the
+packaging metadata is meant to match the rule.
 
 ### If you are verifying branch code from a git worktree
 
