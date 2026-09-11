@@ -4,6 +4,33 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-09-10 - Repo hygiene: a .gitignore rule that never matched, and AGENTS.md drift
+
+**1. `git status` output is not valid `.gitignore` syntax.** The rule added to
+suppress the mangled Windows tempfile names was written as
+`C\357\200\272Users*` - copied straight out of `git status`, which C-quotes
+non-ASCII bytes in paths. Git does **not** decode those octal escapes in a
+`.gitignore` pattern, so the rule matched nothing and all five files kept showing up
+as untracked for months. Replaced with `C*Users*AppData*Temp*`, verified with
+`git check-ignore -v`. Lesson: always confirm a new ignore rule with
+`git check-ignore -v <path>` rather than assuming a pasted path works as a pattern.
+
+**2. `AGENTS.md` was an untracked, stale copy of `CLAUDE.md`.** It was 17 lines
+behind - missing the "there is no CLI" section and the mandate to read
+`docs/AGENT_COMPOSITION.md` - so Codex was reading a guide that still implied a CLI
+existed, while Claude read the current one. Because it was untracked it also existed
+on only one machine. Replaced with a short **pointer** to `CLAUDE.md` and committed.
+Do not re-copy the contents: a copy is what drifted. One guide, one file.
+
+**3. ~40 untracked scratch files were masking the real answer to "is everything
+committed?"** `.pytest-tmp*/` trees, `tools/_*` A/B JSONs and repro scripts,
+`*_fails.txt`, `merge_gate_diff.json`, `live_gui_*`, timestamped `example/colab_*.ipynb`.
+All now ignored, with `!tools/_autoscale_bayes_compare_full.json` negated because it
+is tracked on purpose. A noisy `git status` hid one genuinely unpushed branch
+(`feat/T16-phase2-permutation`, local-only, now pushed).
+
+---
+
 ## 2026-08-30 - T-51 design: two non-obvious constraints on widening the Bayesian search space
 
 **Context**: a downstream contamination project asked for a way to widen DASP's Optuna

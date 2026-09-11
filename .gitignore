@@ -41,7 +41,9 @@ data/
 
 # Stray Windows-encoded tempfile names (legacy artifact, see e.g.
 # CUsersmsponAppDataLocalTempopencodesearch_t30.py from earlier sessions).
-C\357\200\272Users*
+# NB: git does not decode the \357\200\272 octal escapes that `git status`
+# prints, so the pattern has to glob around the mangled separator.
+C*Users*AppData*Temp*
 
 # IDE
 .vscode/
@@ -104,3 +106,25 @@ reftir/
 
 # Binary model files (generated artifacts)
 *.dasp
+
+# Pytest scratch trees from parallel/targeted runs
+.pytest-tmp*/
+.pytest_tmp/
+
+# Scratch A/B results, repro scripts and review prompts produced during
+# investigation. The underscore prefix marks them as non-deliverable.
+tools/_*
+!tools/_autoscale_bayes_compare_full.json
+
+# Test-failure snapshots captured for branch-vs-main diffing
+*_fails.txt
+merge_gate_diff.json
+
+# Live-GUI smoke screenshots
+live_gui_*
+
+# Per-machine Codex git identity
+.gitconfig-codex
+
+# Timestamped Colab notebook exports (regenerate from the generator)
+example/colab_*.ipynb
