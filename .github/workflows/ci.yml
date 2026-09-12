@@ -15,7 +15,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        python-version: ['3.10', '3.11', '3.12']
+        # 3.14 only: the project is 3.14-only (pyproject requires-python).
+        python-version: ['3.14']
 
     steps:
     - uses: actions/checkout@v4
@@ -52,12 +53,12 @@ jobs:
         fi
 
     - name: Check code formatting (black)
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
       run: |
         black --check src/ tests/
 
     - name: Run linter (flake8)
-      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
       run: |
         flake8 src/ tests/ --max-line-length=100 --ignore=E203,W503
 
@@ -77,7 +78,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.14'
 
     - name: Install dependencies
       run: |
@@ -113,7 +114,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.14'
 
     - name: Install with ASD support
       run: |
@@ -137,7 +138,7 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.12'
+        python-version: '3.14'
 
     - name: Install build dependencies
       run: |

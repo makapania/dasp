@@ -12,6 +12,14 @@ where it did not survive contact with the repo.
 numerical results, so they never move in the same phase. Otherwise a divergence is
 undiagnosable.
 
+**Bit-parity with past results is NOT the goal** (user, 2026-09-12). The software is
+unreleased — only the author and a few close colleagues have used it — so there are
+no published numbers to preserve. The bar is "does it work and is it correct going
+forward", not "does it reproduce old output". The baseline harness therefore serves
+as a *change detector*, not an acceptance gate: an unexplained diff is a prompt to
+investigate, and last-bit floating-point noise is not a defect. Test failures and
+broken behavior are the real gates.
+
 ## Decisions taken (user, 2026-09-12)
 
 - Install CPython 3.14 and carry through to a validated frozen bundle.
@@ -57,11 +65,35 @@ untestable, and they carry threading risk the linear models never exercise.
 |---|---|---|
 | 0 — Baseline on 3.12 | **done** | Verified self-reproducible: two consecutive runs byte-identical, per-sample predictions included. Full suite: **7 failed, 2971 passed, 33 skipped, 50m29s**. |
 | 1 — Version-agnostic repo fixes | **done** | jcamp, build toolchain pinned, stale comments, build path parameterized. Baseline unchanged; 112 targeted tests pass. |
-| 2 — Tier-1 dependency bumps | not started | |
+| 2 — Tier-1 dependency bumps | **done** | 35 non-numerical packages. Baseline unchanged. |
 | 3 — 3.14 interpreter, pins held | **done** | Byte-identical results; **identical pytest failure set, zero new failures**. See below. |
-| 4 — Tier-2 numerical bumps | not started | Ordering corrected, see C6. |
-| 5 — Frozen bundle + validation gate | not started | |
-| 6 — CI, docs | not started | |
+| 4 — Tier-2 numerical bumps | **done** | Four groups, each A/B'd. See below. |
+| 5 — Frozen bundle + validation gate | **done** | Bundle builds AND runs on 3.14. See below. |
+| 6 — CI, requires-python, docs | in progress | |
+
+### Phase 4 — dependency upgrade results
+
+Run in the order forced by P1 (numba first, because 0.66 capped `numpy<2.5`).
+
+| Group | Versions | Effect on baseline |
+|---|---|---|
+| Tier 1 (35 pkgs) | infrastructure/dev only | none |
+| (a) numba, llvmlite | 0.66→0.67, 0.48→0.49 | none |
+| (b) numpy, scipy, pandas | 2.4.4→2.5.3, 1.17.1→1.18.1, 3.0.2→3.0.5 | metric noise only, see below |
+| (c) scikit-learn + imblearn, joblib, sklearn-compat | 1.8.0→1.9.1 | none |
+| (d) majors: optuna, plotly, moocore, pymoo, xgboost, lightgbm, matplotlib | 4.8→**5.0**, 6.7→**7.0**, 0.2→**0.3.2**, 0.6.1.6→0.6.2, 3.2→3.4.1, 4.6→4.7, 3.10.8→3.11.2 | covered by the test suite; the baseline does not exercise optuna or pymoo |
+
+**`about-time` and `graphemeu` cannot be upgraded.** `alive-progress 3.3.0` pins both
+to exact versions and is itself already current.
+
+**Group (b) detail.** Per-sample predictions were byte-identical; only the aggregate
+ranked tables moved, by **1e-13 to 1e-15** across the metric columns — changed
+reduction order inside numpy/scipy, not behavior. The only user-visible consequence
+was two PLS/raw 50-variable rows swapping ranks 225 and 226, whose `CompositeScore`
+agrees to 15 significant figures (spread 7.2e-15). A genuine tie broken differently.
+Not a defect, and under the "future not past" framing above, not something to act on
+— but it confirms that ranking ties are decided by noise, so a future change could
+reorder near-tied rows for reasons that have nothing to do with model quality.
 
 ### Phase 3 result, obtained early
 
@@ -96,6 +128,33 @@ Python-version condition, and why that fallback must be retained.
 Consequently the Phase 5 gate must **launch the windowed bundle and run a real CV
 job using LightGBM**, not merely confirm the build produced files. Nothing in
 Phases 0-4 can substitute for that.
+
+### Phase 5 result — the bundle works on 3.14
+
+Built from `.venv314` with `console=False` (a genuine windowed build), then run:
+
+- **42/42 imports**, including SHAP, tksheet, all six spectroscopy readers, and the
+  backend modules — none of which the old 31-import `--test` covered.
+- XGBoost, LightGBM **and CatBoost** native DLLs all functional.
+- `frozen=True, threading fallback active=True`.
+- **`run_search` with LightGBM completed** — the historical fork-bomb scenario —
+  with no crash and a single process.
+- GUI launches and renders correctly, `Responding=True`.
+- Inno Setup produced a 243.9 MB installer.
+
+Two build-path defects were found and fixed in the process:
+
+1. **The installer step failed silently.** Every failure path in
+   `run_inno_setup()` returned True and `main()` discarded the result, so a build
+   producing no installer still printed "Build Complete" and exited 0 —
+   reproduced exactly on this machine. Stale output was never cleared either, so
+   the completion banner could advertise a previous build's installer.
+2. **`find_inno_setup()` never checked `%LOCALAPPDATA%\Programs`**, which is where
+   winget installs Inno Setup by default — so a machine with Inno Setup correctly
+   installed still reported "not found".
+
+**Still not done:** installing from the generated installer on a clean machine, and
+verifying an in-place upgrade over an existing installation.
 
 ### Baseline pytest failure set on 3.12 (the anchor)
 
