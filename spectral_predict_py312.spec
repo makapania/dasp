@@ -1,37 +1,56 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-PyInstaller spec for Spectral Predict — Python 3.12 build (experimental).
+PyInstaller spec for Spectral Predict.
 
-This is a PARALLEL build to the production 3.11 spec (spectral_predict.spec).
-Goals vs 3.11 build:
-  - Use Python 3.12 (newer wheels, fewer workarounds)
-  - Recover real multiprocessing (loky backend instead of threading fallback)
-  - Pick up newly-required deps (Pillow, shap, jcamp, pybaselines, vendor formats)
+This is the ONLY build path. It was once an experimental 3.12 build running
+alongside a "production" 3.11 spec (spectral_predict.spec); that spec no longer
+exists, so nothing here is parallel to anything and nothing is experimental.
+
+The environment is taken from the interpreter PyInstaller is invoked with (see
+sysconfig below), NOT from a hardcoded venv name — so this file does not need
+editing when the Python version changes. build_installer_py312.py selects the
+interpreter; this spec follows it.
 
 Build with:
-    .venv312\\Scripts\\pyinstaller spectral_predict_py312.spec
+    <venv>\\Scripts\\pyinstaller spectral_predict_py312.spec
 
 Output:
     dist/SpectralPredict-py312/SpectralPredict-py312.exe
 
-Do NOT modify the 3.11 spec to mirror this — keep them independent so the
-production build path is never destabilized by 3.12 experiments.
+The py312 in the filenames is a STABLE ARTIFACT IDENTITY, not a statement about
+the Python version. It is deliberately frozen so existing installations upgrade
+in place instead of appearing as a second application. Do not "fix" it to match
+the interpreter.
+
+Historical note: recovering real multiprocessing (loky instead of the threading
+fallback) was an original goal of the 3.12 migration. It FAILED — the same spawn
+failure reproduced on 3.12 and the version condition was removed. See
+docs/SESSION_LOG_ARCHIVE.md:2157. The threading fallback is still required.
 """
 
 import sys
 import glob
 import os
+import sysconfig
 from pathlib import Path
 from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
 
 block_cipher = None
 
 project_root = Path(SPECPATH)
-venv_path = project_root / '.venv312'
-site_packages = venv_path / 'Lib' / 'site-packages'
 
-print(f"[py312] Project root: {project_root}")
-print(f"[py312] Site packages: {site_packages}")
+# Resolve the environment from the interpreter PyInstaller is ACTUALLY running
+# under, rather than naming a venv directory. A hardcoded '.venv312' here is a
+# second, independent source of truth that can silently disagree with the
+# builder's choice of interpreter and mix two environments into one bundle.
+# sysconfig also gets the layout right without assuming Windows 'Lib/'.
+venv_path = Path(sys.prefix)
+site_packages = Path(sysconfig.get_paths()['purelib'])
+PY_TAG = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+print(f"[build] Python:        {PY_TAG} ({sys.executable})")
+print(f"[build] Project root:  {project_root}")
+print(f"[build] Site packages: {site_packages}")
 
 all_datas = []
 all_binaries = []

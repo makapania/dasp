@@ -1,17 +1,18 @@
 #!/usr/bin/env python
 """
-PyInstaller build script for Spectral Predict — Python 3.12 build.
+PyInstaller build script for Spectral Predict.
 
-PARALLEL to build_installer.py (the legacy 3.11 build). This script never
-modifies the 3.11 build path; it only produces the 3.12 bundle in:
+This is the ONLY build path. The legacy 3.11 script (build_installer.py) and its
+spec no longer exist, so nothing here is parallel to anything. Output:
     dist/SpectralPredict-py312/SpectralPredict-py312.exe
 
-Wins over the 3.11 build:
-  - Python 3.12 + PyInstaller 6.x (newer wheels, fewer workarounds)
-  - Pick up newly-required deps (Pillow, shap, jcamp, pybaselines, vendor formats)
-  - Cleaner dependency closure, fewer hidden-import patches
+The "py312" in those filenames is a STABLE ARTIFACT IDENTITY, not a claim about
+the Python version — it is frozen so existing installations upgrade in place
+rather than appearing as a second application. The interpreter actually used is
+chosen by BUILD_PYTHON_VERSION below (override with the DASP_BUILD_PYTHON
+environment variable), and every version-dependent path derives from it.
 
-NOT a win — the 3.12 bundle did NOT recover real multiprocessing:
+NOT a win — the frozen bundle did NOT recover real multiprocessing:
   src/spectral_predict/search.py:_frozen_needs_threading_fallback() returns
   True for ANY frozen build regardless of Python version. The fork-bomb /
   argv-parse crash in PyInstaller's spawned-child runtime hook is not Python-
@@ -23,13 +24,13 @@ NOT a win — the 3.12 bundle did NOT recover real multiprocessing:
   fixing the runtime hook itself, not bumping Python.
 
 Prerequisites:
-    .venv312\\Scripts\\pip install pyinstaller
+    The build venv must exist and contain PyInstaller. Both are pinned in
+    requirements-lock.txt:
+        <build venv>\\Scripts\\pip install -r requirements-lock.txt
 
 Usage:
-    python build_installer_py312.py
-
-This is now the shipped path. The 3.11 build remains in-repo only as a
-fallback during the beta soak (see docs/PROJECT_STATUS.md for retirement plan).
+    python build_installer_py312.py                  # uses BUILD_PYTHON_VERSION
+    DASP_BUILD_PYTHON=312 python build_installer_py312.py   # roll back to 3.12
 """
 
 from __future__ import annotations
@@ -46,9 +47,19 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 from spectral_predict import __version__ as VERSION  # noqa: E402
 
+# APP_NAME is a STABLE ARTIFACT IDENTITY, deliberately decoupled from the Python
+# version. Existing installations upgrade in place only while this is unchanged,
+# so it stays "py312" regardless of which interpreter builds the bundle.
 APP_NAME = "SpectralPredict-py312"
 PROJECT_ROOT = Path(__file__).parent
 DIST_DIR = PROJECT_ROOT / "dist"
+
+# The ONE place the build interpreter is chosen. Everything version-dependent
+# (venv directory, pythonXY.dll, site-packages for the pandas repair) derives
+# from the interpreter this selects, so switching Python versions -- or rolling
+# back -- is a single edit here rather than a rename across three build files.
+BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")
+BUILD_VENV = PROJECT_ROOT / f".venv{BUILD_PYTHON_VERSION}"
 
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform == "win32"
@@ -68,8 +79,8 @@ def create_icon_windows() -> bool:
     try:
         from PIL import Image
     except ImportError:
-        print("ERROR: Pillow not installed in current Python. Run from .venv312:")
-        print("  .venv312\\Scripts\\pip install pillow")
+        print(f"ERROR: Pillow not installed in current Python. Run from {BUILD_VENV.name}:")
+        print(f"  {BUILD_VENV.name}\\Scripts\\pip install pillow")
         return False
 
     png_path = PROJECT_ROOT / "asp_logo_final.png"
@@ -106,23 +117,49 @@ def create_icon() -> bool:
 # ============================================================================
 
 def _find_build_python() -> str:
-    """Locate the .venv312 Python interpreter."""
+    """Locate the build interpreter selected by BUILD_PYTHON_VERSION."""
     if IS_WINDOWS:
-        venv_python = PROJECT_ROOT / ".venv312" / "Scripts" / "python.exe"
+        venv_python = BUILD_VENV / "Scripts" / "python.exe"
     else:
-        venv_python = PROJECT_ROOT / ".venv312" / "bin" / "python"
+        venv_python = BUILD_VENV / "bin" / "python"
 
     if not venv_python.exists():
         raise FileNotFoundError(
-            f".venv312 not found at {venv_python.parent.parent}\n"
+            f"{BUILD_VENV.name} not found at {BUILD_VENV}\n"
             "Create it with: install.bat (or install.sh on mac/linux)\n"
-            "Then install PyInstaller: .venv312\\Scripts\\pip install pyinstaller"
+            f"Then install PyInstaller: {BUILD_VENV.name}\\Scripts\\pip install pyinstaller\n"
+            "Set DASP_BUILD_PYTHON to build against a different interpreter."
         )
     return str(venv_python)
 
 
+def _query_build_python(python_exe: str) -> tuple[str, Path]:
+    """Ask the build interpreter what it actually is.
+
+    Returns (version_tag, site_packages) where version_tag is like "314".
+
+    The value is queried rather than assumed: BUILD_PYTHON_VERSION names a venv
+    directory, and a directory name is not evidence of the interpreter inside
+    it. A .venv314 built from the wrong Python would otherwise produce a bundle
+    verified against the wrong pythonXY.dll.
+    """
+    out = subprocess.run(
+        [
+            python_exe,
+            "-c",
+            "import sys,sysconfig;"
+            "print(f'{sys.version_info.major}{sys.version_info.minor}');"
+            "print(sysconfig.get_paths()['purelib'])",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    return out[0], Path(out[1])
+
+
 def run_pyinstaller() -> bool:
-    print_step("Step 2: Running PyInstaller (Python 3.12)")
+    print_step("Step 2: Running PyInstaller")
 
     spec_file = PROJECT_ROOT / "spectral_predict_py312.spec"
     if not spec_file.exists():
@@ -134,15 +171,17 @@ def run_pyinstaller() -> bool:
         print(f"ERROR: Main script not found: {main_script}")
         return False
 
-    # Clean previous 3.12 build artifacts only — leave the 3.11 dist/ alone.
-    py312_dist = DIST_DIR / APP_NAME
-    py312_build = PROJECT_ROOT / "build" / APP_NAME
-    for d in (py312_dist, py312_build):
+    # Clean this bundle's previous build artifacts.
+    prev_dist = DIST_DIR / APP_NAME
+    prev_build = PROJECT_ROOT / "build" / APP_NAME
+    for d in (prev_dist, prev_build):
         if d.exists():
             print(f"Removing {d} ...")
             shutil.rmtree(d)
 
     python_exe = _find_build_python()
+    py_tag, venv_site_pkgs = _query_build_python(python_exe)
+    print(f"Build interpreter: {python_exe} (Python {py_tag[0]}.{py_tag[1:]})")
     cmd = [
         python_exe, "-m", "PyInstaller",
         "--clean",
@@ -159,8 +198,8 @@ def run_pyinstaller() -> bool:
         print(f"ERROR: PyInstaller failed with code {e.returncode}")
         return False
     except FileNotFoundError:
-        print("ERROR: PyInstaller not installed in .venv312.")
-        print("  .venv312\\Scripts\\pip install pyinstaller")
+        print(f"ERROR: PyInstaller not installed in {BUILD_VENV.name}.")
+        print(f"  {BUILD_VENV.name}\\Scripts\\pip install pyinstaller")
         return False
 
     if IS_MACOS:
@@ -181,7 +220,7 @@ def run_pyinstaller() -> bool:
     # Post-build verification
     critical_files = [
         exe_path,
-        DIST_DIR / APP_NAME / "_internal" / "python312.dll",
+        DIST_DIR / APP_NAME / "_internal" / f"python{py_tag}.dll",
         DIST_DIR / APP_NAME / "_internal" / "python3.dll",
     ]
     all_ok = True
@@ -230,7 +269,6 @@ def run_pyinstaller() -> bool:
     # from 'pandas.util' at bundle launch. Detect by byte-comparing against the
     # source venv and restore when mismatched.
     print("\nVerifying critical bundled files against venv ...")
-    venv_site_pkgs = PROJECT_ROOT / ".venv312" / "Lib" / "site-packages"
     repair_targets = [
         Path("pandas") / "util" / "__init__.py",
     ]

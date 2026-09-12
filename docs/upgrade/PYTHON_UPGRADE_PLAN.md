@@ -17,8 +17,13 @@ undiagnosable.
 - Install CPython 3.14 and carry through to a validated frozen bundle.
 - Dependencies in two tiers: Tier 1 (non-numerical) lands freely; Tier 2 (numerical)
   is gated behind a before/after results comparison.
-- CI matrix becomes `['3.12','3.14']`, `requires-python` floor raised to match
-  (drops 3.10/3.11 — a deliberate support-policy change).
+- **3.14 only going forward.** No backwards compatibility is maintained: anyone
+  running this needs 3.14. CI matrix becomes `['3.14']`; `requires-python` goes to
+  `>=3.14` and the 3.10/3.11/3.12 classifiers are dropped.
+  **Sequencing:** both land in Phase 6, *after* the frozen bundle is validated, not
+  now. `requires-python = ">=3.14"` makes `pip install -e .` fail inside a 3.12
+  venv, which would destroy the rollback lever below — and the whole "3.14 only"
+  decision is conditional on PyInstaller working completely.
 - User-visible artifact names (`SpectralPredict-py312.exe`, install directory,
   installer filename) stay unchanged, so existing installs upgrade in place instead
   of appearing as a second application.
@@ -51,9 +56,9 @@ untestable, and they carry threading risk the linear models never exercise.
 | Phase | State | Result |
 |---|---|---|
 | 0 — Baseline on 3.12 | **done** | Verified self-reproducible: two consecutive runs byte-identical, per-sample predictions included. Full suite: **7 failed, 2971 passed, 33 skipped, 50m29s**. |
-| 1 — Version-agnostic repo fixes | in progress | |
+| 1 — Version-agnostic repo fixes | **done** | jcamp, build toolchain pinned, stale comments, build path parameterized. Baseline unchanged; 112 targeted tests pass. |
 | 2 — Tier-1 dependency bumps | not started | |
-| 3 — 3.14 interpreter, pins held | **verified early** | See below. |
+| 3 — 3.14 interpreter, pins held | **done** | Byte-identical results; **identical pytest failure set, zero new failures**. See below. |
 | 4 — Tier-2 numerical bumps | not started | Ordering corrected, see C6. |
 | 5 — Frozen bundle + validation gate | not started | |
 | 6 — CI, docs | not started | |
@@ -70,8 +75,27 @@ testable during Phase 0 and was run early.
 - **Results are byte-identical between 3.12 and 3.14 with identical pins** — both
   the per-sample predictions and the ranked tables.
 
+Full suite on 3.14: **7 failed, 2971 passed, 33 skipped** — the *same seven tests*
+as the 3.12 baseline, and the same pass count. **Zero new failures.**
+
 Wheel availability is not working software, and this is not yet the frozen bundle.
-But the interpreter itself is numerically neutral for this workload.
+But the interpreter is numerically neutral for this workload at source level.
+
+### Phase 5 is the real risk, and source-level green does not predict it
+
+The user's report: in the past the source worked while **the standalone did not run
+properly**. The repo records the mechanism at `docs/SESSION_LOG_ARCHIVE.md:2159` —
+the Python 3.12 PyInstaller **windowed** bundle crashed whenever LightGBM (or any
+joblib/loky parallel code) spawned workers. The child process ran
+`multiprocessing.freeze_support()` inside the frozen runtime hook and died parsing
+argv (`ValueError: not enough values to unpack (expected 2, got 1)`); the parent
+retried the spawn, producing a fork-bomb of GUI windows. This is why
+`_frozen_needs_threading_fallback()` returns True for **any** frozen build with no
+Python-version condition, and why that fallback must be retained.
+
+Consequently the Phase 5 gate must **launch the windowed bundle and run a real CV
+job using LightGBM**, not merely confirm the build produced files. Nothing in
+Phases 0-4 can substitute for that.
 
 ### Baseline pytest failure set on 3.12 (the anchor)
 
