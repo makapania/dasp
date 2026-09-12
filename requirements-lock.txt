@@ -24,8 +24,14 @@
 #     .venv314\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
 #     (then re-add this header)
 #
-# Note: includes dev extras (pytest, black, flake8, build, twine) and their
-# Windows-only deps (pywin32-ctypes, keyring). All machines are Windows.
+# Note: includes dev extras (pytest, pytest-timeout, black, flake8, build,
+# twine) and their Windows-only deps (pywin32-ctypes, keyring). All machines
+# are Windows.
+#
+# pytest-timeout is pinned rather than captured from a freeze: it was missing
+# from the original one, and CI (.github/workflows/ci.yml) needs it for the
+# T-CI-1 timeout flags. Verified 2026-09-11 on a clean venv - adds no
+# transitive deps.
 #
 # Includes the BUILD toolchain (pyinstaller, pyinstaller-hooks-contrib, and
 # their deps altgraph + pefile). The entire distribution path is a frozen

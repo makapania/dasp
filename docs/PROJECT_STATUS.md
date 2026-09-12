@@ -211,6 +211,32 @@ regenerate and commit the lock:
 
 (then restore the comment header at the top of the file).
 
+**Verified on a second machine 2026-09-11.** The recreate procedure above was run
+end-to-end on a clean Windows box with no prior Python: all pins resolved with no
+conflicts, `spectral_predict` imports from `src/`, and no stale `spectral-predict.exe`
+shim appears in a fresh venv. Two fixes came out of that run:
+
+- `pytest-timeout` was **missing from the lock** — `pyproject.toml` declares it in the
+  dev extra and `.github/workflows/ci.yml` needs it for the T-CI-1 timeout flags, but
+  the original `pip freeze` did not capture it, so a machine following this procedure
+  got a venv that could not run CI's test invocation (`--no-deps` backfills nothing).
+  Now pinned at `pytest-timeout==2.4.0`; it adds no transitive deps.
+- The activate line above contained a raw `0x07` (BEL) byte instead of `\a`, so it read
+  `.venv312\Scriptsctivate` and could not be copy-pasted.
+
+> **That verification covered the Python 3.12 procedure**, which the 3.14 section at the
+> top of this file supersedes. Both fixes it produced still stand — `pytest-timeout` is
+> pinned and the BEL byte is gone. The **3.14** recreate procedure has been run
+> end-to-end on the primary machine only; a second-machine run is still outstanding.
+
+**Superseded 2026-09-12.** This previously read: *"Python 3.12 only" is a convention
+enforced only in docs — `pyproject.toml` still declares `requires-python = ">=3.10"`
+and advertises 3.10/3.11/3.12 classifiers, so nothing stops an install on 3.10. Left
+as-is deliberately; tighten it only if the packaging metadata is meant to match the
+rule.* That tightening has now happened: the version rule is **enforced by packaging
+metadata**, not convention. `requires-python = ">=3.14"`, the classifiers list 3.14
+alone, and CI tests 3.14 only, so pip refuses to install on anything older.
+
 ### If you are verifying branch code from a git worktree
 
 The editable install pins `spectral_predict` to a **fixed path under the main
