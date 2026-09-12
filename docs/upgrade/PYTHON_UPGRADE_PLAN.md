@@ -222,20 +222,50 @@ Found by direct execution, and by an adversarial Codex review of both documents.
 These are separate tickets. They are recorded here because the upgrade makes several
 of them more dangerous, not because this work should fix them.
 
-- **Optuna resume can mix numerical environments.** Study identity
-  (`unified_bayesian.py:2562`) includes the application version and analysis config
-  but **not** the Python or dependency versions. A resumed study reloads completed
-  trial fingerprints and returns cached scores without refitting — so after an
-  upgrade, with the app version unchanged, one study can blend results computed
-  under two different numerical stacks. Use fresh studies for all migration
-  comparisons, and preserve existing databases for rollback.
+- **Optuna resume could mix numerical environments — FIXED 2026-09-12.** Study
+  identity (`unified_bayesian.py:2562`) included the application version and
+  analysis config but **not** the Python or dependency versions, and a resumed
+  study reloads completed trial fingerprints and returns cached scores without
+  refitting. Codex reproduced it directly: a trial scored on Python 3.12 / numpy
+  2.4.4 / sklearn 1.8 replayed its exact value on Python 3.14 / numpy 2.5.3 /
+  sklearn 1.9.1 with **zero CV calls**.
+
+  Fixed by keying the study name on a numerical-environment digest as well as the
+  config hash (`unified_bayesian_<model>_<confighash>_env1_<envhash>`). The
+  readable environment is stored in `study.user_attrs["numerical_environment"]`
+  so a database can be explained without reversing a hash, and a study from a
+  different environment produces an explicit logger + `progress_callback` notice
+  rather than silently starting from zero.
+
+  Two deliberate design choices: an **unreadable** package version raises
+  `EnvironmentFingerprintError` rather than degrading to a placeholder (two
+  environments that both failed to report a version would hash identically and
+  become resume-compatible — the exact bug); and existing pre-fix studies become
+  ineligible for automatic continuation, which is intentional one-time cache
+  invalidation. Their databases stay intact and readable.
+
+  **Coverage boundary:** the tests cover the digest and its sensitivity to each
+  relevant change, plus the existing T-41 storage behaviour. A full cross-version
+  SQLite replay matrix (create under one environment, resume under another,
+  counting real CV calls) is **not** implemented and would be the stronger test.
 - **Installer build failure is silent.** In `build_installer_py312.py:281–338`,
   missing ISCC / ISS files and compiler failures are non-fatal, `main()` ignores the
   return value, and prior installer output is not cleared — so a failed build can
   report success while leaving a **stale** installer at the expected path.
-- **`MultiGroupEPO` seeds off `hash(label)`** (`contaminant_analysis.py:2323`), which
-  is `PYTHONHASHSEED`-dependent, and those vectors determine a projection applied to
-  spectra.
+- **`MultiGroupEPO` seeded off `hash(label)` — FIXED 2026-09-12.**
+  (`contaminant_analysis.py:2323`.) `str` hashing is randomised per process, and
+  those draws feed the SVD that builds the projection matrix applied to spectra in
+  `transform()`, so the returned scientific data differed between runs of the same
+  analysis. Codex measured a **max transformed-value difference of ~1.98** between
+  two hash seeds. Replaced with a stable `blake2b` digest of the label.
+
+  Also fixed alongside it: group iteration used caller insertion order, which set
+  the interferent-library row order and hence the SVD input, so the same groups
+  assembled in a different order gave different projections (~5e-15). Now sorted.
+
+  **This does NOT fix the separate GUI "Apply EPO" path**, which constructs
+  `EstimatedEPO` (GUI:58521) defaulting to `random_state=None`
+  (`contaminant_analysis.py:462`) and remains nondeterministic. Separate ticket.
 - **NSGA-II's seed does not control all its streams** (`nsga2_search.py:187`, `:387`):
   mutation and sampling construct unseeded `default_rng()`, and initialization uses
   global `np.random`.

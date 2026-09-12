@@ -153,8 +153,22 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > seeds off `hash(label)`, which is `PYTHONHASHSEED`-dependent. See
 > `docs/upgrade/PYTHON_UPGRADE_PLAN.md`.
 >
-> **Review recommendation (2026-09-12, Codex): FIX NOW for both pre-existing bugs;
-> neither fix is implemented yet.** Optuna needs environment-specific study names,
+> **UPDATE — BOTH ARE NOW FIXED (2026-09-12).** Codex's design was followed.
+> Optuna study names carry a numerical-environment digest
+> (`unified_bayesian_<model>_<confighash>_env1_<envhash>`), the readable
+> environment is stored in `study.user_attrs["numerical_environment"]`, an
+> incompatible prior study produces an explicit notice instead of a silent fresh
+> start, and an unreadable package version raises rather than degrading to a
+> placeholder. MultiGroupEPO uses a stable blake2b label digest and sorted group
+> assembly. Existing pre-fix studies are intentionally no longer auto-resumable;
+> their databases stay intact. **Still open:** the separate GUI
+> `EstimatedEPO(random_state=None)` path remains nondeterministic, and a full
+> cross-version SQLite replay matrix is not implemented.
+>
+> The original review recommendation follows.
+>
+> **Review recommendation (2026-09-12, Codex): FIX NOW for both pre-existing bugs.**
+> Optuna needs environment-specific study names,
 > stored environment metadata, and a visible fresh-study notice for incompatible
 > or legacy caches; preserve existing databases, but do not resume their unknown
 > scores. MultiGroupEPO needs a stable label digest and sorted group assembly.

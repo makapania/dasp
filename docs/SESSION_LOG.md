@@ -787,6 +787,50 @@ CLAUDE.md. Older entries should be moved to `SESSION_LOG_ARCHIVE.md` in a dedica
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — fourth batch on 2026-08-30 moved entries dated before 2026-07-01 (the four June 2026 entries). Third batch (2026-07-30) moved entries before 2026-06-01. Second batch (2026-05-02) moved 2026-05-01 and earlier. First batch (2026-04-29) moved entries before 2026-04-15. Active log keeps roughly the last two months. Grep the archive when you need historical context on a closed bug, decision, or PR.
 
 
+## 2026-09-12 - Both bugs fixed, and two verification failures worth remembering
+
+Implemented the Codex review below. Notes on the parts that were not obvious.
+
+**An unreadable version must be fatal, not a placeholder.** The Optuna fingerprint
+raises `EnvironmentFingerprintError` when a tracked distribution's version cannot
+be read. Degrading to `"unknown"` would make two DIFFERENT broken environments
+hash identically and therefore resume-compatible - the exact bug the fingerprint
+exists to prevent. A genuinely ABSENT package is different: that is a definite
+fact, recorded as `"absent"` and hashed.
+
+**Enumerating Optuna studies CREATES the SQLite file.** The 'previous results were
+computed elsewhere' notice originally ran whenever a storage URL existed, which
+broke the 'never' and 'auto'-warmup promise of staying purely in memory. Two T-41
+tests caught it (`test_auto_picks_in_memory_no_db_file`,
+`test_never_mode_in_memory_no_db`). Now gated on `always`, which is also the only
+mode that actually resumes before a trial runs.
+
+**A revert that silently does not apply produces a fake proof.** Verifying that the
+new MultiGroupEPO tests actually FAIL against the old code, the revert was written
+with `
+` line endings against a CRLF file, so `str.replace` matched nothing. The
+tests 'passed against the buggy code' because the buggy code was never restored.
+**Assert the mutation happened** (count occurrences before/after) rather than
+trusting a replace, and do byte-level edits on CRLF files.
+
+**A test can pass for the wrong reason.** `test_group_labels_are_sorted` used the
+probe's forward group order, which happened to ALREADY be sorted - so it passed
+with the bug present. It only distinguishes sorted-vs-insertion order when the
+input is deliberately unsorted.
+
+**`run_unified_bayesian`'s third positional is `wavelengths`, not `task_type`.**
+Passing `'regression'` there makes every trial fail with `IndexError: too many
+indices for array: array is 0-dimensional`, and the run returns an empty
+leaderboard rather than raising. That looks exactly like an upgrade regression.
+Signature: `run_unified_bayesian(X, y, wavelengths, model_name, task_type=...)`.
+
+**Not fixed, deliberately:** the GUI 'Apply EPO' path builds `EstimatedEPO`
+(GUI:58521) with `random_state=None` (`contaminant_analysis.py:462`) and is still
+nondeterministic. The full cross-version SQLite replay matrix is also not built;
+current coverage is the digest's sensitivity plus the existing T-41 storage tests.
+
+---
+
 ## 2026-09-12 - Codex review: numerical-environment resume and MultiGroupEPO seeds
 
 Evaluation only; no application source edits. Both pre-existing bugs are real.

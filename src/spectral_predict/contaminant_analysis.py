@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import numpy as np
 import warnings
+from hashlib import blake2b
 from typing import Optional, Tuple, List, Dict, Any, Union
 
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -2278,9 +2279,13 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         if not contaminant_groups:
             raise ValueError("contaminant_groups cannot be empty")
 
-        # Validate all groups
+        # Validate all groups.
+        # Sorted, not insertion-ordered: group order determines the order of the
+        # interferent library rows and hence the SVD input, so two callers passing
+        # the same groups in a different order got measurably different projections.
+        # Sorting makes the result depend on the groups, not on how they were built.
         validated_groups = {}
-        for label, X_group in contaminant_groups.items():
+        for label, X_group in sorted(contaminant_groups.items()):
             X_group = check_array(X_group, dtype=np.float64)
             if X_group.shape[1] != self.n_features_in_:
                 raise ValueError(
@@ -2320,7 +2325,16 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
             diff_std = np.std(diff) if np.std(diff) > 1e-10 else 1.0
 
             group_library = [diff]
-            rng = np.random.RandomState(hash(label) % 2**31)
+            # Stable digest, NOT hash(): Python randomizes str hashing per process
+            # (PYTHONHASHSEED), and these draws feed the SVD that produces the
+            # projection matrix applied to spectra in transform(). Seeding off
+            # hash() therefore made the returned scientific data differ between
+            # runs of the same analysis. blake2b is stable across processes,
+            # machines and Python versions.
+            seed = int.from_bytes(
+                blake2b(str(label).encode("utf-8"), digest_size=4).digest(), "big"
+            ) % 2**31
+            rng = np.random.RandomState(seed)
             for _ in range(n_pseudo - 1):
                 noise = rng.randn(len(diff)) * diff_std * 0.1
                 group_library.append(diff + noise)
