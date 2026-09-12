@@ -1,14 +1,79 @@
 # Project Status
 
+## ⚠ MOVING A 3.12 MACHINE TO 3.14 (added 2026-09-12) — DO THIS FIRST
+
+If this machine is still on `.venv312`, do this **before** pulling and before trying
+to run anything. The project is now Python 3.14 only.
+
+> **The trap:** `pyproject.toml` now sets `requires-python = ">=3.14"`. The moment you
+> pull, `pip install -e .` **fails inside `.venv312`** with a `requires-python` error.
+> That is expected, not a broken checkout. Build the new environment instead of trying
+> to repair the old one.
+
+```bash
+# 1. Install Python 3.14 (ordinary GIL build, NOT the free-threaded "t" variant)
+winget install Python.Python.3.14
+py -3.14 -V                       # expect 3.14.x
+
+# 2. Pull
+cd <repo>
+git checkout feat/python-314-upgrade    # or main, once this is merged
+git pull
+
+# 3. Build the new environment alongside the old one. Do NOT delete .venv312 yet.
+py -3.14 -m venv .venv314
+.venv314\Scripts\python -m pip install --upgrade pip
+.venv314\Scripts\python -m pip install -r requirements-lock.txt
+.venv314\Scripts\python -m pip install -e . --no-deps
+.venv314\Scripts\python -m pip check          # expect: No broken requirements found.
+
+# 4. Verify before trusting it
+.venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
+#    Expect 7 failed / 2971 passed / 33 skipped. Those 7 are PRE-EXISTING
+#    (T-CI-1 rot, listed below). The bar is ZERO NEW failures, not a green run.
+
+# 5. Launch the GUI
+.venv314\Scripts\python spectral_predict_gui_optimized.py
+```
+
+**The launchers are already updated on this branch.** `install.bat`, `install.sh`,
+`RUN_SPECTRAL_PREDICT.bat` and `run_gui.sh` all target 3.14 / `.venv314`, and the
+installers now install `requirements-lock.txt` instead of resolving pyproject floors.
+Steps 3–4 above are exactly what `install.bat` does, so you can just run that.
+
+**Note that `py` now defaults to 3.14** once installed, so a bare `py` or `python` no
+longer means what it did. Always use the explicit `.venv314\Scripts\python` path.
+
+**Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
+so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A true
+rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
+you are confident, and reclaim the disk then.
+
+**If you want to test the installer** (still unverified — see ACTIVE DIRECTION below),
+this is the machine to do it on, because it has a real prior installation:
+1. Note what is currently installed, then run
+   `dist\installer\SpectralPredict_Setup_py312_0.5.0b2.exe` **over** it.
+2. Confirm it upgrades in place rather than appearing as a second app (the artifact
+   names still say `py312` deliberately, precisely so this works).
+3. Launch it, run a small analysis, and confirm no stale DLLs survived — the installer
+   overlays files and has **no obsolete-payload cleanup**, which is the specific risk.
+4. Then test uninstall.
+
+---
+
 ## ⚠ FIRST PULL ON A NEW MACHINE (added 2026-07-30) — DO THIS BEFORE ANYTHING ELSE
 
 If this checkout is the first one on this machine to see commit `763c4ed` or later,
 **run this before running or testing anything:**
 
 ```bash
-# from the repo root, with .venv312 active (project is Python 3.12 only)
-pip install -e .
+# from the repo root, in the project venv (.venv314 — see the 3.14 section above)
+pip install -e . --no-deps
 ```
+
+> Superseded in practice by the 3.14 section above: building a fresh `.venv314` cannot
+> inherit a stale shim, so this only matters for an environment that predates the
+> migration. Kept because the failure mode below is confusing if you hit it.
 
 **Why it is mandatory, not housekeeping.** The `spectral-predict` console script was
 retired and `src/spectral_predict/cli.py` deleted. A `git pull` removes the source but
@@ -96,21 +161,29 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 `pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end
 up on different versions of numpy/pandas/sklearn and disagree about results. The pinned
 set actually verified on the primary machine lives in **`requirements-lock.txt`** at the
-repo root (Python **3.12.10**).
+repo root (Python **3.14.7**).
 
-On a new or drifting machine:
+On a new or drifting machine (or just run `install.bat` / `install.sh`, which do
+exactly this):
 
 ```bash
-py -3.12 -m venv .venv312
-.venv312\Scriptsctivate
+py -3.14 -m venv .venv314
+.venv314\Scripts\activate
 pip install -r requirements-lock.txt
 pip install -e . --no-deps
 ```
 
-After any intentional upgrade, regenerate and commit it:
+Check for and apply updates with the standing process rather than improvising:
 
 ```bash
-.venv312\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
+python scripts\upgrade_check.py   # what is outdated, risky, blocked, order-forced
+```
+
+then follow `docs/upgrade/UPGRADE_RUNBOOK.md`. After any intentional upgrade,
+regenerate and commit the lock:
+
+```bash
+.venv314\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
 ```
 
 (then restore the comment header at the top of the file).
@@ -1303,7 +1376,7 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 **Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (see `src/spectral_predict/search.py:_frozen_needs_threading_fallback` — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
 
 **Still in-repo from the source-install era (kept, not deleted):**
-- `install.bat` / `install.sh`: detects Python 3.12, creates `.venv312`, runs `pip install -e . --upgrade`. Idempotent. Useful for developer setup.
+- `install.bat` / `install.sh`: detects Python 3.14, creates `.venv314`, installs `requirements-lock.txt` then `pip install -e . --no-deps`. Idempotent. Useful for developer setup.
 - `INSTALL.md`: GUI-focused walkthrough — now developer-facing, not user-facing.
 - `pyproject.toml` deps audited via AST scan. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1`. Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11`.
 
