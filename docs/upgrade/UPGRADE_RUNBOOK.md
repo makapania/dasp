@@ -108,6 +108,12 @@ pre-existing failures since ~June 2026 (T-CI-1). Diff your failure set against
 the known-red list in `docs/PROJECT_STATUS.md`; a red run that adds nothing new
 is a pass.
 
+`--gate` writes its baseline to `docs/upgrade/.baselines/`. **That directory is
+committed on purpose — do not add it to `.gitignore`.** Committing it is what
+makes `git diff docs/upgrade/.baselines` a meaningful before/after across
+upgrades rather than a comparison against whatever happens to be on this
+machine. The files are small (a few hundred rows).
+
 For the baseline, compare against the previous run. Per-sample predictions are
 the sharper signal — aggregate CV metrics can round two different prediction
 vectors to the same RMSE. Expect metric deltas around 1e-13 after any numpy or
