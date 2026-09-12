@@ -299,6 +299,10 @@ def find_inno_setup() -> Path | None:
         Path(r"C:\Program Files\Inno Setup 6\ISCC.exe"),
         Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Inno Setup 6" / "ISCC.exe",
         Path(os.environ.get("PROGRAMFILES", "")) / "Inno Setup 6" / "ISCC.exe",
+        # winget installs Inno Setup per-user by default, which is NOT under
+        # either Program Files. Omitting this is how a machine with Inno Setup
+        # correctly installed still reports "Inno Setup not found".
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Inno Setup 6" / "ISCC.exe",
     ]
     for path in candidates:
         if path.exists():
@@ -313,25 +317,47 @@ def find_inno_setup() -> Path | None:
 
 
 def run_inno_setup() -> bool:
-    """Run Inno Setup on the 3.12 .iss script. Non-fatal if ISCC is missing."""
-    print_step("Step 3: Running Inno Setup (optional)")
+    """Run Inno Setup on the .iss script and verify THIS run produced an installer.
+
+    Previously every failure path here returned True and main() discarded the
+    result, so a build that produced no installer -- or that failed outright --
+    still printed "Build Complete". Worse, stale output was never cleared, so the
+    completion banner could advertise an installer left over from an earlier
+    build. For a project whose only distribution channel is this installer, that
+    is the most expensive possible thing to get wrong silently.
+
+    Set DASP_SKIP_INSTALLER=1 to deliberately build the bundle only.
+    """
+    print_step("Step 3: Running Inno Setup")
+
+    installer_dir = DIST_DIR / "installer"
+    installer_path = installer_dir / f"SpectralPredict_Setup_py312_{VERSION}.exe"
+
+    # Remove stale output FIRST, so nothing downstream can mistake a previous
+    # build's installer for this one.
+    if installer_path.exists():
+        print(f"Removing stale installer: {installer_path}")
+        installer_path.unlink()
+
+    if os.environ.get("DASP_SKIP_INSTALLER"):
+        print("DASP_SKIP_INSTALLER set — skipping installer creation deliberately.")
+        print(f"The bundled app is ready at: {DIST_DIR / APP_NAME / APP_NAME}.exe")
+        return True
 
     iscc = find_inno_setup()
     if iscc is None:
-        print("INFO: Inno Setup not found — skipping installer creation.")
+        print("ERROR: Inno Setup not found — cannot create the installer.")
         print("Install from: https://jrsoftware.org/isdl.php")
-        print(f"\nThe bundled app is ready at: {DIST_DIR / APP_NAME / APP_NAME}.exe")
-        return True  # non-fatal
+        print("Or set DASP_SKIP_INSTALLER=1 to build the bundle only.")
+        return False
 
     print(f"Found Inno Setup: {iscc}")
 
     iss_file = PROJECT_ROOT / "installer" / "spectral_predict_py312.iss"
     if not iss_file.exists():
-        print(f"WARNING: ISS file not found: {iss_file}")
-        print("Skipping installer creation.")
-        return True  # non-fatal
+        print(f"ERROR: ISS file not found: {iss_file}")
+        return False
 
-    installer_dir = DIST_DIR / "installer"
     installer_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -340,18 +366,19 @@ def run_inno_setup() -> bool:
             cwd=str(PROJECT_ROOT / "installer"),
             check=True,
         )
-        installer_path = installer_dir / f"SpectralPredict_Setup_py312_{VERSION}.exe"
-        if installer_path.exists():
-            size_mb = installer_path.stat().st_size / (1024 * 1024)
-            print(f"Created: {installer_path}")
-            print(f"Size: {size_mb:.1f} MB")
-        else:
-            print("WARNING: installer exe not found at expected path — check Inno Setup output above.")
-        return True
     except subprocess.CalledProcessError as e:
-        print(f"WARNING: Inno Setup failed with code {e.returncode}")
-        print("The bundled app folder is still usable; only the installer wrapper failed.")
-        return True  # non-fatal — don't fail the build
+        print(f"ERROR: Inno Setup failed with code {e.returncode}")
+        return False
+
+    if not installer_path.exists():
+        print(f"ERROR: Inno Setup reported success but produced no installer at {installer_path}")
+        print("Check the Inno Setup output above — OutputBaseFilename may have drifted.")
+        return False
+
+    size_mb = installer_path.stat().st_size / (1024 * 1024)
+    print(f"Created: {installer_path}")
+    print(f"Size: {size_mb:.1f} MB")
+    return True
 
 
 # ============================================================================
@@ -373,11 +400,14 @@ def main() -> int:
         print("\nBuild failed at PyInstaller step.")
         return 1
 
-    if IS_WINDOWS:
-        run_inno_setup()
+    if IS_WINDOWS and not run_inno_setup():
+        print("\nBuild failed at Inno Setup step.")
+        return 1
 
-    print_step("3.12 Bundle Build Complete")
+    print_step("Bundle Build Complete")
     print(f"Standalone app: {DIST_DIR / APP_NAME / APP_NAME}.exe")
+    # run_inno_setup() deleted any stale installer before building, so reaching
+    # here with the file present means THIS run produced it.
     installer_path = DIST_DIR / "installer" / f"SpectralPredict_Setup_py312_{VERSION}.exe"
     if installer_path.exists():
         print(f"Installer:      {installer_path}")
