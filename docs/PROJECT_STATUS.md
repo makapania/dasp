@@ -42,7 +42,54 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
    T-CI-1 rot, NOT this merge. Do not treat a red check as a signal about your own
    branch — until T-CI-1 closes, diff your failure set against `origin/main` and
    confirm you add zero NEW failures. Current known-red on `main`:
-   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2).
+   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2),
+   **plus two GUI tests** (`tests/gui/test_comprehensive.py::test_catboost_via_gui`,
+   `tests/gui/test_multiclass_gui.py::test_tab9_rejects_multiclass_primary`). That is
+   **7 total** — the list above previously said 5 and was stale. Verified 2026-09-12
+   by full runs on 3.12, on 3.14, and on 3.14 with every dependency upgraded: the
+   same seven fail in all three, 2971 pass, 33 skip.
+
+> ## ▶ ACTIVE DIRECTION (2026-09-12) — **Python 3.14 migration COMPLETE**, all dependencies current, on `feat/python-314-upgrade`
+>
+> **The project is Python 3.14 only.** `requires-python = ">=3.14"`, CI matrix is
+> `['3.14']`, classifiers list 3.14 alone. Earlier versions are not supported and
+> pip refuses to install on them. Use the ordinary GIL build, **not** free-threaded.
+> Recreate an environment with `py -3.14 -m venv .venv314` +
+> `pip install -r requirements-lock.txt` + `pip install -e . --no-deps`.
+>
+> **What was verified, not assumed.** The analysis in `docs/PYTHON_UPGRADE_DECISION.md`
+> was read-only — its own Appendix B says nothing was ever installed, built or run.
+> All of it has now been executed:
+> - All 114 pinned distributions install on CPython 3.14.7; whole stack imports.
+> - Full suite: **7 failed / 2971 passed / 33 skipped, identical on 3.12, on 3.14,
+>   and on 3.14 with every dependency upgraded. Zero new failures.**
+> - **The frozen bundle builds AND runs** — 42/42 imports, all three booster DLLs,
+>   threading fallback engaged, a real LightGBM CV job completing (the historical
+>   fork-bomb scenario), GUI launching, and a 243.9 MB Inno installer produced.
+>
+> **Dependencies are all current except two**, held back by an upstream pin, not by
+> oversight: `alive-progress 3.3.0` requires `about-time==4.2.1` and
+> `graphemeu==0.7.2` exactly and is itself the latest release. Majors that landed:
+> optuna 5.0, plotly 7.0, moocore 0.3.2, xgboost 3.4.1, numpy 2.5.3, sklearn 1.9.1.
+>
+> **Rollback is one variable.** The build path no longer hardcodes an interpreter;
+> `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. The
+> user-visible artifact names still say `py312` **deliberately** — they are a stable
+> identity so existing installs upgrade in place. Do not "fix" them.
+>
+> **Keeping current is now a routine:** `python scripts/upgrade_check.py` reports
+> what is outdated, what is risky (numerical vs infrastructure), what cannot move
+> and why, and what ordering version caps force. `docs/upgrade/UPGRADE_RUNBOOK.md`
+> is the process; run it quarterly or when a new Python minor ships.
+>
+> **Two pre-existing issues found en route, NOT fixed here** (separate tickets):
+> Optuna study identity omits Python/dependency versions, so a *resumed* study can
+> return cached scores computed under a different numerical stack; and `MultiGroupEPO`
+> seeds off `hash(label)`, which is `PYTHONHASHSEED`-dependent. See
+> `docs/upgrade/PYTHON_UPGRADE_PLAN.md`.
+>
+> **Not done:** installing from the generated installer on a clean machine, and
+> verifying an in-place upgrade over an existing installation.
 
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 

@@ -4,6 +4,70 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 ---
 
+## 2026-09-12 - Python 3.14 migration: what the analysis got wrong, and what only building could tell us
+
+**An analysis document that was never executed had nine errors in it.**
+`docs/PYTHON_UPGRADE_DECISION.md` was careful, cited file:line throughout, and
+was still wrong in ways that would each have cost a turn. Its own Appendix B
+admits nothing was installed, built or run. Recorded because the failure mode
+generalizes: *verified by inspection* and *verified* are different claims.
+
+- It reported the installed jcamp as 1.2.1 drifting from a 1.2.2 lockfile pin.
+  It had read `jcamp.__version__`, which the package ships stale. pip metadata
+  said 1.2.2 and matched. **Reading a `__version__` attribute is not a version
+  check** - use `importlib.metadata`.
+- It said the build path hardcodes 3.12 "in four places". It was ~25 across
+  three files, several user-visible.
+- It called source-only `jcamp==1.2.2` the one blocker for 3.14. It builds from
+  source on 3.14 without complaint.
+- It carried the Python 3.12 float `sum()` change in as a migration risk. That
+  landed in 3.11->3.12; the project already started at 3.12.
+- Both build files still deferred to a "production 3.11 spec" and a
+  `build_installer.py` that no longer exist.
+
+**The pandas TOC collision fires on essentially every build.** The post-COLLECT
+repair in `build_installer_py312.py` triggered on all three 3.14 builds. It is
+load-bearing, not a historical workaround awaiting cleanup.
+
+**PyInstaller's manual DLL globs never matched OpenBLAS.** The spec collects
+`*/lib/*.dll`, `*/*.libs/*.dll`, `*/.libs/*.dll`, `*/libs/*.dll` - every pattern
+requires a parent directory. But `numpy.libs/`, `scipy.libs/`, `pandas.libs/`
+and `llvmlite.libs/` sit at the TOP level of site-packages. The bundle works
+only because PyInstaller's hooks collect them. **That manual list is a false
+safety net**; if hook behavior changes, it will not catch the fall.
+
+**A build step that could not fail was failing.** Every path in
+`run_inno_setup()` returned True and `main()` discarded the result, so a build
+producing no installer printed "Build Complete" and exited 0. Reproduced
+directly. Compounding it, `find_inno_setup()` never checked
+`%LOCALAPPDATA%\Programs`, which is where winget installs Inno Setup - so a
+machine with it correctly installed reported "not found". For a project whose
+only distribution channel is that installer, this was the most expensive
+possible thing to fail quietly.
+
+**Aggregate metrics hide per-sample changes.** The first baseline compared only
+ranked tables. Adding per-sample out-of-fold predictions changed what the
+comparison could see: after numpy 2.4.4->2.5.3, per-sample predictions were
+byte-identical while every aggregate metric column moved by 1e-13 to 1e-15.
+Comparing only one of the two would have given a misleading answer either way.
+
+**Ranking ties are decided by floating-point noise.** That same numpy bump
+swapped ranks 225/226 between two PLS models whose `CompositeScore` agreed to 15
+significant figures. Harmless here, but near-tied rows can reorder for reasons
+unrelated to model quality.
+
+**Upgrade ordering can be forced by a cap you cannot see.** `numba 0.66`
+required `numpy<2.5`, so numpy could not advance until numba did - the resolver
+does not explain this, it just refuses. Conversely `alive-progress 3.3.0` pins
+`about-time` and `graphemeu` to exact versions, so pip installs the newer one
+and *then* reports the conflict, leaving the environment broken.
+`scripts/upgrade_check.py` now detects both classes before you try.
+
+**Do not modify a venv while its test suite is running.** Upgrading a package
+mid-run invalidated a 1-hour suite and it had to be redone.
+
+---
+
 ## 2026-09-10 - Repo hygiene: a .gitignore rule that never matched, and AGENTS.md drift
 
 **1. `git status` output is not valid `.gitignore` syntax.** The rule added to
