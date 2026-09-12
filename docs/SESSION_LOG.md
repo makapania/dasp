@@ -785,3 +785,49 @@ CLAUDE.md. Older entries should be moved to `SESSION_LOG_ARCHIVE.md` in a dedica
 ---
 
 > **Older entries archived to [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md)** — fourth batch on 2026-08-30 moved entries dated before 2026-07-01 (the four June 2026 entries). Third batch (2026-07-30) moved entries before 2026-06-01. Second batch (2026-05-02) moved 2026-05-01 and earlier. First batch (2026-04-29) moved entries before 2026-04-15. Active log keeps roughly the last two months. Grep the archive when you need historical context on a closed bug, decision, or PR.
+
+
+## 2026-09-12 - Codex review: numerical-environment resume and MultiGroupEPO seeds
+
+Evaluation only; no application source edits. Both pre-existing bugs are real.
+Recommendation: FIX NOW for both, but Optuna needs explicit old-cache retirement,
+not merely an extra version string silently changing the study name.
+
+- Optuna persistence defaults to auto in both GUI and backend; after 10 trials it
+  migrates if median completed-trial duration exceeds 1 second (or fewer than 3
+  completed). GUI crash recovery restores the storage URL and forces always mode.
+  A bare backend call without active run_state has no disk persistence.
+- Reproduced on a synthetic temporary SQLite: Python 3.12.10 / numpy 2.4.4 /
+  sklearn 1.8.0 / Optuna 4.8.0 created one completed PLS trial; Python 3.14.7 /
+  numpy 2.5.3 / sklearn 1.9.1 / Optuna 5.0.0 reopened the same named study and
+  replayed its exact score as trial 1 with ZERO CV calls. This also affects TPE
+  history, trial-budget accounting, and old leaderboard rows, so changing only
+  trial fingerprints is insufficient. Source: unified_bayesian.py:2562, 2685,
+  1672, 2912, 3074; GUI:23902.
+- Small fix design: keep the existing config-only name as a base; append a stable
+  environment digest, persist the unhashed environment in study.user_attrs before
+  trials, and warn through logging plus progress_callback if resuming instead
+  starts a fresh environment-specific study. Never reuse legacy scores with
+  unknown provenance. Leave old study rows/databases intact. Old studies cannot
+  continue under the new identity even when their actual environment happens to
+  match: this is intentional one-time cache invalidation, not database corruption.
+- MultiGroupEPO's hash(label) at contaminant_analysis.py:2323 drives the library,
+  SVD, projection at :2376, and transform return at :2405. Two subprocesses with
+  identical synthetic input and PYTHONHASHSEED=1/2 differed by max abs 1.976 in
+  transformed values. An in-memory stable blake2b replacement produced identical
+  library/projection/transformed data across those processes. Reversing dict
+  insertion order still produced 5.3e-15 transform differences; sort string keys
+  during validation to fix numeric assembly order too. No second hash() call was
+  found in src/spectral_predict.
+- Blast-radius nuance: analyze_multiple_contaminants returns this transformer
+  under results['epo'], but computes combined_influence/exclusion_regions through
+  a SEPARATE MultiContaminantAnalyzer(random_state=42), at :2721. The GUI displays
+  that combined result (:57677) and Apply EPO uses EstimatedEPO (:58531), not the
+  MultiGroupEPO object. EstimatedEPO defaults random_state=None (:469), including
+  that GUI call, and remains a separate randomness issue after the hash fix.
+- Existing focused suite: 110 passed (test_bayesian_dedup,
+  test_t41_bayesian_sqlite_auto_calculator, test_t42_write_path_plumbing,
+  test_contaminant_analysis). Existing MultiGroupEPO tests mostly assert shapes;
+  add cross-process transformed-output and dict-order tests. Add end-to-end
+  SQLite resume tests for same environment, changed environment, legacy study,
+  and auto-migration preserving environment metadata.

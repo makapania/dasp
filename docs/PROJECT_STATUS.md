@@ -153,6 +153,15 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > seeds off `hash(label)`, which is `PYTHONHASHSEED`-dependent. See
 > `docs/upgrade/PYTHON_UPGRADE_PLAN.md`.
 >
+> **Review recommendation (2026-09-12, Codex): FIX NOW for both pre-existing bugs;
+> neither fix is implemented yet.** Optuna needs environment-specific study names,
+> stored environment metadata, and a visible fresh-study notice for incompatible
+> or legacy caches; preserve existing databases, but do not resume their unknown
+> scores. MultiGroupEPO needs a stable label digest and sorted group assembly.
+> The latter does not fix the separate GUI EstimatedEPO(random_state=None) path.
+> Cross-version SQLite replay and cross-process EPO output drift reproduced;
+> 110 focused existing tests passed. Details are in SESSION_LOG.md.
+>
 > **Not done:** installing from the generated installer on a clean machine, and
 > verifying an in-place upgrade over an existing installation.
 
