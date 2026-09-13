@@ -207,8 +207,7 @@ class TestAutoCalculatorMigratesForSlowModel:
         # Instead of patching Optuna internals (fragile), directly test
         # _migrate_study_to_sqlite and verify it works.
         # Create an in-memory study, add 10 trials, migrate.
-        sampler = TPESampler(seed=42, n_startup_trials=5, multivariate=True,
-                             warn_independent_sampling=False)
+        sampler = TPESampler(seed=42, n_startup_trials=5, multivariate=True)
         study = optuna.create_study(direction="minimize", sampler=sampler)
 
         def _simple_obj(trial):
@@ -333,7 +332,7 @@ class TestWALModeOnMigratedFile:
             _apply_wal_pragmas,
         )
 
-        sampler = TPESampler(seed=42, n_startup_trials=5, warn_independent_sampling=False)
+        sampler = TPESampler(seed=42, n_startup_trials=5)
         study = optuna.create_study(direction="minimize", sampler=sampler)
 
         def _obj(trial):
@@ -405,7 +404,7 @@ class TestMigrationPreservesTrialCount:
     def test_all_trials_present_after_migration(self, tmp_path):
         from spectral_predict.unified_bayesian import _migrate_study_to_sqlite
 
-        sampler = TPESampler(seed=0, n_startup_trials=5, warn_independent_sampling=False)
+        sampler = TPESampler(seed=0, n_startup_trials=5)
         study = optuna.create_study(
             direction="minimize", sampler=sampler, study_name="trial_count_test"
         )
@@ -442,7 +441,7 @@ class TestResumableAfterMigration:
     def test_resume_continues_from_cutoff(self, tmp_path):
         from spectral_predict.unified_bayesian import _migrate_study_to_sqlite
 
-        sampler = TPESampler(seed=42, n_startup_trials=5, warn_independent_sampling=False)
+        sampler = TPESampler(seed=42, n_startup_trials=5)
         study = optuna.create_study(
             direction="minimize", sampler=sampler, study_name="resume_test"
         )
@@ -456,7 +455,7 @@ class TestResumableAfterMigration:
         resumed = optuna.load_study(
             study_name="resume_test",
             storage=sqlite_url,
-            sampler=TPESampler(seed=42, n_startup_trials=5, warn_independent_sampling=False),
+            sampler=TPESampler(seed=42, n_startup_trials=5),
         )
         assert len(resumed.trials) == 8
         resumed.optimize(lambda t: t.suggest_float("x", 0, 10) ** 2, n_trials=5)
@@ -494,8 +493,7 @@ class TestTPEContinuesLearningAcrossMigration:
             y_val = trial.suggest_float("y", -2.0, 2.0)
             return (x - 0.3) ** 2 + (y_val - 0.7) ** 2  # minimum at (0.3, 0.7)
 
-        sampler = TPESampler(seed=42, n_startup_trials=10, multivariate=True,
-                             warn_independent_sampling=False)
+        sampler = TPESampler(seed=42, n_startup_trials=10, multivariate=True)
         study = optuna.create_study(direction="minimize", sampler=sampler,
                                     study_name="tpe_learning_test")
         study.optimize(_obj, n_trials=5)

@@ -492,7 +492,7 @@ you should actually install.
 - numpy ≥ 2.0.0
 - pandas ≥ 2.0.0
 - scikit-learn ≥ 1.5.0
-- scipy ≥ 1.7.0
+- scipy ≥ 1.11.0
 - matplotlib ≥ 3.5.0
 - tabulate ≥ 0.9.0
 - xgboost ≥ 2.0.0

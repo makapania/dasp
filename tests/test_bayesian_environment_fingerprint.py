@@ -101,6 +101,23 @@ def test_unreadable_version_is_fatal_not_a_placeholder(monkeypatch):
         _numerical_environment()
 
 
+@pytest.mark.parametrize("bad_version", [None, ""])
+def test_missing_version_metadata_is_fatal(monkeypatch, bad_version):
+    """importlib.metadata returns None, not an exception, for a dist-info with no
+    Version field. That must not hash as a valid, shared value."""
+    import importlib.metadata as md
+
+    real_version = md.version
+
+    def versionless(name):
+        return bad_version if name == "numpy" else real_version(name)
+
+    monkeypatch.setattr(md, "version", versionless)
+
+    with pytest.raises(EnvironmentFingerprintError, match="numpy"):
+        _numerical_environment()
+
+
 def test_absent_package_is_recorded_not_fatal(monkeypatch):
     """Absence is a definite fact about the environment, unlike an unreadable one."""
     import importlib.metadata as md

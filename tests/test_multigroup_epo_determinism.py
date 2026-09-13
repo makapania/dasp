@@ -114,3 +114,26 @@ def test_group_labels_are_sorted():
     """
     result = _run("1", reverse=True)
     assert result["labels"] == sorted(result["labels"])
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_mixed_type_labels_fit_and_do_not_depend_on_order(reverse):
+    """Sorting groups must not raise on mixed label types, and 1 vs "1" must stay
+    distinct groups whose order is independent of dict construction."""
+    from spectral_predict.contaminant_analysis import MultiGroupEPO
+
+    rng = np.random.RandomState(0)
+    n_wl = 30
+    base = np.linspace(0.1, 0.9, n_wl)
+    clean = base + rng.normal(0, 0.01, size=(10, n_wl))
+    items = [
+        (1, base + 0.2 + rng.normal(0, 0.01, size=(6, n_wl))),
+        ("1", base + 0.3 + rng.normal(0, 0.01, size=(6, n_wl))),
+        ("glyptal", base + 0.1 + rng.normal(0, 0.01, size=(6, n_wl))),
+    ]
+    forward = MultiGroupEPO(n_components_per_group=2).fit(clean, dict(items))
+    other = MultiGroupEPO(n_components_per_group=2).fit(clean, dict(reversed(items)))
+    fitted = other if reverse else forward
+
+    assert list(fitted.group_labels_) == list(forward.group_labels_)
+    np.testing.assert_array_equal(fitted.transform(clean), forward.transform(clean))

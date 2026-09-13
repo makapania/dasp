@@ -2174,6 +2174,23 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
         return X_corrected
 
 
+def _label_token(label: Any) -> str:
+    """Stable text identity for a group label.
+
+    String labels map to themselves, so existing seeds are unchanged. Other types
+    are tagged with their type name so 1 and "1" never share an order or a seed.
+    """
+    if isinstance(label, str):
+        return label
+    return f"{type(label).__qualname__}:{label!r}"
+
+
+def _label_order(item: tuple[Any, Any]) -> tuple[int, str]:
+    """Sort key over (label, value) pairs that tolerates mixed label types."""
+    label = item[0]
+    return (0, label) if isinstance(label, str) else (1, _label_token(label))
+
+
 class MultiGroupEPO(BaseEstimator, TransformerMixin):
     """
     EPO for removing multiple interferent types simultaneously.
@@ -2285,7 +2302,7 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         # the same groups in a different order got measurably different projections.
         # Sorting makes the result depend on the groups, not on how they were built.
         validated_groups = {}
-        for label, X_group in sorted(contaminant_groups.items()):
+        for label, X_group in sorted(contaminant_groups.items(), key=_label_order):
             X_group = check_array(X_group, dtype=np.float64)
             if X_group.shape[1] != self.n_features_in_:
                 raise ValueError(
@@ -2332,7 +2349,7 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
             # runs of the same analysis. blake2b is stable across processes,
             # machines and Python versions.
             seed = int.from_bytes(
-                blake2b(str(label).encode("utf-8"), digest_size=4).digest(), "big"
+                blake2b(_label_token(label).encode("utf-8"), digest_size=4).digest(), "big"
             ) % 2**31
             rng = np.random.RandomState(seed)
             for _ in range(n_pseudo - 1):

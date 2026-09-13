@@ -17,6 +17,9 @@ echo.
 REM Set working directory to script location
 cd /d "%~dp0"
 
+REM The launcher only repairs packages; creating the environment is install.bat's job
+if not exist ".venv314\Scripts\python.exe" goto :venv_missing
+
 REM Ensure core package and required Omnic dependencies are installed in the venv
 .venv314\Scripts\python.exe -c "import importlib.util, sys; required = ('spectral_predict', 'requests', 'spectrochempy_omnic'); missing = [name for name in required if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
 if errorlevel 1 (
@@ -42,6 +45,13 @@ if errorlevel 1 (
 
 pause
 exit /b 0
+
+:venv_missing
+echo.
+echo ERROR: Python 3.14 environment .venv314 not found.
+echo Run install.bat first to create it, then launch again.
+pause
+exit /b 1
 
 :dependency_install_failed
 echo.

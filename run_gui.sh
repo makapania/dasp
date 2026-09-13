@@ -23,10 +23,8 @@ cd "$SCRIPT_DIR"
 if [ ! -d ".venv314" ]; then
     echo -e "${RED}Error: Virtual environment not found!${NC}"
     echo ""
-    echo "Please create the virtual environment first:"
-    echo "  python3 -m venv .venv314"
-    echo "  source .venv314/bin/activate"
-    echo "  pip install -e ."
+    echo "Please run ./install.sh first. It creates .venv314 with Python 3.14"
+    echo "and installs the verified dependency set from requirements-lock.txt."
     echo ""
     exit 1
 fi
@@ -46,15 +44,24 @@ else
     PYTHON=".venv314/bin/python"
 fi
 
+# Repairs install the verified lockfile, never unpinned floor resolution
+install_locked() {
+    $PYTHON -m pip install -q -r requirements-lock.txt || {
+        echo -e "${RED}Error: Failed to install requirements-lock.txt${NC}"
+        return 1
+    }
+    $PYTHON -m pip install -q -e . --no-deps || {
+        echo -e "${RED}Error: Failed to install spectral_predict${NC}"
+        return 1
+    }
+}
+
 # Check if the package is installed
 if ! $PYTHON -c "import spectral_predict" 2>/dev/null; then
     echo -e "${YELLOW}Warning: spectral_predict package not installed in venv${NC}"
     echo ""
     echo "Installing package..."
-    $PYTHON -m pip install -q -e . || {
-        echo -e "${RED}Error: Failed to install package${NC}"
-        exit 1
-    }
+    install_locked || exit 1
     echo -e "${GREEN}Package installed successfully!${NC}"
     echo ""
 fi
@@ -63,10 +70,7 @@ fi
 if ! $PYTHON -c "import matplotlib" 2>/dev/null; then
     echo -e "${YELLOW}Warning: matplotlib not installed${NC}"
     echo "Installing matplotlib..."
-    $PYTHON -m pip install -q matplotlib || {
-        echo -e "${RED}Error: Failed to install matplotlib${NC}"
-        exit 1
-    }
+    install_locked || exit 1
     echo -e "${GREEN}matplotlib installed successfully!${NC}"
     echo ""
 fi
@@ -75,7 +79,7 @@ fi
 if ! $PYTHON -c "import specdal" 2>/dev/null; then
     echo -e "${YELLOW}Note: specdal not installed (needed for binary ASD files)${NC}"
     echo "Installing specdal..."
-    $PYTHON -m pip install -q specdal || {
+    install_locked || {
         echo -e "${YELLOW}Warning: Failed to install specdal (you can still use ASCII ASD files)${NC}"
     }
     if $PYTHON -c "import specdal" 2>/dev/null; then

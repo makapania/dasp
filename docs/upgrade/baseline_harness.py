@@ -21,7 +21,10 @@ Reproducibility controls (all deliberate, do not relax without re-baselining):
   * BLAS/OpenMP thread counts are pinned to 1 before numpy is imported. Thread
     count changes reduction order inside the native libraries and is a real
     source of last-bit drift unrelated to the upgrade under test.
-  * PYTHONHASHSEED is pinned, because at least one code path seeds off hash().
+  * No hash() seeding remains (MultiGroupEPO now uses a blake2b digest), so
+    PYTHONHASHSEED is not controlled here. It is read only at interpreter start;
+    if a historical comparison needs it, set it before launching Python. The
+    manifest records whatever value was inherited.
   * Models are built with n_jobs=1; get_model's own docstring names this the
     setting for reproducibility.
   * Every model family here is seeded (42, internally). The "stochastic" models
@@ -43,7 +46,6 @@ for _v in (
     "VECLIB_MAXIMUM_THREADS",
 ):
     os.environ[_v] = "1"
-os.environ.setdefault("PYTHONHASHSEED", "0")
 
 import hashlib  # noqa: E402
 import json  # noqa: E402

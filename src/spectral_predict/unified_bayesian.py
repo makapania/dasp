@@ -161,13 +161,20 @@ def _numerical_environment() -> Dict[str, Any]:
     missing: List[str] = []
     for dist in _ENV_TRACKED_DISTRIBUTIONS:
         try:
-            packages[dist] = _dist_version(dist)
+            dist_version = _dist_version(dist)
         except PackageNotFoundError:
             # Absent is a fact about the environment and hashes fine. Only an
             # unreadable version is ambiguous.
             packages[dist] = "absent"
         except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
             missing.append(f"{dist} ({type(exc).__name__}: {exc})")
+        else:
+            # importlib.metadata returns None (no exception) when a dist-info has
+            # no Version field. Two such installs would hash identically.
+            if isinstance(dist_version, str) and dist_version:
+                packages[dist] = dist_version
+            else:
+                missing.append(f"{dist} (no version in metadata: {dist_version!r})")
 
     if missing:
         raise EnvironmentFingerprintError(
@@ -2211,7 +2218,6 @@ def _make_tpe_sampler(random_state: int) -> TPESampler:
         n_ei_candidates=32,
         multivariate=True,
         consider_endpoints=True,
-        warn_independent_sampling=False,
     )
 
 
@@ -2587,7 +2593,6 @@ def run_unified_bayesian(
         n_ei_candidates=32,   # More candidates for better exploration
         multivariate=True,    # Model parameter interactions
         consider_endpoints=True,
-        warn_independent_sampling=False  # Suppress dynamic space warning
     )
 
     # Create study. T-11 D: when a run-state storage URL is active, persist
@@ -2704,28 +2709,44 @@ def run_unified_bayesian(
             # Only names are needed for this notice. Resume loads the selected
             # study's trial history separately below.
             _existing = set(optuna.study.get_all_study_names(storage=storage_url))
+            # Pre-fingerprint studies carry the bare base name, so their
+            # environment is unknown rather than known to differ.
+            _legacy = sorted(n for n in _existing if n == _study_base)
             _incompatible = sorted(
                 n for n in _existing
-                if n.startswith(_study_base) and n != study_name
+                if n.startswith(f"{_study_base}_") and n != study_name
             )
-            if _incompatible and study_name not in _existing:
-                _msg = (
-                    f"Previous Bayesian results for {model_name} exist but were "
-                    f"computed in a different numerical environment "
-                    f"(Python {_environment['python_version']}, "
-                    f"numpy {_environment['packages'].get('numpy')}, "
-                    f"scikit-learn {_environment['packages'].get('scikit-learn')} now). "
-                    f"Their cached scores will NOT be reused — starting a fresh "
-                    f"study. The previous results are preserved: "
-                    f"{', '.join(_incompatible)}"
-                )
-                logger.warning(_msg)
-                if progress_callback is not None:
-                    progress_callback({
-                        "stage": "unified_bayesian",
-                        "message": _msg,
-                        "environment_changed": True,
-                    })
+            if study_name not in _existing:
+                _notes = []
+                if _incompatible:
+                    _notes.append((
+                        f"Previous Bayesian results for {model_name} exist but were "
+                        f"computed in a different numerical environment "
+                        f"(Python {_environment['python_version']}, "
+                        f"numpy {_environment['packages'].get('numpy')}, "
+                        f"scikit-learn {_environment['packages'].get('scikit-learn')} now). "
+                        f"Their cached scores will NOT be reused — starting a fresh "
+                        f"study. The previous results are preserved: "
+                        f"{', '.join(_incompatible)}",
+                        "environment_changed",
+                    ))
+                if _legacy:
+                    _notes.append((
+                        f"Previous Bayesian results for {model_name} use an older "
+                        f"study format that does not record the numerical "
+                        f"environment, so their cached scores will NOT be reused — "
+                        f"starting a fresh study. The previous results are "
+                        f"preserved: {', '.join(_legacy)}",
+                        "legacy_study_format",
+                    ))
+                for _msg, _flag in _notes:
+                    logger.warning(_msg)
+                    if progress_callback is not None:
+                        progress_callback({
+                            "stage": "unified_bayesian",
+                            "message": _msg,
+                            _flag: True,
+                        })
         except Exception as exc:  # noqa: BLE001 - advisory only, never fatal
             logger.debug("Could not enumerate existing studies: %s", exc)
 

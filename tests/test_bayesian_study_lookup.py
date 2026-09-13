@@ -82,9 +82,13 @@ def test_name_lookup_preserves_resume_data(tmp_path, monkeypatch, search_options
     assert continued.user_attrs == prior_attrs
 
 
-@pytest.mark.parametrize("prior_kind", ["legacy", "different-environment"])
+@pytest.mark.parametrize(
+    "prior_kinds",
+    [("legacy",), ("different-environment",), ("legacy", "different-environment")],
+    ids=["legacy", "different-environment", "both"],
+)
 def test_incompatible_study_notice_preserves_old_results(
-    tmp_path, monkeypatch, search_options, prior_kind
+    tmp_path, monkeypatch, search_options, prior_kinds
 ):
     path = tmp_path / "incompatible.sqlite3"
     url = f"sqlite:///{path.as_posix()}"
@@ -94,26 +98,36 @@ def test_incompatible_study_notice_preserves_old_results(
     )
     assert not path.exists()
     study_base = template.study_name.rsplit("_env1_", 1)[0]
-    prior_name = study_base if prior_kind == "legacy" else f"{study_base}_env1_other"
-    prior = optuna.create_study(study_name=prior_name, storage=url)
-    prior.set_user_attr("preserve_metadata", {"wavelengths": [1000.0, 1001.0]})
-    prior.add_trial(
-        optuna.trial.create_trial(value=12.5, user_attrs={"preserve_indices": [1, 3, 5]})
-    )
-    old_trials, old_attrs = prior.trials, prior.user_attrs
+    names = {"legacy": study_base, "different-environment": f"{study_base}_env1_other"}
+    flags = {"legacy": "legacy_study_format", "different-environment": "environment_changed"}
+    preserved_state = {}
+    for kind in prior_kinds:
+        prior = optuna.create_study(study_name=names[kind], storage=url)
+        prior.set_user_attr("preserve_metadata", {"wavelengths": [1000.0, 1001.0]})
+        prior.add_trial(
+            optuna.trial.create_trial(value=12.5, user_attrs={"preserve_indices": [1, 3, 5]})
+        )
+        preserved_state[kind] = (prior.trials, prior.user_attrs)
     notes = []
 
     frame, current = run_unified_bayesian(
         **dict(search_options, n_trials=1, progress_callback=notes.append)
     )
 
-    notices = [note for note in notes if note.get("environment_changed")]
-    assert len(notices) == 1
-    assert prior_name in notices[0]["message"]
+    for kind, flag in flags.items():
+        notices = [note for note in notes if note.get(flag)]
+        if kind not in prior_kinds:
+            assert notices == []
+            continue
+        assert len(notices) == 1
+        assert names[kind] in notices[0]["message"]
+        old_trials, old_attrs = preserved_state[kind]
+        preserved = optuna.load_study(study_name=names[kind], storage=url)
+        assert preserved.trials == old_trials
+        assert preserved.user_attrs == old_attrs
+    legacy_notices = [note for note in notes if note.get("legacy_study_format")]
+    assert all("different numerical environment" not in n["message"] for n in legacy_notices)
     assert current.study_name == template.study_name
-    assert current.study_name != prior_name
+    assert current.study_name not in names.values()
     assert len(current.trials) == 1
     assert len(frame) == 1
-    preserved = optuna.load_study(study_name=prior_name, storage=url)
-    assert preserved.trials == old_trials
-    assert preserved.user_attrs == old_attrs

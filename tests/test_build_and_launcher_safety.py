@@ -83,10 +83,14 @@ def test_build_repairs_pandas_in_paths_with_spaces(tmp_path, monkeypatch, capsys
 def test_launcher_checks_each_install_result(
     tmp_path, check_rc, lock_rc, editable_rc, expected, returncode
 ):
-    source = (REPO / "RUN_SPECTRAL_PREDICT.bat").read_text(encoding="utf-8")
     python = r".venv314\Scripts\python.exe"
+    source = (REPO / "RUN_SPECTRAL_PREDICT.bat").read_text(encoding="utf-8")
+    guard = f'if not exist "{python}"'
+    assert source.count(guard) == 1
+    source = source.replace(guard, 'if not exist "%~dp0stub.cmd"')
     assert source.count(python) == 4, "Every Python call must be stubbed; never run pip here"
-    (tmp_path / "launcher.bat").write_text(source.replace(python, "call stub.cmd"))
+    # Explicit paths: bare names fail under NoDefaultCurrentDirectoryInExePath=1.
+    (tmp_path / "launcher.bat").write_text(source.replace(python, 'call "%~dp0stub.cmd"'))
     (tmp_path / "stub.cmd").write_text(
         "@echo off\n"
         'if "%~1"=="-c" (\n'
@@ -105,7 +109,7 @@ def test_launcher_checks_each_install_result(
         "exit /b 0\n"
     )
     result = subprocess.run(
-        ["cmd.exe", "/d", "/c", "launcher.bat"],
+        ["cmd.exe", "/d", "/c", str(tmp_path / "launcher.bat")],
         cwd=tmp_path,
         env=dict(
             os.environ,
@@ -126,3 +130,21 @@ def test_launcher_checks_each_install_result(
     ]
     assert trace == expected, result.stdout + result.stderr
     assert result.returncode == returncode
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Exercises cmd.exe batch behavior")
+def test_launcher_without_venv_points_to_installer(tmp_path):
+    source = (REPO / "RUN_SPECTRAL_PREDICT.bat").read_text(encoding="utf-8")
+    (tmp_path / "launcher.bat").write_text(source)
+    result = subprocess.run(
+        ["cmd.exe", "/d", "/c", str(tmp_path / "launcher.bat")],
+        cwd=tmp_path,
+        input="\n",
+        text=True,
+        capture_output=True,
+        timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert result.returncode == 1
+    assert "install.bat" in result.stdout
+    assert "Failed to install" not in result.stdout
