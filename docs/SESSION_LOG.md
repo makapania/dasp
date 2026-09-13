@@ -498,3 +498,72 @@ XGBoost/LightGBM/CatBoost fits, active frozen threading fallback and a completed
 171742e9f918ee776416d12cc25998a5a64d1b4f86e597ecc17d70039f021c9a.
 No clean install, installed-app upgrade or uninstall was performed. The full
 suite was not repeated; the 77 focused tests and new bundle smoke test passed.
+
+## 2026-09-12 - Final PR #65 review and installation gates
+
+User authorized the final Fable review, installation/upgrade checks and merge if
+they pass. A second, separate read-only Fable opinion is running on the final
+89f9479 implementation and its regression tests. The GitHub connector works even
+though gh CLI authentication fails: PR is open/mergeable, CodeRabbit passed, and
+the current Actions run failed; inspect job evidence before treating it as the
+documented baseline.
+
+The status guide's statement that this machine has an existing installed copy
+is stale. Elevated read-only inventory found no Spectral Predict uninstall entry
+in HKCU/HKLM (including WOW6432Node) and no Program Files installation. The desktop
+entry is a shortcut to RUN_SPECTRAL_PREDICT.bat. Windows is Home and has no Windows
+Sandbox. Use an isolated test install and a verified prior release/build as the
+upgrade baseline; do not describe a source checkout as an installed-app upgrade.
+
+Fable's final review found no merge blocker in 89f9479. It noted a low-severity
+Optuna floor mismatch (name-only API starts in 3.4; pyproject allows 3.0), plus
+informational launcher newline and test-isolation observations. Its full output
+is preserved in reviews/2026-09-12-pr65-fable-final.md. The substantive reviewer
+was claude-fable-5-1; modelUsage also records a 20-token internal Haiku call.
+
+The real installer completed a clean per-user install in the isolated workspace
+with exit 0 and no reboot. The @oai/sky native pipe was unavailable on two tries;
+use the installed runtime and packaged GUI code for an automated integration
+check if recovery also fails, and distinguish this from desktop click testing.
+
+Computer Use recovery after a kernel reset also failed (native pipe missing).
+The installed executable's unchanged --test passed (42/42 imports and all
+functional checks). A separate installed-runtime GUI probe reached the real Run
+Analysis callback but failed importing logging.handlers from run_logging. This
+is not yet attributed to the package versus the custom test host: inspect the
+executable's PYZ, base-library zip and loose modules before deciding. Adding a
+logging package search path alone cannot supply a file absent from the bundle.
+
+Confirmed the GUI failure is a packaging defect: logging.handlers is absent from
+the executable PYZ and loose modules, and PyInstaller's warning file lists
+spectral_predict.run_logging (and many other backend modules) as unresolved.
+The spec gives Analysis only the repository root despite the src layout. Runtime
+sys.path insertion permits backend imports but cannot retroactively discover
+their dependencies during freezing. Add src to Analysis.pathex and extend the
+real --test with run_logging/run_state imports and model save/load/prediction.
+The clean-test install was uninstalled successfully (exit 0). The baseline main
+build on retained .venv312 also completed, including its installer.
+
+The original installer reproduced the overlay defect on an actual baseline
+installation: it retained 3,309 obsolete runtime files, python312.dll and both
+numpy dist-info versions. The upgraded runtime reported numpy.__version__=2.5.3
+but importlib.metadata.version('numpy')=2.4.4. This is a concrete cache-identity
+safety issue, not just excess disk usage. The saved legacy model and user-note
+sentinels survived. Add InstallDelete only for the app-owned {app}\_internal
+directory, preserve the rest of {app}, and add runtime-versus-metadata checks to
+--test. Validate both upgrade and uninstall preserve those user-file sentinels.
+
+Live CI comparison is now exact: on Windows the PR and base main have the same
+five failing node IDs; Linux has the same three non-GUI failures. The optional
+dependency job has those same three. The informational Linux GUI job times out
+on the pre-existing XGBoost GUI case on both commits. All ten new tests passed
+in the PR's Windows CI (3,002 passed total versus base 2,977); package build passed.
+
+Updated focused suite: 81 passed. The extended source --test passes 44/44 imports,
+all runtime/metadata comparisons, booster fits, search and the model round trip.
+Executing that exact extended test function against the original upgraded
+installation correctly fails eight checks: GUI logging plus seven mismatched
+numerical-package metadata versions. This validates that the added gates detect
+both reproduced packaging defects. The corrected bundle/installer build is in
+progress. Only this project's editable metadata was refreshed in .venv314 (no
+dependency installation or version change); pip check remains clean.

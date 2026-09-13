@@ -60237,6 +60237,8 @@ def run_import_tests():
         ("spectral_predict.search", "Search backend"),
         ("spectral_predict.io", "IO backend"),
         ("spectral_predict.model_io", "Model save/load"),
+        ("spectral_predict.run_logging", "GUI analysis logging"),
+        ("spectral_predict.run_state", "Persistent run state"),
     ]
 
     print("=" * 60)
@@ -60257,6 +60259,27 @@ def run_import_tests():
         except Exception as e:
             print(f"  [FAIL] {module_name}: {e}")
             failed.append((module_name, str(e)))
+
+    # Stale dist-info directories can survive an overlay upgrade and report
+    # a different numerical environment from the libraries actually running.
+    print("\n--- Checking numerical runtime metadata ---")
+    from importlib.metadata import version as distribution_version
+    for module_name, distribution_name in (
+        ("numpy", "numpy"), ("scipy", "scipy"), ("pandas", "pandas"),
+        ("sklearn", "scikit-learn"), ("optuna", "optuna"),
+        ("xgboost", "xgboost"), ("lightgbm", "lightgbm"), ("catboost", "catboost"),
+    ):
+        try:
+            runtime_version = str(__import__(module_name).__version__)
+            recorded_version = distribution_version(distribution_name)
+            if runtime_version != recorded_version:
+                raise RuntimeError(
+                    f"runtime {runtime_version} != metadata {recorded_version}"
+                )
+            print(f"  [OK] {module_name} runtime/metadata: {runtime_version}")
+        except Exception as e:
+            print(f"  [FAIL] {module_name} metadata: {e}")
+            failed.append((f"{module_name}.metadata", str(e)))
 
     # Test XGBoost DLL
     print("\n--- Testing XGBoost DLL ---")
@@ -60346,6 +60369,37 @@ def run_import_tests():
     except Exception as e:
         print(f"  [FAIL] cross-validated search: {type(e).__name__}: {e}")
         failed.append(("run_search", str(e)))
+
+    # Saving and reopening a fitted model must work with the bundled libraries.
+    # Keep the fixture outside the installation and remove it even on failure.
+    print("\n--- Testing model save/load and prediction ---")
+    try:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from sklearn.cross_decomposition import PLSRegression
+        from spectral_predict.model_io import save_model, load_model, predict_with_model
+
+        rng = np.random.default_rng(65)
+        wl = np.linspace(1000.0, 2500.0, 120)
+        X = pd.DataFrame(rng.normal(size=(30, 120)), columns=wl)
+        y = X.iloc[:, :5].sum(axis=1).to_numpy()
+        fitted = PLSRegression(n_components=3).fit(X.to_numpy(), y)
+        expected = fitted.predict(X.to_numpy()).ravel()
+        metadata = {
+            "model_name": "PLS", "task_type": "regression",
+            "wavelengths": wl.tolist(), "n_vars": len(wl),
+            "target_name": "smoke_test", "preprocessing": "raw",
+        }
+        with TemporaryDirectory(prefix="spectral-predict-smoke-") as temp_dir:
+            model_path = Path(temp_dir) / "model.dasp"
+            save_model(fitted, None, metadata, str(model_path))
+            loaded = load_model(str(model_path))
+            actual = predict_with_model(loaded, X)
+            np.testing.assert_array_equal(np.asarray(actual).ravel(), expected)
+        print("  [OK] Model round trip preserved all 30 predictions")
+    except Exception as e:
+        print(f"  [FAIL] model round trip: {type(e).__name__}: {e}")
+        failed.append(("model_round_trip", str(e)))
 
     print("\n" + "=" * 60)
     print("SUMMARY")

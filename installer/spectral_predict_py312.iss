@@ -52,6 +52,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "fileassoc"; Description: "Associate .dasp files with {#MyAppName}"; GroupDescription: "File associations:"; Flags: checkedonce
 
+[InstallDelete]
+; Replace the app-owned PyInstaller runtime as a unit. Overlay upgrades leave
+; old DLLs and .dist-info metadata that can misidentify the numerical environment.
+; User files outside _internal are deliberately preserved.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 ; Main application files (PyInstaller 3.12 output folder)
 Source: "..\dist\{#MyAppBundleDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

@@ -262,7 +262,9 @@ print(f"Total hidden imports: {len(all_hiddenimports)}")
 
 a = Analysis(
     ['spectral_predict_gui_optimized.py'],
-    pathex=[str(project_root)],
+    # The backend uses a src layout. Runtime sys.path edits and editable-install
+    # hooks do not make its imports visible to PyInstaller's static analysis.
+    pathex=[str(project_root), str(project_root / 'src')],
     binaries=all_binaries,
     optimize=0,
     datas=[

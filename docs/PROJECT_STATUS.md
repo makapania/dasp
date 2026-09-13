@@ -49,8 +49,18 @@ so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A t
 rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
 you are confident, and reclaim the disk then.
 
-**If you want to test the installer** (still unverified — see ACTIVE DIRECTION below),
-this is the machine to do it on, because it has a real prior installation:
+**Installer validation update (2026-09-12):** this machine has a source-launcher
+shortcut, not a registered prior installation. The final checks therefore use a
+real installer built from base `main` (`8de7445`) with retained `.venv312`, installed
+in an isolated workspace directory, then upgraded using the PR installer.
+The upgrade reproduced 3,309 obsolete runtime files and a NumPy metadata/runtime
+mismatch (2.4.4 versus 2.5.3). The installed GUI also exposed a missing
+`logging.handlers` dependency. Fixes are being validated: replace only the
+app-owned `_internal` payload, expose `src` to PyInstaller analysis, and extend
+the bundled smoke test with GUI logging, metadata and model-round-trip checks.
+The working source launcher and retained `.venv312` are unchanged.
+
+For a release installation check:
 1. Note what is currently installed, then run
    `dist\installer\SpectralPredict_Setup_py312_0.5.0b2.exe` **over** it.
 2. Confirm it upgrades in place rather than appearing as a second app (the artifact
@@ -204,6 +214,14 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > all three review findings. The subsequent implementation retains those verified
 > storage semantics and adds permanent resume/notice regression tests.
 > [Fable's full opinion](reviews/2026-09-12-pr65-fable.md).
+
+> **Final merge gates in progress (2026-09-12).** Fable found no merge blocker in
+> `89f9479`; its low-severity Optuna API floor finding is corrected to `>=3.4.0`.
+> Real installation tests then found the packaging and obsolete-runtime defects
+> described above. Their fixes and stronger frozen smoke test are being rebuilt
+> and verified before merge. Exact live CI comparison found the same five Windows
+> failures and three Linux failures as base main, plus the same informational
+> XGBoost GUI timeout. [Final Fable review](reviews/2026-09-12-pr65-fable-final.md).
 
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
