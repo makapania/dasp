@@ -417,3 +417,44 @@ regression, 3-fold CV; all five tested models' RMSEs agree across stacks. These
 are combined-stack workload measurements, not general GUI performance claims.
 Full evidence, boundaries and next steps are in
 [the review](reviews/2026-09-12-pr65-performance-safety.md).
+
+## 2026-09-12 - PR #65 name-only lookup audit and Fable review
+
+The summaries really do populate _CachedStorage's trial cache, but for the URL
+string passed here Optuna constructs a NEW temporary storage instance. That cache
+is discarded after the summary call; _existing retains only strings. Actual
+resume uses separately constructed create_study/load_study storage objects, and
+rehydrates fingerprints, sampler history, result rows and arrays from study.trials.
+Both enumeration APIs use the same RDBStorage constructor and get_all_studies;
+keep the existing always-mode gate because both can initialize a new database.
+
+Requested Fable review completed through the read-only wrapper; modelUsage
+confirms claude-fable-5-1. Fable independently confirms the replacement is safe
+and all three prior findings are real; it characterizes the scan as avoidable
+cost rather than a correctness bug. Fable did not rerun the timing or SQLite
+probes, and requests a regression check for the incompatible-environment notice.
+
+Probe gotcha: Optuna 5.0 removes Study.set_system_attr (not just deprecates it).
+The first preservation probe stopped at fixture setup for that reason. Use the
+public RDBStorage system-attribute methods for fixture metadata. The subsequent
+Windows cleanup error was an open SQLite handle, not evidence of data loss.
+
+Name-only lookup verification PASSED using the exact replacement compiled only
+in memory (no application source edit):
+- Complete SQLite dumps identical before/after either enumeration. SQL trace:
+  summaries read two studies' trial tables; names read none; neither wrote data.
+- Original and proposed functions resumed the same 24-trial study with all
+  stored fields unchanged, including arrays, parameters, distributions, dates,
+  user/system attrs and 23 fingerprints; identical 23-row leaderboards.
+- Continued original/proposed database copies to 26 trials: identical new TPE
+  suggestions, scores, attrs, arrays, leaderboards and progress callbacks.
+- Same warning for a retained legacy study; its original rows/metadata preserved.
+- auto warmup and never mode performed no lookup and created no SQLite database.
+
+Fable's full returned opinion is saved verbatim in
+[the Fable review](reviews/2026-09-12-pr65-fable.md). Codex agrees with its safety
+conclusion. Its claim that the benchmark differences are specifically library
+version effects is too strong: our benchmark changed Python and dependencies
+together, so it cannot isolate those causes. All checks used disposable SQLite
+fixtures; no existing studies or environments were changed. The proposed source
+change remains unapplied, consistent with this verification/review request.

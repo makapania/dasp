@@ -192,6 +192,15 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > then verify clean and in-place installation. Review only; application code is
 > unchanged. Evidence and scope: [review](reviews/2026-09-12-pr65-performance-safety.md).
 
+> **Follow-up audit (Codex + Fable, 2026-09-12): the name-only lookup loses no
+> needed state.** The summary cache is temporary and separate from resume's
+> storage. An in-memory replacement preserved the whole SQLite dump on a
+> 24-trial resume, then produced identical TPE trials and leaderboards on
+> continuation to 26. Stored arrays, parameters, metadata and fingerprints were
+> preserved; legacy warnings and auto/never gating also matched. Fable confirms
+> all three review findings. **Verification only; the fixes are not applied.**
+> [Fable's full opinion](reviews/2026-09-12-pr65-fable.md).
+
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
 `pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end

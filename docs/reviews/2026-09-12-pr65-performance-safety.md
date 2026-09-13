@@ -123,3 +123,50 @@ The stable artifact names containing `py312` are intentional and are not a
 finding. The GUI's pre-existing unseeded `EstimatedEPO` path is also outside these
 changes. No missing-dependency fingerprint finding is asserted without proving
 that dependency participates in the Bayesian calculation.
+
+## Follow-up: could name-only enumeration lose anything?
+
+**No, for this exact replacement and the pinned Optuna 5.0.0 implementation.**
+The user specifically asked whether the summary load saves state needed later.
+It does populate an in-memory trial cache, but `get_storage(storage_url)` creates
+a fresh temporary `_CachedStorage` for that call. The application retains only
+the study-name strings. Its later `create_study` and `load_study` calls create
+separate storage objects; fingerprints, history, parameters, importances and
+leaderboard rows are reloaded from the selected `study.trials`. The discarded
+summary cache supplies none of these.
+
+Both enumeration APIs call the same storage constructor and `get_all_studies`.
+Both can create/initialize a missing database; the existing `always`-mode gate
+must remain in place. Changing only the enumeration inside that gate preserves
+this behavior. It also preserves the incompatible-environment notice.
+
+**Executed comparison:** the proposed one-line replacement was compiled in
+memory, without editing the application. An actual 24-trial PLS study and an
+unrelated study with array payloads and completed/pruned/failed/running trials
+were created in a temporary SQLite database. Two copies were then exercised by
+the original function and the proposed function.
+
+- Both enumeration calls returned the same names and left the complete SQLite
+  schema/data dump unchanged. SQL tracing found zero data writes for either;
+  summaries issued two trial SELECTs, names issued zero.
+- Resuming at the same 24-trial budget left the entire database unchanged in both
+  cases. All trial records, dates, distributions, parameters, user/system attrs,
+  stored arrays and 23 saved fingerprints were preserved. The 23-row leaderboard
+  matched exactly.
+- Continuing both copies to 26 trials produced identical new TPE suggestions,
+  scores, parameters, distributions, arrays, attrs, leaderboards and progress
+  callbacks. Existing trials were preserved exactly; new trial timestamps were
+  excluded from comparisons because the runs occurred at different times.
+- A retained legacy study triggered the identical incompatibility callback in
+  both versions, while its original trial and metadata stayed intact.
+- `auto` warmup and `never` mode made no name lookup and created no database.
+
+[Fable's independent opinion](2026-09-12-pr65-fable.md), requested by the user,
+agrees the swap loses nothing and confirms the other two PR findings. Fable
+reviewed source; the executable database comparisons above were done by Codex.
+The timing is an avoidable performance cost, not a data-corruption defect. Fable's
+attribution of all benchmark differences to library versions is stronger than
+the experiment supports: it changed interpreter and dependencies together.
+
+This follow-up is verification only. The proposed source change has not been
+applied, and no production study or virtual environment was modified.
