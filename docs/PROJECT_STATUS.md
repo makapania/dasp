@@ -17,7 +17,7 @@ py -3.14 -V                       # expect 3.14.x
 
 # 2. Pull
 cd <repo>
-git checkout feat/python-314-upgrade    # or main, once this is merged
+git checkout main                       # PR #65 merged 2026-09-13 (6b956c8)
 git pull
 
 # 3. Build the new environment alongside the old one. Do NOT delete .venv312 yet.
@@ -69,9 +69,8 @@ Windows VM or manual desktop test. The native automation bridge was unavailable.
 The final CI comparison also passes: Windows has 3,008 passed and the same five
 baseline failures; Linux and optional dependencies each have 2,880 passed and
 the same three baseline failures. Build passes; the informational GUI timeout
-matches base. PR #65 remains open and ready to merge. Automatic approval review
-blocked the merge because it did not find explicit user authorization for merging
-into `main`; that confirmation is the only remaining step. See the
+matches base. **PR #65 was merged into `main` on 2026-09-13 as `6b956c8`** (merge
+commit, user-authorized, guarded to head `8bd3f8f`). See the
 [installation validation report](reviews/2026-09-12-pr65-installation-validation.md)
 for exact commits, artifact hash, review scope and remaining limitations.
 
@@ -130,7 +129,7 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
    by full runs on 3.12, on 3.14, and on 3.14 with every dependency upgraded: the
    same seven fail in all three, 2971 pass, 33 skip.
 
-> ## ▶ ACTIVE DIRECTION (2026-09-12) — **Python 3.14 migration COMPLETE**, all dependencies current, on `feat/python-314-upgrade`
+> ## ▶ ACTIVE DIRECTION (2026-09-12) — **Python 3.14 migration COMPLETE and MERGED to `main`** (PR #65, `6b956c8`, 2026-09-13), all dependencies current
 >
 > **The project is Python 3.14 only.** `requires-python = ">=3.14"`, CI matrix is
 > `['3.14']`, classifiers list 3.14 alone. Earlier versions are not supported and

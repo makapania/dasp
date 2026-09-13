@@ -652,3 +652,13 @@ effect was not found. No alternate merge route was attempted. All code, tests
 and documentation are complete; the PR remains open pending explicit user
 confirmation to merge PR 65 into main. The shared checkout stays on the feature
 branch for the other active session.
+
+### 2026-09-13 — PR #65 merged
+
+User explicitly authorized the merge. PR #65 merged into main as 6b956c8 (merge
+commit, --match-head-commit 8bd3f8f; 8bd3f8f was docs-only on top of the CI-tested
+db975e2). CI failure set at db975e2 identical to main 8de7445 (same five tests;
+zero new). feat/python-314-upgrade branch retained. Deferred from review:
+fingerprint failure still aborts never-mode runs (deliberate); consider_endpoints
+deprecation needs a numerical A/B before removal. Gotcha: gh pr merge
+--match-head-commit rejects short SHAs ("Could not coerce value to GitObjectID").
