@@ -216,3 +216,13 @@ Local artifact: `dist/installer/SpectralPredict_Setup_py312_0.5.0b2.exe`,
 `171742e9f918ee776416d12cc25998a5a64d1b4f86e597ecc17d70039f021c9a`.
 Clean installation, in-place installed-app upgrade and uninstall were not
 tested; those release checks remain outstanding.
+
+## Final installation follow-up
+
+The initial artifact and outstanding-installation statement above are historical.
+The [final installation validation](2026-09-12-pr65-installation-validation.md)
+records the newer `f60cfa5` and `db975e2` commits, two additional packaging fixes,
+the corrected artifact, and completed fresh-installation, real upgrade, installed
+GUI/model and uninstall checks. The final full CI comparison also passes with
+zero new failures: Windows has the same five failing node IDs as base, and both
+Linux jobs have the same three.

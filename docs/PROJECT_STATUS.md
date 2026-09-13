@@ -29,8 +29,8 @@ py -3.14 -m venv .venv314
 
 # 4. Verify before trusting it
 .venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
-#    Expect 7 failed / 2971 passed / 33 skipped. Those 7 are PRE-EXISTING
-#    (T-CI-1 rot, listed below). The bar is ZERO NEW failures, not a green run.
+#    Compare failing node IDs with the known baseline below. Counts vary with
+#    platform and optional dependencies. The bar is ZERO NEW failures.
 
 # 5. Launch the GUI
 .venv314\Scripts\python spectral_predict_gui_optimized.py
@@ -49,25 +49,29 @@ so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A t
 rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
 you are confident, and reclaim the disk then.
 
-**Installer validation update (2026-09-12):** this machine has a source-launcher
-shortcut, not a registered prior installation. The final checks therefore use a
-real installer built from base `main` (`8de7445`) with retained `.venv312`, installed
-in an isolated workspace directory, then upgraded using the PR installer.
-The upgrade reproduced 3,309 obsolete runtime files and a NumPy metadata/runtime
-mismatch (2.4.4 versus 2.5.3). The installed GUI also exposed a missing
-`logging.handlers` dependency. Fixes are being validated: replace only the
-app-owned `_internal` payload, expose `src` to PyInstaller analysis, and extend
-the bundled smoke test with GUI logging, metadata and model-round-trip checks.
-The working source launcher and retained `.venv312` are unchanged.
+**Installer validation complete locally (2026-09-12, application `db975e2`):** a
+real installer built from base `main` (`8de7445`) and retained `.venv312` was
+installed, then upgraded in place. The first attempt exposed 3,309 obsolete
+runtime files and mismatched package metadata; a GUI analysis also exposed the
+missing `logging.handlers` dependency. Both are fixed. The installer replaces
+only its app-owned `_internal` directory, and PyInstaller now analyzes `src`.
 
-For a release installation check:
-1. Note what is currently installed, then run
-   `dist\installer\SpectralPredict_Setup_py312_0.5.0b2.exe` **over** it.
-2. Confirm it upgrades in place rather than appearing as a second app (the artifact
-   names still say `py312` deliberately, precisely so this works).
-3. Launch it, run a small analysis, and confirm no stale DLLs survived — the installer
-   overlays files and has **no obsolete-payload cleanup**, which is the specific risk.
-4. Then test uninstall.
+The corrected upgrade and a fresh installation each match all 20,384 build
+runtime files by SHA256. Both pass the expanded executable smoke test (44/44
+imports, numerical metadata, booster fits, 99-row search and model round trip)
+and programmatic installed-GUI analysis/model loading. A model saved under 3.12
+reproduces all 30 reference predictions after upgrade. Both uninstall checks
+preserve user files and remove the application registration. The test installs
+were removed; the source shortcut and retained `.venv312` are unchanged.
+
+These were current-user installations on this development machine, not a fresh
+Windows VM or manual desktop test. The native automation bridge was unavailable.
+The final CI comparison also passes: Windows has 3,008 passed and the same five
+baseline failures; Linux and optional dependencies each have 2,880 passed and
+the same three baseline failures. Build passes; the informational GUI timeout
+matches base. PR #65 is ready for the authorized merge. See the
+[installation validation report](reviews/2026-09-12-pr65-installation-validation.md)
+for exact commits, artifact hash, review scope and remaining limitations.
 
 ---
 
@@ -186,8 +190,9 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > Cross-version SQLite replay and cross-process EPO output drift reproduced;
 > 110 focused existing tests passed. Details are in SESSION_LOG.md.
 >
-> **Not done:** installing from the generated installer on a clean machine, and
-> verifying an in-place upgrade over an existing installation.
+> **Installation follow-up:** fresh-directory installation and a real in-place
+> upgrade now pass on this development machine; a fresh-OS check remains untested.
+> See the final validation report linked above.
 
 > **PR #65 review fixes implemented (Codex, 2026-09-12; user-authorized).**
 > The build helper preserves spaces in site-packages paths and fails if a pandas
@@ -199,7 +204,8 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > A fresh standalone and 219.4 MiB installer built successfully. The executable's
 > `--test` passed (42/42 imports, all three booster fits, 99-row PLS/LightGBM
 > search, frozen threading fallback active); all 75 bundled project Python files
-> match the source. Clean and in-place installed-app upgrade tests remain open.
+> match the source. This initial artifact was superseded by the corrected 219.6
+> MiB build and completed installation checks documented above.
 > Two timing rounds from the original review found RandomForest about 24% faster
 > and XGBoost about 14% slower on a fixed workload, so the stack upgrade is not a
 > uniform speedup. Evidence and scope:
@@ -215,11 +221,12 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > storage semantics and adds permanent resume/notice regression tests.
 > [Fable's full opinion](reviews/2026-09-12-pr65-fable.md).
 
-> **Final merge gates in progress (2026-09-12).** Fable found no merge blocker in
+> **Final merge gates passed (2026-09-12).** Fable found no merge blocker in
 > `89f9479`; its low-severity Optuna API floor finding is corrected to `>=3.4.0`.
-> Real installation tests then found the packaging and obsolete-runtime defects
-> described above. Their fixes and stronger frozen smoke test are being rebuilt
-> and verified before merge. Exact live CI comparison found the same five Windows
+> Codex reviewed the later `f60cfa5` changes and validated the `db975e2` build:
+> 81 focused tests, five EPO determinism tests, six Unix launcher probes, and the
+> real installation checks above pass. Fable did not review those later commits.
+> The completed final PR CI run has the same five Windows
 > failures and three Linux failures as base main, plus the same informational
 > XGBoost GUI timeout. [Final Fable review](reviews/2026-09-12-pr65-fable-final.md).
 

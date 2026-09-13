@@ -567,3 +567,74 @@ numerical-package metadata versions. This validates that the added gates detect
 both reproduced packaging defects. The corrected bundle/installer build is in
 progress. Only this project's editable metadata was refreshed in .venv314 (no
 dependency installation or version change); pip check remains clean.
+
+The additional concurrent review commit f60cfa5 was explicitly reviewed after it
+was noticed in the latest history. It is a parent of db975e2 and was included in
+the rebuilt artifact and 81-test run. Its five EPO determinism tests also pass;
+six Git Bash launcher control-flow probes pass with stubbed Python (no pip).
+
+The corrected in-place upgrade passes a full SHA256 comparison of all 20,384
+runtime files against the build, with zero missing, extra, or different files.
+The legacy model hash remains identical. Installed --test passes 44/44 plus
+metadata, fits, search, and model round trip. The installed Tk callback harness
+completes PLS analysis and GUI model loading, and reproduces all 30 predictions
+from the baseline 3.12 saved PLS model (1e-12 tolerance). Scikit-learn emits its
+expected cross-version warning; this is evidence for this model, not a general
+promise of pickle compatibility. Uninstall exits 0 and removes the executable,
+Python DLL, and registration while retaining the model and note. The first note
+check falsely failed because PowerShell compared the existing CRLF fixture to
+an LF literal; byte inspection confirmed the expected text and CRLF.
+
+The corrected fresh installation also matches all 20,384 runtime files by SHA256,
+passes the actual executable --test and installed Tk analysis/model loader, and
+uninstalls successfully. Both model and note hashes match before/after the fresh
+uninstall; application registration and runtime are removed. All 75 loose bundled
+backend source files match the checkout. Final installer: 230,295,124 bytes, SHA256
+3ef6ed77e422a8ee0792c21b3a88c24ba3365469fbd10703969707921f321913.
+The final PR description is prepared, but the GitHub connector refused its
+update with HTTP 403 Resource not accessible by integration. The first response
+was mistakenly summarized without checking isError; a read-back showed the old
+body, and the full retry response confirmed the permission failure. Check an
+existing local/browser authentication route for the authorized update and merge.
+The latest application CI (34735172751, db975e2) is still running; build passes
+and its informational GUI timeout matches base. Leave this CI run undisturbed
+while finishing the report; final documentation will be committed and pushed.
+
+The existing local GitHub CLI login works outside the restricted process; the
+connector itself lacks PR-write access. gh pr edit succeeded, and gh pr view
+confirmed the updated body and unchanged db975e2 head. No new login or credential
+was needed. The test-only baseline .venv312 junction was removed without recursion;
+the real rollback Python executable hash was verified unchanged. Only generated
+baseline build/bundle copies were cleaned up; the baseline installer, test logs,
+small evidence files, current deliverable and real .venv312 are retained.
+
+Installed-GUI harness gotcha: setting APPDATA/LOCALAPPDATA isolates logs/state,
+but the GUI output_dir still defaults to cwd/outputs. The two successful harness
+runs exported three-row, 120-variable PLS tables there at 21:32:05 and 21:39:07.
+Those exact test-only CSVs were verified and moved into the isolated evidence
+directory. Future GUI probes should also set app.output_dir to a fixture path.
+
+At 05:06 UTC the three full CI jobs were still running. An attempt to fetch
+the in-progress Windows job log returned GitHub BlobNotFound (404), so its
+failure list is not available yet. This is log availability, not a test result.
+The monitor continues checking both PR head and base while awaiting completion.
+
+Latest optional-dependency CI completed at 05:12:52 UTC: 3 failed, 2,880 passed,
+33 skipped. Its three failing node IDs exactly match base; zero new failures.
+Windows and primary Linux jobs are still running. The user requested that the
+completed work be committed now. Commit/push the validation documents separately
+from the already-pushed application db975e2; documentation-only changes do not
+require another two-hour application test run. The final merge remains pending
+the two remaining failure-set comparisons.
+
+Final application CI completed at approximately 05:14 UTC. Windows: 5 failed,
+3,008 passed, 29 skipped; Linux and optional dependencies: 3 failed, 2,880 passed,
+33 skipped each. Every failing node ID exactly matches base main; no collection
+errors and zero new failures. Build passes and informational Xvfb timeout is the
+same baseline XGBoost GUI case. All authorized merge gates now pass.
+
+The first documentation commit attempt stopped on a transient .git/index.lock.
+The immediate inspection found no remaining lock or Git process; no lock file
+was deleted, and the four staged documentation files remained intact. Retry the
+commit with these completed CI results, then push and perform the authorized
+merge using an expected-head guard.
