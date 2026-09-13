@@ -6,7 +6,13 @@ This includes the additional review fixes in `f60cfa5`, which Codex explicitly
 reviewed and tested after noticing the concurrent commit in the branch history.
 
 **Local installation checks and the final CI comparison pass. Every failing CI
-node matches the existing baseline. PR #65 is ready for the authorized merge.**
+node matches the existing baseline. PR #65 remains open and ready to merge.**
+
+The work is committed and pushed (`fbe8e95`; the subsequent `ecad576` adds review
+notes only). An attempt to merge the reviewed head was stopped before execution
+by automatic approval review, which did not find explicit authorization for the
+merge into `main`. Only that explicit user confirmation remains; no further code
+fixes or validation runs are pending.
 
 ## Review scope
 

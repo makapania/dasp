@@ -69,7 +69,9 @@ Windows VM or manual desktop test. The native automation bridge was unavailable.
 The final CI comparison also passes: Windows has 3,008 passed and the same five
 baseline failures; Linux and optional dependencies each have 2,880 passed and
 the same three baseline failures. Build passes; the informational GUI timeout
-matches base. PR #65 is ready for the authorized merge. See the
+matches base. PR #65 remains open and ready to merge. Automatic approval review
+blocked the merge because it did not find explicit user authorization for merging
+into `main`; that confirmation is the only remaining step. See the
 [installation validation report](reviews/2026-09-12-pr65-installation-validation.md)
 for exact commits, artifact hash, review scope and remaining limitations.
 

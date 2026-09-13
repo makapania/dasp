@@ -638,3 +638,17 @@ The immediate inspection found no remaining lock or Git process; no lock file
 was deleted, and the four staged documentation files remained intact. Retry the
 commit with these completed CI results, then push and perform the authorized
 merge using an expected-head guard.
+
+Validation documents were committed and pushed as fbe8e95. Another active
+session immediately added ecad576 on top, which explains the initial remote-head
+verification mismatch. Its sole change is a 14-line PROJECT_STATUS review note;
+reviewed it and verified db975e2..ecad576 changes documentation only. The final
+PR description was updated with the completed zero-new-failures CI comparison.
+
+The attempted ordinary merge of PR 65, guarded to ecad576, was rejected BEFORE
+execution by automatic approval review. Stated reason: merging into the default
+branch is consequential and explicit authorization for that exact merge side
+effect was not found. No alternate merge route was attempted. All code, tests
+and documentation are complete; the PR remains open pending explicit user
+confirmation to merge PR 65 into main. The shared checkout stays on the feature
+branch for the other active session.
