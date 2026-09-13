@@ -458,3 +458,43 @@ version effects is too strong: our benchmark changed Python and dependencies
 together, so it cannot isolate those causes. All checks used disposable SQLite
 fixtures; no existing studies or environments were changed. The proposed source
 change remains unapplied, consistent with this verification/review request.
+
+## 2026-09-12 - Implementing the three PR #65 review fixes
+
+Added ten focused cases before touching application code: five failed against
+HEAD, reproducing the whitespace-path pandas corruption, missing repair inputs
+being called a successful verification, lock-install failure reaching the GUI,
+and resume using the full-summary API. The other five protect existing behavior.
+
+First launcher attempt added a nested failure/exit block immediately after the
+lock command. It prevented GUI startup but the controlled cmd.exe batch probe
+still returned 0 on that first failure path. Replaced both pip error paths with
+a shared failure label outside the conditional, matching install.bat's pattern;
+keep the exit-code assertion, not just the 'GUI did not start' assertion.
+
+All ten new cases now pass, and the combined focused suite is 77 passed
+(environment fingerprint, Bayesian dedup, T-41/T-42 persistence and build version
+checks included). Black with target py314 and flake8 pass for the new test files.
+The production fix keeps the always-mode gate and uses only study-name lookup;
+resume still reloads the selected study. Build-path lines are split with
+splitlines(), missing repair source or bundle now fails verification, and both
+launcher pip commands branch to the shared nonzero failure exit.
+
+A fresh standalone/installer build is running to replace the artifact that
+predated dcde845. Existing installed application and environments are untouched.
+
+The fresh PyInstaller/Inno build completed successfully and actually repaired
+the pandas.util TOC collision. All 75 bundled project Python files match the
+working source byte-for-byte, and the repaired pandas module matches .venv314.
+The hidden executable --test returned 0 after 16.84 seconds. The capture helper
+then hit a cp1252 UnicodeEncodeError while printing the saved log, after the
+executable had already completed; inspect the saved output with UTF-8 console
+encoding instead of rerunning the completed test.
+
+Saved smoke-test output confirms ALL TESTS PASSED: 42/42 imports, functional
+XGBoost/LightGBM/CatBoost fits, active frozen threading fallback and a completed
+99-row PLS/LightGBM cross-validated search. Installer size is 230,106,755 bytes
+(219.4 MiB), SHA256
+171742e9f918ee776416d12cc25998a5a64d1b4f86e597ecc17d70039f021c9a.
+No clean install, installed-app upgrade or uninstall was performed. The full
+suite was not repeated; the 77 focused tests and new bundle smoke test passed.

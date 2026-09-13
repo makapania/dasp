@@ -154,7 +154,7 @@ def _query_build_python(python_exe: str) -> tuple[str, Path]:
         capture_output=True,
         text=True,
         check=True,
-    ).stdout.split()
+    ).stdout.splitlines()  # Preserve spaces inside the site-packages path.
     return out[0], Path(out[1])
 
 
@@ -276,8 +276,12 @@ def run_pyinstaller() -> bool:
     for target in repair_targets:
         venv_file = venv_site_pkgs / target
         bundle_file = _internal / target
-        if not venv_file.exists() or not bundle_file.exists():
-            continue
+        if not venv_file.is_file():
+            print(f"ERROR: Cannot verify bundled {target}: source file missing: {venv_file}")
+            return False
+        if not bundle_file.is_file():
+            print(f"ERROR: Critical bundled file missing: {bundle_file}")
+            return False
         if venv_file.read_bytes() != bundle_file.read_bytes():
             shutil.copy2(venv_file, bundle_file)
             print(f"  [REPAIR] Restored {target} from venv (TOC collision detected)")

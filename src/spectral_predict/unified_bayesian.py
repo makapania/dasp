@@ -2701,10 +2701,9 @@ def run_unified_bayesian(
     # only path reaching load_if_exists=True before any trial runs.
     if _persistence_mode == "always" and storage_url is not None:
         try:
-            _existing = {
-                s.study_name
-                for s in optuna.get_all_study_summaries(storage=storage_url)
-            }
+            # Only names are needed for this notice. Resume loads the selected
+            # study's trial history separately below.
+            _existing = set(optuna.study.get_all_study_names(storage=storage_url))
             _incompatible = sorted(
                 n for n in _existing
                 if n.startswith(_study_base) and n != study_name

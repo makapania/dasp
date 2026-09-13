@@ -179,18 +179,21 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > **Not done:** installing from the generated installer on a clean machine, and
 > verifying an in-place upgrade over an existing installation.
 
-> **PR #65 performance/safety review (Codex, 2026-09-12; head `e13393f`): three
-> P2 fixes recommended before merge.** Preserve spaces in the build helper's
-> site-packages path (otherwise the pandas repair silently skips); check the
-> launcher's lock-install failure before its editable install masks the error;
-> and enumerate Optuna study names without loading every study's full trial
-> history. All three were reproduced. **134 focused tests passed, 1 skipped**;
-> `.venv314` passes `pip check`. Two timing rounds on a fixed regression workload
-> found RandomForest about 24% faster and XGBoost about 14% slower, so the stack
-> upgrade is not a uniform speedup. The existing frozen bundle predates `dcde845`
-> and contains neither final bug fix: rebuild/test the final head before shipping,
-> then verify clean and in-place installation. Review only; application code is
-> unchanged. Evidence and scope: [review](reviews/2026-09-12-pr65-performance-safety.md).
+> **PR #65 review fixes implemented (Codex, 2026-09-12; user-authorized).**
+> The build helper preserves spaces in site-packages paths and fails if a pandas
+> verification file is missing. The launcher checks both pip commands separately
+> and exits nonzero on either failure. The compatibility notice enumerates study
+> names without loading unrelated trial histories. Ten new regression cases
+> produced five expected failures before the edits and now all pass;
+> **77 focused tests passed** including existing persistence/dedup/build checks.
+> A fresh standalone and 219.4 MiB installer built successfully. The executable's
+> `--test` passed (42/42 imports, all three booster fits, 99-row PLS/LightGBM
+> search, frozen threading fallback active); all 75 bundled project Python files
+> match the source. Clean and in-place installed-app upgrade tests remain open.
+> Two timing rounds from the original review found RandomForest about 24% faster
+> and XGBoost about 14% slower on a fixed workload, so the stack upgrade is not a
+> uniform speedup. Evidence and scope:
+> [review and implementation](reviews/2026-09-12-pr65-performance-safety.md).
 
 > **Follow-up audit (Codex + Fable, 2026-09-12): the name-only lookup loses no
 > needed state.** The summary cache is temporary and separate from resume's
@@ -198,7 +201,8 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > 24-trial resume, then produced identical TPE trials and leaderboards on
 > continuation to 26. Stored arrays, parameters, metadata and fingerprints were
 > preserved; legacy warnings and auto/never gating also matched. Fable confirms
-> all three review findings. **Verification only; the fixes are not applied.**
+> all three review findings. The subsequent implementation retains those verified
+> storage semantics and adds permanent resume/notice regression tests.
 > [Fable's full opinion](reviews/2026-09-12-pr65-fable.md).
 
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)

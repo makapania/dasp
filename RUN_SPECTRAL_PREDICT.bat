@@ -23,13 +23,9 @@ if errorlevel 1 (
     echo.
     echo Required packages missing from .venv314. Installing project dependencies...
     .venv314\Scripts\python.exe -m pip install -q -r requirements-lock.txt
+    if errorlevel 1 goto :dependency_install_failed
     .venv314\Scripts\python.exe -m pip install -q -e . --no-deps
-    if errorlevel 1 (
-        echo.
-        echo ERROR: Failed to install required dependencies into .venv314
-        pause
-        exit /b 1
-    )
+    if errorlevel 1 goto :dependency_install_failed
 )
 
 REM Launch Python GUI with virtual environment Python
@@ -45,3 +41,10 @@ if errorlevel 1 (
 )
 
 pause
+exit /b 0
+
+:dependency_install_failed
+echo.
+echo ERROR: Failed to install required dependencies into .venv314
+pause
+exit /b 1

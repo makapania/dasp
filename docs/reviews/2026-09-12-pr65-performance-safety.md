@@ -3,14 +3,15 @@
 Reviewed 2026-09-12: [PR #65](https://github.com/makapania/dasp/pull/65),
 head `e13393fbab3f676bc3d23a382728a2f4a43723a8`, base
 `8de744595e17a6317a43153b2b7364a22973bd74`. Both remote refs were verified.
-Review only; no application, launcher, dependency, or build source was changed.
+The initial review and follow-up audit made no application changes. The user
+subsequently authorized all three fixes; see the implementation record below.
 
-**Recommendation: make the three small fixes below before merging.** The new
-environment passes focused checks, but the upgrade is not a uniform performance
-improvement. Final-head frozen-build validation and installation testing remain
-outstanding.
+**The three fixes below are now implemented.** The new environment passes focused
+checks, but the upgrade is not a uniform performance improvement. Installation
+testing remains outstanding; the implementation record distinguishes the new
+checks from the original review's evidence.
 
-## Findings
+## Findings in the reviewed head (now fixed)
 
 ### P2: Preserve spaces in the build interpreter's site-packages path
 
@@ -168,5 +169,50 @@ The timing is an avoidable performance cost, not a data-corruption defect. Fable
 attribution of all benchmark differences to library versions is stronger than
 the experiment supports: it changed interpreter and dependencies together.
 
-This follow-up is verification only. The proposed source change has not been
-applied, and no production study or virtual environment was modified.
+That follow-up was verification only: at that point the proposed source change
+was not applied, and no production study or virtual environment was modified.
+
+## Implementation after user authorization
+
+All three review fixes are applied:
+
+- The build interpreter's output is parsed with `splitlines()` to preserve
+  spaces. Missing pandas repair source or destination now fails verification
+  instead of reporting a match.
+- The launcher checks each pip command immediately and sends either failure to
+  a shared error label that exits nonzero. Successful startup exits zero.
+- The compatibility notice uses `optuna.study.get_all_study_names()` inside the
+  existing `always`-mode gate. Actual study loading and resume are unchanged.
+
+Ten permanent regression cases were added in
+`tests/test_build_and_launcher_safety.py` and
+`tests/test_bayesian_study_lookup.py`. Running them before the source edits
+produced five expected failures; all ten pass after the fixes. They exercise a
+corrupt pandas module under a path containing spaces, missing verification files,
+both launcher install failures and success paths, preservation of stored trials
+and leaderboard rows on resume, continued trial budgeting, and both legacy and
+different-environment warning paths.
+
+**77 focused tests passed**, including the existing environment fingerprint,
+deduplication, T-41/T-42 persistence and build-version checks. The two new test
+files pass Black (target Python 3.14) and flake8. The full suite was not rerun for
+these small changes.
+
+A fresh standalone and installer build completed successfully with Python
+3.14.7, replacing the stale artifact described in the original review. The build
+encountered and repaired the pandas.util collision; the repaired module matches
+the virtual environment byte-for-byte. All 75 bundled project Python files match
+the current source, including the environment fingerprint and stable EPO digest.
+
+The packaged executable's hidden `--test` run returned 0 in 16.84 seconds. Its
+saved output confirms 42/42 imports, all three booster fits, active frozen
+threading fallback and a completed PLS/LightGBM cross-validated search with 99
+ranked rows. A console-encoding failure in the capture helper occurred only when
+displaying that completed run's log; inspecting the saved output confirmed the
+success without repeating the test.
+
+Local artifact: `dist/installer/SpectralPredict_Setup_py312_0.5.0b2.exe`,
+230,106,755 bytes (219.4 MiB), SHA256
+`171742e9f918ee776416d12cc25998a5a64d1b4f86e597ecc17d70039f021c9a`.
+Clean installation, in-place installed-app upgrade and uninstall were not
+tested; those release checks remain outstanding.
