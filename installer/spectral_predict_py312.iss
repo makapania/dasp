@@ -1,11 +1,11 @@
-; Spectral Predict Inno Setup Script — Python 3.12 build (experimental)
+; Spectral Predict Inno Setup Script
 ;
-; PARALLEL to spectral_predict.iss (the production 3.11 installer) — this file
-; must never be touched during 3.11 build path changes. The two installers
-; produce distinct output filenames so they can coexist on one machine for
-; A/B testing, but they share the same AppId so installing one upgrades the
-; other. That's intentional: users should have exactly one Spectral Predict
-; installed at a time, regardless of which Python runtime it bundles.
+; The "py312" in this file's name, the bundle directory, and the exe name are
+; stable identity tokens kept from the 3.12 era, not a statement of the bundled
+; Python version (see docs/PROJECT_STATUS.md). The builder can target another
+; interpreter, so no runtime version is written into user-visible labels.
+; AppId is shared with earlier installers so installing this one upgrades them:
+; users should have exactly one Spectral Predict installed at a time.
 
 #define MyAppName "Spectral Predict"
 #define MyAppVersion "0.5.0b2"
@@ -18,12 +18,12 @@
 #define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt
 
 [Setup]
-; Same AppId as the 3.11 installer — installing one replaces the other.
+; Same AppId as earlier installers — installing this one replaces them.
 ; Prevents the "two Spectral Predicts in Add/Remove Programs" confusion.
 AppId={{B8E7F2A1-4C3D-4E5F-9A1B-2C3D4E5F6A7B}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} {#MyAppVersion} (Python 3.12)
+AppVerName={#MyAppName} {#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
@@ -31,8 +31,8 @@ AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-; Output location — distinct filename so it doesn't collide with the 3.11
-; installer. User can spot-check which one they have by the filename.
+; Output location. The py312 token in the filename is a stable identity, not
+; the bundled Python version.
 OutputDir=..\dist\installer
 OutputBaseFilename=SpectralPredict_Setup_py312_{#MyAppVersion}
 Compression=lzma2/ultra64
@@ -51,6 +51,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "fileassoc"; Description: "Associate .dasp files with {#MyAppName}"; GroupDescription: "File associations:"; Flags: checkedonce
+
+[InstallDelete]
+; Replace the app-owned PyInstaller runtime as a unit. Overlay upgrades leave
+; old DLLs and .dist-info metadata that can misidentify the numerical environment.
+; User files outside _internal are deliberately preserved.
+Type: filesandordirs; Name: "{app}\_internal"
 
 [Files]
 ; Main application files (PyInstaller 3.12 output folder)

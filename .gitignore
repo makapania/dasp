@@ -21,9 +21,10 @@ wheels/
 *.egg
 
 # Virtual environments
-.venv/
-.venv311/
-.venv312/
+# Glob, not an enumeration: per-interpreter venvs (.venv312, .venv314, ...) come
+# and go with Python upgrades, and listing them one by one silently fails to
+# ignore the next one.
+.venv*/
 venv/
 ENV/
 env/

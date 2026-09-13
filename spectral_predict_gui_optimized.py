@@ -60218,6 +60218,27 @@ def run_import_tests():
         # pymoo extras
         ("pymoo.util.nds.non_dominated_sorting", "pymoo NDS"),
         ("moocore", "Multi-objective core"),
+        # Diagnostics and grid widgets — previously untested in the bundle even
+        # though both are exactly the kind of component an interpreter or
+        # PyInstaller change breaks.
+        ("shap", "SHAP diagnostics"),
+        ("tksheet", "Spreadsheet widget"),
+        # Spectroscopy readers. These are lazy imports inside per-format reader
+        # functions, so a break costs one file format rather than the app — but
+        # the bundle never checked whether they survived freezing at all.
+        ("jcamp", "JCAMP-DX reader"),
+        ("specdal", "ASD reader support"),
+        ("spc_io", "SPC reader"),
+        ("specio_py310", "PerkinElmer reader"),
+        ("brukeropus", "Bruker OPUS reader"),
+        ("spectrochempy_omnic", "OMNIC reader"),
+        # Backend entry points, to prove the app's own package froze correctly
+        # rather than only its dependencies.
+        ("spectral_predict.search", "Search backend"),
+        ("spectral_predict.io", "IO backend"),
+        ("spectral_predict.model_io", "Model save/load"),
+        ("spectral_predict.run_logging", "GUI analysis logging"),
+        ("spectral_predict.run_state", "Persistent run state"),
     ]
 
     print("=" * 60)
@@ -60238,6 +60259,27 @@ def run_import_tests():
         except Exception as e:
             print(f"  [FAIL] {module_name}: {e}")
             failed.append((module_name, str(e)))
+
+    # Stale dist-info directories can survive an overlay upgrade and report
+    # a different numerical environment from the libraries actually running.
+    print("\n--- Checking numerical runtime metadata ---")
+    from importlib.metadata import version as distribution_version
+    for module_name, distribution_name in (
+        ("numpy", "numpy"), ("scipy", "scipy"), ("pandas", "pandas"),
+        ("sklearn", "scikit-learn"), ("optuna", "optuna"),
+        ("xgboost", "xgboost"), ("lightgbm", "lightgbm"), ("catboost", "catboost"),
+    ):
+        try:
+            runtime_version = str(__import__(module_name).__version__)
+            recorded_version = distribution_version(distribution_name)
+            if runtime_version != recorded_version:
+                raise RuntimeError(
+                    f"runtime {runtime_version} != metadata {recorded_version}"
+                )
+            print(f"  [OK] {module_name} runtime/metadata: {runtime_version}")
+        except Exception as e:
+            print(f"  [FAIL] {module_name} metadata: {e}")
+            failed.append((f"{module_name}.metadata", str(e)))
 
     # Test XGBoost DLL
     print("\n--- Testing XGBoost DLL ---")
@@ -60266,6 +60308,98 @@ def run_import_tests():
     except Exception as e:
         print(f"  [FAIL] LightGBM DLL: {e}")
         failed.append(("lightgbm.dll", str(e)))
+
+    # Test CatBoost DLL — it was the one booster with no fit test here, despite
+    # being the one whose native library is most awkward to collect.
+    print("\n--- Testing CatBoost DLL ---")
+    try:
+        import catboost
+        import numpy as np
+        X = np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        y = np.array([0, 1, 0, 1])
+        catboost.CatBoostClassifier(iterations=2, verbose=0, allow_writing_files=False).fit(X, y)
+        print("  [OK] CatBoost DLL functional")
+    except Exception as e:
+        print(f"  [FAIL] CatBoost DLL: {e}")
+        failed.append(("catboost.dll", str(e)))
+
+    # Test a real cross-validated search. THIS is the check that matters most in
+    # a frozen build, and no import test can stand in for it.
+    #
+    # History (docs/SESSION_LOG_ARCHIVE.md:2159): the frozen WINDOWED bundle
+    # crashed whenever LightGBM/joblib/loky tried to spawn workers. The child
+    # ran multiprocessing.freeze_support() inside PyInstaller's runtime hook and
+    # died parsing argv; the parent retried the spawn, fork-bombing GUI windows.
+    # _frozen_needs_threading_fallback() suppresses that by forcing threading in
+    # ANY frozen build. If that fallback ever stops engaging, this is where it
+    # shows up — as a hang or a swarm of processes rather than an ImportError.
+    print("\n--- Testing cross-validated search (loky/threading fallback) ---")
+    try:
+        import numpy as np
+        import pandas as pd
+        from spectral_predict.search import _frozen_needs_threading_fallback, run_search
+
+        is_frozen = getattr(sys, "frozen", False)
+        fallback = _frozen_needs_threading_fallback()
+        print(f"  frozen={is_frozen}, threading fallback active={fallback}")
+        # Unfrozen, False is the correct answer, so only a frozen build without
+        # the fallback is a problem.
+        if is_frozen and not fallback:
+            print("  [WARN] fallback INACTIVE in a frozen build — spawn crash risk")
+            failed.append(("threading_fallback", "inactive in frozen build"))
+
+        rng = np.random.default_rng(0)
+        n_samples, n_wl = 30, 120
+        wl = np.linspace(1000.0, 2500.0, n_wl)
+        X = pd.DataFrame(rng.normal(size=(n_samples, n_wl)), columns=wl)
+        y = pd.Series(rng.normal(size=n_samples))
+        # Subset sweeps are switched off: this is a smoke test of the frozen
+        # parallelism path, not a search. Leaving them on turns a ~30s check
+        # into a multi-minute one without exercising anything extra.
+        df_ranked, _ = run_search(
+            X, y, "regression",
+            models_to_test=["PLS", "LightGBM"],
+            folds=3,
+            preprocessing_methods={"raw": True},
+            max_n_components=3,
+            enable_variable_subsets=False,
+            enable_region_subsets=False,
+        )
+        print(f"  [OK] run_search completed — {len(df_ranked)} ranked rows")
+    except Exception as e:
+        print(f"  [FAIL] cross-validated search: {type(e).__name__}: {e}")
+        failed.append(("run_search", str(e)))
+
+    # Saving and reopening a fitted model must work with the bundled libraries.
+    # Keep the fixture outside the installation and remove it even on failure.
+    print("\n--- Testing model save/load and prediction ---")
+    try:
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from sklearn.cross_decomposition import PLSRegression
+        from spectral_predict.model_io import save_model, load_model, predict_with_model
+
+        rng = np.random.default_rng(65)
+        wl = np.linspace(1000.0, 2500.0, 120)
+        X = pd.DataFrame(rng.normal(size=(30, 120)), columns=wl)
+        y = X.iloc[:, :5].sum(axis=1).to_numpy()
+        fitted = PLSRegression(n_components=3).fit(X.to_numpy(), y)
+        expected = fitted.predict(X.to_numpy()).ravel()
+        metadata = {
+            "model_name": "PLS", "task_type": "regression",
+            "wavelengths": wl.tolist(), "n_vars": len(wl),
+            "target_name": "smoke_test", "preprocessing": "raw",
+        }
+        with TemporaryDirectory(prefix="spectral-predict-smoke-") as temp_dir:
+            model_path = Path(temp_dir) / "model.dasp"
+            save_model(fitted, None, metadata, str(model_path))
+            loaded = load_model(str(model_path))
+            actual = predict_with_model(loaded, X)
+            np.testing.assert_array_equal(np.asarray(actual).ravel(), expected)
+        print("  [OK] Model round trip preserved all 30 predictions")
+    except Exception as e:
+        print(f"  [FAIL] model round trip: {type(e).__name__}: {e}")
+        failed.append(("model_round_trip", str(e)))
 
     print("\n" + "=" * 60)
     print("SUMMARY")

@@ -16,15 +16,37 @@ Stop manually testing preprocessing pipelines. Get a ranked list of candidate mo
 
 ## 🚀 Quick Start — developers (2 minutes)
 
+> ### ⚠️ Requires Python 3.14
+>
+> **This project runs on Python 3.14 only.** Earlier versions are not supported and
+> will not be — `pyproject.toml` sets `requires-python = ">=3.14"`, so `pip install`
+> refuses to install on anything older. Get it from
+> [python.org](https://www.python.org/downloads/) or `winget install Python.Python.3.14`.
+>
+> Use the ordinary GIL-enabled build, **not** the free-threaded (`t`) variant.
+>
+> End users installing the bundled `.exe` need nothing — Python ships inside it.
+
 ### 1. Install
 
 ```bash
 git clone https://github.com/makapania/dasp.git
 cd dasp
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .[dev]
-pip install specdal  # For binary ASD files
+py -3.14 -m venv .venv314
+.venv314\Scripts\activate        # macOS/Linux: source .venv314/bin/activate
+
+# Install the EXACT verified versions, then the project itself without
+# re-resolving them. Installing from pyproject floors instead lets two machines
+# end up on different numpy/sklearn builds and disagree about results.
+pip install -r requirements-lock.txt
+pip install -e . --no-deps
+```
+
+Checking for updates later is one command — see
+[`docs/upgrade/UPGRADE_RUNBOOK.md`](docs/upgrade/UPGRADE_RUNBOOK.md):
+
+```bash
+python scripts/upgrade_check.py
 ```
 
 ### 2. Launch the app
@@ -449,7 +471,7 @@ black src/ tests/               # Format code
 flake8 src/ tests/              # Lint code
 
 # CI/CD
-# GitHub Actions runs on Linux/Windows with Python 3.10-3.12
+# GitHub Actions runs on Linux/Windows with Python 3.14
 ```
 
 ---
@@ -458,11 +480,19 @@ flake8 src/ tests/              # Lint code
 
 ### Core Dependencies
 
-- Python ≥ 3.10
-- numpy ≥ 1.21.0
-- pandas ≥ 1.3.0
-- scikit-learn ≥ 1.0.0
-- scipy ≥ 1.7.0
+**Python 3.14 only.** Not "3.14 or newer in spirit" — `requires-python = ">=3.14"`
+is enforced at install time, and CI tests 3.14 alone.
+
+The floors below exist so the resolver has a lower bound. They are **not** a
+support claim: older combinations are untested and unsupported. The exact
+verified set is in [`requirements-lock.txt`](requirements-lock.txt), which is what
+you should actually install.
+
+- Python **3.14** (ordinary GIL build, not free-threaded)
+- numpy ≥ 2.0.0
+- pandas ≥ 2.0.0
+- scikit-learn ≥ 1.5.0
+- scipy ≥ 1.11.0
 - matplotlib ≥ 3.5.0
 - tabulate ≥ 0.9.0
 - xgboost ≥ 2.0.0

@@ -113,6 +113,102 @@ _EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
 # leak into the leaderboard with no test signal).
 DUPLICATE_OF_TRIAL_ATTR = 'duplicate_of_trial'
 
+# Study identity must include the numerical environment, not just the analysis
+# configuration. A resumed study reloads completed trial fingerprints and returns
+# their cached scores WITHOUT re-running cross-validation, so a study created
+# under one interpreter/dependency set and resumed under another silently mixes
+# numbers from two different numerical stacks. Reproduced 2026-09-12: a trial
+# scored on Python 3.12 / numpy 2.4.4 / sklearn 1.8 replayed its exact value on
+# Python 3.14 / numpy 2.5.3 / sklearn 1.9.1 with zero CV calls.
+#
+# Bumped ONLY if the meaning of the fingerprint changes; it exists so a future
+# change to this scheme does not collide with digests written by an older one.
+ENV_FINGERPRINT_VERSION = "env1"
+
+# Packages whose version can move a numerical result. Adding one invalidates
+# existing studies by design; that is the point.
+_ENV_TRACKED_DISTRIBUTIONS = (
+    "numpy", "scipy", "pandas", "scikit-learn", "imbalanced-learn",
+    "sklearn-compat", "xgboost", "lightgbm", "catboost", "optuna",
+    "joblib", "threadpoolctl",
+)
+
+# Study user_attr holding the readable environment, so a study on disk can be
+# explained without reversing a hash.
+ENV_FINGERPRINT_ATTR = "numerical_environment"
+
+
+class EnvironmentFingerprintError(RuntimeError):
+    """Raised when the numerical environment cannot be determined.
+
+    Deliberately fatal rather than degrading to a placeholder: two environments
+    that both fail to report a version would hash identically and silently become
+    resume-compatible, which is the exact failure this fingerprint exists to stop.
+    """
+
+
+def _numerical_environment() -> Dict[str, Any]:
+    """Describe the environment that determines numerical results.
+
+    Versions come from installed distribution metadata rather than the lockfile,
+    because what matters is what is actually imported at run time.
+    """
+    import platform
+    import sys as _sys
+    from importlib.metadata import PackageNotFoundError, version as _dist_version
+
+    packages: Dict[str, str] = {}
+    missing: List[str] = []
+    for dist in _ENV_TRACKED_DISTRIBUTIONS:
+        try:
+            dist_version = _dist_version(dist)
+        except PackageNotFoundError:
+            # Absent is a fact about the environment and hashes fine. Only an
+            # unreadable version is ambiguous.
+            packages[dist] = "absent"
+        except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
+            missing.append(f"{dist} ({type(exc).__name__}: {exc})")
+        else:
+            # importlib.metadata returns None (no exception) when a dist-info has
+            # no Version field. Two such installs would hash identically.
+            if isinstance(dist_version, str) and dist_version:
+                packages[dist] = dist_version
+            else:
+                missing.append(f"{dist} (no version in metadata: {dist_version!r})")
+
+    if missing:
+        raise EnvironmentFingerprintError(
+            "Cannot read installed versions for: " + ", ".join(missing) + ". "
+            "Refusing to fingerprint the numerical environment, because an "
+            "unknown version would let incompatible studies resume each other."
+        )
+
+    return {
+        "fingerprint_version": ENV_FINGERPRINT_VERSION,
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        # A free-threaded build computes the same way but schedules differently;
+        # record it so the two are never treated as one environment.
+        "gil_enabled": bool(getattr(_sys, "_is_gil_enabled", lambda: True)()),
+        "platform_system": platform.system(),
+        "platform_machine": platform.machine(),
+        "frozen": bool(getattr(_sys, "frozen", False)),
+        "packages": packages,
+    }
+
+
+def _environment_digest(environment: Optional[Dict[str, Any]] = None) -> str:
+    """Short, stable digest of the numerical environment.
+
+    Canonical JSON with sorted keys, so dict ordering cannot change the digest.
+    """
+    import hashlib as _hl
+    import json as _json
+
+    env = environment if environment is not None else _numerical_environment()
+    payload = _json.dumps(env, sort_keys=True, separators=(",", ":"))
+    return _hl.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
 
 def _supports_early_stopping(model_name: str) -> bool:
     return model_name in _EARLY_STOPPING_MODELS
@@ -2122,7 +2218,6 @@ def _make_tpe_sampler(random_state: int) -> TPESampler:
         n_ei_candidates=32,
         multivariate=True,
         consider_endpoints=True,
-        warn_independent_sampling=False,
     )
 
 
@@ -2498,7 +2593,6 @@ def run_unified_bayesian(
         n_ei_candidates=32,   # More candidates for better exploration
         multivariate=True,    # Model parameter interactions
         consider_endpoints=True,
-        warn_independent_sampling=False  # Suppress dynamic space warning
     )
 
     # Create study. T-11 D: when a run-state storage URL is active, persist
@@ -2579,7 +2673,16 @@ def run_unified_bayesian(
         f"early_stop={early_stopping_rounds}"
     )
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
-    study_name = f"unified_bayesian_{model_name}_{config_hash}"
+
+    # The config hash alone is NOT sufficient identity for a resumable study.
+    # Resuming replays cached trial scores without re-running CV, so the study
+    # must also be keyed on the numerical environment that produced them.
+    # Keeping the config hash as a stable prefix means the corresponding studies
+    # from other environments are still findable by eye in the database.
+    _environment = _numerical_environment()
+    _env_hash = _environment_digest(_environment)
+    _study_base = f"unified_bayesian_{model_name}_{config_hash}"
+    study_name = f"{_study_base}_{ENV_FINGERPRINT_VERSION}_{_env_hash}"
 
     # ---------------------------------------------------------------------------
     # T-41: SQLite auto-calculator — decide storage mode per model.
@@ -2590,6 +2693,62 @@ def run_unified_bayesian(
     # 'always': SQLite from trial 0 (if a storage URL is available).
     # 'auto': first 10 trials in-memory, then decide based on median fit time.
     _persistence_mode = enable_sqlite_persistence  # already validated above
+
+    # If studies for this same analysis config exist under a DIFFERENT numerical
+    # environment, say so. Silently starting from zero after the user chose
+    # "Resume" is the failure mode worth avoiding here: the old study is intact
+    # and still readable, its scores just cannot be trusted in this environment.
+    #
+    # Gated on 'always' specifically. Enumerating studies TOUCHES the storage and
+    # so creates the SQLite file, which would break the 'never' and 'auto'-warmup
+    # guarantee of staying purely in memory. 'always' is also the mode that
+    # actually resumes: GUI crash recovery forces it (GUI:23895), and it is the
+    # only path reaching load_if_exists=True before any trial runs.
+    if _persistence_mode == "always" and storage_url is not None:
+        try:
+            # Only names are needed for this notice. Resume loads the selected
+            # study's trial history separately below.
+            _existing = set(optuna.study.get_all_study_names(storage=storage_url))
+            # Pre-fingerprint studies carry the bare base name, so their
+            # environment is unknown rather than known to differ.
+            _legacy = sorted(n for n in _existing if n == _study_base)
+            _incompatible = sorted(
+                n for n in _existing
+                if n.startswith(f"{_study_base}_") and n != study_name
+            )
+            if study_name not in _existing:
+                _notes = []
+                if _incompatible:
+                    _notes.append((
+                        f"Previous Bayesian results for {model_name} exist but were "
+                        f"computed in a different numerical environment "
+                        f"(Python {_environment['python_version']}, "
+                        f"numpy {_environment['packages'].get('numpy')}, "
+                        f"scikit-learn {_environment['packages'].get('scikit-learn')} now). "
+                        f"Their cached scores will NOT be reused — starting a fresh "
+                        f"study. The previous results are preserved: "
+                        f"{', '.join(_incompatible)}",
+                        "environment_changed",
+                    ))
+                if _legacy:
+                    _notes.append((
+                        f"Previous Bayesian results for {model_name} use an older "
+                        f"study format that does not record the numerical "
+                        f"environment, so their cached scores will NOT be reused — "
+                        f"starting a fresh study. The previous results are "
+                        f"preserved: {', '.join(_legacy)}",
+                        "legacy_study_format",
+                    ))
+                for _msg, _flag in _notes:
+                    logger.warning(_msg)
+                    if progress_callback is not None:
+                        progress_callback({
+                            "stage": "unified_bayesian",
+                            "message": _msg,
+                            _flag: True,
+                        })
+        except Exception as exc:  # noqa: BLE001 - advisory only, never fatal
+            logger.debug("Could not enumerate existing studies: %s", exc)
 
     if _persistence_mode == "always" and storage_url is not None:
         # Always-on: create SQLite study from trial 0 (T-41 Task 2).
@@ -2668,6 +2827,10 @@ def run_unified_bayesian(
         ('cv_strategy', cv_strategy),
         ('cv_n_repeats', cv_n_repeats),
         ('early_stopping_rounds', _hoist_es),
+        # Readable form of what the study_name digest encodes, so a database can
+        # be explained later without reversing a hash. Set before any trial runs,
+        # and carried through optuna.copy_study by the auto-migration path.
+        (ENV_FINGERPRINT_ATTR, _environment),
     )
     for _key, _val in _hoist_pairs:
         if _key in study.user_attrs:

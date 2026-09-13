@@ -3301,7 +3301,8 @@ def read_jcamp_file(
     path = Path(path)
 
     # Read JCAMP file
-    jcamp_data = jcamp.jcamp_readfile(str(path))
+    # jcamp renamed this in 1.3.0: jcamp_readfile -> readfile, with no alias.
+    jcamp_data = jcamp.readfile(str(path))
 
     # Extract x and y data
     wavelengths = jcamp_data['x']

@@ -1,14 +1,95 @@
 # Project Status
 
+## ⚠ MOVING A 3.12 MACHINE TO 3.14 (added 2026-09-12) — DO THIS FIRST
+
+If this machine is still on `.venv312`, do this **before** pulling and before trying
+to run anything. The project is now Python 3.14 only.
+
+> **The trap:** `pyproject.toml` now sets `requires-python = ">=3.14"`. The moment you
+> pull, `pip install -e .` **fails inside `.venv312`** with a `requires-python` error.
+> That is expected, not a broken checkout. Build the new environment instead of trying
+> to repair the old one.
+
+```bash
+# 1. Install Python 3.14 (ordinary GIL build, NOT the free-threaded "t" variant)
+winget install Python.Python.3.14
+py -3.14 -V                       # expect 3.14.x
+
+# 2. Pull
+cd <repo>
+git checkout feat/python-314-upgrade    # or main, once this is merged
+git pull
+
+# 3. Build the new environment alongside the old one. Do NOT delete .venv312 yet.
+py -3.14 -m venv .venv314
+.venv314\Scripts\python -m pip install --upgrade pip
+.venv314\Scripts\python -m pip install -r requirements-lock.txt
+.venv314\Scripts\python -m pip install -e . --no-deps
+.venv314\Scripts\python -m pip check          # expect: No broken requirements found.
+
+# 4. Verify before trusting it
+.venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
+#    Compare failing node IDs with the known baseline below. Counts vary with
+#    platform and optional dependencies. The bar is ZERO NEW failures.
+
+# 5. Launch the GUI
+.venv314\Scripts\python spectral_predict_gui_optimized.py
+```
+
+**The launchers are already updated on this branch.** `install.bat`, `install.sh`,
+`RUN_SPECTRAL_PREDICT.bat` and `run_gui.sh` all target 3.14 / `.venv314`, and the
+installers now install `requirements-lock.txt` instead of resolving pyproject floors.
+Steps 3–4 above are exactly what `install.bat` does, so you can just run that.
+
+**Note that `py` now defaults to 3.14** once installed, so a bare `py` or `python` no
+longer means what it did. Always use the explicit `.venv314\Scripts\python` path.
+
+**Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
+so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A true
+rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
+you are confident, and reclaim the disk then.
+
+**Installer validation complete locally (2026-09-12, application `db975e2`):** a
+real installer built from base `main` (`8de7445`) and retained `.venv312` was
+installed, then upgraded in place. The first attempt exposed 3,309 obsolete
+runtime files and mismatched package metadata; a GUI analysis also exposed the
+missing `logging.handlers` dependency. Both are fixed. The installer replaces
+only its app-owned `_internal` directory, and PyInstaller now analyzes `src`.
+
+The corrected upgrade and a fresh installation each match all 20,384 build
+runtime files by SHA256. Both pass the expanded executable smoke test (44/44
+imports, numerical metadata, booster fits, 99-row search and model round trip)
+and programmatic installed-GUI analysis/model loading. A model saved under 3.12
+reproduces all 30 reference predictions after upgrade. Both uninstall checks
+preserve user files and remove the application registration. The test installs
+were removed; the source shortcut and retained `.venv312` are unchanged.
+
+These were current-user installations on this development machine, not a fresh
+Windows VM or manual desktop test. The native automation bridge was unavailable.
+The final CI comparison also passes: Windows has 3,008 passed and the same five
+baseline failures; Linux and optional dependencies each have 2,880 passed and
+the same three baseline failures. Build passes; the informational GUI timeout
+matches base. PR #65 remains open and ready to merge. Automatic approval review
+blocked the merge because it did not find explicit user authorization for merging
+into `main`; that confirmation is the only remaining step. See the
+[installation validation report](reviews/2026-09-12-pr65-installation-validation.md)
+for exact commits, artifact hash, review scope and remaining limitations.
+
+---
+
 ## ⚠ FIRST PULL ON A NEW MACHINE (added 2026-07-30) — DO THIS BEFORE ANYTHING ELSE
 
 If this checkout is the first one on this machine to see commit `763c4ed` or later,
 **run this before running or testing anything:**
 
 ```bash
-# from the repo root, with .venv312 active (project is Python 3.12 only)
-pip install -e .
+# from the repo root, in the project venv (.venv314 — see the 3.14 section above)
+pip install -e . --no-deps
 ```
+
+> Superseded in practice by the 3.14 section above: building a fresh `.venv314` cannot
+> inherit a stale shim, so this only matters for an environment that predates the
+> migration. Kept because the failure mode below is confusing if you hit it.
 
 **Why it is mandatory, not housekeeping.** The `spectral-predict` console script was
 retired and `src/spectral_predict/cli.py` deleted. A `git pull` removes the source but
@@ -42,28 +123,157 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
    T-CI-1 rot, NOT this merge. Do not treat a red check as a signal about your own
    branch — until T-CI-1 closes, diff your failure set against `origin/main` and
    confirm you add zero NEW failures. Current known-red on `main`:
-   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2).
+   `test_export_code.py` (2), `test_cv_strategy.py` (1), `test_t19_class_weight_per_library.py` (2),
+   **plus two GUI tests** (`tests/gui/test_comprehensive.py::test_catboost_via_gui`,
+   `tests/gui/test_multiclass_gui.py::test_tab9_rejects_multiclass_primary`). That is
+   **7 total** — the list above previously said 5 and was stale. Verified 2026-09-12
+   by full runs on 3.12, on 3.14, and on 3.14 with every dependency upgraded: the
+   same seven fail in all three, 2971 pass, 33 skip.
+
+> ## ▶ ACTIVE DIRECTION (2026-09-12) — **Python 3.14 migration COMPLETE**, all dependencies current, on `feat/python-314-upgrade`
+>
+> **The project is Python 3.14 only.** `requires-python = ">=3.14"`, CI matrix is
+> `['3.14']`, classifiers list 3.14 alone. Earlier versions are not supported and
+> pip refuses to install on them. Use the ordinary GIL build, **not** free-threaded.
+> Recreate an environment with `py -3.14 -m venv .venv314` +
+> `pip install -r requirements-lock.txt` + `pip install -e . --no-deps`.
+>
+> **What was verified, not assumed.** The analysis in `docs/PYTHON_UPGRADE_DECISION.md`
+> was read-only — its own Appendix B says nothing was ever installed, built or run.
+> All of it has now been executed:
+> - All 114 pinned distributions install on CPython 3.14.7; whole stack imports.
+> - Full suite: **7 failed / 2971 passed / 33 skipped, identical on 3.12, on 3.14,
+>   and on 3.14 with every dependency upgraded. Zero new failures.**
+> - **The frozen bundle builds AND runs** — 42/42 imports, all three booster DLLs,
+>   threading fallback engaged, a real LightGBM CV job completing (the historical
+>   fork-bomb scenario), GUI launching, and a 243.9 MB Inno installer produced.
+>
+> **Dependencies are all current except two**, held back by an upstream pin, not by
+> oversight: `alive-progress 3.3.0` requires `about-time==4.2.1` and
+> `graphemeu==0.7.2` exactly and is itself the latest release. Majors that landed:
+> optuna 5.0, plotly 7.0, moocore 0.3.2, xgboost 3.4.1, numpy 2.5.3, sklearn 1.9.1.
+>
+> **Rollback is one variable.** The build path no longer hardcodes an interpreter;
+> `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. The
+> user-visible artifact names still say `py312` **deliberately** — they are a stable
+> identity so existing installs upgrade in place. Do not "fix" them.
+>
+> **Keeping current is now a routine:** `python scripts/upgrade_check.py` reports
+> what is outdated, what is risky (numerical vs infrastructure), what cannot move
+> and why, and what ordering version caps force. `docs/upgrade/UPGRADE_RUNBOOK.md`
+> is the process; run it quarterly or when a new Python minor ships.
+>
+> **Two pre-existing issues found en route, NOT fixed here** (separate tickets):
+> Optuna study identity omits Python/dependency versions, so a *resumed* study can
+> return cached scores computed under a different numerical stack; and `MultiGroupEPO`
+> seeds off `hash(label)`, which is `PYTHONHASHSEED`-dependent. See
+> `docs/upgrade/PYTHON_UPGRADE_PLAN.md`.
+>
+> **UPDATE — BOTH ARE NOW FIXED (2026-09-12).** Codex's design was followed.
+> Optuna study names carry a numerical-environment digest
+> (`unified_bayesian_<model>_<confighash>_env1_<envhash>`), the readable
+> environment is stored in `study.user_attrs["numerical_environment"]`, an
+> incompatible prior study produces an explicit notice instead of a silent fresh
+> start, and an unreadable package version raises rather than degrading to a
+> placeholder. MultiGroupEPO uses a stable blake2b label digest and sorted group
+> assembly. Existing pre-fix studies are intentionally no longer auto-resumable;
+> their databases stay intact. **Still open:** the separate GUI
+> `EstimatedEPO(random_state=None)` path remains nondeterministic, and a full
+> cross-version SQLite replay matrix is not implemented.
+>
+> The original review recommendation follows.
+>
+> **Review recommendation (2026-09-12, Codex): FIX NOW for both pre-existing bugs.**
+> Optuna needs environment-specific study names,
+> stored environment metadata, and a visible fresh-study notice for incompatible
+> or legacy caches; preserve existing databases, but do not resume their unknown
+> scores. MultiGroupEPO needs a stable label digest and sorted group assembly.
+> The latter does not fix the separate GUI EstimatedEPO(random_state=None) path.
+> Cross-version SQLite replay and cross-process EPO output drift reproduced;
+> 110 focused existing tests passed. Details are in SESSION_LOG.md.
+>
+> **Installation follow-up:** fresh-directory installation and a real in-place
+> upgrade now pass on this development machine; a fresh-OS check remains untested.
+> See the final validation report linked above.
+
+> **PR #65 review fixes implemented (Codex, 2026-09-12; user-authorized).**
+> The build helper preserves spaces in site-packages paths and fails if a pandas
+> verification file is missing. The launcher checks both pip commands separately
+> and exits nonzero on either failure. The compatibility notice enumerates study
+> names without loading unrelated trial histories. Ten new regression cases
+> produced five expected failures before the edits and now all pass;
+> **77 focused tests passed** including existing persistence/dedup/build checks.
+> A fresh standalone and 219.4 MiB installer built successfully. The executable's
+> `--test` passed (42/42 imports, all three booster fits, 99-row PLS/LightGBM
+> search, frozen threading fallback active); all 75 bundled project Python files
+> match the source. This initial artifact was superseded by the corrected 219.6
+> MiB build and completed installation checks documented above.
+> Two timing rounds from the original review found RandomForest about 24% faster
+> and XGBoost about 14% slower on a fixed workload, so the stack upgrade is not a
+> uniform speedup. Evidence and scope:
+> [review and implementation](reviews/2026-09-12-pr65-performance-safety.md).
+
+> **Follow-up audit (Codex + Fable, 2026-09-12): the name-only lookup loses no
+> needed state.** The summary cache is temporary and separate from resume's
+> storage. An in-memory replacement preserved the whole SQLite dump on a
+> 24-trial resume, then produced identical TPE trials and leaderboards on
+> continuation to 26. Stored arrays, parameters, metadata and fingerprints were
+> preserved; legacy warnings and auto/never gating also matched. Fable confirms
+> all three review findings. The subsequent implementation retains those verified
+> storage semantics and adds permanent resume/notice regression tests.
+> [Fable's full opinion](reviews/2026-09-12-pr65-fable.md).
+
+> **Final merge gates passed (2026-09-12).** Fable found no merge blocker in
+> `89f9479`; its low-severity Optuna API floor finding is corrected to `>=3.4.0`.
+> Codex reviewed the later `f60cfa5` changes and validated the `db975e2` build:
+> 81 focused tests, five EPO determinism tests, six Unix launcher probes, and the
+> real installation checks above pass. Fable did not review those later commits.
+> The completed final PR CI run has the same five Windows
+> failures and three Linux failures as base main, plus the same informational
+> XGBoost GUI timeout. [Final Fable review](reviews/2026-09-12-pr65-fable-final.md).
+
+> **Review findings fixed in `f60cfa5` (2026-09-12).** PR 65 was reviewed by Claude,
+> GLM 5.3 and Codex (`gpt-6-astra`), and Codex confirmed each fix before it was applied.
+> Fixed: fingerprint now rejects missing/empty package version metadata; the resume
+> notice separates legacy (pre-fingerprint) study names from other-environment ones;
+> MultiGroupEPO sorts mixed int/str group labels with a type-tagged key (string-label
+> output bit-identical); deprecated `warn_independent_sampling` removed; launcher
+> points to `install.bat` when `.venv314` is missing; `run_gui.sh` repairs from the
+> lockfile; launcher tests use explicit paths (`NoDefaultCurrentDirectoryInExePath=1`);
+> installer label, harness hash-seed claim and README scipy floor corrected.
+> **Deferred:** (1) a fingerprint read failure still aborts `never`-mode in-memory
+> runs; this is deliberate, and relaxing it must keep persistent-study strictness.
+> (2) Optuna's `consider_endpoints` is also deprecated (removal in 6.0), but dropping
+> it changes its effective value, so it needs a numerical A/B before removal.
 
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
 `pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end
 up on different versions of numpy/pandas/sklearn and disagree about results. The pinned
 set actually verified on the primary machine lives in **`requirements-lock.txt`** at the
-repo root (Python **3.12.10**).
+repo root (Python **3.14.7**).
 
-On a new or drifting machine:
+On a new or drifting machine (or just run `install.bat` / `install.sh`, which do
+exactly this):
 
 ```bash
-py -3.12 -m venv .venv312
-.venv312\Scripts\activate
+py -3.14 -m venv .venv314
+.venv314\Scripts\activate
 pip install -r requirements-lock.txt
 pip install -e . --no-deps
 ```
 
-After any intentional upgrade, regenerate and commit it:
+Check for and apply updates with the standing process rather than improvising:
 
 ```bash
-.venv312\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
+python scripts\upgrade_check.py   # what is outdated, risky, blocked, order-forced
+```
+
+then follow `docs/upgrade/UPGRADE_RUNBOOK.md`. After any intentional upgrade,
+regenerate and commit the lock:
+
+```bash
+.venv314\Scripts\python -m pip freeze --exclude-editable > requirements-lock.txt
 ```
 
 (then restore the comment header at the top of the file).
@@ -81,10 +291,18 @@ shim appears in a fresh venv. Two fixes came out of that run:
 - The activate line above contained a raw `0x07` (BEL) byte instead of `\a`, so it read
   `.venv312\Scriptsctivate` and could not be copy-pasted.
 
-Note that "Python 3.12 only" is a **convention enforced only in docs**. `pyproject.toml`
-still declares `requires-python = ">=3.10"` and advertises 3.10/3.11/3.12 classifiers,
-so nothing stops an install on 3.10. Left as-is deliberately; tighten it only if the
-packaging metadata is meant to match the rule.
+> **That verification covered the Python 3.12 procedure**, which the 3.14 section at the
+> top of this file supersedes. Both fixes it produced still stand — `pytest-timeout` is
+> pinned and the BEL byte is gone. The **3.14** recreate procedure has been run
+> end-to-end on the primary machine only; a second-machine run is still outstanding.
+
+**Superseded 2026-09-12.** This previously read: *"Python 3.12 only" is a convention
+enforced only in docs — `pyproject.toml` still declares `requires-python = ">=3.10"`
+and advertises 3.10/3.11/3.12 classifiers, so nothing stops an install on 3.10. Left
+as-is deliberately; tighten it only if the packaging metadata is meant to match the
+rule.* That tightening has now happened: the version rule is **enforced by packaging
+metadata**, not convention. `requires-python = ">=3.14"`, the classifiers list 3.14
+alone, and CI tests 3.14 only, so pip refuses to install on anything older.
 
 ### If you are verifying branch code from a git worktree
 
@@ -1274,7 +1492,7 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 **Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (see `src/spectral_predict/search.py:_frozen_needs_threading_fallback` — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
 
 **Still in-repo from the source-install era (kept, not deleted):**
-- `install.bat` / `install.sh`: detects Python 3.12, creates `.venv312`, runs `pip install -e . --upgrade`. Idempotent. Useful for developer setup.
+- `install.bat` / `install.sh`: detects Python 3.14, creates `.venv314`, installs `requirements-lock.txt` then `pip install -e . --no-deps`. Idempotent. Useful for developer setup.
 - `INSTALL.md`: GUI-focused walkthrough — now developer-facing, not user-facing.
 - `pyproject.toml` deps audited via AST scan. Added: `Pillow>=10.0.0`, `shap>=0.44.0`. Re-enabled: `jcamp>=1.2.1`. Floors bumped: `numpy>=2.0`, `pandas>=2.0`, `scikit-learn>=1.5`, `scipy>=1.11`.
 

@@ -7,7 +7,7 @@ name = "spectral-predict"
 version = "0.5.0b2"
 description = "Automated spectral analysis software for preprocessing, modeling, and ranking spectroscopy data"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = {text = "MIT"}
 authors = [
     {name = "Spectral Predict contributors"}
@@ -16,12 +16,13 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    # Floors reflect actually-tested versions on .venv312 (2026-04-17).
+    # Floors reflect actually-tested versions. The project runs on Python 3.14
+    # ONLY (see requires-python above); these floors are a lower bound for
+    # resolution, NOT a statement that older combinations are supported. The
+    # exact, verified set lives in requirements-lock.txt -- install that.
     # numpy: 2.x ABI break vs 1.x. scikit-learn: PR #5 (LightGBM clone fix)
     # was validated against >=1.5; older sklearn missed n_features_in_ checks.
     "numpy>=2.0.0",
@@ -37,7 +38,7 @@ dependencies = [
     "xlsxwriter>=3.2.0",
     "openpyxl>=3.1.0",
     "xlrd>=2.0.1",
-    "jcamp>=1.2.1,<1.3",  # used for READ only; 1.3.0 setup.py is broken (lists stdlib modules as deps); writes go through vendored _build_jcamp_dx_string in io.py
+    "jcamp>=1.3.2",  # READ only; writes go through vendored _build_jcamp_dx_string in io.py. Floor is 1.3.2, not 1.2.x: 1.3.0 renamed jcamp_readfile -> readfile with no alias, and 1.3.2 is Flit-built so the old broken setup.py no longer applies
     "spc-io>=0.2.0",
     # GUI image rendering (app icon, embedded images)
     "Pillow>=10.0.0",
@@ -56,7 +57,7 @@ dependencies = [
     "requests",
     # Note: agilent-ir-formats moved to optional (not available on Python 3.11+)
     # Optimization
-    "optuna>=3.0.0",
+    "optuna>=3.4.0",
     "pymoo>=0.6.0",
     # Advanced baseline correction
     "pybaselines>=1.1.0",
