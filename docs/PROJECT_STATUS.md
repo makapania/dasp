@@ -179,6 +179,19 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > **Not done:** installing from the generated installer on a clean machine, and
 > verifying an in-place upgrade over an existing installation.
 
+> **PR #65 performance/safety review (Codex, 2026-09-12; head `e13393f`): three
+> P2 fixes recommended before merge.** Preserve spaces in the build helper's
+> site-packages path (otherwise the pandas repair silently skips); check the
+> launcher's lock-install failure before its editable install masks the error;
+> and enumerate Optuna study names without loading every study's full trial
+> history. All three were reproduced. **134 focused tests passed, 1 skipped**;
+> `.venv314` passes `pip check`. Two timing rounds on a fixed regression workload
+> found RandomForest about 24% faster and XGBoost about 14% slower, so the stack
+> upgrade is not a uniform speedup. The existing frozen bundle predates `dcde845`
+> and contains neither final bug fix: rebuild/test the final head before shipping,
+> then verify clean and in-place installation. Review only; application code is
+> unchanged. Evidence and scope: [review](reviews/2026-09-12-pr65-performance-safety.md).
+
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
 `pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end
