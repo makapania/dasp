@@ -230,6 +230,20 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > failures and three Linux failures as base main, plus the same informational
 > XGBoost GUI timeout. [Final Fable review](reviews/2026-09-12-pr65-fable-final.md).
 
+> **Review findings fixed in `f60cfa5` (2026-09-12).** PR 65 was reviewed by Claude,
+> GLM 5.3 and Codex (`gpt-6-astra`), and Codex confirmed each fix before it was applied.
+> Fixed: fingerprint now rejects missing/empty package version metadata; the resume
+> notice separates legacy (pre-fingerprint) study names from other-environment ones;
+> MultiGroupEPO sorts mixed int/str group labels with a type-tagged key (string-label
+> output bit-identical); deprecated `warn_independent_sampling` removed; launcher
+> points to `install.bat` when `.venv314` is missing; `run_gui.sh` repairs from the
+> lockfile; launcher tests use explicit paths (`NoDefaultCurrentDirectoryInExePath=1`);
+> installer label, harness hash-seed claim and README scipy floor corrected.
+> **Deferred:** (1) a fingerprint read failure still aborts `never`-mode in-memory
+> runs; this is deliberate, and relaxing it must keep persistent-study strictness.
+> (2) Optuna's `consider_endpoints` is also deprecated (removal in 6.0), but dropping
+> it changes its effective value, so it needs a numerical A/B before removal.
+
 ### Keeping machines in sync: `requirements-lock.txt` (added 2026-09-10)
 
 `pyproject.toml` declares **floors** (`>=`), so two machines installing from it can end
