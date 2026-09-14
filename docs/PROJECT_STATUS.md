@@ -1736,6 +1736,26 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
        lost on rebuild and Tab 7 refit, and ships without a version bump.
      - **`min_split_gain` is added to `lgbm_child`.**
+   - **PR A (extra-axes mechanism): implemented on `feat/T51-pr-a-extra-axes`, PR open,
+     NOT merged (waiting for the user).**
+     - **Code:**
+       - new `src/spectral_predict/search_spaces.py`
+       - additive wiring in `unified_bayesian.py`: `enabled_extra_axes`, `search_space`,
+         `n_startup_trials`
+       - the bundle registry is still empty; bundles land in PR B/C
+     - **Default path proven unchanged:**
+       - pinned default study names and a 30-trial TPE trace captured on `main` @ `2860d17`
+       - SHA-256 pins on both sampler bodies and `_build_fit_fingerprint`
+       - Fable's A/B vs `main` byte-identical for PLS, Ridge, LightGBM, SVM, MLP, LOF,
+         IsolationForest, OneClassSVM and PCA-SIMCA past the startup trials
+     - **Reviews:** GLM, then three rounds each of Fable, Codex `gpt-6-astra` and DeepSeek.
+       Every finding is addressed; the round-3 verdicts were merge / merge after minor
+       fixes / ready with nits.
+     - **Tests:** 11 deliberate mutations are all caught. Full suite on `4ae5d28`: only
+       the 7 baseline failures.
+     - **Next after merge:** PR B0 (PLS-DA head params), then PR B (supervised bundles).
+       Before any edit to the base samplers (PR F), re-audit
+       `discover_derived_keys` (SESSION_LOG 2026-09-14).
    - **Pre-existing follow-ups found (not fixed), details in SESSION_LOG 2026-09-13:**
      - The Bayesian importance proxy is unscaled for all scale-sensitive models.
      - NSGA-II display metrics are unscaled for all scale-sensitive models.

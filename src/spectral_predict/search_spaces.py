@@ -10,10 +10,11 @@ Invariants (see ``docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md``
 - ``resolve_bundles`` is the single canonicalisation step. Its output feeds both the
   study identity and trial-time application, so the two cannot disagree.
 - A bundle may only open parameters the base sampler neither suggests nor derives from
-  a suggestion. Optuna 5 gives no reliable error for a clash: a same-kind duplicate
-  ``suggest_*`` only warns and silently returns the first value (a different-kind
-  duplicate does raise), and overwriting a derived key such as MLP
-  ``hidden_layer_sizes`` is invisible to Optuna altogether. Collisions are therefore
+  a suggestion. Optuna 5.0 gives no reliable error for a clash (probed 2026-09-14): a
+  same-kind duplicate ``suggest_*`` returns the first value, silently when the
+  distribution is identical and with only an "Inconsistent parameter values" warning
+  when it differs; only a different-kind duplicate raises. Overwriting a derived key
+  such as MLP ``hidden_layer_sizes`` is invisible to Optuna altogether. Collisions are therefore
   rejected up front with :class:`ExtraAxesConfigError`, before any storage is touched or
   trial runs.
 - An effective space with no extra axes has no identity, so it never renames a study.
@@ -31,7 +32,7 @@ import itertools
 import json
 import math
 import numbers
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -139,35 +140,60 @@ BUNDLES: dict[str, BundleSpec] = {}
 
 
 class _RecordingTrial:
-    """Stand-in trial: records suggestions, follows a fixed branch path and numeric mode."""
+    """Stand-in trial: records suggestions, follows a fixed branch path and numeric mode.
 
-    def __init__(self, categorical_choice: Mapping[str, int], numeric_high: bool) -> None:
+    ``numeric_mode`` is ``"low"``, ``"high"``, ``"mid"``, or ``("one", name)``: every
+    numeric suggestion at its low bound except ``name``, which takes its high bound.
+    """
+
+    def __init__(self, categorical_choice: Mapping[str, int], numeric_mode: Any) -> None:
         self._choice = categorical_choice
-        self._high = numeric_high
+        self._mode = numeric_mode
         self.names: list[str] = []
+        self.numeric_names: list[str] = []
         self.categoricals: dict[str, int] = {}
         self.params: dict[str, Any] = {}
+        self.number = 0
 
     def _record(self, name: str, value: Any) -> Any:
         self.names.append(name)
         self.params[name] = value
         return value
 
+    def _numeric(self, name: str, low: Any, high: Any, integral: bool) -> Any:
+        self.numeric_names.append(name)
+        mode = self._mode
+        if mode == "high" or mode == ("one", name):
+            value = high
+        elif mode == "mid":
+            value = (low + high) // 2 if integral else (low + high) / 2
+        else:
+            value = low
+        return self._record(name, value)
+
     def suggest_int(self, name: str, low: int, high: int, **_: Any) -> int:
-        return self._record(name, high if self._high else low)
+        return self._numeric(name, low, high, integral=True)
 
     def suggest_float(self, name: str, low: float, high: float, **_: Any) -> float:
-        return self._record(name, high if self._high else low)
+        return self._numeric(name, low, high, integral=False)
 
     def suggest_categorical(self, name: str, choices: Sequence[Any]) -> Any:
         self.categoricals[name] = len(choices)
         return self._record(name, choices[self._choice.get(name, 0)])
 
+    def set_user_attr(self, key: str, value: Any) -> None:  # tolerated, not recorded
+        return None
+
 
 def _explore(
     sampler: Callable[[Any], Any], max_paths: int
 ) -> Iterator[tuple[_RecordingTrial, Any]]:
-    """Run ``sampler`` on every categorical branch, once at numeric lows and once at highs."""
+    """Run ``sampler`` on every categorical branch in several numeric modes.
+
+    Modes per branch: all numeric suggestions at low, at high, at midpoint, and each
+    numeric suggestion alone at high (so two inputs that cancel at shared endpoints, e.g.
+    ``x - y``, still expose a derived key).
+    """
     seen: set[tuple[tuple[str, int], ...]] = set()
     frontier: list[dict[str, int]] = [{}]
     while frontier:
@@ -178,13 +204,17 @@ def _explore(
         seen.add(path_key)
         if len(seen) > max_paths:
             raise ExtraAxesConfigError("base-sampler discovery: branch explosion; raise max_paths")
-        for numeric_high in (False, True):
-            trial = _RecordingTrial(path, numeric_high)
-            output = sampler(trial)
-            yield trial, output
-            for name, n_choices in trial.categoricals.items():
-                if name not in path:
-                    frontier.extend({**path, name: index} for index in range(n_choices))
+        low_trial = _RecordingTrial(path, "low")
+        modes: list[Any] = ["high", "mid"]
+        output = sampler(low_trial)
+        yield low_trial, output
+        modes.extend(("one", name) for name in dict.fromkeys(low_trial.numeric_names))
+        for mode in modes:
+            trial = _RecordingTrial(path, mode)
+            yield trial, sampler(trial)
+        for name, n_choices in low_trial.categoricals.items():
+            if name not in path:
+                frontier.extend({**path, name: index} for index in range(n_choices))
 
 
 def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512) -> frozenset[str]:
@@ -203,9 +233,16 @@ def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512
 def discover_derived_keys(sampler: Callable[[Any], Any], max_paths: int = 512) -> frozenset[str]:
     """Return output keys whose value depends on a suggestion (e.g. MLP ``hidden_layer_sizes``).
 
-    A key is derived if its value differs across categorical branches or between numeric
-    lows and highs. Keys that always hold one fixed value (e.g. SVM ``gamma='scale'``,
-    LightGBM ``reg_alpha``) are genuine pinned constants and stay open to bundles.
+    A key is derived if its value differs across categorical branches or across the
+    numeric probes (low, high, midpoint, and each input alone at high). Keys that always
+    hold one fixed value (e.g. LightGBM ``reg_alpha``) are pinned constants and stay open
+    to bundles. So does a key written with one fixed value on only some branches (SVM
+    ``gamma='scale'`` under rbf), which is what gated bundles such as ``svm_gamma`` open.
+
+    This is a probe, not a proof: a key that changes only at values no probe hits (e.g.
+    ``x // 1000`` constant at every probe point) would be missed, and the runtime guard
+    sees only ``trial.params``, not derived keys. The base samplers are pinned by hash in
+    ``tests/test_t51_extra_axes_mechanism.py``, so any edit to them must re-audit this.
     """
     values: dict[str, set[str]] = {}
     for _, output in _explore(sampler, max_paths):
@@ -245,6 +282,13 @@ def resolve_bundles(
             f"enabled_extra_axes must be a sequence of bundle ids, not the string "
             f"{enabled_extra_axes!r}; wrap it: ({enabled_extra_axes!r},)"
         )
+    if enabled_extra_axes is not None and (
+        isinstance(enabled_extra_axes, (bytes, Mapping))
+        or not isinstance(enabled_extra_axes, Iterable)
+    ):
+        raise ExtraAxesConfigError(
+            f"enabled_extra_axes must be a sequence of bundle ids, got {enabled_extra_axes!r}"
+        )
     if not enabled_extra_axes and search_space is None:
         return ()
     ids = list(enabled_extra_axes or ())
@@ -269,11 +313,13 @@ def resolve_bundles(
         and task_type in registry[bundle_id].task_types
     ]
     reserved = set(base_param_names) | OBJECTIVE_RESERVED_NAMES
-    names: dict[str, str] = {}  # Optuna name -> owner
-    keys: dict[str, str] = {}  # written model-param key -> owner
+    # Owners are structured tuples: string owners could be forged by a key such as
+    # "const:tol" and make an axis indistinguishable from a constant.
+    names: dict[str, tuple[str, ...]] = {}  # Optuna name -> owner
+    keys: dict[str, tuple[str, ...]] = {}  # written model-param key -> owner
     for bundle in applicable:
-        for axis in bundle.axes:
-            owner = f"{bundle.id}:{axis.key}"
+        for index, axis in enumerate(bundle.axes):
+            owner = ("axis", bundle.id, str(index))
             name = axis.optuna_name
             if axis.key in reserved:
                 raise ExtraAxesConfigError(
@@ -290,7 +336,7 @@ def resolve_bundles(
             _claim(keys, axis.key, owner, "both write model param")
             _no_cross(names, keys, name, axis.key, owner)
         for key in bundle.constants:
-            owner = f"{bundle.id}:const:{key}"
+            owner = ("constant", bundle.id, key)
             if key in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} constant {key!r} would override a parameter the "
@@ -301,14 +347,20 @@ def resolve_bundles(
     return tuple(copy.deepcopy(bundle) for bundle in applicable)
 
 
-def _claim(claimed: dict[str, str], item: str, owner: str, what: str) -> None:
+def _claim(
+    claimed: dict[str, tuple[str, ...]], item: str, owner: tuple[str, ...], what: str
+) -> None:
     if item in claimed:
         raise ExtraAxesConfigError(f"{claimed[item]!r} and {owner!r} {what} {item!r}")
     claimed[item] = owner
 
 
 def _no_cross(
-    names: dict[str, str], keys: dict[str, str], name: str | None, key: str, owner: str
+    names: dict[str, tuple[str, ...]],
+    keys: dict[str, tuple[str, ...]],
+    name: str | None,
+    key: str,
+    owner: tuple[str, ...],
 ) -> None:
     # One axis's Optuna name must not be another axis's (or constant's) written key: the
     # trial would record one value under that name while the model is fitted with another.
@@ -361,6 +413,20 @@ def _validate_bundle(bundle_id: str, bundle: BundleSpec) -> None:
     _require_name(bundle_id, "id", bundle.id)
     _require_str_set(bundle_id, "families", bundle.families)
     _require_str_set(bundle_id, "task_types", bundle.task_types)
+    if not bundle.families or not bundle.task_types:
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} must name families and task_types")
+    if not isinstance(bundle.axes, (tuple, list)) or not all(
+        isinstance(axis, AxisSpec) for axis in bundle.axes
+    ):
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} axes must be a tuple of AxisSpec")
+    if not isinstance(bundle.constants, Mapping):
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} constants must be a mapping")
+    if (
+        isinstance(bundle.revision, bool)
+        or not isinstance(bundle.revision, int)
+        or bundle.revision < 1
+    ):
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} revision must be an int >= 1")
     if not bundle.axes and not bundle.constants:
         raise ExtraAxesConfigError(f"Bundle {bundle_id!r} has no axes and no constants")
     for axis in bundle.axes:
@@ -390,6 +456,9 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
             raise ExtraAxesConfigError(f"{where}: categorical axis needs non-empty choices")
         for choice in axis.choices:
             _require_literal(bundle_id, f"axis {axis.key!r} choice", choice)
+        tagged = [json.dumps(_tagged(choice)) for choice in axis.choices]
+        if len(set(tagged)) != len(tagged):
+            raise ExtraAxesConfigError(f"{where}: duplicate categorical choices")
         return
     if axis.kind not in ("int", "float"):
         raise ExtraAxesConfigError(f"{where}: unknown kind {axis.kind!r}")
@@ -423,13 +492,21 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
         or axis.step < 1
     ):
         raise ExtraAxesConfigError(f"{where}: step is only valid for non-log int axes, int >= 1")
+    if axis.step is not None and (int(axis.high) - int(axis.low)) % int(axis.step) != 0:
+        # Optuna would silently lower `high`; requiring alignment keeps one spelling per
+        # effective distribution (and so one study identity).
+        raise ExtraAxesConfigError(f"{where}: (high - low) must be a multiple of step")
 
 
 def _tagged(value: Any) -> Any:
     """Type-tag a value so ``1``, ``1.0``, ``True`` and ``'1'`` serialise distinctly.
 
-    NumPy and other numeric/str subclasses are normalised to ``int``/``float``/``str``
-    first, and ``-0.0`` to ``0.0``, so equivalent values hash alike.
+    Numeric and ``str`` subclasses (e.g. NumPy scalars used as int/float *bounds*, or
+    ``np.str_`` choices) are normalised to ``int``/``float``/``str`` first, and ``-0.0``
+    to ``0.0``, so equivalent values hash alike. NumPy numeric scalars are still rejected
+    as categorical choices and constants by validation, because those values are written
+    into model params and must round-trip through the leaderboard ``Params`` string
+    (``repr(np.int64(3))`` does not survive ``ast.literal_eval``).
     """
     if isinstance(value, str):
         value = str(value)

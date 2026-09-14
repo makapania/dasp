@@ -771,13 +771,94 @@ PLANNED_BUNDLES = [
 ]
 
 
+PLANNED_BUNDLES.append(("LightGBM", "regression", _bundle(
+    "lgbm_regularization", "LightGBM", "regression",
+    AxisSpec(key="reg_alpha", kind="float", low=1e-4, high=10.0, log=True),
+    AxisSpec(key="reg_lambda", kind="float", low=1e-3, high=100.0, log=True))))
+
+# Plan section 3.1 bundles that apply to both task types, and SVR for svm_gamma.
+_OTHER_TASK = {
+    "rf_features": ("RandomForest", "classification"),
+    "xgb_regularization": ("XGBoost", "classification"),
+    "xgb_child": ("XGBoost", "classification"),
+    "xgb_sampling": ("XGBoost", "classification"),
+    "lgbm_sampling": ("LightGBM", "classification"),
+    "lgbm_child": ("LightGBM", "classification"),
+    "lgbm_regularization": ("LightGBM", "classification"),
+    "catboost_sampling": ("CatBoost", "regression"),
+    "svm_gamma": ("SVR", "regression"),
+    "mlp_activation": ("MLP", "classification"),
+}
+PLANNED_BUNDLES.extend(
+    (model, task, BundleSpec(id=b.id, families=frozenset({model}), task_types=frozenset({task}),
+                             axes=b.axes, constants=b.constants))
+    for _, _, b in list(PLANNED_BUNDLES) if b.id in _OTHER_TASK
+    for model, task in [_OTHER_TASK[b.id]]
+)
+
+
 @pytest.mark.parametrize(("model", "task", "bundle"), PLANNED_BUNDLES,
-                         ids=[b.id for _, _, b in PLANNED_BUNDLES])
+                         ids=[f"{b.id}-{t}" for _, t, b in PLANNED_BUNDLES])
 def test_planned_bundles_pass_preflight(model, task, bundle) -> None:
     """Guard for PR B/C: validation must not over-reject the bundles the plan specifies."""
     resolved = resolve_bundles(model, task, (bundle.id,), {bundle.id: bundle},
                                base_param_names=_reserved(model, task))
     assert resolved == (bundle,)
+
+
+def test_owner_tokens_cannot_be_forged_by_keys() -> None:
+    forged = _bundle("f", "PLS", "regression",
+                     AxisSpec(key="const:tol", kind="float", low=1e-7, high=1e-5, param_name="tol"),
+                     tol=1e-6)
+    with pytest.raises(ExtraAxesConfigError, match="writes as a key|suggests as an Optuna"):
+        resolve_bundles("PLS", "regression", ("f",), {"f": forged})
+
+
+def test_derived_key_probes_cover_midpoint_and_cancelling_inputs() -> None:
+    def midpoint_only(trial):
+        x = trial.suggest_int("x", 0, 10)
+        return {"x": x, "flag": "on" if 3 <= x <= 7 else "off"}
+
+    def cancelling(trial):
+        x = trial.suggest_float("x", 0.0, 1.0)
+        y = trial.suggest_float("y", 0.0, 1.0)
+        return {"x": x, "y": y, "diff": x - y, "fixed": 0.5}
+
+    assert "flag" in ss.discover_derived_keys(midpoint_only)
+    derived = ss.discover_derived_keys(cancelling)
+    assert "diff" in derived and "fixed" not in derived
+
+
+@pytest.mark.parametrize(
+    ("bundle_kwargs", "match"),
+    [
+        ({"constants": ["x"]}, "mapping"),
+        ({"axes": AxisSpec(key="tol", kind="float", low=1e-7, high=1e-5)}, "tuple of AxisSpec"),
+        ({"revision": 1.5}, "revision"),
+        ({"revision": 0}, "revision"),
+        ({"families": frozenset()}, "families and task_types"),
+    ],
+)
+def test_malformed_bundle_shape_rejected(bundle_kwargs, match) -> None:
+    fields = {"id": "m", "families": frozenset({"PLS"}), "task_types": frozenset({"regression"}),
+              "axes": PLS_TOL.axes, **bundle_kwargs}
+    with pytest.raises(ExtraAxesConfigError, match=match):
+        resolve_bundles("PLS", "regression", ("m",), {"m": BundleSpec(**fields)})
+
+
+def test_step_must_align_with_bounds_and_choices_must_be_unique() -> None:
+    with pytest.raises(ExtraAxesConfigError, match="multiple of step"):
+        resolve_bundles("PLS", "regression", ("b",),
+                        _one_axis(kind="int", low=1, high=8, step=2))
+    with pytest.raises(ExtraAxesConfigError, match="duplicate"):
+        resolve_bundles("PLS", "regression", ("b",),
+                        _one_axis(kind="categorical", low=None, high=None, choices=("a", "a")))
+
+
+@pytest.mark.parametrize("selection", [5, {"probe_pls_tol": True}, b"probe_pls_tol"])
+def test_non_sequence_selection_rejected(selection) -> None:
+    with pytest.raises(ExtraAxesConfigError, match="sequence of bundle ids"):
+        resolve_bundles("PLS", "regression", selection, SPACE)
 
 
 @pytest.mark.parametrize(

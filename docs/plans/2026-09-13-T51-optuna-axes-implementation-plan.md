@@ -42,6 +42,19 @@
 >   strings. One namespace spans Optuna names and written keys, so one axis's name cannot
 >   be another's key. `families`/`task_types` must be sets of strings. Float spans must be
 >   finite, and int bounds must be within ±2**53.
+> - Review round 3 (2026-09-14) on `4ae5d28`: Fable **merge**, DeepSeek **ready with
+>   nits**, Codex `gpt-6-astra` **merge after fixes** (minors only). Full suite on the
+>   frozen commit: 7 failed / 3142 passed / 33 skipped, where the 7 are exactly the
+>   baseline IDs. The final commit addresses the minors:
+>   - structured owner tokens
+>   - midpoint and one-input-at-high derived-key probes
+>   - int `step` must divide `high - low`
+>   - duplicate choices rejected
+>   - non-sequence selections, malformed bundle shapes, bad `revision` and empty
+>     families rejected
+>   - `lgbm_regularization` and other-task variants added to the planned-bundle guard
+>   - Optuna duplicate-name docstring corrected per a probe (warns only when the
+>     distribution differs)
 > - Review round 2 (2026-09-14) on `68fcde1`: Fable **merge**, DeepSeek **ready with nits**,
 >   Codex `gpt-6-astra` **merge after fixes** (derived-key override). All findings are
 >   addressed in the next commit.
