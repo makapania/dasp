@@ -6,6 +6,32 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-14 - T-CI-2 RESOLVED: the Linux Xvfb GUI "hang" was never a hang — pytest-timeout budget vs. a legitimately huge test
+
+**Evidence (run 34885012314, job 104113389892, `gui-linux`):** pytest-timeout fired on
+`test_xgboost_via_gui` at 180s. The `--timeout-method=thread` stack dump showed the
+**MainThread inside XGBoost training, not blocked**:
+`harness.run_analysis_direct` (harness.py:542) → `run_search` (search.py:3353,
+`pipe.fit`) → `xgboost/sklearn.py:1430 fit` → `training.py:200 bst.update`. The only
+other threads were idle joblib/loky waiters. Captured stdout reached **[33/256] grid
+configs in the 180s window** (~5.5 s/config → the full sweep needs ~25+ min on the
+2-core-class runner). Same test, same run, **windows-latest: 19:30:44 → 20:30:41,
+~60 minutes, PASSED** — because the Windows job sets no per-test timeout.
+
+**Conclusion:** the T-CI-2 hypothesis ("a test deadlocks under Xvfb") is false. The
+heavy `TestAllModelsViaGUI` model tests (xgboost ~60 min, lightgbm ~7 min on Windows)
+simply exceed the informational job's `--timeout=180` on any runner. No OMP/n_jobs
+limit fits 256 configs × 5×5 CV of 100-tree boosts into 180s, and a one-test skip
+would just move the timeout to LightGBM next run. Per user decision (no Linux GUI
+support wanted, fix must be small), the `gui-linux` job was removed from ci.yml and
+the T-CI-2 comments rewritten; `--ignore=tests/gui` stays on both Linux jobs and the
+Windows leg keeps native GUI coverage. pytest-timeout stays in the lock (harmless).
+Killing the job is lossless: with `--timeout-method=thread` pytest-timeout kills the
+whole process at first timeout, so the job could never report more than one heavy
+test anyway.
+
+---
+
 ## 2026-09-14 - REPRODUCED: re-running an 'auto' Bayesian analysis deletes the earlier run's saved study
 
 **Severity: silent data loss, in the default persistence mode.**
