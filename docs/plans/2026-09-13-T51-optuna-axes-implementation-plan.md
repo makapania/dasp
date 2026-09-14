@@ -19,8 +19,22 @@
 > - A runtime `ExtraAxesConfigError` does **not** delete the SQLite study. On a resume
 >   that would destroy prior trials. Pre-flight validation makes the runtime path
 >   effectively unreachable.
-> - A test pins the two sampler bodies to their SHA-256 on `main` @ `2860d17`. PR F must
->   re-bless it. Round 2 (`gpt-6-astra`) found one
+> - A test pins the two sampler bodies and `_build_fit_fingerprint` to their SHA-256 on
+>   `main` @ `2860d17`. PR F must re-bless it.
+> - **Identity depends only on the effective space** (Fable review, supersedes §2.1's
+>   "a custom `search_space` always yields a digest"). A custom space that resolves to no
+>   applicable bundles keeps the default study name, and identical bundle content hashes
+>   the same whether it comes from the registry or a custom space. NumPy scalars hash like
+>   Python scalars.
+> - Every **requested** bundle is validated, not only the applicable ones, so a shared
+>   multi-model selection fails on the first model. Also rejected: empty bundles, a bare
+>   string selection, non-finite bounds/choices/constants, non-integer steps, alias axes
+>   whose key overwrites a base-suggested param (Codex), and non-integer
+>   `n_startup_trials`.
+> - Review round (2026-09-14) on `29e2e1e`: Fable says ready to merge (A/B traces
+>   byte-identical to `main` for LightGBM, SVM, LOF and OneClassSVM past startup); Codex
+>   `gpt-6-astra` says merge after fixes (`gpt-5.6-astra` is rejected on a ChatGPT-account
+>   Codex login); DeepSeek round 2 pending at the time of writing. Round 2 (`gpt-6-astra`) found one
 > blocker (B0's version bump) and five other issues, all folded in (§9b).
 >
 > This plan turns the design ticket

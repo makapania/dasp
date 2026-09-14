@@ -211,6 +211,14 @@ therefore explores every categorical path with a recording stub
 write sources in text mode keep CRLF working copies consistent (git autocrlf). Check line
 endings before committing anything a script rewrote.
 
+**3a. Optuna 5 does NOT raise on a duplicate `suggest_*` name (Fable probe, corrects the
+2026-08-30 entry below).** Calling `suggest_float('a', 0, 2)` after
+`suggest_float('a', 0, 1)` in the same trial emits a `RuntimeWarning` and silently returns
+the first value. A resumed study also accepts a different distribution for the same name
+across trials. A bundle that collides with a base-suggested name would therefore do
+nothing, silently, rather than crash. That is why `resolve_bundles` rejects collisions
+before the run, and why `apply_extra_axes` also checks `trial.params` at run time.
+
 **3b. Pre-existing (GLM review, not fixed): 'auto' persistence never resumes a study that
 an earlier 'auto' run migrated to SQLite.** In 'auto' mode `run_unified_bayesian` always
 creates a fresh **in-memory** study (`create_study(..., sampler=sampler)`); only 'always'

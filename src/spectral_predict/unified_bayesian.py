@@ -36,6 +36,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import ast
+import numbers
 import numpy as np
 import pandas as pd
 import optuna
@@ -2455,7 +2456,8 @@ def run_unified_bayesian(
         leaves the search space and the study name exactly as before.
     search_space : mapping of str to BundleSpec, optional
         Replaces the curated bundle registry for this run; ``enabled_extra_axes`` then
-        selects from it. Always adds a space segment to the study identity.
+        selects from it. The study identity depends only on the resolved bundles, so a
+        custom space that selects nothing applicable keeps the default study name.
     n_startup_trials : int, optional
         TPE random-exploration trials. ``None`` keeps the default of 20. Applied to the
         initial, resumed and auto-migrated samplers. Not part of the study identity:
@@ -2496,6 +2498,10 @@ def run_unified_bayesian(
     if n_startup_trials is None:
         _n_startup = DEFAULT_N_STARTUP_TRIALS
     else:
+        if isinstance(n_startup_trials, bool) or not isinstance(n_startup_trials, numbers.Integral):
+            raise ValueError(
+                f"n_startup_trials must be an integer >= 1, got {n_startup_trials!r}"
+            )
         _n_startup = int(n_startup_trials)
         if _n_startup < 1:
             raise ValueError(f"n_startup_trials must be >= 1, got {n_startup_trials!r}")

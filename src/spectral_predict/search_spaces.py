@@ -9,9 +9,12 @@ Invariants (see ``docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md``
 - ``apply_extra_axes`` with nothing resolved returns ``params`` before doing any work.
 - ``resolve_bundles`` is the single canonicalisation step. Its output feeds both the
   study identity and trial-time application, so the two cannot disagree.
-- A bundle may only open parameters the base sampler does not already suggest. Optuna
-  refuses a second ``suggest_*`` of the same name, so collisions are rejected up front
-  with :class:`ExtraAxesConfigError`, before any storage is touched or trial runs.
+- A bundle may only open parameters the base sampler does not already suggest. Optuna 5
+  does not fail on a second ``suggest_*`` of the same name: it warns and silently returns
+  the first value, so a colliding bundle would do nothing. Collisions are therefore
+  rejected up front with :class:`ExtraAxesConfigError`, before any storage is touched or
+  trial runs.
+- An effective space with no extra axes has no identity, so it never renames a study.
 - Bundle specs hold no callables. Write predicates are referenced by id from
   :data:`PREDICATES`, so a serialised identity fully determines behaviour.
 """
@@ -21,6 +24,8 @@ import copy
 import hashlib
 import itertools
 import json
+import math
+import numbers
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -207,6 +212,11 @@ def resolve_bundles(
         ExtraAxesConfigError: Unknown bundle id, unknown predicate id, or a name
             collision with the base sampler, the objective, or another bundle.
     """
+    if isinstance(enabled_extra_axes, str):
+        raise ExtraAxesConfigError(
+            f"enabled_extra_axes must be a sequence of bundle ids, not the string "
+            f"{enabled_extra_axes!r}; wrap it: ({enabled_extra_axes!r},)"
+        )
     if not enabled_extra_axes and search_space is None:
         return ()
     registry = BUNDLES if search_space is None else search_space
@@ -226,16 +236,31 @@ def resolve_bundles(
     claimed_names: dict[str, str] = {}
     claimed_keys: dict[str, str] = {}
     for bundle_id in requested:
-        if registry[bundle_id].id != bundle_id:
+        bundle = registry[bundle_id]
+        if bundle.id != bundle_id:
             raise ExtraAxesConfigError(
-                f"Registry key {bundle_id!r} holds a bundle whose id is {registry[bundle_id].id!r}"
+                f"Registry key {bundle_id!r} holds a bundle whose id is {bundle.id!r}"
             )
+        # Validate every requested bundle, not just those applying to this model, so a
+        # shared multi-model selection fails on the first model, not mid-batch.
+        if not bundle.axes and not bundle.constants:
+            raise ExtraAxesConfigError(f"Bundle {bundle_id!r} has no axes and no constants")
+        for axis in bundle.axes:
+            _validate_axis(bundle_id, axis)
+        for key, value in bundle.constants.items():
+            _require_name(bundle_id, "constant key", key)
+            _require_literal(bundle_id, f"constant {key!r}", value)
     for bundle in applicable:
         if not bundle.id or bundle.id != bundle.id.strip():
             raise ExtraAxesConfigError(f"Invalid bundle id {bundle.id!r}")
         for axis in bundle.axes:
-            _validate_axis(bundle.id, axis)
             name = axis.optuna_name
+            if axis.key in reserved:
+                raise ExtraAxesConfigError(
+                    f"Bundle {bundle.id!r} axis writes {axis.key!r}, which the base search "
+                    f"already suggests for {model_name}; an alias Optuna name does not make "
+                    "that additive."
+                )
             if name in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} axis {name!r} collides with a parameter the base "
@@ -247,13 +272,12 @@ def resolve_bundles(
                 )
             claimed_names[name] = bundle.id
             _claim_key(claimed_keys, axis.key, bundle.id)
-        for key, value in bundle.constants.items():
+        for key in bundle.constants:
             if key in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} constant {key!r} would override a parameter the "
                     f"search suggests for {model_name}"
                 )
-            _require_literal(bundle.id, f"constant {key!r}", value)
             _claim_key(claimed_keys, key, bundle.id)
     return tuple(copy.deepcopy(bundle) for bundle in applicable)
 
@@ -268,6 +292,15 @@ def _require_literal(bundle_id: str, what: str, value: Any) -> None:
             f"Bundle {bundle_id!r} {what}: {type(value).__name__} is not allowed; "
             "use bool, int, float, str or None"
         )
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} {what}: non-finite {value!r}")
+
+
+def _require_name(bundle_id: str, what: str, value: Any) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ExtraAxesConfigError(
+            f"Bundle {bundle_id!r} {what} must be a non-empty string, got {value!r}"
+        )
 
 
 def _claim_key(claimed: dict[str, str], key: str, bundle_id: str) -> None:
@@ -281,6 +314,11 @@ def _claim_key(claimed: dict[str, str], key: str, bundle_id: str) -> None:
 def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
     """Reject malformed axes before optimisation, so they never become penalty trials."""
     where = f"Bundle {bundle_id!r} axis {axis.key!r}"
+    _require_name(bundle_id, "axis key", axis.key)
+    if axis.param_name is not None:
+        _require_name(bundle_id, "axis param_name", axis.param_name)
+    if not isinstance(axis.log, bool):
+        raise ExtraAxesConfigError(f"{where}: log must be a bool")
     if axis.applies_when_id is not None and axis.applies_when_id not in PREDICATES:
         raise ExtraAxesConfigError(
             f"{where}: unknown applies_when_id {axis.applies_when_id!r}. "
@@ -298,20 +336,36 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
         raise ExtraAxesConfigError(f"{where}: unknown kind {axis.kind!r}")
     if axis.choices is not None:
         raise ExtraAxesConfigError(f"{where}: numeric axes do not take choices")
-    numeric = (int,) if axis.kind == "int" else (int, float)
+    numeric = numbers.Integral if axis.kind == "int" else numbers.Real
     for bound in (axis.low, axis.high):
         if isinstance(bound, bool) or not isinstance(bound, numeric):
             raise ExtraAxesConfigError(f"{where}: {axis.kind} bounds must be {axis.kind}s")
+        if not math.isfinite(bound):
+            raise ExtraAxesConfigError(f"{where}: bounds must be finite, got {bound!r}")
     if axis.low > axis.high:
         raise ExtraAxesConfigError(f"{where}: low {axis.low!r} > high {axis.high!r}")
     if axis.log and axis.low <= 0:
         raise ExtraAxesConfigError(f"{where}: log scale requires low > 0")
-    if axis.step is not None and (axis.kind != "int" or axis.log or axis.step < 1):
-        raise ExtraAxesConfigError(f"{where}: step is only valid for non-log int axes, >= 1")
+    if axis.step is not None and (
+        axis.kind != "int"
+        or axis.log
+        or isinstance(axis.step, bool)
+        or not isinstance(axis.step, numbers.Integral)
+        or axis.step < 1
+    ):
+        raise ExtraAxesConfigError(f"{where}: step is only valid for non-log int axes, int >= 1")
 
 
 def _tagged(value: Any) -> Any:
-    """Type-tag a value so ``1``, ``1.0``, ``True`` and ``'1'`` serialise distinctly."""
+    """Type-tag a value so ``1``, ``1.0``, ``True`` and ``'1'`` serialise distinctly.
+
+    NumPy scalars are normalised to ``int``/``float`` first, so a bundle built from
+    ``np.int64`` bounds hashes like its plain-Python equivalent.
+    """
+    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+        value = int(value)
+    elif isinstance(value, numbers.Real) and not isinstance(value, bool):
+        value = float(value)
     if isinstance(value, (list, tuple)):
         return ["seq", [_tagged(v) for v in value]]
     if isinstance(value, Mapping):
@@ -325,13 +379,17 @@ def canonical_space_identity(
     """Return a short digest of the effective extra-axes space, or ``None`` for the default.
 
     ``None`` means "append nothing to the study identity", which keeps default study names
-    byte-for-byte unchanged. A caller-supplied ``search_space`` always yields a digest.
+    byte-for-byte unchanged. Identity depends only on the effective space: a custom
+    ``search_space`` that resolves to no applicable bundles is search-identical to the
+    default, so it also yields ``None`` and resumes the default study. The same bundle
+    content from the curated registry or a custom space hashes identically.
+    ``search_space_given`` is accepted for call-site clarity and deliberately unused.
     """
-    if not resolved and not search_space_given:
+    del search_space_given
+    if not resolved:
         return None
     payload = {
         "schema": SPACE_SCHEMA_VERSION,
-        "custom_space": bool(search_space_given),
         "bundles": [
             {
                 "id": bundle.id,

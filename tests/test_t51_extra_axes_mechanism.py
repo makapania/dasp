@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -170,6 +171,10 @@ def _trace(study: optuna.Study) -> list[dict[str, Any]]:
 @pytest.mark.parametrize("kwargs", [{}, {"enabled_extra_axes": ()}], ids=["omitted", "empty"])
 def test_t3_default_trajectory_matches_main(baseline, kwargs) -> None:
     if ub._environment_digest(ub._numerical_environment()) != baseline["environment_digest"]:
+        # Set T51_REQUIRE_BASELINE=1 on the machine that blessed the fixture so the
+        # prime-directive pin can never silently turn into a skip there.
+        if os.environ.get("T51_REQUIRE_BASELINE") == "1":
+            pytest.fail("numerical environment differs from t51_default_path_baseline.json")
         pytest.skip(
             "t51_default_path_baseline.json was captured in a different numerical "
             "environment; re-bless it in a reviewed commit (plan section 6, T3)"
@@ -283,7 +288,7 @@ def test_t15_collision_with_base_sampler_raises_before_storage(sqlite_storage) -
         task_types=frozenset({"regression"}),
         axes=(AxisSpec(key="n_components", kind="int", low=2, high=30),),
     )
-    with pytest.raises(ExtraAxesConfigError, match="collides"):
+    with pytest.raises(ExtraAxesConfigError, match="collides|already suggests"):
         _run(n_trials=1, enable_sqlite_persistence="always",
              enabled_extra_axes=("clash",), search_space={"clash": clash})
     assert not sqlite_storage.exists()
@@ -294,7 +299,7 @@ def test_t15_collision_with_objective_name_raises() -> None:
         id="clash", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
         axes=(AxisSpec(key="n_vars", kind="int", low=2, high=30),),
     )
-    with pytest.raises(ExtraAxesConfigError, match="collides"):
+    with pytest.raises(ExtraAxesConfigError, match="collides|already suggests"):
         resolve_bundles("PLS", "regression", ("clash",), {"clash": clash})
 
 
@@ -315,6 +320,10 @@ def test_t15_objective_reraises_config_error_instead_of_penalty() -> None:
 
 def test_objective_reserved_names_match_source() -> None:
     source = Path(ub.__file__).read_text(encoding="utf-8")
+    # The pin below only sees literal names; a computed name would evade it silently.
+    calls = re.findall(r"\.suggest_(?:int|float|categorical)\(\s*([^,\)]*)", source)
+    non_literal = [c for c in calls if not re.fullmatch(r"\s*['\"][^'\"]+['\"]\s*", c)]
+    assert non_literal == [], f"suggest_* with non-literal names: {non_literal}"
     samplers = re.search(
         r"^def suggest_model_params\(.*?^def create_unified_objective\(", source, re.S | re.M
     ).group(0)
@@ -502,6 +511,9 @@ def test_t12_space_attrs_survive_auto_migration(sqlite_storage, monkeypatch) -> 
     url = f"sqlite:///{sqlite_storage.as_posix()}"
     reopened = optuna.load_study(study_name=study.study_name, storage=url)
     assert reopened.user_attrs[ub.EXTRA_AXES_BUNDLES_ATTR] == ["probe_pls_tol@r1"]
+    assert reopened.user_attrs[ub.EXTRA_AXES_SPACE_ATTR] == study.user_attrs[ub.EXTRA_AXES_SPACE_ATTR]
+    assert len(reopened.trials) == ub._AUTO_WARMUP + 1
+    assert all("tol" in t.params for t in reopened.trials)
 
 
 # --- T13: identity serialisation -----------------------------------------------------
@@ -539,8 +551,52 @@ def test_t13_choice_types_are_distinct() -> None:
     assert len({cat((1,)), cat((1.0,)), cat((True,)), cat(("1",))}) == 4
 
 
-def test_t13_custom_space_always_has_identity() -> None:
-    assert canonical_space_identity((), search_space_given=True) is not None
+def test_t13_identity_depends_only_on_effective_space(baseline) -> None:
+    assert canonical_space_identity((), search_space_given=True) is None
+    registry_digest = canonical_space_identity((PLS_TOL,), search_space_given=False)
+    assert canonical_space_identity((PLS_TOL,), search_space_given=True) == registry_digest
+    _, study = _run(n_trials=1, search_space=SPACE)  # custom space, nothing selected
+    assert (
+        recipe.study_base_name(study.study_name)
+        == baseline["default_study_base_names"]["PLS|regression"]
+    )
+
+
+def test_numpy_scalar_bounds_accepted_and_hash_like_python() -> None:
+    plain = BundleSpec(id="n", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                       axes=(AxisSpec(key="max_iter", kind="int", low=400, high=600, step=10),))
+    numpy_ = BundleSpec(id="n", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                        axes=(AxisSpec(key="max_iter", kind="int", low=np.int64(400),
+                                       high=np.int64(600), step=np.int64(10)),))
+    assert resolve_bundles("PLS", "regression", ("n",), {"n": numpy_})
+    assert canonical_space_identity((plain,), False) == canonical_space_identity((numpy_,), False)
+
+
+def test_bare_string_selection_rejected() -> None:
+    with pytest.raises(ExtraAxesConfigError, match="sequence of bundle ids"):
+        resolve_bundles("PLS", "regression", "probe_pls_tol", SPACE)
+
+
+def test_empty_bundle_rejected() -> None:
+    empty = {"e": BundleSpec(id="e", families=frozenset({"PLS"}),
+                             task_types=frozenset({"regression"}), axes=())}
+    with pytest.raises(ExtraAxesConfigError, match="no axes"):
+        resolve_bundles("PLS", "regression", ("e",), empty)
+
+
+def test_malformed_non_applicable_bundle_fails_on_every_model() -> None:
+    """A shared multi-model selection must fail on the first model, not mid-batch."""
+    broken_ridge = {"r": BundleSpec(id="r", families=frozenset({"Ridge"}),
+                                    task_types=frozenset({"regression"}),
+                                    axes=(AxisSpec(key="tol", kind="float", low=1.0, high=0.1),))}
+    with pytest.raises(ExtraAxesConfigError, match="low"):
+        resolve_bundles("PLS", "regression", ("r",), broken_ridge)
+
+
+@pytest.mark.parametrize("value", [5.9, "5", True])
+def test_non_integer_startup_trials_rejected(value) -> None:
+    with pytest.raises(ValueError, match="integer"):
+        _run(n_trials=1, n_startup_trials=value)
 
 
 def test_t13_unknown_predicate_rejected() -> None:
@@ -579,6 +635,14 @@ def _one_axis(**axis: Any) -> dict[str, BundleSpec]:
         ({"kind": "categorical", "low": None, "high": None, "choices": ()}, "non-empty choices"),
         ({"kind": "categorical", "low": object(), "high": None, "choices": ("a",)}, "choices only"),
         ({"choices": (1.0,)}, "do not take choices"),
+        ({"low": float("nan")}, "finite"),
+        ({"high": float("inf")}, "finite"),
+        ({"kind": "int", "low": 1, "high": 9, "step": 1.5}, "step"),
+        ({"kind": "int", "low": 1, "high": 9, "step": True}, "step"),
+        ({"log": 1}, "log must be a bool"),
+        ({"kind": "categorical", "low": None, "high": None, "choices": (float("nan"),)}, "non-finite"),
+        ({"key": ""}, "non-empty string"),
+        ({"param_name": 3}, "non-empty string"),
         ({"kind": "categorical", "low": None, "high": None, "choices": ({"a": 1},)}, "not allowed"),
         ({"log": True, "low": 0.0}, "log scale"),
         ({"kind": "int", "low": 1.5, "high": 3}, "bounds"),
@@ -596,6 +660,76 @@ def test_constants_cannot_override_suggested_params() -> None:
                            axes=PLS_TOL.axes, constants={"n_components": 3})}
     with pytest.raises(ExtraAxesConfigError, match="override"):
         resolve_bundles("PLS", "regression", ("b",), bad, base_param_names=base)
+
+
+def test_axis_alias_cannot_override_base_sampled_key() -> None:
+    base = discover_suggested_names(lambda t: ub.suggest_model_params(t, "PLS", 80, "regression"))
+    alias = {"a": BundleSpec(id="a", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                             axes=(AxisSpec(key="n_components", kind="int", low=2, high=9,
+                                            param_name="alternate"),))}
+    with pytest.raises(ExtraAxesConfigError, match="alias"):
+        resolve_bundles("PLS", "regression", ("a",), alias, base_param_names=base)
+
+
+def test_optuna_name_alias_colliding_with_base_is_rejected() -> None:
+    """Key is new, but the Optuna name shadows a base suggestion: Optuna 5 would reuse it."""
+    base = discover_suggested_names(lambda t: ub.suggest_model_params(t, "PLS", 80, "regression"))
+    shadow = {"s": BundleSpec(id="s", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                              axes=(AxisSpec(key="tol", kind="float", low=1e-7, high=1e-5, log=True,
+                                             param_name="n_components"),))}
+    with pytest.raises(ExtraAxesConfigError, match="collides"):
+        resolve_bundles("PLS", "regression", ("s",), shadow, base_param_names=base)
+
+
+def test_non_string_constant_keys_rejected() -> None:
+    bad = {"b": BundleSpec(id="b", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                           axes=PLS_TOL.axes, constants={1: 2})}
+    with pytest.raises(ExtraAxesConfigError, match="constant key"):
+        resolve_bundles("PLS", "regression", ("b",), bad)
+
+
+def test_malformed_axis_fails_before_storage_via_entry_point(sqlite_storage) -> None:
+    with pytest.raises(ExtraAxesConfigError, match="finite"):
+        _run(n_trials=2, enable_sqlite_persistence="always", enabled_extra_axes=("b",),
+             search_space=_one_axis(low=float("nan")))
+    assert not sqlite_storage.exists()
+
+
+def _raise_on_trial(monkeypatch: pytest.MonkeyPatch, from_trial: int) -> None:
+    real = ub.apply_extra_axes
+
+    def failing(trial, params, resolved):
+        if trial.number >= from_trial:
+            raise ExtraAxesConfigError("injected runtime configuration error")
+        return real(trial, params, resolved)
+
+    monkeypatch.setattr(ub, "apply_extra_axes", failing)
+
+
+def test_config_error_propagates_after_migration_restart(sqlite_storage, monkeypatch) -> None:
+    monkeypatch.setattr(ub, "_AUTO_THRESHOLD_S", 0.0)
+    _raise_on_trial(monkeypatch, from_trial=ub._AUTO_WARMUP + 1)
+    with pytest.raises(ExtraAxesConfigError, match="injected"):
+        _run(n_trials=ub._AUTO_WARMUP + 4, enable_sqlite_persistence="auto",
+             enabled_extra_axes=("probe_pls_tol",), search_space=SPACE)
+    # Documented decision: completed trials are retained, never deleted, on runtime errors.
+    url = f"sqlite:///{sqlite_storage.as_posix()}"
+    (name,) = optuna.study.get_all_study_names(storage=url)
+    stored = optuna.load_study(study_name=name, storage=url)
+    completed = [t for t in stored.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    assert len(completed) == ub._AUTO_WARMUP + 1
+
+
+def test_one_class_config_error_propagates(monkeypatch) -> None:
+    _raise_on_trial(monkeypatch, from_trial=0)
+    lof_metric = BundleSpec(
+        id="probe_lof_metric", families=frozenset({"LOF"}), task_types=frozenset({"one_class"}),
+        axes=(AxisSpec(key="metric", kind="categorical", choices=("euclidean", "manhattan")),),
+    )
+    with pytest.raises(ExtraAxesConfigError, match="injected"):
+        _run("LOF", "one_class", n_trials=2, inlier_class_label=1,
+             enabled_extra_axes=("probe_lof_metric",),
+             search_space={"probe_lof_metric": lof_metric})
 
 
 def test_constants_must_be_literals_and_unique_across_bundles() -> None:
