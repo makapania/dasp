@@ -49,6 +49,18 @@ Steps 3–4 above are exactly what `install.bat` does, so you can just run that.
 **Note that `py` now defaults to 3.14** once installed, so a bare `py` or `python` no
 longer means what it did. Always use the explicit `.venv314\Scripts\python` path.
 
+**Machine progress (2026-09-13):** the primary Windows machine is on `.venv314`
+(Python 3.14.7, jcamp 1.3.2, `pip check` clean). Full suite: all 3,042 tests ran and
+only the five baseline IDs failed (listed in the installation validation report
+below). But Python crashed with an access violation in the GUI `session_app`
+teardown after the last test, so pytest printed no summary. It did not recur in a
+later `tests/gui` run: 132 passed, 2 baseline failed. The GUI launches and runs an
+analysis. Its first launch exposed a Model Development CV-row `TclError` on the
+default kfold, fixed in `a746d5c`. **Other machines:** pull, then do step 3b
+(jcamp 1.3.2). JCAMP-DX import is broken in any `.venv314` still on 1.2.2. **Still
+untested on 3.14:** importing a JCAMP-DX file through the GUI. The backend round
+trip passed.
+
 **Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
 so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A true
 rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
