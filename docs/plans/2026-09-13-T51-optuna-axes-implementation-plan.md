@@ -249,8 +249,10 @@ trial budget on `1e10` penalty trials. Unknown bundle ids also raise it (step 2)
 7. **Readable study attrs, written only when `_space_id is not None`:** add
    `extra_axes_bundles` (sorted applicable ids plus revisions) and `extra_axes_space_id`
    through the existing hoist loop (`:2826-2846`). It carries across `copy_study`
-   migration (T12). Record `n_startup_trials_session` **only when the caller passed
-   non-None**. It is session metadata, not an audit trail across concurrent sessions.
+   migration (T12). Record `n_startup_trials_requested` **only when the caller passed
+   non-None**, via a direct `study.set_user_attr` (not the hoist loop, so a later request
+   overwrites it). It is last-explicit-request metadata, not an audit trail across
+   concurrent sessions.
 8. **Hoist** `_AUTO_WARMUP = 10` and `_AUTO_THRESHOLD_S = 1.0` to module scope with
    identical values. Their use sites read the module names.
 9. **Not changed:**

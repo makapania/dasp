@@ -223,8 +223,10 @@ before the run, and why `apply_extra_axes` also checks `trial.params` at run tim
 an earlier 'auto' run migrated to SQLite.** In 'auto' mode `run_unified_bayesian` always
 creates a fresh **in-memory** study (`create_study(..., sampler=sampler)`); only 'always'
 touches storage before warmup. A second 'auto' run therefore starts from zero under the
-same name, and when it migrates again it copies into the existing SQLite study. This is
-unchanged from `main`; it needs a T-41 follow-up ticket.
+same name, and when it migrates again it copies into the existing SQLite study. If that
+re-migration fails, the cleanup `optuna.delete_study(study_name, storage_url)` could
+remove the **earlier run's** trials (DeepSeek round-2 note). This is unchanged from
+`main`; it needs a T-41 follow-up ticket.
 
 **4. Default-path baseline captured on `main` @ `2860d17`** (post-#67). Two independent
 captures were byte-identical, so the 30-trial PLS TPE trace is deterministic under
