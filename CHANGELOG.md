@@ -31,7 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validation rebuild used `C=1.0` for every current PLS-DA row. Model Development
   refit and exported scripts lost the head for rows that spell it `lr_C` / `lr_solver` /
   `lr_max_iter`, and ensemble training ignored it for every row. Refits of grid searches
-  whose `plsda_lr_C_list` differs from 1.0 therefore change, and now match the search.
+  whose `plsda_lr_C_list` differs from 1.0 therefore change, and now match the search's
+  head params. Known remaining gap (pre-existing): `class_weight` is not re-applied in
+  ensemble training.
   `build_model('PLS-DA', params)` no longer raises on `lr_*` or `pls__*` keys.
   Search-time scores, the default Bayesian search and study names are unchanged; no
   version bump.
