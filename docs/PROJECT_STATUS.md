@@ -1723,7 +1723,7 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 4. Follow-up PRs (post-merge): see "Follow-Ups (unclaimed)" section below
 5. **T-51 — opt-in Bayesian search-space axes.**
    - **Step 0 (caller sweep):** done 2026-09-13.
-   - **Step 1 (SVM scaler fix):** PR #67 open (`fix/T51-svm-scaler`); full suite 7 baseline failures / 3035 passed, zero new.
+   - **Step 1 (SVM scaler fix):** **merged to `main` 2026-09-14 as `8f047d8`** (PR #67); full suite 7 baseline failures / 3035 passed, zero new. **Next session: implement PR A** from the implementation plan (capture T2/T2b/T3 baselines on this post-merge `main`).
      - Classification SVM was fit unscaled everywhere in the app, while exported
        scripts scaled it.
      - Version is now `0.5.0b3`. `__version__` is in every Optuna study name, so persisted
