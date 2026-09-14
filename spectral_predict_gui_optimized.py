@@ -37720,10 +37720,10 @@ F1 Score:  {f1:.4f}
                 return result
 
             # SVM models
-            elif model_type in ('SVC', 'SVR'):
+            elif model_type in ('SVC', 'SVM', 'SVR'):
                 base_C = params.get('C', 1.0)
                 from sklearn.svm import SVC, SVR
-                model_class = SVC if model_type == 'SVC' else SVR
+                model_class = SVR if model_type == 'SVR' else SVC
                 # Use sklearn validation curve
                 C_range = np.logspace(np.log10(base_C) - 2, np.log10(base_C) + 2, 8)
                 estimator = model_class()
@@ -38822,7 +38822,7 @@ F1 Score:  {f1:.4f}
                                 stripped_params[unprefixed] = val
                             elif key in pipeline_param_keys:
                                 continue
-                            elif not any(key.startswith(p) for p in ['scaler__', 'steps', 'memory', 'verbose', 'transform_input']):
+                            elif not any(key.startswith(p) for p in ['scaler__', 'pls__', 'lr__', 'imbalance__', 'steps', 'memory', 'verbose', 'transform_input']):
                                 stripped_params[key] = val
                         if stripped_params:
                             model.set_params(**stripped_params)

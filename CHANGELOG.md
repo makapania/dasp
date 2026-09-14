@@ -18,8 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Bayesian search, validation rebuild and Model Development refit. The scale-sensitive
   sets listed `'SVC'`, which no model name matches; the registered family is `'SVM'`, so
   every classification SVM had been fit on unscaled spectra. Exported scripts already
-  scaled it. **This changes SVM classification results.** The version bump puts new
-  Optuna study names in place, so persisted SVM studies are not resumed across the fix.
+  scaled it. **This changes SVM classification results.** `__version__` is part of
+  every Optuna study name, so persisted Bayesian studies for **all** models start fresh
+  after upgrading. The old studies stay on disk.
 
 ## [0.5.0b2] - 2026-05-03
 

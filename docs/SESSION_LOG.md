@@ -209,6 +209,19 @@ spectra, even though their CV fits are scaled. It is independent of the `'SVC'` 
 bug, and fixing it changes importance rankings for every scale-sensitive model, so it
 needs its own ticket and approval. The new spy test excludes that caller explicitly.
 
+**3b. Also found, NOT fixed (DeepSeek review):**
+- **NSGA-II display metrics are unscaled for every scale-sensitive family.** The helpers
+  `_compute_solution_r2`, `_compute_display_rmse`, `_compute_nir_metrics`,
+  `_compute_classification_cv_metrics` and `_compute_calibration_metrics` call
+  `_build_model` bare, and only wrap it when an imbalance step exists. Fitness itself is
+  scaled (`nsga2_search.py:~1465`). The NSGA-II leaderboard's F1/AUC/R2 columns therefore
+  describe a different model than the one ranked. So the earlier "NSGA-II was never
+  affected" holds only for the fitness path.
+- **GUI refit double-scales under autoscale.** The preprocessing pipeline appends an
+  `autoscale` StandardScaler, and the scale-sensitive branches (`~:39628/39756/39811`)
+  append another. This affects SVR, Ridge, MLP and others, not just SVM. It is
+  near-identity, but it diverges from T-36 backend behaviour.
+
 **4. There are three TPE sampler paths, not two.** `_make_tpe_sampler(random_state)`
 hardcodes `n_startup_trials=20`. It is used by `_migrate_study_to_sqlite` (the T-41 'auto'
 in-memory→SQLite migration) and the 'always' reattach, in addition to the inline sampler.
