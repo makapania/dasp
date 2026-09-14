@@ -11,7 +11,6 @@ Covers:
 """
 from __future__ import annotations
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -49,19 +48,18 @@ class _FakeGUI:
 
 
 @pytest.fixture
-def fresh_state(tmp_path, monkeypatch):
+def fresh_state(tmp_path, monkeypatch, reimport_modules):
     """Fresh run_state module with a tmp user-data dir."""
     if sys.platform == "win32":
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
-    sys.modules.pop("spectral_predict.run_state", None)
-    sys.modules.pop("spectral_predict.resource_paths", None)
-    sys.modules.pop("spectral_predict.run_gui_settings", None)
-    rp = importlib.import_module("spectral_predict.resource_paths")
-    rs = importlib.import_module("spectral_predict.run_state")
-    rgs = importlib.import_module("spectral_predict.run_gui_settings")
+    rp, rs, rgs = reimport_modules(
+        "spectral_predict.resource_paths",
+        "spectral_predict.run_state",
+        "spectral_predict.run_gui_settings",
+    )
     rs._reset_for_tests()
 
     yield rs, rp, rgs, tmp_path

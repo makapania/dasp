@@ -10,7 +10,7 @@ import pytest
 
 
 @pytest.fixture
-def fresh_logging(tmp_path, monkeypatch):
+def fresh_logging(tmp_path, monkeypatch, reimport_modules):
     """Force the run-logging module into a clean state with a tmp log dir.
 
     Each test gets a fresh module + a private LOCALAPPDATA / XDG_DATA_HOME so
@@ -21,11 +21,8 @@ def fresh_logging(tmp_path, monkeypatch):
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
-    # Drop the cached module + reimport so module-level state is fresh.
-    sys.modules.pop("spectral_predict.run_logging", None)
-    sys.modules.pop("spectral_predict.resource_paths", None)
-    rp = importlib.import_module("spectral_predict.resource_paths")
-    rl = importlib.import_module("spectral_predict.run_logging")
+    # Reimport so module-level state is fresh; originals are restored on teardown.
+    rp, rl = reimport_modules("spectral_predict.resource_paths", "spectral_predict.run_logging")
 
     yield rl, rp, tmp_path
 
