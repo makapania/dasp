@@ -6,6 +6,70 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-14 - REPRODUCED: re-running an 'auto' Bayesian analysis deletes the earlier run's saved study
+
+**Severity: silent data loss, in the default persistence mode.**
+
+**Reproduction:** `tests/test_t41_auto_rerun_preserves_study.py`, which fails on `main`
+@ `2860d17`. Run 1 of a slow PLS analysis in 'auto' migrates to SQLite and persists 11
+trials. Run 2 of the same configuration:
+
+1. **Starts over in memory.** 'auto' always creates a fresh in-memory study and never
+   looks for the one already in SQLite, so the warmup trials are repeated for nothing.
+2. **The migration fails.** After warmup, `_migrate_study_to_sqlite` calls
+   `optuna.copy_study` into the same configuration-derived `study_name`, which raises
+   "Another study with study_name=... already exists".
+3. **The cleanup deletes the earlier study.** The except-branch runs
+   `optuna.delete_study(study_name, storage_url)`. It was meant to remove a
+   half-created copy, but it deletes the earlier run's study. In the test the SQLite
+   file ends with **zero studies**.
+
+**Scope, narrower than first assumed.** Data loss needs two 'auto' runs with the same
+configuration sharing one storage URL.
+- **GUI, normal use:** protected by accident. `run_state.start_run` gives every
+  analysis a new `<run_id>.sqlite3`, and GUI crash recovery forces 'always'.
+- **Exposed:** callers that keep one storage URL across runs (scripts, custom
+  `run_state` use), or the same model and configuration run twice inside one active run.
+- **Origin:** it predates T-51. It was surfaced by the T-51 PR A reviews (DeepSeek,
+  Codex) and then reproduced.
+
+**Fix** (branch `fix/T41-auto-resume-data-loss`, revised after GLM + DeepSeek review):
+- **Resume in 'auto'** only when the SQLite file exists (checked without opening it;
+  zero-byte files count as absent), holds this exact `study_name`, **and** its stored
+  `data_fingerprint` matches the current (X, y, wavelengths).
+  - The study name encodes configuration and environment but **no data identity**.
+    Without the data gate, a script reusing one storage for two same-shape datasets
+    would resume the wrong study and replay its cached scores (GLM finding).
+  - Every study now records `data_fingerprint`, a full SHA-256 of the arrays. The
+    existing `run_state.fingerprint_dataset` hashes only three values, too weak for
+    this gate.
+  - Older studies have no fingerprint, so they are not resumed. They are left intact.
+- **Never delete after `DuplicatedStudyError`.** `copy_study` raises it before writing
+  anything, so the name belongs to someone else. This closes the check-then-copy race.
+- **An unanswerable existence check never authorises deletion** (DeepSeek HIGH: the
+  first version treated a listing error as "absent" and would have deleted).
+  `_study_exists` returns `None` when unsure.
+- **A partial study created by the failing attempt is still deleted.**
+- **Review round 2** (DeepSeek ready, GLM merge-with-fixes), all applied:
+  - **The fingerprint is written ONLY on a study with no trials.** Writing it onto a
+    legacy study resumed via 'always' would claim that study's old trials came from
+    the current data, and the 'auto' gate would then wrongly resume it. GLM had called
+    that backfill a bonus; DeepSeek was right.
+  - **A data mismatch in 'auto' switches that run to 'never'.** The name is taken, so a
+    migration could never succeed and would only raise a "migration failed" alarm.
+  - **'always' resume on different recorded data now warns** through `progress_callback`
+    (flag `data_mismatch_resume`). It still resumes, because crash recovery and legacy
+    studies depend on resume by name. The check reuses the single name listing that
+    `test_bayesian_study_lookup` pins to one call; a second listing broke that contract.
+  - **Fingerprinting is skipped in 'never' mode and when there is no storage.** It hashes
+    through a buffer view with no copy, and is documented as SHA-256 truncated to 64 bits.
+  - **`_sqlite_file_exists` swallows `OSError`** from a stat race.
+- **Six guard mutations, all caught:** no duplicate guard, fail-open check, no data
+  gate, no resume, fingerprint written onto existing studies, mismatch staying 'auto'.
+- **Accepted residual risk (documented, not fixed):** a multi-process window where our
+  check says "absent", our migration fails before writing anything, and another process
+  creates the same name before our delete.
+
 ## 2026-09-13 - Lockfile changes never reached existing venvs (why jcamp stayed 1.2.2)
 
 Root cause, confirmed by GLM 5.3 Flash and DeepSeek 4.1 Flash reviews plus git
