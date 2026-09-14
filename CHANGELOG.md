@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0b3] - Unreleased
 
+### Added
+
+- **T-51 PR A** — opt-in extra hyperparameter axes for the unified Bayesian search.
+  `run_unified_bayesian` gains `enabled_extra_axes`, `search_space` and
+  `n_startup_trials`. The new `spectral_predict.search_spaces` module provides
+  `AxisSpec`, `BundleSpec`, `ExtraAxesConfigError` and the curated `BUNDLES` registry,
+  which is empty until PR B/C. Bundles may open only hyperparameters the default space
+  pins to a single value. Collisions and malformed bundles raise before any study is
+  created. With nothing enabled, the search, its TPE trajectory and its study names are
+  unchanged. `n_startup_trials` now also survives the T-41 in-memory→SQLite
+  auto-migration. See `docs/AGENT_COMPOSITION.md` §7b.
+
 ### Fixed
 
 - **T-51 step 1** — classification SVM is now StandardScaler-wrapped in grid search,

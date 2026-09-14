@@ -1736,8 +1736,9 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
        lost on rebuild and Tab 7 refit, and ships without a version bump.
      - **`min_split_gain` is added to `lgbm_child`.**
-   - **PR A (extra-axes mechanism): **PR #68** (`feat/T51-pr-a-extra-axes`, final `60edfe3`; full suite 7 baseline failures / 3166 passed, zero new),
-     NOT merged (waiting for the user).**
+   - **PR A (extra-axes mechanism): PR #68, NOT merged (waiting for the user).**
+     Branch `feat/T51-pr-a-extra-axes`; code final at `60edfe3`, later commits are docs
+     only. Full suite: 7 baseline failures / 3166 passed, zero new.
      - **Code:**
        - new `src/spectral_predict/search_spaces.py`
        - additive wiring in `unified_bayesian.py`: `enabled_extra_axes`, `search_space`,
@@ -1749,10 +1750,17 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
        - Fable's A/B vs `main` byte-identical for PLS, Ridge, LightGBM, SVM, MLP, LOF,
          IsolationForest, OneClassSVM and PCA-SIMCA past the startup trials
      - **Reviews:** GLM, then three rounds each of Fable, Codex `gpt-6-astra` and DeepSeek.
-       Every finding is addressed; the round-3 verdicts were merge / merge after minor
-       fixes / ready with nits.
-     - **Tests:** 11 deliberate mutations are all caught. Full suite on `4ae5d28`: only
-       the 7 baseline failures.
+       Every finding is addressed. Final verdicts: Fable merge, DeepSeek ready with nits,
+       Codex merge (on `60edfe3`).
+     - **Tests:** 11 deliberate mutations are all caught. Documented in
+       `docs/AGENT_COMPOSITION.md` §7b (example executed against `example/` data) and
+       CHANGELOG 0.5.0b3.
+     - **Known pre-existing issues surfaced during PR A** (SESSION_LOG 2026-09-14):
+       - **T-41 'auto' persistence:** it doesn't resume an earlier migrated study, and a
+         failed re-migration could delete that study's trials. Its own fix PR comes next,
+         reproduced first.
+       - **Test-order dependence:** `test_bayesian_study_lookup` fails after `test_t41_*`
+         in one process, because the fixture re-imports `run_state`.
      - **Next after merge:** PR B0 (PLS-DA head params), then PR B (supervised bundles).
        Before any edit to the base samplers (PR F), re-audit
        `discover_derived_keys` (SESSION_LOG 2026-09-14).
