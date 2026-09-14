@@ -193,7 +193,8 @@ def _function_source(source: str, name: str, following: str) -> str:
 @pytest.mark.parametrize(
     ("name", "following"),
     [("suggest_model_params", "suggest_one_class_params"),
-     ("suggest_one_class_params", "compute_importances")],
+     ("suggest_one_class_params", "compute_importances"),
+     ("_build_fit_fingerprint", "_register_or_replay_fingerprint")],
 )
 def test_base_sampler_bodies_unchanged_from_main(baseline, name, following) -> None:
     """Prime directive: bundles are additive; the default samplers are never edited.
@@ -424,6 +425,40 @@ def test_t7_written_values_split_fingerprints_and_suggest_is_uniform() -> None:
     assert "gamma" in linear_trial.params  # suggested even when not written
 
 
+def _svm_gated_study() -> tuple[optuna.Study, Any, dict[str, Any]]:
+    X, y, wl = recipe.classification_data()
+    objective = ub.create_unified_objective(
+        X, y, wl, "SVM", task_type="classification", cv_folds=3, random_state=42,
+        y_original=y, seen_fingerprints={}, resolved_extra_axes=(GATED,),
+    )
+    study = optuna.create_study(direction="minimize", sampler=optuna.samplers.RandomSampler(0))
+    study.optimize(objective, n_trials=1)
+    return study, objective, dict(study.trials[0].params)
+
+
+@pytest.mark.parametrize(("kernel", "replays"), [("linear", True), ("rbf", False)])
+def test_t7_dedup_replay_through_objective(kernel, replays) -> None:
+    """Unwritten bundle values replay a prior fit; written ones are fitted afresh."""
+    study, objective, template = _svm_gated_study()
+    for gamma in (0.1, 3.0):
+        study.enqueue_trial({**template, "kernel": kernel, "gamma": gamma})
+    study.optimize(objective, n_trials=2)
+    first, second = study.trials[1], study.trials[2]
+    assert first.params["gamma"] != second.params["gamma"]
+    assert first.user_attrs.get(ub.DUPLICATE_OF_TRIAL_ATTR) is None
+    duplicate_of = second.user_attrs.get(ub.DUPLICATE_OF_TRIAL_ATTR)
+    if replays:
+        assert duplicate_of == first.number
+        assert second.value == first.value
+    else:
+        assert duplicate_of is None
+
+
+def test_registry_key_must_match_bundle_id() -> None:
+    with pytest.raises(ExtraAxesConfigError, match="Registry key"):
+        resolve_bundles("PLS", "regression", ("x",), {"x": PLS_TOL})
+
+
 def test_constants_are_written() -> None:
     bundle = BundleSpec(
         id="c", families=frozenset({"X"}), task_types=frozenset({"regression"}),
@@ -540,8 +575,11 @@ def _one_axis(**axis: Any) -> dict[str, BundleSpec]:
     [
         ({"kind": "integer"}, "unknown kind"),
         ({"low": 1e-5, "high": 1e-7}, "low"),
-        ({"kind": "categorical", "choices": ()}, "non-empty choices"),
-        ({"kind": "categorical", "choices": ({"a": 1},)}, "not allowed"),
+        ({"kind": "categorical", "choices": ()}, "choices only"),
+        ({"kind": "categorical", "low": None, "high": None, "choices": ()}, "non-empty choices"),
+        ({"kind": "categorical", "low": object(), "high": None, "choices": ("a",)}, "choices only"),
+        ({"choices": (1.0,)}, "do not take choices"),
+        ({"kind": "categorical", "low": None, "high": None, "choices": ({"a": 1},)}, "not allowed"),
         ({"log": True, "low": 0.0}, "log scale"),
         ({"kind": "int", "low": 1.5, "high": 3}, "bounds"),
         ({"kind": "int", "low": 1, "high": 9, "step": 2, "log": True}, "step"),
@@ -569,7 +607,8 @@ def test_constants_must_be_literals_and_unique_across_bundles() -> None:
                             task_types=frozenset({"regression"}), axes=PLS_ITER.axes,
                             constants={"tol": 1e-6})
     with pytest.raises(ExtraAxesConfigError, match="both write"):
-        resolve_bundles("PLS", "regression", ("b", "c"), {"b": PLS_TOL, "c": writes_tol})
+        resolve_bundles("PLS", "regression", ("probe_pls_tol", "c"),
+                        {"probe_pls_tol": PLS_TOL, "c": writes_tol})
 
 
 def test_same_key_under_different_optuna_names_rejected() -> None:

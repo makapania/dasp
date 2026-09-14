@@ -211,6 +211,13 @@ therefore explores every categorical path with a recording stub
 write sources in text mode keep CRLF working copies consistent (git autocrlf). Check line
 endings before committing anything a script rewrote.
 
+**3b. Pre-existing (GLM review, not fixed): 'auto' persistence never resumes a study that
+an earlier 'auto' run migrated to SQLite.** In 'auto' mode `run_unified_bayesian` always
+creates a fresh **in-memory** study (`create_study(..., sampler=sampler)`); only 'always'
+touches storage before warmup. A second 'auto' run therefore starts from zero under the
+same name, and when it migrates again it copies into the existing SQLite study. This is
+unchanged from `main`; it needs a T-41 follow-up ticket.
+
 **4. Default-path baseline captured on `main` @ `2860d17`** (post-#67). Two independent
 captures were byte-identical, so the 30-trial PLS TPE trace is deterministic under
 `enable_sqlite_persistence='never'`. Fixture: `tests/fixtures/t51_default_path_baseline.json`.

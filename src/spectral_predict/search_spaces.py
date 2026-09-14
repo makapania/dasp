@@ -155,6 +155,10 @@ def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512
     Numeric suggestions take their lower bound; every combination of categorical choices
     that the sampler reveals is explored, so names suggested only on some branches (e.g.
     LightGBM ``num_leaves``) are found.
+
+    Guarantee is categorical branches only: a name suggested only for some *numeric*
+    suggested value would be missed. No current base sampler has such a gate; if one is
+    added, the runtime guard in :func:`apply_extra_axes` still aborts the run.
     """
     names: set[str] = set()
     seen: set[tuple[tuple[str, int], ...]] = set()
@@ -166,7 +170,9 @@ def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512
             continue
         seen.add(key)
         if len(seen) > max_paths:
-            raise RuntimeError("discover_suggested_names: branch explosion; raise max_paths")
+            raise ExtraAxesConfigError(
+                "discover_suggested_names: branch explosion; raise max_paths"
+            )
         trial = _RecordingTrial(path)
         sampler(trial)
         names.update(trial.names)
@@ -219,6 +225,11 @@ def resolve_bundles(
     reserved = set(base_param_names) | OBJECTIVE_RESERVED_NAMES
     claimed_names: dict[str, str] = {}
     claimed_keys: dict[str, str] = {}
+    for bundle_id in requested:
+        if registry[bundle_id].id != bundle_id:
+            raise ExtraAxesConfigError(
+                f"Registry key {bundle_id!r} holds a bundle whose id is {registry[bundle_id].id!r}"
+            )
     for bundle in applicable:
         if not bundle.id or bundle.id != bundle.id.strip():
             raise ExtraAxesConfigError(f"Invalid bundle id {bundle.id!r}")
@@ -276,6 +287,8 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
             f"Valid ids: {sorted(PREDICATES)}"
         )
     if axis.kind == "categorical":
+        if any(v is not None for v in (axis.low, axis.high, axis.step)) or axis.log:
+            raise ExtraAxesConfigError(f"{where}: categorical axes take choices only")
         if not axis.choices:
             raise ExtraAxesConfigError(f"{where}: categorical axis needs non-empty choices")
         for choice in axis.choices:
@@ -283,6 +296,8 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
         return
     if axis.kind not in ("int", "float"):
         raise ExtraAxesConfigError(f"{where}: unknown kind {axis.kind!r}")
+    if axis.choices is not None:
+        raise ExtraAxesConfigError(f"{where}: numeric axes do not take choices")
     numeric = (int,) if axis.kind == "int" else (int, float)
     for bound in (axis.low, axis.high):
         if isinstance(bound, bool) or not isinstance(bound, numeric):

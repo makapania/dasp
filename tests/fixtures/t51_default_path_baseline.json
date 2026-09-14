@@ -385,6 +385,7 @@
   "reference_commit": "2860d1713701645e01dd762d103be0e56d402e5f",
   "sampler_source_commit": "2860d17",
   "sampler_source_sha256": {
+    "_build_fit_fingerprint": "9f718c9eab6315112b085c7571ea3ce437565904345f41ac27638cbcb798ea36",
     "suggest_model_params": "8d66108fc382bad45000c59295cd3fd76400b829cd148cb9931a29b146af069e",
     "suggest_one_class_params": "291515400f83a3e8f980f400147720280763707c87dd2811c8df5e84e5d94521"
   }
