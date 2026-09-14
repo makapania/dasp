@@ -1736,7 +1736,7 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
        lost on rebuild and Tab 7 refit, and ships without a version bump.
      - **`min_split_gain` is added to `lgbm_child`.**
-   - **PR A (extra-axes mechanism): implemented on `feat/T51-pr-a-extra-axes`, PR open,
+   - **PR A (extra-axes mechanism): **PR #68** (`feat/T51-pr-a-extra-axes`, final `60edfe3`; full suite 7 baseline failures / 3166 passed, zero new),
      NOT merged (waiting for the user).**
      - **Code:**
        - new `src/spectral_predict/search_spaces.py`
