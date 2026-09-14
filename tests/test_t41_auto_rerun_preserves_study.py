@@ -250,6 +250,21 @@ def test_unreadable_stored_fingerprint_blocks_resume(
     assert ub._stored_data_fingerprint(slow_sqlite, first.study_name) is None
 
 
+def test_fingerprint_handles_empty_and_datetime_arrays() -> None:
+    empty = ub._data_fingerprint(np.empty((0, 5)), np.empty(0), np.empty(0))
+    assert empty != ub._data_fingerprint(np.empty((0, 6)), np.empty(0), np.empty(0))
+    stamps = np.array(["2026-01-01", "2026-01-02"], dtype="datetime64[D]")
+    assert ub._data_fingerprint(np.ones((2, 3)), stamps, np.arange(3.0))
+    # The buffer view hashes the same bytes as a copy would (backward compatible).
+    X = np.asfortranarray(np.arange(12.0).reshape(3, 4))[:, ::2]
+    manual = __import__("hashlib").sha256()
+    for arr in (X, np.arange(3), np.arange(2.0)):
+        a = np.asarray(arr)
+        manual.update(f"{a.dtype.str}|{a.shape}|".encode("utf-8"))
+        manual.update(np.ascontiguousarray(a).tobytes())
+    assert ub._data_fingerprint(X, np.arange(3), np.arange(2.0)) == manual.hexdigest()[:16]
+
+
 def test_never_mode_does_not_fingerprint(slow_sqlite: str, monkeypatch: pytest.MonkeyPatch) -> None:
     def must_not_run(*args: Any, **kwargs: Any):
         raise AssertionError("fingerprint computed for a run that cannot persist")

@@ -2235,6 +2235,10 @@ def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> 
         digest.update(f"{arr.dtype.str}|{arr.shape}|".encode("utf-8"))
         if arr.dtype.kind in "OUS":
             digest.update("\x1f".join(map(repr, arr.ravel().tolist())).encode("utf-8"))
+        elif arr.size == 0 or arr.dtype.kind in "mM":
+            # memoryview cannot cast empty shapes or expose datetime dtypes; the
+            # copy is harmless here because such arrays are empty or tiny.
+            digest.update(np.ascontiguousarray(arr).tobytes())
         else:
             digest.update(memoryview(np.ascontiguousarray(arr)).cast("B"))
     return digest.hexdigest()[:16]
@@ -2895,6 +2899,8 @@ def run_unified_bayesian(
         except Exception as exc:  # noqa: BLE001 - advisory only, never fatal
             logger.debug("Could not enumerate existing studies: %s", exc)
 
+    # None = unknown; the data-fingerprint stamp only fires on a known-empty study.
+    _initial_trial_count: Optional[int] = None
     if _persistence_mode == "always" and storage_url is not None:
         # Always-on: create SQLite study from trial 0 (T-41 Task 2).
         create_kwargs: dict = {
@@ -2913,7 +2919,8 @@ def run_unified_bayesian(
         # Apply WAL pragmas immediately — Optuna may create the file lazily on
         # the first access, so we trigger that by doing a read on the study.
         try:
-            _ = len(study.trials)  # forces lazy SQLite init
+            # Forces lazy SQLite init; the count is reused by the fingerprint stamp.
+            _initial_trial_count = len(study.trials)
         except Exception:
             pass
         if not _apply_wal_pragmas(storage_url):
@@ -2943,6 +2950,7 @@ def run_unified_bayesian(
             sampler=sampler,
             study_name=study_name,
         )
+        _initial_trial_count = 0  # a new in-memory study has no trials
         _sqlite_decided = (_persistence_mode == "never")  # 'never' is final
 
     # Hoist the three keys that are constant per study (cv_strategy,
@@ -2984,7 +2992,7 @@ def run_unified_bayesian(
     if (
         _data_fp is not None
         and DATA_FINGERPRINT_ATTR not in study.user_attrs
-        and len(study.trials) == 0
+        and _initial_trial_count == 0
     ):
         study.set_user_attr(DATA_FINGERPRINT_ATTR, _data_fp)
     for _key, _val in _hoist_pairs:
