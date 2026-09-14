@@ -132,7 +132,9 @@ DEFAULT_N_STARTUP_TRIALS = 20
 # study.user_attrs keys written only when extra axes are in effect (T-51).
 EXTRA_AXES_SPACE_ATTR = 'extra_axes_space_id'
 EXTRA_AXES_BUNDLES_ATTR = 'extra_axes_bundles'
-N_STARTUP_TRIALS_SESSION_ATTR = 'n_startup_trials_session'
+# Last explicitly requested startup count (last writer wins). Not written when the caller
+# passes None, so it can lag behind a later default-startup resume; audit only.
+N_STARTUP_TRIALS_REQUESTED_ATTR = 'n_startup_trials_requested'
 
 # Study identity must include the numerical environment, not just the analysis
 # configuration. A resumed study reloads completed trial fingerprints and returns
@@ -2435,19 +2437,6 @@ def run_unified_bayesian(
                      time. If median > 1.0s the study migrates to SQLite+WAL (overhead
                      ~1.2x). If median <= 1.0s stays in-memory (fast models like PLS are 8x
                      slower with persistence, so the auto-calculator keeps them in-memory).
-    enabled_extra_axes : sequence of str, default=()
-        T-51 opt-in bundle ids from ``spectral_predict.search_spaces.BUNDLES``. Ids that
-        do not apply to ``model_name``/``task_type`` are skipped (one selection can be
-        shared across a multi-model run); unknown ids raise ``ExtraAxesConfigError``
-        before any study is created. Empty (the default) leaves the search space and the
-        study name exactly as before.
-    search_space : mapping of str to BundleSpec, optional
-        Replaces the curated bundle registry for this run; ``enabled_extra_axes`` then
-        selects from it. Always adds a space segment to the study identity.
-    n_startup_trials : int, optional
-        TPE random-exploration trials. ``None`` keeps the default of 20. Applied to the
-        initial, resumed and auto-migrated samplers. Not part of the study identity:
-        it changes future sampling, not the validity of stored scores.
         - 'always' : SQLite+WAL from trial 0 for every model. Accepts the speed cost in
                      exchange for crash-resume on all models.
         - 'never'  : always in-memory; no SQLite file created. Zero overhead but no
@@ -2458,6 +2447,19 @@ def run_unified_bayesian(
         banner was a no-op (root cause: GUI radio button at 'never' silently ignored the
         loaded SQLite URL). With the resume-override fix and the auto-decision restart
         pattern in place, 'auto' is again a sensible default.
+    enabled_extra_axes : sequence of str, default=()
+        T-51 opt-in bundle ids from ``spectral_predict.search_spaces.BUNDLES``. Ids that
+        do not apply to ``model_name``/``task_type`` are skipped (one selection can be
+        shared across a multi-model run); unknown ids and malformed or colliding bundles
+        raise ``ExtraAxesConfigError`` before any study is created. Empty (the default)
+        leaves the search space and the study name exactly as before.
+    search_space : mapping of str to BundleSpec, optional
+        Replaces the curated bundle registry for this run; ``enabled_extra_axes`` then
+        selects from it. Always adds a space segment to the study identity.
+    n_startup_trials : int, optional
+        TPE random-exploration trials. ``None`` keeps the default of 20. Applied to the
+        initial, resumed and auto-migrated samplers. Not part of the study identity:
+        it changes future sampling, not the validity of stored scores.
 
     Returns
     -------
@@ -2480,7 +2482,6 @@ def run_unified_bayesian(
         'svr': 'SVR',
         'svm': 'SVM',
         'mlp': 'MLP',
-        'neuralboosted': 'NeuralBoosted',
         # One-class models
         'pca-simca': 'PCA-SIMCA',
         'oneclasssvm': 'OneClassSVM',
@@ -2934,7 +2935,7 @@ def run_unified_bayesian(
     if n_startup_trials is not None:
         # Session metadata (last writer wins), not an audit trail: startup trials
         # affect future sampling only, so they are deliberately not hoisted.
-        study.set_user_attr(N_STARTUP_TRIALS_SESSION_ATTR, _n_startup)
+        study.set_user_attr(N_STARTUP_TRIALS_REQUESTED_ATTR, _n_startup)
     for _key, _val in _hoist_pairs:
         if _key in study.user_attrs:
             if study.user_attrs[_key] != _val:

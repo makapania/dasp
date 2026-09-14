@@ -382,5 +382,10 @@
       "value": 0.057939836593898224
     }
   ],
-  "reference_commit": "2860d1713701645e01dd762d103be0e56d402e5f"
+  "reference_commit": "2860d1713701645e01dd762d103be0e56d402e5f",
+  "sampler_source_commit": "2860d17",
+  "sampler_source_sha256": {
+    "suggest_model_params": "8d66108fc382bad45000c59295cd3fd76400b829cd148cb9931a29b146af069e",
+    "suggest_one_class_params": "291515400f83a3e8f980f400147720280763707c87dd2811c8df5e84e5d94521"
+  }
 }

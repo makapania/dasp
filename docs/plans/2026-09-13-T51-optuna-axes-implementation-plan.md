@@ -4,9 +4,23 @@
 > (`search_spaces.py`, `unified_bayesian.py` wiring, `tests/test_t51_extra_axes_mechanism.py`,
 > baseline fixture captured on `main` @ `2860d17`). B0–F not started. Plan revised after
 > review rounds 1 and 2 and the contamination project's evidence (§10).
-> **PR A deviation:** `apply_extra_axes`/`resolve_bundles` take the base sampler's
-> discovered names as an argument (`discover_suggested_names`), so `search_spaces` does
-> not import `unified_bayesian`. Round 2 (`gpt-6-astra`) found one
+> **PR A deviations from §2:**
+> - `resolve_bundles` takes the base sampler's discovered names as an argument
+>   (`discover_suggested_names`), so `search_spaces` does not import `unified_bayesian`.
+> - **The `'neuralboosted'` map entry (§2.2.2) is NOT in PR A** (DeepSeek review). It
+>   changes the study name for that lowercase spelling, which is a default-path identity
+>   change. It moves to the follow-up that adds `neuralboosted_base`.
+> - The session attr is named `n_startup_trials_requested` (last explicit request wins),
+>   not `n_startup_trials_session`.
+> - `resolve_bundles` also validates axis specs (kind, bounds, choices, log/step) and
+>   bundle `constants` (literal values; may not override suggested or objective names;
+>   no two bundles write the same key). It does this so malformed bundles fail before any
+>   storage access, rather than as penalty trials or a half-created SQLite study.
+> - A runtime `ExtraAxesConfigError` does **not** delete the SQLite study. On a resume
+>   that would destroy prior trials. Pre-flight validation makes the runtime path
+>   effectively unreachable.
+> - A test pins the two sampler bodies to their SHA-256 on `main` @ `2860d17`. PR F must
+>   re-bless it. Round 2 (`gpt-6-astra`) found one
 > blocker (B0's version bump) and five other issues, all folded in (§9b).
 >
 > This plan turns the design ticket

@@ -143,7 +143,7 @@ def test_t2_default_study_name_env_suffix() -> None:
     digest = ub._environment_digest(ub._numerical_environment())
     assert study.study_name.endswith(f"_{ub.ENV_FINGERPRINT_VERSION}_{digest}")
     assert ub.EXTRA_AXES_SPACE_ATTR not in study.user_attrs
-    assert ub.N_STARTUP_TRIALS_SESSION_ATTR not in study.user_attrs
+    assert ub.N_STARTUP_TRIALS_REQUESTED_ATTR not in study.user_attrs
 
 
 def test_t2_empty_selection_and_default_startup_keep_default_name(baseline) -> None:
@@ -176,7 +176,35 @@ def test_t3_default_trajectory_matches_main(baseline, kwargs) -> None:
         )
     _, study = _run(n_trials=recipe.TRACE_TRIALS, **kwargs)
     assert len(study.trials) == recipe.TRACE_TRIALS > ub.DEFAULT_N_STARTUP_TRIALS
-    assert _trace(study) == baseline["pls_regression_trace"]
+    got, expected = _trace(study), baseline["pls_regression_trace"]
+    # Params exactly; values to rel 1e-9, because the env digest does not capture BLAS.
+    assert [(t["number"], t["params"]) for t in got] == [
+        (t["number"], t["params"]) for t in expected
+    ]
+    assert [t["value"] for t in got] == pytest.approx([t["value"] for t in expected], rel=1e-9)
+
+
+def _function_source(source: str, name: str, following: str) -> str:
+    match = re.search(rf"^def {name}\(.*?(?=^def {following}\()", source, re.S | re.M)
+    assert match, f"could not locate {name}"
+    return match.group(0).rstrip()
+
+
+@pytest.mark.parametrize(
+    ("name", "following"),
+    [("suggest_model_params", "suggest_one_class_params"),
+     ("suggest_one_class_params", "compute_importances")],
+)
+def test_base_sampler_bodies_unchanged_from_main(baseline, name, following) -> None:
+    """Prime directive: bundles are additive; the default samplers are never edited.
+
+    PR F is the one planned exception (plan section 5) and must re-bless this pin.
+    """
+    import hashlib
+
+    source = Path(ub.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
+    digest = hashlib.sha256(_function_source(source, name, following).encode("utf-8")).hexdigest()
+    assert digest == baseline["sampler_source_sha256"][name]
 
 
 # --- T4 / T10: startup trials on all three sampler paths -----------------------------
@@ -219,9 +247,17 @@ def test_t4_t10_startup_trials_on_always_reattach(
     assert set(sampler_spy) == {expected}
 
 
+def test_t10_resume_reattaches_with_the_new_startup_value(sqlite_storage) -> None:
+    _, first = _run(n_trials=2, enable_sqlite_persistence="always", n_startup_trials=5)
+    _, resumed = _run(n_trials=3, enable_sqlite_persistence="always", n_startup_trials=9)
+    assert resumed.study_name == first.study_name
+    assert resumed.sampler._n_startup_trials == 9
+    assert resumed.user_attrs[ub.N_STARTUP_TRIALS_REQUESTED_ATTR] == 9
+
+
 def test_t10_startup_attr_only_when_passed() -> None:
     _, study = _run(n_trials=1, n_startup_trials=7)
-    assert study.user_attrs[ub.N_STARTUP_TRIALS_SESSION_ATTR] == 7
+    assert study.user_attrs[ub.N_STARTUP_TRIALS_REQUESTED_ATTR] == 7
     assert study.sampler._n_startup_trials == 7
 
 
@@ -491,6 +527,58 @@ def test_resolved_bundles_are_snapshots() -> None:
     space = {"probe_pls_tol": PLS_TOL}
     resolved = resolve_bundles("PLS", "regression", ("probe_pls_tol",), space)
     assert resolved == (PLS_TOL,) and resolved[0] is not PLS_TOL
+
+
+def _one_axis(**axis: Any) -> dict[str, BundleSpec]:
+    fields = {"key": "tol", "kind": "float", "low": 1e-7, "high": 1e-5, **axis}
+    return {"b": BundleSpec(id="b", families=frozenset({"PLS"}),
+                            task_types=frozenset({"regression"}), axes=(AxisSpec(**fields),))}
+
+
+@pytest.mark.parametrize(
+    ("axis", "match"),
+    [
+        ({"kind": "integer"}, "unknown kind"),
+        ({"low": 1e-5, "high": 1e-7}, "low"),
+        ({"kind": "categorical", "choices": ()}, "non-empty choices"),
+        ({"kind": "categorical", "choices": ({"a": 1},)}, "not allowed"),
+        ({"log": True, "low": 0.0}, "log scale"),
+        ({"kind": "int", "low": 1.5, "high": 3}, "bounds"),
+        ({"kind": "int", "low": 1, "high": 9, "step": 2, "log": True}, "step"),
+    ],
+)
+def test_malformed_axes_rejected_before_optimisation(axis, match) -> None:
+    with pytest.raises(ExtraAxesConfigError, match=match):
+        resolve_bundles("PLS", "regression", ("b",), _one_axis(**axis))
+
+
+def test_constants_cannot_override_suggested_params() -> None:
+    base = discover_suggested_names(lambda t: ub.suggest_model_params(t, "PLS", 80, "regression"))
+    bad = {"b": BundleSpec(id="b", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                           axes=PLS_TOL.axes, constants={"n_components": 3})}
+    with pytest.raises(ExtraAxesConfigError, match="override"):
+        resolve_bundles("PLS", "regression", ("b",), bad, base_param_names=base)
+
+
+def test_constants_must_be_literals_and_unique_across_bundles() -> None:
+    odd = {"b": BundleSpec(id="b", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                           axes=PLS_TOL.axes, constants={"flags": frozenset({1})})}
+    with pytest.raises(ExtraAxesConfigError, match="not allowed"):
+        resolve_bundles("PLS", "regression", ("b",), odd)
+    writes_tol = BundleSpec(id="c", families=frozenset({"PLS"}),
+                            task_types=frozenset({"regression"}), axes=PLS_ITER.axes,
+                            constants={"tol": 1e-6})
+    with pytest.raises(ExtraAxesConfigError, match="both write"):
+        resolve_bundles("PLS", "regression", ("b", "c"), {"b": PLS_TOL, "c": writes_tol})
+
+
+def test_same_key_under_different_optuna_names_rejected() -> None:
+    alias = BundleSpec(id="alias", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+                       axes=(AxisSpec(key="tol", kind="float", low=1e-8, high=1e-6, log=True,
+                                      param_name="tol_alias"),))
+    with pytest.raises(ExtraAxesConfigError, match="both write"):
+        resolve_bundles("PLS", "regression", ("probe_pls_tol", "alias"),
+                        {"probe_pls_tol": PLS_TOL, "alias": alias})
 
 
 def test_duplicate_axis_across_bundles_rejected() -> None:

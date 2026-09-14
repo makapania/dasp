@@ -217,28 +217,82 @@ def resolve_bundles(
         and task_type in registry[bundle_id].task_types
     ]
     reserved = set(base_param_names) | OBJECTIVE_RESERVED_NAMES
-    claimed: dict[str, str] = {}
+    claimed_names: dict[str, str] = {}
+    claimed_keys: dict[str, str] = {}
     for bundle in applicable:
-        if bundle.id != bundle.id.strip() or not bundle.id:
+        if not bundle.id or bundle.id != bundle.id.strip():
             raise ExtraAxesConfigError(f"Invalid bundle id {bundle.id!r}")
         for axis in bundle.axes:
-            if axis.applies_when_id is not None and axis.applies_when_id not in PREDICATES:
-                raise ExtraAxesConfigError(
-                    f"Bundle {bundle.id!r} axis {axis.key!r}: unknown applies_when_id "
-                    f"{axis.applies_when_id!r}. Valid ids: {sorted(PREDICATES)}"
-                )
+            _validate_axis(bundle.id, axis)
             name = axis.optuna_name
             if name in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} axis {name!r} collides with a parameter the base "
                     f"search already suggests for {model_name}; it cannot be opened additively."
                 )
-            if name in claimed:
+            if name in claimed_names:
                 raise ExtraAxesConfigError(
-                    f"Bundles {claimed[name]!r} and {bundle.id!r} both suggest {name!r}"
+                    f"Bundles {claimed_names[name]!r} and {bundle.id!r} both suggest {name!r}"
                 )
-            claimed[name] = bundle.id
+            claimed_names[name] = bundle.id
+            _claim_key(claimed_keys, axis.key, bundle.id)
+        for key, value in bundle.constants.items():
+            if key in reserved:
+                raise ExtraAxesConfigError(
+                    f"Bundle {bundle.id!r} constant {key!r} would override a parameter the "
+                    f"search suggests for {model_name}"
+                )
+            _require_literal(bundle.id, f"constant {key!r}", value)
+            _claim_key(claimed_keys, key, bundle.id)
     return tuple(copy.deepcopy(bundle) for bundle in applicable)
+
+
+_LITERAL_TYPES = (bool, int, float, str, type(None))
+
+
+def _require_literal(bundle_id: str, what: str, value: Any) -> None:
+    # Identity hashing and Params round-trips need plain, order-stable literals.
+    if not isinstance(value, _LITERAL_TYPES):
+        raise ExtraAxesConfigError(
+            f"Bundle {bundle_id!r} {what}: {type(value).__name__} is not allowed; "
+            "use bool, int, float, str or None"
+        )
+
+
+def _claim_key(claimed: dict[str, str], key: str, bundle_id: str) -> None:
+    if key in claimed:
+        raise ExtraAxesConfigError(
+            f"Bundles {claimed[key]!r} and {bundle_id!r} both write model param {key!r}"
+        )
+    claimed[key] = bundle_id
+
+
+def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
+    """Reject malformed axes before optimisation, so they never become penalty trials."""
+    where = f"Bundle {bundle_id!r} axis {axis.key!r}"
+    if axis.applies_when_id is not None and axis.applies_when_id not in PREDICATES:
+        raise ExtraAxesConfigError(
+            f"{where}: unknown applies_when_id {axis.applies_when_id!r}. "
+            f"Valid ids: {sorted(PREDICATES)}"
+        )
+    if axis.kind == "categorical":
+        if not axis.choices:
+            raise ExtraAxesConfigError(f"{where}: categorical axis needs non-empty choices")
+        for choice in axis.choices:
+            _require_literal(bundle_id, f"axis {axis.key!r} choice", choice)
+        return
+    if axis.kind not in ("int", "float"):
+        raise ExtraAxesConfigError(f"{where}: unknown kind {axis.kind!r}")
+    numeric = (int,) if axis.kind == "int" else (int, float)
+    for bound in (axis.low, axis.high):
+        if isinstance(bound, bool) or not isinstance(bound, numeric):
+            raise ExtraAxesConfigError(f"{where}: {axis.kind} bounds must be {axis.kind}s")
+    if axis.low > axis.high:
+        raise ExtraAxesConfigError(f"{where}: low {axis.low!r} > high {axis.high!r}")
+    if axis.log and axis.low <= 0:
+        raise ExtraAxesConfigError(f"{where}: log scale requires low > 0")
+    if axis.step is not None and (axis.kind != "int" or axis.log or axis.step < 1):
+        raise ExtraAxesConfigError(f"{where}: step is only valid for non-log int axes, >= 1")
 
 
 def _tagged(value: Any) -> Any:
@@ -311,6 +365,9 @@ def apply_extra_axes(
     Every axis is suggested on every trial so the parameter-name set stays uniform for
     TPE. A value is written only when its predicate holds, so inapplicable values do not
     split the fit fingerprint of otherwise identical fits.
+
+    Predicates see the base sampler's ``params`` only, never other extra axes or bundle
+    constants, so a gate cannot depend on the order bundles are applied in.
     """
     if not resolved:
         return params
