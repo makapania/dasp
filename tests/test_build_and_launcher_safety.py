@@ -43,6 +43,8 @@ def test_build_repairs_pandas_in_paths_with_spaces(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(builder, "IS_MACOS", False)
 
     def fake_build(command, **kwargs):
+        if command[1].endswith("check_env_lock.py"):
+            return subprocess.CompletedProcess(command, 0)
         if command[1] == "-c":
             return subprocess.CompletedProcess(command, 0, stdout=f"314\n{site_packages}\n")
         assert command[1:3] == ["-m", "PyInstaller"]
@@ -69,6 +71,48 @@ def test_build_repairs_pandas_in_paths_with_spaces(tmp_path, monkeypatch, capsys
         assert "match venv" not in output
 
 
+@pytest.mark.parametrize("allow_drift", [False, True])
+def test_build_refuses_drifted_venv_before_removing_previous_bundle(
+    tmp_path, monkeypatch, allow_drift
+):
+    spec = importlib.util.spec_from_file_location("build_script", REPO / "build_installer_py312.py")
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+
+    root = tmp_path / "checkout"
+    python = root / ".venv314" / "Scripts" / "python.exe"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    (root / "spectral_predict_py312.spec").touch()
+    (root / "spectral_predict_gui_optimized.py").touch()
+    previous_exe = root / "dist" / builder.APP_NAME / f"{builder.APP_NAME}.exe"
+    previous_exe.parent.mkdir(parents=True)
+    previous_exe.touch()
+    monkeypatch.setattr(builder, "PROJECT_ROOT", root)
+    monkeypatch.setattr(builder, "DIST_DIR", root / "dist")
+    monkeypatch.setattr(builder, "BUILD_VENV", root / ".venv314")
+    monkeypatch.setattr(builder, "IS_WINDOWS", True)
+    if allow_drift:
+        monkeypatch.setenv("DASP_ALLOW_LOCK_DRIFT", "1")
+    else:
+        monkeypatch.delenv("DASP_ALLOW_LOCK_DRIFT", raising=False)
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[1] == "-c":
+            return subprocess.CompletedProcess(command, 0, stdout=f"314\n{tmp_path}\n")
+        if command[1].endswith("check_env_lock.py"):
+            return subprocess.CompletedProcess(command, 1)
+        raise subprocess.CalledProcessError(1, command)  # stop at PyInstaller
+
+    monkeypatch.setattr(builder.subprocess, "run", fake_run)
+
+    assert not builder.run_pyinstaller()
+    assert previous_exe.exists() is not allow_drift
+    assert any(c[1:3] == ["-m", "PyInstaller"] for c in calls) is allow_drift
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Exercises cmd.exe batch behavior")
 @pytest.mark.parametrize(
     "check_rc,lock_rc,editable_rc,expected,returncode",
@@ -77,8 +121,9 @@ def test_build_repairs_pandas_in_paths_with_spaces(tmp_path, monkeypatch, capsys
         (1, 0, 1, ["check", "lock", "editable"], 1),
         (1, 0, 0, ["check", "lock", "editable", "gui"], 0),
         (0, 0, 0, ["check", "gui"], 0),
+        (2, 0, 0, ["check", "gui"], 0),
     ],
-    ids=["lock-failed", "editable-failed", "installed", "already-present"],
+    ids=["lock-failed", "editable-failed", "installed", "already-present", "lock-unreadable"],
 )
 def test_launcher_checks_each_install_result(
     tmp_path, check_rc, lock_rc, editable_rc, expected, returncode
@@ -93,7 +138,7 @@ def test_launcher_checks_each_install_result(
     (tmp_path / "launcher.bat").write_text(source.replace(python, 'call "%~dp0stub.cmd"'))
     (tmp_path / "stub.cmd").write_text(
         "@echo off\n"
-        'if "%~1"=="-c" (\n'
+        'if "%~1"=="scripts\\check_env_lock.py" (\n'
         " echo PROBE check\n"
         " exit /b %PR65_CHECK_RC%\n"
         ")\n"

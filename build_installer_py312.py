@@ -30,7 +30,10 @@ Prerequisites:
 
 Usage:
     python build_installer_py312.py                  # uses BUILD_PYTHON_VERSION
-    DASP_BUILD_PYTHON=312 python build_installer_py312.py   # roll back to 3.12
+    DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py   # roll back to 3.12
+
+The build refuses to run if the build venv differs from requirements-lock.txt
+(scripts/check_env_lock.py); DASP_ALLOW_LOCK_DRIFT=1 overrides that.
 """
 
 from __future__ import annotations
@@ -171,6 +174,22 @@ def run_pyinstaller() -> bool:
         print(f"ERROR: Main script not found: {main_script}")
         return False
 
+    python_exe = _find_build_python()
+    py_tag, venv_site_pkgs = _query_build_python(python_exe)
+    print(f"Build interpreter: {python_exe} (Python {py_tag[0]}.{py_tag[1:]})")
+
+    # The bundle freezes whatever the build venv holds, so a venv that missed a
+    # lockfile update would ship the stale package to every user. Checked before
+    # cleaning, so a refused build leaves the previous bundle in place.
+    lock_check = PROJECT_ROOT / "scripts" / "check_env_lock.py"
+    if subprocess.run([python_exe, str(lock_check)], cwd=str(PROJECT_ROOT)).returncode != 0:
+        if os.environ.get("DASP_ALLOW_LOCK_DRIFT") != "1":
+            print(f"ERROR: {BUILD_VENV.name} does not match requirements-lock.txt. Run:")
+            print(f"  {BUILD_VENV.name}\\Scripts\\python -m pip install -r requirements-lock.txt")
+            print("Set DASP_ALLOW_LOCK_DRIFT=1 to build anyway (e.g. a 3.12 rollback build).")
+            return False
+        print("WARNING: building from a venv that differs from requirements-lock.txt.")
+
     # Clean this bundle's previous build artifacts.
     prev_dist = DIST_DIR / APP_NAME
     prev_build = PROJECT_ROOT / "build" / APP_NAME
@@ -179,9 +198,6 @@ def run_pyinstaller() -> bool:
             print(f"Removing {d} ...")
             shutil.rmtree(d)
 
-    python_exe = _find_build_python()
-    py_tag, venv_site_pkgs = _query_build_python(python_exe)
-    print(f"Build interpreter: {python_exe} (Python {py_tag[0]}.{py_tag[1:]})")
     cmd = [
         python_exe, "-m", "PyInstaller",
         "--clean",

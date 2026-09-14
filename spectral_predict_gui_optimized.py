@@ -60277,6 +60277,17 @@ def run_import_tests():
             print(f"  [FAIL] {module_name} metadata: {e}")
             failed.append((f"{module_name}.metadata", str(e)))
 
+    # jcamp 1.2.x imports cleanly but lacks the reader API io.py calls.
+    print("\n--- Checking JCAMP-DX reader API ---")
+    try:
+        import jcamp
+        if not hasattr(jcamp, "readfile"):
+            raise RuntimeError("jcamp.readfile missing; jcamp>=1.3.2 required")
+        print("  [OK] jcamp.readfile available")
+    except Exception as e:
+        print(f"  [FAIL] jcamp reader API: {e}")
+        failed.append(("jcamp.readfile", str(e)))
+
     # Test XGBoost DLL
     print("\n--- Testing XGBoost DLL ---")
     try:

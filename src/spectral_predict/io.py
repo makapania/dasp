@@ -3300,8 +3300,14 @@ def read_jcamp_file(
 
     path = Path(path)
 
-    # Read JCAMP file
     # jcamp renamed this in 1.3.0: jcamp_readfile -> readfile, with no alias.
+    # An environment built from an older lockfile still has 1.2.x.
+    if not hasattr(jcamp, 'readfile'):
+        raise ImportError(
+            "JCAMP-DX import requires jcamp>=1.3.2, but an older jcamp is installed.\n"
+            "Update the environment with: pip install -r requirements-lock.txt "
+            "(the launchers do this automatically)."
+        )
     jcamp_data = jcamp.readfile(str(path))
 
     # Extract x and y data

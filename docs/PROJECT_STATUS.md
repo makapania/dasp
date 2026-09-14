@@ -27,10 +27,16 @@ py -3.14 -m venv .venv314
 .venv314\Scripts\python -m pip install -e . --no-deps
 .venv314\Scripts\python -m pip check          # expect: No broken requirements found.
 
-# 3b. Upgrade jcamp to 1.3.2 (required for JCAMP-DX import). Run this on any
-#     existing .venv314 too.
-.venv314\Scripts\python -m pip install "jcamp==1.3.2"
-.venv314\Scripts\python -m pip show jcamp     # expect Version: 1.3.2
+# 3b. Existing .venv314? Re-apply the lock after every pull. The launchers now do
+#     this automatically when the venv differs from requirements-lock.txt;
+#     this is the manual equivalent. A venv built from the 09-10 lock still has
+#     jcamp 1.2.2, and JCAMP-DX import is broken until it is resynced.
+.venv314\Scripts\python -m pip install -r requirements-lock.txt
+.venv314\Scripts\python -m pip install -e . --no-deps
+.venv314\Scripts\python scripts\check_env_lock.py   # expect: Environment matches ...
+#     (pip check only verifies that installed packages satisfy each other's
+#     declared requirements, so it misses drift from the exact lock pins.
+#     check_env_lock.py compares against the lock.)
 
 # 4. Verify before trusting it
 .venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
@@ -56,13 +62,19 @@ below). But Python crashed with an access violation in the GUI `session_app`
 teardown after the last test, so pytest printed no summary. It did not recur in a
 later `tests/gui` run: 132 passed, 2 baseline failed. The GUI launches and runs an
 analysis. Its first launch exposed a Model Development CV-row `TclError` on the
-default kfold, fixed in `a746d5c`. **Other machines:** pull, then do step 3b
-(jcamp 1.3.2). JCAMP-DX import is broken in any `.venv314` still on 1.2.2. **Still
+default kfold, fixed in `a746d5c`. **Other machines:** pull, then launch with
+`RUN_SPECTRAL_PREDICT.bat` (it resyncs the venv to the lock) or do step 3b by hand.
+JCAMP-DX import is broken in any `.venv314` still on jcamp 1.2.2. **Automatic lock
+sync (branch `fix/auto-sync-venv-to-lockfile`):** the launchers run
+`scripts/check_env_lock.py` and reinstall from the lock on drift, the installer build
+refuses a drifted build venv (`DASP_ALLOW_LOCK_DRIFT=1` overrides), the frozen
+self-test checks `jcamp.readfile`, and `read_jcamp_file` raises an actionable
+`ImportError` on jcamp <1.3. **Still
 untested on 3.14:** importing a JCAMP-DX file through the GUI. The backend round
 trip passed.
 
 **Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
-so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A true
+so `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. A true
 rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
 you are confident, and reclaim the disk then.
 
@@ -170,7 +182,7 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > optuna 5.0, plotly 7.0, moocore 0.3.2, xgboost 3.4.1, numpy 2.5.3, sklearn 1.9.1.
 >
 > **Rollback is one variable.** The build path no longer hardcodes an interpreter;
-> `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. The
+> `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. The
 > user-visible artifact names still say `py312` **deliberately** — they are a stable
 > identity so existing installs upgrade in place. Do not "fix" them.
 >

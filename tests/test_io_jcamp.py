@@ -261,6 +261,17 @@ def test_jcamp_import_error():
         read_jcamp_file(Path("dummy.jdx"))
 
 
+def test_jcamp_pre_1_3_raises_actionable_error(monkeypatch):
+    """jcamp 1.2.x imports fine but has no readfile; the error must say how to update."""
+    import sys
+    import types
+
+    monkeypatch.setitem(sys.modules, 'jcamp', types.SimpleNamespace(jcamp_readfile=None))
+
+    with pytest.raises(ImportError, match="requirements-lock.txt"):
+        read_jcamp_file(Path("dummy.jdx"))
+
+
 def test_jcamp_data_type_detection(tmp_path):
     """Test that data type is correctly detected from JCAMP data."""
     jcamp_path = tmp_path / "detect.jdx"

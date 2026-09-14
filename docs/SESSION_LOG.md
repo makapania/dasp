@@ -6,6 +6,36 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-13 - Lockfile changes never reached existing venvs (why jcamp stayed 1.2.2)
+
+Root cause, confirmed by GLM 5.3 Flash and DeepSeek 4.1 Flash reviews plus git
+history: `requirements-lock.txt` was created with `jcamp==1.2.2` (`0cad9e5`,
+09-10) and moved to `==1.3.2` in `be7963c` (09-12), the same commit that switched
+`io.py` to `jcamp.readfile`. Venvs built from the older lock kept 1.2.2. Nothing
+re-applied the lock: `RUN_SPECTRAL_PREDICT.bat` only reinstalled when three
+modules were *missing*, not when versions were *wrong*; the migration steps read
+as create-time only; `pip check` compares against pyproject floors, not exact pins.
+The manual step 3b (`pip install jcamp==1.3.2`) fixed one package and would miss
+the next bump the same way.
+
+Fix: `scripts/check_env_lock.py` (stdlib only, ~120 ms) compares installed
+distributions to every `==` pin. Launchers run it and reinstall from the lock on
+drift; a failed install still stops the launch, as
+`tests/test_build_and_launcher_safety.py` requires (an early warn-and-launch
+version broke those tests, caught in GLM's PR 66 review). Exit 2 (unreadable
+lock) warns and launches without reinstalling, and the parser skips lines it
+cannot judge (options, URLs, markers) so a lock change cannot cause a
+reinstall on every launch. The installer build
+refuses a drifted build venv, since the bundle would ship the stale package
+(`DASP_ALLOW_LOCK_DRIFT=1` for 3.12 rollback builds). The check runs before the
+previous `dist/` bundle is deleted, so a refused build keeps the old one. `read_jcamp_file` raises an
+actionable `ImportError` instead of `AttributeError`; the frozen self-test checks
+`jcamp.readfile`. Gotcha: a lockfile regenerated with PowerShell `>` gets a BOM
+(UTF-8 or UTF-16), so the script decodes by BOM. Verified end to end: downgraded
+`.venv314` to jcamp 1.2.2 → check exit 1 → lock reinstall → exit 0, jcamp 1.3.2.
+
+---
+
 ## 2026-09-13 - FIXED: Model Development CV row raised TclError "isn't packed" on default kfold
 
 `_on_refine_cv_strategy_changed` packed widgets `before=` siblings that the

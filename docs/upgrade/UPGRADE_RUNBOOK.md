@@ -70,7 +70,12 @@ py -3.XX -m venv .venvXXX
 .venvXXX\Scripts\python -m pip install -r requirements-lock.txt   # pins HELD
 .venvXXX\Scripts\python -m pip install -e . --no-deps
 .venvXXX\Scripts\python -m pip check
+.venvXXX\Scripts\python scripts\check_env_lock.py               # installed == lock
 ```
+
+Changing `requirements-lock.txt` reaches other machines on their next launch:
+`RUN_SPECTRAL_PREDICT.bat` / `run_gui.sh` run `check_env_lock.py` and reinstall from
+the lock when the venv differs. No per-package migration step is needed.
 
 Pins held is the point: this isolates the interpreter. Then run step 4 and
 compare against the previous interpreter before touching any dependency.
@@ -79,7 +84,7 @@ Update in this order once it passes: `pyproject.toml` (`requires-python` +
 classifiers), `.github/workflows/ci.yml`, `README.md`, the `requirements-lock.txt`
 header, and `BUILD_PYTHON_VERSION` in `build_installer_py312.py`.
 
-Rolling back is one variable: `DASP_BUILD_PYTHON=312 python build_installer_py312.py`.
+Rolling back is one variable: `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py`.
 
 ## Step 3 — Upgrade, in the reported order
 
