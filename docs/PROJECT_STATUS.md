@@ -1,5 +1,95 @@
 # Project Status
 
+## ▶ NEXT SESSION — START HERE (hand-off written 2026-09-14)
+
+### 1. Three open PRs need the user's merge decision (none merged by agents)
+
+| PR | Branch | What | State |
+|---|---|---|---|
+| **#69** | `fix/T41-auto-resume-data-loss` | **Data-loss fix.** Re-running an `'auto'`-persistence Bayesian analysis on a storage that already held its study **deleted the earlier study** (reproduced on `main`). | Final `9640141`. GLM + DeepSeek, 3 rounds each → merge / ready. Full suite: only the 7 baseline failures. |
+| **#68** | `feat/T51-pr-a-extra-axes` | **T-51 PR A:** opt-in extra Optuna axes mechanism (`search_spaces.py`; `run_unified_bayesian(enabled_extra_axes, search_space, n_startup_trials)`). No bundles yet. The default search is proven byte-identical to `main`. | Code final `60edfe3` (later commits are docs). Fable + Codex `gpt-6-astra` + DeepSeek, 3 rounds each → merge. Full suite: only the 7 baseline failures. |
+| #63 | `feat/T17-multitarget-regression` | T-17 multi-target regression | Older (last touched 2026-07-08). Not part of this work; ask the user. |
+
+**Suggested order:** #69 first (a data-loss fix, smaller), then #68.
+- **Conflict warning:** both edit the study `user_attrs` hoist block in
+  `run_unified_bayesian`. Resolve by keeping #68's `extra_axes_*` attrs **and** #69's
+  guarded `data_fingerprint` stamp.
+- **Re-run both test files after resolving:**
+  - `tests/test_t51_extra_axes_mechanism.py`
+  - `tests/test_t41_auto_rerun_preserves_study.py`
+- **#68's T2b and T3 pins capture study names and a trace from `main` @ `2860d17`.** #69
+  adds a new study attribute but does not change study names or the trace, so the pins
+  should still hold. If they fail, investigate before re-blessing them.
+- **Detailed notes land on `main` only when these merge.** The branches carry their own
+  SESSION_LOG entries (2026-09-14) and PROJECT_STATUS updates, plus PR A's documentation
+  (`docs/AGENT_COMPOSITION.md` §7b, CHANGELOG 0.5.0b3).
+
+### 2. NEW TASK: investigate the GitHub failure/warning emails (user request, 2026-09-14)
+
+The user gets frequent GitHub error emails. **Find out which are meaningful and which
+are noise, then propose, don't just silence.** First look (2026-09-14):
+- **98 of the last 100 CI runs concluded `failure`.** Every push and PR emails. On the
+  latest `main` run these jobs fail:
+  - `Test Python 3.14 on windows-latest`
+  - `Test Python 3.14 on ubuntu-latest`
+  - `Test with optional dependencies`
+  - `GUI tests (Linux Xvfb, informational)`
+
+  `Build package` passes.
+- **Likely cause: the known baseline failures (T-CI-1),** red since about June 2026.
+  Locally, exactly 7 tests fail on `main`:
+  - `test_export_code.py` (2)
+  - `test_cv_strategy.py` (1)
+  - `test_t19_class_weight_per_library.py` (2)
+  - `tests/gui/test_comprehensive.py::test_catboost_via_gui`
+  - `tests/gui/test_multiclass_gui.py::test_tab9_rejects_multiclass_primary`
+
+  **Verify CI's failing node IDs match these**, rather than assuming.
+- **Real deprecation warning:** `Node.js 20 is deprecated … actions/checkout@v4,
+  actions/setup-python@v5` (annotation on every job). This is cheap to fix by bumping the
+  action versions in `.github/workflows/`.
+- **`[skip ci]` doesn't seem to be honoured:** docs-only `main` pushes marked
+  `[skip ci]` still show CI runs. Check the workflow triggers.
+- **Dependabot alerts are disabled** for the repo, and code scanning has no analysis, so
+  neither is a source of these emails. Check notification settings for anything else,
+  such as workflow-run emails.
+- **Useful commands** (use the Bash tool; PowerShell mangles `--jq` quoting):
+  - `gh run list --limit 50 --json conclusion,workflowName,headBranch`
+  - `gh run view <id> --log-failed`
+  - `gh api repos/makapania/dasp/check-runs/<job_id>/annotations`
+- **Memory note:** CI is not a merge gate in this project (local tests plus GLM/DeepSeek
+  review are). A red CI badge is still worth fixing, so emails mean something again.
+  Likely fixes: T-CI-1 (the 7 baseline failures), the action version bumps, and possibly
+  making the informational GUI job `continue-on-error`.
+
+### 3. Queued work after the PRs merge
+1. **T-51 PR B0 (approved by the user):** PLS-DA logistic-head params (C, solver,
+   max_iter) are lost on rebuild and Tab 7 refit. Plan:
+   `docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md` §3.2.
+2. **T-51 PR B:** supervised bundles (§3.1; `min_split_gain` approved for `lgbm_child`),
+   then C (one-class), D (GUI), E/F (one-class clamp).
+3. **Test-order fix (small):** `tests/test_bayesian_study_lookup.py` (4 tests) fails when
+   run after `test_t41_*` or `test_run_state.py` in one process, because their fixtures
+   pop and re-import `spectral_predict.run_state`. xdist hides it. Fix: make those
+   fixtures restore the original module (`monkeypatch.setitem(sys.modules, ...)`).
+4. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
+   - the unscaled Bayesian importance proxy
+   - unscaled NSGA-II display metrics
+   - NSGA-II `'SVM'` chromosomes always scoring the 1e10 penalty
+   - `MODELS_WITH_FEATURE_IMPORTANCE` lacking `'SVM'` (coupled to subset search)
+   - GUI refit double-scaling under autoscale
+
+### 4. Tooling notes from this session
+- **Codex:** on this ChatGPT-account login only `gpt-6-astra` works for the "astra"
+  model. `gpt-5.6-astra`, `gpt-5.6-alpha` and `gpt-6-alpha` are all rejected.
+- **opencode/GLM write mode** (`--dangerously-skip-permissions`) is blocked by Claude
+  Code's auto-mode check. Use opencode for read-only reviews.
+- **Rewriting docs from PowerShell:** use `[IO.File]::WriteAllText(..., UTF8Encoding
+  $false)` and check `git diff --stat`. `Set-Content` once rewrote the whole of
+  PROJECT_STATUS with new line endings.
+
+---
+
 ## ⚠ MOVING A 3.12 MACHINE TO 3.14 (added 2026-09-12) — DO THIS FIRST
 
 If this machine is still on `.venv312`, do this **before** pulling and before trying
@@ -1770,6 +1860,29 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - NSGA-II `'SVM'` chromosomes always score the 1e10 penalty.
      - `MODELS_WITH_FEATURE_IMPORTANCE` lacks `'SVM'`, and it is coupled to subset support.
      - GUI refit double-scales under autoscale.
+6. **T-41 follow-up: 'auto' persistence re-run data loss. FIXED in PR #69
+   (`fix/T41-auto-resume-data-loss`, final `9640141`; full suite 7 baseline failures / 3050 passed, zero new), NOT merged (waiting for the user).**
+   - **The bug (reproduced on `main`):** re-running an 'auto' Bayesian analysis on the
+     same storage deleted the earlier run's saved study.
+   - **Exposure:** scripts reusing one storage URL, or a same-config rerun inside one
+     active run. Normal GUI use is protected by per-run SQLite files.
+   - **The fix:**
+     - 'auto' resumes an existing study only when the stored data fingerprint matches.
+       On a mismatch, that run stays in memory.
+     - 'always' warns when resuming a study recorded on different data.
+     - A failed migration never deletes a study it did not create.
+     - New attr `data_fingerprint`, written only on new studies.
+     - `tests/test_t41_auto_rerun_preserves_study.py`: 14 tests, about 2.5 minutes
+       because trials are deliberately slowed past the 1 s threshold. 6 guard mutations,
+       all caught.
+     - Reviewed by GLM and DeepSeek over two rounds; all findings applied.
+   - **Details:** SESSION_LOG 2026-09-14.
+   - **Merge note:** this branch and PR #68 both edit the study-attrs hoist list in
+     `run_unified_bayesian`, so whichever merges second resolves a small conflict.
+7. **Test-order dependence (pre-existing, not fixed):** `test_bayesian_study_lookup.py`
+   (4 tests) fails after `test_t41_*` or `test_run_state.py` in one process, because
+   their fixtures re-import `run_state`. The full xdist suite hides it. Planned fix:
+   the fixtures restore the original module.
 
 ## Follow-Ups (unclaimed)
 
