@@ -31,7 +31,7 @@ EXIT_IN_SYNC = 0
 EXIT_DRIFTED = 1
 EXIT_BAD_LOCK = 2
 
-_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;#]+)")
+_PIN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s;#\\]+)")
 
 
 def normalize_name(name: str) -> str:
@@ -50,13 +50,18 @@ def read_lock_text(path: Path) -> str:
 def parse_lock(text: str) -> dict[str, str]:
     """Return {normalized name: pinned version} for every `name==version` line.
 
+    Lines this stdlib-only parser cannot judge are skipped rather than rejected,
+    so they never make a launcher reinstall on every start: pip options and hash
+    continuations (`-...`), direct URLs (`name @ url`), and environment markers
+    (`; ...`), which need `packaging` to evaluate.
+
     Raises:
         ValueError: A requirement line is not an exact `==` pin.
     """
     pins: dict[str, str] = {}
     for line_number, raw in enumerate(text.splitlines(), start=1):
         line = raw.split("#", 1)[0].strip()
-        if not line:
+        if not line or line.startswith("-") or " @ " in line or ";" in line:
             continue
         match = _PIN.match(line)
         if match is None:
@@ -75,7 +80,8 @@ def find_drift(
             installed = installed_version(name)
         except PackageNotFoundError:
             installed = None
-        if installed != pinned:
+        # pip treats `==1.0` as satisfied by a local build such as `1.0+cpu`.
+        if installed is None or (installed != pinned and installed.split("+", 1)[0] != pinned):
             drift.append((name, pinned, installed))
     return drift
 

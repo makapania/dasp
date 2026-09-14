@@ -33,6 +33,27 @@ def test_parse_lock_skips_comments_and_normalizes_names():
     assert check_env_lock.parse_lock(text) == {"jcamp": "1.3.2", "specio-py310": "0.1"}
 
 
+def test_parse_lock_accepts_extras_and_skips_lines_it_cannot_judge():
+    text = (
+        "--index-url https://example.invalid/simple\n"
+        "-e .\n"
+        "uvicorn[standard]==0.30.0 \\\n"
+        "    --hash=sha256:abc\n"
+        "mylib @ https://example.invalid/mylib.whl\n"
+        'pywin32==306 ; sys_platform == "win32"\n'
+    )
+
+    assert check_env_lock.parse_lock(text) == {"uvicorn": "0.30.0"}
+
+
+def test_find_drift_accepts_local_version_of_pin():
+    drift = check_env_lock.find_drift(
+        {"torch": "2.5.0"}, installed_version=_fake_installed({"torch": "2.5.0+cpu"})
+    )
+
+    assert drift == []
+
+
 def test_parse_lock_rejects_non_exact_pin():
     with pytest.raises(ValueError, match="line 2"):
         check_env_lock.parse_lock("numpy==2.0\njcamp>=1.3.2\n")

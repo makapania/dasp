@@ -84,7 +84,7 @@ Update in this order once it passes: `pyproject.toml` (`requires-python` +
 classifiers), `.github/workflows/ci.yml`, `README.md`, the `requirements-lock.txt`
 header, and `BUILD_PYTHON_VERSION` in `build_installer_py312.py`.
 
-Rolling back is one variable: `DASP_BUILD_PYTHON=312 python build_installer_py312.py`.
+Rolling back is one variable: `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py`.
 
 ## Step 3 — Upgrade, in the reported order
 

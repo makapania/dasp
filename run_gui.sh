@@ -58,15 +58,16 @@ install_locked() {
 
 # Apply requirements-lock.txt whenever the venv no longer matches it: a pull
 # that changes a pin must reach existing environments without a manual step.
-if ! $PYTHON scripts/check_env_lock.py --quiet; then
+$PYTHON scripts/check_env_lock.py --quiet
+lock_status=$?
+if [ "$lock_status" -eq 2 ]; then
+    # The lockfile itself is unreadable; reinstalling would not fix it.
+    echo -e "${YELLOW}Warning: could not check the venv against requirements-lock.txt.${NC}"
+elif [ "$lock_status" -ne 0 ] || ! $PYTHON -c "import spectral_predict" 2>/dev/null; then
     echo ""
     echo "Updating .venv314 to match requirements-lock.txt..."
-    if install_locked; then
-        echo -e "${GREEN}Environment updated.${NC}"
-    else
-        # Offline is the usual cause; an out-of-date venv may still run, so try it.
-        echo -e "${YELLOW}Warning: could not update the venv. Launching anyway; run ./install.sh when online.${NC}"
-    fi
+    install_locked || exit 1
+    echo -e "${GREEN}Environment updated.${NC}"
     echo ""
 fi
 

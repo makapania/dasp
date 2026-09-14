@@ -20,9 +20,15 @@ the next bump the same way.
 
 Fix: `scripts/check_env_lock.py` (stdlib only, ~120 ms) compares installed
 distributions to every `==` pin. Launchers run it and reinstall from the lock on
-drift (warn and launch anyway if pip fails, e.g. offline). The installer build
+drift; a failed install still stops the launch, as
+`tests/test_build_and_launcher_safety.py` requires (an early warn-and-launch
+version broke those tests, caught in GLM's PR 66 review). Exit 2 (unreadable
+lock) warns and launches without reinstalling, and the parser skips lines it
+cannot judge (options, URLs, markers) so a lock change cannot cause a
+reinstall on every launch. The installer build
 refuses a drifted build venv, since the bundle would ship the stale package
-(`DASP_ALLOW_LOCK_DRIFT=1` for 3.12 rollback builds). `read_jcamp_file` raises an
+(`DASP_ALLOW_LOCK_DRIFT=1` for 3.12 rollback builds). The check runs before the
+previous `dist/` bundle is deleted, so a refused build keeps the old one. `read_jcamp_file` raises an
 actionable `ImportError` instead of `AttributeError`; the frozen self-test checks
 `jcamp.readfile`. Gotcha: a lockfile regenerated with PowerShell `>` gets a BOM
 (UTF-8 or UTF-16), so the script decodes by BOM. Verified end to end: downgraded

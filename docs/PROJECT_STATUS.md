@@ -34,8 +34,9 @@ py -3.14 -m venv .venv314
 .venv314\Scripts\python -m pip install -r requirements-lock.txt
 .venv314\Scripts\python -m pip install -e . --no-deps
 .venv314\Scripts\python scripts\check_env_lock.py   # expect: Environment matches ...
-#     (pip check only compares against pyproject floors, so it misses any
-#     drift that still satisfies them. check_env_lock.py compares exact pins.)
+#     (pip check only verifies that installed packages satisfy each other's
+#     declared requirements, so it misses drift from the exact lock pins.
+#     check_env_lock.py compares against the lock.)
 
 # 4. Verify before trusting it
 .venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
@@ -73,7 +74,7 @@ untested on 3.14:** importing a JCAMP-DX file through the GUI. The backend round
 trip passed.
 
 **Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
-so `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. A true
+so `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. A true
 rollback would also mean lowering `requires-python` again. Delete `.venv312` only once
 you are confident, and reclaim the disk then.
 
@@ -181,7 +182,7 @@ Re-running `pip install -e .` removes the stale shim. Verified on the primary ma
 > optuna 5.0, plotly 7.0, moocore 0.3.2, xgboost 3.4.1, numpy 2.5.3, sklearn 1.9.1.
 >
 > **Rollback is one variable.** The build path no longer hardcodes an interpreter;
-> `DASP_BUILD_PYTHON=312 python build_installer_py312.py` rebuilds on 3.12. The
+> `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. The
 > user-visible artifact names still say `py312` **deliberately** — they are a stable
 > identity so existing installs upgrade in place. Do not "fix" them.
 >

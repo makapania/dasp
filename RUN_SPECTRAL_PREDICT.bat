@@ -23,6 +23,8 @@ if not exist ".venv314\Scripts\python.exe" goto :venv_missing
 REM Apply requirements-lock.txt whenever the venv no longer matches it: a pull
 REM that changes a pin must reach existing environments without a manual step.
 .venv314\Scripts\python.exe scripts\check_env_lock.py --quiet
+REM Exit 2 means the lockfile itself is unreadable; reinstalling would not fix it.
+if errorlevel 2 goto :lock_unreadable
 if errorlevel 1 (
     echo.
     echo Updating .venv314 to match requirements-lock.txt...
@@ -55,11 +57,15 @@ echo Run install.bat first to create it, then launch again.
 pause
 exit /b 1
 
-:dependency_install_failed
-REM Offline is the usual cause; an out-of-date venv may still run, so try it.
+:lock_unreadable
 echo.
-echo WARNING: Could not update .venv314 from requirements-lock.txt.
-echo Launching anyway. Features whose packages are out of date may fail;
-echo reconnect and run install.bat to finish the update.
+echo WARNING: Could not check .venv314 against requirements-lock.txt ^(see above^).
+echo Launching without updating the environment.
 echo.
 goto :launch
+
+:dependency_install_failed
+echo.
+echo ERROR: Failed to install required dependencies into .venv314
+pause
+exit /b 1
