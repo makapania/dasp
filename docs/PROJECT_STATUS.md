@@ -1750,10 +1750,14 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      active run. Normal GUI use is protected by per-run SQLite files.
    - **The fix:**
      - 'auto' resumes an existing study only when the stored data fingerprint matches.
+       On a mismatch, that run stays in memory.
+     - 'always' warns when resuming a study recorded on different data.
      - A failed migration never deletes a study it did not create.
-     - New attr `data_fingerprint` on every study.
-     - `tests/test_t41_auto_rerun_preserves_study.py`: 9 tests, about 2 minutes because
-       trials are deliberately slowed past the 1 s threshold.
+     - New attr `data_fingerprint`, written only on new studies.
+     - `tests/test_t41_auto_rerun_preserves_study.py`: 13 tests, about 2.5 minutes
+       because trials are deliberately slowed past the 1 s threshold. 6 guard mutations,
+       all caught.
+     - Reviewed by GLM and DeepSeek over two rounds; all findings applied.
    - **Details:** SESSION_LOG 2026-09-14.
    - **Merge note:** this branch and PR #68 both edit the study-attrs hoist list in
      `run_unified_bayesian`, so whichever merges second resolves a small conflict.

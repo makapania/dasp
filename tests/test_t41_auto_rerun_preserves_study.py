@@ -160,6 +160,8 @@ def test_rerun_on_different_data_is_not_resumed_and_keeps_first_study(slow_sqlit
     decisions = {m.get("t41_decision") for m in messages}
     assert "auto_existing_study_data_mismatch" in decisions
     assert "auto_resumed_existing_study" not in decisions
+    assert "migration_failed_inmemory" not in decisions, "doomed migration was attempted"
+    assert isinstance(second._storage, optuna.storages.InMemoryStorage)
     assert second.user_attrs[ub.DATA_FINGERPRINT_ATTR] != first.user_attrs[ub.DATA_FINGERPRINT_ATTR]
     assert name in optuna.study.get_all_study_names(storage=slow_sqlite)
     assert _completed(slow_sqlite, name) == WARMUP + 1
@@ -192,6 +194,72 @@ def test_unanswerable_check_never_authorises_deletion(
     monkeypatch.setattr(ub, "_migrate_study_to_sqlite", failing_migration)
     _run(WARMUP + 2)
     assert _completed(slow_sqlite, name) == WARMUP + 1
+
+
+def test_existing_unfingerprinted_study_is_never_stamped(slow_sqlite: str) -> None:
+    """A legacy study resumed via 'always' must not acquire the current data's identity."""
+    X, y, wl = _data()
+    _, template = ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=0,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="never",
+    )
+    name = template.study_name
+    legacy = optuna.create_study(study_name=name, storage=slow_sqlite, direction="minimize")
+    legacy.add_trial(optuna.trial.create_trial(value=5.0))  # trials, but no fingerprint attr
+
+    ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=2,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="always",
+    )
+    stored = optuna.load_study(study_name=name, storage=slow_sqlite)
+    assert ub.DATA_FINGERPRINT_ATTR not in stored.user_attrs
+    assert len(stored.trials) == 2
+
+    # And a later 'auto' run on the same data must therefore still refuse to resume it.
+    messages: list[dict] = []
+    ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=3,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="auto",
+        progress_callback=messages.append,
+    )
+    assert any(m.get("t41_decision") == "auto_existing_study_data_mismatch" for m in messages)
+
+
+def test_always_resume_on_different_data_warns(slow_sqlite: str) -> None:
+    first = _run(WARMUP + 1)
+    X, y, wl = _data()
+    messages: list[dict] = []
+    _, resumed = ub.run_unified_bayesian(
+        X=X, y=y[::-1].copy(), wavelengths=wl, model_name="PLS", task_type="regression",
+        n_trials=WARMUP + 1, cv_folds=3, random_state=7, verbose=False,
+        enable_sqlite_persistence="always", progress_callback=messages.append,
+    )
+    assert resumed.study_name == first.study_name
+    assert any(m.get("data_mismatch_resume") for m in messages)
+
+
+def test_unreadable_stored_fingerprint_blocks_resume(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _run(WARMUP + 1)
+
+    def unreadable(*args: Any, **kwargs: Any):
+        raise RuntimeError("simulated locked database")
+
+    monkeypatch.setattr(ub.optuna, "load_study", unreadable)
+    assert ub._stored_data_fingerprint(slow_sqlite, first.study_name) is None
+
+
+def test_never_mode_does_not_fingerprint(slow_sqlite: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def must_not_run(*args: Any, **kwargs: Any):
+        raise AssertionError("fingerprint computed for a run that cannot persist")
+
+    monkeypatch.setattr(ub, "_data_fingerprint", must_not_run)
+    X, y, wl = _data()
+    ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=1,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="never",
+    )
 
 
 def test_partial_study_created_by_this_attempt_is_still_cleaned_up(

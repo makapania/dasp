@@ -50,8 +50,25 @@ configuration sharing one storage URL.
   first version treated a listing error as "absent" and would have deleted).
   `_study_exists` returns `None` when unsure.
 - **A partial study created by the failing attempt is still deleted.**
-- **Four guard mutations, all caught:** no duplicate guard, fail-open check, no data
-  gate, no resume.
+- **Review round 2** (DeepSeek ready, GLM merge-with-fixes), all applied:
+  - **The fingerprint is written ONLY on a study with no trials.** Writing it onto a
+    legacy study resumed via 'always' would claim that study's old trials came from
+    the current data, and the 'auto' gate would then wrongly resume it. GLM had called
+    that backfill a bonus; DeepSeek was right.
+  - **A data mismatch in 'auto' switches that run to 'never'.** The name is taken, so a
+    migration could never succeed and would only raise a "migration failed" alarm.
+  - **'always' resume on different recorded data now warns** through `progress_callback`
+    (flag `data_mismatch_resume`). It still resumes, because crash recovery and legacy
+    studies depend on resume by name. The check reuses the single name listing that
+    `test_bayesian_study_lookup` pins to one call; a second listing broke that contract.
+  - **Fingerprinting is skipped in 'never' mode and when there is no storage.** It hashes
+    through a buffer view with no copy, and is documented as SHA-256 truncated to 64 bits.
+  - **`_sqlite_file_exists` swallows `OSError`** from a stat race.
+- **Six guard mutations, all caught:** no duplicate guard, fail-open check, no data
+  gate, no resume, fingerprint written onto existing studies, mismatch staying 'auto'.
+- **Accepted residual risk (documented, not fixed):** a multi-process window where our
+  check says "absent", our migration fails before writing anything, and another process
+  creates the same name before our delete.
 
 ## 2026-09-13 - Lockfile changes never reached existing venvs (why jcamp stayed 1.2.2)
 

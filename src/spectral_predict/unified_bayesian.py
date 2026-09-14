@@ -2219,7 +2219,14 @@ DATA_FINGERPRINT_ATTR = "data_fingerprint"
 
 
 def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> str:
-    """Full-content digest of the arrays a study optimizes on."""
+    """Digest of the full contents, dtype and shape of the arrays a study optimizes on.
+
+    SHA-256 over every element, truncated to 64 bits (16 hex characters): ample to
+    tell datasets apart, not a cryptographic claim. Numeric arrays are hashed through
+    a buffer view without an extra copy. Object/string arrays are hashed via
+    ``repr`` of their elements, which is deterministic for the str/int/float/bool/None
+    labels that reach this point (classification labels are already integer-encoded).
+    """
     import hashlib as _hashlib
 
     digest = _hashlib.sha256()
@@ -2229,7 +2236,7 @@ def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> 
         if arr.dtype.kind in "OUS":
             digest.update("\x1f".join(map(repr, arr.ravel().tolist())).encode("utf-8"))
         else:
-            digest.update(np.ascontiguousarray(arr).tobytes())
+            digest.update(memoryview(np.ascontiguousarray(arr)).cast("B"))
     return digest.hexdigest()[:16]
 
 
@@ -2244,7 +2251,11 @@ def _sqlite_file_exists(storage_url: str) -> bool:
     if not storage_url.startswith(prefix):
         return False
     path = Path(storage_url[len(prefix):].split("?", 1)[0])
-    return bool(str(path)) and path.is_file() and path.stat().st_size > 0
+    try:
+        return bool(str(path)) and path.is_file() and path.stat().st_size > 0
+    except OSError:
+        # Vanished or locked between checks: advisory, so report absent, never raise.
+        return False
 
 
 def _study_exists(storage_url: str, study_name: str) -> bool | None:
@@ -2771,7 +2782,12 @@ def run_unified_bayesian(
     # no data identity, and resuming a different dataset would replay its cached
     # scores. The file-existence check never creates the file, so a fresh 'auto'
     # run still stays purely in memory.
-    _data_fp = _data_fingerprint(X, y, wavelengths)
+    # Only computed when a study can be persisted; 'never' and storage-less runs skip it.
+    _data_fp = (
+        _data_fingerprint(X, y, wavelengths)
+        if storage_url is not None and _persistence_mode != "never"
+        else None
+    )
     if (
         _persistence_mode == "auto"
         and storage_url is not None
@@ -2786,12 +2802,15 @@ def run_unified_bayesian(
             _decision = "auto_resumed_existing_study"
             _persistence_mode = "always"
         else:
+            # Its name is taken, so this run could never migrate into it: skip the
+            # doomed migration (and its "migration failed" alarm) by staying in memory.
             _msg = (
                 f"A persisted study named for this {model_name} configuration exists but "
                 "was run on different or unrecorded data, so it is NOT resumed. This run "
-                "stays in memory and will not overwrite or delete it."
+                "stays in memory (no crash-resume) and leaves that study untouched."
             )
             _decision = "auto_existing_study_data_mismatch"
+            _persistence_mode = "never"
         logger.info("T-41: %s", _msg)
         if progress_callback is not None:
             progress_callback({
@@ -2815,6 +2834,26 @@ def run_unified_bayesian(
             # Only names are needed for this notice. Resume loads the selected
             # study's trial history separately below.
             _existing = set(optuna.study.get_all_study_names(storage=storage_url))
+            # T-41 follow-up: 'always' resumes by name (GUI crash recovery relies on
+            # that, and legacy studies carry no fingerprint), so a data mismatch cannot
+            # block it, but a study recorded on DIFFERENT data must not replay its
+            # scores silently. Reuses this single name listing (pinned by
+            # tests/test_bayesian_study_lookup.py).
+            if study_name in _existing and _data_fp is not None:
+                _stored_fp = _stored_data_fingerprint(storage_url, study_name)
+                if _stored_fp is not None and _stored_fp != _data_fp:
+                    _msg = (
+                        f"Resuming the persisted {model_name} study, but it was run on "
+                        "DIFFERENT data than is loaded now. Its cached scores describe the "
+                        "old data; start a fresh analysis if the data changed on purpose."
+                    )
+                    logger.warning("T-41: %s", _msg)
+                    if progress_callback is not None:
+                        progress_callback({
+                            "stage": "unified_bayesian",
+                            "message": f"[T-41] WARNING: {_msg}",
+                            "data_mismatch_resume": True,
+                        })
             # Pre-fingerprint studies carry the bare base name, so their
             # environment is unknown rather than known to differ.
             _legacy = sorted(n for n in _existing if n == _study_base)
@@ -2937,9 +2976,17 @@ def run_unified_bayesian(
         # be explained later without reversing a hash. Set before any trial runs,
         # and carried through optuna.copy_study by the auto-migration path.
         (ENV_FINGERPRINT_ATTR, _environment),
-        # T-41 follow-up: the data this study ran on. 'auto' resumes only on a match.
-        (DATA_FINGERPRINT_ATTR, _data_fp),
     )
+    # T-41 follow-up: record the data this study ran on, ONLY on a study with no
+    # trials yet. Stamping it onto an existing (e.g. legacy, unfingerprinted) study
+    # would claim its old trials came from the current data and defeat the 'auto'
+    # resume gate.
+    if (
+        _data_fp is not None
+        and DATA_FINGERPRINT_ATTR not in study.user_attrs
+        and len(study.trials) == 0
+    ):
+        study.set_user_attr(DATA_FINGERPRINT_ATTR, _data_fp)
     for _key, _val in _hoist_pairs:
         if _key in study.user_attrs:
             if study.user_attrs[_key] != _val:
