@@ -6,6 +6,39 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-14 - REPRODUCED: re-running an 'auto' Bayesian analysis deletes the earlier run's saved study
+
+**Severity: silent data loss, in the default persistence mode.**
+
+**Reproduction:** `tests/test_t41_auto_rerun_preserves_study.py`, which fails on `main`
+@ `2860d17`. Run 1 of a slow PLS analysis in 'auto' migrates to SQLite and persists 11
+trials. Run 2 of the same configuration:
+
+1. **Starts over in memory.** 'auto' always creates a fresh in-memory study and never
+   looks for the one already in SQLite, so the warmup trials are repeated for nothing.
+2. **The migration fails.** After warmup, `_migrate_study_to_sqlite` calls
+   `optuna.copy_study` into the same configuration-derived `study_name`, which raises
+   "Another study with study_name=... already exists".
+3. **The cleanup deletes the earlier study.** The except-branch runs
+   `optuna.delete_study(study_name, storage_url)`. It was meant to remove a
+   half-created copy, but it deletes the earlier run's study. In the test the SQLite
+   file ends with **zero studies**.
+
+**Scope, narrower than first assumed.** Data loss needs two 'auto' runs with the same
+configuration sharing one storage URL.
+- **GUI, normal use:** protected by accident. `run_state.start_run` gives every
+  analysis a new `<run_id>.sqlite3`, and GUI crash recovery forces 'always'.
+- **Exposed:** callers that keep one storage URL across runs (scripts, custom
+  `run_state` use), or the same model and configuration run twice inside one active run.
+- **Origin:** it predates T-51. It was surfaced by the T-51 PR A reviews (DeepSeek,
+  Codex) and then reproduced.
+
+**Fix direction** (branch `fix/T41-auto-resume-data-loss`):
+- **Safe cleanup:** only delete a study this migration attempt created.
+- **Resume in 'auto':** when the SQLite file already exists and holds this exact
+  `study_name`, resume it as 'always' would. Checking whether the file exists never
+  creates it, so fresh 'auto' runs still stay in memory.
+
 ## 2026-09-13 - Lockfile changes never reached existing venvs (why jcamp stayed 1.2.2)
 
 Root cause, confirmed by GLM 5.3 Flash and DeepSeek 4.1 Flash reviews plus git

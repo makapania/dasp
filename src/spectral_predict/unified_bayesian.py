@@ -36,6 +36,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 import ast
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import optuna
@@ -2210,6 +2212,28 @@ def _apply_wal_pragmas(sqlite_url: str) -> bool:
     return True
 
 
+def _sqlite_file_exists(storage_url: str) -> bool:
+    """True if a ``sqlite:///`` storage URL points at an existing file.
+
+    Never opens or creates the database, so callers can check before deciding
+    whether touching storage is allowed.
+    """
+    prefix = "sqlite:///"
+    if not storage_url.startswith(prefix):
+        return False
+    path = storage_url[len(prefix):].split("?", 1)[0]
+    return bool(path) and Path(path).is_file()
+
+
+def _study_exists(storage_url: str, study_name: str) -> bool:
+    """True if ``study_name`` is present in an existing storage. Errors count as absent."""
+    try:
+        return study_name in optuna.study.get_all_study_names(storage=storage_url)
+    except Exception as exc:  # noqa: BLE001 - advisory lookup, never fatal
+        logger.debug("Could not list studies in %s: %s", storage_url, exc)
+        return False
+
+
 def _make_tpe_sampler(random_state: int) -> TPESampler:
     """Construct a fresh TPE sampler with dasp's standard settings."""
     return TPESampler(
@@ -2694,6 +2718,30 @@ def run_unified_bayesian(
     # 'auto': first 10 trials in-memory, then decide based on median fit time.
     _persistence_mode = enable_sqlite_persistence  # already validated above
 
+    # T-41 follow-up: an 'auto' run whose exact study already exists in the active
+    # SQLite file must resume it, as 'always' would. Before this, 'auto' restarted
+    # in memory and its later migration collided with the existing name, and the
+    # failed-migration cleanup deleted the earlier run's study. The existence check
+    # never creates the file, so a fresh 'auto' run still stays purely in memory.
+    if (
+        _persistence_mode == "auto"
+        and storage_url is not None
+        and _sqlite_file_exists(storage_url)
+        and _study_exists(storage_url, study_name)
+    ):
+        _msg = (
+            f"Found an existing persisted study for this {model_name} configuration; "
+            "resuming it from SQLite instead of starting over in memory."
+        )
+        logger.info("T-41: %s", _msg)
+        if progress_callback is not None:
+            progress_callback({
+                "stage": "unified_bayesian",
+                "message": f"[T-41] {_msg}",
+                "t41_decision": "auto_resumed_existing_study",
+            })
+        _persistence_mode = "always"
+
     # If studies for this same analysis config exist under a DIFFERENT numerical
     # environment, say so. Silently starting from zero after the user chose
     # "Resume" is the failure mode worth avoiding here: the old study is intact
@@ -2947,6 +2995,12 @@ def run_unified_bayesian(
                     # _study_ref here doesn't redirect writes. Stop the in-memory
                     # loop, the outer scope restarts on _study_ref[0] so trials
                     # 11..N land directly in SQLite.
+                    # Only a study this attempt creates may be deleted on failure.
+                    # A pre-existing study under the same name (another process,
+                    # or a race with the resume check above) must survive.
+                    _target_preexisted = _sqlite_file_exists(storage_url) and _study_exists(
+                        storage_url, study_name
+                    )
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state,
@@ -2969,10 +3023,17 @@ def run_unified_bayesian(
                             exc,
                         )
                         try:
-                            optuna.delete_study(
-                                study_name=study_name,
-                                storage=storage_url,
-                            )
+                            if _target_preexisted:
+                                logger.warning(
+                                    "T-41: not deleting %s after the failed migration: "
+                                    "it existed before this run and holds earlier results.",
+                                    study_name,
+                                )
+                            else:
+                                optuna.delete_study(
+                                    study_name=study_name,
+                                    storage=storage_url,
+                                )
                         except Exception as cleanup_exc:
                             # KeyError if the study row was never written, or
                             # any other delete failure — log and continue.
