@@ -256,7 +256,7 @@ under that kernel.
 | `xgb_sampling` | XGBoost / both | `colsample_bytree`: float[0.3,1.0]; `colsample_bylevel`: float[0.3,1.0] | base `subsample` suggest untouched |
 | `lgbm_regularization` | LightGBM / both | `reg_alpha`: float[1e-4,10] log; `reg_lambda`: float[1e-3,100] log | |
 | `lgbm_sampling` | LightGBM / both | `subsample`: float[0.5,1.0]; `colsample_bytree`: float[0.3,1.0] | `bagging_freq=1` already set (`:846`) |
-| `lgbm_child` | LightGBM / both | `min_child_samples`: int[2,50] | constant range per study; large values stop splitting, documented in `help` |
+| `lgbm_child` | LightGBM / both | `min_child_samples`: int[2,50]; `min_split_gain`: float[1e-4,1] log (user-approved 2026-09-14, §10) | constant range per study; large values stop splitting, documented in `help` |
 | `catboost_sampling` | CatBoost / both | `subsample`: float[0.5,1.0]; `rsm`: float[0.1,1.0] | **constant `bootstrap_type='Bernoulli'`**. Multiclass defaults to Bayesian, which rejects `subsample` (Codex probe). T8b fits regression, binary and multiclass. |
 | `svm_gamma` | SVM, SVR / matching task | `gamma`: float[1e-5,10] log, `applies_when=kernel_is_rbf` | `help`: tuning C and gamma jointly on small n overfits |
 | `mlp_activation` | MLP / both | `activation`: cat[`relu`,`tanh`,`logistic`] | |
@@ -429,16 +429,15 @@ both silently take their defaults. PR D must not copy that pattern for bundles.
 
 ## 8. Open questions (remaining)
 
-1. **B0 approval.** It changes Tab 7 refit for PLS-DA rows whose C, solver or max_iter
-   differ from the defaults. That is a correctness fix, but it alters results users may
-   already have. Saved models keep their fitted objects; only new refits change.
-   *Round 2:* ship as a separate correctness fix.
+1. **B0 approval — APPROVED by the user 2026-09-14** ("if it was legit wrong before then
+   fixing it we should do"). Ship it as a separate correctness fix, with no version bump.
+   It changes Tab 7 refit for PLS-DA rows whose C, solver or max_iter differ from the
+   defaults. Saved models keep their fitted objects; only new refits change.
 2. **T3 fixture maintenance.** *Round 2 answer, adopted:* never auto-bless. The upgrade
    check may generate a candidate fixture and diff report; a human commit accepts it.
-3. **`min_split_gain` for LightGBM (§10).** The contamination probe opened it (winner 0.058)
-   and the plan has no bundle for it. Add it to `lgbm_child` as float[1e-4,1] log, or
-   leave it out of v1? *Recommendation:* add it. It is a pinned-absent axis, it cannot
-   collide, and it is the one downstream-measured regulariser the plan lacks.
+3. **`min_split_gain` for LightGBM — APPROVED by the user 2026-09-14.** It is added to
+   `lgbm_child` (§3.1) as float[1e-4,1] log. It was absent from the base (so it cannot
+   collide), and it is the downstream-measured regulariser (winner 0.058).
 4. **`colsample_bytree` floor.** The downstream winner sat at 0.32, near the plan's 0.3
    floor. The evidence is one model, too thin to lower the floor. Keep 0.3 and revisit with
    data.

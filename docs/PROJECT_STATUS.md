@@ -1732,10 +1732,10 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
    - **Steps 2–5:** implementation plan
      `docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md`, revised after Fable +
      `gpt-6-astra` rounds 1–2 and the contamination project's evidence. **No code yet.**
-     Two decisions are open for the user (plan §8):
-     - approve PR B0 (the PLS-DA logistic head's C/solver/max_iter are lost on
-       rebuild/Tab 7 refit, and `plsda_head` would crash in `build_model`)
-     - whether to add `min_split_gain` to the LightGBM bundle
+     User decisions of 2026-09-14 (plan §8):
+     - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
+       lost on rebuild and Tab 7 refit, and ships without a version bump.
+     - **`min_split_gain` is added to `lgbm_child`.**
    - **Pre-existing follow-ups found (not fixed), details in SESSION_LOG 2026-09-13:**
      - The Bayesian importance proxy is unscaled for all scale-sensitive models.
      - NSGA-II display metrics are unscaled for all scale-sensitive models.
