@@ -83,7 +83,9 @@ def reimport_modules(monkeypatch):
     at import time (``from spectral_predict import run_state``) then patches an
     object the code under test no longer sees.
 
-    Returns a function ``reimport(*names)`` that returns the fresh modules.
+    Returns a function ``reimport(*names)`` that returns the fresh modules. Names are
+    imported in the order given, so list dependencies first (``resource_paths`` before
+    ``run_state``): a module imported before its dependency binds the stale copy.
     """
     import importlib
     import sys
@@ -94,8 +96,10 @@ def reimport_modules(monkeypatch):
             monkeypatch.setitem(sys.modules, name, None)
             del sys.modules[name]
             parent_name, _, child = name.rpartition(".")
-            parent = sys.modules.get(parent_name)
-            if parent is not None:
+            if parent_name:
+                # Import the parent first so its child attribute is always recorded
+                # and restored, even when the package was not yet imported.
+                parent = importlib.import_module(parent_name)
                 monkeypatch.setattr(parent, child, None, raising=False)
                 delattr(parent, child)
         return [importlib.import_module(name) for name in names]
