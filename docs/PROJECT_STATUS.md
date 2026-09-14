@@ -9,6 +9,7 @@
 | **#69** | T-41 `'auto'` re-run no longer deletes an earlier study | Fresh Kimi K2.6 review: merge-with-nits (endianness / signed-zero fingerprint nits, not practical on x86). Tests 14/14 on branch; **11/14 fail against `main`'s `unified_bayesian.py`**, incl. both "never deletes" tests. |
 | **#68** | T-51 PR A: opt-in extra Optuna axes mechanism | Fresh Kimi review: merge. Conflict with #69 resolved by keeping both (imports; T-41 helpers + #68 sampler signature; T-51 attrs + T-41 fingerprint stamp). After merge: 234 passed across both PRs' test files, `test_agent_composition_api`, `test_bayesian_study_lookup`, `test_t41_bayesian_sqlite_auto_calculator`. |
 | **#70** | Test-order leak fix: `reimport_modules` fixture in `tests/conftest.py` | GLM review: merge-with-nits; nits applied (parent imported first, name-order docstring). |
+| **#71** | CI fix: 5 drifted tests, `test_export_code` `sys.executable`, actions v7, docs `paths-ignore`, PR-run concurrency cancel, `timeout-minutes: 180`, black/flake8 informational. | Kimi: merge-with-nits (SVR GUI test now runs at `comprehensive` tier, noted on PR). Its CI run: **ubuntu + optional-deps green (first time)**; Windows 1 failed / 3194 passed — `test_catboost_via_gui` now reaches CatBoost and hits a real bug (below). |
 | **#72** | T-51 PR B0: PLS-DA head params (C/solver/max_iter) survive validation rebuild, Tab 7 refit, ensemble training, export, `build_model`. Shared `models.split_plsda_params`. | Agent-implemented. 34 new tests (16 fail on main). Full non-GUI suite: only known baseline. Kimi + GLM: merge-with-nits, no blockers. CHANGELOG corrected re ensemble `class_weight`. Gotchas: SESSION_LOG 2026-09-14 "T-51 PR B0". |
 
 **Open follow-up from Kimi on #68 (LOW):** `search_spaces.apply_extra_axes` never adds
@@ -20,8 +21,11 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 
 | PR | What | State |
 |---|---|---|
-| **#71** `fix/ci-green` | CI red cause fixed (see SESSION_LOG 2026-09-14 "CI red-cause"): 5 drifted tests + `test_export_code` `sys.executable`; actions → v7; `paths-ignore` docs/md; PR-run concurrency cancel; `timeout-minutes: 180`; black/flake8 informational. | Local targeted tests pass (incl. 7/7 per-model GUI tests). Kimi review running (DeepSeek via opencode hung, see SESSION_LOG); its own CI run is the end-to-end check. **Merge when CI is green + review clean.** |
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
+
+### 2b. In progress
+- **CatBoost `catboost_info` bug (agent PR pending, branch `fix/catboost-no-train-dir`).** No production CatBoost construction passes `allow_writing_files=False`, so CatBoost writes `catboost_info/` into the cwd. Windows CI failed with `Can't create train working dir: catboost_info`; the installer targets Program Files, so an unwritable cwd would break every CatBoost fit for users. Fix must not change hashed params / study names / T2b pins.
+- **T-CI-2 lead:** in #71's run the Linux Xvfb GUI job hit pytest-timeout on `tests/gui/test_comprehensive.py::TestAllModelsViaGUI::test_xgboost_via_gui` (passes on Windows CI and locally). That's the first named candidate for the Linux GUI hang.
 
 ### 3. Decisions for the user
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
