@@ -65,13 +65,14 @@ analysis. Its first launch exposed a Model Development CV-row `TclError` on the
 default kfold, fixed in `a746d5c`. **Other machines:** pull, then launch with
 `RUN_SPECTRAL_PREDICT.bat` (it resyncs the venv to the lock) or do step 3b by hand.
 JCAMP-DX import is broken in any `.venv314` still on jcamp 1.2.2. **Automatic lock
-sync (branch `fix/auto-sync-venv-to-lockfile`):** the launchers run
+sync (PR #66, merged 2026-09-13 as `77bb4ad`):** the launchers run
 `scripts/check_env_lock.py` and reinstall from the lock on drift, the installer build
 refuses a drifted build venv (`DASP_ALLOW_LOCK_DRIFT=1` overrides), the frozen
 self-test checks `jcamp.readfile`, and `read_jcamp_file` raises an actionable
 `ImportError` on jcamp <1.3. **Still
-untested on 3.14:** importing a JCAMP-DX file through the GUI. The backend round
-trip passed.
+untested on 3.14:** importing a JCAMP-DX file through the GUI (the backend round
+trip passed), and a real installer build with the new lock-drift gate (logic is
+covered by `tests/test_build_and_launcher_safety.py`).
 
 **Keep `.venv312` for now.** It is the rollback lever: the build path is parameterized,
 so `DASP_BUILD_PYTHON=312 DASP_ALLOW_LOCK_DRIFT=1 python build_installer_py312.py` rebuilds on 3.12. A true
