@@ -153,7 +153,18 @@ NEURALBOOSTED_MODELS = {"NeuralBoosted"}
 
 # Scale-sensitive models: These use gradient descent or kernel methods
 # that are sensitive to feature scale and benefit from StandardScaler
-SCALE_SENSITIVE_MODELS = {"SVC", "SVR", "MLP", "NeuralBoosted", "Ridge", "Lasso", "ElasticNet"}
+# "SVM" is the registered classification family (model_registry.py); "SVC" is kept
+# for exported-code/template names. Missing "SVM" left classifiers unscaled (T-51).
+SCALE_SENSITIVE_MODELS = {
+    "SVC",
+    "SVM",
+    "SVR",
+    "MLP",
+    "NeuralBoosted",
+    "Ridge",
+    "Lasso",
+    "ElasticNet",
+}
 
 # Models that are slower with parallel CV due to threading conflicts or low overhead
 # SVM: internal multi-threading conflicts with sklearn's CV parallelization

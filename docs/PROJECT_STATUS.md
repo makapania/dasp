@@ -1721,7 +1721,27 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
 2. ~~Re-run grid-search OC validation in the GUI to confirm `val_*` columns now populate~~ ✅ done 2026-04-11 — user confirmed "the validation stats now appear in grid search"
 3. ~~Merge PR #3 to main~~ ✅ pending merge in this session
 4. Follow-up PRs (post-merge): see "Follow-Ups (unclaimed)" section below
-5. **T-51 — opt-in Bayesian search-space axes.** Ticket written 2026-08-30, design complete, **not started**. See `docs/plans/2026-08-30-T51-bayesian-opt-in-search-axes.md`.
+5. **T-51 — opt-in Bayesian search-space axes.**
+   - **Step 0 (caller sweep):** done 2026-09-13.
+   - **Step 1 (SVM scaler fix):** PR #67 open (`fix/T51-svm-scaler`); full suite 7 baseline failures / 3035 passed, zero new.
+     - Classification SVM was fit unscaled everywhere in the app, while exported
+       scripts scaled it.
+     - Version is now `0.5.0b3`. `__version__` is in every Optuna study name, so persisted
+       Bayesian studies for all models start fresh after upgrading.
+     - Reviewed by GLM 5.3 Flash and DeepSeek 4.1 Flash; their in-scope findings are fixed.
+   - **Steps 2–5:** implementation plan
+     `docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md`, revised after Fable +
+     `gpt-6-astra` rounds 1–2 and the contamination project's evidence. **No code yet.**
+     User decisions of 2026-09-14 (plan §8):
+     - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
+       lost on rebuild and Tab 7 refit, and ships without a version bump.
+     - **`min_split_gain` is added to `lgbm_child`.**
+   - **Pre-existing follow-ups found (not fixed), details in SESSION_LOG 2026-09-13:**
+     - The Bayesian importance proxy is unscaled for all scale-sensitive models.
+     - NSGA-II display metrics are unscaled for all scale-sensitive models.
+     - NSGA-II `'SVM'` chromosomes always score the 1e10 penalty.
+     - `MODELS_WITH_FEATURE_IMPORTANCE` lacks `'SVM'`, and it is coupled to subset support.
+     - GUI refit double-scales under autoscale.
 
 ## Follow-Ups (unclaimed)
 

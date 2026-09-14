@@ -186,6 +186,73 @@ is tracked on purpose. A noisy `git status` hid one genuinely unpushed branch
 
 ---
 
+## 2026-09-13 - T-51 step 1 (SVM scaler) and step 0 (caller sweep): what the ticket got wrong
+
+**1. The SVM scaler bug reached further than the ticket listed, and exported code was
+already correct.** `'SVM'` (the registered classification family) was missing from
+`search.py` `SCALE_SENSITIVE_MODELS` (grid pipeline and `_rebuild_model_from_row`), from the
+local set in `unified_bayesian.py`, and from **five** GUI tuples (Tab 7 param stripping,
+three refit pipelines, and the full-spectrum save path). `code_generator._needs_standard_scaler`
+already listed `'SVM'`, so exported scripts scaled the model while the app did not. The fix
+also restores app/export parity. On the pinned fixture in `tests/test_svm_scaler_family.py`,
+accuracy is 1.0 scaled vs 0.883 unscaled.
+
+**2. NSGA-II was never affected.** It encodes classification SVM as `model_type='SVR'`
+(`nsga2_search._build_model` returns `SVC` for classification), and `'SVR'` was already
+in its set. The ticket's "omits both" was wrong.
+
+**3. Found, NOT fixed: the Bayesian importance proxy is unscaled for every scale-sensitive
+family.** `unified_bayesian.compute_importances` (`method='importance'`) calls
+`build_model(...)` then `model.fit(X, y)` on a bare estimator. SVR, Ridge, Lasso,
+ElasticNet, MLP and (now) SVM all compute variable-selection importances on unscaled
+spectra, even though their CV fits are scaled. It is independent of the `'SVC'` string
+bug, and fixing it changes importance rankings for every scale-sensitive model, so it
+needs its own ticket and approval. The new spy test excludes that caller explicitly.
+
+**3b. Also found, NOT fixed (DeepSeek review):**
+- **NSGA-II display metrics are unscaled for every scale-sensitive family.** The helpers
+  `_compute_solution_r2`, `_compute_display_rmse`, `_compute_nir_metrics`,
+  `_compute_classification_cv_metrics` and `_compute_calibration_metrics` call
+  `_build_model` bare, and only wrap it when an imbalance step exists. Fitness itself is
+  scaled (`nsga2_search.py:~1465`). The NSGA-II leaderboard's F1/AUC/R2 columns therefore
+  describe a different model than the one ranked. So the earlier "NSGA-II was never
+  affected" holds only for the fitness path.
+- **NSGA-II cannot evaluate classification SVM chosen as 'SVM' (GLM review).** The GUI
+  appends `'SVM'` to `selected_models` (`gui:~24084` → `models=` `~:29153`), but
+  `nsga2_search._build_model` has no `'SVM'` branch (it returns `None` at `~:1062`). Every
+  such chromosome scores the 1e10 penalty, and no SVM row can come out. Only the `'SVR'`
+  encoding builds SVC.
+- **`model_registry.MODELS_WITH_FEATURE_IMPORTANCE` lacks `'SVM'` (GLM review).** Grid
+  classification SVM rows show `top_vars = "N/A"`, even though `get_feature_importances`
+  handles `'SVM'`. It is not a one-word fix: `MODELS_WITH_SUBSET_SUPPORT` is the same list,
+  so adding `'SVM'` also switches on subset search for SVM (more configs, longer runs).
+  That needs its own decision.
+- **GUI refit double-scales under autoscale.** The preprocessing pipeline appends an
+  `autoscale` StandardScaler, and the scale-sensitive branches (`~:39628/39756/39811`)
+  append another. This affects SVR, Ridge, MLP and others, not just SVM. It is
+  near-identity, but it diverges from T-36 backend behaviour.
+
+**4. There are three TPE sampler paths, not two.** `_make_tpe_sampler(random_state)`
+hardcodes `n_startup_trials=20`. It is used by `_migrate_study_to_sqlite` (the T-41 'auto'
+in-memory→SQLite migration) and the 'always' reattach, in addition to the inline sampler.
+Threading a new `n_startup_trials` only to the two sites named in the ticket would
+silently reset it after auto-migration. Recorded in
+`docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md`.
+
+**5. Step-0 caller sweep:** 55 real calls to `run_unified_bayesian` /
+`create_unified_objective`, none via `**kwargs`. `tools/bench_baseline_compare.py`
+runs a `WORKER_SCRIPT` string against an *old checkout*, so it must never gain new kwargs.
+
+**6. The version bump touches four files.** `test_t14b_pyinstaller_and_gui_version_drift.py`
+pins `pyproject.toml`, `installer/spectral_predict_py312.iss` and `version_info.txt`
+(strings and the `filevers` tuple) to `__version__`.
+
+**Tooling:** dispatching opencode (GLM) in write mode with `--dangerously-skip-permissions`
+is blocked by Claude Code's auto-mode permission check ("Create Unsafe Agents"). Read-only
+opencode reviews are unaffected.
+
+---
+
 ## 2026-08-30 - T-51 design: two non-obvious constraints on widening the Bayesian search space
 
 **Context**: a downstream contamination project asked for a way to widen DASP's Optuna

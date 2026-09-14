@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `git log v0.1.0..0.5.0b1` (or commit `bbf7766` for the b1 cut) is the
 > authoritative record for that period.
 
+## [0.5.0b3] - Unreleased
+
+### Fixed
+
+- **T-51 step 1** — classification SVM is now StandardScaler-wrapped in grid search,
+  Bayesian search, validation rebuild and Model Development refit. The scale-sensitive
+  sets listed `'SVC'`, which no model name matches; the registered family is `'SVM'`, so
+  every classification SVM had been fit on unscaled spectra. Exported scripts already
+  scaled it. **This changes SVM classification results.** `__version__` is part of
+  every Optuna study name, so persisted Bayesian studies for **all** models start fresh
+  after upgrading. The old studies stay on disk.
+
 ## [0.5.0b2] - 2026-05-03
 
 Second beta of the 0.5.0 cycle. Bug-fix-and-observability batch on top of

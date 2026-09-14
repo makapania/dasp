@@ -270,7 +270,7 @@ def _compute_model_specific_importance(
         return _compute_neural_importance(X, y, task_type)
 
     # SVM - use support vector based importance
-    elif model_name in ('SVR', 'SVC'):
+    elif model_name in ('SVR', 'SVC', 'SVM'):
         return _compute_svm_importance(X, y, task_type)
 
     else:

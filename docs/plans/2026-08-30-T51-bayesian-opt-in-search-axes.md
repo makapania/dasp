@@ -1,8 +1,14 @@
 # T-51 — Opt-in Bayesian search-space axes
 
-> **STATUS: ticket committed 2026-08-30 (`9162a6d`), design complete, not started.**
+> **STATUS: ticket committed 2026-08-30 (`9162a6d`), design complete.**
 >
-> No code has been written. Everything below is design.
+> **2026-09-13:** step 0 (caller sweep) done. Results are in §7 of
+> [`2026-09-13-T51-optuna-axes-implementation-plan.md`](2026-09-13-T51-optuna-axes-implementation-plan.md),
+> which is the implementation plan for steps 2–5 and now supersedes this file's line
+> numbers, which are stale by about 95 lines. Step 1 (SVM scaler) is on `fix/T51-svm-scaler`.
+> **Corrections to the prerequisite section below:** NSGA-II was never affected (it
+> encodes classification SVM as `'SVR'`); there were five GUI sites, not one; and
+> `code_generator` already scaled `'SVM'`. See SESSION_LOG 2026-09-13.
 
 **One-line summary:** supervised Bayesian works well; add opt-in knobs for the
 hyperparameters that currently take exactly one value, curated per model family,
