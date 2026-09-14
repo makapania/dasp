@@ -38811,7 +38811,7 @@ F1 Score:  {f1:.4f}
                             print(f"DEBUG: Applied PLS-DA params (unprefixed): {pls_params}")
                         else:
                             print(f"DEBUG: No applicable PLS params found in: {params_from_search}")
-                    elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+                    elif model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                         # Strip model__ prefix for scale-sensitive models
                         # These are wrapped in Pipeline([('scaler', StandardScaler()), ('model', model)])
                         # Params SHOULD be unprefixed, but handle prefixed case defensively
@@ -39625,7 +39625,7 @@ F1 Score:  {f1:.4f}
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+                elif model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.extend([
                         ('scaler', StandardScaler()),
@@ -39753,7 +39753,7 @@ F1 Score:  {f1:.4f}
                     ])
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+                elif model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.extend([
                         ('scaler', StandardScaler()),
@@ -39808,7 +39808,7 @@ F1 Score:  {f1:.4f}
                     pipe_steps.append(('lr', LogisticRegression(**_lr_kwargs)))
                 # For scale-sensitive models (SVC/SVR, MLP, NeuralBoosted), add StandardScaler
                 # These use gradient descent or kernel methods that are sensitive to feature scale
-                elif model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+                elif model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                     from sklearn.preprocessing import StandardScaler
                     pipe_steps.append(('scaler', StandardScaler()))
                     pipe_steps.append(('model', model))
@@ -40473,7 +40473,7 @@ External Validation Performance (n={n_val}):
             elif model_name == "PLS-DA" and task_type == "classification":
                 # Save entire PLS-DA pipeline (both PLS and LogisticRegression)
                 final_model = final_pipe
-            elif use_full_spectrum_preprocessing and model_name in ('SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
+            elif use_full_spectrum_preprocessing and model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                 # For full-spectrum preprocessing, scaler is applied AFTER subsetting.
                 # Save a prediction pipeline that includes the fitted scaler + model (exclude resampling).
                 if 'scaler' in final_pipe.named_steps and 'model' in final_pipe.named_steps:

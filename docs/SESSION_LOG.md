@@ -186,6 +186,50 @@ is tracked on purpose. A noisy `git status` hid one genuinely unpushed branch
 
 ---
 
+## 2026-09-13 - T-51 step 1 (SVM scaler) and step 0 (caller sweep): what the ticket got wrong
+
+**1. The SVM scaler bug reached further than the ticket listed, and exported code was
+already correct.** `'SVM'` (the registered classification family) was missing from
+`search.py` `SCALE_SENSITIVE_MODELS` (grid pipeline and `_rebuild_model_from_row`), from the
+local set in `unified_bayesian.py`, and from **five** GUI tuples (Tab 7 param stripping,
+three refit pipelines, and the full-spectrum save path). `code_generator._needs_standard_scaler`
+already listed `'SVM'`, so exported scripts scaled the model while the app did not. The fix
+also restores app/export parity. On the pinned fixture in `tests/test_svm_scaler_family.py`,
+accuracy is 1.0 scaled vs 0.883 unscaled.
+
+**2. NSGA-II was never affected.** It encodes classification SVM as `model_type='SVR'`
+(`nsga2_search._build_model` returns `SVC` for classification), and `'SVR'` was already
+in its set. The ticket's "omits both" was wrong.
+
+**3. Found, NOT fixed: the Bayesian importance proxy is unscaled for every scale-sensitive
+family.** `unified_bayesian.compute_importances` (`method='importance'`) calls
+`build_model(...)` then `model.fit(X, y)` on a bare estimator. SVR, Ridge, Lasso,
+ElasticNet, MLP and (now) SVM all compute variable-selection importances on unscaled
+spectra, even though their CV fits are scaled. It is independent of the `'SVC'` string
+bug, and fixing it changes importance rankings for every scale-sensitive model, so it
+needs its own ticket and approval. The new spy test excludes that caller explicitly.
+
+**4. There are three TPE sampler paths, not two.** `_make_tpe_sampler(random_state)`
+hardcodes `n_startup_trials=20`. It is used by `_migrate_study_to_sqlite` (the T-41 'auto'
+in-memory→SQLite migration) and the 'always' reattach, in addition to the inline sampler.
+Threading a new `n_startup_trials` only to the two sites named in the ticket would
+silently reset it after auto-migration. Recorded in
+`docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md`.
+
+**5. Step-0 caller sweep:** 55 real calls to `run_unified_bayesian` /
+`create_unified_objective`, none via `**kwargs`. `tools/bench_baseline_compare.py`
+runs a `WORKER_SCRIPT` string against an *old checkout*, so it must never gain new kwargs.
+
+**6. The version bump touches four files.** `test_t14b_pyinstaller_and_gui_version_drift.py`
+pins `pyproject.toml`, `installer/spectral_predict_py312.iss` and `version_info.txt`
+(strings and the `filevers` tuple) to `__version__`.
+
+**Tooling:** dispatching opencode (GLM) in write mode with `--dangerously-skip-permissions`
+is blocked by Claude Code's auto-mode permission check ("Create Unsafe Agents"). Read-only
+opencode reviews are unaffected.
+
+---
+
 ## 2026-08-30 - T-51 design: two non-obvious constraints on widening the Bayesian search space
 
 **Context**: a downstream contamination project asked for a way to widen DASP's Optuna

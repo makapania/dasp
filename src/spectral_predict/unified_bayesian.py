@@ -1627,7 +1627,7 @@ def create_unified_objective(
             # Scale-sensitive models need StandardScaler (matches search.py behavior)
             # For PLS-DA: PLS + StandardScaler + LogisticRegression
             # For scale-sensitive models: StandardScaler + Model
-            SCALE_SENSITIVE_MODELS = {'SVC', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
+            SCALE_SENSITIVE_MODELS = {'SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
             # Build pipeline steps with imbalance handling support
             pipe_steps = []
