@@ -27,6 +27,11 @@ py -3.14 -m venv .venv314
 .venv314\Scripts\python -m pip install -e . --no-deps
 .venv314\Scripts\python -m pip check          # expect: No broken requirements found.
 
+# 3b. Upgrade jcamp to 1.3.2 (required for JCAMP-DX import). Run this on any
+#     existing .venv314 too.
+.venv314\Scripts\python -m pip install "jcamp==1.3.2"
+.venv314\Scripts\python -m pip show jcamp     # expect Version: 1.3.2
+
 # 4. Verify before trusting it
 .venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
 #    Compare failing node IDs with the known baseline below. Counts vary with

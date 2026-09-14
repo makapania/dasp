@@ -579,6 +579,18 @@ the installed 1.2.1: `hasattr(jcamp, 'jcamp_readfile')` → `True`,
 jcamp_data = jcamp.jcamp_readfile(str(path))
 ```
 
+### Upgrading an existing `.venv314`
+
+Use jcamp **1.3.2** in `.venv314`. JCAMP-DX import does not work on 1.2.2
+because the current code calls `jcamp.readfile`. On any machine:
+
+```bash
+.venv314\Scripts\python -m pip install "jcamp==1.3.2"
+```
+
+Confirm with `pip show jcamp` (expect 1.3.2). Don't use `jcamp.__version__`,
+which still says `1.2.2` in the 1.3.2 release.
+
 ### Required change
 
 1. `pyproject.toml:40` — change the pin to `jcamp>=1.3.2` and remove the now-obsolete

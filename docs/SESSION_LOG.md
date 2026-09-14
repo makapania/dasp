@@ -6,6 +6,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-13 - jcamp: .venv314 must be upgraded to 1.3.2 (JCAMP import is broken on 1.2.2)
+
+**Install jcamp 1.3.2 in `.venv314` on every machine.** Since `be7963c`, `io.py`
+calls `jcamp.readfile(...)`, which exists only in jcamp >=1.3.0, so JCAMP-DX
+import fails on 1.2.2. As of 2026-09-13, JCAMP did not work in `.venv314` on
+other machines.
+
+```bash
+.venv314\Scripts\python -m pip install "jcamp==1.3.2"
+.venv314\Scripts\python -c "import importlib.metadata as m; print(m.version('jcamp'))"   # expect 1.3.2
+```
+
+Confirm with `pip show jcamp` or `importlib.metadata`, not `jcamp.__version__`:
+upstream never updated that string, so 1.3.2 still prints `1.2.2`.
+
+Verified on the primary machine (`.venv314`, Python 3.14.7) with 1.3.2: a
+JCAMP-DX write/read round trip through `write_jcamp_file` / `read_jcamp_file`
+recovered all 2151 wavelengths. `.venv312` stays on 1.2.2 as the rollback venv.
+
+---
+
 ## 2026-09-12 - Python 3.14 migration: what the analysis got wrong, and what only building could tell us
 
 **An analysis document that was never executed had nine errors in it.**
