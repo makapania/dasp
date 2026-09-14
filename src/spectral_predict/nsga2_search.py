@@ -55,7 +55,7 @@ from pymoo.termination import get_termination
 
 # V1 imports - use local modules
 from .preprocess import SNV, SavgolDerivative
-from .models import get_feature_importances
+from .models import CATBOOST_RUNTIME_PARAMS, get_feature_importances, strip_runtime_params
 from .variable_selection import cars_selection
 from .scoring import compute_specificity, lins_ccc
 from .bayesian_utils import _extract_fitted_n_components
@@ -995,7 +995,8 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
                 l2_leaf_reg=l2_leaf_reg,
                 random_state=random_state,
                 verbose=0,
-                thread_count=1
+                thread_count=1,
+                **CATBOOST_RUNTIME_PARAMS,
             )
         else:
             return CatBoostClassifier(
@@ -1005,7 +1006,8 @@ def _build_model(model_type: str, model_param: int, task_type: str, random_state
                 l2_leaf_reg=l2_leaf_reg,
                 random_state=random_state,
                 verbose=0,
-                thread_count=1
+                thread_count=1,
+                **CATBOOST_RUNTIME_PARAMS,
             )
 
     elif model_type == 'SVR':
@@ -2438,8 +2440,9 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
             filtered_overrides = {k: v for k, v in nsga_overrides.items() if k in valid_params}
             if filtered_overrides:
                 model.set_params(**filtered_overrides)
-            # Get COMPLETE params (includes all defaults from get_model)
-            params_dict = model.get_params()
+            # Get COMPLETE params (includes all defaults from get_model), minus
+            # runtime-only kwargs that are not model identity.
+            params_dict = strip_runtime_params(model.get_params())
         else:
             params_dict = nsga_overrides
     except (ImportError, ValueError):

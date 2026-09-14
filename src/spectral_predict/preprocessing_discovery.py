@@ -335,13 +335,16 @@ def _compute_tree_importance(
 
         elif model_name == 'CatBoost':
             from catboost import CatBoostRegressor, CatBoostClassifier
+            from .models import CATBOOST_RUNTIME_PARAMS
             if task_type == 'classification':
                 model = CatBoostClassifier(
-                    n_estimators=100, max_depth=5, random_state=RANDOM_STATE, verbose=0
+                    n_estimators=100, max_depth=5, random_state=RANDOM_STATE, verbose=0,
+                    **CATBOOST_RUNTIME_PARAMS,
                 )
             else:
                 model = CatBoostRegressor(
-                    n_estimators=100, max_depth=5, random_state=RANDOM_STATE, verbose=0
+                    n_estimators=100, max_depth=5, random_state=RANDOM_STATE, verbose=0,
+                    **CATBOOST_RUNTIME_PARAMS,
                 )
         else:
             # Default to LightGBM

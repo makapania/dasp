@@ -78,7 +78,7 @@ from joblib import Parallel, delayed
 from imblearn.pipeline import Pipeline as ImbPipeline
 
 from .preprocess import build_preprocessing_pipeline
-from .models import get_model_grids, get_feature_importances
+from .models import get_model_grids, get_feature_importances, strip_runtime_params
 from .scoring import (
     add_result,
     compute_cv_anova_pvalue,
@@ -5340,7 +5340,8 @@ def _run_single_config(
         print(f"DIAGNOSTIC - {model_name} Training (Results Tab)")
         print(f"{'='*80}")
         try:
-            all_params = fitted_model.get_params()
+            # Runtime-only kwargs (CatBoost allow_writing_files) are not model identity.
+            all_params = strip_runtime_params(fitted_model.get_params())
             print(f"ALL {model_name} parameters after training:")
             for key in sorted(all_params.keys()):
                 print(f"  {key}: {all_params[key]}")

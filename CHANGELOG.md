@@ -26,6 +26,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CatBoost no longer writes `catboost_info/`.** Every CatBoost fit wrote a
+  training-log directory into the current working directory, so fits failed with
+  `Can't create train working dir: catboost_info` when the cwd was unwritable (an
+  install under Program Files), concurrent fits could race on it (seen in CI), and it
+  littered wherever the app ran. Every CatBoost construction (`get_model`,
+  `build_model`, the grid, NSGA-II, preprocessing discovery, diagnostics validation
+  curves) now passes `allow_writing_files=False` via `models.CATBOOST_RUNTIME_PARAMS`.
+  It is a runtime kwarg, not model identity: result-row `Params`, Bayesian trial
+  `model_params`, fit fingerprints and study names are unchanged. Exported Python
+  scripts now include `'allow_writing_files': False` in the CatBoost `model_params`.
+  Models saved before this fix still carry the default if refit after loading.
+
 - **T-51 PR B0** — PLS-DA models rebuilt from a results row now keep the tuned
   LogisticRegression head (`C`, `solver`, `max_iter`) and the PLS transformer settings.
   Validation rebuild used `C=1.0` for every current PLS-DA row. Model Development

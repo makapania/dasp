@@ -682,7 +682,9 @@ def _create_ensemble_model(model_type, params, task):
     elif model_type == 'CatBoost':
         try:
             import catboost as cb
+            from .models import with_catboost_runtime_params
             params.setdefault('verbose', False)
+            params = with_catboost_runtime_params(params)
             if task == 'regression':
                 return cb.CatBoostRegressor(**params)
             else:

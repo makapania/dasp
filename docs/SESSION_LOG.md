@@ -1008,3 +1008,25 @@ printed only the header and hung 10-20 min with no tool calls; GLM 5.3 Flash and
 K2.6 ran equivalent prompts fine in the same window. Killed the two processes and
 re-ran those reviews on Kimi. Until re-checked, don't rely on DeepSeek via opencode;
 pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/network.
+
+### 2026-09-14 — CatBoost `catboost_info/` (fix/catboost-no-train-dir)
+
+- **Root cause:** no production CatBoost construction passed `allow_writing_files=False`,
+  so every fit created `catboost_info/` in the cwd. Unwritable cwd (Program Files
+  install) or a concurrent-fit race makes the fit raise. Portable repro: a regular
+  *file* named `catboost_info` in the cwd (error then reads `Can't create train tmp
+  dir: tmp`).
+- **Gotcha: CatBoost `get_params()` echoes every explicitly passed constructor kwarg**
+  (it returns `_init_params`, not all defaults). A runtime kwarg set at construction
+  therefore leaks into every `get_params()` capture: grid `Params` (search.py
+  `_run_single_config`), Bayesian `_capture_serializable_params`, NSGA-II
+  `decode_solution`. Fix: `models.CATBOOST_RUNTIME_PARAMS` + `strip_runtime_params` at
+  those three capture sites; `with_catboost_runtime_params` merges (explicit wins) so a
+  stored dict carrying the key never raises a duplicate-kwarg TypeError.
+- **The failure was silently swallowed in most paths:** preprocessing-discovery tree
+  importance falls back to LightGBM, diagnostics validation curve yields NaN scores,
+  Bayesian returns the 1e10 penalty, `run_search` drops the configs.
+- **`run_search(models_to_test=[...])` only filters the tier's grid.** CatBoost is not
+  in the `quick` tier, so `models_to_test=["CatBoost"]` raises "No valid models found"
+  unless `enabled_models=["CatBoost"]` is also passed. AGENT_COMPOSITION §7 says
+  `models_to_test` "overrides tier", which is misleading.
