@@ -6,6 +6,27 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-13 - Local .venv314 full suite: baseline-clean, but Python crashes at session teardown
+
+Primary Windows machine, `.venv314` (Python 3.14.7), `main` at `8231feb`,
+`pytest -q -p no:randomly --tb=no -rf`: all 3,042 collected tests ran, and the
+only failures were the five known baseline node IDs listed in
+`reviews/2026-09-12-pr65-installation-validation.md`. Zero new failures.
+
+**But the process died with `Windows fatal exception: access violation` after the
+last test**, in the `session_app` fixture teardown (`tests/gui/conftest.py:86`,
+`root.destroy()` in tkinter). Exit code 5 (from 0xC0000005), and pytest's final
+summary, `-rf` list and cache were never written. It looks like a failed run
+but is not. Seen once; not yet known whether it reproduces or happens on CI.
+
+**Recovering the failure list without the summary:** with `-p no:randomly` the
+order is fixed, so each `F` in the progress output maps to the test at that
+position in `pytest --collect-only -q -p no:randomly`. Check that the progress
+character count equals the collected count first. Or run with `-v` so each
+result is written as it happens.
+
+---
+
 ## 2026-09-13 - jcamp: .venv314 must be upgraded to 1.3.2 (JCAMP import is broken on 1.2.2)
 
 **Install jcamp 1.3.2 in `.venv314` on every machine.** Since `be7963c`, `io.py`
