@@ -1826,6 +1826,34 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - **PR B0 approved.** It fixes the PLS-DA logistic head's C/solver/max_iter being
        lost on rebuild and Tab 7 refit, and ships without a version bump.
      - **`min_split_gain` is added to `lgbm_child`.**
+   - **PR A (extra-axes mechanism): PR #68, NOT merged (waiting for the user).**
+     Branch `feat/T51-pr-a-extra-axes`; code final at `60edfe3`, later commits are docs
+     only. Full suite: 7 baseline failures / 3166 passed, zero new.
+     - **Code:**
+       - new `src/spectral_predict/search_spaces.py`
+       - additive wiring in `unified_bayesian.py`: `enabled_extra_axes`, `search_space`,
+         `n_startup_trials`
+       - the bundle registry is still empty; bundles land in PR B/C
+     - **Default path proven unchanged:**
+       - pinned default study names and a 30-trial TPE trace captured on `main` @ `2860d17`
+       - SHA-256 pins on both sampler bodies and `_build_fit_fingerprint`
+       - Fable's A/B vs `main` byte-identical for PLS, Ridge, LightGBM, SVM, MLP, LOF,
+         IsolationForest, OneClassSVM and PCA-SIMCA past the startup trials
+     - **Reviews:** GLM, then three rounds each of Fable, Codex `gpt-6-astra` and DeepSeek.
+       Every finding is addressed. Final verdicts: Fable merge, DeepSeek ready with nits,
+       Codex merge (on `60edfe3`).
+     - **Tests:** 11 deliberate mutations are all caught. Documented in
+       `docs/AGENT_COMPOSITION.md` §7b (example executed against `example/` data) and
+       CHANGELOG 0.5.0b3.
+     - **Known pre-existing issues surfaced during PR A** (SESSION_LOG 2026-09-14):
+       - **T-41 'auto' persistence:** it doesn't resume an earlier migrated study, and a
+         failed re-migration could delete that study's trials. Its own fix PR comes next,
+         reproduced first.
+       - **Test-order dependence:** `test_bayesian_study_lookup` fails after `test_t41_*`
+         in one process, because the fixture re-imports `run_state`.
+     - **Next after merge:** PR B0 (PLS-DA head params), then PR B (supervised bundles).
+       Before any edit to the base samplers (PR F), re-audit
+       `discover_derived_keys` (SESSION_LOG 2026-09-14).
    - **Pre-existing follow-ups found (not fixed), details in SESSION_LOG 2026-09-13:**
      - The Bayesian importance proxy is unscaled for all scale-sensitive models.
      - NSGA-II display metrics are unscaled for all scale-sensitive models.

@@ -5,7 +5,14 @@
 > **2026-09-13:** step 0 (caller sweep) done. Results are in §7 of
 > [`2026-09-13-T51-optuna-axes-implementation-plan.md`](2026-09-13-T51-optuna-axes-implementation-plan.md),
 > which is the implementation plan for steps 2–5 and now supersedes this file's line
-> numbers, which are stale by about 95 lines. Step 1 (SVM scaler) is on `fix/T51-svm-scaler`.
+> numbers, which are stale by about 95 lines.
+>
+> **Progress (2026-09-14):**
+> - Step 1 (SVM scaler) merged as PR #67 (`8f047d8`).
+> - Step 2, PR A (extra-axes mechanism), is open as PR #68.
+> - PR B0 (PLS-DA head params) and `min_split_gain` were approved by the user.
+>
+> The implementation plan's status header is the live record.
 > **Corrections to the prerequisite section below:** NSGA-II was never affected (it
 > encodes classification SVM as `'SVR'`); there were five GUI sites, not one; and
 > `code_generator` already scaled `'SVM'`. See SESSION_LOG 2026-09-13.

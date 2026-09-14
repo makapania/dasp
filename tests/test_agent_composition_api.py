@@ -40,6 +40,7 @@ PRIMITIVES: dict[str, list[str]] = {
     ],
     "preprocess": ["build_preprocessing_pipeline"],
     "unified_bayesian": ["apply_preprocessing", "run_unified_bayesian"],
+    "search_spaces": ["AxisSpec", "BundleSpec", "ExtraAxesConfigError"],
     "variable_selection": [
         # score-array family: (X, y, ...) -> ndarray of shape (n_features,)
         "cars_selection",
@@ -100,6 +101,21 @@ def test_required_positional_arguments_are_stable(
         f"spectral_predict.{module_name}.{symbol} leading positionals changed: "
         f"expected {expected}, got {params[: len(expected)]}"
     )
+
+
+def test_run_unified_bayesian_extra_axes_keywords_are_stable() -> None:
+    """§7b documents these keywords and their no-op defaults (T-51)."""
+    import inspect
+
+    from spectral_predict.search_spaces import BUNDLES, ExtraAxesConfigError
+    from spectral_predict.unified_bayesian import run_unified_bayesian
+
+    params = inspect.signature(run_unified_bayesian).parameters
+    assert params["enabled_extra_axes"].default == ()
+    assert params["search_space"].default is None
+    assert params["n_startup_trials"].default is None
+    assert isinstance(BUNDLES, dict)
+    assert issubclass(ExtraAxesConfigError, ValueError)
 
 
 def test_multiclass_varsel_mask_n_select_is_optional() -> None:

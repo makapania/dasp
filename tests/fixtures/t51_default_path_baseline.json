@@ -1,0 +1,392 @@
+{
+  "_comment": "T-51 PR A default-path baseline. Captured on main after PR #67. Re-bless only by a reviewed commit (plan section 6, T2b/T3).",
+  "dasp_version": "0.5.0b3",
+  "default_study_base_names": {
+    "PCA-SIMCA|one_class": "unified_bayesian_PCA-SIMCA_0b7db3ef",
+    "PLS|regression": "unified_bayesian_PLS_b41bc659",
+    "Ridge|regression": "unified_bayesian_Ridge_b41bc659",
+    "SVM|classification": "unified_bayesian_SVM_60a63ae7"
+  },
+  "environment": {
+    "fingerprint_version": "env1",
+    "frozen": false,
+    "gil_enabled": true,
+    "packages": {
+      "catboost": "1.2.10",
+      "imbalanced-learn": "0.14.2",
+      "joblib": "1.6.0",
+      "lightgbm": "4.7.0",
+      "numpy": "2.5.3",
+      "optuna": "5.0.0",
+      "pandas": "3.0.5",
+      "scikit-learn": "1.9.1",
+      "scipy": "1.18.1",
+      "sklearn-compat": "0.1.6",
+      "threadpoolctl": "3.6.0",
+      "xgboost": "3.4.1"
+    },
+    "platform_machine": "AMD64",
+    "platform_system": "Windows",
+    "python_implementation": "CPython",
+    "python_version": "3.14.7"
+  },
+  "environment_digest": "322dc72485c2",
+  "optuna_version": "5.0.0",
+  "pls_regression_trace": [
+    {
+      "number": 0,
+      "params": {
+        "n_components": 11,
+        "n_vars": 1000,
+        "preprocessing": "deriv2_snv",
+        "region_id": 1,
+        "savgol_window": 13,
+        "subset_type": "region"
+      },
+      "value": 2.43071216684904
+    },
+    {
+      "number": 1,
+      "params": {
+        "n_components": 19,
+        "n_vars": 100,
+        "preprocessing": "snv_deriv1",
+        "region_id": 5,
+        "savgol_window": 5,
+        "subset_type": "importance"
+      },
+      "value": 5.661660262441783
+    },
+    {
+      "number": 2,
+      "params": {
+        "n_components": 3,
+        "n_vars": 500,
+        "preprocessing": "deriv4_snv",
+        "region_id": 3,
+        "savgol_window": 41,
+        "subset_type": "region"
+      },
+      "value": 3.145258339718513
+    },
+    {
+      "number": 3,
+      "params": {
+        "n_components": 5,
+        "n_vars": 20,
+        "preprocessing": "deriv3",
+        "region_id": 2,
+        "savgol_window": 5,
+        "subset_type": "region"
+      },
+      "value": 3.02457881548793
+    },
+    {
+      "number": 4,
+      "params": {
+        "n_components": 8,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 7,
+        "subset_type": "cars"
+      },
+      "value": 0.05975916531198102
+    },
+    {
+      "number": 5,
+      "params": {
+        "n_components": 17,
+        "n_vars": 10,
+        "preprocessing": "raw",
+        "region_id": 0,
+        "subset_type": "cars"
+      },
+      "value": 0.1375745308676061
+    },
+    {
+      "number": 6,
+      "params": {
+        "n_components": 14,
+        "n_vars": 1000,
+        "preprocessing": "deriv3_snv",
+        "region_id": 9,
+        "savgol_window": 21,
+        "subset_type": "cars"
+      },
+      "value": 4.691828646146729
+    },
+    {
+      "number": 7,
+      "params": {
+        "n_components": 12,
+        "n_vars": 1000,
+        "preprocessing": "snv_deriv4",
+        "region_id": 6,
+        "savgol_window": 5,
+        "subset_type": "region"
+      },
+      "value": 4.76626410343126
+    },
+    {
+      "number": 8,
+      "params": {
+        "n_components": 18,
+        "n_vars": 1000,
+        "preprocessing": "deriv3",
+        "region_id": 9,
+        "savgol_window": 17,
+        "subset_type": "cars"
+      },
+      "value": 0.17436721722850435
+    },
+    {
+      "number": 9,
+      "params": {
+        "n_components": 14,
+        "n_vars": 250,
+        "preprocessing": "deriv2_snv",
+        "region_id": 7,
+        "savgol_window": 47,
+        "subset_type": "importance"
+      },
+      "value": 15.484142231816287
+    },
+    {
+      "number": 10,
+      "params": {
+        "n_components": 20,
+        "n_vars": "full",
+        "preprocessing": "deriv1",
+        "region_id": 7,
+        "savgol_window": 43,
+        "subset_type": "region"
+      },
+      "value": 0.08964519250980833
+    },
+    {
+      "number": 11,
+      "params": {
+        "n_components": 4,
+        "n_vars": "full",
+        "preprocessing": "snv_deriv2",
+        "region_id": 0,
+        "savgol_window": 31,
+        "subset_type": "importance"
+      },
+      "value": 4.729609886789001
+    },
+    {
+      "number": 12,
+      "params": {
+        "n_components": 14,
+        "n_vars": 500,
+        "preprocessing": "deriv1",
+        "region_id": 3,
+        "savgol_window": 21,
+        "subset_type": "region"
+      },
+      "value": 0.0938819907289823
+    },
+    {
+      "number": 13,
+      "params": {
+        "n_components": 17,
+        "n_vars": 50,
+        "preprocessing": "deriv3",
+        "region_id": 7,
+        "savgol_window": 45,
+        "subset_type": "cars"
+      },
+      "value": 0.14707644963878255
+    },
+    {
+      "number": 14,
+      "params": {
+        "n_components": 7,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 4,
+        "subset_type": "cars"
+      },
+      "value": 0.059678272142839196
+    },
+    {
+      "number": 15,
+      "params": {
+        "n_components": 17,
+        "n_vars": 500,
+        "preprocessing": "deriv1_snv",
+        "region_id": 3,
+        "savgol_window": 41,
+        "subset_type": "importance"
+      },
+      "value": 7.11925983016061
+    },
+    {
+      "number": 16,
+      "params": {
+        "n_components": 20,
+        "n_vars": 1000,
+        "preprocessing": "snv",
+        "region_id": 0,
+        "subset_type": "region"
+      },
+      "value": 2.6442490754009715
+    },
+    {
+      "number": 17,
+      "params": {
+        "n_components": 20,
+        "n_vars": 10,
+        "preprocessing": "deriv2",
+        "region_id": 9,
+        "savgol_window": 7,
+        "subset_type": "cars"
+      },
+      "value": 0.9010835438248078
+    },
+    {
+      "number": 18,
+      "params": {
+        "n_components": 7,
+        "n_vars": "full",
+        "preprocessing": "snv_deriv3",
+        "region_id": 4,
+        "savgol_window": 7,
+        "subset_type": "region"
+      },
+      "value": 2.8233518212535804
+    },
+    {
+      "number": 19,
+      "params": {
+        "n_components": 9,
+        "n_vars": 250,
+        "preprocessing": "deriv2",
+        "region_id": 8,
+        "savgol_window": 15,
+        "subset_type": "importance"
+      },
+      "value": 0.10599960552434384
+    },
+    {
+      "number": 20,
+      "params": {
+        "n_components": 6,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 4,
+        "subset_type": "importance"
+      },
+      "value": 0.05975904429291993
+    },
+    {
+      "number": 21,
+      "params": {
+        "n_components": 5,
+        "n_vars": 100,
+        "preprocessing": "raw",
+        "region_id": 5,
+        "subset_type": "importance"
+      },
+      "value": 0.05974925227633932
+    },
+    {
+      "number": 22,
+      "params": {
+        "n_components": 9,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 3,
+        "subset_type": "importance"
+      },
+      "value": 0.06005534533276649
+    },
+    {
+      "number": 23,
+      "params": {
+        "n_components": 13,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 0,
+        "subset_type": "cars"
+      },
+      "value": 0.05977679239218586
+    },
+    {
+      "number": 24,
+      "params": {
+        "n_components": 5,
+        "n_vars": 250,
+        "preprocessing": "raw",
+        "region_id": 5,
+        "subset_type": "importance"
+      },
+      "value": 0.05974925227633932
+    },
+    {
+      "number": 25,
+      "params": {
+        "n_components": 3,
+        "n_vars": 100,
+        "preprocessing": "snv_deriv1",
+        "region_id": 5,
+        "savgol_window": 33,
+        "subset_type": "importance"
+      },
+      "value": 4.329491156415767
+    },
+    {
+      "number": 26,
+      "params": {
+        "n_components": 10,
+        "n_vars": 100,
+        "preprocessing": "raw",
+        "region_id": 8,
+        "subset_type": "importance"
+      },
+      "value": 0.060052797853604525
+    },
+    {
+      "number": 27,
+      "params": {
+        "n_components": 3,
+        "n_vars": 250,
+        "preprocessing": "deriv1",
+        "region_id": 8,
+        "savgol_window": 51,
+        "subset_type": "importance"
+      },
+      "value": 0.060198202280881824
+    },
+    {
+      "number": 28,
+      "params": {
+        "n_components": 3,
+        "n_vars": "full",
+        "preprocessing": "raw",
+        "region_id": 2,
+        "subset_type": "importance"
+      },
+      "value": 0.057939836593898224
+    },
+    {
+      "number": 29,
+      "params": {
+        "n_components": 3,
+        "n_vars": "full",
+        "preprocessing": "raw",
+        "region_id": 2,
+        "subset_type": "cars"
+      },
+      "value": 0.057939836593898224
+    }
+  ],
+  "reference_commit": "2860d1713701645e01dd762d103be0e56d402e5f",
+  "sampler_source_commit": "2860d17",
+  "sampler_source_sha256": {
+    "_build_fit_fingerprint": "9f718c9eab6315112b085c7571ea3ce437565904345f41ac27638cbcb798ea36",
+    "suggest_model_params": "8d66108fc382bad45000c59295cd3fd76400b829cd148cb9931a29b146af069e",
+    "suggest_one_class_params": "291515400f83a3e8f980f400147720280763707c87dd2811c8df5e84e5d94521"
+  }
+}

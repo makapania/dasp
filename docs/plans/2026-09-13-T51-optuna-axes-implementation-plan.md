@@ -1,7 +1,67 @@
 # T-51 steps 2–5 — Opt-in Optuna search axes: implementation plan
 
-> **STATUS (2026-09-14): revised after review rounds 1 and 2, and after the contamination
-> project's evidence (§10). No code written.** Round 2 (`gpt-6-astra`) found one
+> **STATUS (2026-09-14): PR A implemented on `feat/T51-pr-a-extra-axes`**
+> (`search_spaces.py`, `unified_bayesian.py` wiring, `tests/test_t51_extra_axes_mechanism.py`,
+> baseline fixture captured on `main` @ `2860d17`). B0–F not started. Plan revised after
+> review rounds 1 and 2 and the contamination project's evidence (§10).
+> **PR A deviations from §2:**
+> - `resolve_bundles` takes the base sampler's discovered names as an argument
+>   (`discover_suggested_names`), so `search_spaces` does not import `unified_bayesian`.
+> - **The `'neuralboosted'` map entry (§2.2.2) is NOT in PR A** (DeepSeek review). It
+>   changes the study name for that lowercase spelling, which is a default-path identity
+>   change. It moves to the follow-up that adds `neuralboosted_base`.
+> - The session attr is named `n_startup_trials_requested` (last explicit request wins),
+>   not `n_startup_trials_session`.
+> - `resolve_bundles` also validates axis specs (kind, bounds, choices, log/step) and
+>   bundle `constants` (literal values; may not override suggested or objective names;
+>   no two bundles write the same key). It does this so malformed bundles fail before any
+>   storage access, rather than as penalty trials or a half-created SQLite study.
+> - A runtime `ExtraAxesConfigError` does **not** delete the SQLite study. On a resume
+>   that would destroy prior trials. Pre-flight validation makes the runtime path
+>   effectively unreachable.
+> - A test pins the two sampler bodies and `_build_fit_fingerprint` to their SHA-256 on
+>   `main` @ `2860d17`. PR F must re-bless it.
+> - **Identity depends only on the effective space** (Fable review, supersedes §2.1's
+>   "a custom `search_space` always yields a digest"). A custom space that resolves to no
+>   applicable bundles keeps the default study name, and identical bundle content hashes
+>   the same whether it comes from the registry or a custom space. NumPy scalars hash like
+>   Python scalars.
+> - Every **requested** bundle is validated, not only the applicable ones, so a shared
+>   multi-model selection fails on the first model. Also rejected: empty bundles, a bare
+>   string selection, non-finite bounds/choices/constants, non-integer steps, alias axes
+>   whose key overwrites a base-suggested param (Codex), and non-integer
+>   `n_startup_trials`.
+> - **Derived keys are reserved too** (Codex round 2). `discover_derived_keys` probes each
+>   base sampler at numeric lows and highs across every categorical branch. Keys whose
+>   value varies (e.g. MLP `hidden_layer_sizes`, LightGBM `num_leaves`) may not be written
+>   by an axis or constant. Keys with one fixed value (SVM `gamma='scale'`, LightGBM
+>   `reg_alpha`) stay open. A test runs every §3.1/§5 bundle through pre-flight against the
+>   real samplers so the checks cannot over-reject PR B/C.
+> - **Identity hashes each axis's effective Optuna distribution**: `0`/`0.0`/`-0.0` are
+>   equal, `step=None` equals `step=1` for non-log ints, and NumPy strings equal Python
+>   strings. One namespace spans Optuna names and written keys, so one axis's name cannot
+>   be another's key. `families`/`task_types` must be sets of strings. Float spans must be
+>   finite, and int bounds must be within ±2**53.
+> - Review round 3 (2026-09-14) on `4ae5d28`: Fable **merge**, DeepSeek **ready with
+>   nits**, Codex `gpt-6-astra` **merge after fixes** (minors only). Full suite on the
+>   frozen commit: 7 failed / 3142 passed / 33 skipped, where the 7 are exactly the
+>   baseline IDs. The final commit addresses the minors:
+>   - structured owner tokens
+>   - midpoint and one-input-at-high derived-key probes
+>   - int `step` must divide `high - low`
+>   - duplicate choices rejected
+>   - non-sequence selections, malformed bundle shapes, bad `revision` and empty
+>     families rejected
+>   - `lgbm_regularization` and other-task variants added to the planned-bundle guard
+>   - Optuna duplicate-name docstring corrected per a probe (warns only when the
+>     distribution differs)
+> - Review round 2 (2026-09-14) on `68fcde1`: Fable **merge**, DeepSeek **ready with nits**,
+>   Codex `gpt-6-astra` **merge after fixes** (derived-key override). All findings are
+>   addressed in the next commit.
+> - Review round (2026-09-14) on `29e2e1e`: Fable says ready to merge (A/B traces
+>   byte-identical to `main` for LightGBM, SVM, LOF and OneClassSVM past startup); Codex
+>   `gpt-6-astra` says merge after fixes (`gpt-5.6-astra` is rejected on a ChatGPT-account
+>   Codex login); DeepSeek round 2 pending at the time of writing. Round 2 (`gpt-6-astra`) found one
 > blocker (B0's version bump) and five other issues, all folded in (§9b).
 >
 > This plan turns the design ticket
@@ -216,8 +276,10 @@ trial budget on `1e10` penalty trials. Unknown bundle ids also raise it (step 2)
 7. **Readable study attrs, written only when `_space_id is not None`:** add
    `extra_axes_bundles` (sorted applicable ids plus revisions) and `extra_axes_space_id`
    through the existing hoist loop (`:2826-2846`). It carries across `copy_study`
-   migration (T12). Record `n_startup_trials_session` **only when the caller passed
-   non-None**. It is session metadata, not an audit trail across concurrent sessions.
+   migration (T12). Record `n_startup_trials_requested` **only when the caller passed
+   non-None**, via a direct `study.set_user_attr` (not the hoist loop, so a later request
+   overwrites it). It is last-explicit-request metadata, not an audit trail across
+   concurrent sessions.
 8. **Hoist** `_AUTO_WARMUP = 10` and `_AUTO_THRESHOLD_S = 1.0` to module scope with
    identical values. Their use sites read the module names.
 9. **Not changed:**

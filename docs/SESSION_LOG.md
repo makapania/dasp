@@ -250,6 +250,56 @@ is tracked on purpose. A noisy `git status` hid one genuinely unpushed branch
 
 ---
 
+## 2026-09-14 - T-51 PR A (extra-axes mechanism): gotchas hit while implementing
+
+**1. `tests/test_bayesian_study_lookup.py` fails when run after `test_t41_*` in one process
+(pre-existing on `main`, not fixed).**
+- **Cause:** the T-41 `fresh_run_state` fixture pops `spectral_predict.run_state` from
+  `sys.modules` and re-imports it. The lookup tests then patch `get_storage_url` on their
+  import-time module object. `run_unified_bayesian` does
+  `from spectral_predict.run_state import get_storage_url` at call time, which now gets the
+  new module, so the patch is never seen and 4 tests fail.
+- **Why the full suite hides it:** xdist distributes the two files to different workers.
+- **Reproduce:** `pytest -p no:xdist tests/test_t41_bayesian_sqlite_auto_calculator.py tests/test_bayesian_study_lookup.py`.
+- **Fix pattern** (used in the new T-51 tests): resolve the module with
+  `importlib.import_module("spectral_predict.run_state")` inside the fixture.
+
+**2. Base-sampler parameter names depend on categorical branches.** For example, LightGBM
+`num_leaves` is suggested only for some `max_depth` values. The pre-flight collision check
+therefore explores every categorical path with a recording stub
+(`search_spaces.discover_suggested_names`) instead of running the sampler once.
+`search_spaces` receives the sampler as a callable, which avoids an import cycle with
+`unified_bayesian`.
+
+**3. `Path.write_text` translates `\n` to CRLF on Windows.** Mutation scripts that read and
+write sources in text mode keep CRLF working copies consistent (git autocrlf). Check line
+endings before committing anything a script rewrote.
+
+**3a. Optuna 5 does NOT raise on a duplicate `suggest_*` name (Fable probe, corrects the
+2026-08-30 entry below).** Calling `suggest_float('a', 0, 2)` after
+`suggest_float('a', 0, 1)` in the same trial emits an "Inconsistent parameter values"
+warning and returns the first value. An *identical* duplicate returns silently with no
+warning. Only a different-kind duplicate (`suggest_int` after `suggest_float`) raises
+`ValueError`. Re-probed 2026-09-14 after reviewers disagreed. A resumed study also accepts a different distribution for the same name
+across trials. A bundle that collides with a base-suggested name would therefore do
+nothing, silently, rather than crash. That is why `resolve_bundles` rejects collisions
+before the run, and why `apply_extra_axes` also checks `trial.params` at run time.
+
+**3b. Pre-existing (GLM review, not fixed): 'auto' persistence never resumes a study that
+an earlier 'auto' run migrated to SQLite.** In 'auto' mode `run_unified_bayesian` always
+creates a fresh **in-memory** study (`create_study(..., sampler=sampler)`); only 'always'
+touches storage before warmup. A second 'auto' run therefore starts from zero under the
+same name, and when it migrates again it copies into the existing SQLite study. If that
+re-migration fails, the cleanup `optuna.delete_study(study_name, storage_url)` could
+remove the **earlier run's** trials (DeepSeek round-2 note). This is unchanged from
+`main`; it needs a T-41 follow-up ticket.
+
+**4. Default-path baseline captured on `main` @ `2860d17`** (post-#67). Two independent
+captures were byte-identical, so the 30-trial PLS TPE trace is deterministic under
+`enable_sqlite_persistence='never'`. Fixture: `tests/fixtures/t51_default_path_baseline.json`.
+
+---
+
 ## 2026-09-13 - T-51 step 1 (SVM scaler) and step 0 (caller sweep): what the ticket got wrong
 
 **1. The SVM scaler bug reached further than the ticket listed, and exported code was

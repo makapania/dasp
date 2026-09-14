@@ -326,6 +326,57 @@ DataFrame) and `run_multiclass_simca_search` (returns a DataFrame).
 having fewer variables. Filter by `SubsetTag` before comparing if that is not what
 you want.
 
+### 7b. Bayesian search, and opening extra hyperparameter axes
+
+`run_unified_bayesian` jointly tunes preprocessing, variable selection and model
+hyperparameters with Optuna TPE, one model per call. It returns
+`(results_df, study)`, which is **another 2-tuple**.
+
+Some model hyperparameters are pinned to a single value in the default Bayesian
+space. An example is PLS `tol`, which is always `1e-6`. You can open such an axis for
+one run by passing a **bundle** of extra axes. With no bundle, the search and its study
+name are exactly as they have always been.
+
+```python
+from spectral_predict.search_spaces import AxisSpec, BundleSpec, ExtraAxesConfigError
+from spectral_predict.unified_bayesian import run_unified_bayesian
+
+pls_tol = BundleSpec(
+    id="my_pls_tol",
+    families=frozenset({"PLS"}),          # canonical model names; a set, not a string
+    task_types=frozenset({"regression"}),
+    axes=(AxisSpec(key="tol", kind="float", low=1e-7, high=1e-5, log=True),),
+)
+
+results_df, study = run_unified_bayesian(          # NOTE: 2-tuple
+    X_aligned.to_numpy(dtype=float), y.to_numpy(dtype=float),
+    X_aligned.columns.to_numpy(dtype=float),
+    model_name="PLS", task_type="regression",
+    n_trials=25, cv_folds=3, verbose=False,
+    enabled_extra_axes=("my_pls_tol",),            # a tuple/list of ids, not a string
+    search_space={"my_pls_tol": pls_tol},          # registry key must equal bundle.id
+    n_startup_trials=None,                         # None keeps TPE's default of 20
+    enable_sqlite_persistence="never",
+)
+print(study.user_attrs["extra_axes_bundles"])      # ['my_pls_tol@r1']
+print(sorted({t.params["tol"] for t in study.trials})[:3])
+```
+
+What to know:
+
+- **Only pinned values can be opened.** A bundle that suggests or writes a
+  parameter the base search already tunes (PLS `n_components`), or one derived from
+  tuned values (MLP `hidden_layer_sizes`), raises `ExtraAxesConfigError` before any
+  study is created. So do unknown ids, malformed axes, and a bare-string selection.
+- **The curated registry `search_spaces.BUNDLES` is empty in this release.** Curated
+  bundles arrive with T-51 PR B/C. Until then, pass your own `search_space`.
+- **An id that doesn't apply to this model is skipped**, so one selection can be shared
+  across a multi-model loop. If none applies, a single warning is logged.
+- **Enabling bundles gives the run its own study name.** It never resumes, or
+  pollutes, a default study. A custom space that selects nothing keeps the default name.
+- **`n_startup_trials` is not part of the study identity.** It changes future sampling
+  only, so a resumed study can use a different value.
+
 ---
 
 ## 8. Save and reuse a model
@@ -382,7 +433,8 @@ listed is an internal implementation detail that may change without notice.
 |---|---|
 | `io` | `read_spectra`, `read_asd_dir`, `read_csv_spectra`, `read_reference_csv`, `align_xy` |
 | `preprocess` | `build_preprocessing_pipeline` |
-| `unified_bayesian` | `apply_preprocessing`, `run_unified_bayesian` |
+| `unified_bayesian` | `apply_preprocessing`, `run_unified_bayesian` (including its `enabled_extra_axes`, `search_space` and `n_startup_trials` keywords) |
+| `search_spaces` | `AxisSpec`, `BundleSpec`, `ExtraAxesConfigError`; the `BUNDLES` registry (read-only) |
 | `variable_selection` | score-array: `cars_selection`, `ipls_selection`, `spa_selection`, `uve_selection`; interval-subset: `ipls_forward`, `ipls_backward`, `mc_sipls`, `mwpls` |
 | `simca` | `MultiClassClassModel` |
 | `contamination` | `PCASIMCA` |

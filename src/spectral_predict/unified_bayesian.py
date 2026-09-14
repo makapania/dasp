@@ -36,6 +36,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 import ast
+import numbers
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +59,7 @@ from sklearn.metrics import (
     balanced_accuracy_score, cohen_kappa_score, matthews_corrcoef, log_loss,
     f1_score, precision_score, recall_score, classification_report
 )
-from typing import Dict, List, Optional, Callable, Tuple, Any
+from typing import Dict, List, Optional, Callable, Tuple, Any, Mapping, Sequence
 
 # Import existing infrastructure
 from spectral_predict.preprocess import SNV, SavgolDerivative, SavgolSmooth
@@ -69,6 +70,15 @@ from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
 )
 from spectral_predict.scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
+from spectral_predict.search_spaces import (
+    BundleSpec,
+    ExtraAxesConfigError,
+    apply_extra_axes,
+    canonical_space_identity,
+    discover_derived_keys,
+    discover_suggested_names,
+    resolve_bundles,
+)
 
 # Imbalance handling imports
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -114,6 +124,21 @@ _EARLY_STOPPING_MODELS = frozenset({'XGBoost', 'LightGBM', 'CatBoost'})
 # typo-asymmetric silent failures (writer-reader mismatch would make duplicates
 # leak into the leaderboard with no test signal).
 DUPLICATE_OF_TRIAL_ATTR = 'duplicate_of_trial'
+
+# T-41 'auto' persistence decision. Module-level (values unchanged) so tests can force
+# the in-memory -> SQLite migration end to end.
+_AUTO_WARMUP = 10        # warmup trials before the auto-calculator decides
+_AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (post-T-42 ratio ~1.0-1.06x)
+
+# TPE random-exploration trials when the caller does not set n_startup_trials.
+DEFAULT_N_STARTUP_TRIALS = 20
+
+# study.user_attrs keys written only when extra axes are in effect (T-51).
+EXTRA_AXES_SPACE_ATTR = 'extra_axes_space_id'
+EXTRA_AXES_BUNDLES_ATTR = 'extra_axes_bundles'
+# Last explicitly requested startup count (last writer wins). Not written when the caller
+# passes None, so it can lag behind a later default-startup resume; audit only.
+N_STARTUP_TRIALS_REQUESTED_ATTR = 'n_startup_trials_requested'
 
 # Study identity must include the numerical environment, not just the analysis
 # configuration. A resumed study reloads completed trial fingerprints and returns
@@ -1113,6 +1138,7 @@ def create_unified_objective(
     inlier_class_label=None,
     y_original: np.ndarray | None = None,
     seen_fingerprints: Optional[Dict[tuple, tuple]] = None,
+    resolved_extra_axes: Tuple[BundleSpec, ...] = (),
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -1402,6 +1428,8 @@ def create_unified_objective(
 
                 # --- Suggest one-class model params (after subsetting, feature count may differ) ---
                 oc_params = suggest_one_class_params(trial, model_name)
+                # T-51: opt-in extra axes. Returns oc_params untouched when none resolved.
+                oc_params = apply_extra_axes(trial, oc_params, resolved_extra_axes)
 
                 # PCA-SIMCA applies its own n_components clamp inside
                 # contamination.py. We fingerprint the suggested oc_params
@@ -1606,6 +1634,8 @@ def create_unified_objective(
             model_params = suggest_model_params(
                 trial, model_name, n_features_final, task_type
             )
+            # T-51: opt-in extra axes. Returns model_params untouched when none resolved.
+            model_params = apply_extra_axes(trial, model_params, resolved_extra_axes)
 
             # 5b. Skip invalid PLS trials where n_components > n_features.
             # Return 1e10 (matching pre-dedup behavior) so TPE sees a real
@@ -2136,6 +2166,10 @@ def create_unified_objective(
             # via `trial.report(...) + trial.should_prune()` doesn't get
             # silently downgraded to a 1e10 penalty by the broad except below.
             raise
+        except ExtraAxesConfigError:
+            # T-51: a configuration error must abort the run, not spend the trial
+            # budget on 1e10 penalty trials.
+            raise
         except Exception as e:
             logging.warning(f"Trial {trial.number} failed: {type(e).__name__}: {e}")
             # Return large penalty (don't cache failed fits — let retry attempt
@@ -2286,11 +2320,13 @@ def _stored_data_fingerprint(storage_url: str, study_name: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _make_tpe_sampler(random_state: int) -> TPESampler:
+def _make_tpe_sampler(
+    random_state: int, n_startup_trials: int = DEFAULT_N_STARTUP_TRIALS
+) -> TPESampler:
     """Construct a fresh TPE sampler with dasp's standard settings."""
     return TPESampler(
         seed=random_state,
-        n_startup_trials=20,
+        n_startup_trials=n_startup_trials,
         n_ei_candidates=32,
         multivariate=True,
         consider_endpoints=True,
@@ -2303,6 +2339,7 @@ def _migrate_study_to_sqlite(
     study_name: str,
     random_state: int,
     progress_callback: Optional[Callable] = None,
+    n_startup_trials: int = DEFAULT_N_STARTUP_TRIALS,
 ) -> optuna.Study:
     """Migrate a running in-memory Optuna study to a SQLite backend.
 
@@ -2330,6 +2367,8 @@ def _migrate_study_to_sqlite(
             case, not an edge case. ``None`` (default) keeps the helper
             usable from headless callers and tests; logger.warning still
             fires on rejection regardless of callback presence.
+        n_startup_trials: TPE startup trials for the reattached sampler. Must match
+            the value the in-memory sampler used, or migration resets it (T-51).
 
     Returns:
         A new ``optuna.Study`` object backed by SQLite, containing all
@@ -2375,7 +2414,7 @@ def _migrate_study_to_sqlite(
     return optuna.load_study(
         study_name=study_name,
         storage=sqlite_url,
-        sampler=_make_tpe_sampler(random_state),
+        sampler=_make_tpe_sampler(random_state, n_startup_trials),
     )
 
 
@@ -2408,6 +2447,9 @@ def run_unified_bayesian(
     enable_uve: bool = False,
     inlier_class_label=None,
     enable_sqlite_persistence: "PersistenceMode" = "auto",  # T-41: 'auto' | 'always' | 'never'
+    enabled_extra_axes: Sequence[str] = (),  # T-51 opt-in bundle ids
+    search_space: Optional[Mapping[str, BundleSpec]] = None,  # T-51 registry override
+    n_startup_trials: Optional[int] = None,  # T-51; None -> DEFAULT_N_STARTUP_TRIALS
 ) -> Tuple[pd.DataFrame, optuna.Study]:
     """Run unified Bayesian optimization.
 
@@ -2490,6 +2532,20 @@ def run_unified_bayesian(
         banner was a no-op (root cause: GUI radio button at 'never' silently ignored the
         loaded SQLite URL). With the resume-override fix and the auto-decision restart
         pattern in place, 'auto' is again a sensible default.
+    enabled_extra_axes : sequence of str, default=()
+        T-51 opt-in bundle ids from ``spectral_predict.search_spaces.BUNDLES``. Ids that
+        do not apply to ``model_name``/``task_type`` are skipped (one selection can be
+        shared across a multi-model run); unknown ids and malformed or colliding bundles
+        raise ``ExtraAxesConfigError`` before any study is created. Empty (the default)
+        leaves the search space and the study name exactly as before.
+    search_space : mapping of str to BundleSpec, optional
+        Replaces the curated bundle registry for this run; ``enabled_extra_axes`` then
+        selects from it. The study identity depends only on the resolved bundles, so a
+        custom space that selects nothing applicable keeps the default study name.
+    n_startup_trials : int, optional
+        TPE random-exploration trials. ``None`` keeps the default of 20. Applied to the
+        initial, resumed and auto-migrated samplers. Not part of the study identity:
+        it changes future sampling, not the validity of stored scores.
 
     Returns
     -------
@@ -2520,6 +2576,46 @@ def run_unified_bayesian(
         'lof': 'LOF',
     }
     model_name = model_name_map.get(model_name.lower(), model_name)
+
+    # T-51: validate extra axes and startup trials before any data work or storage
+    # access, so a typo or collision fails fast instead of producing a study.
+    if n_startup_trials is None:
+        _n_startup = DEFAULT_N_STARTUP_TRIALS
+    else:
+        if isinstance(n_startup_trials, bool) or not isinstance(n_startup_trials, numbers.Integral):
+            raise ValueError(
+                f"n_startup_trials must be an integer >= 1, got {n_startup_trials!r}"
+            )
+        _n_startup = int(n_startup_trials)
+        if _n_startup < 1:
+            raise ValueError(f"n_startup_trials must be >= 1, got {n_startup_trials!r}")
+    if enabled_extra_axes or search_space is not None:
+        _n_features_raw = int(np.asarray(X).shape[1])
+        if task_type == 'one_class':
+            _base_sampler = lambda t: suggest_one_class_params(t, model_name)  # noqa: E731
+        else:
+            _base_sampler = lambda t: suggest_model_params(  # noqa: E731
+                t, model_name, _n_features_raw, task_type
+            )
+        _resolved_extra_axes = resolve_bundles(
+            model_name,
+            task_type,
+            enabled_extra_axes,
+            search_space,
+            base_param_names=(
+                discover_suggested_names(_base_sampler) | discover_derived_keys(_base_sampler)
+            ),
+        )
+        if enabled_extra_axes and not _resolved_extra_axes:
+            _msg = (
+                f"None of the enabled extra-axes bundles {sorted(set(enabled_extra_axes))} "
+                f"apply to {model_name} ({task_type}); running the default search space."
+            )
+            logger.warning(_msg)
+            if progress_callback is not None:
+                progress_callback({"stage": "unified_bayesian", "message": _msg})
+    else:
+        _resolved_extra_axes = ()
 
     # UVE family is a y-driven discrimination method, not a one-class method
     # (CLAUDE.md:66, Pomerantsev et al. 2025 LOVE). Coerce enable_uve=False
@@ -2667,12 +2763,13 @@ def run_unified_bayesian(
         inlier_class_label=inlier_class_label,
         y_original=y,
         seen_fingerprints=seen_fingerprints,
+        resolved_extra_axes=_resolved_extra_axes,
     )
 
     # Create TPE sampler with good defaults
     sampler = TPESampler(
         seed=random_state,
-        n_startup_trials=20,  # Random exploration first
+        n_startup_trials=_n_startup,  # Random exploration first
         n_ei_candidates=32,   # More candidates for better exploration
         multivariate=True,    # Model parameter interactions
         consider_endpoints=True,
@@ -2755,6 +2852,11 @@ def run_unified_bayesian(
         f"region_pair={region_test_pairwise}|"
         f"early_stop={early_stopping_rounds}"
     )
+    # T-51: only runs with extra axes get a space segment, so default study names
+    # (and every study already on disk) are unchanged.
+    _space_id = canonical_space_identity(_resolved_extra_axes, search_space is not None)
+    if _space_id is not None:
+        config_components += f"|space={_space_id}"
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
 
     # The config hash alone is NOT sufficient identity for a resumable study.
@@ -2940,7 +3042,7 @@ def run_unified_bayesian(
         study = optuna.load_study(
             study_name=study_name,
             storage=storage_url,
-            sampler=_make_tpe_sampler(random_state),
+            sampler=_make_tpe_sampler(random_state, _n_startup),
         )
         _sqlite_decided = True
     else:
@@ -2985,6 +3087,17 @@ def run_unified_bayesian(
         # and carried through optuna.copy_study by the auto-migration path.
         (ENV_FINGERPRINT_ATTR, _environment),
     )
+    if _space_id is not None:
+        # T-51: readable form of the space segment, so a "no matching study" on resume
+        # can be explained later. Never written for default runs.
+        _hoist_pairs += (
+            (EXTRA_AXES_SPACE_ATTR, _space_id),
+            (EXTRA_AXES_BUNDLES_ATTR, [f"{b.id}@r{b.revision}" for b in _resolved_extra_axes]),
+        )
+    if n_startup_trials is not None:
+        # Session metadata (last writer wins), not an audit trail: startup trials
+        # affect future sampling only, so they are deliberately not hoisted.
+        study.set_user_attr(N_STARTUP_TRIALS_REQUESTED_ATTR, _n_startup)
     # T-41 follow-up: record the data this study ran on, ONLY on a study with no
     # trials yet. Stamping it onto an existing (e.g. legacy, unfingerprinted) study
     # would claim its old trials came from the current data and defeat the 'auto'
@@ -3015,9 +3128,7 @@ def run_unified_bayesian(
             _rehydrated,
         )
 
-    # --- auto-decision state ---
-    _AUTO_WARMUP = 10       # warmup trials before the auto-calculator decides
-    _AUTO_THRESHOLD_S = 1.0  # median fit > 1.0s -> SQLite ON (post-T-42 ratio ~1.0-1.06x)
+    # --- auto-decision state (thresholds are module-level _AUTO_WARMUP/_AUTO_THRESHOLD_S) ---
     _auto_migrated = False   # True after the in-memory -> SQLite migration
 
     # Progress callback wrapper (must reference `study` via mutable container
@@ -3122,6 +3233,7 @@ def run_unified_bayesian(
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state,
                             progress_callback=progress_callback,
+                            n_startup_trials=_n_startup,
                         )
                         _study_ref[0] = migrated
                         _auto_migrated = True
