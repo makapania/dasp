@@ -217,6 +217,16 @@ needs its own ticket and approval. The new spy test excludes that caller explici
   scaled (`nsga2_search.py:~1465`). The NSGA-II leaderboard's F1/AUC/R2 columns therefore
   describe a different model than the one ranked. So the earlier "NSGA-II was never
   affected" holds only for the fitness path.
+- **NSGA-II cannot evaluate classification SVM chosen as 'SVM' (GLM review).** The GUI
+  appends `'SVM'` to `selected_models` (`gui:~24084` → `models=` `~:29153`), but
+  `nsga2_search._build_model` has no `'SVM'` branch (it returns `None` at `~:1062`). Every
+  such chromosome scores the 1e10 penalty, and no SVM row can come out. Only the `'SVR'`
+  encoding builds SVC.
+- **`model_registry.MODELS_WITH_FEATURE_IMPORTANCE` lacks `'SVM'` (GLM review).** Grid
+  classification SVM rows show `top_vars = "N/A"`, even though `get_feature_importances`
+  handles `'SVM'`. It is not a one-word fix: `MODELS_WITH_SUBSET_SUPPORT` is the same list,
+  so adding `'SVM'` also switches on subset search for SVM (more configs, longer runs).
+  That needs its own decision.
 - **GUI refit double-scales under autoscale.** The preprocessing pipeline appends an
   `autoscale` StandardScaler, and the scale-sensitive branches (`~:39628/39756/39811`)
   append another. This affects SVR, Ridge, MLP and others, not just SVM. It is

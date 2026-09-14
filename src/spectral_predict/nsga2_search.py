@@ -1385,8 +1385,10 @@ class SpectralOptimizationProblem(Problem):
             # Scale-sensitive models need StandardScaler (matches search.py behavior)
             # For classification: PLS needs StandardScaler + LogisticRegression wrapper
             # For both tasks: SVC/SVR, MLP, NeuralBoosted need StandardScaler wrapper
-            # NSGA-II encodes classification SVM as model_type 'SVR' (see _build_model),
-            # so 'SVM' is listed for consistency with search.py, not because it is reached.
+            # Classification SVC is built from model_type 'SVR' (see _build_model). The GUI
+            # can also pass 'SVM', but _build_model has no 'SVM' branch, so those
+            # chromosomes currently score the 1e10 penalty (open follow-up, SESSION_LOG
+            # 2026-09-13). 'SVM' is listed so it is scaled once that branch exists.
             SCALE_SENSITIVE_MODELS = {'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'}
 
             # Build pipeline steps with imbalance handling support
