@@ -1000,3 +1000,11 @@ plan's hop table on main (plan §3.2 was partly wrong):
 - Search-time construction (search.py ~4952, unified_bayesian.py ~1724, nsga2,
   ga_preprocessing) reads legacy `lr_C` from the grid/suggest dict and is correct;
   untouched.
+
+### 2026-09-14 — opencode DeepSeek route hangs
+
+Two `opencode run --agent readonly -m deepseek/deepseek-flash` reviews (PR #71, #72)
+printed only the header and hung 10-20 min with no tool calls; GLM 5.3 Flash and Kimi
+K2.6 ran equivalent prompts fine in the same window. Killed the two processes and
+re-ran those reviews on Kimi. Until re-checked, don't rely on DeepSeek via opencode;
+pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/network.

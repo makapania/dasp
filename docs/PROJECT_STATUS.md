@@ -9,6 +9,7 @@
 | **#69** | T-41 `'auto'` re-run no longer deletes an earlier study | Fresh Kimi K2.6 review: merge-with-nits (endianness / signed-zero fingerprint nits, not practical on x86). Tests 14/14 on branch; **11/14 fail against `main`'s `unified_bayesian.py`**, incl. both "never deletes" tests. |
 | **#68** | T-51 PR A: opt-in extra Optuna axes mechanism | Fresh Kimi review: merge. Conflict with #69 resolved by keeping both (imports; T-41 helpers + #68 sampler signature; T-51 attrs + T-41 fingerprint stamp). After merge: 234 passed across both PRs' test files, `test_agent_composition_api`, `test_bayesian_study_lookup`, `test_t41_bayesian_sqlite_auto_calculator`. |
 | **#70** | Test-order leak fix: `reimport_modules` fixture in `tests/conftest.py` | GLM review: merge-with-nits; nits applied (parent imported first, name-order docstring). |
+| **#72** | T-51 PR B0: PLS-DA head params (C/solver/max_iter) survive validation rebuild, Tab 7 refit, ensemble training, export, `build_model`. Shared `models.split_plsda_params`. | Agent-implemented. 34 new tests (16 fail on main). Full non-GUI suite: only known baseline. Kimi + GLM: merge-with-nits, no blockers. CHANGELOG corrected re ensemble `class_weight`. Gotchas: SESSION_LOG 2026-09-14 "T-51 PR B0". |
 
 **Open follow-up from Kimi on #68 (LOW):** `search_spaces.apply_extra_axes` never adds
 suggested axes to `already`, so a duplicate `param_name` across two axes (only possible
@@ -19,8 +20,7 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 
 | PR | What | State |
 |---|---|---|
-| **#71** `fix/ci-green` | CI red cause fixed (see SESSION_LOG 2026-09-14 "CI red-cause"): 5 drifted tests + `test_export_code` `sys.executable`; actions → v7; `paths-ignore` docs/md; PR-run concurrency cancel; `timeout-minutes: 180`; black/flake8 informational. | Local targeted tests pass (incl. 7/7 per-model GUI tests). DeepSeek review running; its own CI run is the end-to-end check. **Merge when CI is green + review clean.** |
-| **B0** `fix/T51-b0-plsda-head-params` | T-51 PR B0 (PLS-DA head params lost on rebuild / Tab 7 refit), implemented by an agent per plan §3.2. Shared `models.split_plsda_params`; also fixes ensemble reconstruction. Gotchas in SESSION_LOG 2026-09-14 "T-51 PR B0". | PR opened; full non-GUI suite: only the 5 known baseline failures. Needs review before merge. |
+| **#71** `fix/ci-green` | CI red cause fixed (see SESSION_LOG 2026-09-14 "CI red-cause"): 5 drifted tests + `test_export_code` `sys.executable`; actions → v7; `paths-ignore` docs/md; PR-run concurrency cancel; `timeout-minutes: 180`; black/flake8 informational. | Local targeted tests pass (incl. 7/7 per-model GUI tests). Kimi review running (DeepSeek via opencode hung, see SESSION_LOG); its own CI run is the end-to-end check. **Merge when CI is green + review clean.** |
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
 ### 3. Decisions for the user
@@ -31,12 +31,21 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 ### 4. Queued work
 1. **T-51 PR B:** supervised bundles (§3.1; `min_split_gain` approved for `lgbm_child`),
    then C (one-class), D (GUI), E/F (one-class clamp). Include the #68 `already` fix above.
-2. **Possible second order-leak:** `tests/test_baseline_advanced.py` (~L90-106) clears
+   B0 is merged, so `plsda_head` can go in PR B.
+2. **B0 review follow-ups (all pre-existing, not regressions):**
+   - `class_weight` is not re-applied in ensemble training (`_reconstruct_models_from_results`).
+   - Validation rebuild: Kimi claims `class_weight` is dropped; GLM traced it restored via
+     the rebuild discriminator (`search.py` ~499-513). Verify before acting.
+   - `split_plsda_params` passes `C` through uncoerced; a hand-edited CSV with `'0.05'` would crash.
+   - Tab 7 re-applies stored params over a user's `n_components` edit; decide if that's intended.
+   - `split_plsda_params` is public but not on the `docs/AGENT_COMPOSITION.md` surface.
+   - Dead `except ValueError` around `PLSTransformer.set_params` in ensemble reconstruction (it never raises).
+3. **Possible second order-leak:** `tests/test_baseline_advanced.py` (~L90-106) clears
    and restores all of `sys.modules`; modules first imported inside that block are
    dropped afterwards. Not observed failing; check if order flakes recur.
-3. **`SESSION_LOG.md` is ~975 lines** (limit ~200): archive older entries to
+4. **`SESSION_LOG.md` is ~990 lines** (limit ~200): archive older entries to
    `docs/SESSION_LOG_ARCHIVE.md`.
-4. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
+5. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
    - the unscaled Bayesian importance proxy
    - unscaled NSGA-II display metrics
    - NSGA-II `'SVM'` chromosomes always scoring the 1e10 penalty
