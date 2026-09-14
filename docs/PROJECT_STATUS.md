@@ -20,7 +20,7 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 | PR | What | State |
 |---|---|---|
 | **#71** `fix/ci-green` | CI red cause fixed (see SESSION_LOG 2026-09-14 "CI red-cause"): 5 drifted tests + `test_export_code` `sys.executable`; actions → v7; `paths-ignore` docs/md; PR-run concurrency cancel; `timeout-minutes: 180`; black/flake8 informational. | Local targeted tests pass (incl. 7/7 per-model GUI tests). DeepSeek review running; its own CI run is the end-to-end check. **Merge when CI is green + review clean.** |
-| **B0** `fix/T51-b0-plsda-head-params` | T-51 PR B0 (PLS-DA head params lost on rebuild / Tab 7 refit), implemented by an agent per plan §3.2 | PR being opened by the agent; needs review before merge. |
+| **B0** `fix/T51-b0-plsda-head-params` | T-51 PR B0 (PLS-DA head params lost on rebuild / Tab 7 refit), implemented by an agent per plan §3.2. Shared `models.split_plsda_params`; also fixes ensemble reconstruction. Gotchas in SESSION_LOG 2026-09-14 "T-51 PR B0". | PR opened; full non-GUI suite: only the 5 known baseline failures. Needs review before merge. |
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
 ### 3. Decisions for the user

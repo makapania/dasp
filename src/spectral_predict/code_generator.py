@@ -1296,22 +1296,33 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         return bool(raw)
 
     def _split_pls_da_params(self, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Split params into PLS and LogisticRegression sets for PLS-DA."""
-        pls_params: Dict[str, Any] = {}
+        """Split params into PLS and LogisticRegression sets for PLS-DA.
+
+        Transformer params and the head's C/solver/max_iter come from the shared
+        ``split_plsda_params`` (T-51 B0), so legacy ``lr_C``/``lr_solver``/
+        ``lr_max_iter`` reach the exported LogisticRegression and canonical ``lr__*``
+        wins when both spellings are present. Other canonical ``lr__*`` keys (e.g.
+        ``lr__random_state``, ``lr__tol``) still pass through to the head, as before;
+        the rendered script filters them against the LogisticRegression signature.
+        """
+        from .models import split_plsda_params
+
+        pls_params, head_params = split_plsda_params(params)
         lr_params: Dict[str, Any] = {}
         for key, value in (params or {}).items():
-            if key.startswith('pls__'):
-                pls_params[key[5:]] = value
-            elif key.startswith('lr__'):
-                lr_params[key[4:]] = value
-            elif key.startswith('scaler__'):
+            if not isinstance(key, str):
                 continue
-            else:
-                # Allow unprefixed PLS params for older configs
-                if key in ('n_components', 'max_iter', 'tol', 'scale'):
-                    pls_params[key] = value
-                else:
-                    lr_params[key] = value
+            if key.startswith('lr__'):
+                lr_params[key[4:]] = value
+            elif (
+                '__' not in key
+                and not key.startswith('lr_')
+                and key not in ('n_components', 'max_iter', 'tol', 'scale')
+                and key not in self._PIPELINE_PARAMS
+            ):
+                # Unknown bare keys went to the head before B0; keep that routing.
+                lr_params[key] = value
+        lr_params.update(head_params)
         return pls_params, lr_params
 
     def _render_pls_da_pipeline(

@@ -422,7 +422,17 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     # falls back to the inflated default n_components from the (potentially stale)
     # LVs column. Other Pipeline wrappers (scaler__, lr__) are still skipped because
     # those sub-estimators are constructed fresh during the wrap, not via set_params.
-    if model_kwargs:
+    #
+    # T-51 B0: PLS-DA rows go through split_plsda_params instead. The generic loop
+    # below dropped canonical lr__C/solver/max_iter (so the head fell back to C=1.0)
+    # and passed legacy lr_C into PLSTransformer.set_params, which setattr's any key
+    # without validation and so left junk head attributes on the transformer.
+    plsda_head_params: dict = {}
+    if task_type == "classification" and model_name == "PLS-DA":
+        from .models import split_plsda_params
+
+        model_kwargs, plsda_head_params = split_plsda_params(model_kwargs)
+    elif model_kwargs:
         normalized = {}
         for key, value in model_kwargs.items():
             if key.startswith("model__"):
@@ -448,21 +458,14 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
         from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
 
-        # Extract LogisticRegression parameters from config (prefixed with lr_)
-        lr_C = model_kwargs.get("lr_C", 1.0)
-        lr_solver = model_kwargs.get("lr_solver", "lbfgs")
-        lr_max_iter = model_kwargs.get("lr_max_iter", 1000)
+        from .models import PLSDA_HEAD_DEFAULTS
 
+        head_kwargs = {**PLSDA_HEAD_DEFAULTS, **plsda_head_params}
         pls_lr_pipeline = Pipeline(
             [
                 ("pls", model),
                 ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
-                (
-                    "lr",
-                    LogisticRegression(
-                        C=lr_C, solver=lr_solver, max_iter=lr_max_iter, random_state=42
-                    ),
-                ),
+                ("lr", LogisticRegression(**head_kwargs, random_state=42)),
             ]
         )
         return pls_lr_pipeline

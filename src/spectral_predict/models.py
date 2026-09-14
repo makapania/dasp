@@ -1,6 +1,10 @@
 """Model definitions and grid search configurations."""
 
+from __future__ import annotations
+
 import logging
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 from sklearn.cross_decomposition import PLSRegression
@@ -97,6 +101,71 @@ class PLSTransformer(BaseEstimator, TransformerMixin):
         if pls is not None:
             return getattr(pls, name)
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}' (model not fitted)")
+
+
+# Hyperparameters of the PLS-DA logistic-regression head that a results row can carry,
+# with the values every search path uses when the row does not set them.
+PLSDA_HEAD_DEFAULTS: dict[str, Any] = {"C": 1.0, "solver": "lbfgs", "max_iter": 1000}
+
+# Pipeline meta-parameters that are never estimator hyperparameters.
+_PIPELINE_META_KEYS = frozenset({"steps", "memory", "verbose", "transform_input"})
+
+
+def split_plsda_params(
+    params: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Split a PLS-DA params dict into transformer and logistic-head parameters.
+
+    PLS-DA results rows store params in two spellings. Rows captured from the fitted
+    ``Pipeline([('pls', ...), ('scaler', ...), ('lr', ...)])`` use the canonical
+    ``pls__*`` / ``lr__*`` names; grid configs and older rows use bare transformer
+    names plus legacy ``lr_C`` / ``lr_solver`` / ``lr_max_iter``. Every consumer that
+    rebuilds a PLS-DA model must call this before any ``set_params()``, so a head key
+    never reaches ``PLSTransformer``.
+
+    Rules:
+        * ``lr__C|solver|max_iter`` (canonical) and ``lr_C|solver|max_iter`` (legacy)
+          become head params; canonical wins when both are present.
+        * ``pls__`` is stripped from transformer keys; a ``pls__`` key wins over the
+          same bare key.
+        * Any other ``lr_``-prefixed key, any other ``__``-qualified key (``scaler__``,
+          ``imbalance__``, other ``lr__`` keys) and Pipeline meta keys are dropped.
+        * Remaining bare keys are transformer params.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Returns:
+        ``(transformer_params, head_params)``. ``head_params`` holds only the keys the
+        row set (a subset of ``C``, ``solver``, ``max_iter``); merge it over
+        :data:`PLSDA_HEAD_DEFAULTS` to build the ``LogisticRegression``.
+    """
+    transformer_params: dict[str, Any] = {}
+    prefixed_transformer: dict[str, Any] = {}
+    legacy_head: dict[str, Any] = {}
+    canonical_head: dict[str, Any] = {}
+
+    for key, value in (params or {}).items():
+        if not isinstance(key, str) or key in _PIPELINE_META_KEYS:
+            continue
+        if key.startswith("lr__"):
+            name = key[4:]
+            if name in PLSDA_HEAD_DEFAULTS:
+                canonical_head[name] = value
+        elif key.startswith("pls__"):
+            prefixed_transformer[key[5:]] = value
+        elif key.startswith("lr_"):
+            name = key[3:]
+            if name in PLSDA_HEAD_DEFAULTS:
+                legacy_head[name] = value
+        elif "__" in key:
+            continue
+        else:
+            transformer_params[key] = value
+
+    transformer_params.update(prefixed_transformer)
+    head_params = {**legacy_head, **canonical_head}
+    return transformer_params, head_params
 
 
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=10, max_iter=500, n_jobs=-1):
@@ -466,7 +535,11 @@ def build_model(model_name, params, task_type='regression'):
 
     elif task_type == "classification":
         if model_name in ["PLS-DA", "PLS"]:
-            return PLSTransformer(scale=False, **params)
+            # Head params (lr_C, lr__C, ...) belong to the LogisticRegression the caller
+            # appends; they must never reach the transformer (T-51 B0).
+            transformer_params, _head_params = split_plsda_params(params)
+            transformer_params.setdefault("scale", False)
+            return PLSTransformer(**transformer_params)
 
         elif model_name == "Ridge":
             from sklearn.linear_model import RidgeClassifier

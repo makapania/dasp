@@ -24629,15 +24629,30 @@ class SpectralPredictApp:
                 # PLS-DA uses PLSTransformer to reduce dimensions, then LogisticRegression to classify
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
-                    from spectral_predict.models import PLSTransformer
+                    from spectral_predict.models import (
+                        PLSDA_HEAD_DEFAULTS,
+                        PLSTransformer,
+                        split_plsda_params,
+                    )
 
-                    # Extract n_components from params (may be stored with different keys)
-                    n_components = params_dict.get('n_components', params_dict.get('pls__n_components', 5))
+                    # T-51 B0: canonical pls__*/lr__* or bare + legacy lr_* keys.
+                    pls_params, head_params = split_plsda_params(params_dict)
+                    n_components = pls_params.pop('n_components', 5)
 
                     pls = PLSTransformer(n_components=n_components, scale=False)
+                    if pls_params:
+                        try:
+                            pls.set_params(**pls_params)
+                        except ValueError as e:
+                            self._log_progress(
+                                f"    [WARN] Could not set PLS-DA transformer params {pls_params}: {e}"
+                            )
                     steps.append(('pls', pls))
                     steps.append(('scaler', StandardScaler()))
-                    steps.append(('lr', LogisticRegression(max_iter=1000, random_state=42)))
+                    steps.append((
+                        'lr',
+                        LogisticRegression(**{**PLSDA_HEAD_DEFAULTS, **head_params}, random_state=42),
+                    ))
                 else:
                     # Generic model building for all other models
                     # Add scaler for models that need it
@@ -38044,7 +38059,7 @@ F1 Score:  {f1:.4f}
     def _run_refined_model_thread(self):
         """Execute the refined model in a background thread."""
         try:
-            from spectral_predict.models import get_model
+            from spectral_predict.models import PLSDA_HEAD_DEFAULTS, get_model, split_plsda_params
             from spectral_predict.preprocess import SavgolDerivative, SNV
             from spectral_predict.cv_utils import build_cv_splitter
             from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
@@ -38753,6 +38768,16 @@ F1 Score:  {f1:.4f}
                     except (ValueError, SyntaxError) as parse_err:
                         print(f"WARNING: Could not parse saved Params '{raw_params}': {parse_err}")
 
+            # T-51 B0: split PLS-DA params once, before any set_params(), so the
+            # logistic head (C, solver, max_iter) reaches _lr_kwargs from either the
+            # canonical lr__* or the legacy lr_* spelling.
+            plsda_transformer_params = {}
+            plsda_head_params = {}
+            if model_name == "PLS-DA" and task_type == "classification":
+                plsda_transformer_params, plsda_head_params = split_plsda_params(
+                    params_from_search
+                )
+
             def _apply_pipeline_params_to_pipe(pipe_obj, params_source):
                 if pipe_obj is None or not params_source:
                     return
@@ -38789,23 +38814,13 @@ F1 Score:  {f1:.4f}
                             print(f"ERROR capturing before params: {e}")
                         print(f"{'='*80}\n")
 
-                    # CRITICAL FIX: Handle PLS-DA prefixed params specially
-                    # PLS-DA params are prefixed (pls__n_components, lr__max_iter) but model is just PLSTransformer
-                    # Strip pls__ prefix and only apply params that PLSTransformer understands
+                    # PLS-DA params come as canonical pls__*/lr__* or as bare transformer
+                    # keys plus legacy lr_C/lr_solver/lr_max_iter. The model here is just
+                    # the PLSTransformer; split_plsda_params keeps every head key off it
+                    # (T-51 B0). Head params feed _lr_kwargs below.
                     pipeline_param_keys = {'steps', 'memory', 'verbose', 'transform_input'}
-                    pipeline_param_prefixes = ('scaler__', 'lr__', 'imbalance__')
                     if model_name == "PLS-DA" and task_type == "classification":
-                        pls_params = {}
-                        for key, val in params_from_search.items():
-                            if key.startswith('pls__'):
-                                # Strip prefix and apply to PLSTransformer
-                                unprefixed = key[5:]  # Remove 'pls__' prefix
-                                pls_params[unprefixed] = val
-                            elif key in pipeline_param_keys or key.startswith(pipeline_param_prefixes):
-                                continue
-                            elif not any(key.startswith(p) for p in ['lr__', 'scaler__']):
-                                # Also apply unprefixed params (fallback for older data)
-                                pls_params[key] = val
+                        pls_params = plsda_transformer_params
                         if pls_params:
                             model.set_params(**pls_params)
                             print(f"DEBUG: Applied PLS-DA params (unprefixed): {pls_params}")
@@ -39466,7 +39481,7 @@ F1 Score:  {f1:.4f}
                 loaded_imbalance_method = None
 
             # Shared LR kwargs for the three PLS-DA tail-construction sites below.
-            _lr_kwargs = {'max_iter': 1000, 'random_state': 42}
+            _lr_kwargs = {**PLSDA_HEAD_DEFAULTS, **plsda_head_params, 'random_state': 42}
             if apply_class_weight_to_lr:
                 _lr_kwargs['class_weight'] = 'balanced'
 

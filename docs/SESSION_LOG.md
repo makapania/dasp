@@ -974,3 +974,29 @@ deprecation needs a numerical A/B before removal. Gotcha: gh pr merge
 the fresh copy registered, so the patch hit a module nobody used. Fix: shared
 `reimport_modules` fixture in `tests/conftest.py` that registers each entry and the
 package attribute with monkeypatch.
+
+### 2026-09-14 — T-51 PR B0: PLS-DA head-param plumbing (branch fix/T51-b0-plsda-head-params)
+
+Shared `models.split_plsda_params(params) -> (transformer_params, head_params)` plus
+`models.PLSDA_HEAD_DEFAULTS` now feed build_model, `_rebuild_model_from_row`, Tab 7
+refit, ensemble reconstruction and the exporter. Gotchas found while verifying the
+plan's hop table on main (plan §3.2 was partly wrong):
+- **`PLSTransformer.set_params` never raises.** It overrides BaseEstimator's and
+  `setattr`s any key, so legacy `lr_C` pushed into it becomes a junk attribute, not a
+  ValueError. Only the constructor (`build_model`) raises TypeError. Tests detect leaks
+  via `vars(pipe.named_steps['pls'])`.
+- **Tab 7 canonical rows were already right.** `_apply_pipeline_params_to_pipe`
+  re-applies every `lr__*` / `pls__*` key found in `pipe.get_params(deep=True)` after
+  the pipeline is built (all three build paths). Only legacy `lr_*` rows lost
+  C/solver/max_iter there. Worth a ticket: that re-apply also clobbers a UI override of
+  `n_components` and applies a stored `lr__class_weight`.
+- **Real grid/Bayesian rows are canonical.** Grid `params` is replaced by the fitted
+  pipeline's full `get_params()` (search.py ~5340), so legacy `lr_*` rows only come from
+  a failed capture or old CSVs. Validation rebuild was the consumer that dropped C for
+  current rows.
+- **Fifth consumer not in the plan:** GUI `_reconstruct_models_from_results` (ensemble
+  training) hard-coded `LogisticRegression(max_iter=1000)` and applied only
+  `n_components`. Fixed with the same helper.
+- Search-time construction (search.py ~4952, unified_bayesian.py ~1724, nsga2,
+  ga_preprocessing) reads legacy `lr_C` from the grid/suggest dict and is correct;
+  untouched.
