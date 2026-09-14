@@ -17,7 +17,6 @@
 """
 from __future__ import annotations
 
-import importlib
 import sqlite3
 import sys
 import time
@@ -57,18 +56,14 @@ def _make_one_class_data(n_samples: int = 30, n_features: int = 50, seed: int = 
 
 
 @pytest.fixture()
-def fresh_run_state(tmp_path, monkeypatch):
+def fresh_run_state(tmp_path, monkeypatch, reimport_modules):
     """Fresh run_state module with a redirected optuna dir."""
     if sys.platform == "win32":
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
-    for mod in list(sys.modules.keys()):
-        if "run_state" in mod or "resource_paths" in mod:
-            sys.modules.pop(mod, None)
-
-    rs = importlib.import_module("spectral_predict.run_state")
+    _, rs = reimport_modules("spectral_predict.resource_paths", "spectral_predict.run_state")
     rs._reset_for_tests()
     yield rs, tmp_path
     rs._reset_for_tests()
