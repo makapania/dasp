@@ -1,7 +1,6 @@
 """T-11 D regression tests for Optuna run-state persistence."""
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import sys
@@ -13,7 +12,7 @@ import pytest
 
 
 @pytest.fixture
-def fresh_state(tmp_path, monkeypatch):
+def fresh_state(tmp_path, monkeypatch, reimport_modules):
     """Fresh run_state module with a tmp user-data dir.
 
     Uses LOCALAPPDATA / XDG_DATA_HOME injection to redirect the optuna sidecar
@@ -25,10 +24,7 @@ def fresh_state(tmp_path, monkeypatch):
     else:
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path))
 
-    sys.modules.pop("spectral_predict.run_state", None)
-    sys.modules.pop("spectral_predict.resource_paths", None)
-    rp = importlib.import_module("spectral_predict.resource_paths")
-    rs = importlib.import_module("spectral_predict.run_state")
+    rp, rs = reimport_modules("spectral_predict.resource_paths", "spectral_predict.run_state")
     rs._reset_for_tests()
 
     yield rs, rp, tmp_path

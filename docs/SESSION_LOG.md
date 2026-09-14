@@ -933,6 +933,48 @@ fingerprint failure still aborts never-mode runs (deliberate); consider_endpoint
 deprecation needs a numerical A/B before removal. Gotcha: gh pr merge
 --match-head-commit rejects short SHAs ("Could not coerce value to GitObjectID").
 
+### 2026-09-14 — CI red-cause investigation (GitHub failure emails)
+
+- **Not timeouts.** Every CI test job ran to completion (~2h is the serial suite:
+  ~3,000 tests, no xdist). CI red = five deterministic failures, all test drift, none
+  product bugs:
+  - `test_cv_strategy::test_classification_metrics_template_has_no_nameerror` execs
+    `get_cross_validation_template()` standalone; since #52 the template calls
+    `_fit_fold` / `EARLY_STOPPING_ROUNDS`, which CodeGenerator always emits first.
+    The template is only used via CodeGenerator.
+  - `test_t19` ×2: one pinned the pre-`_fit_fold` fold-fit string; the other asserted
+    bare substring `"fit_kwargs" not in script`, tripped by the helper's `**_fit_kwargs`
+    and by an unconditional XGBoost comment in the CV block (comment now emitted only
+    with the XGBoost sample-weight block).
+  - `tests/gui/test_multiclass_gui::test_tab9_rejects_multiclass_primary` patched
+    `src.spectral_predict.model_io.load_model` — a *different module object* from the
+    `spectral_predict.model_io` the GUI imports, so the patch never applied. The
+    auxiliary twin passed by accident (a FileNotFoundError also calls showerror).
+  - `tests/gui/test_comprehensive::test_catboost_via_gui`: harness hard-coded CatBoost
+    as `comprehensive`; `model_config.MODEL_TIERS` has it only in `experimental`.
+    Harness now derives the tier from `get_tier_models`.
+- **Local-only** `test_export_code` ×2 failures: tests ran exported scripts with bare
+  `python` (PATH = system Python without sklearn). Use `sys.executable`.
+- **`[skip ci]` is honoured**; the extra runs were PR-branch commits and merge commits.
+- black/flake8 CI steps were never reached while tests failed; tree needs ~212 files
+  reformatted and has ~1.8k flake8 issues.
+- **Gotcha:** `pyproject.toml` sets `pythonpath = ["src"]`, which is prepended ahead
+  of `PYTHONPATH`. Pointing `PYTHONPATH` at another source tree does NOT test that
+  tree — swap the file in the worktree instead.
+- **Gotcha (agents):** opencode read-only mode rejects reads outside the repo root,
+  including scratchpad worktrees and temp files. Tell it to read branch code inline
+  (`git show origin/<branch>:<path>`) and run tests yourself. Git Bash also strips
+  backslashes from Windows paths in prompts — use forward slashes.
+
+### 2026-09-14 — Test-order leak root cause (PR #70)
+
+`test_bayesian_study_lookup.py` binds `run_state` at import and monkeypatches
+`run_state.get_storage_url`; `unified_bayesian` imports `run_state` lazily from
+`sys.modules`. Fixtures that `sys.modules.pop()` + re-import without restoring left
+the fresh copy registered, so the patch hit a module nobody used. Fix: shared
+`reimport_modules` fixture in `tests/conftest.py` that registers each entry and the
+package attribute with monkeypatch.
+
 ### 2026-09-14 — T-51 PR B0: PLS-DA head-param plumbing (branch fix/T51-b0-plsda-head-params)
 
 Shared `models.split_plsda_params(params) -> (transformer_params, head_params)` plus

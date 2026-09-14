@@ -70,6 +70,44 @@ def pytest_configure(config):
 
 
 # =============================================================================
+# Module Re-import Fixture
+# =============================================================================
+
+
+@pytest.fixture
+def reimport_modules(monkeypatch):
+    """Re-import modules fresh for one test, restoring the originals afterwards.
+
+    Popping a module from ``sys.modules`` and re-importing it without restoring
+    leaks the new copy into later tests: a test module that bound the original
+    at import time (``from spectral_predict import run_state``) then patches an
+    object the code under test no longer sees.
+
+    Returns a function ``reimport(*names)`` that returns the fresh modules. Names are
+    imported in the order given, so list dependencies first (``resource_paths`` before
+    ``run_state``): a module imported before its dependency binds the stale copy.
+    """
+    import importlib
+    import sys
+
+    def reimport(*names: str) -> list:
+        for name in names:
+            # setitem records the original entry (or its absence) for teardown.
+            monkeypatch.setitem(sys.modules, name, None)
+            del sys.modules[name]
+            parent_name, _, child = name.rpartition(".")
+            if parent_name:
+                # Import the parent first so its child attribute is always recorded
+                # and restored, even when the package was not yet imported.
+                parent = importlib.import_module(parent_name)
+                monkeypatch.setattr(parent, child, None, raising=False)
+                delattr(parent, child)
+        return [importlib.import_module(name) for name in names]
+
+    return reimport
+
+
+# =============================================================================
 # Path Fixtures
 # =============================================================================
 
