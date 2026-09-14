@@ -1817,6 +1817,7 @@ def _regression_resample(X_vals, y_vals, method_name, params):
             if xgb_sample_weight else ''
         )
         sample_weight_block_cv = (
+            "    # XGBoost class_weight=='balanced' threads sample_weight through fit_kwargs.\n"
             "    fit_kwargs = {}\n"
             "    if IMBALANCE_METHOD == 'class_weight':\n"
             "        fit_kwargs['sample_weight'] = compute_sample_weight('balanced', y_train_fold)\n"
@@ -1863,7 +1864,6 @@ for train_idx, test_idx in cv.split({x_var}, y):
     fold_model = clone(model)
 {sample_weight_block_cv}    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
     # early-stop on the held-out fold; non-boosters fall through to .fit().
-    # XGBoost class_weight=='balanced' threads sample_weight through fit_kwargs.
     _fit_fold(fold_model, X_train_fold, y_train_fold, X_test, y_test, EARLY_STOPPING_ROUNDS{cv_fit_kwargs_spread})
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D

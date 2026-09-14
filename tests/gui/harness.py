@@ -483,20 +483,6 @@ class GUITestHarness:
         models = models or ['PLS']
         preprocessing = preprocessing or ['Raw', 'SNV']
 
-        # Auto-select tier based on requested models if not specified
-        if tier is None:
-            # Models that require higher tiers
-            experimental_only = {'SVR', 'MLP'}
-            comprehensive_models = {'XGBoost', 'CatBoost', 'NeuralBoosted'}
-
-            requested = set(models)
-            if requested & experimental_only:
-                tier = 'experimental'
-            elif requested & comprehensive_models:
-                tier = 'comprehensive'
-            else:
-                tier = 'standard'
-
         if self.app.X is None or self.app.y is None:
             return False
 
@@ -531,6 +517,17 @@ class GUITestHarness:
                 task_type = 'regression'
             else:
                 task_type = 'regression'
+
+        # Auto-select the smallest tier that contains every requested model, read
+        # from model_config so tier membership changes don't silently break tests.
+        if tier is None:
+            from spectral_predict.model_config import get_tier_models
+
+            tier = 'experimental'
+            for candidate in ('standard', 'comprehensive'):
+                if set(models) <= set(get_tier_models(candidate, task_type)):
+                    tier = candidate
+                    break
 
         # Map preprocessing list to format expected by run_search
         # run_search expects preprocessing_methods dict like {'raw': True, 'snv': True, ...}

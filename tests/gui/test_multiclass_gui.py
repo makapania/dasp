@@ -492,7 +492,7 @@ def test_tab9_rejects_multiclass_primary(gui_app):
     app = gui_app
     app.comparison_primary_model = None
     with patch("tkinter.filedialog.askopenfilename", return_value="fake.dasp"), \
-         patch("src.spectral_predict.model_io.load_model",
+         patch("spectral_predict.model_io.load_model",
                return_value=_multiclass_model_dict()), \
          patch("tkinter.messagebox.showerror") as showerror, \
          patch("zipfile.ZipFile", side_effect=Exception("not a zip")):
@@ -509,7 +509,7 @@ def test_tab9_rejects_multiclass_auxiliary(gui_app):
     app = gui_app
     app.comparison_auxiliary_models = []
     with patch("tkinter.filedialog.askopenfilenames", return_value=["fake.dasp"]), \
-         patch("src.spectral_predict.model_io.load_model",
+         patch("spectral_predict.model_io.load_model",
                return_value=_multiclass_model_dict()), \
          patch("tkinter.messagebox.showerror") as showerror, \
          patch("zipfile.ZipFile", side_effect=Exception("not a zip")):
