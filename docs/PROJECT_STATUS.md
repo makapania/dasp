@@ -27,10 +27,15 @@ py -3.14 -m venv .venv314
 .venv314\Scripts\python -m pip install -e . --no-deps
 .venv314\Scripts\python -m pip check          # expect: No broken requirements found.
 
-# 3b. Upgrade jcamp to 1.3.2 (required for JCAMP-DX import). Run this on any
-#     existing .venv314 too.
-.venv314\Scripts\python -m pip install "jcamp==1.3.2"
-.venv314\Scripts\python -m pip show jcamp     # expect Version: 1.3.2
+# 3b. Existing .venv314? Re-apply the lock after every pull. The launchers now do
+#     this automatically when the venv differs from requirements-lock.txt;
+#     this is the manual equivalent. A venv built from the 09-10 lock still has
+#     jcamp 1.2.2, and JCAMP-DX import is broken until it is resynced.
+.venv314\Scripts\python -m pip install -r requirements-lock.txt
+.venv314\Scripts\python -m pip install -e . --no-deps
+.venv314\Scripts\python scripts\check_env_lock.py   # expect: Environment matches ...
+#     (pip check only compares against pyproject floors, so it misses any
+#     drift that still satisfies them. check_env_lock.py compares exact pins.)
 
 # 4. Verify before trusting it
 .venv314\Scripts\python -m pytest -q -p no:randomly --tb=no -rf
@@ -56,8 +61,14 @@ below). But Python crashed with an access violation in the GUI `session_app`
 teardown after the last test, so pytest printed no summary. It did not recur in a
 later `tests/gui` run: 132 passed, 2 baseline failed. The GUI launches and runs an
 analysis. Its first launch exposed a Model Development CV-row `TclError` on the
-default kfold, fixed in `a746d5c`. **Other machines:** pull, then do step 3b
-(jcamp 1.3.2). JCAMP-DX import is broken in any `.venv314` still on 1.2.2. **Still
+default kfold, fixed in `a746d5c`. **Other machines:** pull, then launch with
+`RUN_SPECTRAL_PREDICT.bat` (it resyncs the venv to the lock) or do step 3b by hand.
+JCAMP-DX import is broken in any `.venv314` still on jcamp 1.2.2. **Automatic lock
+sync (branch `fix/auto-sync-venv-to-lockfile`):** the launchers run
+`scripts/check_env_lock.py` and reinstall from the lock on drift, the installer build
+refuses a drifted build venv (`DASP_ALLOW_LOCK_DRIFT=1` overrides), the frozen
+self-test checks `jcamp.readfile`, and `read_jcamp_file` raises an actionable
+`ImportError` on jcamp <1.3. **Still
 untested on 3.14:** importing a JCAMP-DX file through the GUI. The backend round
 trip passed.
 

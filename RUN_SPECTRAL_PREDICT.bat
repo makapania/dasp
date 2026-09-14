@@ -20,16 +20,18 @@ cd /d "%~dp0"
 REM The launcher only repairs packages; creating the environment is install.bat's job
 if not exist ".venv314\Scripts\python.exe" goto :venv_missing
 
-REM Ensure core package and required Omnic dependencies are installed in the venv
-.venv314\Scripts\python.exe -c "import importlib.util, sys; required = ('spectral_predict', 'requests', 'spectrochempy_omnic'); missing = [name for name in required if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
+REM Apply requirements-lock.txt whenever the venv no longer matches it: a pull
+REM that changes a pin must reach existing environments without a manual step.
+.venv314\Scripts\python.exe scripts\check_env_lock.py --quiet
 if errorlevel 1 (
     echo.
-    echo Required packages missing from .venv314. Installing project dependencies...
+    echo Updating .venv314 to match requirements-lock.txt...
     .venv314\Scripts\python.exe -m pip install -q -r requirements-lock.txt
     if errorlevel 1 goto :dependency_install_failed
     .venv314\Scripts\python.exe -m pip install -q -e . --no-deps
     if errorlevel 1 goto :dependency_install_failed
 )
+:launch
 
 REM Launch Python GUI with virtual environment Python
 .venv314\Scripts\python.exe "spectral_predict_gui_optimized.py"
@@ -54,7 +56,10 @@ pause
 exit /b 1
 
 :dependency_install_failed
+REM Offline is the usual cause; an out-of-date venv may still run, so try it.
 echo.
-echo ERROR: Failed to install required dependencies into .venv314
-pause
-exit /b 1
+echo WARNING: Could not update .venv314 from requirements-lock.txt.
+echo Launching anyway. Features whose packages are out of date may fail;
+echo reconnect and run install.bat to finish the update.
+echo.
+goto :launch

@@ -573,7 +573,7 @@ The 1.3.2 wheel exposes **`readfile`** with **no `jcamp_readfile` alias**. Confi
 the installed 1.2.1: `hasattr(jcamp, 'jcamp_readfile')` → `True`,
 `hasattr(jcamp, 'readfile')` → `False`. The API was renamed.
 
-`src/spectral_predict/io.py:3304` currently calls:
+`src/spectral_predict/io.py:3304` called (before `be7963c`):
 
 ```python
 jcamp_data = jcamp.jcamp_readfile(str(path))
@@ -592,6 +592,10 @@ Confirm with `pip show jcamp` (expect 1.3.2). Don't use `jcamp.__version__`,
 which still says `1.2.2` in the 1.3.2 release.
 
 ### Required change
+
+> **Done in `be7963c` (2026-09-12).** Kept as the record of what changed. Existing
+> venvs pick up the new pin automatically: the launchers resync to
+> `requirements-lock.txt` via `scripts/check_env_lock.py`.
 
 1. `pyproject.toml:40` — change the pin to `jcamp>=1.3.2` and remove the now-obsolete
    comment about the broken setup.py.
