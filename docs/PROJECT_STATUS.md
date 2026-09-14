@@ -11,6 +11,7 @@
 | **#70** | Test-order leak fix: `reimport_modules` fixture in `tests/conftest.py` | GLM review: merge-with-nits; nits applied (parent imported first, name-order docstring). |
 | **#71** | CI fix: 5 drifted tests, `test_export_code` `sys.executable`, actions v7, docs `paths-ignore`, PR-run concurrency cancel, `timeout-minutes: 180`, black/flake8 informational. | Kimi: merge-with-nits (SVR GUI test now runs at `comprehensive` tier, noted on PR). Its CI run: **ubuntu + optional-deps green (first time)**; Windows 1 failed / 3194 passed — `test_catboost_via_gui` now reaches CatBoost and hits a real bug (below). |
 | **#73** | CatBoost no longer writes `catboost_info/` into the cwd (failed fits when cwd unwritable — installed app in Program Files; Windows CI). `models.CATBOOST_RUNTIME_PARAMS` at every construction; `strip_runtime_params` at every param capture so row params, fingerprints, study names, T2b pins unchanged. Exported scripts now include `allow_writing_files: False`. | Agent-implemented. 23 new tests (16 fail/error on main). Full non-GUI suite 3113 passed / 0 failed; `test_catboost_via_gui` passes. GLM: merge; Kimi: merge-with-nits. |
+| **#75** | Removed the Linux Xvfb GUI CI job. T-CI-2 closed: no deadlock — `test_xgboost_via_gui` legitimately needs ~60 min (passes on Windows), far beyond that job's 180s per-test timeout. App is Windows-only; Windows job runs `tests/gui`. | GLM 5.3 Flash (write mode, worktree) diagnosed from the timeout stack dump; Claude reviewed. |
 | **#72** | T-51 PR B0: PLS-DA head params (C/solver/max_iter) survive validation rebuild, Tab 7 refit, ensemble training, export, `build_model`. Shared `models.split_plsda_params`. | Agent-implemented. 34 new tests (16 fail on main). Full non-GUI suite: only known baseline. Kimi + GLM: merge-with-nits, no blockers. CHANGELOG corrected re ensemble `class_weight`. Gotchas: SESSION_LOG 2026-09-14 "T-51 PR B0". |
 
 **Open follow-up from Kimi on #68 (LOW):** `search_spaces.apply_extra_axes` never adds
@@ -25,7 +26,7 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
 ### 2b. In progress
-- **T-CI-2 lead:** in #71's run the Linux Xvfb GUI job hit pytest-timeout on `tests/gui/test_comprehensive.py::TestAllModelsViaGUI::test_xgboost_via_gui` (passes on Windows CI and locally). That's the first named candidate for the Linux GUI hang.
+- **T-51 PR B (#74)** open: 11 supervised bundles, agent-implemented; full non-GUI suite 3248 passed / 0 failed. GLM + Kimi reviews running. Agent's questions: should `plsda_head` also apply to model name `PLS` in classification? Tab 7 refit of Bayesian XGBoost rows prints an XGBoost 'params not used' warning (pre-existing, predictions unaffected) — ticket?
 
 ### 3. Decisions for the user
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
