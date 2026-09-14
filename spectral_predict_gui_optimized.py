@@ -15758,25 +15758,21 @@ class SpectralPredictApp:
         self.refine_cv_hint.pack(side='left')
 
         def _on_refine_cv_strategy_changed(*args):
+            # Anchor to the always-packed hint: packing before a hidden sibling raises TclError.
             strategy = self.refine_cv_strategy.get()
+            folds_widgets = [(self.refine_folds_label, 3), (self.refine_folds_spinbox, 8)]
+            repeats_widgets = [(self.refine_repeats_label, 3), (self.refine_repeats_spinbox, 8)]
             if strategy == 'loo':
-                self.refine_folds_label.pack_forget()
-                self.refine_folds_spinbox.pack_forget()
-                self.refine_repeats_label.pack_forget()
-                self.refine_repeats_spinbox.pack_forget()
-                self.refine_cv_hint.config(text="(one sample held out per iteration)")
+                visible, hint = [], "(one sample held out per iteration)"
             elif strategy == 'repeated_kfold':
-                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
-                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
-                self.refine_repeats_label.pack(side='left', padx=(0, 3), before=self.refine_repeats_spinbox)
-                self.refine_repeats_spinbox.pack(side='left', padx=(0, 8), before=self.refine_cv_hint)
-                self.refine_cv_hint.config(text="(folds x repeats iterations)")
+                visible, hint = folds_widgets + repeats_widgets, "(folds x repeats iterations)"
             else:  # kfold
-                self.refine_folds_label.pack(side='left', padx=(0, 3), before=self.refine_folds_spinbox)
-                self.refine_folds_spinbox.pack(side='left', padx=(0, 8), before=self.refine_repeats_label)
-                self.refine_repeats_label.pack_forget()
-                self.refine_repeats_spinbox.pack_forget()
-                self.refine_cv_hint.config(text="(3-10 folds recommended)")
+                visible, hint = folds_widgets, "(3-10 folds recommended)"
+            for widget, _ in folds_widgets + repeats_widgets:
+                widget.pack_forget()
+            for widget, right_pad in visible:
+                widget.pack(side='left', padx=(0, right_pad), before=self.refine_cv_hint)
+            self.refine_cv_hint.config(text=hint)
 
         self.refine_cv_strategy.trace_add('write', _on_refine_cv_strategy_changed)
         _on_refine_cv_strategy_changed()  # Set initial state

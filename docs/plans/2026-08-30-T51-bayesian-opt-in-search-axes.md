@@ -1,16 +1,8 @@
 # T-51 — Opt-in Bayesian search-space axes
 
-> **STATUS: ticket drafted 2026-08-30, not started. Picking up tomorrow.**
+> **STATUS: ticket committed 2026-08-30 (`9162a6d`), design complete, not started.**
 >
-> **First action next session:** copy this content to
-> `docs/plans/2026-08-30-T51-bayesian-opt-in-search-axes.md` (repo convention
-> `docs/plans/YYYY-MM-DD-T<NN>-<slug>.md`; highest existing is T-50, so T-51), match the
-> structure of `2026-05-01-T41-bayesian-sqlite-auto-calculator.md`, and add a T-51 line
-> to `docs/PROJECT_STATUS.md`. It must live in the repo, not in a local plan file —
-> per CLAUDE.md's Session Protocol, project knowledge is git-tracked so other machines
-> get it on pull.
->
-> No code has been written. Nothing has been committed. Everything below is design.
+> No code has been written. Everything below is design.
 
 **One-line summary:** supervised Bayesian works well; add opt-in knobs for the
 hyperparameters that currently take exactly one value, curated per model family,

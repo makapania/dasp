@@ -6,6 +6,23 @@ Non-obvious discoveries, bug root causes, and failed approaches. Prevents re-dis
 
 Older entries are in [SESSION_LOG_ARCHIVE.md](SESSION_LOG_ARCHIVE.md); batch 5 on 2026-09-12 moved entries before 2026-07-12, following the two-month retention rule.
 
+## 2026-09-13 - FIXED: Model Development CV row raised TclError "isn't packed" on default kfold
+
+`_on_refine_cv_strategy_changed` packed widgets `before=` siblings that the
+previous state had hidden with `pack_forget()`. The tab starts on kfold, which
+hides the Repeats label; any later `refine_cv_strategy.set('kfold')`
+(`_load_default_parameters`, loading a saved model's training config) then packed
+the Folds spinbox before that hidden label and Tk raised. Also broken:
+loo -> repeated_kfold. No user action needed. Tkinter reports callback
+exceptions to stderr and keeps running, so it showed only in the console log
+during a first 3.14 GUI launch. Fix: hide all four widgets, then re-pack the
+visible ones before the always-packed hint label. Tests:
+`tests/gui/test_refine_cv_strategy_widgets.py` (8, fail before / pass after).
+`tests/gui` in `.venv314`: 132 passed, 2 failed (both baseline), no teardown crash
+this time.
+
+---
+
 ## 2026-09-13 - Local .venv314 full suite: baseline-clean, but Python crashes at session teardown
 
 Primary Windows machine, `.venv314` (Python 3.14.7), `main` at `8231feb`,
