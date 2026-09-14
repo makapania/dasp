@@ -926,14 +926,18 @@ class TestPostMergeReviewFixes:
         X, y = make_classification(n_samples=40, n_features=6, n_classes=2, random_state=0)
 
         # Simulate what a generated script does around the template: define X_final,
-        # y, model, np, then run the rendered CV + metrics blocks.
+        # y, model, np and the per-fold fit helper (CodeGenerator always emits it
+        # before the CV block), then run the rendered CV + metrics blocks.
         from sklearn.linear_model import LogisticRegression
+        from spectral_predict.code_generator import CodeGenerator
         script_ns = {
             'np': np,
             'X_final': X,
             'y': y,
             'model': LogisticRegression(max_iter=500),
         }
+        fit_fold_helper = CodeGenerator({'task_type': 'classification'})._render_fit_fold_helper()
+        exec(fit_fold_helper, script_ns)
         exec(cv_block, script_ns)
         exec(metrics_block, script_ns)
         assert 'accuracy' in script_ns

@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import shutil
 import os
+import sys
 from pathlib import Path
 
 from spectral_predict.code_generator import CodeGenerator, ExportOptions
@@ -296,7 +297,7 @@ def test_python_script_execution(sample_model_config, sample_spectral_data, temp
 
     # Execute the script
     result = subprocess.run(
-        ['python', str(script_path)],
+        [sys.executable, str(script_path)],
         capture_output=True,
         text=True,
         timeout=60
@@ -559,7 +560,7 @@ def test_full_workflow_python(sample_model_config, sample_spectral_data, temp_di
 
     # Execute and verify output
     result = subprocess.run(
-        ['python', str(script_path)],
+        [sys.executable, str(script_path)],
         capture_output=True,
         text=True,
         timeout=60
