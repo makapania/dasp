@@ -157,7 +157,8 @@ model = CatBoostRegressor(
     max_depth={max_depth},
     learning_rate={learning_rate},
     random_state={random_state},
-    verbose=0
+    verbose=0,
+    allow_writing_files=False
 )
 ''',
 
@@ -168,7 +169,8 @@ model = CatBoostClassifier(
     max_depth={max_depth},
     learning_rate={learning_rate},
     random_state={random_state},
-    verbose=0
+    verbose=0,
+    allow_writing_files=False
 )
 ''',
 

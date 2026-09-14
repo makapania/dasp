@@ -994,6 +994,8 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                     params_full.pop('num_trees', None)
                 if 'verbose' not in params_full:
                     params_full['verbose'] = 0
+                # Don't write catboost_info/ into the cwd (fails when unwritable).
+                params_full.setdefault('allow_writing_files', False)
             if model_class.startswith('LightGBM'):
                 # LightGBM does not allow both n_estimators and num_iterations
                 if 'n_estimators' in params_full and 'num_iterations' in params_full:

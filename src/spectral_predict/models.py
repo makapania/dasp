@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -29,6 +30,35 @@ from .model_config import get_tier_models, get_hyperparameters
 from .contamination import (
     get_one_class_model, build_one_class_model, get_one_class_model_grids
 )
+
+
+# Construction-time CatBoost kwargs that control side effects, not the fitted model.
+# By default CatBoost writes a ``catboost_info/`` training log into the current working
+# directory on every fit: that fails when the cwd is unwritable (an install under
+# Program Files), races between concurrent fits, and litters the filesystem.
+#
+# These keys are NOT model identity. They must never reach result-row params, fit
+# fingerprints or study hashes; every site that captures params via ``get_params()``
+# passes them through ``strip_runtime_params``.
+CATBOOST_RUNTIME_PARAMS: Mapping[str, Any] = MappingProxyType({"allow_writing_files": False})
+
+
+def with_catboost_runtime_params(params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return a copy of CatBoost constructor kwargs with the runtime-only kwargs filled in.
+
+    Explicit values in ``params`` win, so a params dict that already carries a runtime key
+    never produces a duplicate-keyword ``TypeError``.
+    """
+    return {**CATBOOST_RUNTIME_PARAMS, **(params or {})}
+
+
+def strip_runtime_params(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Drop runtime-only kwargs (bare or Pipeline-prefixed) from a captured params dict."""
+    return {
+        key: value
+        for key, value in params.items()
+        if str(key).rsplit("__", 1)[-1] not in CATBOOST_RUNTIME_PARAMS
+    }
 
 
 class PLSTransformer(BaseEstimator, TransformerMixin):
@@ -301,7 +331,8 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 # 2026-01-15: Added bootstrap_type to control sampling strategy
                 bootstrap_type='Bayesian',  # Bayesian bootstrap (default, works well for regression)
                 random_state=42,
-                verbose=False
+                verbose=False,
+                **CATBOOST_RUNTIME_PARAMS,
             )
 
         else:
@@ -405,7 +436,8 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
                 # 2026-01-15: Added bootstrap_type - Bernoulli often works better for classification
                 bootstrap_type='Bernoulli',  # Bernoulli bootstrap for classification
                 random_state=42,
-                verbose=False
+                verbose=False,
+                **CATBOOST_RUNTIME_PARAMS,
             )
 
         else:
@@ -527,7 +559,7 @@ def build_model(model_name, params, task_type='regression'):
             return CatBoostRegressor(
                 random_state=42,
                 verbose=False,
-                **cb_params
+                **with_catboost_runtime_params(cb_params)
             )
 
         else:
@@ -600,7 +632,7 @@ def build_model(model_name, params, task_type='regression'):
             return CatBoostClassifier(
                 random_state=42,
                 verbose=False,
-                **cb_params
+                **with_catboost_runtime_params(cb_params)
             )
 
         else:
@@ -1419,9 +1451,11 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                 if bootstrap_type == 'Bayesian':
                                                     model_kwargs['bagging_temperature'] = bagging_temp
                                                     params_dict['bagging_temperature'] = bagging_temp
-                                                catboost_configs.append(
-                                                    (CatBoostRegressor(**model_kwargs), params_dict)
+                                                # Runtime kwargs go to the estimator only, never params_dict.
+                                                cb_model = CatBoostRegressor(
+                                                    **with_catboost_runtime_params(model_kwargs)
                                                 )
+                                                catboost_configs.append((cb_model, params_dict))
             grids["CatBoost"] = catboost_configs
 
     elif task_type == "classification":
@@ -1766,9 +1800,11 @@ def get_model_grids(task_type, n_features, max_n_components=10, max_iter=500,
                                                 if bootstrap_type == 'Bayesian':
                                                     model_kwargs['bagging_temperature'] = bagging_temp
                                                     params_dict['bagging_temperature'] = bagging_temp
-                                                catboost_configs.append(
-                                                    (CatBoostClassifier(**model_kwargs), params_dict)
+                                                # Runtime kwargs go to the estimator only, never params_dict.
+                                                cb_model = CatBoostClassifier(
+                                                    **with_catboost_runtime_params(model_kwargs)
                                                 )
+                                                catboost_configs.append((cb_model, params_dict))
             grids["CatBoost"] = catboost_configs
 
     elif task_type == "one_class":

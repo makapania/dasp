@@ -64,7 +64,7 @@ from typing import Dict, List, Optional, Callable, Tuple, Any, Mapping, Sequence
 # Import existing infrastructure
 from spectral_predict.preprocess import SNV, SavgolDerivative, SavgolSmooth
 from spectral_predict.baseline import BaselineALS, BaselineAirPLS, BaselinePolynomial, BaselineRubberBand
-from spectral_predict.models import build_model, get_feature_importances
+from spectral_predict.models import build_model, get_feature_importances, strip_runtime_params
 from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection
@@ -244,7 +244,8 @@ def _supports_early_stopping(model_name: str) -> bool:
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
     """Return model params that can round-trip through str() and ast.literal_eval()."""
     try:
-        all_params = model.get_params()
+        # Runtime-only kwargs (CatBoost allow_writing_files) are not model identity.
+        all_params = strip_runtime_params(model.get_params())
     except Exception:
         return None
 
