@@ -681,6 +681,166 @@ def test_optuna_name_alias_colliding_with_base_is_rejected() -> None:
         resolve_bundles("PLS", "regression", ("s",), shadow, base_param_names=base)
 
 
+def _reserved(model: str, task: str) -> frozenset[str]:
+    if task == "one_class":
+        sampler = lambda t: ub.suggest_one_class_params(t, model)  # noqa: E731
+    else:
+        sampler = lambda t: ub.suggest_model_params(t, model, 500, task)  # noqa: E731
+    return discover_suggested_names(sampler) | ss.discover_derived_keys(sampler)
+
+
+def _bundle(bid: str, family: str, task: str, *axes: AxisSpec, **constants: Any) -> BundleSpec:
+    return BundleSpec(id=bid, families=frozenset({family}), task_types=frozenset({task}),
+                      axes=axes, constants=constants)
+
+
+def test_derived_keys_are_reserved_but_pinned_constants_are_not() -> None:
+    mlp = _reserved("MLP", "regression")
+    assert "hidden_layer_sizes" in mlp  # derived from hidden_size and n_layers
+    assert "max_iter" not in mlp  # genuinely pinned
+    svm = _reserved("SVM", "classification")
+    assert "gamma" not in svm  # 'scale' whenever present: a pinned constant
+    lgbm = _reserved("LightGBM", "regression")
+    assert {"num_leaves", "max_depth"} <= lgbm
+    assert not {"reg_alpha", "subsample", "min_child_samples"} & lgbm
+
+
+@pytest.mark.parametrize("as_constant", [False, True], ids=["axis", "constant"])
+def test_derived_key_override_rejected(as_constant) -> None:
+    if as_constant:
+        bundle = _bundle("d", "MLP", "regression",
+                         AxisSpec(key="activation", kind="categorical", choices=("relu",)),
+                         hidden_layer_sizes=5)
+    else:
+        bundle = _bundle("d", "MLP", "regression",
+                         AxisSpec(key="hidden_layer_sizes", kind="int", low=2, high=9,
+                                  param_name="hls_alias"))
+    with pytest.raises(ExtraAxesConfigError, match="derives"):
+        resolve_bundles("MLP", "regression", ("d",), {"d": bundle},
+                        base_param_names=_reserved("MLP", "regression"))
+
+
+def test_derived_key_override_rejected_via_entry_point(sqlite_storage) -> None:
+    """run_unified_bayesian must feed derived keys into pre-flight, not only names."""
+    bundle = _bundle("derived_override", "MLP", "regression",
+                     AxisSpec(key="hidden_layer_sizes", kind="int", low=2, high=9,
+                              param_name="hls_alias"))
+    with pytest.raises(ExtraAxesConfigError, match="derives"):
+        _run("MLP", "regression", n_trials=1, enable_sqlite_persistence="always",
+             enabled_extra_axes=("derived_override",),
+             search_space={"derived_override": bundle})
+    assert not sqlite_storage.exists()
+
+
+PLANNED_BUNDLES = [
+    ("RandomForest", "regression", _bundle("rf_features", "RandomForest", "regression",
+        AxisSpec(key="max_features", kind="categorical", choices=("sqrt", "log2", 0.1, 0.3, 0.5, 1.0)))),
+    ("XGBoost", "regression", _bundle("xgb_regularization", "XGBoost", "regression",
+        AxisSpec(key="reg_alpha", kind="float", low=1e-4, high=10.0, log=True),
+        AxisSpec(key="reg_lambda", kind="float", low=1e-3, high=100.0, log=True))),
+    ("XGBoost", "regression", _bundle("xgb_child", "XGBoost", "regression",
+        AxisSpec(key="min_child_weight", kind="float", low=0.5, high=20.0, log=True),
+        AxisSpec(key="gamma", kind="float", low=1e-4, high=5.0, log=True))),
+    ("XGBoost", "regression", _bundle("xgb_sampling", "XGBoost", "regression",
+        AxisSpec(key="colsample_bytree", kind="float", low=0.3, high=1.0),
+        AxisSpec(key="colsample_bylevel", kind="float", low=0.3, high=1.0))),
+    ("LightGBM", "regression", _bundle("lgbm_sampling", "LightGBM", "regression",
+        AxisSpec(key="subsample", kind="float", low=0.5, high=1.0),
+        AxisSpec(key="colsample_bytree", kind="float", low=0.3, high=1.0))),
+    ("LightGBM", "regression", _bundle("lgbm_child", "LightGBM", "regression",
+        AxisSpec(key="min_child_samples", kind="int", low=2, high=50),
+        AxisSpec(key="min_split_gain", kind="float", low=1e-4, high=1.0, log=True))),
+    ("CatBoost", "classification", _bundle("catboost_sampling", "CatBoost", "classification",
+        AxisSpec(key="subsample", kind="float", low=0.5, high=1.0),
+        AxisSpec(key="rsm", kind="float", low=0.1, high=1.0), bootstrap_type="Bernoulli")),
+    ("SVM", "classification", _bundle("svm_gamma", "SVM", "classification",
+        AxisSpec(key="gamma", kind="float", low=1e-5, high=10.0, log=True,
+                 applies_when_id="kernel_is_rbf"))),
+    ("MLP", "regression", _bundle("mlp_activation", "MLP", "regression",
+        AxisSpec(key="activation", kind="categorical", choices=("relu", "tanh", "logistic")))),
+    ("PLS-DA", "classification", _bundle("plsda_head", "PLS-DA", "classification",
+        AxisSpec(key="lr_C", kind="float", low=1e-3, high=1e3, log=True))),
+    ("IsolationForest", "one_class", _bundle("if_max_samples", "IsolationForest", "one_class",
+        AxisSpec(key="max_samples", kind="categorical", choices=("auto", 0.5, 0.8, 1.0)))),
+    ("LOF", "one_class", _bundle("lof_metric", "LOF", "one_class",
+        AxisSpec(key="metric", kind="categorical", choices=("euclidean", "manhattan", "cosine")))),
+    ("OneClassSVM", "one_class", _bundle("ocsvm_poly", "OneClassSVM", "one_class",
+        AxisSpec(key="degree", kind="int", low=2, high=3, applies_when_id="oc_kernel_is_poly"),
+        AxisSpec(key="coef0", kind="float", low=-1.0, high=1.0,
+                 applies_when_id="oc_kernel_poly_or_sigmoid"))),
+]
+
+
+@pytest.mark.parametrize(("model", "task", "bundle"), PLANNED_BUNDLES,
+                         ids=[b.id for _, _, b in PLANNED_BUNDLES])
+def test_planned_bundles_pass_preflight(model, task, bundle) -> None:
+    """Guard for PR B/C: validation must not over-reject the bundles the plan specifies."""
+    resolved = resolve_bundles(model, task, (bundle.id,), {bundle.id: bundle},
+                               base_param_names=_reserved(model, task))
+    assert resolved == (bundle,)
+
+
+@pytest.mark.parametrize(
+    ("low_a", "low_b", "step_a", "step_b"),
+    [(0, 0.0, None, None), (0.0, -0.0, None, None)],
+)
+def test_equivalent_float_bounds_share_identity(low_a, low_b, step_a, step_b) -> None:
+    a = _bundle("e", "PLS", "regression", AxisSpec(key="tol", kind="float", low=low_a, high=1.0))
+    b = _bundle("e", "PLS", "regression", AxisSpec(key="tol", kind="float", low=low_b, high=1.0))
+    assert canonical_space_identity((a,), False) == canonical_space_identity((b,), False)
+
+
+def test_int_step_none_equals_step_one_and_np_str_equals_str() -> None:
+    a = _bundle("e", "PLS", "regression", AxisSpec(key="max_iter", kind="int", low=1, high=9))
+    b = _bundle("e", "PLS", "regression",
+                AxisSpec(key="max_iter", kind="int", low=1, high=9, step=1))
+    assert canonical_space_identity((a,), False) == canonical_space_identity((b,), False)
+    c = _bundle("c", "LOF", "one_class", AxisSpec(key="metric", kind="categorical", choices=("x",)))
+    d = _bundle("c", "LOF", "one_class",
+                AxisSpec(key="metric", kind="categorical", choices=(np.str_("x"),)))
+    assert canonical_space_identity((c,), False) == canonical_space_identity((d,), False)
+
+
+@pytest.mark.parametrize(
+    ("axis", "match"),
+    [({"low": -1e308, "high": 1e308}, "span"),
+     ({"kind": "int", "low": 1, "high": 10**400}, "2\\*\\*53")],
+)
+def test_unrepresentable_bounds_rejected(axis, match) -> None:
+    with pytest.raises(ExtraAxesConfigError, match=match):
+        resolve_bundles("PLS", "regression", ("b",), _one_axis(**axis))
+
+
+def test_string_families_rejected() -> None:
+    bad = BundleSpec(id="s", families="PLS-DA", task_types=frozenset({"classification"}),
+                     axes=PLS_TOL.axes)
+    with pytest.raises(ExtraAxesConfigError, match="set of strings"):
+        resolve_bundles("PLS", "classification", ("s",), {"s": bad})
+
+
+def test_non_string_ids_rejected() -> None:
+    with pytest.raises(ExtraAxesConfigError, match="must be strings"):
+        resolve_bundles("PLS", "regression", ("probe_pls_tol", 3), SPACE)
+
+
+def test_optuna_name_of_one_axis_cannot_be_key_of_another() -> None:
+    writes_k = _bundle("a", "PLS", "regression",
+                       AxisSpec(key="tol", kind="float", low=1e-7, high=1e-5, param_name="tol_n"))
+    names_k = _bundle("b", "PLS", "regression",
+                      AxisSpec(key="max_iter", kind="int", low=400, high=600, param_name="tol"))
+    with pytest.raises(ExtraAxesConfigError, match="writes as a key|suggests as an Optuna"):
+        resolve_bundles("PLS", "regression", ("a", "b"), {"a": writes_k, "b": names_k})
+
+
+def test_runtime_guard_checks_written_keys_too() -> None:
+    alias = _bundle("x", "PLS", "regression",
+                    AxisSpec(key="n_components", kind="int", low=2, high=9, param_name="alt"))
+    trial = _FixedTrial({"alt": 3})
+    trial.params["n_components"] = 5
+    with pytest.raises(ExtraAxesConfigError, match="clashes"):
+        apply_extra_axes(trial, {"n_components": 5}, (alias,))
+
+
 def test_non_string_constant_keys_rejected() -> None:
     bad = {"b": BundleSpec(id="b", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
                            axes=PLS_TOL.axes, constants={1: 2})}

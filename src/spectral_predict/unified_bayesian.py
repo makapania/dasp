@@ -73,6 +73,7 @@ from spectral_predict.search_spaces import (
     ExtraAxesConfigError,
     apply_extra_axes,
     canonical_space_identity,
+    discover_derived_keys,
     discover_suggested_names,
     resolve_bundles,
 )
@@ -2518,7 +2519,9 @@ def run_unified_bayesian(
             task_type,
             enabled_extra_axes,
             search_space,
-            base_param_names=discover_suggested_names(_base_sampler),
+            base_param_names=(
+                discover_suggested_names(_base_sampler) | discover_derived_keys(_base_sampler)
+            ),
         )
         if enabled_extra_axes and not _resolved_extra_axes:
             _msg = (

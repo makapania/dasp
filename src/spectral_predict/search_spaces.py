@@ -9,12 +9,17 @@ Invariants (see ``docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md``
 - ``apply_extra_axes`` with nothing resolved returns ``params`` before doing any work.
 - ``resolve_bundles`` is the single canonicalisation step. Its output feeds both the
   study identity and trial-time application, so the two cannot disagree.
-- A bundle may only open parameters the base sampler does not already suggest. Optuna 5
-  does not fail on a second ``suggest_*`` of the same name: it warns and silently returns
-  the first value, so a colliding bundle would do nothing. Collisions are therefore
+- A bundle may only open parameters the base sampler neither suggests nor derives from
+  a suggestion. Optuna 5 gives no reliable error for a clash: a same-kind duplicate
+  ``suggest_*`` only warns and silently returns the first value (a different-kind
+  duplicate does raise), and overwriting a derived key such as MLP
+  ``hidden_layer_sizes`` is invisible to Optuna altogether. Collisions are therefore
   rejected up front with :class:`ExtraAxesConfigError`, before any storage is touched or
   trial runs.
 - An effective space with no extra axes has no identity, so it never renames a study.
+  Identity is computed from each axis's effective Optuna distribution, so equivalent
+  spellings (``0`` vs ``0.0``, ``step=None`` vs ``step=1``, NumPy vs Python scalars)
+  share a study.
 - Bundle specs hold no callables. Write predicates are referenced by id from
   :data:`PREDICATES`, so a serialised identity fully determines behaviour.
 """
@@ -26,13 +31,17 @@ import itertools
 import json
 import math
 import numbers
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
 SPACE_SCHEMA_VERSION = 1
 
 AxisKind = Literal["int", "float", "categorical"]
+
+# Largest integer bound accepted: TPE samples in float space, so integers beyond 2**53
+# are not exactly representable there.
+_MAX_INT_BOUND = 2**53
 
 # Optuna names the unified objective suggests OUTSIDE the two model samplers. A bundle
 # must not reuse them. tests/test_t51_extra_axes_mechanism.py checks this list against
@@ -130,10 +139,11 @@ BUNDLES: dict[str, BundleSpec] = {}
 
 
 class _RecordingTrial:
-    """Stand-in trial that records suggested names and follows a fixed branch path."""
+    """Stand-in trial: records suggestions, follows a fixed branch path and numeric mode."""
 
-    def __init__(self, categorical_choice: Mapping[str, int]) -> None:
+    def __init__(self, categorical_choice: Mapping[str, int], numeric_high: bool) -> None:
         self._choice = categorical_choice
+        self._high = numeric_high
         self.names: list[str] = []
         self.categoricals: dict[str, int] = {}
         self.params: dict[str, Any] = {}
@@ -144,49 +154,65 @@ class _RecordingTrial:
         return value
 
     def suggest_int(self, name: str, low: int, high: int, **_: Any) -> int:
-        return self._record(name, low)
+        return self._record(name, high if self._high else low)
 
     def suggest_float(self, name: str, low: float, high: float, **_: Any) -> float:
-        return self._record(name, low)
+        return self._record(name, high if self._high else low)
 
     def suggest_categorical(self, name: str, choices: Sequence[Any]) -> Any:
         self.categoricals[name] = len(choices)
         return self._record(name, choices[self._choice.get(name, 0)])
 
 
+def _explore(
+    sampler: Callable[[Any], Any], max_paths: int
+) -> Iterator[tuple[_RecordingTrial, Any]]:
+    """Run ``sampler`` on every categorical branch, once at numeric lows and once at highs."""
+    seen: set[tuple[tuple[str, int], ...]] = set()
+    frontier: list[dict[str, int]] = [{}]
+    while frontier:
+        path = frontier.pop()
+        path_key = tuple(sorted(path.items()))
+        if path_key in seen:
+            continue
+        seen.add(path_key)
+        if len(seen) > max_paths:
+            raise ExtraAxesConfigError("base-sampler discovery: branch explosion; raise max_paths")
+        for numeric_high in (False, True):
+            trial = _RecordingTrial(path, numeric_high)
+            output = sampler(trial)
+            yield trial, output
+            for name, n_choices in trial.categoricals.items():
+                if name not in path:
+                    frontier.extend({**path, name: index} for index in range(n_choices))
+
+
 def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512) -> frozenset[str]:
     """Return every Optuna name ``sampler(trial)`` can suggest, across categorical branches.
-
-    Numeric suggestions take their lower bound; every combination of categorical choices
-    that the sampler reveals is explored, so names suggested only on some branches (e.g.
-    LightGBM ``num_leaves``) are found.
 
     Guarantee is categorical branches only: a name suggested only for some *numeric*
     suggested value would be missed. No current base sampler has such a gate; if one is
     added, the runtime guard in :func:`apply_extra_axes` still aborts the run.
     """
     names: set[str] = set()
-    seen: set[tuple[tuple[str, int], ...]] = set()
-    frontier: list[dict[str, int]] = [{}]
-    while frontier:
-        path = frontier.pop()
-        key = tuple(sorted(path.items()))
-        if key in seen:
-            continue
-        seen.add(key)
-        if len(seen) > max_paths:
-            raise ExtraAxesConfigError(
-                "discover_suggested_names: branch explosion; raise max_paths"
-            )
-        trial = _RecordingTrial(path)
-        sampler(trial)
+    for trial, _ in _explore(sampler, max_paths):
         names.update(trial.names)
-        for name, n_choices in trial.categoricals.items():
-            if name in path:
-                continue
-            for index in range(n_choices):
-                frontier.append({**path, name: index})
     return frozenset(names)
+
+
+def discover_derived_keys(sampler: Callable[[Any], Any], max_paths: int = 512) -> frozenset[str]:
+    """Return output keys whose value depends on a suggestion (e.g. MLP ``hidden_layer_sizes``).
+
+    A key is derived if its value differs across categorical branches or between numeric
+    lows and highs. Keys that always hold one fixed value (e.g. SVM ``gamma='scale'``,
+    LightGBM ``reg_alpha``) are genuine pinned constants and stay open to bundles.
+    """
+    values: dict[str, set[str]] = {}
+    for _, output in _explore(sampler, max_paths):
+        if isinstance(output, Mapping):
+            for key, value in output.items():
+                values.setdefault(str(key), set()).add(repr(value))
+    return frozenset(key for key, seen in values.items() if len(seen) > 1)
 
 
 def resolve_bundles(
@@ -203,14 +229,16 @@ def resolve_bundles(
         task_type: ``'regression'``, ``'classification'`` or ``'one_class'``.
         enabled_extra_axes: Bundle ids requested by the caller.
         search_space: Replaces :data:`BUNDLES` as the registry when given.
-        base_param_names: Optuna names the base sampler can suggest for this model.
+        base_param_names: Optuna names the base sampler suggests plus model-param keys it
+            derives from them, for this model. Neither may be suggested or written.
 
     Returns:
         Deep-copied applicable bundles, de-duplicated and sorted by id.
 
     Raises:
-        ExtraAxesConfigError: Unknown bundle id, unknown predicate id, or a name
-            collision with the base sampler, the objective, or another bundle.
+        ExtraAxesConfigError: Malformed selection or bundle, unknown bundle or predicate
+            id, or a name/key collision with the base sampler, the objective, or another
+            bundle.
     """
     if isinstance(enabled_extra_axes, str):
         raise ExtraAxesConfigError(
@@ -219,13 +247,21 @@ def resolve_bundles(
         )
     if not enabled_extra_axes and search_space is None:
         return ()
+    ids = list(enabled_extra_axes or ())
+    bad_ids = [bundle_id for bundle_id in ids if not isinstance(bundle_id, str)]
+    if bad_ids:
+        raise ExtraAxesConfigError(f"Bundle ids must be strings, got {bad_ids!r}")
     registry = BUNDLES if search_space is None else search_space
-    requested = sorted(set(enabled_extra_axes or ()))
+    requested = sorted(set(ids))
     unknown = [bundle_id for bundle_id in requested if bundle_id not in registry]
     if unknown:
         raise ExtraAxesConfigError(
             f"Unknown extra-axes bundle id(s) {unknown}. Valid ids: {sorted(registry)}"
         )
+    # Validate every requested bundle, not just those applying to this model, so a
+    # shared multi-model selection fails on the first model, not mid-batch.
+    for bundle_id in requested:
+        _validate_bundle(bundle_id, registry[bundle_id])
     applicable = [
         registry[bundle_id]
         for bundle_id in requested
@@ -233,53 +269,57 @@ def resolve_bundles(
         and task_type in registry[bundle_id].task_types
     ]
     reserved = set(base_param_names) | OBJECTIVE_RESERVED_NAMES
-    claimed_names: dict[str, str] = {}
-    claimed_keys: dict[str, str] = {}
-    for bundle_id in requested:
-        bundle = registry[bundle_id]
-        if bundle.id != bundle_id:
-            raise ExtraAxesConfigError(
-                f"Registry key {bundle_id!r} holds a bundle whose id is {bundle.id!r}"
-            )
-        # Validate every requested bundle, not just those applying to this model, so a
-        # shared multi-model selection fails on the first model, not mid-batch.
-        if not bundle.axes and not bundle.constants:
-            raise ExtraAxesConfigError(f"Bundle {bundle_id!r} has no axes and no constants")
-        for axis in bundle.axes:
-            _validate_axis(bundle_id, axis)
-        for key, value in bundle.constants.items():
-            _require_name(bundle_id, "constant key", key)
-            _require_literal(bundle_id, f"constant {key!r}", value)
+    names: dict[str, str] = {}  # Optuna name -> owner
+    keys: dict[str, str] = {}  # written model-param key -> owner
     for bundle in applicable:
-        if not bundle.id or bundle.id != bundle.id.strip():
-            raise ExtraAxesConfigError(f"Invalid bundle id {bundle.id!r}")
         for axis in bundle.axes:
+            owner = f"{bundle.id}:{axis.key}"
             name = axis.optuna_name
             if axis.key in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} axis writes {axis.key!r}, which the base search "
-                    f"already suggests for {model_name}; an alias Optuna name does not make "
-                    "that additive."
+                    f"already suggests or derives for {model_name}; an alias Optuna name "
+                    "does not make that additive."
                 )
             if name in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} axis {name!r} collides with a parameter the base "
                     f"search already suggests for {model_name}; it cannot be opened additively."
                 )
-            if name in claimed_names:
-                raise ExtraAxesConfigError(
-                    f"Bundles {claimed_names[name]!r} and {bundle.id!r} both suggest {name!r}"
-                )
-            claimed_names[name] = bundle.id
-            _claim_key(claimed_keys, axis.key, bundle.id)
+            _claim(names, name, owner, "both suggest Optuna parameter")
+            _claim(keys, axis.key, owner, "both write model param")
+            _no_cross(names, keys, name, axis.key, owner)
         for key in bundle.constants:
+            owner = f"{bundle.id}:const:{key}"
             if key in reserved:
                 raise ExtraAxesConfigError(
                     f"Bundle {bundle.id!r} constant {key!r} would override a parameter the "
-                    f"search suggests for {model_name}"
+                    f"search suggests or derives for {model_name}"
                 )
-            _claim_key(claimed_keys, key, bundle.id)
+            _claim(keys, key, owner, "both write model param")
+            _no_cross(names, keys, None, key, owner)
     return tuple(copy.deepcopy(bundle) for bundle in applicable)
+
+
+def _claim(claimed: dict[str, str], item: str, owner: str, what: str) -> None:
+    if item in claimed:
+        raise ExtraAxesConfigError(f"{claimed[item]!r} and {owner!r} {what} {item!r}")
+    claimed[item] = owner
+
+
+def _no_cross(
+    names: dict[str, str], keys: dict[str, str], name: str | None, key: str, owner: str
+) -> None:
+    # One axis's Optuna name must not be another axis's (or constant's) written key: the
+    # trial would record one value under that name while the model is fitted with another.
+    if name is not None and keys.get(name, owner) != owner:
+        raise ExtraAxesConfigError(
+            f"{owner!r} suggests Optuna parameter {name!r}, which {keys[name]!r} writes as a key"
+        )
+    if names.get(key, owner) != owner:
+        raise ExtraAxesConfigError(
+            f"{owner!r} writes key {key!r}, which {names[key]!r} suggests as an Optuna parameter"
+        )
 
 
 _LITERAL_TYPES = (bool, int, float, str, type(None))
@@ -303,12 +343,31 @@ def _require_name(bundle_id: str, what: str, value: Any) -> None:
         )
 
 
-def _claim_key(claimed: dict[str, str], key: str, bundle_id: str) -> None:
-    if key in claimed:
+def _require_str_set(bundle_id: str, what: str, value: Any) -> None:
+    # A bare string would substring-match ("PLS" in "PLS-DA").
+    if isinstance(value, (str, bytes)) or not isinstance(value, (set, frozenset, tuple, list)):
         raise ExtraAxesConfigError(
-            f"Bundles {claimed[key]!r} and {bundle_id!r} both write model param {key!r}"
+            f"Bundle {bundle_id!r} {what} must be a set of strings, got {value!r}"
         )
-    claimed[key] = bundle_id
+    for item in value:
+        _require_name(bundle_id, what, item)
+
+
+def _validate_bundle(bundle_id: str, bundle: BundleSpec) -> None:
+    if bundle.id != bundle_id:
+        raise ExtraAxesConfigError(
+            f"Registry key {bundle_id!r} holds a bundle whose id is {bundle.id!r}"
+        )
+    _require_name(bundle_id, "id", bundle.id)
+    _require_str_set(bundle_id, "families", bundle.families)
+    _require_str_set(bundle_id, "task_types", bundle.task_types)
+    if not bundle.axes and not bundle.constants:
+        raise ExtraAxesConfigError(f"Bundle {bundle_id!r} has no axes and no constants")
+    for axis in bundle.axes:
+        _validate_axis(bundle_id, axis)
+    for key, value in bundle.constants.items():
+        _require_name(bundle_id, "constant key", key)
+        _require_literal(bundle_id, f"constant {key!r}", value)
 
 
 def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
@@ -340,10 +399,20 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
     for bound in (axis.low, axis.high):
         if isinstance(bound, bool) or not isinstance(bound, numeric):
             raise ExtraAxesConfigError(f"{where}: {axis.kind} bounds must be {axis.kind}s")
-        if not math.isfinite(bound):
-            raise ExtraAxesConfigError(f"{where}: bounds must be finite, got {bound!r}")
+        if axis.kind == "int":
+            if abs(int(bound)) > _MAX_INT_BOUND:
+                raise ExtraAxesConfigError(f"{where}: int bounds must be within +/-2**53")
+        else:
+            try:
+                finite = math.isfinite(float(bound))
+            except OverflowError:
+                finite = False
+            if not finite:
+                raise ExtraAxesConfigError(f"{where}: bounds must be finite, got {bound!r}")
     if axis.low > axis.high:
         raise ExtraAxesConfigError(f"{where}: low {axis.low!r} > high {axis.high!r}")
+    if axis.kind == "float" and not math.isfinite(float(axis.high) - float(axis.low)):
+        raise ExtraAxesConfigError(f"{where}: bound span overflows a float")
     if axis.log and axis.low <= 0:
         raise ExtraAxesConfigError(f"{where}: log scale requires low > 0")
     if axis.step is not None and (
@@ -359,18 +428,40 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
 def _tagged(value: Any) -> Any:
     """Type-tag a value so ``1``, ``1.0``, ``True`` and ``'1'`` serialise distinctly.
 
-    NumPy scalars are normalised to ``int``/``float`` first, so a bundle built from
-    ``np.int64`` bounds hashes like its plain-Python equivalent.
+    NumPy and other numeric/str subclasses are normalised to ``int``/``float``/``str``
+    first, and ``-0.0`` to ``0.0``, so equivalent values hash alike.
     """
-    if isinstance(value, numbers.Integral) and not isinstance(value, bool):
+    if isinstance(value, str):
+        value = str(value)
+    elif isinstance(value, numbers.Integral) and not isinstance(value, bool):
         value = int(value)
     elif isinstance(value, numbers.Real) and not isinstance(value, bool):
-        value = float(value)
+        value = float(value) + 0.0
     if isinstance(value, (list, tuple)):
         return ["seq", [_tagged(v) for v in value]]
     if isinstance(value, Mapping):
         return ["map", [[str(k), _tagged(value[k])] for k in sorted(value, key=str)]]
-    return [type(value).__name__, value if isinstance(value, (bool, int, float, str)) or value is None else repr(value)]
+    return [type(value).__name__, value if isinstance(value, _LITERAL_TYPES) else repr(value)]
+
+
+def _distribution_payload(axis: AxisSpec) -> dict[str, Any]:
+    """Serialise an axis by its effective Optuna distribution, not its spelling."""
+    if axis.kind == "categorical":
+        return {"kind": "categorical", "choices": _tagged(axis.choices)}
+    if axis.kind == "int":
+        return {
+            "kind": "int",
+            "low": int(axis.low),
+            "high": int(axis.high),
+            "log": axis.log,
+            "step": None if axis.log else int(axis.step or 1),
+        }
+    return {
+        "kind": "float",
+        "low": float(axis.low) + 0.0,
+        "high": float(axis.high) + 0.0,
+        "log": axis.log,
+    }
 
 
 def canonical_space_identity(
@@ -399,12 +490,7 @@ def canonical_space_identity(
                     {
                         "key": axis.key,
                         "optuna_name": axis.optuna_name,
-                        "kind": axis.kind,
-                        "low": _tagged(axis.low),
-                        "high": _tagged(axis.high),
-                        "log": axis.log,
-                        "step": _tagged(axis.step),
-                        "choices": _tagged(axis.choices),
+                        "distribution": _distribution_payload(axis),
                         "applies_when_id": axis.applies_when_id,
                     }
                     for axis in bundle.axes
@@ -421,10 +507,10 @@ def _suggest(trial: Any, axis: AxisSpec) -> Any:
     name = axis.optuna_name
     if axis.kind == "int":
         if axis.log:
-            return trial.suggest_int(name, axis.low, axis.high, log=True)
-        return trial.suggest_int(name, axis.low, axis.high, step=axis.step or 1)
+            return trial.suggest_int(name, int(axis.low), int(axis.high), log=True)
+        return trial.suggest_int(name, int(axis.low), int(axis.high), step=int(axis.step or 1))
     if axis.kind == "float":
-        return trial.suggest_float(name, axis.low, axis.high, log=axis.log)
+        return trial.suggest_float(name, float(axis.low), float(axis.high), log=axis.log)
     if axis.kind == "categorical":
         return trial.suggest_categorical(name, list(axis.choices or ()))
     raise ExtraAxesConfigError(f"Unknown axis kind {axis.kind!r} for {name!r}")
@@ -447,11 +533,17 @@ def apply_extra_axes(
     already = set(trial.params)
     suggested: list[tuple[AxisSpec, Any]] = []
     for axis in itertools.chain.from_iterable(bundle.axes for bundle in resolved):
-        if axis.optuna_name in already:
+        for clash in {axis.optuna_name, axis.key} & already:
             raise ExtraAxesConfigError(
-                f"Extra axis {axis.optuna_name!r} was already suggested in this trial"
+                f"Extra axis {axis.optuna_name!r} (key {axis.key!r}) clashes with "
+                f"{clash!r}, already suggested in this trial"
             )
         suggested.append((axis, _suggest(trial, axis)))
+    for bundle in resolved:
+        for clash in set(bundle.constants) & already:
+            raise ExtraAxesConfigError(
+                f"Bundle {bundle.id!r} constant {clash!r} clashes with a suggested parameter"
+            )
     out = dict(params)
     for axis, value in suggested:
         if axis.applies_when_id is None or PREDICATES[axis.applies_when_id](params):

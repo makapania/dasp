@@ -31,6 +31,20 @@
 >   string selection, non-finite bounds/choices/constants, non-integer steps, alias axes
 >   whose key overwrites a base-suggested param (Codex), and non-integer
 >   `n_startup_trials`.
+> - **Derived keys are reserved too** (Codex round 2). `discover_derived_keys` probes each
+>   base sampler at numeric lows and highs across every categorical branch. Keys whose
+>   value varies (e.g. MLP `hidden_layer_sizes`, LightGBM `num_leaves`) may not be written
+>   by an axis or constant. Keys with one fixed value (SVM `gamma='scale'`, LightGBM
+>   `reg_alpha`) stay open. A test runs every §3.1/§5 bundle through pre-flight against the
+>   real samplers so the checks cannot over-reject PR B/C.
+> - **Identity hashes each axis's effective Optuna distribution**: `0`/`0.0`/`-0.0` are
+>   equal, `step=None` equals `step=1` for non-log ints, and NumPy strings equal Python
+>   strings. One namespace spans Optuna names and written keys, so one axis's name cannot
+>   be another's key. `families`/`task_types` must be sets of strings. Float spans must be
+>   finite, and int bounds must be within ±2**53.
+> - Review round 2 (2026-09-14) on `68fcde1`: Fable **merge**, DeepSeek **ready with nits**,
+>   Codex `gpt-6-astra` **merge after fixes** (derived-key override). All findings are
+>   addressed in the next commit.
 > - Review round (2026-09-14) on `29e2e1e`: Fable says ready to merge (A/B traces
 >   byte-identical to `main` for LightGBM, SVM, LOF and OneClassSVM past startup); Codex
 >   `gpt-6-astra` says merge after fixes (`gpt-5.6-astra` is rejected on a ChatGPT-account
