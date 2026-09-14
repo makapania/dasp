@@ -8,6 +8,7 @@
 |---|---|---|---|
 | **#69** | `fix/T41-auto-resume-data-loss` | **Data-loss fix.** Re-running an `'auto'`-persistence Bayesian analysis on a storage that already held its study **deleted the earlier study** (reproduced on `main`). | Final `9640141`. GLM + DeepSeek, 3 rounds each → merge / ready. Full suite: only the 7 baseline failures. |
 | **#68** | `feat/T51-pr-a-extra-axes` | **T-51 PR A:** opt-in extra Optuna axes mechanism (`search_spaces.py`; `run_unified_bayesian(enabled_extra_axes, search_space, n_startup_trials)`). No bundles yet. The default search is proven byte-identical to `main`. | Code final `60edfe3` (later commits are docs). Fable + Codex `gpt-6-astra` + DeepSeek, 3 rounds each → merge. Full suite: only the 7 baseline failures. |
+| **B0** | `fix/T51-b0-plsda-head-params` | **T-51 PR B0:** PLS-DA logistic head (C/solver/max_iter) now survives validation rebuild, Tab 7 refit, ensemble reconstruction, export and `build_model`, via shared `models.split_plsda_params`. Unblocks the `plsda_head` bundle in PR B. No version bump. Gotchas in SESSION_LOG 2026-09-14. | Opened by agent 2026-09-14; needs review + merge decision. |
 | #63 | `feat/T17-multitarget-regression` | T-17 multi-target regression | Older (last touched 2026-07-08). Not part of this work; ask the user. |
 
 **Suggested order:** #69 first (a data-loss fix, smaller), then #68.
