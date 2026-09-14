@@ -1742,6 +1742,25 @@ Verification: harness `scripts/verify_shared_model_fix.py` run with GUI defaults
      - NSGA-II `'SVM'` chromosomes always score the 1e10 penalty.
      - `MODELS_WITH_FEATURE_IMPORTANCE` lacks `'SVM'`, and it is coupled to subset support.
      - GUI refit double-scales under autoscale.
+6. **T-41 follow-up: 'auto' persistence re-run data loss. FIXED on branch
+   `fix/T41-auto-resume-data-loss`, PR pending review and merge.**
+   - **The bug (reproduced on `main`):** re-running an 'auto' Bayesian analysis on the
+     same storage deleted the earlier run's saved study.
+   - **Exposure:** scripts reusing one storage URL, or a same-config rerun inside one
+     active run. Normal GUI use is protected by per-run SQLite files.
+   - **The fix:**
+     - 'auto' resumes an existing study only when the stored data fingerprint matches.
+     - A failed migration never deletes a study it did not create.
+     - New attr `data_fingerprint` on every study.
+     - `tests/test_t41_auto_rerun_preserves_study.py`: 9 tests, about 2 minutes because
+       trials are deliberately slowed past the 1 s threshold.
+   - **Details:** SESSION_LOG 2026-09-14.
+   - **Merge note:** this branch and PR #68 both edit the study-attrs hoist list in
+     `run_unified_bayesian`, so whichever merges second resolves a small conflict.
+7. **Test-order dependence (pre-existing, not fixed):** `test_bayesian_study_lookup.py`
+   (4 tests) fails after `test_t41_*` or `test_run_state.py` in one process, because
+   their fixtures re-import `run_state`. The full xdist suite hides it. Planned fix:
+   the fixtures restore the original module.
 
 ## Follow-Ups (unclaimed)
 

@@ -52,8 +52,8 @@ def slow_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     return url
 
 
-def _run(n_trials: int, **kwargs: Any) -> optuna.Study:
-    X, y, wl = _data()
+def _run(n_trials: int, data: tuple | None = None, **kwargs: Any) -> optuna.Study:
+    X, y, wl = data if data is not None else _data()
     _, study = ub.run_unified_bayesian(
         X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression",
         n_trials=n_trials, cv_folds=3, random_state=7, verbose=False,
@@ -140,5 +140,71 @@ def test_sqlite_file_exists_parses_urls(tmp_path: Path) -> None:
     url = f"sqlite:///{db.as_posix()}?check_same_thread=False&timeout=30"
     assert not ub._sqlite_file_exists(url)
     db.write_bytes(b"")
+    assert not ub._sqlite_file_exists(url), "zero-byte file: listing studies would write a schema"
+    db.write_bytes(b"x")
     assert ub._sqlite_file_exists(url)
     assert not ub._sqlite_file_exists("postgresql://host/db")
+
+
+def test_rerun_on_different_data_is_not_resumed_and_keeps_first_study(slow_sqlite: str) -> None:
+    """The study name has no data identity; resuming would replay the wrong scores."""
+    first = _run(WARMUP + 1)
+    name = first.study_name
+    assert first.user_attrs[ub.DATA_FINGERPRINT_ATTR]
+    X, y, wl = _data()
+    other = (X, y[::-1].copy(), wl)  # same shapes and config, different targets
+    messages: list[dict] = []
+
+    second = _run(WARMUP + 2, data=other, progress_callback=messages.append)
+
+    decisions = {m.get("t41_decision") for m in messages}
+    assert "auto_existing_study_data_mismatch" in decisions
+    assert "auto_resumed_existing_study" not in decisions
+    assert second.user_attrs[ub.DATA_FINGERPRINT_ATTR] != first.user_attrs[ub.DATA_FINGERPRINT_ATTR]
+    assert name in optuna.study.get_all_study_names(storage=slow_sqlite)
+    assert _completed(slow_sqlite, name) == WARMUP + 1
+
+
+def test_check_then_copy_race_never_deletes(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both existence checks miss; copy_study's DuplicatedStudyError must block deletion."""
+    first = _run(WARMUP + 1)
+    name = first.study_name
+    monkeypatch.setattr(ub, "_study_exists", lambda url, study_name: False)
+    messages: list[dict] = []
+    _run(WARMUP + 2, progress_callback=messages.append)
+    assert any(m.get("t41_decision") == "migration_failed_inmemory" for m in messages)
+    assert _completed(slow_sqlite, name) == WARMUP + 1
+
+
+def test_unanswerable_check_never_authorises_deletion(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failing listing (lock, AV, share) plus a non-duplicate migration error."""
+    first = _run(WARMUP + 1)
+    name = first.study_name
+    monkeypatch.setattr(ub, "_study_exists", lambda url, study_name: None)
+
+    def failing_migration(*args: Any, **kwargs: Any):
+        raise RuntimeError("simulated WAL/permission failure")
+
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", failing_migration)
+    _run(WARMUP + 2)
+    assert _completed(slow_sqlite, name) == WARMUP + 1
+
+
+def test_partial_study_created_by_this_attempt_is_still_cleaned_up(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    created: list[str] = []
+
+    def partial_then_fail(study, storage_url, study_name, *args: Any, **kwargs: Any):
+        optuna.create_study(study_name=study_name, storage=storage_url)
+        created.append(study_name)
+        raise RuntimeError("simulated failure after copy_study wrote the study")
+
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", partial_then_fail)
+    _run(WARMUP + 1)
+    assert created, "setup did not reach migration"
+    assert created[0] not in optuna.study.get_all_study_names(storage=slow_sqlite)

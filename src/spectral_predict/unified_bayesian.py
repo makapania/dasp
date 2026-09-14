@@ -2212,26 +2212,63 @@ def _apply_wal_pragmas(sqlite_url: str) -> bool:
     return True
 
 
-def _sqlite_file_exists(storage_url: str) -> bool:
-    """True if a ``sqlite:///`` storage URL points at an existing file.
+# study.user_attrs key: digest of the exact (X, y, wavelengths) a study was run on.
+# The study name encodes configuration and environment but not the data, so 'auto'
+# resume requires this to match (T-41 follow-up).
+DATA_FINGERPRINT_ATTR = "data_fingerprint"
 
-    Never opens or creates the database, so callers can check before deciding
-    whether touching storage is allowed.
+
+def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> str:
+    """Full-content digest of the arrays a study optimizes on."""
+    import hashlib as _hashlib
+
+    digest = _hashlib.sha256()
+    for array in (X, y, wavelengths):
+        arr = np.asarray(array)
+        digest.update(f"{arr.dtype.str}|{arr.shape}|".encode("utf-8"))
+        if arr.dtype.kind in "OUS":
+            digest.update("\x1f".join(map(repr, arr.ravel().tolist())).encode("utf-8"))
+        else:
+            digest.update(np.ascontiguousarray(arr).tobytes())
+    return digest.hexdigest()[:16]
+
+
+def _sqlite_file_exists(storage_url: str) -> bool:
+    """True if a ``sqlite:///`` storage URL points at an existing, non-empty file.
+
+    Never opens or creates the database. A zero-byte file (a crash before the
+    schema was written) counts as absent, because listing its studies would write
+    the schema.
     """
     prefix = "sqlite:///"
     if not storage_url.startswith(prefix):
         return False
-    path = storage_url[len(prefix):].split("?", 1)[0]
-    return bool(path) and Path(path).is_file()
+    path = Path(storage_url[len(prefix):].split("?", 1)[0])
+    return bool(str(path)) and path.is_file() and path.stat().st_size > 0
 
 
-def _study_exists(storage_url: str, study_name: str) -> bool:
-    """True if ``study_name`` is present in an existing storage. Errors count as absent."""
+def _study_exists(storage_url: str, study_name: str) -> bool | None:
+    """Whether ``study_name`` is in the storage; ``None`` if that cannot be determined.
+
+    Callers must treat ``None`` conservatively: it never authorises a resume, and
+    never authorises a deletion.
+    """
     try:
         return study_name in optuna.study.get_all_study_names(storage=storage_url)
-    except Exception as exc:  # noqa: BLE001 - advisory lookup, never fatal
-        logger.debug("Could not list studies in %s: %s", storage_url, exc)
-        return False
+    except Exception as exc:  # noqa: BLE001 - reported as unknown, never as absent
+        logger.warning("T-41: could not list studies in %s: %s", storage_url, exc)
+        return None
+
+
+def _stored_data_fingerprint(storage_url: str, study_name: str) -> str | None:
+    """The data fingerprint recorded on a stored study, or ``None`` if absent/unreadable."""
+    try:
+        attrs = optuna.load_study(study_name=study_name, storage=storage_url).user_attrs
+    except Exception as exc:  # noqa: BLE001 - unreadable means no resume
+        logger.warning("T-41: could not read %s from %s: %s", study_name, storage_url, exc)
+        return None
+    value = attrs.get(DATA_FINGERPRINT_ATTR)
+    return value if isinstance(value, str) else None
 
 
 def _make_tpe_sampler(random_state: int) -> TPESampler:
@@ -2421,6 +2458,13 @@ def run_unified_bayesian(
                      time. If median > 1.0s the study migrates to SQLite+WAL (overhead
                      ~1.2x). If median <= 1.0s stays in-memory (fast models like PLS are 8x
                      slower with persistence, so the auto-calculator keeps them in-memory).
+                     Resume first: if the active SQLite file already holds this exact study
+                     (same configuration and environment) AND its recorded data fingerprint
+                     matches this (X, y, wavelengths), the run resumes it as 'always' would,
+                     treating ``n_trials`` as a total (a finished study returns without new
+                     trials). A same-named study on different or unrecorded data is left
+                     untouched and not resumed. A failed migration never deletes a study it
+                     did not create.
         - 'always' : SQLite+WAL from trial 0 for every model. Accepts the speed cost in
                      exchange for crash-resume on all models.
         - 'never'  : always in-memory; no SQLite file created. Zero overhead but no
@@ -2719,28 +2763,42 @@ def run_unified_bayesian(
     _persistence_mode = enable_sqlite_persistence  # already validated above
 
     # T-41 follow-up: an 'auto' run whose exact study already exists in the active
-    # SQLite file must resume it, as 'always' would. Before this, 'auto' restarted
-    # in memory and its later migration collided with the existing name, and the
-    # failed-migration cleanup deleted the earlier run's study. The existence check
-    # never creates the file, so a fresh 'auto' run still stays purely in memory.
+    # SQLite file resumes it, as 'always' would. Before this, 'auto' restarted in
+    # memory, its later migration collided with the existing name, and the
+    # failed-migration cleanup deleted the earlier run's study.
+    #
+    # Resume also requires the stored data fingerprint to match: the study name has
+    # no data identity, and resuming a different dataset would replay its cached
+    # scores. The file-existence check never creates the file, so a fresh 'auto'
+    # run still stays purely in memory.
+    _data_fp = _data_fingerprint(X, y, wavelengths)
     if (
         _persistence_mode == "auto"
         and storage_url is not None
         and _sqlite_file_exists(storage_url)
-        and _study_exists(storage_url, study_name)
+        and _study_exists(storage_url, study_name) is True
     ):
-        _msg = (
-            f"Found an existing persisted study for this {model_name} configuration; "
-            "resuming it from SQLite instead of starting over in memory."
-        )
+        if _stored_data_fingerprint(storage_url, study_name) == _data_fp:
+            _msg = (
+                f"Found an existing persisted study for this {model_name} configuration "
+                "and data; resuming it from SQLite instead of starting over in memory."
+            )
+            _decision = "auto_resumed_existing_study"
+            _persistence_mode = "always"
+        else:
+            _msg = (
+                f"A persisted study named for this {model_name} configuration exists but "
+                "was run on different or unrecorded data, so it is NOT resumed. This run "
+                "stays in memory and will not overwrite or delete it."
+            )
+            _decision = "auto_existing_study_data_mismatch"
         logger.info("T-41: %s", _msg)
         if progress_callback is not None:
             progress_callback({
                 "stage": "unified_bayesian",
                 "message": f"[T-41] {_msg}",
-                "t41_decision": "auto_resumed_existing_study",
+                "t41_decision": _decision,
             })
-        _persistence_mode = "always"
 
     # If studies for this same analysis config exist under a DIFFERENT numerical
     # environment, say so. Silently starting from zero after the user chose
@@ -2879,6 +2937,8 @@ def run_unified_bayesian(
         # be explained later without reversing a hash. Set before any trial runs,
         # and carried through optuna.copy_study by the auto-migration path.
         (ENV_FINGERPRINT_ATTR, _environment),
+        # T-41 follow-up: the data this study ran on. 'auto' resumes only on a match.
+        (DATA_FINGERPRINT_ATTR, _data_fp),
     )
     for _key, _val in _hoist_pairs:
         if _key in study.user_attrs:
@@ -2996,11 +3056,13 @@ def run_unified_bayesian(
                     # loop, the outer scope restarts on _study_ref[0] so trials
                     # 11..N land directly in SQLite.
                     # Only a study this attempt creates may be deleted on failure.
-                    # A pre-existing study under the same name (another process,
-                    # or a race with the resume check above) must survive.
-                    _target_preexisted = _sqlite_file_exists(storage_url) and _study_exists(
-                        storage_url, study_name
-                    )
+                    # `_target_absent` is True only when the storage positively
+                    # reported the name missing (or the file does not exist yet);
+                    # an unanswerable check (None) never authorises a deletion.
+                    if _sqlite_file_exists(storage_url):
+                        _target_absent = _study_exists(storage_url, study_name) is False
+                    else:
+                        _target_absent = True
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state,
@@ -3023,10 +3085,16 @@ def run_unified_bayesian(
                             exc,
                         )
                         try:
-                            if _target_preexisted:
+                            # DuplicatedStudyError: copy_study found the name taken
+                            # at copy time and wrote nothing, so the study belongs to
+                            # someone else (closes the check-then-copy race).
+                            if isinstance(exc, optuna.exceptions.DuplicatedStudyError) or (
+                                not _target_absent
+                            ):
                                 logger.warning(
                                     "T-41: not deleting %s after the failed migration: "
-                                    "it existed before this run and holds earlier results.",
+                                    "this attempt did not create it (it may hold earlier "
+                                    "results).",
                                     study_name,
                                 )
                             else:

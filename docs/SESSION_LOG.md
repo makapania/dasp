@@ -33,11 +33,25 @@ configuration sharing one storage URL.
 - **Origin:** it predates T-51. It was surfaced by the T-51 PR A reviews (DeepSeek,
   Codex) and then reproduced.
 
-**Fix direction** (branch `fix/T41-auto-resume-data-loss`):
-- **Safe cleanup:** only delete a study this migration attempt created.
-- **Resume in 'auto':** when the SQLite file already exists and holds this exact
-  `study_name`, resume it as 'always' would. Checking whether the file exists never
-  creates it, so fresh 'auto' runs still stay in memory.
+**Fix** (branch `fix/T41-auto-resume-data-loss`, revised after GLM + DeepSeek review):
+- **Resume in 'auto'** only when the SQLite file exists (checked without opening it;
+  zero-byte files count as absent), holds this exact `study_name`, **and** its stored
+  `data_fingerprint` matches the current (X, y, wavelengths).
+  - The study name encodes configuration and environment but **no data identity**.
+    Without the data gate, a script reusing one storage for two same-shape datasets
+    would resume the wrong study and replay its cached scores (GLM finding).
+  - Every study now records `data_fingerprint`, a full SHA-256 of the arrays. The
+    existing `run_state.fingerprint_dataset` hashes only three values, too weak for
+    this gate.
+  - Older studies have no fingerprint, so they are not resumed. They are left intact.
+- **Never delete after `DuplicatedStudyError`.** `copy_study` raises it before writing
+  anything, so the name belongs to someone else. This closes the check-then-copy race.
+- **An unanswerable existence check never authorises deletion** (DeepSeek HIGH: the
+  first version treated a listing error as "absent" and would have deleted).
+  `_study_exists` returns `None` when unsure.
+- **A partial study created by the failing attempt is still deleted.**
+- **Four guard mutations, all caught:** no duplicate guard, fail-open check, no data
+  gate, no resume.
 
 ## 2026-09-13 - Lockfile changes never reached existing venvs (why jcamp stayed 1.2.2)
 
