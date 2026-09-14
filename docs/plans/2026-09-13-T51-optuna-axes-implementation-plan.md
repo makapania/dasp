@@ -1,7 +1,12 @@
 # T-51 steps 2–5 — Opt-in Optuna search axes: implementation plan
 
-> **STATUS (2026-09-14): revised after review rounds 1 and 2, and after the contamination
-> project's evidence (§10). No code written.** Round 2 (`gpt-6-astra`) found one
+> **STATUS (2026-09-14): PR A implemented on `feat/T51-pr-a-extra-axes`**
+> (`search_spaces.py`, `unified_bayesian.py` wiring, `tests/test_t51_extra_axes_mechanism.py`,
+> baseline fixture captured on `main` @ `2860d17`). B0–F not started. Plan revised after
+> review rounds 1 and 2 and the contamination project's evidence (§10).
+> **PR A deviation:** `apply_extra_axes`/`resolve_bundles` take the base sampler's
+> discovered names as an argument (`discover_suggested_names`), so `search_spaces` does
+> not import `unified_bayesian`. Round 2 (`gpt-6-astra`) found one
 > blocker (B0's version bump) and five other issues, all folded in (§9b).
 >
 > This plan turns the design ticket
