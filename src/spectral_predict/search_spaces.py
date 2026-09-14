@@ -32,7 +32,7 @@ import itertools
 import json
 import math
 import numbers
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -142,8 +142,9 @@ BUNDLES: dict[str, BundleSpec] = {}
 class _RecordingTrial:
     """Stand-in trial: records suggestions, follows a fixed branch path and numeric mode.
 
-    ``numeric_mode`` is ``"low"``, ``"high"``, ``"mid"``, or ``("one", name)``: every
-    numeric suggestion at its low bound except ``name``, which takes its high bound.
+    ``numeric_mode`` is ``("frac", f)`` — every numeric suggestion at fraction ``f`` of its
+    range (geometric for log axes, snapped to the step grid for ints) — or
+    ``("one", name)``: every numeric suggestion at its low bound except ``name`` at high.
     """
 
     def __init__(self, categorical_choice: Mapping[str, int], numeric_mode: Any) -> None:
@@ -160,22 +161,26 @@ class _RecordingTrial:
         self.params[name] = value
         return value
 
-    def _numeric(self, name: str, low: Any, high: Any, integral: bool) -> Any:
+    def _numeric(
+        self, name: str, low: Any, high: Any, integral: bool, step: Any, log: bool
+    ) -> Any:
         self.numeric_names.append(name)
         mode = self._mode
-        if mode == "high" or mode == ("one", name):
-            value = high
-        elif mode == "mid":
-            value = (low + high) // 2 if integral else (low + high) / 2
+        if mode[0] == "one":
+            fraction = 1.0 if mode[1] == name else 0.0
         else:
-            value = low
-        return self._record(name, value)
+            fraction = mode[1]
+        return self._record(name, _probe_value(low, high, fraction, integral, step, log))
 
-    def suggest_int(self, name: str, low: int, high: int, **_: Any) -> int:
-        return self._numeric(name, low, high, integral=True)
+    def suggest_int(
+        self, name: str, low: int, high: int, step: int = 1, log: bool = False, **_: Any
+    ) -> int:
+        return self._numeric(name, low, high, integral=True, step=step, log=log)
 
-    def suggest_float(self, name: str, low: float, high: float, **_: Any) -> float:
-        return self._numeric(name, low, high, integral=False)
+    def suggest_float(
+        self, name: str, low: float, high: float, step: Any = None, log: bool = False, **_: Any
+    ) -> float:
+        return self._numeric(name, low, high, integral=False, step=step, log=log)
 
     def suggest_categorical(self, name: str, choices: Sequence[Any]) -> Any:
         self.categoricals[name] = len(choices)
@@ -185,14 +190,37 @@ class _RecordingTrial:
         return None
 
 
+_PROBE_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+
+def _probe_value(
+    low: Any, high: Any, fraction: float, integral: bool, step: Any, log: bool
+) -> Any:
+    """A valid point at ``fraction`` of a distribution's range, without overflow."""
+    if fraction <= 0.0:
+        return low
+    if fraction >= 1.0:
+        return high
+    if log and low > 0:
+        value = math.exp(math.log(low) + fraction * (math.log(high) - math.log(low)))
+    else:
+        value = low * (1.0 - fraction) + high * fraction
+    value = min(max(value, low), high)
+    if integral:
+        grid = int(step or 1)
+        value = int(low) + int((value - low) // grid) * grid
+        value = min(max(value, int(low)), int(high))
+    return value
+
+
 def _explore(
     sampler: Callable[[Any], Any], max_paths: int
-) -> Iterator[tuple[_RecordingTrial, Any]]:
+) -> Iterator[tuple[tuple[tuple[str, int], ...], _RecordingTrial, Any]]:
     """Run ``sampler`` on every categorical branch in several numeric modes.
 
-    Modes per branch: all numeric suggestions at low, at high, at midpoint, and each
-    numeric suggestion alone at high (so two inputs that cancel at shared endpoints, e.g.
-    ``x - y``, still expose a derived key).
+    Modes per branch: all numeric suggestions at 0, 25, 50, 75 and 100 % of their ranges,
+    plus each numeric suggestion alone at high (so two inputs that cancel at shared
+    endpoints, e.g. ``x - y``, still expose a derived key). Yields the branch path too.
     """
     seen: set[tuple[tuple[str, int], ...]] = set()
     frontier: list[dict[str, int]] = [{}]
@@ -204,14 +232,13 @@ def _explore(
         seen.add(path_key)
         if len(seen) > max_paths:
             raise ExtraAxesConfigError("base-sampler discovery: branch explosion; raise max_paths")
-        low_trial = _RecordingTrial(path, "low")
-        modes: list[Any] = ["high", "mid"]
-        output = sampler(low_trial)
-        yield low_trial, output
+        low_trial = _RecordingTrial(path, ("frac", 0.0))
+        yield path_key, low_trial, sampler(low_trial)
+        modes: list[Any] = [("frac", f) for f in _PROBE_FRACTIONS[1:]]
         modes.extend(("one", name) for name in dict.fromkeys(low_trial.numeric_names))
         for mode in modes:
             trial = _RecordingTrial(path, mode)
-            yield trial, sampler(trial)
+            yield path_key, trial, sampler(trial)
         for name, n_choices in low_trial.categoricals.items():
             if name not in path:
                 frontier.extend({**path, name: index} for index in range(n_choices))
@@ -225,7 +252,7 @@ def discover_suggested_names(sampler: Callable[[Any], Any], max_paths: int = 512
     added, the runtime guard in :func:`apply_extra_axes` still aborts the run.
     """
     names: set[str] = set()
-    for trial, _ in _explore(sampler, max_paths):
+    for _, trial, _ in _explore(sampler, max_paths):
         names.update(trial.names)
     return frozenset(names)
 
@@ -245,11 +272,20 @@ def discover_derived_keys(sampler: Callable[[Any], Any], max_paths: int = 512) -
     ``tests/test_t51_extra_axes_mechanism.py``, so any edit to them must re-audit this.
     """
     values: dict[str, set[str]] = {}
-    for _, output in _explore(sampler, max_paths):
+    presence: dict[tuple[tuple[str, int], ...], list[frozenset[str]]] = {}
+    for path_key, _, output in _explore(sampler, max_paths):
+        keys = frozenset(str(k) for k in output) if isinstance(output, Mapping) else frozenset()
+        presence.setdefault(path_key, []).append(keys)
         if isinstance(output, Mapping):
             for key, value in output.items():
                 values.setdefault(str(key), set()).add(repr(value))
-    return frozenset(key for key, seen in values.items() if len(seen) > 1)
+    derived = {key for key, seen in values.items() if len(seen) > 1}
+    # A key present for some numeric values but not others on the SAME categorical branch
+    # depends on a numeric suggestion, even if only one value was ever observed. Presence
+    # that varies only BETWEEN branches (SVM gamma under rbf) stays open.
+    for runs in presence.values():
+        derived |= frozenset().union(*runs) - frozenset.intersection(*runs)
+    return frozenset(derived)
 
 
 def resolve_bundles(
@@ -282,10 +318,11 @@ def resolve_bundles(
             f"enabled_extra_axes must be a sequence of bundle ids, not the string "
             f"{enabled_extra_axes!r}; wrap it: ({enabled_extra_axes!r},)"
         )
-    if enabled_extra_axes is not None and (
-        isinstance(enabled_extra_axes, (bytes, Mapping))
-        or not isinstance(enabled_extra_axes, Iterable)
+    if enabled_extra_axes is not None and not isinstance(
+        enabled_extra_axes, (list, tuple, set, frozenset)
     ):
+        # Concrete collections only: a generator would be exhausted by the first read,
+        # and run_unified_bayesian reads the selection more than once.
         raise ExtraAxesConfigError(
             f"enabled_extra_axes must be a sequence of bundle ids, got {enabled_extra_axes!r}"
         )

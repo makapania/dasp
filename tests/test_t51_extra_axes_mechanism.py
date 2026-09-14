@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -824,9 +825,27 @@ def test_derived_key_probes_cover_midpoint_and_cancelling_inputs() -> None:
         y = trial.suggest_float("y", 0.0, 1.0)
         return {"x": x, "y": y, "diff": x - y, "fixed": 0.5}
 
+    def present_only_mid_range(trial):
+        x = trial.suggest_int("x", 0, 10)
+        return {"x": x, **({"derived": x} if 3 <= x <= 7 else {})}
+
     assert "flag" in ss.discover_derived_keys(midpoint_only)
     derived = ss.discover_derived_keys(cancelling)
     assert "diff" in derived and "fixed" not in derived
+    assert "derived" in ss.discover_derived_keys(present_only_mid_range)
+
+
+def test_probe_values_stay_on_grid_and_finite() -> None:
+    assert ss._probe_value(50, 500, 0.5, True, 50, False) % 50 == 0
+    assert 50 <= ss._probe_value(50, 500, 0.5, True, 50, False) <= 500
+    assert math.isfinite(ss._probe_value(1e308, 1.1e308, 0.5, False, None, True))
+    assert math.isfinite(ss._probe_value(-1e308, 1e308, 0.25, False, None, False))
+    assert ss._probe_value(1e-4, 100.0, 0.5, False, None, True) == pytest.approx(0.1)
+
+
+def test_generator_selection_rejected() -> None:
+    with pytest.raises(ExtraAxesConfigError, match="sequence of bundle ids"):
+        resolve_bundles("PLS", "regression", (b for b in ("probe_pls_tol",)), SPACE)
 
 
 @pytest.mark.parametrize(
