@@ -1356,6 +1356,23 @@ should always block — they found two crash bugs no test covered.
     mismatched data*, so the call site catches it and stops. The GUI tests stop the
     worker at `start_run` with a `BaseException` sentinel, which the thread's
     `except Exception` handlers don't catch.
+  - **Final review of the mismatch change (Codex block, DeepSeek, GLM):**
+    - *Verification errors counted as a match.* `verify_resume_fingerprint`
+      returned `(True, None)` for a missing or unreadable sidecar. An exception
+      from it also reached the worker's logging-only handler, so the search ran on
+      the old storage. It now raises `ResumeVerificationError` while resuming.
+      The GUI treats any failure as "ask, default keep".
+    - *The 300 s cross-thread wait was wrong.* On timeout the worker acted on
+      "No" while the dialog stayed open, and a late "Yes" was lost. The whole
+      check (`_confirm_resume_before_launch`) moved to the main thread in
+      `_run_analysis`, just before the worker starts, and `_ask_on_main_thread`
+      was removed. The worker only re-checks and stops on failure. Lesson: ask
+      before launching the worker rather than blocking it on the main thread.
+    - `_cancel_search_ui` now also ends the `SearchController`.
+    - *A grid/NSGA run deleted a pending resume.* `mark_complete` acts on the
+      *active* run, and `resume_run` makes the interrupted run active. The worker
+      now calls `_mark_run_state_complete(analysis_run_id)`, and the id is set only
+      when this analysis's `start_run` succeeded.
   - GUI `_RESUME_ISSUE_NOTICES` maps `resume_declined`, `resume_check_failed`,
     `data_mismatch_resume` and `data_unverified_resume` to per-kind wording, with one
     dialog per resumed run.

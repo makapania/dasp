@@ -23991,6 +23991,8 @@ class SpectralPredictApp:
         though no thread was launched.
         """
         self._update_search_buttons('idle')
+        if getattr(self, 'search_controller', None) is not None:
+            self.search_controller.end()
         if hasattr(self, 'running_figure'):
             self.running_figure.stop_animation()
         if hasattr(self, 'progress_status'):
@@ -24235,6 +24237,27 @@ class SpectralPredictApp:
                         )
                         self._cancel_search_ui("Cancelled — LOO not possible for this data")
                         return
+
+        # A pending crash resume is checked against the loaded data here, on
+        # the main thread, so the user's answer is final before the worker
+        # starts. Last of the pre-launch checks, so an earlier cancel cannot
+        # abandon the resume.
+        try:
+            launch = self._confirm_resume_before_launch()
+        except Exception as resume_err:  # never launch on an unchecked resume
+            self._log_progress(f"[RUN] Resume check failed: {resume_err}")
+            messagebox.showerror(
+                "Resume could not be verified",
+                f"The interrupted run could not be checked:\n\n{resume_err}\n\n"
+                "Nothing was run and nothing was deleted.",
+            )
+            launch = False
+        if not launch:
+            self._cancel_search_ui(
+                "Resume kept — load the data of the interrupted run and click "
+                "Run Analysis"
+            )
+            return
 
         # Run in thread (daemon=True so the process can exit cleanly if the
         # user closes the main window while analysis is in flight)
@@ -26052,82 +26075,91 @@ class SpectralPredictApp:
         finally:
             self._pending_validation_indices = None
 
-    def _ask_on_main_thread(self, ask, default, timeout_s=300):
-        """Run a blocking dialog on the Tk main thread from the worker; return its answer.
+    def _confirm_resume_before_launch(self):
+        """Check a pending crash resume against the loaded data. Main thread only.
 
-        Same pattern as the iPLS prompt: schedule via ``root.after`` and wait on
-        a queue. ``default`` is returned if scheduling fails, the dialog raises,
-        or the user does not answer within ``timeout_s``.
+        Called by ``_run_analysis`` just before the worker starts, so the user's
+        answer is final before anything runs (no cross-thread wait, no timeout).
+        Returns True to launch the analysis, False to stay idle. Nothing is ever
+        deleted here:
+
+        - not a Bayesian run, or no resume pending: True;
+        - data matches: True, and the worker resumes;
+        - data differs, or it cannot be verified: ask. The default "No" keeps
+          the resume pending (False). "Yes" abandons it in memory only
+          (``run_state.abandon_resume``) and starts fresh (True).
         """
-        import queue as _queue
-
-        answers: "_queue.Queue" = _queue.Queue()
-
-        def _run():
-            try:
-                answers.put(ask())
-            except Exception:
-                answers.put(default)
-
+        if not (
+            hasattr(self, "optimization_method")
+            and self.optimization_method.get() == "unified"
+        ):
+            return True
         try:
-            self.root.after(0, _run)
-        except Exception:
-            return default
-        try:
-            return answers.get(timeout=timeout_s)
-        except _queue.Empty:
-            return default
+            from spectral_predict.run_state import (
+                abandon_resume,
+                fingerprint_dataset,
+                get_resumed_run,
+                is_resuming,
+                verify_resume_fingerprint,
+            )
+        except ImportError:
+            return True  # without run_state no resume can be pending
+        if not is_resuming():
+            return True
 
-    def _handle_resume_data_mismatch(self, fingerprint, stored_fp):
-        """Ask what to do when the loaded data does not match the resumed run.
-
-        Nothing is deleted either way. Returns True to start a fresh analysis
-        with the current data (resume abandoned in memory only; the next
-        ``start_run`` writes a new sidecar and storage path, and the old SQLite
-        file stays on disk). Returns False to keep the resume pending (the
-        caller stops before the search), so loading the matching data and
-        clicking Run again resumes normally. Called on the worker thread.
-        """
-        from spectral_predict.run_state import abandon_resume, get_resumed_run
-
+        fingerprint = fingerprint_dataset(self.X, self.y)
         meta = get_resumed_run()
-        if stored_fp:
-            detail = (
-                f"Interrupted run data fingerprint: {stored_fp[:8]}…\n"
-                f"Loaded data fingerprint: {fingerprint[:8]}…"
-            )
-        else:
-            detail = (
-                "The resume record on disk now belongs to a different run "
-                "(another dasp window may have started one), so it cannot be "
-                "checked against the loaded data."
-            )
-        started = ""
+        run_desc = ""
         if meta is not None:
-            started = f" (run {meta.run_id}, started {meta.started_iso[:16].replace('T', ' ')})"
-        self._log_progress(
-            "[RUN] Resume paused — the loaded data does not match the "
-            f"interrupted run{started}. current={fingerprint[:8]}..., "
-            f"stored={(stored_fp or '?')[:8]}... The saved run was kept."
-        )
-        body = (
-            "The data loaded now does not match the interrupted run you chose "
-            f"to resume{started}.\n\n{detail}\n\n"
-            "The saved run has been kept; nothing was deleted.\n\n"
+            run_desc = (
+                f" (run {meta.run_id}, started "
+                f"{meta.started_iso[:16].replace('T', ' ')})"
+            )
+        try:
+            matches, stored_fp = verify_resume_fingerprint(fingerprint)
+        except Exception as verify_err:
+            title = "Resume could not be verified"
+            reason = (
+                "The loaded data could not be checked against the interrupted "
+                f"run you chose to resume{run_desc}:\n\n{verify_err}"
+            )
+            self._log_progress(f"[RUN] Resume could not be verified: {verify_err}")
+        else:
+            if matches:
+                return True
+            title = "Loaded data does not match the interrupted run"
+            if stored_fp:
+                detail = (
+                    f"Interrupted run data fingerprint: {stored_fp[:8]}…\n"
+                    f"Loaded data fingerprint: {fingerprint[:8]}…"
+                )
+            else:
+                detail = (
+                    "The resume record on disk now belongs to a different run "
+                    "(another dasp window may have started one), so it cannot "
+                    "be checked against the loaded data."
+                )
+            reason = (
+                "The data loaded now does not match the interrupted run you "
+                f"chose to resume{run_desc}.\n\n{detail}"
+            )
+            self._log_progress(
+                "[RUN] Resume paused — the loaded data does not match the "
+                f"interrupted run{run_desc}. current={fingerprint[:8]}..., "
+                f"stored={(stored_fp or '?')[:8]}... The saved run was kept."
+            )
+
+        start_fresh = messagebox.askyesno(
+            title,
+            f"{reason}\n\n"
+            "Nothing was run and nothing was deleted.\n\n"
             "Start a fresh analysis with the current data instead?\n\n"
             "  • Yes — start fresh now. The saved run will not be resumed; its "
             "file stays on disk.\n"
             "  • No — keep the saved run. Load the data of the interrupted run "
-            "and click Run Analysis again to resume."
-        )
-        start_fresh = self._ask_on_main_thread(
-            lambda: messagebox.askyesno(
-                "Loaded data does not match the interrupted run",
-                body,
-                icon="warning",
-                default="no",
-            ),
-            default=False,
+            "and click Run Analysis again to resume.",
+            icon="warning",
+            default="no",
         )
         if not start_fresh:
             self._log_progress(
@@ -26143,22 +26175,38 @@ class SpectralPredictApp:
         )
         return True
 
-    def _end_analysis_without_search(self, status_text):
-        """Return the UI to idle when the worker stops before any search runs."""
-        def _reset():
-            try:
-                self.progress_status.config(text=status_text)
-            except Exception:
-                pass
-            if hasattr(self, 'running_figure'):
-                try:
-                    self.running_figure.stop_animation()
-                except Exception:
-                    pass
-            self._update_search_buttons('idle')
+    def _mark_run_state_complete(self, analysis_run_id):
+        """Mark the run this analysis registered as complete (removes its sidecar).
 
+        ``analysis_run_id`` is None when the analysis registered no run (grid,
+        NSGA-II, or a failed ``start_run``); then nothing is touched.
+        ``mark_complete`` acts on the *active* run, which during a pending
+        resume is the interrupted Bayesian run, so calling it for any other
+        search would destroy that resume (GLM review of #79).
+        """
+        if analysis_run_id is None:
+            return
         try:
-            self.root.after(0, _reset)
+            from spectral_predict.run_state import mark_complete as _mark_complete
+            _mark_complete()
+        except Exception as _mc_err:
+            # Don't re-raise — the analysis itself completed successfully
+            # and the user shouldn't see a "completion failed" error. But
+            # surface the failure to the progress log: a stale sidecar
+            # would otherwise produce an unexplained "resume previous run?"
+            # dialog on next launch.
+            try:
+                self._log_progress(
+                    f"[RUN] mark_complete failed; sidecar will persist "
+                    f"and next launch may prompt to resume: {_mc_err}"
+                )
+            except Exception:
+                pass  # progress log itself broken — nothing else we can do
+
+    def _end_analysis_without_search(self, reason):
+        """Return the UI to idle when the worker stops before any search runs."""
+        try:
+            self.root.after(0, lambda: self._cancel_search_ui(reason))
         except Exception:
             pass
 
@@ -26196,6 +26244,9 @@ class SpectralPredictApp:
                 hasattr(self, "optimization_method")
                 and self.optimization_method.get() == "unified"
             )
+            # Only the run this analysis started or resumed may be marked
+            # complete; a grid/NSGA run must not remove a pending resume.
+            analysis_run_id = None
             if is_bayesian_run:
                 try:
                     from spectral_predict.run_state import (
@@ -26210,29 +26261,31 @@ class SpectralPredictApp:
                     # matches the run they're resuming. Resuming on
                     # different data would silently pick up Optuna trials
                     # with stale objective values.
+                    #
+                    # The user already answered on the main thread
+                    # (_confirm_resume_before_launch). This re-check only
+                    # guards against the record changing in between. Any
+                    # failure stops here: it must not reach the logging-only
+                    # handler below and resume on unverified data. Nothing
+                    # is deleted.
                     if _is_resuming():
-                        matches, stored_fp = verify_resume_fingerprint(fingerprint)
+                        try:
+                            matches, _stored_fp = verify_resume_fingerprint(fingerprint)
+                        except Exception as verify_err:
+                            self._log_progress(
+                                f"[RUN] Resume could not be verified: {verify_err}"
+                            )
+                            matches = False
                         if not matches:
-                            # User decision (PR #79): never delete the saved
-                            # run on a mismatch. Ask; either keep the resume
-                            # pending (nothing runs) or start fresh on purpose.
-                            # Any failure here must stop, not fall through to
-                            # the outer handler and resume on mismatched data.
-                            try:
-                                start_fresh = self._handle_resume_data_mismatch(
-                                    fingerprint, stored_fp
-                                )
-                            except Exception as mismatch_err:
-                                self._log_progress(
-                                    f"[RUN] Resume check failed: {mismatch_err}"
-                                )
-                                start_fresh = False
-                            if not start_fresh:
-                                self._end_analysis_without_search(
-                                    "Resume kept — load the data of the "
-                                    "interrupted run and click Run Analysis."
-                                )
-                                return
+                            self._log_progress(
+                                "[RUN] The resumed run no longer matches at "
+                                "search start; nothing was run or deleted."
+                            )
+                            self._end_analysis_without_search(
+                                "Resume kept — could not verify the data; "
+                                "click Run Analysis to check again."
+                            )
+                            return
                         else:
                             # Fingerprint matched. Apply pending validation
                             # indices (T-49) before the search starts, so the
@@ -26277,6 +26330,7 @@ class SpectralPredictApp:
                         gui_settings=capture_gui_settings(self),
                         validation_indices=_val_indices,
                     )
+                    analysis_run_id = meta.run_id
                     self._log_progress(f"[RUN] Run id: {meta.run_id}")
                 except ImportError as run_err:
                     # The new run_state / run_logging modules failed to import.
@@ -29674,22 +29728,7 @@ class SpectralPredictApp:
             # the except block below, which deliberately does NOT mark
             # complete — leaving the sidecar lets the user resume from where
             # they left off.
-            try:
-                from spectral_predict.run_state import mark_complete as _mark_complete
-                _mark_complete()
-            except Exception as _mc_err:
-                # Don't re-raise — the analysis itself completed successfully
-                # and the user shouldn't see a "completion failed" error. But
-                # surface the failure to the progress log: a stale sidecar
-                # would otherwise produce an unexplained "resume previous run?"
-                # dialog on next launch.
-                try:
-                    self._log_progress(
-                        f"[RUN] mark_complete failed; sidecar will persist "
-                        f"and next launch may prompt to resume: {_mc_err}"
-                    )
-                except Exception:
-                    pass  # progress log itself broken — nothing else we can do
+            self._mark_run_state_complete(analysis_run_id)
 
             # Analysis complete - status updated
 

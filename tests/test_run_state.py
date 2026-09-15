@@ -241,6 +241,34 @@ def test_verify_fingerprint_passes_when_stored_unknown(fresh_state):
     assert matches is True
 
 
+@pytest.mark.parametrize("sidecar_content", [None, "{not json", "[1, 2]", b"\xff\xfe\x00"])
+def test_verify_fingerprint_raises_when_resume_record_unreadable(fresh_state, sidecar_content):
+    """Codex review of #79: while resuming, a missing/unreadable/invalid sidecar is a
+    verification failure, never a match."""
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="x", dataset_fingerprint="abc", model_names=["m"])
+    Path(meta.storage_path).touch()
+    rs._reset_for_tests()
+    rs.resume_run(meta.run_id)
+    sidecar = rs._sidecar_path()
+    if sidecar_content is None:
+        sidecar.unlink()
+    elif isinstance(sidecar_content, bytes):
+        sidecar.write_bytes(sidecar_content)
+    else:
+        sidecar.write_text(sidecar_content, encoding="utf-8")
+
+    with pytest.raises(rs.ResumeVerificationError):
+        rs.verify_resume_fingerprint("abc")
+
+
+def test_verify_fingerprint_unreadable_sidecar_ignored_when_not_resuming(fresh_state):
+    rs, _, _ = fresh_state
+    rs.start_run(label="x", dataset_fingerprint="abc", model_names=["m"])
+    rs._sidecar_path().write_text("{not json", encoding="utf-8")
+    assert rs.verify_resume_fingerprint("zzz") == (True, None)
+
+
 def test_clear_resume_state_drops_flag_without_deleting_sidecar(fresh_state):
     rs, rp, _ = fresh_state
 

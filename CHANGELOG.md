@@ -66,8 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worded as "resumed, but …". The resume banner no longer promises unconditional reuse.
 - **Behaviour change: data that doesn't match the resumed run no longer deletes it.**
   Clicking Run Analysis on a resumed run with different data used to discard the
-  sidecar *and the SQLite store* and silently start fresh. Now nothing is deleted, and
-  a dialog shows both data fingerprints and offers two choices:
+  sidecar *and the SQLite store* and silently start fresh. Now nothing is deleted. The
+  check runs on the main thread before the analysis starts, so there is no timeout.
+  A resume that cannot be verified is not treated as a match: an unreadable or
+  missing record now raises `run_state.ResumeVerificationError`. A dialog shows both
+  data fingerprints, or why they couldn't be checked, and offers two choices:
   - **No (default):** keep the saved run. Nothing runs, so you can load the matching
     data and click Run again to resume.
   - **Yes:** start a fresh analysis with the current data. Only the in-memory resume
@@ -75,7 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     store and sidecar, and the old SQLite file stays on disk for retention cleanup.
 
   Pending validation indices are kept while the resume is pending and cleared on a
-  fresh start. New `run_state.get_resumed_run()`.
+  fresh start. Keeping the run returns the UI fully to idle and ends the search
+  controller. New `run_state.get_resumed_run()`.
+- **A grid or NSGA-II run no longer removes a pending Bayesian resume.** Every
+  successful analysis called `run_state.mark_complete()`, which deleted the resumed
+  run's sidecar. It is now called only for the run the analysis registered.
 - `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
   (e.g. an embedded NUL) instead of crashing the startup check.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**

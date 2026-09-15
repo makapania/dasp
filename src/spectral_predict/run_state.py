@@ -70,6 +70,10 @@ def _validate_persistence_mode(value: str) -> str:
     return value
 
 
+class ResumeVerificationError(RuntimeError):
+    """The loaded data could not be checked against the run being resumed."""
+
+
 _lock = threading.Lock()
 _active_storage_url: str | None = None
 _active_run_id: str | None = None
@@ -520,24 +524,31 @@ def verify_resume_fingerprint(current_fingerprint: str) -> tuple[bool, str | Non
         - the stored fingerprint is unknown/empty (older sidecars), OR
         - the current and stored fingerprints are identical.
     Otherwise returns (False, stored_fingerprint) and the caller should
-    refuse to proceed — typically by calling `clear_resume_state()` and
-    surfacing an error to the user.
+    refuse to proceed and tell the user.
+
+    Raises:
+        ResumeVerificationError: while resuming, if the sidecar is missing,
+            unreadable or not a JSON object. A resume that cannot be verified
+            must stop the run, never count as a match (Codex review of #79).
     """
     if not _is_resuming:
         return True, None
     if not _active_run_id:
-        return True, None
+        raise ResumeVerificationError("resume is active but has no run id")
 
     sidecar = _sidecar_path()
-    if not sidecar.exists():
-        # Sidecar was deleted between resume_run() and now — treat as
-        # "nothing to verify" since the resume metadata is gone anyway.
-        return True, None
-
     try:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return True, None
+    except FileNotFoundError as exc:
+        raise ResumeVerificationError(
+            f"the resume record {sidecar} no longer exists"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ResumeVerificationError(
+            f"the resume record {sidecar} could not be read: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ResumeVerificationError(f"the resume record {sidecar} is not a JSON object")
 
     # Kimi MAJOR #2: a second app instance could have overwritten the sidecar
     # between resume_run() and now. If the sidecar's run_id no longer
