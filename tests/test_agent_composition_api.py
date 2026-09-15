@@ -38,7 +38,12 @@ PRIMITIVES: dict[str, list[str]] = {
         "read_reference_csv",
         "align_xy",
     ],
-    "preprocess": ["build_preprocessing_pipeline"],
+    "preprocess": [
+        "build_preprocessing_pipeline",
+        "preprocessing_config_from_row",
+        "parse_bool_cell",
+    ],
+    "ga_preprocessing": ["chromosome_from_row", "chromosome_to_steps"],
     "unified_bayesian": ["apply_preprocessing", "run_unified_bayesian"],
     "search_spaces": ["AxisSpec", "BundleSpec", "ExtraAxesConfigError"],
     "variable_selection": [
@@ -55,7 +60,13 @@ PRIMITIVES: dict[str, list[str]] = {
     ],
     "simca": ["MultiClassClassModel"],
     "contamination": ["PCASIMCA"],
-    "models": ["PLSTransformer"],
+    "models": [
+        "PLSTransformer",
+        # rebuilding a model from a results row
+        "parse_row_params",
+        "estimator_params_from_row",
+        "plsda_head_kwargs",
+    ],
     "model_io": ["save_model", "load_model", "predict_with_model"],
     "search": [
         "run_search",

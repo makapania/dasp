@@ -42,6 +42,7 @@ from .preprocess import SNV, SavgolDerivative
 # expanded from 2 genes to 3, with backward-compat decode for legacy
 # 2-gene callers and saved-CSV ga_genes columns).
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
 
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
@@ -220,47 +221,171 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     if preproc_type == 'raw':
         return (name, None)
 
-    def transform(X, pt=preproc_type, w=window):
+    steps = _spectrum_steps(preproc_type, window)
+
+    def transform(X, steps=steps):
         X_out = np.asarray(X, dtype=np.float64)
-
-        if pt == 'snv':
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv1':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'deriv2':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv3':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'deriv4':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'snv_deriv1':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv2':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-
+        for _, step in steps:
+            X_out = clone(step).fit_transform(X_out)
         return X_out
 
     return (name, transform)
+
+
+def _spectrum_steps(preproc_type: str, window: int) -> list:
+    """Per-spectrum sklearn steps for one chromosome preprocessing type.
+
+    Single source for :func:`chromosome_to_transform` (the search / validation closure)
+    and :func:`chromosome_to_steps` (clonable Pipeline steps for model rebuilds).
+    SNV and Savitzky-Golay derivatives are stateless, so applying these steps with
+    ``fit_transform`` per call reproduces the closure exactly.
+    """
+    if preproc_type == 'raw':
+        return []
+    if preproc_type == 'snv':
+        return [('snv', SNV())]
+    deriv = int(preproc_type.replace('snv', '').replace('_', '').replace('deriv', ''))
+    # deriv1/deriv2 use SavgolDerivative's polyorder default; deriv3/4 are pinned.
+    polyorder = {3: 4, 4: 5}.get(deriv)
+    savgol = ('savgol', SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder))
+    if preproc_type.startswith('snv_'):
+        return [('snv', SNV()), savgol]
+    if preproc_type.endswith('_snv'):
+        return [savgol, ('snv', SNV())]
+    return [savgol]
+
+
+def _to_float64(X):
+    """Module-level so the ``FunctionTransformer`` wrapping it pickles and clones."""
+    return np.asarray(X, dtype=np.float64)
+
+
+# Everything malformed input can raise while being parsed or converted. Callers (GUI
+# ensemble rebuild, validation rebuild) recover from ValueError only.
+_MALFORMED_CHROMOSOME_ERRORS = (
+    TypeError, ValueError, OverflowError, RecursionError, MemoryError, IndexError, SyntaxError,
+)
+
+
+def _chromosome_preview(genes) -> str:
+    try:
+        text = repr(genes)
+    except _MALFORMED_CHROMOSOME_ERRORS:
+        text = f"<unprintable {type(genes).__name__}>"
+    return text if len(text) <= 100 else text[:100] + "..."
+
+
+def _checked_genes(genes) -> np.ndarray:
+    """Return ``genes`` as an int array, or raise ValueError if it is not a valid chromosome."""
+    preview = _chromosome_preview(genes)
+    try:
+        arr = np.asarray(genes)
+        if arr.ndim != 1 or len(arr) not in (2, 3):
+            raise ValueError("expected a flat list of 2 or 3 genes")
+        as_int = arr.astype(np.int64)
+        if not np.array_equal(as_int, arr):
+            raise ValueError("genes must be integers")
+    except _MALFORMED_CHROMOSOME_ERRORS as e:
+        raise ValueError(f"Invalid preprocessing chromosome {preview}: {e}") from e
+    if not 0 <= as_int[0] < len(PREPROC_TYPES):
+        raise ValueError(
+            f"Invalid preprocessing chromosome {preview}: preprocessing gene {as_int[0]} "
+            f"is outside 0..{len(PREPROC_TYPES) - 1}"
+        )
+    if not 0 <= as_int[1] < len(WINDOW_SIZES):
+        raise ValueError(
+            f"Invalid preprocessing chromosome {preview}: window gene {as_int[1]} "
+            f"is outside 0..{len(WINDOW_SIZES) - 1}"
+        )
+    return as_int
+
+
+def chromosome_to_steps(genes, *, autoscale: bool = False) -> list:
+    """Return clonable Pipeline steps equivalent to a preprocessing chromosome.
+
+    A ``'float64'`` conversion step comes first, because the search-time transform and
+    the validation rebuild both convert the input to float64 (spectra read as float32,
+    e.g. SPC files, would otherwise give different derivatives). The per-spectrum steps
+    match :func:`chromosome_to_transform`; a ``StandardScaler`` step named
+    ``'autoscale'`` follows when the chromosome's autoscale gene is set or ``autoscale``
+    is true (a row's ``Autoscale`` column), as the validation rebuild applies it.
+
+    Args:
+        genes: ``[preproc_idx, window_idx]`` or ``[preproc_idx, window_idx, autoscale]``.
+        autoscale: Also autoscale when the chromosome itself does not say so.
+
+    Returns:
+        List of ``(name, transformer)`` tuples.
+
+    Raises:
+        ValueError: If ``genes`` is not a valid chromosome (wrong length, non-integer,
+            or an index outside ``PREPROC_TYPES`` / ``WINDOW_SIZES``).
+    """
+    from sklearn.preprocessing import FunctionTransformer
+
+    genes = _checked_genes(genes)
+    steps = [('float64', FunctionTransformer(_to_float64))]
+    steps.extend(_spectrum_steps(PREPROC_TYPES[genes[0]], WINDOW_SIZES[genes[1]]))
+    if autoscale or _decode_autoscale_gene(genes):
+        steps.append(('autoscale', StandardScaler()))
+    return steps
+
+
+def _chromosome_cell(raw):
+    """Parse one chromosome cell; ``None`` when it is missing or an empty sequence.
+
+    Raises:
+        ValueError: If the cell holds text that is not a Python literal.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        if raw.strip() == '':
+            return None
+        import ast
+
+        try:
+            raw = ast.literal_eval(raw)
+        except _MALFORMED_CHROMOSOME_ERRORS as e:
+            raise ValueError(
+                f"Unparseable preprocess_chromosome {_chromosome_preview(raw)}: {e}"
+            ) from e
+    if isinstance(raw, np.ndarray):
+        return None if raw.size == 0 else raw
+    if isinstance(raw, (list, tuple)):
+        return None if len(raw) == 0 else raw
+    try:
+        if bool(pd.isna(raw)):
+            return None
+    except _MALFORMED_CHROMOSOME_ERRORS:
+        pass
+    return raw
+
+
+def chromosome_from_row(row) -> Optional[np.ndarray]:
+    """Return a results row's preprocessing chromosome, or ``None`` if it has none.
+
+    Reads ``preprocess_chromosome``, falling back to the pre-2026-05-06 ``ga_genes``
+    column when ``preprocess_chromosome`` is absent or empty (``None``, ``''``, ``'[]'``,
+    ``[]``, NaN in a mixed results table). Accepts a list, an array or the ``str(list)``
+    a results CSV stores.
+
+    Args:
+        row: A results row as a mapping (``pd.Series``, ``dict``).
+
+    Returns:
+        The genes as an integer array, or ``None`` when the row carries no chromosome.
+
+    Raises:
+        ValueError: For any malformed chromosome (unparseable text, wrong shape,
+            non-integer or out-of-range genes).
+    """
+    genes = _chromosome_cell(row.get('preprocess_chromosome', None))
+    if genes is None:
+        genes = _chromosome_cell(row.get('ga_genes', None))
+    if genes is None:
+        return None
+    return _checked_genes(genes)
 
 
 def get_config_description(genes: np.ndarray) -> str:

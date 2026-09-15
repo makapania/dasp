@@ -1090,7 +1090,121 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
   search-time model, because the unprefixed values are applied as well. It happens with
   or without bundles.
 
-### 2026-09-14 — Post-merge review round (Codex + DeepSeek Flash + GLM 5.3) of #68-#75
+### 2026-09-14 — Post-merge fixes: GUI ensemble reconstruction, CatBoost refit, NameErrors (branch fix/post-merge-gui-ensemble)
+
+- **Two `Params` spellings, three consumers.** Grid rows capture `pipe.named_steps['model']`
+  (bare keys; search.py ~5252); Bayesian rows capture the whole Pipeline (`model__*`,
+  `scaler__*`; unified_bayesian `_capture_serializable_params`); PLS-DA rows are always
+  `pls__*` / `lr__*`. The GUI ensemble reconstruction (`_reconstruct_models_from_results`)
+  *filtered out* `model__*`, so every ensemble base model built from a Bayesian row used
+  defaults. `models.estimator_params_from_row` is now shared with `_rebuild_model_from_row`.
+- **`get_model` clips `n_components` to `max_n_components` (default 10).** The ensemble path
+  passed `n_components` only to `get_model`, so PLS rows with >10 LVs were silently clipped.
+  It is now applied via `set_params` after construction.
+- **Rows record the PLS-DA head seed and weighting** (`lr__random_state`, `lr__class_weight`
+  come from the fitted pipeline's `get_params`). `split_plsda_params` deliberately drops them;
+  use `models.plsda_head_kwargs` to build the head. Grid search always seeds 42
+  (`RANDOM_STATE`); only Bayesian runs with a non-default `random_state` differ.
+- **Ensemble classes refit clones, not the loaded model.** `clone()` of a fitted CatBoost
+  works (via get_params) and `set_params` is legal on the unfitted clone, so the runtime kwarg
+  is applied in `ensemble._clone_for_refit`, which walks `get_params(deep=True)` for nested
+  CatBoost steps.
+- **The GUI module had no `logger`** although four Tab 7 branches call `logger.warning`
+  (flake8 F821). Use `logging.getLogger("spectral_predict.gui")`: `__name__` is `__main__`
+  when run as a script, and `setup_app_logger` attaches its file handler to
+  `spectral_predict` only.
+- **Testing a Tk deferred callback:** monkeypatch `app.root.after` to record the function and
+  call it after the method returns. Tk's real loop would swallow the NameError via
+  `report_callback_exception`, so `root.update()` alone does not fail the test.
+- **Not fixed (questions):** XGBoost classification `sample_weight` is fit-time and not in
+  `Params`, so ensembles don't re-apply it (GUI ensembles are regression-only, so moot
+  today). `models.py` has a pre-existing, unreachable F821 (`return model` at the end of
+  `get_model`).
+
+#### PR #77 review round (Codex block, GLM, DeepSeek)
+
+- **The GUI ensemble rebuild ignored most preprocessing, not just Autoscale.** It matched
+  literal `Preprocess` names only: `snv`/`snv_deriv`/`deriv_snv` built steps, `raw`/`snv`
+  went to a GA wrapper, and **`deriv` (the grid/Bayesian/NSGA-II name for plain
+  derivatives) and every `+`-affixed display name fell through with no preprocessing**.
+  Bayesian and NSGA-II rows also store the *normalised* name (`deriv`, not `deriv1`), so
+  the `NSGA_PREPROCESS_TYPES` numbered list never matched current rows. The validation
+  rebuild's inline row parsing is now `preprocess.preprocessing_config_from_row`, shared by
+  both paths.
+- **Changing wrapper types changes ensemble CV mode.** `_is_wrapped_model` keys on the
+  class name; any wrapped base model switches `create_ensemble(refit_base_models=False)`
+  for the whole ensemble. `raw`/`snv` rows are now plain Pipelines, so ensembles of them
+  refit per fold (the default). Subsets use `FunctionTransformer(np.take, indices, axis=1)`
+  after the preprocessing steps: clonable and picklable, positional like the validation
+  path.
+- **The validation rebuild read `smoothing` as `bool(cell)` before its float check**, so a
+  NaN cell (mixed grid + NSGA-II table) meant smoothing ON. The shared helper treats NaN
+  as off.
+- **GUI wrappers' `get_params(deep=True)` is shallow**, so walking `get_params(deep=True)`
+  misses estimators inside them. `ensemble._iter_nested_estimators` walks shallow params,
+  `__dict__`, and list/tuple/dict containers, with an id() visited set.
+- **Test recipe for Bayesian preprocessing parity:** `unified_bayesian.apply_preprocessing`
+  steps are per-spectrum (stateless) except autoscale, so preprocess train+test together
+  with `apply_autoscale=False`, then fit a `StandardScaler` on the train rows.
+- Legacy `sg1`/`sg2`, `deriv1`-style and GA names keep the old wrapper path.
+
+#### PR #77 review round 3 (Codex block on ae15e64, GLM)
+
+- **Exhaustive-search rows have an unbuildable `PreprocessBase`** (`snv_deriv1_w11`, the
+  chromosome name). Preferring `PreprocessBase` made `build_preprocessing_pipeline` raise,
+  and the GUI's per-row `except` silently dropped the model from the ensemble. The rebuild
+  must check `preprocess_chromosome` first, as validation does. The search-time closure
+  (`chromosome_to_transform`) is not clonable. `ga_preprocessing._spectrum_steps` now feeds
+  both the closure and `chromosome_to_steps` (Pipeline steps), verified bit-identical over
+  all 14 types x 17 windows x {2,3}-gene chromosomes, including identical ValueErrors for
+  illegal window/polyorder pairs.
+- **The GUI rebuild's per-row `except` turns any rebuild error into a silently shorter
+  ensemble.** Regressions there show up only as "Failed to reconstruct" in the progress
+  log, so tests must assert that one model came back.
+- **Missing `Window` on a derivative row:** on main the validation rebuild passed
+  `window=None` to `SavgolDerivative` and failed in `transform` (`None % 2`), while the old
+  GUI defaulted deriv=1/window=15. The shared helper now applies 1/15 for derivative names.
+- **GLM's round-1 claim was wrong: NSGA-II writes `str(dict)` Params** (`decode_solution`,
+  nsga2_search.py ~2453), so NSGA-II rows never rebuilt with defaults. Dict cells are real
+  only for in-memory result rows (scoring.py ~308). `parse_row_params` keeps dict support
+  as defence; the docs no longer claim NSGA-II writes dicts. Verify reviewer claims about
+  row shapes against the writer before building on them.
+- `smoothing` string cells: `bool('False')` is True; parse strings like `Autoscale`.
+- `chromosome_from_row` keeps validation's `ga_genes` fallback (pre-rename CSVs). The GUI
+  Refine tab uses `ga_genes` for GA-PLS wavelength indices, so such a column in a results
+  table would be decoded as a preprocessing chromosome by both paths (pre-existing risk).
+
+#### PR #77 review round 4 (Codex block on c60ff80, DeepSeek, GLM)
+
+- **dtype is part of preprocessing parity.** `chromosome_to_transform` and the validation
+  rebuild both `np.asarray(X, dtype=np.float64)` before SNV/Savitzky-Golay. The SPC reader
+  returns float32, and float32 counts around 1e6 give derivatives that differ enough to
+  move RMSEP (0.941 -> 0.949 in Codex's repro). Pipeline steps rebuilt from a chromosome
+  now start with `FunctionTransformer(_to_float64)`, a module-level function so it pickles.
+  Parity tests need float32 count-scale input: float64 standard-normal data hides this.
+  Non-chromosome rows (`build_preprocessing_pipeline`) have no such step in either the
+  validation or ensemble path, so they stay consistent with each other.
+- **"Missing" is not just `None` in a results row.** Validation's legacy
+  `preprocess_chromosome` -> `ga_genes` fallback used `is None`, but in a concatenated
+  table a legacy row's `preprocess_chromosome` cell is NaN. That is pre-existing on main;
+  `tests/test_ga_preprocessing.py` already pinned the NaN fallback in a mirror of the
+  logic, not in the real reader.
+- Chromosome genes are bounds-checked (`_checked_genes`): an out-of-range `WINDOW_SIZES`
+  index used to raise `IndexError`, which the GUI's `except ValueError` did not catch.
+
+#### PR #77 round 5 (merge-with-nits)
+
+- **Malformed input raises more than ValueError.** `np.asarray([10**30, 3]).astype(int64)`
+  raises `OverflowError`, `len()` of a 0-d array raises `TypeError`, and `ast.literal_eval`
+  of a deeply nested string can raise `RecursionError`/`MemoryError`. Callers that recover
+  on `ValueError` need the parser to normalise all of them (`_MALFORMED_CHROMOSOME_ERRORS`).
+  Also build the error message from a guarded, truncated `repr`, because repr itself can
+  recurse.
+- **Widening one copy of a parser creates divergence.** Round 4 widened the truthy strings
+  in `preprocess.py` only, and four sibling copies (GUI `_parse_autoscale_flag`, the GUI
+  model loader, `CodeGenerator._autoscale_enabled`, the one-class validation rebuild)
+  kept `{true, 1, yes}`. They now all call `preprocess.parse_bool_cell`, and a source-scan
+  test rejects a reintroduced `in ('true', '1'...)` tuple in those modules.
 
 User asked for Codex, DeepSeek Flash and GLM 5.3 on everything merged this session
 (earlier reviews were Kimi/GLM only; DeepSeek had hung). DeepSeek via opencode worked

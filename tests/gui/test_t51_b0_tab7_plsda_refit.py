@@ -116,5 +116,5 @@ def test_ensemble_reconstruction_plsda_head_matrix(
 
     assert len(reconstructed) == 1
     fitted, _, _ = reconstructed[0]
-    _assert_pipeline_matches(fitted.pipeline, transformer)
+    _assert_pipeline_matches(getattr(fitted, "pipeline", fitted), transformer)
     assert np.allclose(fitted.predict_proba(X_TEST), _reference_proba(transformer))

@@ -18,6 +18,64 @@ import warnings
 from .preprocessing_wrapper import PreprocessorConfig
 
 
+def _clone_for_refit(model):
+    """Clone a base model for a per-fold refit with CatBoost's runtime kwargs applied.
+
+    CatBoost models saved before ``allow_writing_files=False`` was set at construction
+    would otherwise write ``catboost_info/`` into the cwd on refit, and fail (NaN OOF
+    predictions) when the cwd is unwritable. The kwargs go on the unfitted clone, since
+    CatBoost rejects ``set_params`` on a fitted model.
+    """
+    fold_model = clone(model)
+    try:
+        from catboost import CatBoost
+    except ImportError:
+        return fold_model
+    from .models import CATBOOST_RUNTIME_PARAMS
+
+    for member in _iter_nested_estimators(fold_model):
+        if isinstance(member, CatBoost):
+            member.set_params(**CATBOOST_RUNTIME_PARAMS)
+    return fold_model
+
+
+def _iter_nested_estimators(root):
+    """Yield every estimator reachable from ``root``, each once.
+
+    ``get_params(deep=True)`` is not enough: the GUI wrappers (WavelengthSubsetWrapper
+    and friends) return shallow dicts even for ``deep=True``. This walks each
+    estimator's shallow params and instance attributes, and lists / tuples / sets /
+    dicts inside them (Pipeline.steps, VotingRegressor.estimators).
+    """
+    seen = set()
+    stack = [root]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            children = list(obj)
+        elif isinstance(obj, dict):
+            children = list(obj.values())
+        elif hasattr(obj, "get_params") and not isinstance(obj, type):
+            yield obj
+            children = []
+            try:
+                children.extend(obj.get_params(deep=False).values())
+            except Exception:  # noqa: BLE001 - a broken get_params must not stop the refit
+                pass
+            children.extend(getattr(obj, "__dict__", {}).values())
+        else:
+            continue
+        stack.extend(
+            child
+            for child in children
+            if isinstance(child, (list, tuple, set, frozenset, dict))
+            or (hasattr(child, "get_params") and not isinstance(child, type))
+        )
+
+
 class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
     """
     Simple averaging ensemble.
@@ -319,7 +377,7 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
 
                     # Clone and fit model on this fold (or use original if refit disabled)
                     if self.refit_base_models:
-                        fold_model = clone(model)
+                        fold_model = _clone_for_refit(model)
                         fold_model.fit(X_train_proc, y_train)
                     else:
                         # Use original pre-fitted model (preserves scaler stats)
@@ -575,7 +633,7 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
 
                     # Clone and fit model on this fold (or use original if refit disabled)
                     if self.refit_base_models:
-                        fold_model = clone(model)
+                        fold_model = _clone_for_refit(model)
                         fold_model.fit(X_train_proc, y_train)
                     else:
                         # Use original pre-fitted model (preserves scaler stats)
@@ -822,7 +880,7 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
 
                     # Clone and fit model on this fold (or use original if refit disabled)
                     if self.refit_base_models:
-                        fold_model = clone(model)
+                        fold_model = _clone_for_refit(model)
                         fold_model.fit(X_train_proc, y_train)
                     else:
                         # Use original pre-fitted model (preserves scaler stats)

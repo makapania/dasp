@@ -77,7 +77,7 @@ from joblib import Parallel, delayed
 
 from imblearn.pipeline import Pipeline as ImbPipeline
 
-from .preprocess import build_preprocessing_pipeline
+from .preprocess import build_preprocessing_pipeline, preprocessing_config_from_row
 from .models import get_model_grids, get_feature_importances, strip_runtime_params
 from .scoring import (
     add_result,
@@ -386,8 +386,7 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     model : sklearn estimator
         Model instance with correct hyperparameters applied
     """
-    import ast
-    from .models import get_model
+    from .models import get_model, parse_row_params
 
     # Get model info
     model_name = row.get("Model", "PLS")
@@ -395,14 +394,8 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     n_lvs = row.get("LVs", None)
 
     # Parse params using ast.literal_eval (same as Model Dev tab)
-    model_kwargs = {}
-    if params_str and isinstance(params_str, str) and params_str.strip():
-        try:
-            parsed = ast.literal_eval(params_str)
-            if isinstance(parsed, dict):
-                model_kwargs = parsed
-        except (ValueError, SyntaxError):
-            pass  # Keep empty dict if parsing fails
+    # Params is normally str(dict); in-memory result rows can hold the dict itself.
+    model_kwargs = parse_row_params(params_str)
 
     # Get model instance with n_components
     n_components = int(n_lvs) if n_lvs and not pd.isna(n_lvs) and n_lvs > 0 else 10
@@ -427,23 +420,18 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     # below dropped canonical lr__C/solver/max_iter (so the head fell back to C=1.0)
     # and passed legacy lr_C into PLSTransformer.set_params, which setattr's any key
     # without validation and so left junk head attributes on the transformer.
-    plsda_head_params: dict = {}
+    plsda_head: dict = {}
     if task_type == "classification" and model_name == "PLS-DA":
-        from .models import split_plsda_params
+        from .models import plsda_head_kwargs, split_plsda_params
 
-        model_kwargs, plsda_head_params = split_plsda_params(model_kwargs)
+        # The row's recorded lr__random_state / lr__class_weight are restored too, so a
+        # search run with a non-default seed and a stochastic solver refits identically.
+        plsda_head = plsda_head_kwargs(model_kwargs)
+        model_kwargs, _ = split_plsda_params(model_kwargs)
     elif model_kwargs:
-        normalized = {}
-        for key, value in model_kwargs.items():
-            if key.startswith("model__"):
-                normalized[key[7:]] = value
-            elif key.startswith("pls__"):
-                normalized[key[5:]] = value
-            elif "__" in key:
-                continue  # Skip remaining Pipeline wrapper params (scaler__, lr__)
-            else:
-                normalized[key] = value
-        model_kwargs = normalized
+        from .models import estimator_params_from_row
+
+        model_kwargs = estimator_params_from_row(model_kwargs)
 
     # Apply parameters using set_params (same as Model Dev tab)
     if model_kwargs:
@@ -458,14 +446,11 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
         from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
 
-        from .models import PLSDA_HEAD_DEFAULTS
-
-        head_kwargs = {**PLSDA_HEAD_DEFAULTS, **plsda_head_params}
         pls_lr_pipeline = Pipeline(
             [
                 ("pls", model),
                 ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
-                ("lr", LogisticRegression(**head_kwargs, random_state=42)),
+                ("lr", LogisticRegression(**plsda_head)),
             ]
         )
         return pls_lr_pipeline
@@ -974,69 +959,20 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
         try:
             # === STEP 1: Get preprocessing config ===
-            # Use PreprocessBase (clean pipeline name) if available, fall back to Preprocess
-            preprocess_name = row.get("PreprocessBase", row.get("Preprocess", "raw"))
-
-            # Read explicit metadata columns (stored by Bayesian search paths)
-            baseline_method = row.get("baseline_method", None)
-            if isinstance(baseline_method, float) and pd.isna(baseline_method):
-                baseline_method = None
-            smoothing = bool(row.get("smoothing", False))
-            if isinstance(smoothing, float):
-                smoothing = smoothing > 0
-            smoothing_window = (
-                int(row.get("smoothing_window", 17))
-                if not (
-                    isinstance(row.get("smoothing_window"), float)
-                    and pd.isna(row.get("smoothing_window"))
-                )
-                else 17
-            )
-            smoothing_polyorder = (
-                int(row.get("smoothing_polyorder", 2))
-                if not (
-                    isinstance(row.get("smoothing_polyorder"), float)
-                    and pd.isna(row.get("smoothing_polyorder"))
-                )
-                else 2
-            )
-            # T-36: autoscale flag must be read so the validation rebuild matches the
-            # search pipeline. Old .dasp files without the column default to False.
-            # Parse robustly: handles bool, numpy.bool_, NaN-float, int 0/1, and the
-            # quoted-string forms ("True"/"False"/"1"/"0") that hand-edited CSVs may
-            # contain. Note: bool("False") == True in Python, so a naive bool() cast
-            # is wrong on the string path.
-            autoscale_raw = row.get("Autoscale", False)
-            if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
-                autoscale = False
-            elif isinstance(autoscale_raw, str):
-                autoscale = autoscale_raw.strip().lower() in ("true", "1", "yes")
-            else:
-                autoscale = bool(autoscale_raw)
-
-            # Fallback: parse display name for old results without explicit columns.
-            # Sets autoscale=True ONLY when the explicit column read above produced False
-            # (so an explicit column always wins over a name suffix). The smoothing flag
-            # follows the same pattern (sg0 prefix only sets it when not already True).
-            if "+" in str(preprocess_name):
-                parts = str(preprocess_name).split("+")
-                core_parts = []
-                for part in parts:
-                    if part in ("als", "polynomial", "rubber_band", "airpls", "advanced"):
-                        if baseline_method is None:
-                            baseline_method = part
-                    elif part == "sg0":
-                        smoothing = True
-                    elif part == "autoscale":
-                        if not autoscale:
-                            autoscale = True
-                    else:
-                        core_parts.append(part)
-                preprocess_name = "_".join(core_parts) if core_parts else "raw"
-
-            deriv = row.get("Deriv", 0)
-            window = row.get("Window", None)
-            poly = row.get("Poly", None)
+            # Shared with the GUI ensemble rebuild. Reads PreprocessBase/Preprocess, the
+            # explicit Deriv/Window/Poly, Autoscale (T-36), baseline and smoothing columns,
+            # and falls back to the '+'-separated display name for old results.
+            prep_config = preprocessing_config_from_row(row)
+            preprocess_name = prep_config["preprocess_name"]
+            baseline_method = prep_config["baseline_method"]
+            baseline_params = prep_config["baseline_params"]
+            smoothing = prep_config["smoothing"]
+            smoothing_window = prep_config["smoothing_window"]
+            smoothing_polyorder = prep_config["smoothing_polyorder"]
+            autoscale = prep_config["autoscale"]
+            deriv = prep_config["deriv"]
+            window = prep_config["window"]
+            poly = prep_config["polyorder"]
 
             # Check for exhaustive-preprocessing chromosome (needs reconstruction).
             # Column rename 2026-05-06: this used to be `ga_genes`, but the GUI's
@@ -1046,36 +982,22 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             # produced silent garbage (X[:, [3,5,1]] instead of a transform).
             # Read `preprocess_chromosome` first; fall back to `ga_genes` for
             # result CSVs written before the rename.
-            ga_genes_str = row.get("preprocess_chromosome", None)
-            if ga_genes_str is None:
-                ga_genes_str = row.get("ga_genes", None)
             use_ga_transform = False
             ga_transform = None
             ga_genes = None
 
-            # Handle ga_genes_str being None, empty string, NaN scalar, list, or array
-            ga_genes_is_valid = False
-            if ga_genes_str is not None:
-                if isinstance(ga_genes_str, (list, np.ndarray)):
-                    ga_genes_is_valid = len(ga_genes_str) > 0
-                elif isinstance(ga_genes_str, str):
-                    ga_genes_is_valid = ga_genes_str != ""
-                else:
-                    try:
-                        ga_genes_is_valid = not pd.isna(ga_genes_str)
-                    except (ValueError, TypeError):
-                        ga_genes_is_valid = True
+            # Parsing (preprocess_chromosome, legacy ga_genes fallback, list / array /
+            # str(list) / NaN) is shared with the GUI ensemble rebuild.
+            try:
+                from spectral_predict.ga_preprocessing import chromosome_from_row
 
-            if ga_genes_is_valid:
+                ga_genes = chromosome_from_row(row)
+            except ValueError as e:
+                print(f"  [Warning] Could not reconstruct GA transform: {e}")
+                ga_genes = None
+
+            if ga_genes is not None:
                 try:
-                    # Parse genes from string (stored as list representation)
-                    import ast
-
-                    if isinstance(ga_genes_str, str):
-                        ga_genes = np.array(ast.literal_eval(ga_genes_str))
-                    else:
-                        ga_genes = np.array(ga_genes_str)
-
                     # Import GA reconstruction function
                     from spectral_predict.ga_preprocessing import (
                         chromosome_to_transform,
@@ -1095,40 +1017,10 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                     if not autoscale and _decode_autoscale_gene(ga_genes):
                         autoscale = True
                 except Exception as e:
-                    genes_preview = (
-                        str(ga_genes_str)[:100]
-                        if isinstance(ga_genes_str, str)
-                        else str(ga_genes_str)
-                    )
+                    genes_preview = str(ga_genes)[:100]
                     print(f"  [Warning] Could not reconstruct GA transform: {e}")
                     print(f"            GA genes data: {genes_preview}")
                     use_ga_transform = False
-
-            # Convert to proper types (only needed if not using GA transform)
-            if not use_ga_transform:
-                deriv = int(deriv) if deriv and not pd.isna(deriv) and deriv > 0 else None
-                window = int(window) if window and not pd.isna(window) and window > 0 else None
-                poly = int(poly) if poly and not pd.isna(poly) and poly > 0 else None
-
-            # T-36 fix (post-merge review v2): persist baseline_params from the
-            # row so non-default ALS/polynomial settings survive the regression /
-            # classification validation roundtrip rather than silently snapping
-            # back to defaults — same shape as the one-class fix in
-            # contamination.py:~1141.
-            baseline_params_raw = row.get("baseline_params", None)
-            baseline_params = None
-            if baseline_params_raw is not None:
-                if isinstance(baseline_params_raw, dict):
-                    baseline_params = baseline_params_raw
-                elif isinstance(baseline_params_raw, str) and baseline_params_raw.strip():
-                    try:
-                        import ast as _ast_local
-
-                        parsed = _ast_local.literal_eval(baseline_params_raw)
-                        if isinstance(parsed, dict):
-                            baseline_params = parsed
-                    except (ValueError, SyntaxError):
-                        baseline_params = None
 
             # Create cache key
             if use_ga_transform:
