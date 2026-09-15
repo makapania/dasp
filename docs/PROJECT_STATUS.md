@@ -1,78 +1,113 @@
 # Project Status
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-14, later session)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-15)
 
-### 1. Merged this session (user authorized "merge once ready")
+### 1. First job: finish PR #79 (resume) — round 9
+**Branch** `fix/resume-no-persistence-flip` @ `8f4cf54` (round 8, pushed; full non-GUI suite
+3395 passed; F821 clean). **Round-9 work in progress** is on a separate branch
+`wip/79-round9` @ `1900cfc` (one commit on top of `8f4cf54`, **untested**, only `py_compile`
+checked) — interrupted by an API session limit. Continue from it, then fast-forward/merge it
+into the PR branch once tests pass. Worktree used so far:
+`.claude/worktrees/agent-ab48c23611b807093` (now on `wip/79-round9`).
 
-| PR | What | Evidence |
+**What #79 does (rounds 1-8, reviewed each round by Codex + DeepSeek Flash + GLM 5.3):**
+- GUI crash-resume no longer forces the persistence radio to 'Always on'; 'auto' resumes a
+  crashed run (proven with a real killed subprocess).
+- No resume prompt when nothing was saved ('never', or crash during auto's in-memory warmup).
+- User-visible notice whenever saved trials can't be reused (data/env mismatch, legacy study,
+  failed check); env-change diagnostics also run under 'auto' when the store exists.
+- **User decisions (binding):**
+  1. Data mismatch on resume → nothing deleted, nothing runs; dialog: keep the saved run and
+     load the right data, or start fresh (start fresh *deletes* the interrupted run — only one
+     saved run is kept).
+  2. **Pause/Stop exists so runs can be resumed.** A saved paused/failed/crashed Bayesian run
+     is always offered — at launch (Yes resume / No delete / Cancel decide later) and when
+     clicking Run in-session (Resume / Delete / Decide later) — until resumed to completion or
+     deleted. Decide later = don't launch a new Bayesian run this click (Grid/NSGA-II
+     unaffected); wording says so.
+- Round 8 design: `_confirm_resume_before_launch` is the single main-thread launch gate
+  (snapshots method/task/models/persistence/data, decides resume/delete/fresh, claims the run
+  slot before the worker starts, passes frozen `analysis_run_id`/`uses_bayesian_run_state`).
+  `_LAUNCH_CONTEXT_UNSET` sentinel keeps old self-registering worker behaviour for tests that
+  call the worker directly (no production caller). Worker try/finally releases the in-process
+  claim on non-completion exits. Resume reconciles saved `model_names` with the selection.
+  Read failures / incomplete deletes don't launch; `discard_incomplete_run` re-checks run id.
+
+**Round-8 review:** DeepSeek + GLM merge-with-nits; **Codex block.** Round-9 scope (decided —
+fix single-instance bugs, *document* multi-instance limits):
+| # | Item | State on `wip/79-round9` |
 |---|---|---|
-| **#69** | T-41 `'auto'` re-run no longer deletes an earlier study | Fresh Kimi K2.6 review: merge-with-nits (endianness / signed-zero fingerprint nits, not practical on x86). Tests 14/14 on branch; **11/14 fail against `main`'s `unified_bayesian.py`**, incl. both "never deletes" tests. |
-| **#68** | T-51 PR A: opt-in extra Optuna axes mechanism | Fresh Kimi review: merge. Conflict with #69 resolved by keeping both (imports; T-41 helpers + #68 sampler signature; T-51 attrs + T-41 fingerprint stamp). After merge: 234 passed across both PRs' test files, `test_agent_composition_api`, `test_bayesian_study_lookup`, `test_t41_bayesian_sqlite_auto_calculator`. |
-| **#70** | Test-order leak fix: `reimport_modules` fixture in `tests/conftest.py` | GLM review: merge-with-nits; nits applied (parent imported first, name-order docstring). |
-| **#71** | CI fix: 5 drifted tests, `test_export_code` `sys.executable`, actions v7, docs `paths-ignore`, PR-run concurrency cancel, `timeout-minutes: 180`, black/flake8 informational. | Kimi: merge-with-nits (SVR GUI test now runs at `comprehensive` tier, noted on PR). Its CI run: **ubuntu + optional-deps green (first time)**; Windows 1 failed / 3194 passed — `test_catboost_via_gui` now reaches CatBoost and hits a real bug (below). |
-| **#73** | CatBoost no longer writes `catboost_info/` into the cwd (failed fits when cwd unwritable — installed app in Program Files; Windows CI). `models.CATBOOST_RUNTIME_PARAMS` at every construction; `strip_runtime_params` at every param capture so row params, fingerprints, study names, T2b pins unchanged. Exported scripts now include `allow_writing_files: False`. | Agent-implemented. 23 new tests (16 fail/error on main). Full non-GUI suite 3113 passed / 0 failed; `test_catboost_via_gui` passes. GLM: merge; Kimi: merge-with-nits. |
-| **#74** | T-51 PR B: 11 opt-in supervised bundles (`rf_features`, `xgb_regularization`, `xgb_child`, `xgb_sampling`, `lgbm_regularization`, `lgbm_sampling`, `lgbm_child`, `catboost_sampling`, `svm_gamma`, `mlp_activation`, `plsda_head`) + `apply_extra_axes` duplicate guard. Default path/pins untouched. Enable from Python only until PR D (see `docs/AGENT_COMPOSITION.md` §7b). | Agent-implemented. 134 + 7 GUI new tests; full non-GUI suite 3248 passed / 0 failed. Kimi: merge. GLM: BLOCK — verified false positive (`FixedTrial.params` starts empty; T9 35/35 pass). |
-| **#75** | Removed the Linux Xvfb GUI CI job. T-CI-2 closed: no deadlock — `test_xgboost_via_gui` legitimately needs ~60 min (passes on Windows), far beyond that job's 180s per-test timeout. App is Windows-only; Windows job runs `tests/gui`. | GLM 5.3 Flash (write mode, worktree) diagnosed from the timeout stack dump; Claude reviewed. |
-| **#72** | T-51 PR B0: PLS-DA head params (C/solver/max_iter) survive validation rebuild, Tab 7 refit, ensemble training, export, `build_model`. Shared `models.split_plsda_params`. | Agent-implemented. 34 new tests (16 fail on main). Full non-GUI suite: only known baseline. Kimi + GLM: merge-with-nits, no blockers. CHANGELOG corrected re ensemble `class_weight`. Gotchas: SESSION_LOG 2026-09-14 "T-51 PR B0". |
+| 1 | One-class resume (PCA-SIMCA→IsolationForest) rereads live checkboxes (GUI ~28993/29114) — use frozen model list | **not done** |
+| 2 | Stale `_pending_bayesian_models` override leaks into a fresh run after delete / mismatch start-fresh | done, untested |
+| 3 | Malformed/corrupt sidecar swallowed (run_state ~643) → fresh launch overwrites it; surface as corrupt state, offer Delete/Cancel | **not done** |
+| 4 | Claim leak if `Thread()`/`start()` raises after the gate claimed (GUI ~24314) | done, untested |
+| 5 | `mark_complete` unlink failure (Windows lock) leaves claim unreleased (run_state ~477) | partial |
+| 6 | Reconciliation restores model names only — show trials/settings differences in the dialog; use saved `n_trials_per_model` for resume; full hyperparameter restore = known limitation | **not done** |
+| — | End-to-end GUI-handoff tests through real `_run_analysis` (gate → fake thread → worker) covering one-failing-model keep, setup-exception release, click-time data | **not done** |
+| — | Remove "sidecar"/"saved-run slot" from user-facing text | done, untested |
+| — | "Known limitations" in PR body/CHANGELOG/SESSION_LOG: two dasp windows sharing `active_run.json` (needs file locking); non-atomic cross-process re-read→unlink; absent/empty store edge cases | **not done** |
 
-**Open follow-up from Kimi on #68 (LOW):** `search_spaces.apply_extra_axes` never adds
-suggested axes to `already`, so a duplicate `param_name` across two axes (only possible
-if `resolve_bundles` is bypassed) is not caught. Add `already.update((axis.optuna_name,
-axis.key))` after `_suggest` in PR B, when bundles land.
+Then: full non-GUI suite + `tests/gui/test_resume_*.py` + F821 check → push to the PR branch →
+**Codex-only** final review; if it only raises multi-instance/out-of-scope items, merge.
+Implementation agents hit Opus weekly and Sonnet session limits this session — check limits.
 
-### 2. Open PRs
+### 2. Merged this session (2026-09-14/15)
+| PR | What |
+|---|---|
+| #69 | T-41 'auto' re-run no longer deletes an earlier study |
+| #68 | T-51 PR A: opt-in extra Optuna axes mechanism |
+| #70 | Test-order leak fix (`reimport_modules` fixture) |
+| #71 | CI: 5 drifted tests fixed, actions v7, docs paths-ignore, PR concurrency, timeouts |
+| #72 | T-51 PR B0: PLS-DA head params survive rebuild/refit/ensemble/export |
+| #73 | CatBoost never writes `catboost_info/` (failed fits under Program Files) |
+| #74 | T-51 PR B: 11 opt-in supervised bundles (Python-only until PR D) |
+| #75 | Removed Linux Xvfb GUI CI job (T-CI-2 was a too-short timeout, not a hang) |
+| #76 | CI: per-sha push concurrency; **blocking flake8 F821/F822/F823 gate** |
+| #77 | Ensembles: tuned `model__*` params + correct row preprocessing (incl. chromosome rows, float64), PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors; shared row helpers on declared surface §8b. **Ensemble scores change.** 5 review rounds. |
+| #78 | Bayesian: no automatic study deletion after failed migration; baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars; legacy-study warning. 3 review rounds. |
 
-| PR | What | State |
-|---|---|---|
-| #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
+Review process used (user preference): **Codex + DeepSeek Flash + GLM 5.3** on every PR,
+re-review each round until clean. A post-merge round on #68-#75 found real pre-existing bugs
+(fixed in #76-#78). See SESSION_LOG 2026-09-14 "Post-merge review round".
 
-### 2b. Post-merge review round — results
-Codex + DeepSeek Flash + GLM 5.3 reviewed everything merged (#68-#75); real pre-existing bugs found (SESSION_LOG 2026-09-14 "Post-merge review round"). Fix PRs, each re-reviewed by the same trio until clean:
-- **#78 merged** — no automatic study deletion after failed auto-migration (removed; name-based delete can't be race-safe); `convert_study_to_dataframe` baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars → builtins (AxisSpec eq/hash); legacy-study 'always' resume warning; F821s. 3 review rounds.
-- **#77 merged** — ensembles: tuned `model__*` params, row preprocessing (Autoscale/baseline/smoothing/deriv, subset after prep, chromosome rows incl. float64), PLS-DA class_weight/seed, legacy CatBoost refit (recursive clone), GUI NameErrors; new shared helpers `models.parse_row_params/estimator_params_from_row/plsda_head_kwargs`, `preprocess.preprocessing_config_from_row/parse_bool_cell`, `ga_preprocessing.chromosome_from_row/chromosome_to_steps` (declared surface §8b). **Ensemble scores change** (base models now get tuned params + correct preprocessing). 5 review rounds; search-time numerics verified bit-identical by Codex.
-- **#76 merged** — CI: per-sha push concurrency; blocking flake8 F821/F822/F823 gate (main is clean); CatBoost test litter.
-- **#79 open — round 7 needed; BLOCKED ON USER DECISION.** Branch `fix/resume-no-persistence-flip` @ `2522a64` (round 6; full non-GUI suite 3395 passed; 143 resume tests pass; F821 clean). Done so far: no persistence-radio flip; 'auto' resumes crashed runs (real killed-subprocess test); no prompt when nothing saved; data-mismatch keeps the saved run + dialog (Yes = start fresh, keeps file); verification errors stop a resume; dialog on main thread before worker; completion released right after each Bayesian search (one-class too), kept if a model raised or Stop.
-  - **User decision (2026-09-15) — pause/Stop:** pausing exists so runs can be resumed. Whenever a saved paused/failed/crashed Bayesian run exists, the app always asks to resume it (at launch and when clicking Run in-session), with an option to delete it; it keeps asking until resumed to completion or deleted. Being implemented in #79 round 7 (Sonnet agent, worktree agent-ab48c23611b807093).
-  - **Round-7 fixes queued** (Codex block + DeepSeek): overlapping Stop→Run race (old worker sees new controller, clears sidecar — capture controller per worker); all-fits-failed model returns empty results and is counted as success (treat empty/all-penalty as failure); stopped/failed run stays active in-process so the next Run on different data reuses its storage without the fingerprint gate (clear in-process active state, keep sidecar); HAS_UNIFIED_BAYESIAN=False path registers a run with no completion; post-bind `self.X` reads for training-count metadata; source-scan test should become behavioural (classification, all-failed, Stop/Run overlap).
-  - Implementing agent hit the Opus weekly limit (resets 4am MT 2026-09-15); use a Sonnet agent in the existing worktree `.claude/worktrees/agent-ab48c23611b807093` or a fresh one. Reviewers: Codex + DeepSeek Flash + GLM 5.3 (re-review each round).
-
-### 3. Decisions for the user
-- **Decided 2026-09-14:** when the loaded data doesn't match a resumed run, keep the saved SQLite store and sidecar, tell the user it doesn't match so they can load the right data, and offer an explicit "start fresh" (clears only the resume marker). Being implemented in #79.
-- **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
-  Until then the CI lint steps are `continue-on-error`. A mass reformat conflicts with
-  every open branch, so do it between feature PRs if at all.
+### 3. Open PRs / decisions for the user
+- **#79** — see §1.
+- **#63** T-17 multi-target regression (+16k lines, stale since 2026-07-08): user leaning
+  toward not using it. Leave open; close only on the user's word.
+- **Repo-wide black/flake8 pass?** ~212 files would be reformatted; CI lint steps are
+  informational. Do it between feature PRs if at all.
+- **Pending question:** should `plsda_head` also apply to model name `PLS` in classification?
 
 ### 4. Queued work
-1. **T-51 PR B:** supervised bundles (§3.1; `min_split_gain` approved for `lgbm_child`),
-   then C (one-class), D (GUI), E/F (one-class clamp). Include the #68 `already` fix above.
-   B0 is merged, so `plsda_head` can go in PR B.
-2. **B0 review follow-ups (all pre-existing, not regressions):**
-   - `class_weight` is not re-applied in ensemble training (`_reconstruct_models_from_results`).
-   - Validation rebuild: Kimi claims `class_weight` is dropped; GLM traced it restored via
-     the rebuild discriminator (`search.py` ~499-513). Verify before acting.
-   - `split_plsda_params` passes `C` through uncoerced; a hand-edited CSV with `'0.05'` would crash.
-   - Tab 7 re-applies stored params over a user's `n_components` edit; decide if that's intended.
-   - `split_plsda_params` is public but not on the `docs/AGENT_COMPOSITION.md` surface.
-   - Dead `except ValueError` around `PLSTransformer.set_params` in ensemble reconstruction (it never raises).
-3. **#73 follow-ups:** (a) CatBoost models saved before #73 still write `catboost_info/` if refit after load — consider `set_params(allow_writing_files=False)` at load. (b) Tests constructing CatBoost directly can litter the repo root: `tests/test_t20_saved_model_export_parity.py` (~814-935), `tests/test_class_weight_validation_rebuild.py` (~259). (c) Before #73 most search paths *silently* swallowed CatBoost failures (discovery fell back to LightGBM, diagnostics NaN, Bayesian 1e10 penalty, run_search dropped configs) — worth surfacing failures. (d) `docs/AGENT_COMPOSITION.md` §7 says `models_to_test` overrides tier; it only filters within the tier (needs `enabled_models`). (e) New public names (`CATBOOST_RUNTIME_PARAMS`, `with_catboost_runtime_params`, `strip_runtime_params`, `split_plsda_params`) not on the declared surface. (f) Delete `src/spectral_predict/nsga2_search.py.backup` (grep trap; ask user).
-4. **#74 follow-ups / questions for user:** (a) should `plsda_head` apply to model name `PLS` in classification (needs rebuild/Tab 7 to treat it as PLS-DA)? (b) `svm_gamma` resolves for SVM+regression / SVR+classification, which have no estimator — every trial silently gets the 1e10 penalty with only a warning; narrow or warn. (c) Tab 7 refit of Bayesian XGBoost rows prints XGBoost 'params not used' warning (pre-existing, predictions unaffected). (d) `apply_extra_axes` constant-clash message says 'suggested parameter' also for axis keys.
-5. **Possible second order-leak:** `tests/test_baseline_advanced.py` (~L90-106) clears
-   and restores all of `sys.modules`; modules first imported inside that block are
-   dropped afterwards. Not observed failing; check if order flakes recur.
-6. **`SESSION_LOG.md` is >1000 lines** (limit ~200): archive older entries to
+1. **T-51 next:** PR C (one-class bundles `if_max_samples`, `lof_metric`, `ocsvm_poly`), then
+   PR D (GUI card to enable bundles), E/F (one-class clamp, own approval).
+2. **Smaller follow-ups:**
+   - `split_plsda_params` passes `C` through uncoerced (hand-edited CSV `'0.05'` would crash).
+   - Tab 7 re-applies stored params over a user's `n_components` edit — intended?
+   - Tab 7 refit of Bayesian XGBoost rows prints XGBoost "params not used" warning (harmless).
+   - `apply_extra_axes` constant-clash message wording.
+   - #73: surface CatBoost/model failures that search paths used to swallow silently;
+     `docs/AGENT_COMPOSITION.md` §7 wrongly says `models_to_test` overrides tier.
+   - Delete `src/spectral_predict/nsga2_search.py.backup` (grep trap) — ask user.
+   - `tests/test_baseline_advanced.py` (~L90-106) clears/restores all of `sys.modules`
+     (possible order-leak; not observed failing).
+   - Pre-existing from T-51 step 1: unscaled Bayesian importance proxy; unscaled NSGA-II
+     display metrics; NSGA-II 'SVM' chromosomes always 1e10; `MODELS_WITH_FEATURE_IMPORTANCE`
+     lacks 'SVM'; GUI refit double-scaling under autoscale.
+3. **`SESSION_LOG.md` is well over 1000 lines** (limit ~200): archive older entries to
    `docs/SESSION_LOG_ARCHIVE.md`.
-7. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
-   - the unscaled Bayesian importance proxy
-   - unscaled NSGA-II display metrics
-   - NSGA-II `'SVM'` chromosomes always scoring the 1e10 penalty
-   - `MODELS_WITH_FEATURE_IMPORTANCE` lacking `'SVM'` (coupled to subset search)
-   - GUI refit double-scaling under autoscale
 
-### 5. Tooling notes from this session
+### 5. Tooling notes (2026-09-14/15)
 - **Codex:** on this ChatGPT-account login only `gpt-6-astra` works for the "astra"
   model. `gpt-5.6-astra`, `gpt-5.6-alpha` and `gpt-6-alpha` are all rejected.
-- **opencode/GLM write mode** (`--dangerously-skip-permissions`) is blocked by Claude
-  Code's auto-mode check. Use opencode for read-only reviews.
+- **opencode/GLM write mode** worked this session when pointed at a pre-created worktree
+  inside the repo (`.claude/worktrees/...`) — used for #75. Read-only opencode can't read
+  outside the repo root; give it refs and `git show`, and forbid `gh`/`git fetch` (hangs).
+- **DeepSeek via opencode:** tell it to read files only via `git show <sha>:<relpath>` — it
+  once mistyped an absolute path and aborted.
+- **Parallel agents:** give each a unique PR-body filename (a shared `pr_body.md` got clobbered).
+- **Implementation agents often end their turn while a background test run is still going** —
+  tell them to block on it, and check.
 - **opencode read-only** can't read outside the repo root (scratchpad worktrees, temp
   files). Have it read branch code via `git show origin/<branch>:<path>`; run tests yourself.
 - **Rewriting docs from PowerShell:** use `[IO.File]::WriteAllText(..., UTF8Encoding

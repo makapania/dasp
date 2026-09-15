@@ -1285,3 +1285,20 @@ should always block — they found two crash bugs no test covered.
 - **A text-mode Python read/write converts CRLF files to LF**, which shows as a
   whole-file diff. `unified_bayesian.py` and `models.py` are CRLF in the index,
   `search_spaces.py` is LF. Restore CRLF before committing.
+
+### 2026-09-15 — PR #79 resume rework (rounds 2-8) and interruption
+
+- Resume/persistence rework took 8 review rounds (Codex + DeepSeek Flash + GLM 5.3). Codex
+  kept finding real races because the launch decision was split between the Tk main thread and
+  the worker. Round 8 fixed the design: one main-thread launch gate decides and claims, the
+  worker receives a frozen context. Lesson: for GUI state machines, decide once on the main
+  thread and pass immutable context; never let the worker re-read Tk state.
+- `Path.is_file()` on Python 3.14 swallows every OSError (→ False); use `stat()` directly when
+  "unknown" must differ from "absent".
+- Only one resume record (`active_run.json`) exists; a fresh `start_run` overwrites it. Hence
+  user decision: keep asking about a saved run until resumed or deleted; "Decide later" blocks
+  new Bayesian launches. Multi-window safety needs file locking (documented limitation).
+- A batch-edit script once converted the whole 60k-line GUI file from CRLF to LF (122k-line
+  diff); check `file`/`git diff --stat` after scripted edits.
+- Round 9 was interrupted by an API session limit; partial untested work saved on branch
+  `wip/79-round9`. See PROJECT_STATUS §1.
