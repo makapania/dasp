@@ -840,7 +840,35 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     optuna_dir = get_user_optuna_dir().resolve()
     errors: list[str] = []
 
+    # Codex review of #79 round 9: the store goes first. Deleting the record
+    # first and then failing on a locked store left a store no retry could find
+    # (the record naming it was gone). A store already absent counts as deleted,
+    # so a retry after a half-finished delete can complete.
+    storage_deleted = False
+    storage_retryable_failure = False
+    try:
+        storage_path = Path(meta.storage_path).resolve()
+    except (OSError, ValueError) as e:
+        errors.append(f"storage_path resolve failed: {e}")
+    else:
+        if not storage_path.is_relative_to(optuna_dir):
+            errors.append(
+                f"storage_path outside optuna dir, refusing to unlink: {storage_path}"
+            )
+        else:
+            try:
+                storage_path.unlink(missing_ok=True)
+                storage_deleted = True
+            except OSError as e:
+                errors.append(f"storage unlink failed: {e}")
+                storage_retryable_failure = True
+            except ValueError as e:  # e.g. an embedded NUL: retrying can't help
+                errors.append(f"storage path unusable: {e}")
+
     sidecar_deleted = False
+    if storage_retryable_failure:
+        # Keep the record so Delete can be retried once the lock clears.
+        return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=errors)
     try:
         if sidecar.exists():
             try:
@@ -858,28 +886,6 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
                 sidecar_deleted = True
     except OSError as e:
         errors.append(f"sidecar unlink failed: {e}")
-
-    storage_deleted = False
-    try:
-        storage_path = Path(meta.storage_path).resolve()
-    except OSError as e:
-        errors.append(f"storage_path resolve failed: {e}")
-        return DiscardResult(
-            sidecar_deleted=sidecar_deleted,
-            storage_deleted=False,
-            errors=errors,
-        )
-    if not storage_path.is_relative_to(optuna_dir):
-        errors.append(
-            f"storage_path outside optuna dir, refusing to unlink: {storage_path}"
-        )
-    else:
-        try:
-            if storage_path.exists():
-                storage_path.unlink()
-                storage_deleted = True
-        except OSError as e:
-            errors.append(f"storage unlink failed: {e}")
 
     return DiscardResult(
         sidecar_deleted=sidecar_deleted,

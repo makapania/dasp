@@ -366,21 +366,21 @@ def test_e2e_setup_exception_releases_claim(gui_app, worker_env, fake_thread, mo
     _select_models(gui_app, ["PLS"])
 
     def setup_fails(*a, **k):
-        raise RuntimeError("logger setup failed")
+        raise RuntimeError("setup failed")
 
-    monkeypatch.setattr("spectral_predict.run_logging.setup_run_logger", setup_fails)
-    monkeypatch.setattr(
-        gui_module, "run_unified_bayesian",
-        lambda *a, **k: (_ for _ in ()).throw(_StopSearch()),
-    )
+    fake, calls = _recording_bayesian()
+    monkeypatch.setattr(gui_module, "run_unified_bayesian", fake)
 
     with patch("tkinter.messagebox.showerror"), patch("tkinter.messagebox.showwarning"):
         worker = _click(gui_app)
         run_id = worker.kwargs["analysis_run_id"]
         assert rs.get_active_run_id() == run_id, "the gate claimed the run"
+        # Uncaught during worker setup, after the claim and before any search.
+        monkeypatch.setattr(gui_app, "_get_imbalance_params", setup_fails)
         try:
             worker.target(*worker.args, **worker.kwargs)
-        except _StopSearch:
+        except RuntimeError:
             pass
 
+    assert calls == [], "the search never started"
     assert rs.get_active_run_id() is None

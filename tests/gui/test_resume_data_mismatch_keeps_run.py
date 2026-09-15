@@ -257,7 +257,8 @@ def test_unreadable_sidecar_is_not_a_match(gui_app, resumed):
         worker = _click_run(gui_app, X, y)
 
     assert worker is None and not started
-    assert ask.call_args[0][0] == "Can't check the interrupted run"
+    # #79 round 10: a damaged record is offered for moving aside first; No keeps it.
+    assert ask.call_args[0][0] == "Saved run record is damaged"
     assert store.exists() and rs.is_resuming()
 
 

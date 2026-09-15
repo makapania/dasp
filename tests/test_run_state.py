@@ -636,10 +636,43 @@ def test_discard_reports_partial_failure(fresh_state, monkeypatch):
     monkeypatch.setattr(Path, "unlink", selective_fail_unlink)
     result = rs.discard_incomplete_run(meta.run_id)
 
-    assert result.sidecar_deleted is True
+    # #79 round 10: the record is kept so the delete can be retried.
+    assert result.sidecar_deleted is False
+    assert sidecar.exists()
     assert result.storage_deleted is False
     assert result.errors and "simulated SQLite lock" in result.errors[0]
     assert result.fully_succeeded is False
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)  # the lock clears
+    retry = rs.discard_incomplete_run(meta.run_id)
+    assert retry.fully_succeeded
+    assert not sidecar.exists() and not storage_path.exists()
+
+
+def test_discard_retry_completes_after_record_unlink_failed(fresh_state, monkeypatch):
+    """Store deleted but the record was locked: a retry finishes the delete."""
+    rs, rp, _ = fresh_state
+
+    meta = rs.start_run(label="x", model_names=["m"])
+    storage_path = Path(meta.storage_path)
+    storage_path.touch()
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    rs._reset_for_tests()
+
+    real_unlink = Path.unlink
+
+    def record_locked(self, *a, **kw):
+        if self == sidecar:
+            raise OSError("record locked")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", record_locked)
+    first = rs.discard_incomplete_run(meta.run_id)
+    assert first.storage_deleted and not first.sidecar_deleted
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    assert rs.discard_incomplete_run(meta.run_id).fully_succeeded
+    assert not sidecar.exists()
 
 
 def test_resume_rejects_path_traversal(fresh_state):

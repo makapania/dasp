@@ -24382,6 +24382,9 @@ class SpectralPredictApp:
                     analysis_n_trials=getattr(self, "_pending_bayesian_n_trials", None),
                     # The data the gate just checked, bound on this thread.
                     analysis_data=(self.X, self.y, self.X_original),
+                    # The mode the gate decided for; a later radio change must
+                    # not turn this launch into an unchecked Bayesian run.
+                    analysis_modes=(self.optimization_method.get(), self.task_type.get()),
                 ),
                 daemon=True,
             )
@@ -24414,9 +24417,9 @@ class SpectralPredictApp:
                 messagebox.showerror(
                     "Could not start analysis",
                     "dasp could not start the analysis worker, so nothing "
-                    f"ran.\n\nDetails: {launch_err}\n\nIf a run was claimed "
-                    "for this click, it stays saved and can be resumed or "
-                    "deleted the next time you click Run Analysis.",
+                    f"ran.\n\nDetails: {launch_err}\n\nIf this click was resuming "
+                    "an interrupted run, that run is still saved and will be "
+                    "offered again the next time you click Run Analysis.",
                 )
             except Exception:
                 pass
@@ -26789,6 +26792,36 @@ class SpectralPredictApp:
             _register_fresh_run()
             return True
 
+        # Round 10 (Codex): the record may have become damaged after the resume
+        # was claimed. Deleting refuses a damaged record, so without this the
+        # only way out was restarting dasp.
+        try:
+            find_incomplete_run()
+        except CorruptRunRecordError as corrupt_err:
+            if not self._offer_to_set_aside_corrupt_run_record(corrupt_err, at_launch=False):
+                return False
+            try:
+                still_there = find_incomplete_run()
+            except (CorruptRunRecordError, OSError) as reread_err:
+                self._log_progress(f"[RUN] Could not re-check the run record: {reread_err}")
+                return False
+            if still_there is not None:
+                # Readable again (rewritten meanwhile): never start fresh over it.
+                self._log_progress(
+                    "[RUN] The run record is readable again; click Run Analysis again."
+                )
+                return False
+            abandon_resume()
+            self._pending_validation_indices = None
+            self._log_progress(
+                "[RUN] The interrupted run's record was damaged and has been moved "
+                "aside; starting a fresh analysis."
+            )
+            _register_fresh_run()
+            return True
+        except OSError:
+            pass  # unreadable: the fingerprint check below stops and asks
+
         if meta is not None:
             # Round 9 item 6 (Codex): analysis settings that differ from the
             # interrupted run's would make the resumed trials incomparable (or
@@ -26997,7 +27030,8 @@ class SpectralPredictApp:
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None, controller=None,
                               analysis_run_id=_LAUNCH_CONTEXT_UNSET,
                               uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET,
-                              analysis_n_trials=None, analysis_data=None):
+                              analysis_n_trials=None, analysis_data=None,
+                              analysis_modes=None):
         """Run analysis in background thread.
 
         ``analysis_n_trials``: Bayesian trials per model frozen by the launch gate
@@ -27007,6 +27041,11 @@ class SpectralPredictApp:
         ``analysis_data``: ``(X, y, X_original)`` bound on the main thread at the
         click, i.e. the data the launch gate fingerprinted (round 9). None binds
         ``self.X`` / ``self.y`` / ``self.X_original`` here, as direct test calls do.
+
+        ``analysis_modes``: ``(optimization_method, task_type)`` read at the click
+        (round 10, Codex): dispatch uses these, so switching Grid to Bayesian while
+        the worker starts can't reach a resumed run's storage unchecked. None reads
+        the live controls, as direct test calls do.
 
         ``controller``: THIS worker's own ``SearchController``, captured by
         ``_run_analysis`` on the main thread before the thread was started.
@@ -27248,7 +27287,9 @@ class SpectralPredictApp:
                     pass  # run_state unavailable; nothing to re-verify
 
             # Determine task type
-            task_type_setting = self.task_type.get()
+            task_type_setting = (
+                analysis_modes[1] if analysis_modes is not None else self.task_type.get()
+            )
 
             if task_type_setting == "auto":
                 # Delegate to the centralized helper so this path agrees with
@@ -29272,7 +29313,10 @@ class SpectralPredictApp:
                     self.root.after(0, lambda: self._update_search_buttons('idle'))
                     return
 
-                opt_method_oc = self.optimization_method.get()
+                opt_method_oc = (
+                    analysis_modes[0] if analysis_modes is not None
+                    else self.optimization_method.get()
+                )
 
                 if opt_method_oc == 'unified':
                     # === BAYESIAN OPTIMIZATION FOR ONE-CLASS ===
@@ -29837,7 +29881,10 @@ class SpectralPredictApp:
                 return
 
             # Dispatch to Grid Search, Bayesian Optimization, or NSGA-II based on user selection
-            optimization_method = self.optimization_method.get()
+            optimization_method = (
+                analysis_modes[0] if analysis_modes is not None
+                else self.optimization_method.get()
+            )
 
             if optimization_method == "unified":
                 # === BAYESIAN OPTIMIZATION (Joint Preprocessing + Model + Variable Selection) ===

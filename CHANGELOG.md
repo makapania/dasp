@@ -216,6 +216,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the in-process claim is still released. The record stays on disk and is offered at
     the next launch.
   - User-facing text no longer says "sidecar" or "saved-run slot".
+  - **Round 10 (Codex review of round 9):**
+    - The worker dispatches on the optimization method and task type read at the
+      click. Switching Grid to Bayesian while a Grid run was starting could run a
+      Bayesian search on a resumed run's storage with no data check.
+    - `bayes_enable_autoscale`, `k_neighbors`, `n_bins` and `boost_factor` are now
+      captured and compared on resume. They are part of the Bayesian study name, so
+      changing one used to silently start a new study.
+    - **Behaviour change:** `discard_incomplete_run` deletes the store before the
+      record, and keeps the record when the store is locked. Before, a locked store
+      left a deleted record and a store no retry could reach. A store that is
+      already gone counts as deleted, so a retry after a half-finished delete
+      completes.
+    - A record that becomes damaged after a resume was claimed is offered for moving
+      aside from Run Analysis. Before, only restarting dasp got out of that state.
   - **Known limitations (not addressed):**
     - Two dasp windows share one `active_run.json` with no file lock. The last
       `start_run` wins, and a window may offer or delete a run another window just

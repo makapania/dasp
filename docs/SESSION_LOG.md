@@ -1618,3 +1618,25 @@ should always block — they found two crash bugs no test covered.
       `_run_analysis` gate → fake thread → worker tests). The two `.corrupt` quarantine
       tests in `tests/test_run_state.py` were replaced by damaged-record and set-aside
       tests.
+  - **Round 10 (Codex block on round 9, 2026-09-15):**
+    - *Mode not frozen:* round 8 froze `uses_bayesian_run_state`, but the worker's
+      dispatch still re-read `optimization_method` and `task_type`. So "Grid clicked,
+      then radio switched to Bayesian" ran `run_unified_bayesian` against a resumed
+      run's storage with no fingerprint check. The fix passes `analysis_modes` from
+      the click. Lesson: freezing a derived flag is not enough when the branch reads
+      the raw inputs again.
+    - *Whitelist gap:* `bayes_enable_autoscale` and the imbalance params (`k_neighbors`,
+      `n_bins`, `boost_factor`) feed the Bayesian study-name hash
+      (`unified_bayesian.py` config_components) but were not in
+      `CAPTURABLE_SETTINGS`. When adding a study-name input, add its GUI var to the
+      whitelist too.
+    - *Delete order:* `discard_incomplete_run` unlinked the sidecar before the store.
+      A locked store (Windows sharing violation) then left no record, and retries
+      returned "nothing to delete" forever. The store now goes first, the record is
+      kept on a retryable store failure, and a missing store counts as deleted.
+      `unlink` raises `ValueError` for an embedded NUL, which must not be treated as
+      retryable (`test_resume_run_refuses_nul_in_storage_path`).
+    - *Damaged while resuming:* the corrupt-record check only ran when not resuming.
+      It now also runs at the top of the resuming branch.
+      `test_unreadable_sidecar_is_not_a_match` now expects the damaged-record dialog
+      first.
