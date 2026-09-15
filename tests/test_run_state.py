@@ -798,3 +798,48 @@ def test_t44_no_phantom_hasattr_typos_in_gui():
         f"hasattr guard silently skips them. Use the actual Tk var names: "
         f"n_unified_trials (NOT n_trials_var), task_type (NOT task_type_var)."
     )
+
+
+def test_never_run_leaves_no_resumable_store(fresh_state):
+    """A crashed 'never' run leaves a sidecar but nothing to resume: no prompt."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="never")
+    meta = rs.find_incomplete_run()
+    assert meta is not None
+    assert rs.has_resumable_store(meta) is False
+
+
+def test_auto_run_crashed_in_warmup_has_no_resumable_store(fresh_state):
+    """'auto' creates the SQLite file only when a study migrates."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    meta = rs.find_incomplete_run()
+    assert not Path(meta.storage_path).exists()
+    assert rs.has_resumable_store(meta) is False
+    Path(meta.storage_path).write_bytes(b"")  # schema never written
+    assert rs.has_resumable_store(meta) is False
+
+
+def test_migrated_auto_run_has_resumable_store(fresh_state):
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    meta = rs.find_incomplete_run()
+    Path(meta.storage_path).write_bytes(b"SQLite format 3\x00")
+    assert rs.has_resumable_store(meta) is True
+
+
+def test_unreadable_store_is_still_offered(fresh_state, monkeypatch):
+    """An undeterminable store is not treated as absent; resume_run decides."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="always")
+    meta = rs.find_incomplete_run()
+    target = str(Path(meta.storage_path))
+    real_stat = Path.stat
+
+    def deny(self, *args, **kwargs):
+        if str(self) == target:
+            raise PermissionError("locked")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", deny)
+    assert rs.has_resumable_store(meta) is True

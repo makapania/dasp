@@ -1171,3 +1171,30 @@ should always block — they found two crash bugs no test covered.
 - **A text-mode Python read/write converts CRLF files to LF**, which shows as a
   whole-file diff. `unified_bayesian.py` and `models.py` are CRLF in the index,
   `search_spaces.py` is LF. Restore CRLF before committing.
+
+### 2026-09-14 — Crash-resume no longer flips persistence to 'always' (branch fix/resume-no-persistence-flip)
+
+- **Premise verified with a real crash.** A child process runs an 'auto' PLS search via
+  `start_run`, migrates after the 10-trial warmup, and dies with `os._exit` at 12/14
+  trials (no WAL checkpoint). `find_incomplete_run` → `resume_run` → 'auto' re-run hits
+  `auto_resumed_existing_study`, keeps the 12 trials unchanged and finishes at 14 in
+  the same study. The migrated study carries `data_fingerprint` because it is stamped
+  on the in-memory study at creation and `copy_study` copies user attrs.
+- **A crashed 'never' run still left a sidecar and a prompt.** `start_run` writes the
+  sidecar for every mode, so the next launch asked "Resume?", and Yes/No both ended in
+  `resume_run` finding no SQLite ("Resume failed"). The same happened for an 'auto' run
+  that crashed during warmup (the file only appears at migration). Fixed: the GUI skips
+  the prompt when `run_state.has_resumable_store(meta)` is False. The sidecar is not
+  deleted; the next Bayesian `start_run` overwrites it. A `stat` error other than
+  FileNotFoundError still prompts.
+- **T-43 restore includes `bayesian_persistence_mode`.** Resume therefore sets the radio
+  to the crashed run's own mode, which the user accepts in the prompt. Nothing else
+  captured the forced 'always': `start_run` returns the resumed metadata unchanged, so
+  the sidecar kept the original mode, and the GUI has no preferences file for it.
+- **Behaviour differences from forced 'always', accepted:** under 'auto', a study with
+  a different or missing data fingerprint is not resumed. That run stays in memory with
+  no crash-resume for that model, and the stored study is untouched. A legacy
+  unfingerprinted study needs a name match, and the name includes `__version__` and
+  the environment hash. Only a 0.5.0b3 dev build from 2026-09-13/14 could leave one.
+  Multi-model runs gate each study by name: migrated models resume, unmigrated ones
+  start fresh.

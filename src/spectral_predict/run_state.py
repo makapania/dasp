@@ -27,6 +27,7 @@ Public surface:
     get_storage_url() -> str | None
     is_resuming() -> bool
     find_incomplete_run() -> RunMetadata | None
+    has_resumable_store(meta) -> bool
     resume_run(run_id)
     discard_incomplete_run(run_id)
 """
@@ -38,6 +39,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import tempfile
 import threading
 import uuid
@@ -612,6 +614,27 @@ def find_incomplete_run() -> RunMetadata | None:
     # OSError (permission, locked file, dead network share) intentionally
     # escapes — the GUI startup wraps this in its own handler and surfaces
     # a warning to the user.
+
+
+def has_resumable_store(meta: RunMetadata) -> bool:
+    """Whether an incomplete run left a SQLite store that could hold trials.
+
+    False for a run started under 'never' (no storage URL) and for an 'auto' run
+    that crashed during its in-memory warmup (the file is only created when a study
+    migrates). The GUI uses this to skip the "Resume previous run?" prompt when there
+    is nothing to resume. It does not validate the path; ``resume_run`` still does.
+    The sidecar is left alone: the next Bayesian run's ``start_run`` replaces it.
+    """
+    if not meta.storage_url or not meta.storage_path:
+        return False
+    try:
+        st = Path(meta.storage_path).stat()
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        # Unknown is not "absent": prompt, and let resume_run decide and report.
+        return True
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
 def resume_run(run_id: str) -> RunMetadata | None:

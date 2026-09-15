@@ -12649,8 +12649,7 @@ class SpectralPredictApp:
             "be the largest fraction of trial time.\n"
             "Always on: SQLite from trial 0 — universal crash-resume with "
             "near-zero overhead (all models within ~1.06x of in-memory in "
-            "benchmarks). Auto-set for the session when you accept the "
-            "resume banner so the loaded SQLite is actually used.\n"
+            "benchmarks).\n"
             "Always off: pure in-memory."
         )
         ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
@@ -23720,6 +23719,7 @@ class SpectralPredictApp:
         try:
             from spectral_predict.run_state import (
                 find_incomplete_run,
+                has_resumable_store,
                 resume_run,
                 discard_incomplete_run,
             )
@@ -23754,6 +23754,12 @@ class SpectralPredictApp:
                 pass
             return
         if meta is None:
+            return
+        if not has_resumable_store(meta):
+            # A run under 'never', or an 'auto' run that crashed during its
+            # in-memory warmup, left a sidecar but no saved trials. Prompting
+            # would only end in "Resume failed". The next Bayesian run
+            # replaces the sidecar.
             return
 
         try:
@@ -23828,11 +23834,8 @@ class SpectralPredictApp:
                     else None
                 )
 
-                # Auto-restore the captured GUI settings before forcing the
-                # persistence override. Order matters — if the override ran
-                # first, restoring would clobber bayesian_persistence_mode
-                # back to whatever the previous run was using (likely
-                # 'auto'), and the resumed SQLite URL would be ignored.
+                # Auto-restore the captured GUI settings (T-43), including the
+                # persistence mode the crashed run was started with.
                 restore_summary = ""
                 if resumed.gui_settings:
                     try:
@@ -23888,49 +23891,17 @@ class SpectralPredictApp:
                             f"[RUN] GUI-settings restore failed: {restore_err}"
                         )
 
-                # Force 'always' on resume — under 'auto' or 'never', the loaded
-                # SQLite URL would be ignored and the user would get a fresh run
-                # despite the banner. If the set fails, surface a recovery error
-                # rather than letting the banner lie about persistence.
-                _override_ok = False
-                try:
-                    if hasattr(self, "bayesian_persistence_mode"):
-                        self.bayesian_persistence_mode.set("always")
-                        _override_ok = (
-                            self.bayesian_persistence_mode.get() == "always"
-                        )
-                except Exception as set_err:
-                    try:
-                        self._log_progress(
-                            f"[RUN] resume override (set persistence='always') failed: {set_err}"
-                        )
-                    except Exception:
-                        pass
-
-                if _override_ok:
-                    banner_text = (
-                        "Resuming previous run — load the same data, set the "
-                        "Y variable manually (resume does not restore the Y "
-                        "selection), and click Run Analysis. (Persistence "
-                        "auto-set to Always-on for this session."
-                        f"{restore_summary})"
-                    )
-                else:
-                    banner_text = (
-                        "Resume queued, but the persistence radio button could "
-                        "not be auto-set. Before clicking Run Analysis: "
-                        "(1) set 'Crash-resume persistence' to 'Always on' "
-                        "(otherwise the resumed SQLite store will be ignored), "
-                        "and (2) set the Y variable manually (resume does not "
-                        "restore the Y selection)."
-                    )
-                    try:
-                        messagebox.showwarning(
-                            "Resume needs manual step",
-                            banner_text,
-                        )
-                    except Exception:
-                        pass
+                # The persistence radio is deliberately NOT changed here. Both
+                # 'auto' and 'always' reload a saved study whose name and data
+                # fingerprint match (unified_bayesian T-41 follow-up), so the
+                # user's setting is honoured. Only 'never' ignores the store.
+                banner_text = (
+                    "Resuming previous run — load the same data, set the "
+                    "Y variable manually (resume does not restore the Y "
+                    "selection), and click Run Analysis. Saved trials are "
+                    "reused unless crash-resume persistence is Always off."
+                    f"{restore_summary}"
+                )
 
                 try:
                     if hasattr(self, "progress_status"):

@@ -2953,14 +2953,15 @@ def run_unified_bayesian(
     # Gated on 'always' specifically. Enumerating studies TOUCHES the storage and
     # so creates the SQLite file, which would break the 'never' and 'auto'-warmup
     # guarantee of staying purely in memory. 'always' is also the mode that
-    # actually resumes: GUI crash recovery forces it (GUI:23895), and it is the
-    # only path reaching load_if_exists=True before any trial runs.
+    # actually resumes: the user's 'always', or 'auto' promoted above when its
+    # study exists with matching data. It is the only path reaching
+    # load_if_exists=True before any trial runs.
     if _persistence_mode == "always" and storage_url is not None:
         try:
             # Only names are needed for this notice. Resume loads the selected
             # study's trial history separately below.
             _existing = set(optuna.study.get_all_study_names(storage=storage_url))
-            # T-41 follow-up: 'always' resumes by name (GUI crash recovery relies on
+            # T-41 follow-up: 'always' resumes by name (a user who chose it relies on
             # that, and legacy studies carry no fingerprint), so a data mismatch cannot
             # block it, but a study recorded on DIFFERENT data must not replay its
             # scores silently. Reuses this single name listing (pinned by

@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Resuming a crashed Bayesian run no longer changes the persistence setting.**
+  Accepting "Resume previous run?" used to force *Crash-resume persistence* to
+  *Always on*, because 'auto' once ignored the saved study. 'auto' now reloads a saved
+  study whose configuration and data match, so the setting is left as the user (or the
+  restored run settings) had it, and the banner no longer mentions Always-on. The
+  prompt is also skipped when the crashed run saved nothing: a run under *Always off*,
+  or an 'auto' run that crashed during its in-memory warmup. Before, those prompted and
+  then reported "Resume failed". New `run_state.has_resumable_store(meta)`.
 - **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
   - **Behaviour change: a failed 'auto' SQLite migration no longer deletes anything.**
     The cleanup called `optuna.delete_study` by name, and nothing could prove this
