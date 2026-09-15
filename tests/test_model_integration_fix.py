@@ -5,6 +5,7 @@ are properly integrated and can be loaded from Results Tab into Model Developmen
 This test verifies the fixes for the catastrophic R² failures.
 """
 
+import sys
 import numpy as np
 from spectral_predict.model_registry import (
     get_supported_models,

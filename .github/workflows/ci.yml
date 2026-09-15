@@ -9,10 +9,13 @@ on:
     branches: [ main, master, develop ]
     paths-ignore: [ 'docs/**', '**/*.md' ]
 
-# A new push to a PR supersedes its in-progress run. Pushes to main are never
-# cancelled so every merge gets a complete result.
+# A new push to a PR supersedes its in-progress run (per-PR group, cancel-in-progress).
+# Push runs (merges to main etc.) get a per-commit group: GitHub keeps at most one
+# *pending* run per group and cancels an older pending run when a newer one queues,
+# even with cancel-in-progress false, so a shared per-branch group would silently drop
+# intermediate merges. Keying on the SHA gives every merge its own complete result.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('push-{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -75,6 +78,14 @@ jobs:
       continue-on-error: true
       run: |
         flake8 src/ tests/ --max-line-length=100 --ignore=E203,W503
+
+    # Blocking: the informational flake8 step above hides real bugs among the style
+    # noise. These pyflakes codes are correctness errors, never style: F821 undefined
+    # name, F822 undefined name in __all__, F823 local referenced before assignment.
+    - name: Check for undefined names (flake8 F821/F822/F823)
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.14'
+      run: |
+        flake8 src/ tests/ spectral_predict_gui_optimized.py --select=F821,F822,F823
 
   test-optional-deps:
     name: Test with optional dependencies

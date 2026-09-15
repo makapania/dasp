@@ -9,6 +9,7 @@ This test verifies:
 5. Models perform reasonably on the example dataset
 """
 
+import sys
 import pytest
 import numpy as np
 import pandas as pd
