@@ -27,7 +27,11 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
 ### 2b. In progress
-- Nothing in flight. Next T-51 steps: **PR C** (one-class bundles `if_max_samples`, `lof_metric`, `ocsvm_poly`), **PR D** (GUI card so users can enable bundles), E/F (one-class clamp, own approval).
+- **Post-merge review round (Codex + DeepSeek Flash + GLM 5.3)** of #68-#75 found real pre-existing bugs (SESSION_LOG 2026-09-14 "Post-merge review round"). Fix PRs, each re-reviewed by the same trio:
+  - **#78** Bayesian/search_spaces: deletion guard, `convert_study_to_dataframe` NameError, svm_gamma pairs, 'pls-da', equal categorical choices, numpy scalars, F821s. Re-review blocked it (Codex+DeepSeek): `is_file()` swallows OSError on 3.14; **decision: remove the automatic delete after a failed auto-migration entirely** (name-based delete can't be made race-safe); URI-form sqlite paths; also warn when 'always' resumes a legacy unfingerprinted study (user chose option b). Rework in progress.
+  - **#77** GUI ensemble: `model__` params dropped, PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors. Re-review (Codex block): CatBoost inside GUI wrappers, ensemble ignores Autoscale/baseline/smoothing, NSGA-II dict Params, malformed head values. Rework in progress.
+  - **#76** CI: per-sha push concurrency, blocking flake8 F821/F822/F823 gate, test `sys` imports, CatBoost test litter. **Merge last** (gate fails until #78 and #77 land).
+- **Queued after #78 (user-approved): remove the crash-resume radio flip.** Since T-41 (e99d35a, 2026-05-01) GUI resume forces persistence to 'Always on' because 'auto' used to ignore the saved study. #69 taught 'auto' to resume a matching existing study, so the flip should be unnecessary; it also silently changes the user's visible setting. PR: stop flipping + banner text, test crash→resume under 'auto' continues saved trials, check 'never' shows no resume.
 
 ### 3. Decisions for the user
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
