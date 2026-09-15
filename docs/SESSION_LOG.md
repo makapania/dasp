@@ -1056,3 +1056,33 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
   in the `quick` tier, so `models_to_test=["CatBoost"]` raises "No valid models found"
   unless `enabled_models=["CatBoost"]` is also passed. AGENT_COMPOSITION §7 says
   `models_to_test` "overrides tier", which is misleading.
+
+### 2026-09-14 — T-51 PR B: supervised bundles (branch feat/T51-pr-b-supervised-bundles)
+
+- **A bundle that breaks a fit does not fail a real run.** The objective's broad handler
+  turns any fit error into a `1e10` penalty trial, so `run_unified_bayesian` "succeeds"
+  with every trial penalised. Bundle tests must assert `trial.value < 1e9` on every
+  completed trial (as `test_t9_real_run_rows_match_search_time_model` does), not just
+  that a dataframe came back.
+- **`families` x `task_types` is a cartesian product.** `svm_gamma` (families `{SVM,SVR}`,
+  both tasks) therefore also resolves for `SVM`+regression and `SVR`+classification.
+  Harmless: `build_model` has no estimator for either, so such a run fails regardless.
+  Tests skip those two combos (`_NO_ESTIMATOR`).
+- **`plsda_head` applies to `PLS-DA` only, not `PLS`+classification**, although the
+  objective builds the same PLS-DA pipeline for both spellings. The rebuild and Tab 7
+  paths key on the literal `'PLS-DA'`, so opening the head for `'PLS'` would store an
+  `lr__C` that `_rebuild_model_from_row` ignores. Left as the plan specifies.
+- **`lgbm_child` on small data can flatten the search.** Recipe data (45 rows, 3-fold,
+  30 train rows per fold) with `min_child_samples=34` gave three identical trial values:
+  no tree can split. The bundle's help text warns about it; it is not a bug.
+- **Constructing the search-time model in tests.** `optuna.trial.FixedTrial(trial.params)`
+  replays `suggest_model_params` + `apply_extra_axes` for a stored trial, and
+  `build_model` plus the objective's pipeline wrap (scaler for SVM/SVR/MLP, the
+  `pls/scaler/lr` pipeline for PLS-DA) reproduces `trial.user_attrs['model_params']`
+  exactly. The round-trip tests rely on that, and it is asserted against real runs.
+- **Pre-existing, not traced: Tab 7 refit of a Bayesian XGBoost row logs
+  `Parameters: { "model__colsample_bytree", ... } are not used`.** Some Tab 7 step hands
+  `model__`-prefixed keys to the bare `XGBRegressor`, whose `set_params` accepts unknown
+  keys into `kwargs` and forwards them to the booster. Predictions still match the
+  search-time model, because the unprefixed values are applied as well. It happens with
+  or without bundles.

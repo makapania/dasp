@@ -1,5 +1,11 @@
 # T-51 steps 2–5 — Opt-in Optuna search axes: implementation plan
 
+> **PR B (2026-09-14): implemented on `feat/T51-pr-b-supervised-bundles`.** All eleven
+> §3.1 bundles are registered exactly as in the table, including `plsda_head` (B0 is
+> merged). `svm_gamma` is one bundle with families `{SVM, SVR}` × both tasks; the two
+> cross-products without an estimator are inert. Tests: `tests/test_t51_supervised_bundles.py`,
+> `tests/gui/test_t51_pr_b_tab7_bundle_refit.py`.
+>
 > **STATUS (2026-09-14): PR A implemented on `feat/T51-pr-a-extra-axes`**
 > (`search_spaces.py`, `unified_bayesian.py` wiring, `tests/test_t51_extra_axes_mechanism.py`,
 > baseline fixture captured on `main` @ `2860d17`). B0–F not started. Plan revised after

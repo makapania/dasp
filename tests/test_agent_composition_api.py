@@ -118,6 +118,19 @@ def test_run_unified_bayesian_extra_axes_keywords_are_stable() -> None:
     assert issubclass(ExtraAxesConfigError, ValueError)
 
 
+def test_documented_bundle_ids_match_registry() -> None:
+    """§7b's curated-bundle table lists exactly the ids in ``search_spaces.BUNDLES``."""
+    import re
+    from pathlib import Path
+
+    from spectral_predict.search_spaces import BUNDLES
+
+    guide = Path(__file__).resolve().parents[1] / "docs" / "AGENT_COMPOSITION.md"
+    section = guide.read_text(encoding="utf-8").split("### 7b.", 1)[1].split("\n## ", 1)[0]
+    documented = set(re.findall(r"^\| `([a-z0-9_]+)` \|", section, flags=re.MULTILINE))
+    assert documented == set(BUNDLES)
+
+
 def test_multiclass_varsel_mask_n_select_is_optional() -> None:
     """The guide states n_select may be omitted — the signature must allow it.
 

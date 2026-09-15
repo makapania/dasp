@@ -135,8 +135,196 @@ class BundleSpec:
     revision: int = 1
 
 
-# Curated registry. Empty in PR A: the mechanism ships first, bundles land in PR B/C.
-BUNDLES: dict[str, BundleSpec] = {}
+_SUPERVISED = frozenset({"regression", "classification"})
+
+# Shared caveat for every bundle's help text (plan section 10: downstream evidence).
+_WIDEN_CAVEAT = (
+    " Opening axes improves the best candidates but lowers the average one. Validate externally."
+)
+
+
+def _supervised_bundles() -> tuple[BundleSpec, ...]:
+    """Curated supervised bundles (T-51 PR B, plan section 3.1).
+
+    Every axis opens a hyperparameter the base sampler pins to one value or leaves at the
+    library default; none re-suggests a tuned or derived parameter (enforced per model by
+    ``resolve_bundles`` and tested against the real samplers).
+    """
+    return (
+        BundleSpec(
+            id="rf_features",
+            families=frozenset({"RandomForest"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(
+                    key="max_features",
+                    kind="categorical",
+                    choices=("sqrt", "log2", 0.1, 0.3, 0.5, 1.0),
+                ),
+            ),
+            label="Random forest: features per split",
+            help=(
+                "Tunes max_features (default search pins 'sqrt'): 'sqrt', 'log2', or a "
+                "fraction 0.1-1.0 of the features considered at each split." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="xgb_regularization",
+            families=frozenset({"XGBoost"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="reg_alpha", kind="float", low=1e-4, high=10.0, log=True),
+                AxisSpec(key="reg_lambda", kind="float", low=1e-3, high=100.0, log=True),
+            ),
+            label="XGBoost: L1/L2 regularization",
+            help=(
+                "Tunes reg_alpha (L1, 1e-4-10) and reg_lambda (L2, 1e-3-100), log scale. "
+                "The default search pins 0.1 and 1.0." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="xgb_child",
+            families=frozenset({"XGBoost"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="min_child_weight", kind="float", low=0.5, high=20.0, log=True),
+                AxisSpec(key="gamma", kind="float", low=1e-4, high=5.0, log=True),
+            ),
+            label="XGBoost: leaf size and split gain",
+            help=(
+                "Tunes min_child_weight (0.5-20) and gamma, the minimum loss reduction "
+                "to split (1e-4-5), log scale. The default search uses library "
+                "defaults." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="xgb_sampling",
+            families=frozenset({"XGBoost"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="colsample_bytree", kind="float", low=0.3, high=1.0),
+                AxisSpec(key="colsample_bylevel", kind="float", low=0.3, high=1.0),
+            ),
+            label="XGBoost: column sampling",
+            help=(
+                "Tunes colsample_bytree (default search pins 0.8) and colsample_bylevel, "
+                "each 0.3-1.0. Row subsample is already tuned by the default search."
+                + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="lgbm_regularization",
+            families=frozenset({"LightGBM"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="reg_alpha", kind="float", low=1e-4, high=10.0, log=True),
+                AxisSpec(key="reg_lambda", kind="float", low=1e-3, high=100.0, log=True),
+            ),
+            label="LightGBM: L1/L2 regularization",
+            help=(
+                "Tunes reg_alpha (L1, 1e-4-10) and reg_lambda (L2, 1e-3-100), log scale. "
+                "The default search pins 0.1 and 1.0." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="lgbm_sampling",
+            families=frozenset({"LightGBM"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="subsample", kind="float", low=0.5, high=1.0),
+                AxisSpec(key="colsample_bytree", kind="float", low=0.3, high=1.0),
+            ),
+            label="LightGBM: row and column sampling",
+            help=(
+                "Tunes subsample (rows, 0.5-1.0; bagging_freq=1 is already set) and "
+                "colsample_bytree (0.3-1.0). The default search pins both at 0.8." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="lgbm_child",
+            families=frozenset({"LightGBM"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="min_child_samples", kind="int", low=2, high=50),
+                AxisSpec(key="min_split_gain", kind="float", low=1e-4, high=1.0, log=True),
+            ),
+            label="LightGBM: leaf size and split gain",
+            help=(
+                "Tunes min_child_samples (2-50; default search pins 5) and min_split_gain "
+                "(1e-4-1, log scale). Both ranges are fixed per study: on small data, large "
+                "values stop the trees splitting at all, which shows up as a flat, poor "
+                "score." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="catboost_sampling",
+            families=frozenset({"CatBoost"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(key="subsample", kind="float", low=0.5, high=1.0),
+                AxisSpec(key="rsm", kind="float", low=0.1, high=1.0),
+            ),
+            # CatBoost's default bootstrap (Bayesian, and for multiclass always) rejects
+            # `subsample`; Bernoulli accepts it for regression, binary and multiclass.
+            constants={"bootstrap_type": "Bernoulli"},
+            label="CatBoost: row and feature sampling",
+            help=(
+                "Tunes subsample (rows, 0.5-1.0) and rsm (features per split, 0.1-1.0), "
+                "and switches bootstrap_type to 'Bernoulli', which subsample requires."
+                + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="svm_gamma",
+            families=frozenset({"SVM", "SVR"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(
+                    key="gamma",
+                    kind="float",
+                    low=1e-5,
+                    high=10.0,
+                    log=True,
+                    applies_when_id="kernel_is_rbf",
+                ),
+            ),
+            label="SVM: RBF gamma",
+            help=(
+                "Tunes the RBF kernel width gamma (1e-5-10, log scale) instead of 'scale'. "
+                "Used only on trials whose kernel is rbf. Tuning C and gamma jointly on "
+                "few samples overfits easily." + _WIDEN_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="mlp_activation",
+            families=frozenset({"MLP"}),
+            task_types=_SUPERVISED,
+            axes=(
+                AxisSpec(
+                    key="activation", kind="categorical", choices=("relu", "tanh", "logistic")
+                ),
+            ),
+            label="MLP: activation function",
+            help="Tunes the hidden-layer activation: relu (default), tanh or logistic."
+            + _WIDEN_CAVEAT,
+        ),
+        BundleSpec(
+            id="plsda_head",
+            families=frozenset({"PLS-DA"}),
+            task_types=frozenset({"classification"}),
+            axes=(AxisSpec(key="lr_C", kind="float", low=1e-3, high=1e3, log=True),),
+            label="PLS-DA: logistic head C",
+            help=(
+                "Tunes the inverse regularization C of the logistic regression on the PLS "
+                "scores (1e-3-1e3, log scale; default 1.0). Stored in results as lr__C."
+                + _WIDEN_CAVEAT
+            ),
+        ),
+    )
+
+
+# Curated registry, keyed by bundle id. Every bundle is off unless named by the caller.
+BUNDLES: dict[str, BundleSpec] = {bundle.id: bundle for bundle in _supervised_bundles()}
 
 
 class _RecordingTrial:
@@ -653,6 +841,8 @@ def apply_extra_axes(
                 f"{clash!r}, already suggested in this trial"
             )
         suggested.append((axis, _suggest(trial, axis)))
+        # Catches a duplicate name/key across axes when resolve_bundles was bypassed.
+        already.update((axis.optuna_name, axis.key))
     for bundle in resolved:
         for clash in set(bundle.constants) & already:
             raise ExtraAxesConfigError(

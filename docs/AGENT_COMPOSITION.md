@@ -337,6 +337,50 @@ space. An example is PLS `tol`, which is always `1e-6`. You can open such an axi
 one run by passing a **bundle** of extra axes. With no bundle, the search and its study
 name are exactly as they have always been.
 
+**Curated bundles.** `search_spaces.BUNDLES` ships these ids. Every one is off unless you
+name it:
+
+| id | models / task | tunes (Optuna distribution) |
+|---|---|---|
+| `rf_features` | RandomForest / both | `max_features` ∈ {`sqrt`, `log2`, 0.1, 0.3, 0.5, 1.0} (default pins `sqrt`) |
+| `xgb_regularization` | XGBoost / both | `reg_alpha` [1e-4, 10] log, `reg_lambda` [1e-3, 100] log |
+| `xgb_child` | XGBoost / both | `min_child_weight` [0.5, 20] log, `gamma` [1e-4, 5] log |
+| `xgb_sampling` | XGBoost / both | `colsample_bytree` [0.3, 1], `colsample_bylevel` [0.3, 1] |
+| `lgbm_regularization` | LightGBM / both | `reg_alpha` [1e-4, 10] log, `reg_lambda` [1e-3, 100] log |
+| `lgbm_sampling` | LightGBM / both | `subsample` [0.5, 1], `colsample_bytree` [0.3, 1] |
+| `lgbm_child` | LightGBM / both | `min_child_samples` int [2, 50], `min_split_gain` [1e-4, 1] log |
+| `catboost_sampling` | CatBoost / both | `subsample` [0.5, 1], `rsm` [0.1, 1]; also writes `bootstrap_type='Bernoulli'` |
+| `svm_gamma` | SVM (classification), SVR (regression) | `gamma` [1e-5, 10] log, written only on trials whose kernel is `rbf` |
+| `mlp_activation` | MLP / both | `activation` ∈ {`relu`, `tanh`, `logistic`} |
+| `plsda_head` | PLS-DA / classification | logistic-head `lr_C` [1e-3, 1e3] log; stored in `Params` as `lr__C` |
+
+Each `BundleSpec` also carries a `label` and `help` string. Pass one selection to every
+model in a loop: ids that don't apply to a model are skipped for it.
+
+```python
+from spectral_predict.search_spaces import BUNDLES
+from spectral_predict.unified_bayesian import run_unified_bayesian
+
+print(sorted(BUNDLES))                             # the curated ids above
+results_df, study = run_unified_bayesian(          # NOTE: 2-tuple
+    X_aligned.to_numpy(dtype=float), y.to_numpy(dtype=float),
+    X_aligned.columns.to_numpy(dtype=float),
+    model_name="LightGBM", task_type="regression",
+    n_trials=60, cv_folds=5, verbose=False,
+    enabled_extra_axes=("lgbm_child", "lgbm_sampling"),  # tuple of ids, not a string
+    enable_sqlite_persistence="never",
+)
+print(study.user_attrs["extra_axes_bundles"])      # ['lgbm_child@r1', 'lgbm_sampling@r1']
+print(results_df.iloc[0]["Params"])                # includes 'model__min_split_gain': ...
+```
+
+Sampled values land in `Params` as real estimator parameters (`model__gamma`,
+`model__max_features`, `lr__C`), so the usual rebuild, Tab 7 refit, save/load and export
+paths carry them. Opening axes tends to improve the best candidates while lowering the
+average one, so validate the winner externally.
+
+**Custom bundles.** You can also define your own and pass them as `search_space`:
+
 ```python
 from spectral_predict.search_spaces import AxisSpec, BundleSpec, ExtraAxesConfigError
 from spectral_predict.unified_bayesian import run_unified_bayesian
@@ -368,8 +412,9 @@ What to know:
   parameter the base search already tunes (PLS `n_components`), or one derived from
   tuned values (MLP `hidden_layer_sizes`), raises `ExtraAxesConfigError` before any
   study is created. So do unknown ids, malformed axes, and a bare-string selection.
-- **The curated registry `search_spaces.BUNDLES` is empty in this release.** Curated
-  bundles arrive with T-51 PR B/C. Until then, pass your own `search_space`.
+- **`search_space` replaces the curated registry for that call.** To combine a curated
+  bundle with your own, pass `{**BUNDLES, "my_pls_tol": pls_tol}`. There are no one-class
+  bundles yet (T-51 PR C).
 - **An id that doesn't apply to this model is skipped**, so one selection can be shared
   across a multi-model loop. If none applies, a single warning is logged.
 - **Enabling bundles gives the run its own study name.** It never resumes, or

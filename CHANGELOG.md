@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   created. With nothing enabled, the search, its TPE trajectory and its study names are
   unchanged. `n_startup_trials` now also survives the T-41 in-memory→SQLite
   auto-migration. See `docs/AGENT_COMPOSITION.md` §7b.
+- **T-51 PR B** — curated supervised bundles in `search_spaces.BUNDLES`, all off by
+  default: `rf_features`, `xgb_regularization`, `xgb_child`, `xgb_sampling`,
+  `lgbm_regularization`, `lgbm_sampling`, `lgbm_child` (including `min_split_gain`),
+  `catboost_sampling` (also sets `bootstrap_type='Bernoulli'`, which `subsample` needs
+  for multiclass), `svm_gamma` (written only on RBF-kernel trials), `mlp_activation` and
+  `plsda_head` (the PLS-DA logistic head's `C`, stored as `lr__C`). Enable them from
+  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
+  control yet (PR D). Enabled bundles give the run its own study name. Sampled values are
+  stored in `Params` as estimator parameters and survive rebuild, Tab 7 refit,
+  save/load and export. With no bundle enabled, searches and study names are unchanged.
+  `apply_extra_axes` now also rejects two axes that share an Optuna name or key when
+  `resolve_bundles` is bypassed.
 
 ### Fixed
 
