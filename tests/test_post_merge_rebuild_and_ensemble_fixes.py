@@ -346,7 +346,17 @@ def test_preprocessing_config_from_row_reads_columns_and_display_name() -> None:
 
 @pytest.mark.parametrize(
     ("cell", "expected"),
-    [("False", False), ("false", False), ("0", False), ("True", True), ("1", True), (0.0, False)],
+    [
+        ("False", False),
+        ("false", False),
+        ("0", False),
+        ("off", False),
+        ("True", True),
+        ("1", True),
+        ("1.0", True),
+        ("on", True),
+        (0.0, False),
+    ],
 )
 def test_preprocessing_config_from_row_parses_smoothing_strings(cell, expected) -> None:
     from spectral_predict.preprocess import preprocessing_config_from_row
@@ -435,14 +445,88 @@ def test_chromosome_to_steps_matches_search_transform() -> None:
     )
 
     rng = np.random.default_rng(1)
-    X = rng.standard_normal((12, 80)).cumsum(axis=1)
+    # float32 counts ~1e6 (as the SPC reader returns): the search transform converts to
+    # float64 first, so the steps must too.
+    X = (1e6 + 1e3 * rng.standard_normal((12, 80)).cumsum(axis=1)).astype(np.float32)
     for p in range(len(PREPROC_TYPES)):
         genes = [p, 6]  # window 17 is legal for every derivative order
         _, transform = chromosome_to_transform(np.array(genes))
         steps = chromosome_to_steps(genes)
-        expected = X if transform is None else transform(X)
-        got = Pipeline([(n, clone(s)) for n, s in steps]).fit_transform(X) if steps else X
+        expected = np.asarray(X, dtype=np.float64) if transform is None else transform(X)
+        got = Pipeline([(n, clone(s)) for n, s in steps]).fit_transform(X)
+        assert got.dtype == np.float64
         np.testing.assert_array_equal(got, expected)
-    assert chromosome_to_steps([0, 6]) == []
-    assert [n for n, _ in chromosome_to_steps([0, 6, 1])] == ["autoscale"]
-    assert [n for n, _ in chromosome_to_steps([1, 6], autoscale=True)] == ["snv", "autoscale"]
+    assert [n for n, _ in chromosome_to_steps([0, 6])] == ["float64"]
+    assert [n for n, _ in chromosome_to_steps([0, 6, 1])] == ["float64", "autoscale"]
+    assert [n for n, _ in chromosome_to_steps([1, 6], autoscale=True)] == [
+        "float64",
+        "snv",
+        "autoscale",
+    ]
+    # Pickles (module-level conversion function) for saved ensembles.
+    restored = pickle.loads(pickle.dumps(Pipeline(chromosome_to_steps([6, 3]))))
+    np.testing.assert_array_equal(restored.fit_transform(X), chromosome_to_transform([6, 3])[1](X))
+
+
+def test_chromosome_from_row_falls_back_to_ga_genes_for_nan_cell() -> None:
+    """Mixed results tables give legacy rows preprocess_chromosome=NaN."""
+    from spectral_predict.ga_preprocessing import chromosome_from_row
+
+    nan = float("nan")
+    assert list(chromosome_from_row({"preprocess_chromosome": nan, "ga_genes": "[3, 5]"})) == [3, 5]
+    assert list(chromosome_from_row({"preprocess_chromosome": "", "ga_genes": [2, 1]})) == [2, 1]
+    row = pd.Series({"preprocess_chromosome": nan, "ga_genes": "[6, 3, 1]"})
+    assert list(chromosome_from_row(row)) == [6, 3, 1]
+    assert chromosome_from_row({"preprocess_chromosome": nan, "ga_genes": nan}) is None
+
+
+@pytest.mark.parametrize(
+    "genes",
+    ["[6, 99]", "[14, 0]", "[-1, 0]", "[6]", "[6, 3, 0, 1]", "[6.5, 3]", "'abc'"],
+)
+def test_out_of_range_chromosome_raises_value_error(genes) -> None:
+    from spectral_predict.ga_preprocessing import chromosome_from_row, chromosome_to_steps
+
+    with pytest.raises(ValueError, match="chromosome"):
+        chromosome_from_row({"preprocess_chromosome": genes})
+    if genes.startswith("["):
+        import ast
+
+        with pytest.raises(ValueError, match="chromosome"):
+            chromosome_to_steps(ast.literal_eval(genes))
+
+
+def test_validation_rebuild_scores_legacy_ga_genes_row_in_mixed_table() -> None:
+    """NaN preprocess_chromosome + legacy ga_genes must decode the chromosome (window 17)."""
+    from spectral_predict.ga_preprocessing import chromosome_to_transform
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    rng = np.random.default_rng(8)
+    X = rng.standard_normal((50, 40)).cumsum(axis=1)
+    y = X[:, 5] - X[:, 20]
+    X_val = rng.standard_normal((15, 40)).cumsum(axis=1)
+    y_val = X_val[:, 5] - X_val[:, 20]
+    df = pd.DataFrame(
+        [
+            {
+                "CompositeScore": 0.0,
+                "Task": "regression",
+                "Model": "Ridge",
+                "Params": str({"alpha": 2.0}),
+                "Preprocess": "deriv",
+                "preprocess_chromosome": np.nan,
+                "ga_genes": "[2, 6]",  # deriv1, window 17
+            }
+        ]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = compute_validation_metrics_for_top_models(
+            df, X, y, X_val, y_val, "regression", np.arange(1000.0, 1080.0, 2.0), top_n=1
+        )
+
+    transform = chromosome_to_transform([2, 6])[1]
+    model = Pipeline([("scaler", StandardScaler()), ("model", Ridge(alpha=2.0, random_state=42))])
+    model.fit(transform(X), y)
+    expected = np.sqrt(np.mean((model.predict(transform(X_val)) - y_val) ** 2))
+    np.testing.assert_allclose(out.loc[0, "RMSEP"], expected, rtol=1e-9)

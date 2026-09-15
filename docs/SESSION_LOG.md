@@ -1174,6 +1174,24 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
   Refine tab uses `ga_genes` for GA-PLS wavelength indices, so such a column in a results
   table would be decoded as a preprocessing chromosome by both paths (pre-existing risk).
 
+#### PR #77 review round 4 (Codex block on c60ff80, DeepSeek, GLM)
+
+- **dtype is part of preprocessing parity.** `chromosome_to_transform` and the validation
+  rebuild both `np.asarray(X, dtype=np.float64)` before SNV/Savitzky-Golay. The SPC reader
+  returns float32, and float32 counts around 1e6 give derivatives that differ enough to
+  move RMSEP (0.941 -> 0.949 in Codex's repro). Pipeline steps rebuilt from a chromosome
+  now start with `FunctionTransformer(_to_float64)`, a module-level function so it pickles.
+  Parity tests need float32 count-scale input: float64 standard-normal data hides this.
+  Non-chromosome rows (`build_preprocessing_pipeline`) have no such step in either the
+  validation or ensemble path, so they stay consistent with each other.
+- **"Missing" is not just `None` in a results row.** Validation's legacy
+  `preprocess_chromosome` -> `ga_genes` fallback used `is None`, but in a concatenated
+  table a legacy row's `preprocess_chromosome` cell is NaN. That is pre-existing on main;
+  `tests/test_ga_preprocessing.py` already pinned the NaN fallback in a mirror of the
+  logic, not in the real reader.
+- Chromosome genes are bounds-checked (`_checked_genes`): an out-of-range `WINDOW_SIZES`
+  index used to raise `IndexError`, which the GUI's `except ValueError` did not catch.
+
 User asked for Codex, DeepSeek Flash and GLM 5.3 on everything merged this session
 (earlier reviews were Kimi/GLM only; DeepSeek had hung). DeepSeek via opencode worked
 once prompts forbade `gh`/`git fetch`; one run died on a self-typoed absolute path

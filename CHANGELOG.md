@@ -72,9 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation rebuild already did (their `PreprocessBase`, e.g. `snv_deriv1_w11`, is not a
   pipeline name). New `ga_preprocessing.chromosome_from_row` / `chromosome_to_steps` share
   the parsing and the per-spectrum steps with the search-time transform, which is
-  bit-identical after the refactor.
+  bit-identical after the refactor. The steps start with a float64 conversion, as the
+  search transform does, so float32 spectra (SPC files) match the validation rebuild.
+- Validation rebuild: a legacy row in a mixed results table (`preprocess_chromosome`
+  NaN, `ga_genes` set) decodes its `ga_genes` chromosome again instead of falling back to
+  the preprocessing name. A malformed or out-of-range chromosome raises `ValueError` and
+  that row falls back to its name, instead of an `IndexError`.
 - A derivative row with a missing `Deriv` / `Window` rebuilds with 1 / 15 (the GUI's old
-  defaults) in both paths; validation used to fail on it. A `smoothing` cell of `'False'`
+  defaults) in both paths; validation used to fail on it. `smoothing` / `Autoscale` string
+  cells are matched explicitly (`'true'`, `'1'`, `'1.0'`, `'yes'`, `'on'`), so `'False'`
   no longer reads as on.
 - `plsda_head_kwargs` coerces `lr__random_state=42.0` to `42` and `'None'` to `None`,
   and raises `ValueError` on values `LogisticRegression` would reject.

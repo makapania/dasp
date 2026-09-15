@@ -599,6 +599,8 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 # Baseline methods a results row's display name can carry as a "+"-separated prefix.
 _DISPLAY_BASELINE_TAGS = ("als", "polynomial", "rubber_band", "airpls", "advanced")
 _DERIVATIVE_PREPROCESS_NAMES = ("deriv", "snv_deriv", "deriv_snv")
+# bool("False") is True, so string cells in results tables are matched explicitly.
+_TRUTHY_CELL_STRINGS = ("true", "1", "1.0", "yes", "on")
 _LEGACY_DEFAULT_DERIV = 1
 _LEGACY_DEFAULT_WINDOW = 15
 
@@ -652,7 +654,7 @@ def preprocessing_config_from_row(row) -> dict:
     if isinstance(smoothing_raw, float):
         smoothing = False if _row_value_missing(smoothing_raw) else smoothing_raw > 0
     elif isinstance(smoothing_raw, str):
-        smoothing = smoothing_raw.strip().lower() in ("true", "1", "yes")
+        smoothing = smoothing_raw.strip().lower() in _TRUTHY_CELL_STRINGS
     else:
         smoothing = bool(smoothing_raw)
     smoothing_window = row.get("smoothing_window", 17)
@@ -667,7 +669,7 @@ def preprocessing_config_from_row(row) -> dict:
     if _row_value_missing(autoscale_raw):
         autoscale = False
     elif isinstance(autoscale_raw, str):
-        autoscale = autoscale_raw.strip().lower() in ("true", "1", "yes")
+        autoscale = autoscale_raw.strip().lower() in _TRUTHY_CELL_STRINGS
     else:
         autoscale = bool(autoscale_raw)
 

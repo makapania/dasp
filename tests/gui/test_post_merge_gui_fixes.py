@@ -418,11 +418,16 @@ def _validation_rmsep(row: dict, X: pd.DataFrame, y: np.ndarray, X_val: np.ndarr
     return float(out.loc[0, "RMSEP"])
 
 
-def _val_split():
+def _val_split(dtype=np.float64):
     X, y, _ = _round_trip_data("regression")
     rng = np.random.default_rng(5)
     X_val = rng.standard_normal((20, X.shape[1]))
     y_val = X_val[:, 0] - 0.7 * X_val[:, 3] + 0.4 * X_val[:, 7]
+    if dtype == np.float32:
+        # Count-like float32 spectra around 1e6, as the SPC reader returns: float32
+        # rounding changes derivatives unless the rebuild converts to float64 first.
+        X = (1e6 + 1e3 * X.cumsum(axis=1)).astype(np.float32)
+        X_val = (1e6 + 1e3 * np.cumsum(X_val, axis=1)).astype(np.float32)
     return X, y, X_val, y_val
 
 
@@ -463,10 +468,11 @@ CHROMOSOME_ROWS = {
 }
 
 
+@pytest.mark.parametrize("dtype", [np.float64, np.float32], ids=["float64", "float32"])
 @pytest.mark.parametrize("name", sorted(CHROMOSOME_ROWS))
-def test_ensemble_reconstruction_decodes_preprocess_chromosome(gui_app, name):
+def test_ensemble_reconstruction_decodes_preprocess_chromosome(gui_app, name, dtype):
     row = CHROMOSOME_ROWS[name]
-    X, y, X_val, y_val = _val_split()
+    X, y, X_val, y_val = _val_split(dtype)
 
     fitted = _reconstruct(gui_app, row, X, y, "regression")
     rmse = float(np.sqrt(np.mean((np.ravel(fitted.predict(X_val)) - y_val) ** 2)))
@@ -482,6 +488,8 @@ def test_ensemble_reconstruction_decodes_preprocess_chromosome(gui_app, name):
 
     refit = clone(fitted).fit(X, y)
     np.testing.assert_allclose(refit.predict(X_val), fitted.predict(X_val), rtol=1e-9)
+    refit_rmse = float(np.sqrt(np.mean((np.ravel(refit.predict(X_val)) - y_val) ** 2)))
+    np.testing.assert_allclose(refit_rmse, _validation_rmsep(row, X, y, X_val, y_val), rtol=1e-9)
 
 
 def test_ensemble_reconstruction_defaults_missing_derivative_window(gui_app):

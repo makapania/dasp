@@ -255,34 +255,91 @@ def _spectrum_steps(preproc_type: str, window: int) -> list:
     return [savgol]
 
 
+def _to_float64(X):
+    """Module-level so the ``FunctionTransformer`` wrapping it pickles and clones."""
+    return np.asarray(X, dtype=np.float64)
+
+
+def _checked_genes(genes) -> np.ndarray:
+    """Return ``genes`` as an int array, or raise ValueError if it is not a valid chromosome."""
+    try:
+        arr = np.asarray(genes)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: {e}") from e
+    if arr.ndim != 1 or len(arr) not in (2, 3):
+        raise ValueError(
+            f"Invalid preprocessing chromosome {genes!r}: expected 2 or 3 genes"
+        )
+    try:
+        as_int = arr.astype(np.int64)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: {e}") from e
+    if not np.array_equal(as_int, arr):
+        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: genes must be integers")
+    if not 0 <= as_int[0] < len(PREPROC_TYPES):
+        raise ValueError(
+            f"Invalid preprocessing chromosome {genes!r}: preprocessing gene {as_int[0]} "
+            f"is outside 0..{len(PREPROC_TYPES) - 1}"
+        )
+    if not 0 <= as_int[1] < len(WINDOW_SIZES):
+        raise ValueError(
+            f"Invalid preprocessing chromosome {genes!r}: window gene {as_int[1]} "
+            f"is outside 0..{len(WINDOW_SIZES) - 1}"
+        )
+    return as_int
+
+
 def chromosome_to_steps(genes, *, autoscale: bool = False) -> list:
     """Return clonable Pipeline steps equivalent to a preprocessing chromosome.
 
-    The per-spectrum steps match :func:`chromosome_to_transform`; a ``StandardScaler``
-    step named ``'autoscale'`` follows when the chromosome's autoscale gene is set or
-    ``autoscale`` is true (a row's ``Autoscale`` column), as the validation rebuild
-    applies it.
+    A ``'float64'`` conversion step comes first, because the search-time transform and
+    the validation rebuild both convert the input to float64 (spectra read as float32,
+    e.g. SPC files, would otherwise give different derivatives). The per-spectrum steps
+    match :func:`chromosome_to_transform`; a ``StandardScaler`` step named
+    ``'autoscale'`` follows when the chromosome's autoscale gene is set or ``autoscale``
+    is true (a row's ``Autoscale`` column), as the validation rebuild applies it.
 
     Args:
         genes: ``[preproc_idx, window_idx]`` or ``[preproc_idx, window_idx, autoscale]``.
         autoscale: Also autoscale when the chromosome itself does not say so.
 
     Returns:
-        List of ``(name, transformer)`` tuples, possibly empty.
+        List of ``(name, transformer)`` tuples.
+
+    Raises:
+        ValueError: If ``genes`` is not a valid chromosome (wrong length, non-integer,
+            or an index outside ``PREPROC_TYPES`` / ``WINDOW_SIZES``).
     """
-    genes = np.asarray(genes)
-    steps = _spectrum_steps(PREPROC_TYPES[genes[0]], WINDOW_SIZES[genes[1]])
+    from sklearn.preprocessing import FunctionTransformer
+
+    genes = _checked_genes(genes)
+    steps = [('float64', FunctionTransformer(_to_float64))]
+    steps.extend(_spectrum_steps(PREPROC_TYPES[genes[0]], WINDOW_SIZES[genes[1]]))
     if autoscale or _decode_autoscale_gene(genes):
         steps.append(('autoscale', StandardScaler()))
     return steps
+
+
+def _chromosome_cell_missing(raw) -> bool:
+    if raw is None:
+        return True
+    if isinstance(raw, (list, tuple, np.ndarray)):
+        return len(raw) == 0
+    if isinstance(raw, str):
+        return raw.strip() == ''
+    try:
+        return bool(pd.isna(raw))
+    except (TypeError, ValueError):
+        return False
 
 
 def chromosome_from_row(row) -> Optional[np.ndarray]:
     """Return a results row's preprocessing chromosome, or ``None`` if it has none.
 
     Reads ``preprocess_chromosome``, falling back to the pre-2026-05-06 ``ga_genes``
-    column only when ``preprocess_chromosome`` is absent. Accepts a list, an array or
-    the ``str(list)`` a results CSV stores.
+    column when ``preprocess_chromosome`` is absent or empty (``None``, ``''``, NaN in a
+    mixed results table). Accepts a list, an array or the ``str(list)`` a results CSV
+    stores.
 
     Args:
         row: A results row as a mapping (``pd.Series``, ``dict``).
@@ -291,32 +348,21 @@ def chromosome_from_row(row) -> Optional[np.ndarray]:
         The genes as an integer array, or ``None`` when the row carries no chromosome.
 
     Raises:
-        ValueError: If a chromosome is present but cannot be parsed.
+        ValueError: If a chromosome is present but cannot be parsed or is out of range.
     """
     raw = row.get('preprocess_chromosome', None)
-    if raw is None:
+    if _chromosome_cell_missing(raw):
         raw = row.get('ga_genes', None)
-    if raw is None:
+    if _chromosome_cell_missing(raw):
         return None
-    if isinstance(raw, (list, tuple, np.ndarray)):
-        if len(raw) == 0:
-            return None
-        return np.asarray(raw)
     if isinstance(raw, str):
-        if raw == '':
-            return None
         import ast
 
         try:
-            return np.asarray(ast.literal_eval(raw))
+            raw = ast.literal_eval(raw)
         except (ValueError, SyntaxError) as e:
             raise ValueError(f"Unparseable preprocess_chromosome {raw[:100]!r}: {e}") from e
-    try:
-        if pd.isna(raw):
-            return None
-    except (TypeError, ValueError):
-        pass
-    return np.asarray(raw)
+    return _checked_genes(raw)
 
 
 def get_config_description(genes: np.ndarray) -> str:
