@@ -22,6 +22,7 @@
 ### Housekeeping
 - `docs/SESSION_LOG.md` is reference-only — grep it for specific topics, don't read the whole thing.
 - When `SESSION_LOG.md` exceeds ~200 lines, move older entries to `docs/SESSION_LOG_ARCHIVE.md` and keep only the last ~2 months.
+- Keep `docs/PROJECT_STATUS.md` to current state (target under ~40 KB). Move finished hand-offs, per-PR narratives and superseded sections verbatim to `docs/PROJECT_STATUS_ARCHIVE.md`.
 
 ---
 
