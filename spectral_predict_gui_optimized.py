@@ -23886,8 +23886,8 @@ class SpectralPredictApp:
                         if report.skipped_unknown:
                             self._log_progress(
                                 f"[RUN] {len(report.skipped_unknown)} "
-                                "setting(s) from sidecar are not in the "
-                                "current build — ignored."
+                                "setting(s) from the saved run are not in "
+                                "the current build — ignored."
                             )
                         # skipped_no_var represents whitelisted keys whose Tk
                         # var no longer exists on this build (renamed or
@@ -23937,8 +23937,8 @@ class SpectralPredictApp:
                     messagebox.showwarning(
                         "Resume failed",
                         "The previous run could not be resumed. Likely "
-                        "causes: the SQLite store is missing (the sidecar "
-                        "has been cleared automatically), the sidecar's "
+                        "causes: the SQLite store is missing (the saved "
+                        "run's record has been cleared automatically), its "
                         "storage path resolved outside the expected "
                         "directory, or the path could not be read. Start "
                         "a fresh analysis on the same data to begin again.",
@@ -23954,7 +23954,7 @@ class SpectralPredictApp:
             if not result.fully_succeeded:
                 try:
                     detail_lines = [
-                        f"Sidecar deleted: {result.sidecar_deleted}",
+                        f"Saved run record deleted: {result.sidecar_deleted}",
                         f"SQLite store deleted: {result.storage_deleted}",
                     ]
                     if result.errors:
@@ -24311,18 +24311,54 @@ class SpectralPredictApp:
         # worker never has to read self.search_controller — which a
         # subsequent Run Analysis click (once this worker exits) would have
         # already replaced (Codex review of #79 round 7).
-        self.analysis_thread = threading.Thread(
-            target=self._run_analysis_thread,
-            args=(models_for_thread, tier, resolved_inlier_label, self.search_controller),
-            kwargs=dict(
-                analysis_run_id=getattr(self, "_pending_bayesian_run_id", None),
-                uses_bayesian_run_state=getattr(
-                    self, "_pending_uses_bayesian_run_state", False
+        try:
+            self.analysis_thread = threading.Thread(
+                target=self._run_analysis_thread,
+                args=(models_for_thread, tier, resolved_inlier_label, self.search_controller),
+                kwargs=dict(
+                    analysis_run_id=getattr(self, "_pending_bayesian_run_id", None),
+                    uses_bayesian_run_state=getattr(
+                        self, "_pending_uses_bayesian_run_state", False
+                    ),
                 ),
-            ),
-            daemon=True,
-        )
-        self.analysis_thread.start()
+                daemon=True,
+            )
+            self.analysis_thread.start()
+        except Exception as launch_err:
+            # Round 9 item 4 (Codex): the gate above already claimed the run
+            # (registered or resumed it) before we ever try to start the
+            # worker. If Thread() or start() itself raises — an OS thread
+            # limit, say — nothing else would ever complete or release that
+            # claim, since the worker that was supposed to do so never runs.
+            self._log_progress(
+                f"[RUN] Could not start the analysis worker: {launch_err}"
+            )
+            pending_run_id = getattr(self, "_pending_bayesian_run_id", None)
+            if pending_run_id is not None:
+                try:
+                    from spectral_predict.run_state import (
+                        clear_resume_state,
+                        get_active_run_id,
+                    )
+                    if get_active_run_id() == pending_run_id:
+                        clear_resume_state()
+                except Exception as claim_err:
+                    self._log_progress(
+                        f"[RUN] Could not release the claimed run either: "
+                        f"{claim_err}"
+                    )
+            self._cancel_search_ui("Could not start the analysis — see log")
+            try:
+                messagebox.showerror(
+                    "Could not start analysis",
+                    "dasp could not start the analysis worker, so nothing "
+                    f"ran.\n\nDetails: {launch_err}\n\nIf a run was claimed "
+                    "for this click, it stays saved and can be resumed or "
+                    "deleted the next time you click Run Analysis.",
+                )
+            except Exception:
+                pass
+            return
 
     def _reconstruct_models_from_results(self, top_models_df, X_train, y_train, task_type):
         """
@@ -26090,7 +26126,7 @@ class SpectralPredictApp:
         if self.validation_X is not None and len(self.validation_X) > 0:
             self._log_progress(
                 "[RUN] Validation set already populated by user; ignoring "
-                "the captured indices from the resumed sidecar."
+                "the captured indices from the resumed run."
             )
             self._pending_validation_indices = None
             return
@@ -26127,7 +26163,7 @@ class SpectralPredictApp:
                 except Exception:
                     pass
             self._log_progress(
-                f"[RUN] Restored validation set from sidecar "
+                f"[RUN] Restored validation set from the saved run "
                 f"({len(pending)} samples). Trials will be evaluated "
                 "against the same partition the resumed run used."
             )
@@ -26418,8 +26454,8 @@ class SpectralPredictApp:
                                 "Couldn't delete the interrupted run",
                                 "The interrupted run could not be fully "
                                 "deleted, so nothing was started — starting "
-                                "fresh would otherwise risk overwriting its "
-                                f"saved-run slot.\n\nDetails: {result.errors}"
+                                "fresh would otherwise risk overwriting the "
+                                f"saved run.\n\nDetails: {result.errors}"
                                 "\n\nClick Run Analysis again to retry.",
                             )
                         except Exception:
@@ -26429,6 +26465,12 @@ class SpectralPredictApp:
                     # path below, which already calls abandon_resume() after
                     # a successful delete.
                     abandon_resume()
+                    # Round 9 item 2: no model-list override can be pending
+                    # this early (reconciliation only happens once
+                    # is_resuming() is True, below), but clear it anyway —
+                    # a Delete must never carry any override into the fresh
+                    # run that follows it.
+                    self._pending_bayesian_models = None
                     self._log_progress(
                         f"[RUN] Deleted the interrupted run {pending.run_id}; "
                         "starting fresh."
@@ -26445,7 +26487,7 @@ class SpectralPredictApp:
                         messagebox.showwarning(
                             "Resume failed",
                             "The interrupted run could not be resumed (its "
-                            "SQLite store went missing, or its sidecar "
+                            "SQLite store went missing, or its saved record "
                             "could not be read). Nothing was started.\n\n"
                             "Click Run Analysis again to retry.",
                         )
@@ -26555,9 +26597,9 @@ class SpectralPredictApp:
             "Nothing was run and nothing was deleted.\n\n"
             "Start a fresh analysis with the current data instead?\n\n"
             "  • Yes — delete the interrupted run and start fresh now. "
-            "(There is only one saved-run slot; keeping the old run while "
-            "starting a new one would silently orphan it — it could never "
-            "be offered again.)\n"
+            "(Only one saved run is kept at a time; keeping the old one "
+            "while starting a new one would silently orphan it — it could "
+            "never be offered again.)\n"
             "  • No — keep the interrupted run. Load the data it used and click "
             "Run Analysis again to continue it.\n\n"
             f"Details: {details}",
@@ -26600,7 +26642,7 @@ class SpectralPredictApp:
                         "Couldn't delete the interrupted run",
                         "The interrupted run could not be fully deleted, so "
                         "nothing was started — starting fresh would "
-                        "otherwise risk overwriting its saved-run slot.\n\n"
+                        "otherwise risk overwriting the saved run.\n\n"
                         f"Details: {result.errors}\n\nClick Run Analysis "
                         "again to retry.",
                     )
@@ -26610,6 +26652,12 @@ class SpectralPredictApp:
         abandon_resume()
         # The captured partition belonged to the deleted run.
         self._pending_validation_indices = None
+        # Round 9 item 2 (Codex): a model-list override set earlier in THIS
+        # call (accepting the resumed run's original models, above) belonged
+        # to the run we just deleted. Clear it before registering fresh, or
+        # _run_analysis would hand the fresh worker the abandoned run's
+        # model list instead of the click's own selection.
+        self._pending_bayesian_models = None
         self._log_progress(
             "[RUN] Starting a fresh analysis with the current data; the "
             "interrupted run was deleted so it can't be silently orphaned."
@@ -26694,17 +26742,41 @@ class SpectralPredictApp:
                 return
             mark_complete()
         except Exception as _mc_err:
-            # Don't re-raise — the search itself completed successfully and the
-            # user shouldn't see a "completion failed" error. But surface the
-            # failure: a stale sidecar would otherwise produce an unexplained
-            # "resume previous run?" dialog on next launch.
+            # Round 9 item 5 (Codex): mark_complete() re-raises when the
+            # sidecar unlink itself fails (e.g. a Windows AV lock) WITHOUT
+            # clearing its in-process state, by design — so the caller can
+            # retry. But this caller never retries; every search that
+            # reaches here already finished successfully, so leaving the
+            # in-process claim set would make the NEXT start_run() reuse
+            # this now-finished run's stale metadata idempotently, with no
+            # fingerprint check ever running (the same class of bug the
+            # round-8 `finally` net fixes for early exits). Release the
+            # claim here too — the sidecar itself is untouched on disk (the
+            # unlink failed), so the next launch's "Resume previous run?"
+            # will still find and offer it. That's expected and safe: a
+            # finished run's saved trials are quietly ignored if the user
+            # loads the same data and starts fresh, and it can be deleted
+            # from that prompt if it's just clutter.
             try:
                 self._log_progress(
-                    f"[RUN] mark_complete failed; sidecar will persist "
-                    f"and next launch may prompt to resume: {_mc_err}"
+                    f"[RUN] mark_complete failed; the saved run's record "
+                    "will persist on disk and the next launch may prompt "
+                    f"to resume it: {_mc_err}"
                 )
             except Exception:
                 pass  # progress log itself broken — nothing else we can do
+            try:
+                from spectral_predict.run_state import clear_resume_state
+                if get_active_run_id() == analysis_run_id:
+                    clear_resume_state()
+            except Exception as _cr_err:
+                try:
+                    self._log_progress(
+                        f"[RUN] Could not release the finished run's "
+                        f"in-memory claim either: {_cr_err}"
+                    )
+                except Exception:
+                    pass
 
     def _end_analysis_without_search(self, reason):
         """Return the UI to idle when the worker stops before any search runs."""
