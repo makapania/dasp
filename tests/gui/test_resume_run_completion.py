@@ -75,8 +75,41 @@ def worker_env(gui_app, tmp_path, monkeypatch, reimport_modules):
     rs._reset_for_tests()
 
 
+def _successful_results_row() -> pd.DataFrame:
+    """A minimal but realistic single-row results frame.
+
+    Covers the columns every downstream branch (regression, classification,
+    one-class) reads off ``results_df_model.iloc[0]`` or sorts by, so a
+    ``_fake_bayesian`` "success" stand-in behaves like a model that actually
+    produced a usable trial, not like the all-fits-failed case (an empty
+    frame — see ``test_all_fits_failed_keeps_run_resumable``).
+    """
+    return pd.DataFrame([{
+        "RMSE": 1.0, "RMSEcv": 1.0, "R2cv": 0.9,
+        "Accuracy": 0.9, "CV Error": 0.1,
+        "BalancedAcccv": 0.9,
+        "Preprocess": "raw", "n_vars": 5, "full_vars": 20,
+    }])
+
+
 def _fake_bayesian(behaviour):
     """A run_unified_bayesian stand-in; ``behaviour(model_name, X, y)`` may raise."""
+    calls = []
+
+    def fake(X, y, wavelengths, model_name, **kwargs):
+        calls.append((model_name, np.array(X, copy=True), np.array(y, copy=True)))
+        behaviour(model_name, X, y)
+        return _successful_results_row(), None
+
+    return fake, calls
+
+
+def _fake_bayesian_empty_results(behaviour):
+    """Like ``_fake_bayesian``, but every call "succeeds" with NO usable
+    results — the all-fits-failed shape: the backend caught every trial's
+    exception and turned it into a 1e10 penalty, so ``run_unified_bayesian``
+    returns normally with an empty frame instead of raising.
+    """
     calls = []
 
     def fake(X, y, wavelengths, model_name, **kwargs):

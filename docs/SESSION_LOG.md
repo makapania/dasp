@@ -1401,3 +1401,102 @@ should always block — they found two crash bugs no test covered.
   - GUI `_RESUME_ISSUE_NOTICES` maps `resume_declined`, `resume_check_failed`,
     `data_mismatch_resume` and `data_unverified_resume` to per-kind wording, with one
     dialog per resumed run.
+  - **Round 7 (Codex + DeepSeek review), plus a binding user decision made mid-round:**
+    "the point of pausing a run was that you could resume... if there was a paused
+    run, we get asked to resume", extended later in the same round to "we can then be
+    asked to delete previous too, so that it always looks for a saved run and always
+    asks to resume, unless it gets deleted."
+    - *Stop -> Run race, confirmed.* `_complete_run_state_after_search` read
+      `getattr(self, "search_controller", None)` to decide "was I stopped?". If the
+      user pressed Stop and clicked Run Analysis again before the old worker noticed,
+      `_run_analysis` had already replaced `self.search_controller` with the new run's
+      (unstopped) controller by the time the old worker got there, so it saw "not
+      stopped" and released the *old* run's record. Fixed: `_run_analysis` now passes
+      its freshly-created controller into `_run_analysis_thread(..., controller=...)`,
+      which captures it once as `my_controller` and uses it for every stop decision
+      and every `controller=` kwarg passed downstream — never `self.search_controller`
+      again inside the worker. Also added a guard in `_run_analysis`: refuse a second
+      click while `self.analysis_thread.is_alive()`.
+    - *All-fits-failed counted as success, confirmed.* The objective's blanket
+      `except Exception` (unified_bayesian.py) turns every trial's exception into a
+      1e10 penalty and returns normally; `convert_study_to_dataframe` then drops
+      penalty rows, so a model whose every trial failed comes back as an *empty*
+      DataFrame, not a raised exception. The GUI's per-model try/except only counted
+      raised exceptions toward `oc_model_errors`/`unified_model_errors`, so an
+      all-fits-failed model looked like zero errors and the run got released. Fixed at
+      the two GUI call sites (one-class, main unified): an empty `results_df_model`
+      now increments the same error counter a raised exception would.
+    - *Paused/failed run stays active in-process, confirmed and the fix redesigned
+      around the user decision.* `_complete_run_state_after_search`'s stop/error
+      branch used to just log and `return` — it never touched
+      `_active_run_id`/`_active_metadata`/`_active_storage_url`, which were still set
+      from this run's own `start_run`. The next `start_run()` call then hit the
+      Cluster-C idempotent-return path (`_active_metadata is not None`) and handed
+      back the SAME stale metadata with `is_resuming()` still False, so
+      `_confirm_resume_before_launch` never ran the fingerprint check at all — a
+      silent, ungated reuse under 'always'. First fix attempt (pre-user-decision) was
+      to call `resume_run()` right there, auto-flagging it resuming. The user's
+      follow-up decision made that wrong: resuming automatically, with no ask, is
+      exactly the "only worth it for crashes" case they rejected. Landed instead: the
+      stop/error branch calls `run_state.clear_resume_state()` (releases the
+      in-process claim only — sidecar and SQLite store untouched, and it also drops a
+      truly-empty store, e.g. an 'auto' run stopped during in-memory warmup). Then
+      `_confirm_resume_before_launch` gained a new branch: whenever
+      `not is_resuming()` but `find_incomplete_run()` still returns a resumable
+      record (from this session's Stop/failure, *or* a startup "decide later"
+      answer), it calls a new `_prompt_resume_delete_or_keep` — the same three-way
+      Resume/Delete/Decide-later choice as the startup dialog — before this click's
+      own `start_run()` can overwrite the one shared sidecar. Resume falls through to
+      the existing fingerprint check (so a mismatch still gets the mismatch dialog and
+      `_notify_resume_issue` fires normally once the search starts); Delete calls
+      `discard_incomplete_run` then proceeds fresh; Decide-later cancels the click and
+      touches nothing.
+    - *Orphaning gotcha the user caught mid-round:* there is exactly one sidecar file
+      (`active_run.json`). A fresh run's `start_run()` overwrites it unconditionally.
+      Originally the mismatch dialog's "Yes, start fresh" only called
+      `abandon_resume()` (in-memory only) and left the old SQLite file "for retention
+      cleanup" — but the very next `start_run()` from the fresh run would silently
+      overwrite the only sidecar entry pointing at it, and it could never be
+      offered/resumed again. Both the new pre-launch dialog's "Delete" and the
+      mismatch dialog's "Yes, start fresh" now call `discard_incomplete_run` before
+      proceeding, so the old run is removed on purpose instead of orphaned by
+      accident. Considered and rejected: a multi-sidecar (keyed by run id) design, so
+      a "keep for later while starting a new one" choice could exist safely — too
+      invasive for this round; the three-way choice's "Decide later" (Cancel) already
+      covers "keep it and don't run anything right now" without needing a second
+      sidecar slot. `test_start_fresh_keeps_file_and_cannot_resume_old_store` (round 6)
+      is now `test_start_fresh_deletes_old_run_instead_of_orphaning_it` — the round-6
+      assertion that the old file survives is exactly the bug the user caught.
+    - *`HAS_UNIFIED_BAYESIAN == False`, confirmed.* `_uses_bayesian_run_state` didn't
+      check the flag, so a run got registered via `start_run` and then the unified
+      branch returned early (module-missing error dialog) before ever calling
+      `_complete_run_state_after_search` — a permanent phantom resume prompt. Fixed by
+      ANDing `HAS_UNIFIED_BAYESIAN` into `_uses_bayesian_run_state`.
+    - *Post-bind `self.X` reads, confirmed.* `total_samples_original` in
+      `last_training_config` (both one-class and main branches) read
+      `self.X_original`/`self.X` again after the worker had already bound
+      `X_run, y_run` at the top of `_run_analysis_thread` — the same class of bug the
+      round-6 fingerprint fix addressed for the search inputs themselves, just missed
+      for this one metadata field. Now binds `X_original_run = self.X_original`
+      alongside `X_run, y_run` and both call sites read the bound snapshot.
+    - Test design note: `_fake_bayesian` in `test_resume_run_completion.py` used to
+      return `pd.DataFrame()` unconditionally — a stand-in for "success" that, once
+      the all-fits-failed fix landed, is indistinguishable from "every trial failed".
+      Split into `_fake_bayesian` (returns a new `_successful_results_row()` helper
+      with the columns the GUI reads off `.iloc[0]` and sorts by) and
+      `_fake_bayesian_empty_results` (the genuine empty-frame case) so existing
+      "success releases the record" tests didn't start failing for the wrong reason.
+    - **Coordinator follow-up: confirmed the "keep-for-later" leg wasn't dropped, and
+      closed a startup test gap.** The three-way dialog keeps Resume/Delete/Decide-later
+      at both the startup check and the new pre-launch check — "Decide later" *is*
+      keep-for-later; it just also means "don't launch anything this click," which is
+      exactly what keeps the single shared sidecar from ever being touched while a run
+      is being kept. No second sidecar was needed. What was actually missing: a
+      GUI-level test for the startup dialog's "No" (delete) choice — only unit tests of
+      `run_state.discard_incomplete_run` in isolation existed, no test drove
+      `_check_for_incomplete_run()` itself through that branch. Added
+      `test_startup_no_deletes_saved_run` and `test_startup_yes_resumes` (the paired
+      "Yes" case, for completeness) to `test_resume_round7.py`. Full non-GUI suite
+      re-confirmed unaffected: 3395 passed, 26 skipped (984s) — identical to the
+      documented baseline. Targeted resume battery: 156 passed (up from 154 with the
+      two added startup tests).

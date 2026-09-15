@@ -73,9 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   data fingerprints, or why they couldn't be checked, and offers two choices:
   - **No (default):** keep the saved run. Nothing runs, so you can load the matching
     data and click Run again to resume.
-  - **Yes:** start a fresh analysis with the current data. Only the in-memory resume
-    state is dropped (new `run_state.abandon_resume`). The new run gets its own id,
-    store and sidecar, and the old SQLite file stays on disk for retention cleanup.
+  - **Yes:** delete the interrupted run and start fresh now (round 7: there is only
+    one sidecar slot, so leaving the old run in place while a new one starts would
+    silently overwrite its sidecar and orphan its SQLite store — it could never be
+    offered again).
 
   Pending validation indices are kept while the resume is pending and cleared on a
   fresh start. Keeping the run returns the UI fully to idle and ends the search
@@ -98,6 +99,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `run_state.get_active_run_id()` and `SearchController.is_end_requested()`.
 - `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
   (e.g. an embedded NUL) instead of crashing the startup check.
+- **Round 7 (reviews of #79): a paused or failed run is now offered again — resume,
+  delete, or decide later — every time it could otherwise be silently reused or
+  silently orphaned.** User decision: a saved paused/failed/crashed Bayesian run is
+  asked about until it is resumed to completion or deleted.
+  - **Behaviour change:** clicking Run Analysis while an un-decided resumable run sits
+    on disk (paused via Stop or left over from a model failure earlier this session,
+    or from a startup "decide later" answer) now shows the same three-way choice as
+    the startup dialog — *Resume* / *Delete* / *Decide later* — before the click's own
+    `start_run()` can silently overwrite the shared sidecar. *Resume* falls through to
+    the existing data-fingerprint check; *Delete* removes it and starts fresh; *Decide
+    later* cancels the click and touches nothing.
+  - A Stop or a model failure used to leave the run's in-process state active but not
+    flagged as resuming, so the *next* `start_run()` idempotently returned that stale
+    metadata with no fingerprint check ever running (`_confirm_resume_before_launch`
+    only checks while `is_resuming()`). `_complete_run_state_after_search` now releases
+    the in-process claim (`run_state.clear_resume_state`) on Stop/failure — the sidecar
+    and SQLite store are untouched, so the next click or launch still finds them.
+  - **Stop → Run race:** if the user pressed Stop and clicked Run Analysis again
+    before the old worker noticed, `self.search_controller` was already the new run's
+    (unstopped) controller by the time the old worker checked whether it had been
+    stopped, so it wrongly released the old run's record. Each worker now captures its
+    own `SearchController` when `_run_analysis` starts it, and uses only that one for
+    every stop decision and every search call.
+  - **A second Run Analysis click is refused while a previous worker is still alive**,
+    rather than racing two workers on `self.search_controller` and on run_state's
+    single active run.
+  - **A model whose search comes back with no usable results now counts as failed,
+    same as a raised exception.** When every trial for a model fails inside the
+    objective, the backend absorbs the exception into a 1e10 penalty per trial and
+    returns an empty results frame rather than raising — which the GUI's "0 errors"
+    count had been treating as a clean finish, releasing a run that produced nothing.
+  - `_uses_bayesian_run_state` now also checks `HAS_UNIFIED_BAYESIAN`. A build where
+    `unified_bayesian` failed to import used to register a run and then bail out
+    before ever completing it, leaving a permanent phantom resume prompt.
+  - The training-config `total_samples_original` metadata read `self.X_original` /
+    `self.X` again after the worker bound `X_run`/`y_run` to a snapshot at start —
+    changing data while the worker was still setting up could report a stale count
+    against the wrong dataset. Both branches now use the worker's own bound snapshot.
+  - The mismatch dialog's "Yes, start fresh" now deletes the interrupted run instead of
+    just abandoning it in memory, for the same orphaning reason as above (see the
+    updated behaviour-change entry further up).
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
   Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
   Bayesian rows store all estimator params under that prefix, so each base model trained

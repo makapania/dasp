@@ -178,7 +178,12 @@ def test_retry_with_matching_data_resumes(gui_app, resumed):
     assert rs.is_resuming() and rs.get_storage_url() == meta.storage_url
 
 
-def test_start_fresh_keeps_file_and_cannot_resume_old_store(gui_app, resumed):
+def test_start_fresh_deletes_old_run_instead_of_orphaning_it(gui_app, resumed):
+    """User decision on #79: there is only one sidecar slot. Starting a fresh
+    run would silently overwrite it, orphaning the interrupted run's SQLite
+    store (it could never be offered again). "Yes, start fresh" must delete
+    the interrupted run explicitly instead of just abandoning it in memory.
+    """
     rs, meta, store, started, _ = resumed
     with patch("tkinter.messagebox.askyesno", return_value=True):
         worker = _click_run(gui_app, *_dataset(2))
@@ -188,7 +193,7 @@ def test_start_fresh_keeps_file_and_cannot_resume_old_store(gui_app, resumed):
     new = started[0]
     assert new.run_id != meta.run_id and new.storage_path != meta.storage_path
     assert not rs.is_resuming() and rs.get_storage_url() != meta.storage_url
-    assert store.exists(), "the old SQLite file stays for retention cleanup"
+    assert not store.exists(), "the old SQLite file is deleted, not orphaned"
     assert rs.find_incomplete_run().run_id == new.run_id
     assert gui_app._pending_validation_indices is None
 
