@@ -137,11 +137,13 @@ class BundleSpec:
     families: frozenset[str]
     task_types: frozenset[str]
     axes: tuple[AxisSpec, ...]
-    constants: Mapping[str, Any] = field(default_factory=dict)
+    # Mapping fields are excluded from __hash__ (still compared by __eq__), so a bundle
+    # stays hashable while callers keep passing plain dicts.
+    constants: Mapping[str, Any] = field(default_factory=dict, hash=False)
     label: str = ""
     help: str = ""
     revision: int = 1
-    family_task_types: Mapping[str, frozenset[str]] | None = None
+    family_task_types: Mapping[str, frozenset[str]] | None = field(default=None, hash=False)
 
 
 _SUPERVISED = frozenset({"regression", "classification"})

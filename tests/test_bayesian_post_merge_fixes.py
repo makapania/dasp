@@ -93,6 +93,16 @@ def test_convert_study_without_baseline_trial_has_no_baseline_params() -> None:
     assert df.iloc[0]["baseline_params"] is None
 
 
+@pytest.mark.parametrize("task", ["regression", "classification", "one_class"])
+def test_empty_study_dataframe_has_baseline_columns(task: str) -> None:
+    df = ub.convert_study_to_dataframe(
+        optuna.create_study(), model_name="PLS", task_type=task,
+        wavelengths=np.array([1000.0, 2000.0]), n_features=8, cv_folds=3,
+    )
+    assert df.empty
+    assert {"baseline_method", "baseline_params"} <= set(df.columns)
+
+
 def test_bayesian_run_with_baseline_persists_params_for_validation_rebuild() -> None:
     df, study = _run(
         "PLS", "regression", n_trials=8,
@@ -131,6 +141,24 @@ def test_svm_gamma_still_resolves_supported_pairs_with_unchanged_identity(
     )
     assert canonical_space_identity((resolved,), False) == canonical_space_identity(
         (unrestricted,), False
+    )
+
+
+@pytest.mark.parametrize("bid", sorted(BUNDLES))
+def test_curated_bundles_are_hashable(bid: str) -> None:
+    bundle = BUNDLES[bid]
+    assert hash(bundle) == hash(_rebuilt_with_fresh_dicts(bundle))
+    assert {bundle}
+
+
+def _rebuilt_with_fresh_dicts(bundle: BundleSpec) -> BundleSpec:
+    return BundleSpec(
+        id=bundle.id, families=bundle.families, task_types=bundle.task_types,
+        axes=bundle.axes, constants=dict(bundle.constants), label=bundle.label,
+        help=bundle.help, revision=bundle.revision,
+        family_task_types=(
+            None if bundle.family_task_types is None else dict(bundle.family_task_types)
+        ),
     )
 
 
@@ -177,6 +205,17 @@ def test_categorical_choices_equal_under_optuna_are_rejected(choices: tuple) -> 
         axes=(AxisSpec(key="max_features", kind="categorical", choices=choices),),
     )
     with pytest.raises(ExtraAxesConfigError, match="duplicate categorical choices"):
+        resolve_bundles("RandomForest", "regression", ("rf",), {"rf": bundle})
+
+
+@pytest.mark.parametrize("nan", [float("nan"), np.float64("nan")], ids=["float", "numpy"])
+def test_nan_categorical_choices_are_rejected(nan: float) -> None:
+    """``nan != nan`` would slip past the equality check; NaN is rejected outright."""
+    bundle = BundleSpec(
+        id="rf", families=frozenset({"RandomForest"}), task_types=frozenset({"regression"}),
+        axes=(AxisSpec(key="max_features", kind="categorical", choices=(nan, nan)),),
+    )
+    with pytest.raises(ExtraAxesConfigError, match="non-finite"):
         resolve_bundles("RandomForest", "regression", ("rf",), {"rf": bundle})
 
 

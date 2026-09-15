@@ -4,7 +4,9 @@
 copies the study into SQLite under a configuration-derived name. Reported by the
 T-51 reviews (DeepSeek, Codex): on a second 'auto' run of the same configuration,
 that migration targets a name that already exists; if it fails, the cleanup calls
-``optuna.delete_study`` on that name — the EARLIER run's study.
+``optuna.delete_study`` on that name — the EARLIER run's study. Post-merge reviews of
+#78 showed no guard could make that delete safe, so it was removed: a failed migration
+now only warns, and these tests assert earlier studies survive every failure mode.
 
 These tests drive the real auto-decision: trials are made slow (> the 1 s threshold)
 by wrapping the CV helper, not by patching the decision itself.
@@ -12,6 +14,7 @@ by wrapping the CV helper, not by patching the decision itself.
 from __future__ import annotations
 
 import importlib
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -196,20 +199,69 @@ def test_unanswerable_check_never_authorises_deletion(
     assert _completed(slow_sqlite, name) == WARMUP + 1
 
 
-class _StatFailsPath(type(Path())):
-    """A path whose existence check raises, as a locked or AV-scanned file can."""
+def _deny_stat(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make ``Path.stat`` raise PermissionError for ``target`` only, as a locked,
+    permission-denied or AV-scanned file can. Real pathlib predicates are left intact:
+    ``Path.is_file`` swallows that error and returns False, which is the trap."""
+    real_stat = Path.stat
+    denied = os.path.normcase(os.path.abspath(target))
 
-    def is_file(self, *args: Any, **kwargs: Any) -> bool:
-        raise PermissionError("simulated locked database file")
+    def stat(self: Path, *args: Any, **kwargs: Any):
+        if os.path.normcase(os.path.abspath(self)) == denied:
+            raise PermissionError(13, "simulated permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
 
 
-def test_file_check_oserror_is_unknown_not_absent(tmp_path: Path, monkeypatch) -> None:
+def test_file_check_stat_error_reports_not_found_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     db = tmp_path / "x.sqlite3"
     db.write_bytes(b"x")
-    url = f"sqlite:///{db.as_posix()}"
-    monkeypatch.setattr(ub, "Path", _StatFailsPath)
-    assert ub._sqlite_file_state(url) is None
-    assert ub._sqlite_file_exists(url) is False, "advisory check still reports not-found"
+    url = f"sqlite:///{db.as_posix()}?check_same_thread=False"
+    assert ub._sqlite_file_exists(url)
+    _deny_stat(monkeypatch, db)
+    assert ub._sqlite_file_exists(url) is False
+
+
+def test_file_check_absent_directory_and_uri_forms(tmp_path: Path) -> None:
+    assert not ub._sqlite_file_exists(f"sqlite:///{(tmp_path / 'no_dir' / 'x.db').as_posix()}")
+    assert not ub._sqlite_file_exists(f"sqlite:///{tmp_path.as_posix()}")
+    # SQLite URI filenames name a file only via SQLite's own parsing: never "exists".
+    real = tmp_path / "studies.db"
+    real.write_bytes(b"x")
+    assert not ub._sqlite_file_exists(f"sqlite:///file:{real.as_posix()}?uri=true")
+    assert not ub._sqlite_file_exists(f"sqlite:///{real.as_posix()}?mode=ro&uri=true")
+
+
+def test_uri_storage_form_never_loses_earlier_study(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2: ``sqlite:///file:x.db?uri=true`` read as a missing path. With no cleanup
+    delete, a re-run on that URL stays in memory and leaves the earlier study intact."""
+    db = tmp_path / "studies.db"
+    url = f"sqlite:///file:{db.as_posix()}?uri=true"
+    monkeypatch.setattr(
+        importlib.import_module("spectral_predict.run_state"), "get_storage_url", lambda: url
+    )
+    X, y, wl = _data()
+    _, template = ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=0,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="never",
+    )
+    earlier = optuna.create_study(study_name=template.study_name, storage=url)
+    earlier.add_trial(optuna.trial.create_trial(value=1.0))
+    real_migrate = ub._migrate_study_to_sqlite
+    monkeypatch.setattr(ub, "_AUTO_THRESHOLD_S", 0.0)
+
+    def flaky(*args: Any, **kwargs: Any):
+        raise RuntimeError("simulated transient lock during copy")
+
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", flaky)
+    _run(WARMUP + 1)
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", real_migrate)
+    assert _completed(url, template.study_name) == 1
 
 
 def test_file_check_oserror_never_authorises_deletion(
@@ -219,7 +271,7 @@ def test_file_check_oserror_never_authorises_deletion(
     so a non-duplicate migration failure deleted the earlier run's study."""
     first = _run(WARMUP + 1)
     name = first.study_name
-    monkeypatch.setattr(ub, "Path", _StatFailsPath)
+    _deny_stat(monkeypatch, Path(slow_sqlite[len("sqlite:///"):].split("?", 1)[0]))
 
     def failing_migration(*args: Any, **kwargs: Any):
         raise RuntimeError("simulated WAL/permission failure")
@@ -315,17 +367,34 @@ def test_never_mode_does_not_fingerprint(slow_sqlite: str, monkeypatch: pytest.M
     )
 
 
-def test_partial_study_created_by_this_attempt_is_still_cleaned_up(
-    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+def test_failed_migration_never_deletes_a_study_created_during_the_copy(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Codex P1: after the absence check, another process creates the study, then this
+    attempt's copy fails with a non-duplicate (transient lock) error. Nothing can prove
+    who created the study, so failed migrations never delete; they warn instead."""
     created: list[str] = []
 
-    def partial_then_fail(study, storage_url, study_name, *args: Any, **kwargs: Any):
-        optuna.create_study(study_name=study_name, storage=storage_url)
+    def other_process_creates_then_copy_fails(
+        study, storage_url, study_name, *args: Any, **kwargs: Any
+    ):
+        other = optuna.create_study(study_name=study_name, storage=storage_url)
+        other.add_trial(optuna.trial.create_trial(value=3.0))
         created.append(study_name)
-        raise RuntimeError("simulated failure after copy_study wrote the study")
+        raise RuntimeError("simulated database is locked during copy_study")
 
-    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", partial_then_fail)
-    _run(WARMUP + 1)
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", other_process_creates_then_copy_fails)
+    messages: list[dict] = []
+    with caplog.at_level("WARNING", logger="spectral_predict.unified_bayesian"):
+        _run(WARMUP + 1, progress_callback=messages.append)
     assert created, "setup did not reach migration"
-    assert created[0] not in optuna.study.get_all_study_names(storage=slow_sqlite)
+    assert any(m.get("t41_decision") == "migration_failed_inmemory" for m in messages)
+    assert _completed(slow_sqlite, created[0]) == 1
+    warning = " ".join(r.getMessage() for r in caplog.records)
+    assert created[0] in warning and "Nothing was deleted" in warning
+
+
+def test_no_code_path_deletes_studies() -> None:
+    import inspect
+
+    assert "delete_study" not in inspect.getsource(ub)
