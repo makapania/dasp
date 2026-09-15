@@ -315,6 +315,46 @@ def test_existing_unfingerprinted_study_is_never_stamped(slow_sqlite: str) -> No
     assert any(m.get("t41_decision") == "auto_existing_study_data_mismatch" for m in messages)
 
 
+def test_always_resume_of_unfingerprinted_study_warns_unverified(
+    slow_sqlite: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    X, y, wl = _data()
+    _, template = ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=0,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="never",
+    )
+    legacy = optuna.create_study(
+        study_name=template.study_name, storage=slow_sqlite, direction="minimize"
+    )
+    legacy.add_trial(optuna.trial.create_trial(value=5.0))  # no fingerprint attr
+    messages: list[dict] = []
+    with caplog.at_level("WARNING", logger="spectral_predict.unified_bayesian"):
+        _, resumed = ub.run_unified_bayesian(
+            X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=2,
+            cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="always",
+            progress_callback=messages.append,
+        )
+    assert resumed.study_name == template.study_name
+    assert len(resumed.trials) == 2, "still resumed"
+    assert any(m.get("data_unverified_resume") for m in messages)
+    assert not any(m.get("data_mismatch_resume") for m in messages)
+    assert "can't be verified" in caplog.text
+
+
+def test_always_resume_with_matching_fingerprint_does_not_warn(slow_sqlite: str) -> None:
+    _run(WARMUP + 1)
+    X, y, wl = _data()
+    messages: list[dict] = []
+    ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression",
+        n_trials=WARMUP + 1, cv_folds=3, random_state=7, verbose=False,
+        enable_sqlite_persistence="always", progress_callback=messages.append,
+    )
+    assert not any(
+        m.get("data_unverified_resume") or m.get("data_mismatch_resume") for m in messages
+    )
+
+
 def test_always_resume_on_different_data_warns(slow_sqlite: str) -> None:
     first = _run(WARMUP + 1)
     X, y, wl = _data()

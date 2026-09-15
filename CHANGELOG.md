@@ -53,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     fingerprint, so a later 'auto' run on the same data resumes it, or discard it with
     the run's saved state. The resume-gating file check now calls `stat` directly and
     never treats a SQLite URI filename as an existing file.
+  - An 'always' run that resumes a persisted study with no stored data fingerprint (a
+    legacy study) now warns that the data it ran on can't be verified. The progress
+    event carries `data_unverified_resume: True`. The study is still resumed.
   - `run_unified_bayesian` raised `NameError` while building its results table whenever
     `baseline_method` was set and any trial applied baseline correction.
     `convert_study_to_dataframe` gains a `baseline_params` keyword. Baseline rows now

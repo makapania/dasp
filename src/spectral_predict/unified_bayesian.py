@@ -2980,6 +2980,19 @@ def run_unified_bayesian(
                             "message": f"[T-41] WARNING: {_msg}",
                             "data_mismatch_resume": True,
                         })
+                elif _stored_fp is None:
+                    # A legacy study (or an unreadable attr): still resumed, but say so.
+                    _msg = (
+                        f"Resuming a persisted {model_name} study recorded before data "
+                        "fingerprints existed; the data it ran on can't be verified."
+                    )
+                    logger.warning("T-41: %s", _msg)
+                    if progress_callback is not None:
+                        progress_callback({
+                            "stage": "unified_bayesian",
+                            "message": f"[T-41] WARNING: {_msg}",
+                            "data_unverified_resume": True,
+                        })
             # Pre-fingerprint studies carry the bare base name, so their
             # environment is unknown rather than known to differ.
             _legacy = sorted(n for n in _existing if n == _study_base)
