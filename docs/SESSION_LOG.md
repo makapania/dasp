@@ -1212,6 +1212,21 @@ should always block — they found two crash bugs no test covered.
     storage URL).
   - `Path.resolve()` raises `ValueError` on an embedded NUL. `resume_run` caught only
     `OSError`.
-  - Only 'never' sidecars without a store are cleared at startup. Clearing an
-    'auto' one could strip crash recovery from a live instance still in its
-    in-memory warmup (the sidecar is one global file).
+  - (Superseded in round 2) Round 1 cleared 'never' sidecars that had no store.
+- **Review round 2 on #79:**
+  - *Codex:* the cleanup read the sidecar, compared run_id, then unlinked it.
+    `threading.Lock` is per process, so another window could write its own 'auto'
+    sidecar between the check and the unlink, and cleanup deleted that window's
+    recovery record (reproduced). **Decision: no automatic sidecar deletion.** A
+    stale sidecar costs only a silent check per launch; `start_run` overwrites it.
+    Same lesson as the T-41 study delete: a name/id check followed by a delete is
+    never atomic across processes.
+  - *Codex:* the environment/legacy notice fired for studies with zero trials, e.g.
+    a crash right after `create_study`. `resume_declined` now requires at least one
+    COMPLETE trial (`_has_completed_trials`, read-only, only on storage already
+    listed; unreadable counts as non-empty).
+  - A `_study_exists` of None (lock) under 'auto' with a file now emits
+    `resume_check_failed` instead of restarting silently.
+  - GUI `_RESUME_ISSUE_NOTICES` maps `resume_declined`, `resume_check_failed`,
+    `data_mismatch_resume` and `data_unverified_resume` to per-kind wording, with one
+    dialog per resumed run.

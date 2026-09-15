@@ -23720,7 +23720,6 @@ class SpectralPredictApp:
             from spectral_predict.run_state import (
                 find_incomplete_run,
                 has_resumable_store,
-                clear_unresumable_never_sidecar,
                 resume_run,
                 discard_incomplete_run,
             )
@@ -23759,13 +23758,8 @@ class SpectralPredictApp:
         if not has_resumable_store(meta):
             # A run under 'never', or an 'auto' run that crashed during its
             # in-memory warmup, left a sidecar but no saved trials. Prompting
-            # would only end in "Resume failed". A 'never' sidecar is removed
-            # (never any SQLite); others are left for a possibly live instance
-            # and replaced by the next Bayesian run.
-            try:
-                clear_unresumable_never_sidecar(meta)
-            except Exception:
-                pass
+            # would only end in "Resume failed". The sidecar is not deleted (another
+            # window may be replacing it); the next Bayesian run overwrites it.
             return
 
         try:
@@ -29634,44 +29628,75 @@ class SpectralPredictApp:
             except Exception:
                 pass
 
-    def _notify_resume_declined(self, message):
-        """Tell a resuming user that one model's saved trials are not reused.
+    # Backend progress keys that a resuming user must see, mapped to
+    # (log prefix, status line, dialog title, dialog lead). Checked in order.
+    _RESUME_ISSUE_NOTICES = (
+        ("resume_declined", (
+            "[RUN] Resume: saved trials were NOT reused for this model; it starts over.",
+            "Resumed run: some saved trials could not be reused (different data "
+            "or software environment) — those models start over. See log.",
+            "Saved trials not reused",
+            "Part of the resumed run is starting over instead of continuing "
+            "from its saved trials.",
+        )),
+        ("resume_check_failed", (
+            "[RUN] Resume: could not check this model's saved trials; it starts over.",
+            "Resumed run: saved trials could not be checked for some models — "
+            "those models start over. See log.",
+            "Saved trials could not be checked",
+            "The saved study could not be read, so part of the resumed run is "
+            "starting over.",
+        )),
+        ("data_mismatch_resume", (
+            "[RUN] Resume: saved trials were reused, but they were run on DIFFERENT data.",
+            "Resumed run: saved trials were reused but the data differs — their "
+            "scores describe the old data. See log.",
+            "Resumed on different data",
+            "The run resumed its saved trials, but the data loaded now differs "
+            "from the data they were run on.",
+        )),
+        ("data_unverified_resume", (
+            "[RUN] Resume: saved trials were reused, but their data can't be verified.",
+            "Resumed run: saved trials were reused but the data they ran on "
+            "can't be verified. See log.",
+            "Resumed data can't be verified",
+            "The run resumed its saved trials, but the data they were run on "
+            "can't be verified against the data loaded now.",
+        )),
+    )
 
-        Called from the worker thread when the backend emits a
-        ``resume_declined`` event. Only acts while a crash resume is active;
-        the warning dialog is shown once per resumed run.
+    def _notify_resume_issue(self, info):
+        """Surface a resume-relevant backend event while a crash resume is active.
+
+        Called from the worker thread. Logs and updates the status line for
+        every event; the warning dialog is shown once per resumed run.
         """
+        spec = next(
+            (s for key, s in self._RESUME_ISSUE_NOTICES if info.get(key)), None
+        )
+        if spec is None:
+            return
         try:
             from spectral_predict.run_state import get_storage_url, is_resuming
         except ImportError:
             return
         if not is_resuming():
             return
-        notice = (
-            "[RUN] Resume: saved trials were NOT reused for this model; it "
-            f"starts over. {message}"
-        )
-        self._log_progress(notice)
-        status = (
-            "Resumed run: some saved trials could not be reused (different "
-            "data or software environment) — those models start over. See log."
-        )
+        log_prefix, status, title, lead = spec
+        message = info.get('message', '')
+        self._log_progress(f"{log_prefix} {message}")
         try:
             self.root.after(0, lambda: self.progress_status.config(text=status))
         except Exception:
             pass
         run_key = get_storage_url()  # unique per run
-        if getattr(self, "_resume_decline_warned_run", None) == run_key:
+        if getattr(self, "_resume_issue_warned_run", None) == run_key:
             return
-        self._resume_decline_warned_run = run_key
+        self._resume_issue_warned_run = run_key
         try:
             self.root.after(
                 0,
-                lambda b=message: messagebox.showwarning(
-                    "Saved trials not reused",
-                    "Part of the resumed run is starting over instead of "
-                    f"continuing from its saved trials.\n\n{b}",
-                ),
+                lambda t=title, b=f"{lead}\n\n{message}": messagebox.showwarning(t, b),
             )
         except Exception:
             pass
@@ -29679,8 +29704,7 @@ class SpectralPredictApp:
     def _progress_callback_impl(self, info):
         msg = info.get('message', '')
         self._log_progress(msg)
-        if info.get('resume_declined'):
-            self._notify_resume_declined(msg)
+        self._notify_resume_issue(info)
 
         current = info.get('current', 0)
         total = info.get('total', 1)

@@ -28,7 +28,6 @@ Public surface:
     is_resuming() -> bool
     find_incomplete_run() -> RunMetadata | None
     has_resumable_store(meta) -> bool
-    clear_unresumable_never_sidecar(meta) -> bool
     resume_run(run_id)
     discard_incomplete_run(run_id)
 """
@@ -624,7 +623,10 @@ def has_resumable_store(meta: RunMetadata) -> bool:
     that crashed during its in-memory warmup (the file is only created when a study
     migrates). The GUI uses this to skip the "Resume previous run?" prompt when there
     is nothing to resume. It does not validate the path; ``resume_run`` still does.
-    The sidecar is left alone: the next Bayesian run's ``start_run`` replaces it.
+    The sidecar is deliberately left alone, never deleted here: the next Bayesian
+    run's ``start_run`` replaces it. A check-then-delete cannot be made safe across
+    processes, because another window may write its own sidecar in between (Codex
+    review of #79).
     """
     if not meta.storage_url or not meta.storage_path:
         return False
@@ -636,41 +638,6 @@ def has_resumable_store(meta: RunMetadata) -> bool:
         # Unknown is not "absent": prompt, and let resume_run decide and report.
         return True
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
-
-
-def clear_unresumable_never_sidecar(meta: RunMetadata) -> bool:
-    """Remove the sidecar of a 'never' run that has no store. Never touches SQLite.
-
-    Such a sidecar can never become resumable, even if another instance is still
-    running that search, so removing it only stops the startup check from finding it
-    again. 'auto' and 'always' sidecars without a store are left alone: a live
-    instance may still be in its in-memory warmup and migrate later, and removing its
-    sidecar would silently cost it crash recovery.
-
-    Returns:
-        True if the sidecar was removed.
-    """
-    if meta.bayesian_persistence_mode != "never" or has_resumable_store(meta):
-        return False
-    with _lock:
-        sidecar = _sidecar_path()
-        try:
-            data = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
-            return False
-        except OSError as exc:
-            logger.warning("Could not read resume sidecar %s: %s", sidecar, exc)
-            return False
-        if data.get("run_id") != meta.run_id:
-            return False  # replaced by another run since it was read
-        try:
-            sidecar.unlink()
-        except FileNotFoundError:
-            return False
-        except OSError as exc:
-            logger.warning("Could not remove stale 'never' sidecar %s: %s", sidecar, exc)
-            return False
-    return True
 
 
 def resume_run(run_id: str) -> RunMetadata | None:

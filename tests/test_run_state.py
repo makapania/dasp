@@ -1,7 +1,6 @@
 """T-11 D regression tests for Optuna run-state persistence."""
 from __future__ import annotations
 
-import dataclasses
 import json
 import os
 import sys
@@ -866,29 +865,15 @@ def test_resume_run_refuses_nul_in_storage_path(fresh_state):
     assert rs.get_storage_url() is None
 
 
-def test_clear_unresumable_never_sidecar_removes_only_the_sidecar(fresh_state):
+def test_unresumable_sidecar_is_never_deleted_by_run_state(fresh_state):
+    """No check-then-delete of the sidecar: another window may replace it in between
+    (Codex review of #79). A stale one is overwritten by the next start_run."""
     rs, _, _ = fresh_state
     rs.start_run(label="t", bayesian_persistence_mode="never")
     rs._reset_for_tests()
     meta = rs.find_incomplete_run()
-    optuna_dir = rs._sidecar_path().parent
-    unrelated = optuna_dir / "other_run.sqlite3"
-    unrelated.write_bytes(b"SQLite format 3\x00")
-
-    assert rs.clear_unresumable_never_sidecar(meta) is True
-    assert rs.find_incomplete_run() is None
-    assert unrelated.exists(), "SQLite files are never touched"
-
-
-def test_clear_unresumable_never_sidecar_leaves_auto_and_replaced_sidecars(fresh_state):
-    rs, _, _ = fresh_state
-    rs.start_run(label="t", bayesian_persistence_mode="auto")
-    rs._reset_for_tests()
-    auto_meta = rs.find_incomplete_run()
-    assert rs.clear_unresumable_never_sidecar(auto_meta) is False
+    assert rs.has_resumable_store(meta) is False
     assert rs.find_incomplete_run() is not None
 
-    never_meta = dataclasses.replace(auto_meta, bayesian_persistence_mode="never",
-                                     storage_url="", run_id="someone_else")
-    assert rs.clear_unresumable_never_sidecar(never_meta) is False, "run_id changed"
-    assert rs.find_incomplete_run().run_id == auto_meta.run_id
+    fresh = rs.start_run(label="next", bayesian_persistence_mode="auto")
+    assert rs.find_incomplete_run().run_id == fresh.run_id

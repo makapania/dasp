@@ -191,6 +191,78 @@ def test_resumed_run_on_different_data_flags_the_decline(crashed_auto_run) -> No
     assert _snapshot(url, name) == before
 
 
+def _point_storage_at(monkeypatch: pytest.MonkeyPatch, db: Path) -> str:
+    import importlib
+
+    url = f"sqlite:///{db.as_posix()}?check_same_thread=False&timeout=30"
+    monkeypatch.setattr(
+        importlib.import_module("spectral_predict.run_state"), "get_storage_url", lambda: url
+    )
+    return url
+
+
+def _fake_numpy_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    from spectral_predict import unified_bayesian as ub
+
+    real_env = ub._numerical_environment
+
+    def updated_numpy() -> dict:
+        env = real_env()
+        env["packages"] = dict(env["packages"], numpy="99.0.0")
+        return env
+
+    monkeypatch.setattr(ub, "_numerical_environment", updated_numpy)
+
+
+def test_environment_change_with_an_empty_old_study_is_not_a_decline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of #79: a crash right after creating an (empty) study must not
+    make a resumed run claim that saved trials are not reused."""
+    from spectral_predict import unified_bayesian as ub
+
+    # Learn this configuration's study name from a quick 'always' run elsewhere.
+    _point_storage_at(monkeypatch, tmp_path / "name_probe.sqlite3")
+    X, y, wl = _data()
+    _, probe = ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=1,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="always",
+    )
+    url = _point_storage_at(monkeypatch, tmp_path / "crashed_empty.sqlite3")
+    optuna.create_study(study_name=probe.study_name, storage=url)  # no trials
+
+    _fake_numpy_update(monkeypatch)
+    messages: list[dict] = []
+    _run("PLS", (X, y, wl), messages)
+
+    notices = [m for m in messages if m.get("environment_changed")]
+    assert notices, "the diagnostic itself still runs"
+    assert not any(m.get("resume_declined") for m in messages)
+    assert optuna.study.get_all_study_names(storage=url)[0] == probe.study_name
+
+
+def test_unanswerable_study_check_is_announced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from spectral_predict import unified_bayesian as ub
+
+    db = tmp_path / "locked.sqlite3"
+    url = _point_storage_at(monkeypatch, db)
+    optuna.create_study(study_name="something", storage=url)
+    monkeypatch.setattr(ub, "_study_exists", lambda *_a: None)
+    messages: list[dict] = []
+    _run_fast = ub.run_unified_bayesian
+    X, y, wl = _data()
+    _run_fast(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression", n_trials=2,
+        cv_folds=3, random_state=7, verbose=False, enable_sqlite_persistence="auto",
+        progress_callback=messages.append,
+    )
+    failed = [m for m in messages if m.get("resume_check_failed")]
+    assert [m.get("t41_decision") for m in failed] == ["auto_study_check_failed"]
+    assert not any(m.get("resume_declined") for m in messages)
+
+
 def test_auto_without_a_store_never_lists_studies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

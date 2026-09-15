@@ -77,9 +77,8 @@ def test_no_prompt_when_nothing_was_saved(gui_app, run_state_tmp, mode):
     assert not warn.called
     assert not rs.is_resuming()
     assert gui_app.bayesian_persistence_mode.get() == mode
-    # A 'never' sidecar can never become resumable and is cleared; an 'auto' one may
-    # belong to a live instance still in warmup, so it stays.
-    assert (rs.find_incomplete_run() is None) == (mode == "never")
+    # The sidecar is kept (no cross-process-unsafe delete); next start_run replaces it.
+    assert rs.find_incomplete_run() is not None
 
 
 def test_banner_does_not_promise_unconditional_reuse(gui_app, run_state_tmp):
@@ -124,6 +123,39 @@ def test_declined_resume_is_surfaced(gui_app, run_state_tmp, immediate_after):
     assert "not reused" in warn.call_args[0][0].lower()
     assert any(m.startswith("[RUN] Resume: saved trials were NOT reused") for m in immediate_after)
     assert "could not be reused" in gui_app.progress_status.cget("text")
+
+
+@pytest.mark.parametrize(
+    "key, title, log_prefix, status_fragment",
+    [
+        ("data_mismatch_resume", "Resumed on different data",
+         "[RUN] Resume: saved trials were reused, but they were run on DIFFERENT data",
+         "reused but the data differs"),
+        ("data_unverified_resume", "Resumed data can't be verified",
+         "[RUN] Resume: saved trials were reused, but their data can't be verified",
+         "can't be verified"),
+        ("resume_check_failed", "Saved trials could not be checked",
+         "[RUN] Resume: could not check this model's saved trials",
+         "could not be checked"),
+    ],
+)
+def test_resume_issue_notices_are_worded_per_kind(
+    gui_app, run_state_tmp, immediate_after, key, title, log_prefix, status_fragment
+):
+    """An explicit-'always' resume that replays trials from different/unverifiable data
+    is 'resumed, but ...', not 'declined'; all kinds share the one-per-run dialog."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "always", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+
+    with patch("tkinter.messagebox.showwarning") as warn:
+        gui_app._progress_callback({"message": "[T-41] WARNING: detail", key: True})
+        assert status_fragment in gui_app.progress_status.cget("text")
+        gui_app._progress_callback({"message": "second", "resume_declined": True})
+
+    assert warn.call_count == 1, "one dialog per resumed run across all kinds"
+    assert warn.call_args[0][0] == title
+    assert any(m.startswith(log_prefix) for m in immediate_after)
 
 
 def test_declined_event_outside_resume_is_only_logged(gui_app, run_state_tmp, immediate_after):
