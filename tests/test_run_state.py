@@ -865,6 +865,31 @@ def test_resume_run_refuses_nul_in_storage_path(fresh_state):
     assert rs.get_storage_url() is None
 
 
+def test_abandon_resume_touches_no_files_and_next_run_is_new(fresh_state):
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="t", bayesian_persistence_mode="auto")
+    Path(meta.storage_path).write_bytes(b"SQLite format 3\x00")
+    rs._reset_for_tests()
+    assert rs.resume_run(meta.run_id) is not None
+    assert rs.get_resumed_run().run_id == meta.run_id
+
+    rs.abandon_resume()
+
+    assert rs.get_resumed_run() is None and not rs.is_resuming()
+    assert rs.get_storage_url() is None
+    assert Path(meta.storage_path).exists()
+    assert rs.find_incomplete_run().run_id == meta.run_id, "sidecar untouched"
+    fresh = rs.start_run(label="fresh", bayesian_persistence_mode="auto")
+    assert fresh.run_id != meta.run_id and fresh.storage_url != meta.storage_url
+    assert rs.find_incomplete_run().run_id == fresh.run_id
+
+
+def test_get_resumed_run_is_none_for_a_normal_run(fresh_state):
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    assert rs.get_resumed_run() is None
+
+
 def test_unresumable_sidecar_is_never_deleted_by_run_state(fresh_state):
     """No check-then-delete of the sidecar: another window may replace it in between
     (Codex review of #79). A stale one is overwritten by the next start_run."""

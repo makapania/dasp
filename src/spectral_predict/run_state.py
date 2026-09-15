@@ -28,6 +28,8 @@ Public surface:
     is_resuming() -> bool
     find_incomplete_run() -> RunMetadata | None
     has_resumable_store(meta) -> bool
+    get_resumed_run() -> RunMetadata | None
+    abandon_resume()
     resume_run(run_id)
     discard_incomplete_run(run_id)
 """
@@ -556,11 +558,9 @@ def verify_resume_fingerprint(current_fingerprint: str) -> tuple[bool, str | Non
 def clear_resume_state() -> None:
     """Drop the resume flag without deleting the sidecar / SQLite.
 
-    Fallback path used when the GUI cannot determine the rejected run_id
-    (e.g. import-time / partial-init failure); in normal operation,
-    fingerprint mismatches go through `discard_incomplete_run` instead
-    (Kimi MAJOR #3b). The sidecar persists; future launches will re-offer
-    it for inspection.
+    The sidecar persists; future launches will re-offer it for inspection.
+    A data-fingerprint mismatch no longer uses this: the GUI keeps the resume
+    pending or, on the user's choice, calls `abandon_resume`.
 
     T-41: also cleans up empty SQLite files from all-in-memory sessions so
     the next launch doesn't offer a phantom "Resume?" with nothing to resume.
@@ -573,6 +573,29 @@ def clear_resume_state() -> None:
         _active_run_id = None
         _active_metadata = None
         _is_resuming = False
+
+
+def abandon_resume() -> None:
+    """Stop resuming the active run without touching any file.
+
+    Used when the user deliberately starts a fresh analysis instead of resuming
+    (e.g. the loaded data does not match the interrupted run). Nothing is deleted:
+    the old SQLite store stays on disk for normal retention cleanup. The next
+    `start_run` generates a new run id and storage path and overwrites the sidecar,
+    so the old store can no longer be resumed by accident. If no run is started,
+    the sidecar still names the old run and the next launch offers it again.
+    """
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
+    with _lock:
+        _active_storage_url = None
+        _active_run_id = None
+        _active_metadata = None
+        _is_resuming = False
+
+
+def get_resumed_run() -> RunMetadata | None:
+    """Metadata of the run being resumed, or ``None`` when not resuming."""
+    return _active_metadata if _is_resuming else None
 
 
 def find_incomplete_run() -> RunMetadata | None:

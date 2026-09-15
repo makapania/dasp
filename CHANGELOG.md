@@ -64,6 +64,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and warns once per run. It does the same for 'always' resumes that replay trials from
   different (`data_mismatch_resume`) or unverifiable (`data_unverified_resume`) data,
   worded as "resumed, but …". The resume banner no longer promises unconditional reuse.
+- **Behaviour change: data that doesn't match the resumed run no longer deletes it.**
+  Clicking Run Analysis on a resumed run with different data used to discard the
+  sidecar *and the SQLite store* and silently start fresh. Now nothing is deleted, and
+  a dialog shows both data fingerprints and offers two choices:
+  - **No (default):** keep the saved run. Nothing runs, so you can load the matching
+    data and click Run again to resume.
+  - **Yes:** start a fresh analysis with the current data. Only the in-memory resume
+    state is dropped (new `run_state.abandon_resume`). The new run gets its own id,
+    store and sidecar, and the old SQLite file stays on disk for retention cleanup.
+
+  Pending validation indices are kept while the resume is pending and cleared on a
+  fresh start. New `run_state.get_resumed_run()`.
 - `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
   (e.g. an embedded NUL) instead of crashing the startup check.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**

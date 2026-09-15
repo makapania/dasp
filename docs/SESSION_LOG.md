@@ -1341,6 +1341,21 @@ should always block — they found two crash bugs no test covered.
     listed; unreadable counts as non-empty).
   - A `_study_exists` of None (lock) under 'auto' with a file now emits
     `resume_check_failed` instead of restarting silently.
+  - **User decision (2026-09-15): a resume data mismatch never deletes.** The old
+    `_run_analysis_thread` path called `discard_incomplete_run`, which deleted the
+    sidecar and the SQLite store, and then started fresh silently. It now asks
+    through `_ask_on_main_thread` (the iPLS queue pattern; the worker must not open
+    Tk dialogs):
+    - **keep** (default, also on timeout or error): `_end_analysis_without_search`,
+      and the resume state stays intact;
+    - **start fresh**: `run_state.abandon_resume()` (in memory only), after which
+      `start_run` writes a new id, store and sidecar.
+
+    Gotcha: the check sits inside the run-state `try/except Exception`, which only
+    logs and continues. An exception in the handler would therefore *resume on the
+    mismatched data*, so the call site catches it and stops. The GUI tests stop the
+    worker at `start_run` with a `BaseException` sentinel, which the thread's
+    `except Exception` handlers don't catch.
   - GUI `_RESUME_ISSUE_NOTICES` maps `resume_declined`, `resume_check_failed`,
     `data_mismatch_resume` and `data_unverified_resume` to per-kind wording, with one
     dialog per resumed run.

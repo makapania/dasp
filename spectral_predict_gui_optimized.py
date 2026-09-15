@@ -26052,6 +26052,116 @@ class SpectralPredictApp:
         finally:
             self._pending_validation_indices = None
 
+    def _ask_on_main_thread(self, ask, default, timeout_s=300):
+        """Run a blocking dialog on the Tk main thread from the worker; return its answer.
+
+        Same pattern as the iPLS prompt: schedule via ``root.after`` and wait on
+        a queue. ``default`` is returned if scheduling fails, the dialog raises,
+        or the user does not answer within ``timeout_s``.
+        """
+        import queue as _queue
+
+        answers: "_queue.Queue" = _queue.Queue()
+
+        def _run():
+            try:
+                answers.put(ask())
+            except Exception:
+                answers.put(default)
+
+        try:
+            self.root.after(0, _run)
+        except Exception:
+            return default
+        try:
+            return answers.get(timeout=timeout_s)
+        except _queue.Empty:
+            return default
+
+    def _handle_resume_data_mismatch(self, fingerprint, stored_fp):
+        """Ask what to do when the loaded data does not match the resumed run.
+
+        Nothing is deleted either way. Returns True to start a fresh analysis
+        with the current data (resume abandoned in memory only; the next
+        ``start_run`` writes a new sidecar and storage path, and the old SQLite
+        file stays on disk). Returns False to keep the resume pending (the
+        caller stops before the search), so loading the matching data and
+        clicking Run again resumes normally. Called on the worker thread.
+        """
+        from spectral_predict.run_state import abandon_resume, get_resumed_run
+
+        meta = get_resumed_run()
+        if stored_fp:
+            detail = (
+                f"Interrupted run data fingerprint: {stored_fp[:8]}…\n"
+                f"Loaded data fingerprint: {fingerprint[:8]}…"
+            )
+        else:
+            detail = (
+                "The resume record on disk now belongs to a different run "
+                "(another dasp window may have started one), so it cannot be "
+                "checked against the loaded data."
+            )
+        started = ""
+        if meta is not None:
+            started = f" (run {meta.run_id}, started {meta.started_iso[:16].replace('T', ' ')})"
+        self._log_progress(
+            "[RUN] Resume paused — the loaded data does not match the "
+            f"interrupted run{started}. current={fingerprint[:8]}..., "
+            f"stored={(stored_fp or '?')[:8]}... The saved run was kept."
+        )
+        body = (
+            "The data loaded now does not match the interrupted run you chose "
+            f"to resume{started}.\n\n{detail}\n\n"
+            "The saved run has been kept; nothing was deleted.\n\n"
+            "Start a fresh analysis with the current data instead?\n\n"
+            "  • Yes — start fresh now. The saved run will not be resumed; its "
+            "file stays on disk.\n"
+            "  • No — keep the saved run. Load the data of the interrupted run "
+            "and click Run Analysis again to resume."
+        )
+        start_fresh = self._ask_on_main_thread(
+            lambda: messagebox.askyesno(
+                "Loaded data does not match the interrupted run",
+                body,
+                icon="warning",
+                default="no",
+            ),
+            default=False,
+        )
+        if not start_fresh:
+            self._log_progress(
+                "[RUN] Resume kept. Load the matching data and click Run Analysis."
+            )
+            return False
+        abandon_resume()
+        # The captured partition belonged to the abandoned run.
+        self._pending_validation_indices = None
+        self._log_progress(
+            "[RUN] Starting a fresh analysis with the current data; the "
+            "interrupted run will not be resumed (its file was kept)."
+        )
+        return True
+
+    def _end_analysis_without_search(self, status_text):
+        """Return the UI to idle when the worker stops before any search runs."""
+        def _reset():
+            try:
+                self.progress_status.config(text=status_text)
+            except Exception:
+                pass
+            if hasattr(self, 'running_figure'):
+                try:
+                    self.running_figure.stop_animation()
+                except Exception:
+                    pass
+            self._update_search_buttons('idle')
+
+        try:
+            self.root.after(0, _reset)
+        except Exception:
+            pass
+
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
         try:
@@ -26091,7 +26201,6 @@ class SpectralPredictApp:
                     from spectral_predict.run_state import (
                         is_resuming as _is_resuming,
                         verify_resume_fingerprint,
-                        clear_resume_state,
                     )
 
                     fingerprint = fingerprint_dataset(self.X, self.y)
@@ -26104,30 +26213,26 @@ class SpectralPredictApp:
                     if _is_resuming():
                         matches, stored_fp = verify_resume_fingerprint(fingerprint)
                         if not matches:
-                            # Kimi MAJOR #3b: capture run_id BEFORE state is
-                            # cleared, then discard the sidecar + SQLite (NOT
-                            # just clear the in-memory flag). If we only
-                            # cleared in-memory state, the sidecar would
-                            # persist and the user would be re-prompted to
-                            # resume the same rejected run on every launch.
-                            from spectral_predict import run_state as _rs
-                            rejected_id = _rs._active_run_id
-                            self._log_progress(
-                                "[RUN] Resume rejected — current data does "
-                                f"not match the resumed run "
-                                f"(current={fingerprint[:8]}..., "
-                                f"stored={(stored_fp or '?')[:8]}...). "
-                                "Discarding stale sidecar + SQLite; "
-                                "starting a fresh run."
-                            )
-                            if rejected_id:
-                                _rs.discard_incomplete_run(rejected_id)
-                            else:
-                                _rs.clear_resume_state()
-                            # Pending indices were tied to the rejected run —
-                            # discard them too so a future load doesn't apply
-                            # them to mismatched data.
-                            self._pending_validation_indices = None
+                            # User decision (PR #79): never delete the saved
+                            # run on a mismatch. Ask; either keep the resume
+                            # pending (nothing runs) or start fresh on purpose.
+                            # Any failure here must stop, not fall through to
+                            # the outer handler and resume on mismatched data.
+                            try:
+                                start_fresh = self._handle_resume_data_mismatch(
+                                    fingerprint, stored_fp
+                                )
+                            except Exception as mismatch_err:
+                                self._log_progress(
+                                    f"[RUN] Resume check failed: {mismatch_err}"
+                                )
+                                start_fresh = False
+                            if not start_fresh:
+                                self._end_analysis_without_search(
+                                    "Resume kept — load the data of the "
+                                    "interrupted run and click Run Analysis."
+                                )
+                                return
                         else:
                             # Fingerprint matched. Apply pending validation
                             # indices (T-49) before the search starts, so the
