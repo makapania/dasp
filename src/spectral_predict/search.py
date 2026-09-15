@@ -427,23 +427,18 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     # below dropped canonical lr__C/solver/max_iter (so the head fell back to C=1.0)
     # and passed legacy lr_C into PLSTransformer.set_params, which setattr's any key
     # without validation and so left junk head attributes on the transformer.
-    plsda_head_params: dict = {}
+    plsda_head: dict = {}
     if task_type == "classification" and model_name == "PLS-DA":
-        from .models import split_plsda_params
+        from .models import plsda_head_kwargs, split_plsda_params
 
-        model_kwargs, plsda_head_params = split_plsda_params(model_kwargs)
+        # The row's recorded lr__random_state / lr__class_weight are restored too, so a
+        # search run with a non-default seed and a stochastic solver refits identically.
+        plsda_head = plsda_head_kwargs(model_kwargs)
+        model_kwargs, _ = split_plsda_params(model_kwargs)
     elif model_kwargs:
-        normalized = {}
-        for key, value in model_kwargs.items():
-            if key.startswith("model__"):
-                normalized[key[7:]] = value
-            elif key.startswith("pls__"):
-                normalized[key[5:]] = value
-            elif "__" in key:
-                continue  # Skip remaining Pipeline wrapper params (scaler__, lr__)
-            else:
-                normalized[key] = value
-        model_kwargs = normalized
+        from .models import estimator_params_from_row
+
+        model_kwargs = estimator_params_from_row(model_kwargs)
 
     # Apply parameters using set_params (same as Model Dev tab)
     if model_kwargs:
@@ -458,14 +453,11 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
         from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
 
-        from .models import PLSDA_HEAD_DEFAULTS
-
-        head_kwargs = {**PLSDA_HEAD_DEFAULTS, **plsda_head_params}
         pls_lr_pipeline = Pipeline(
             [
                 ("pls", model),
                 ("scaler", StandardScaler()),  # Scale PLS scores for LogisticRegression
-                ("lr", LogisticRegression(**head_kwargs, random_state=42)),
+                ("lr", LogisticRegression(**plsda_head)),
             ]
         )
         return pls_lr_pipeline

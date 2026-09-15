@@ -198,6 +198,73 @@ def split_plsda_params(
     return transformer_params, head_params
 
 
+# Seed every search path passes to the PLS-DA head unless the row records another one.
+PLSDA_HEAD_DEFAULT_RANDOM_STATE = 42
+
+
+def plsda_head_kwargs(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the ``LogisticRegression`` kwargs that rebuild a row's PLS-DA head.
+
+    Starts from :data:`PLSDA_HEAD_DEFAULTS` plus the row's C/solver/max_iter (via
+    :func:`split_plsda_params`), then restores the row's recorded
+    ``lr__random_state`` and ``lr__class_weight``. Rows captured from the fitted
+    pipeline always carry both; without them a rebuild would reseed the head with 42
+    (diverging from a search run with another seed and a stochastic solver) and train
+    it unweighted.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Returns:
+        Kwargs for ``LogisticRegression(**kwargs)``.
+    """
+    _, head_params = split_plsda_params(params)
+    kwargs: dict[str, Any] = {
+        **PLSDA_HEAD_DEFAULTS,
+        **head_params,
+        "random_state": PLSDA_HEAD_DEFAULT_RANDOM_STATE,
+    }
+    for name in ("random_state", "class_weight"):
+        key = f"lr__{name}"
+        if params and key in params:
+            kwargs[name] = params[key]
+    return kwargs
+
+
+# Pipeline step prefixes under which a results row stores the final estimator's params.
+_ESTIMATOR_STEP_PREFIXES = ("model__", "pls__")
+
+
+def estimator_params_from_row(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the final-estimator hyperparameters stored in a results-row ``Params`` dict.
+
+    Rows captured from a fitted ``Pipeline`` (Bayesian search, PLS-DA) store estimator
+    params under the step prefix (``model__alpha``, ``pls__n_components``); grid rows
+    store bare names. This strips ``model__`` / ``pls__``, drops every other
+    step-qualified key (``scaler__``, ``imbalance__``, ``lr__``) and Pipeline meta keys,
+    and keeps bare keys. A prefixed key wins over the same bare key.
+
+    Not for PLS-DA head params: use :func:`plsda_head_kwargs`.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Returns:
+        Params ready for ``estimator.set_params(**params)``.
+    """
+    bare: dict[str, Any] = {}
+    prefixed: dict[str, Any] = {}
+    for key, value in (params or {}).items():
+        if not isinstance(key, str) or key in _PIPELINE_META_KEYS:
+            continue
+        prefix = next((p for p in _ESTIMATOR_STEP_PREFIXES if key.startswith(p)), None)
+        if prefix is not None:
+            prefixed[key[len(prefix):]] = value
+        elif "__" not in key:
+            bare[key] = value
+    return {**bare, **prefixed}
+
+
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=10, max_iter=500, n_jobs=-1):
     """
     Get a single model instance with default hyperparameters.

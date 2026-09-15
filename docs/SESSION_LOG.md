@@ -1087,31 +1087,35 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
   search-time model, because the unprefixed values are applied as well. It happens with
   or without bundles.
 
-### 2026-09-14 — Post-merge review round (Codex + DeepSeek Flash + GLM 5.3) of #68-#75
+### 2026-09-14 — Post-merge fixes: GUI ensemble reconstruction, CatBoost refit, NameErrors (branch fix/post-merge-gui-ensemble)
 
-User asked for Codex, DeepSeek Flash and GLM 5.3 on everything merged this session
-(earlier reviews were Kimi/GLM only; DeepSeek had hung). DeepSeek via opencode worked
-once prompts forbade `gh`/`git fetch`; one run died on a self-typoed absolute path
-(`sporheim`) — tell it to read files only via `git show <sha>:<relpath>`.
-Codex found the most. Verified real bugs (all pre-existing or edge cases, none caused
-by the PRs' default paths):
-- **Deletion guard fails open:** `_sqlite_file_exists` returns False on OSError, and the
-  migration code treats False as "file absent" → `_target_absent=True` → a failed
-  migration can `delete_study` a pre-existing study.
-- **`convert_study_to_dataframe` NameError:** `baseline_params` undefined (flake8 F821)
-  — crashes result conversion for any Bayesian trial with `apply_baseline=True`.
-- **Ensemble reconstruction drops tuned params:** GUI `_reconstruct_models_from_results`
-  filters out `model__*` keys instead of stripping the prefix; Bayesian rows store
-  estimator params as `model__*`, so ensembles train with defaults. Also drops PLS-DA
-  `class_weight` and forces `random_state=42` (validation rebuild too).
-- **GUI NameErrors:** `logger` undefined in `_run_refined_model_thread` (Tab 7 task-type
-  mismatch branch); deferred `lambda: ...(str(e))` after `except ... as e` (Py3 unbinds e).
-- `svm_gamma` resolves for SVM+regression / SVR+classification (silent 1e10 penalty);
-  `'pls-da'` not normalised; categorical `(1, 1.0)` conflated by Optuna; `np.str_`
-  constants break `ast.literal_eval` of Params; legacy CatBoost refit in ensemble.py.
-- **CI:** push runs share one concurrency group, so a newer merge cancels an older
-  *pending* main run; `continue-on-error` flake8 hid the F821 bugs above.
-Rejected: branch-protection "required checks" concerns (main is unprotected); GLM's
-"FixedTrial.params is pre-populated" block (it starts empty; verified).
-Lesson: black/flake8 non-blocking was fine for style, but pyflakes F821-class checks
-should always block — they found two crash bugs no test covered.
+- **Two `Params` spellings, three consumers.** Grid rows capture `pipe.named_steps['model']`
+  (bare keys; search.py ~5252); Bayesian rows capture the whole Pipeline (`model__*`,
+  `scaler__*`; unified_bayesian `_capture_serializable_params`); PLS-DA rows are always
+  `pls__*` / `lr__*`. The GUI ensemble reconstruction (`_reconstruct_models_from_results`)
+  *filtered out* `model__*`, so every ensemble base model built from a Bayesian row used
+  defaults. `models.estimator_params_from_row` is now shared with `_rebuild_model_from_row`.
+- **`get_model` clips `n_components` to `max_n_components` (default 10).** The ensemble path
+  passed `n_components` only to `get_model`, so PLS rows with >10 LVs were silently clipped.
+  It is now applied via `set_params` after construction.
+- **Rows record the PLS-DA head seed and weighting** (`lr__random_state`, `lr__class_weight`
+  come from the fitted pipeline's `get_params`). `split_plsda_params` deliberately drops them;
+  use `models.plsda_head_kwargs` to build the head. Grid search always seeds 42
+  (`RANDOM_STATE`); only Bayesian runs with a non-default `random_state` differ.
+- **Ensemble classes refit clones, not the loaded model.** `clone()` of a fitted CatBoost
+  works (via get_params) and `set_params` is legal on the unfitted clone, so the runtime kwarg
+  is applied in `ensemble._clone_for_refit`, which walks `get_params(deep=True)` for nested
+  CatBoost steps.
+- **The GUI module had no `logger`** although four Tab 7 branches call `logger.warning`
+  (flake8 F821). Use `logging.getLogger("spectral_predict.gui")`: `__name__` is `__main__`
+  when run as a script, and `setup_app_logger` attaches its file handler to
+  `spectral_predict` only.
+- **Testing a Tk deferred callback:** monkeypatch `app.root.after` to record the function and
+  call it after the method returns. Tk's real loop would swallow the NameError via
+  `report_callback_exception`, so `root.update()` alone does not fail the test.
+- **Not fixed (out of scope / questions):** ensemble reconstruction ignores the row's
+  `Autoscale` flag (it always adds a per-model scaler for non-tree models and never
+  autoscales PLS/trees). XGBoost classification `sample_weight` is fit-time and not in
+  `Params`, so ensembles don't re-apply it (GUI ensembles are regression-only, so moot
+  today). `models.py` has a pre-existing, unreachable F821 (`return model` at the end of
+  `get_model`).

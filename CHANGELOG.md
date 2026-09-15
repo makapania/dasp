@@ -38,6 +38,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
+  Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
+  Bayesian rows store all estimator params under that prefix, so each base model trained
+  with defaults (e.g. RandomForest `n_estimators`/`max_features`, SVM `C`/`gamma`, MLP
+  `activation`, Ridge `alpha`, boosting learning rates and regularisation). The prefix is
+  now stripped through the new shared `models.estimator_params_from_row`, which the
+  validation rebuild also uses. Grid-search rows (bare keys) are unaffected, except
+  that PLS `n_components` above 10 is no longer clipped to 10 in ensembles.
+  **Ensemble results built from Bayesian rows change.**
+- **PLS-DA heads rebuilt from a row keep the search's seed and class weighting.**
+  Validation rebuild and ensemble reconstruction forced `random_state=42`; ensemble
+  reconstruction also dropped `class_weight`. Both now restore the row's
+  `lr__random_state` and `lr__class_weight` (new `models.plsda_head_kwargs`), so a
+  search run with another seed and a stochastic solver (`saga`) refits the same head.
+  Rows without a recorded seed keep 42.
+- **Ensemble refits of CatBoost models saved before the `catboost_info/` fix** no longer
+  write that directory. Per-fold clones get `allow_writing_files=False` (including
+  CatBoost steps nested in a Pipeline or wrapper); previously the refit failed in an
+  unwritable cwd and the model silently got NaN out-of-fold predictions.
+- **GUI NameErrors.** The GUI module had no `logger`, so Model Development refit crashed
+  when the task radio disagreed with the saved result's Task (and in two other warning
+  branches); it now logs to `spectral_predict.gui`, which reaches `dasp.log`. The
+  learning-curve error callback referenced the except-bound `e` after the block ended
+  and raised instead of showing the error.
+
 - **CatBoost no longer writes `catboost_info/`.** Every CatBoost fit wrote a
   training-log directory into the current working directory, so fits failed with
   `Can't create train working dir: catboost_info` when the cwd was unwritable (an
@@ -56,8 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refit and exported scripts lost the head for rows that spell it `lr_C` / `lr_solver` /
   `lr_max_iter`, and ensemble training ignored it for every row. Refits of grid searches
   whose `plsda_lr_C_list` differs from 1.0 therefore change, and now match the search's
-  head params. Known remaining gap (pre-existing): `class_weight` is not re-applied in
-  ensemble training.
+  head params. Ensemble training re-applying `class_weight` and the head seed is covered
+  by the PLS-DA head entry above.
   `build_model('PLS-DA', params)` no longer raises on `lr_*` or `pls__*` keys.
   Search-time scores, the default Bayesian search and study names are unchanged; no
   version bump.

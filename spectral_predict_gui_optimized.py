@@ -60,6 +60,7 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
         _orig_popen_init(self, *args, **kwargs)
     _subprocess.Popen.__init__ = _silent_popen_init
 import ast
+import logging
 import re
 from pathlib import Path
 import tkinter as tk
@@ -68,6 +69,10 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+
+# Child of "spectral_predict" so setup_app_logger's dasp.log handler receives GUI
+# warnings (__name__ is "__main__" when the GUI is run as a script).
+logger = logging.getLogger("spectral_predict.gui")
 
 
 def _normalize_mixed_type_labels(labels):
@@ -24630,63 +24635,50 @@ class SpectralPredictApp:
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
                     from spectral_predict.models import (
-                        PLSDA_HEAD_DEFAULTS,
                         PLSTransformer,
+                        plsda_head_kwargs,
                         split_plsda_params,
                     )
 
                     # T-51 B0: canonical pls__*/lr__* or bare + legacy lr_* keys.
-                    pls_params, head_params = split_plsda_params(params_dict)
+                    pls_params, _ = split_plsda_params(params_dict)
                     n_components = pls_params.pop('n_components', 5)
 
                     pls = PLSTransformer(n_components=n_components, scale=False)
                     if pls_params:
-                        try:
-                            pls.set_params(**pls_params)
-                        except ValueError as e:
-                            self._log_progress(
-                                f"    [WARN] Could not set PLS-DA transformer params {pls_params}: {e}"
-                            )
+                        # PLSTransformer.set_params never raises (it setattr's any key).
+                        pls.set_params(**pls_params)
                     steps.append(('pls', pls))
                     steps.append(('scaler', StandardScaler()))
-                    steps.append((
-                        'lr',
-                        LogisticRegression(**{**PLSDA_HEAD_DEFAULTS, **head_params}, random_state=42),
-                    ))
+                    # Head matches search time: C/solver/max_iter plus the recorded
+                    # lr__random_state and lr__class_weight.
+                    steps.append(('lr', LogisticRegression(**plsda_head_kwargs(params_dict))))
                 else:
+                    from spectral_predict.models import estimator_params_from_row
+
                     # Generic model building for all other models
                     # Add scaler for models that need it
                     if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
                         steps.append(('scaler', StandardScaler()))
 
-                    # Create model with exact parameters from search results
-                    # FIX: Pass ALL hyperparameters, not just a whitelist
-                    # get_model() creates a base model; we then apply all params via set_params()
+                    # Rows captured from a fitted Pipeline (Bayesian search) store the
+                    # estimator's params as model__*; grid rows store bare names. Both
+                    # become bare estimator params here. Filtering model__* keys out
+                    # instead (as before) trained Bayesian rows with default
+                    # hyperparameters.
+                    estimator_params = estimator_params_from_row(params_dict)
 
-                    # Extract params that get_model() signature accepts
-                    get_model_params = {}
-                    if 'n_components' in params_dict:
-                        get_model_params['n_components'] = params_dict['n_components']
-                    if 'max_n_components' in params_dict:
-                        get_model_params['max_n_components'] = params_dict['max_n_components']
-                    if 'max_iter' in params_dict:
-                        get_model_params['max_iter'] = params_dict['max_iter']
+                    # max_n_components only bounds get_model's clip; the stored
+                    # n_components is applied through set_params below, unclipped.
+                    estimator_params.pop('max_n_components', None)
+                    model = get_model(model_name, task_type=task_type)
 
-                    model = get_model(model_name, task_type=task_type, **get_model_params)
-
-                    # Apply ALL remaining hyperparameters via set_params()
-                    # This ensures tuned values like alpha, n_estimators, max_depth, etc. are used
-                    # Filter out Pipeline-specific params that shouldn't go to the model
-                    remaining_params = {k: v for k, v in params_dict.items()
-                                       if k not in {'n_components', 'max_n_components', 'max_iter'}
-                                       and not any(k.startswith(p) for p in ['steps', 'memory', 'verbose', 'scaler__', 'model__'])}
-                    if remaining_params:
+                    if estimator_params:
                         try:
-                            model.set_params(**remaining_params)
+                            model.set_params(**estimator_params)
                         except Exception as e:
-                            # Some params may not apply (e.g., nested pipeline params)
                             # Log but continue with base model
-                            self._log_progress(f"    [WARN] Could not set params {remaining_params}: {e}")
+                            self._log_progress(f"    [WARN] Could not set params {estimator_params}: {e}")
 
                     steps.append(('model', model))
 
@@ -37957,7 +37949,10 @@ F1 Score:  {f1:.4f}
             print(f"Error computing learning curve: {e}")
             import traceback
             traceback.print_exc()
-            self.root.after(0, lambda: self._on_learning_curve_error(str(e)))
+            # Bind now: Python unbinds `e` when the except block ends, before the
+            # deferred callback runs.
+            error_msg = str(e)
+            self.root.after(0, lambda: self._on_learning_curve_error(error_msg))
 
     def _on_learning_curve_error(self, error_msg):
         """Handle learning curve computation error."""
