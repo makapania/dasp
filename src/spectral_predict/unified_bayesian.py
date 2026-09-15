@@ -2257,6 +2257,12 @@ def _apply_wal_pragmas(sqlite_url: str) -> bool:
 # resume requires this to match (T-41 follow-up).
 DATA_FINGERPRINT_ATTR = "data_fingerprint"
 
+# progress_callback event key: stored trials exist for this model's configuration but
+# will not be reused (different data, unrecorded data, or a different environment).
+RESUME_DECLINED_KEY = "resume_declined"
+# progress_callback event key: whether stored trials could be reused was not determinable.
+RESUME_CHECK_FAILED_KEY = "resume_check_failed"
+
 
 def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> str:
     """Digest of the full contents, dtype and shape of the arrays a study optimizes on.
@@ -2324,6 +2330,22 @@ def _study_exists(storage_url: str, study_name: str) -> bool | None:
     except Exception as exc:  # noqa: BLE001 - reported as unknown, never as absent
         logger.warning("T-41: could not list studies in %s: %s", storage_url, exc)
         return None
+
+
+def _has_completed_trials(storage_url: str, study_name: str) -> bool:
+    """Whether a stored study has at least one COMPLETE trial. Read-only.
+
+    Only called on storage already known to exist. An unreadable study counts as
+    possibly non-empty (True), so a decline notice is never suppressed on an unknown.
+    """
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_url)
+        return bool(
+            study.get_trials(deepcopy=False, states=(optuna.trial.TrialState.COMPLETE,))
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown is treated as non-empty
+        logger.warning("T-41: could not count trials of %s in %s: %s", study_name, storage_url, exc)
+        return True
 
 
 def _stored_data_fingerprint(storage_url: str, study_name: str) -> str | None:
@@ -2914,12 +2936,31 @@ def run_unified_bayesian(
         if storage_url is not None and _persistence_mode != "never"
         else None
     )
-    if (
+    # Checked once: never opens or creates the file. Also gates the 'auto' notices below.
+    _auto_store_exists = (
         _persistence_mode == "auto"
         and storage_url is not None
         and _sqlite_file_exists(storage_url)
-        and _study_exists(storage_url, study_name) is True
-    ):
+    )
+    _auto_study_present = (
+        _study_exists(storage_url, study_name) if _auto_store_exists else False
+    )
+    if _auto_study_present is None:
+        # Listing failed (e.g. a transient lock). Resume is never authorised on an
+        # unknown, so this model starts over; say so rather than restart silently.
+        _msg = (
+            f"Could not check the saved studies for {model_name} (storage busy or "
+            "unreadable), so any saved trials are not reused; starting fresh in memory."
+        )
+        logger.warning("T-41: %s", _msg)
+        if progress_callback is not None:
+            progress_callback({
+                "stage": "unified_bayesian",
+                "message": f"[T-41] WARNING: {_msg}",
+                "t41_decision": "auto_study_check_failed",
+                RESUME_CHECK_FAILED_KEY: True,
+            })
+    if _auto_study_present is True:
         if _stored_data_fingerprint(storage_url, study_name) == _data_fp:
             _msg = (
                 f"Found an existing persisted study for this {model_name} configuration "
@@ -2939,33 +2980,44 @@ def run_unified_bayesian(
             _persistence_mode = "never"
         logger.info("T-41: %s", _msg)
         if progress_callback is not None:
-            progress_callback({
+            _event = {
                 "stage": "unified_bayesian",
                 "message": f"[T-41] {_msg}",
                 "t41_decision": _decision,
-            })
+            }
+            if _decision == "auto_existing_study_data_mismatch" and _has_completed_trials(
+                storage_url, study_name
+            ):
+                # Saved trials exist but are not reused: the GUI tells a resuming user.
+                _event[RESUME_DECLINED_KEY] = True
+            progress_callback(_event)
 
     # If studies for this same analysis config exist under a DIFFERENT numerical
     # environment, say so. Silently starting from zero after the user chose
     # "Resume" is the failure mode worth avoiding here: the old study is intact
     # and still readable, its scores just cannot be trusted in this environment.
     #
-    # Gated on 'always' specifically. Enumerating studies TOUCHES the storage and
-    # so creates the SQLite file, which would break the 'never' and 'auto'-warmup
-    # guarantee of staying purely in memory. 'always' is also the mode that
-    # actually resumes: GUI crash recovery forces it (GUI:23895), and it is the
-    # only path reaching load_if_exists=True before any trial runs.
-    if _persistence_mode == "always" and storage_url is not None:
+    # Gated on 'always', or on 'auto' with a file already proven to exist.
+    # Enumerating studies TOUCHES the storage and so creates the SQLite file, which
+    # would break the 'never' and 'auto'-warmup guarantee of staying purely in
+    # memory. 'always' is the mode that resumes (the user's 'always', or 'auto'
+    # promoted above). The existing-file 'auto' case is an accepted crash resume
+    # whose study name no longer matches, e.g. after a NumPy or Python update:
+    # without this notice it would silently start over (Codex review of #79).
+    if storage_url is not None and (
+        _persistence_mode == "always"
+        or (_auto_store_exists and _persistence_mode == "auto")
+    ):
         try:
             # Only names are needed for this notice. Resume loads the selected
             # study's trial history separately below.
             _existing = set(optuna.study.get_all_study_names(storage=storage_url))
-            # T-41 follow-up: 'always' resumes by name (GUI crash recovery relies on
+            # T-41 follow-up: 'always' resumes by name (a user who chose it relies on
             # that, and legacy studies carry no fingerprint), so a data mismatch cannot
             # block it, but a study recorded on DIFFERENT data must not replay its
             # scores silently. Reuses this single name listing (pinned by
             # tests/test_bayesian_study_lookup.py).
-            if study_name in _existing and _data_fp is not None:
+            if _persistence_mode == "always" and study_name in _existing and _data_fp is not None:
                 _stored_fp = _stored_data_fingerprint(storage_url, study_name)
                 if _stored_fp is not None and _stored_fp != _data_fp:
                     _msg = (
@@ -3013,6 +3065,7 @@ def run_unified_bayesian(
                         f"study. The previous results are preserved: "
                         f"{', '.join(_incompatible)}",
                         "environment_changed",
+                        _incompatible,
                     ))
                 if _legacy:
                     _notes.append((
@@ -3022,15 +3075,17 @@ def run_unified_bayesian(
                         f"starting a fresh study. The previous results are "
                         f"preserved: {', '.join(_legacy)}",
                         "legacy_study_format",
+                        _legacy,
                     ))
-                for _msg, _flag in _notes:
+                for _msg, _flag, _names in _notes:
                     logger.warning(_msg)
                     if progress_callback is not None:
-                        progress_callback({
-                            "stage": "unified_bayesian",
-                            "message": _msg,
-                            _flag: True,
-                        })
+                        _event = {"stage": "unified_bayesian", "message": _msg, _flag: True}
+                        # Only a study with completed trials has anything to "not reuse"
+                        # (Codex review of #79): an empty one must not alarm a resuming user.
+                        if any(_has_completed_trials(storage_url, n) for n in _names):
+                            _event[RESUME_DECLINED_KEY] = True
+                        progress_callback(_event)
         except Exception as exc:  # noqa: BLE001 - advisory only, never fatal
             logger.debug("Could not enumerate existing studies: %s", exc)
 

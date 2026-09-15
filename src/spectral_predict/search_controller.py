@@ -52,6 +52,10 @@ class SearchController:
         """Alias for end() - stops the search immediately."""
         self.end()
 
+    def is_end_requested(self) -> bool:
+        """True once end()/stop() was called. Never blocks, even while paused."""
+        return self._end_event.is_set()
+
     def reset(self):
         """Reset controller to initial state for a new search."""
         self._pause_event.set()

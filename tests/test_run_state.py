@@ -241,6 +241,34 @@ def test_verify_fingerprint_passes_when_stored_unknown(fresh_state):
     assert matches is True
 
 
+@pytest.mark.parametrize("sidecar_content", [None, "{not json", "[1, 2]", b"\xff\xfe\x00"])
+def test_verify_fingerprint_raises_when_resume_record_unreadable(fresh_state, sidecar_content):
+    """Codex review of #79: while resuming, a missing/unreadable/invalid sidecar is a
+    verification failure, never a match."""
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="x", dataset_fingerprint="abc", model_names=["m"])
+    Path(meta.storage_path).touch()
+    rs._reset_for_tests()
+    rs.resume_run(meta.run_id)
+    sidecar = rs._sidecar_path()
+    if sidecar_content is None:
+        sidecar.unlink()
+    elif isinstance(sidecar_content, bytes):
+        sidecar.write_bytes(sidecar_content)
+    else:
+        sidecar.write_text(sidecar_content, encoding="utf-8")
+
+    with pytest.raises(rs.ResumeVerificationError):
+        rs.verify_resume_fingerprint("abc")
+
+
+def test_verify_fingerprint_unreadable_sidecar_ignored_when_not_resuming(fresh_state):
+    rs, _, _ = fresh_state
+    rs.start_run(label="x", dataset_fingerprint="abc", model_names=["m"])
+    rs._sidecar_path().write_text("{not json", encoding="utf-8")
+    assert rs.verify_resume_fingerprint("zzz") == (True, None)
+
+
 def test_clear_resume_state_drops_flag_without_deleting_sidecar(fresh_state):
     rs, rp, _ = fresh_state
 
@@ -798,3 +826,109 @@ def test_t44_no_phantom_hasattr_typos_in_gui():
         f"hasattr guard silently skips them. Use the actual Tk var names: "
         f"n_unified_trials (NOT n_trials_var), task_type (NOT task_type_var)."
     )
+
+
+def test_never_run_leaves_no_resumable_store(fresh_state):
+    """A crashed 'never' run leaves a sidecar but nothing to resume: no prompt."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="never")
+    meta = rs.find_incomplete_run()
+    assert meta is not None
+    assert rs.has_resumable_store(meta) is False
+
+
+def test_auto_run_crashed_in_warmup_has_no_resumable_store(fresh_state):
+    """'auto' creates the SQLite file only when a study migrates."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    meta = rs.find_incomplete_run()
+    assert not Path(meta.storage_path).exists()
+    assert rs.has_resumable_store(meta) is False
+    Path(meta.storage_path).write_bytes(b"")  # schema never written
+    assert rs.has_resumable_store(meta) is False
+
+
+def test_migrated_auto_run_has_resumable_store(fresh_state):
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    meta = rs.find_incomplete_run()
+    Path(meta.storage_path).write_bytes(b"SQLite format 3\x00")
+    assert rs.has_resumable_store(meta) is True
+
+
+def test_unreadable_store_is_still_offered(fresh_state, monkeypatch):
+    """An undeterminable store is not treated as absent; resume_run decides."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="always")
+    meta = rs.find_incomplete_run()
+    target = str(Path(meta.storage_path))
+    real_stat = Path.stat
+
+    def deny(self, *args, **kwargs):
+        if str(self) == target:
+            raise PermissionError("locked")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", deny)
+    assert rs.has_resumable_store(meta) is True
+
+
+def _rewrite_sidecar(rs, **changes):
+    sidecar = rs._sidecar_path()
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data.update(changes)
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_resume_run_refuses_nul_in_storage_path(fresh_state):
+    """A NUL in the sidecar path raises ValueError in Path.resolve; resume refuses."""
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="t", bayesian_persistence_mode="auto")
+    rs._reset_for_tests()
+    _rewrite_sidecar(rs, storage_path=meta.storage_path + "\x00evil")
+    revived = rs.find_incomplete_run()
+    assert rs.has_resumable_store(revived) is True  # unknown: prompt, then refuse
+    assert rs.resume_run(meta.run_id) is None
+    assert rs.is_resuming() is False
+    assert rs.get_storage_url() is None
+
+
+def test_abandon_resume_touches_no_files_and_next_run_is_new(fresh_state):
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="t", bayesian_persistence_mode="auto")
+    Path(meta.storage_path).write_bytes(b"SQLite format 3\x00")
+    rs._reset_for_tests()
+    assert rs.resume_run(meta.run_id) is not None
+    assert rs.get_resumed_run().run_id == meta.run_id
+
+    rs.abandon_resume()
+
+    assert rs.get_resumed_run() is None and not rs.is_resuming()
+    assert rs.get_storage_url() is None
+    assert Path(meta.storage_path).exists()
+    assert rs.find_incomplete_run().run_id == meta.run_id, "sidecar untouched"
+    fresh = rs.start_run(label="fresh", bayesian_persistence_mode="auto")
+    assert fresh.run_id != meta.run_id and fresh.storage_url != meta.storage_url
+    assert rs.find_incomplete_run().run_id == fresh.run_id
+
+
+def test_get_resumed_run_is_none_for_a_normal_run(fresh_state):
+    rs, _, _ = fresh_state
+    assert rs.get_active_run_id() is None
+    meta = rs.start_run(label="t", bayesian_persistence_mode="auto")
+    assert rs.get_resumed_run() is None
+    assert rs.get_active_run_id() == meta.run_id
+
+
+def test_unresumable_sidecar_is_never_deleted_by_run_state(fresh_state):
+    """No check-then-delete of the sidecar: another window may replace it in between
+    (Codex review of #79). A stale one is overwritten by the next start_run."""
+    rs, _, _ = fresh_state
+    rs.start_run(label="t", bayesian_persistence_mode="never")
+    rs._reset_for_tests()
+    meta = rs.find_incomplete_run()
+    assert rs.has_resumable_store(meta) is False
+    assert rs.find_incomplete_run() is not None
+
+    fresh = rs.start_run(label="next", bayesian_persistence_mode="auto")
+    assert rs.find_incomplete_run().run_id == fresh.run_id

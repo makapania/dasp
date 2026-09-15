@@ -2623,6 +2623,15 @@ def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, 
     return resolved_task, inlier_label
 
 
+# Round 8 (#79): sentinel distinguishing "the main-thread launch gate
+# (_confirm_resume_before_launch, via _run_analysis) explicitly froze this
+# value" from "not provided at all". `_run_analysis_thread` uses it to tell
+# a real GUI launch (always passes both explicitly) apart from a direct call
+# (existing tests, which self-register exactly as the pre-round-8 worker did)
+# — see `_run_analysis_thread`'s docstring.
+_LAUNCH_CONTEXT_UNSET = object()
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -12648,8 +12657,7 @@ class SpectralPredictApp:
             "be the largest fraction of trial time.\n"
             "Always on: SQLite from trial 0 — universal crash-resume with "
             "near-zero overhead (all models within ~1.06x of in-memory in "
-            "benchmarks). Auto-set for the session when you accept the "
-            "resume banner so the loaded SQLite is actually used.\n"
+            "benchmarks).\n"
             "Always off: pure in-memory."
         )
         ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
@@ -23719,6 +23727,7 @@ class SpectralPredictApp:
         try:
             from spectral_predict.run_state import (
                 find_incomplete_run,
+                has_resumable_store,
                 resume_run,
                 discard_incomplete_run,
             )
@@ -23754,6 +23763,12 @@ class SpectralPredictApp:
             return
         if meta is None:
             return
+        if not has_resumable_store(meta):
+            # A run under 'never', or an 'auto' run that crashed during its
+            # in-memory warmup, left a sidecar but no saved trials. Prompting
+            # would only end in "Resume failed". The sidecar is not deleted (another
+            # window may be replacing it); the next Bayesian run overwrites it.
+            return
 
         try:
             started_str = datetime.fromisoformat(meta.started_iso).strftime(
@@ -23779,6 +23794,10 @@ class SpectralPredictApp:
         except Exception:
             settings_summary = ""
 
+        # User decision on #79: keep asking about a saved run until it is
+        # resumed to completion or deleted — Cancel must clearly mean "ask
+        # again", not "gone".
+        cancel_line = "  • Cancel — decide later; you'll be asked again next launch."
         if settings_summary:
             message = (
                 f"Found an unfinished Bayesian run from {started_str}.\n\n"
@@ -23786,11 +23805,13 @@ class SpectralPredictApp:
                 f"Models: {models_str}\n"
                 f"Trials per model (target): {n_trials_str}\n\n"
                 f"Captured settings:\n{settings_summary}\n\n"
-                "Resume?\n\n"
+                "Resume, delete, or decide later?\n\n"
                 "  • Yes — restore the captured settings and keep the SQLite\n"
                 "    store. Re-load the same data and click Run Analysis to\n"
                 "    continue from where it left off.\n"
-                "  • No — delete the unfinished run and start fresh next time."
+                "  • No — permanently delete the unfinished run and start "
+                "fresh next time.\n"
+                f"{cancel_line}"
             )
         else:
             message = (
@@ -23798,10 +23819,12 @@ class SpectralPredictApp:
                 f"Run id: {meta.run_id}\n"
                 f"Models: {models_str}\n"
                 f"Trials per model (target): {n_trials_str}\n\n"
-                "Resume?\n\n"
+                "Resume, delete, or decide later?\n\n"
                 "  • Yes — keep the SQLite store. Re-load the same data and\n"
                 "    click Run Analysis to continue from where it left off.\n"
-                "  • No — delete the unfinished run and start fresh next time."
+                "  • No — permanently delete the unfinished run and start "
+                "fresh next time.\n"
+                f"{cancel_line}"
             )
 
         try:
@@ -23827,11 +23850,8 @@ class SpectralPredictApp:
                     else None
                 )
 
-                # Auto-restore the captured GUI settings before forcing the
-                # persistence override. Order matters — if the override ran
-                # first, restoring would clobber bayesian_persistence_mode
-                # back to whatever the previous run was using (likely
-                # 'auto'), and the resumed SQLite URL would be ignored.
+                # Auto-restore the captured GUI settings (T-43), including the
+                # persistence mode the crashed run was started with.
                 restore_summary = ""
                 if resumed.gui_settings:
                     try:
@@ -23887,49 +23907,19 @@ class SpectralPredictApp:
                             f"[RUN] GUI-settings restore failed: {restore_err}"
                         )
 
-                # Force 'always' on resume — under 'auto' or 'never', the loaded
-                # SQLite URL would be ignored and the user would get a fresh run
-                # despite the banner. If the set fails, surface a recovery error
-                # rather than letting the banner lie about persistence.
-                _override_ok = False
-                try:
-                    if hasattr(self, "bayesian_persistence_mode"):
-                        self.bayesian_persistence_mode.set("always")
-                        _override_ok = (
-                            self.bayesian_persistence_mode.get() == "always"
-                        )
-                except Exception as set_err:
-                    try:
-                        self._log_progress(
-                            f"[RUN] resume override (set persistence='always') failed: {set_err}"
-                        )
-                    except Exception:
-                        pass
-
-                if _override_ok:
-                    banner_text = (
-                        "Resuming previous run — load the same data, set the "
-                        "Y variable manually (resume does not restore the Y "
-                        "selection), and click Run Analysis. (Persistence "
-                        "auto-set to Always-on for this session."
-                        f"{restore_summary})"
-                    )
-                else:
-                    banner_text = (
-                        "Resume queued, but the persistence radio button could "
-                        "not be auto-set. Before clicking Run Analysis: "
-                        "(1) set 'Crash-resume persistence' to 'Always on' "
-                        "(otherwise the resumed SQLite store will be ignored), "
-                        "and (2) set the Y variable manually (resume does not "
-                        "restore the Y selection)."
-                    )
-                    try:
-                        messagebox.showwarning(
-                            "Resume needs manual step",
-                            banner_text,
-                        )
-                    except Exception:
-                        pass
+                # The persistence radio is deliberately NOT changed here. Both
+                # 'auto' and 'always' reload a saved study whose name and data
+                # fingerprint match (unified_bayesian T-41 follow-up), so the
+                # user's setting is honoured. Only 'never' ignores the store.
+                banner_text = (
+                    "Resuming previous run — load the same data, set the "
+                    "Y variable manually (resume does not restore the Y "
+                    "selection), and click Run Analysis. Saved trials are "
+                    "reused when the data, settings and software environment "
+                    "match (and persistence is not Always off); the log says "
+                    "if they are not."
+                    f"{restore_summary}"
+                )
 
                 try:
                     if hasattr(self, "progress_status"):
@@ -24018,6 +24008,8 @@ class SpectralPredictApp:
         though no thread was launched.
         """
         self._update_search_buttons('idle')
+        if getattr(self, 'search_controller', None) is not None:
+            self.search_controller.end()
         if hasattr(self, 'running_figure'):
             self.running_figure.stop_animation()
         if hasattr(self, 'progress_status'):
@@ -24031,6 +24023,22 @@ class SpectralPredictApp:
 
     def _run_analysis(self):
         """Run analysis in background thread."""
+        # Codex review of #79 round 7: a previous worker still running (e.g.
+        # the user pressed Stop and clicked Run Analysis again before the
+        # worker noticed and exited) must not start a second one — two
+        # workers would race on self.search_controller and on run_state's
+        # single active run. Refuse until the old thread has actually ended.
+        _prior_thread = getattr(self, "analysis_thread", None)
+        if _prior_thread is not None and _prior_thread.is_alive():
+            messagebox.showwarning(
+                "Analysis already running",
+                "A previous analysis is still shutting down. Wait a moment "
+                "for it to finish (Stop takes effect at the next checkpoint, "
+                "which can be minutes into a slow trial), then click Run "
+                "Analysis again.",
+            )
+            return
+
         # Validate data is loaded
         if self.X is None:
             messagebox.showwarning("No Data", "Please load data first in the 'Import & Preview' tab")
@@ -24263,11 +24271,55 @@ class SpectralPredictApp:
                         self._cancel_search_ui("Cancelled — LOO not possible for this data")
                         return
 
+        # A pending crash resume is checked against the loaded data here, on
+        # the main thread, so the user's answer is final before the worker
+        # starts. Last of the pre-launch checks, so an earlier cancel cannot
+        # abandon the resume.
+        try:
+            launch = self._confirm_resume_before_launch(selected_models, tier)
+        except Exception as resume_err:  # never launch on an unchecked resume
+            self._log_progress(f"[RUN] Resume check failed: {resume_err}")
+            messagebox.showerror(
+                "Can't check the interrupted run",
+                "dasp could not check whether the data you loaded matches the "
+                "interrupted run, so the analysis did not start. Nothing was "
+                f"deleted.\n\nDetails: {resume_err}",
+            )
+            launch = False
+        if not launch:
+            self._cancel_search_ui(
+                "Resume kept — load the data of the interrupted run and click "
+                "Run Analysis"
+            )
+            return
+
+        # Round 8 (#79): _confirm_resume_before_launch is the single
+        # main-thread authority for this decision. It has already decided
+        # resume/delete/fresh and claimed the run slot (registered or resumed
+        # it); the three attributes below freeze that decision. The worker
+        # trusts them as-is and never re-derives or re-decides any of this
+        # from live Tk state (Codex + DeepSeek review of #79 round 8).
+        models_for_thread = (
+            self._pending_bayesian_models
+            if getattr(self, "_pending_bayesian_models", None)
+            else selected_models
+        )
+
         # Run in thread (daemon=True so the process can exit cleanly if the
         # user closes the main window while analysis is in flight)
+        # Capture this run's own controller now, on the main thread, so the
+        # worker never has to read self.search_controller — which a
+        # subsequent Run Analysis click (once this worker exits) would have
+        # already replaced (Codex review of #79 round 7).
         self.analysis_thread = threading.Thread(
             target=self._run_analysis_thread,
-            args=(selected_models, tier, resolved_inlier_label),
+            args=(models_for_thread, tier, resolved_inlier_label, self.search_controller),
+            kwargs=dict(
+                analysis_run_id=getattr(self, "_pending_bayesian_run_id", None),
+                uses_bayesian_run_state=getattr(
+                    self, "_pending_uses_bayesian_run_state", False
+                ),
+            ),
             daemon=True,
         )
         self.analysis_thread.start()
@@ -26013,11 +26065,12 @@ class SpectralPredictApp:
             # log line so the warning still surfaces somewhere.
             self._log_progress(f"[OC Params] {body}")
 
-    def _apply_pending_validation_indices(self):
+    def _apply_pending_validation_indices(self, X=None, y=None):
         """Apply validation indices captured at the prior run's start_run.
 
         Called after the dataset_fingerprint check passes in
-        `_run_analysis_thread`. The indices are DataFrame labels; reapply
+        `_run_analysis_thread`, with the worker's bound ``X``/``y`` (defaults to
+        ``self.X``/``self.y``). The indices are DataFrame labels; reapply
         them to populate `self.validation_X` / `self.validation_y` /
         `self.validation_indices` so the post-search validation step uses
         the same partition the resumed trials trained on.
@@ -26041,13 +26094,15 @@ class SpectralPredictApp:
             )
             self._pending_validation_indices = None
             return
-        if self.X is None or self.y is None:
+        X = self.X if X is None else X
+        y = self.y if y is None else y
+        if X is None or y is None:
             return  # caller's fingerprint check should have caught this
 
         try:
             missing_labels = [
                 i for i in pending
-                if i not in self.X.index or i not in self.y.index
+                if i not in X.index or i not in y.index
             ]
             if missing_labels:
                 self._log_progress(
@@ -26058,8 +26113,8 @@ class SpectralPredictApp:
                 self._pending_validation_indices = None
                 return
 
-            new_validation_X = self.X.loc[pending]
-            new_validation_y = self.y.loc[pending]
+            new_validation_X = X.loc[pending]
+            new_validation_y = y.loc[pending]
             self.validation_indices = set(pending)
             self.validation_X = new_validation_X
             self.validation_y = new_validation_y
@@ -26079,8 +26134,639 @@ class SpectralPredictApp:
         finally:
             self._pending_validation_indices = None
 
-    def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
-        """Run analysis in background thread."""
+    def _uses_bayesian_run_state(self):
+        """True if Run Analysis will run an Optuna (unified Bayesian) search.
+
+        Only those searches register a resumable run. Multi-class SIMCA has its
+        own grid pipeline and ignores the optimization method, so it must not
+        claim (and later complete) a pending Bayesian resume. Same for a build
+        where ``unified_bayesian`` failed to import (``HAS_UNIFIED_BAYESIAN``
+        False) — the unified branches bail out before running any search or
+        calling ``_complete_run_state_after_search``, so registering a run
+        here would leave it permanently unresumable-but-never-completed
+        (DeepSeek review of #79 round 7).
+        """
+        return (
+            HAS_UNIFIED_BAYESIAN
+            and hasattr(self, "optimization_method")
+            and self.optimization_method.get() == "unified"
+            and not (
+                hasattr(self, "task_type")
+                and self.task_type.get() == "multiclass_simca"
+            )
+        )
+
+    def _prompt_resume_delete_or_keep(self, meta):
+        """Ask Resume / Delete / Decide-later about a saved run, mid-session.
+
+        Fired from ``_confirm_resume_before_launch`` when Run Analysis is
+        clicked while a resumable-but-not-yet-decided run sits on disk — one
+        paused (Stop) or left failed earlier this session, or one left
+        pending from a startup "decide later"/Cancel answer. User decision
+        on PR #79: whenever such a run exists, keep asking about it (and
+        offering to delete it) until the user resumes it to completion or
+        deletes it — the startup dialog (``_check_for_incomplete_run``)
+        already does this at launch; this is the same three-way choice at
+        the moment a NEW analysis is about to claim the one shared sidecar
+        slot, which would otherwise silently orphan the saved run.
+
+        Returns True (resume), False (delete), or None (decide later — this
+        click is cancelled and the sidecar/store are left exactly as they
+        are either way until an explicit Yes/No).
+        """
+        try:
+            started_str = datetime.fromisoformat(meta.started_iso).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+        except Exception:
+            started_str = meta.started_iso
+        models_str = ", ".join(meta.model_names) if meta.model_names else "(unknown)"
+        n_trials_str = (
+            str(meta.n_trials_per_model)
+            if meta.n_trials_per_model is not None
+            else "?"
+        )
+        try:
+            from spectral_predict.run_gui_settings import summarize_gui_settings
+            settings_summary = summarize_gui_settings(meta.gui_settings)
+        except Exception:
+            settings_summary = ""
+        settings_block = (
+            f"\n\nCaptured settings:\n{settings_summary}" if settings_summary else ""
+        )
+
+        message = (
+            f"An interrupted Bayesian run from {started_str} is still saved "
+            "(paused, or left over from a failure or an earlier launch).\n\n"
+            f"Run id: {meta.run_id}\n"
+            f"Models: {models_str}\n"
+            f"Trials per model (target): {n_trials_str}"
+            f"{settings_block}\n\n"
+            "Resume, delete, or decide later?\n\n"
+            "  • Yes — resume it now. Re-load the data it used if you "
+            "haven't already; this click will check it and continue from "
+            "where it left off.\n"
+            "  • No — permanently delete the unfinished run and start fresh "
+            "now.\n"
+            "  • Cancel — don't run anything now; decide later. You'll be "
+            "asked again the next time you click Run Analysis or launch dasp. "
+            "A new Bayesian analysis can't start until this saved run is "
+            "resumed or deleted; Grid and NSGA-II searches aren't affected "
+            "and can run either way."
+        )
+        try:
+            return messagebox.askyesnocancel(
+                "Resume interrupted run?", message, icon="question"
+            )
+        except Exception:
+            return None  # can't ask — behave like "decide later"
+
+    def _confirm_resume_before_launch(self, selected_models=None, tier=None):
+        """The single main-thread authority for a Bayesian launch. Decides
+        resume/delete/fresh and CLAIMS the run slot before the worker starts.
+
+        Called by ``_run_analysis`` just before the worker thread is created.
+        Returns True to launch, False to stay idle. On True, the decision is
+        frozen into three instance attributes that ``_run_analysis`` reads
+        right after and passes into ``_run_analysis_thread`` as plain
+        arguments — the worker never re-derives any of this from live Tk
+        state and never re-decides (Codex + DeepSeek review of #79 round 8:
+        a worker that called ``self._uses_bayesian_run_state()`` or
+        ``start_run()`` itself raced a GUI radio flipped after the click, or
+        a second click landing while it was still starting up):
+
+        - ``self._pending_uses_bayesian_run_state``: whether this launch is a
+          unified Bayesian search at all (frozen from ``_uses_bayesian_run_state()``,
+          called exactly once, here).
+        - ``self._pending_bayesian_run_id``: the run id already registered or
+          resumed by the time this returns True, or None if run-state is
+          unavailable.
+        - ``self._pending_bayesian_models``: overrides ``selected_models`` when
+          resuming a run whose own model list differs (round 8 item 1) —
+          None means "use the models the user selected this click" (fresh
+          launch, or a resume whose models already match / can't be
+          compared).
+
+        Nothing here is ever a silent overwrite of a saved run's sidecar:
+        - not a Bayesian run: True, nothing checked, no registration;
+        - the record can't be read, a chosen Delete doesn't fully succeed, or
+          a chosen Resume fails: False. None of these can prove it's safe to
+          let this click's own registration overwrite the one shared
+          sidecar, so nothing launches (round 8 items 2 + 3);
+        - a resumable run sits on disk but isn't yet being actively resumed
+          (a Stop/failure earlier this session, or a startup "decide
+          later"): ask Resume / Delete / Decide-later. "Decide later"
+          cancels this click and touches nothing; "Delete" discards it
+          (and calls ``abandon_resume()``, same as the mismatch path) and
+          this function then registers a fresh run itself; "Yes" resumes it
+          and falls through to the model-list and fingerprint checks below;
+        - already resuming (from the branch above, or from a prior startup
+          "Resume" answer), and the resumed run's own model list differs
+          from what's currently selected: ask before continuing — resuming
+          runs the ORIGINAL models, never the current click's selection
+          (round 8 item 1);
+        - already resuming, data matches: True — the run stays registered
+          exactly as ``resume_run`` left it;
+        - already resuming, data differs or can't be verified: ask. The
+          default "No" keeps the resume pending (False). "Yes" deletes it
+          (never leaves an orphaned, un-resumable sidecar behind; False if
+          the delete doesn't fully succeed) and this function registers a
+          fresh run;
+        - nothing pending anywhere above: this function registers a fresh
+          run itself (moved here from the worker in round 8), using the
+          data, models, tier and persistence mode as they are on THIS
+          thread, at THIS moment — never re-read later from the worker.
+        """
+        self._pending_uses_bayesian_run_state = False
+        self._pending_bayesian_run_id = None
+        self._pending_bayesian_models = None
+        if not self._uses_bayesian_run_state():
+            return True
+        self._pending_uses_bayesian_run_state = True
+        try:
+            from spectral_predict.run_state import (
+                abandon_resume,
+                discard_incomplete_run,
+                fingerprint_dataset,
+                find_incomplete_run,
+                get_resumed_run,
+                has_resumable_store,
+                is_resuming,
+                resume_run,
+                start_run,
+                verify_resume_fingerprint,
+            )
+            from spectral_predict.run_gui_settings import capture_gui_settings
+        except ImportError:
+            return True  # without run_state no resume can be pending or registered
+
+        def _register_fresh_run():
+            """Claim the run slot for a fresh (non-resumed) Bayesian launch.
+
+            Moved here from the worker (round 8 item 4): registering on the
+            SAME thread, in the SAME function, that just finished deciding
+            there is nothing pending to protect closes the window where a
+            GUI setting changed between the decision and the worker calling
+            ``start_run()`` itself. Failure here is logging-only (as it was
+            in the worker) — the run still proceeds in-memory.
+            """
+            try:
+                fingerprint = fingerprint_dataset(self.X, self.y)
+                val_indices = (
+                    list(self.validation_indices)
+                    if getattr(self, "validation_indices", None)
+                    else None
+                )
+                meta = start_run(
+                    label=tier,
+                    dataset_fingerprint=fingerprint,
+                    model_names=list(selected_models) if selected_models else [],
+                    n_trials_per_model=(
+                        int(self.n_unified_trials.get())
+                        if hasattr(self, "n_unified_trials")
+                        else None
+                    ),
+                    # T-41 + T-47: 'never' here is a safety-net fallback for a
+                    # corrupted GUI state (Tk var missing entirely), not the
+                    # user-facing default — see the matching comment that used
+                    # to live at the worker's own call site.
+                    bayesian_persistence_mode=(
+                        self.bayesian_persistence_mode.get()
+                        if hasattr(self, "bayesian_persistence_mode")
+                        else "never"
+                    ),
+                    gui_settings=capture_gui_settings(self),
+                    validation_indices=val_indices,
+                )
+                self._pending_bayesian_run_id = meta.run_id
+                self._log_progress(f"[RUN] Run id: {meta.run_id}")
+            except ImportError as run_err:
+                self._log_progress(
+                    f"[RUN] Run-state modules unavailable (ImportError): {run_err}. "
+                    "Falling back to in-memory Optuna; resume-on-restart "
+                    "and disk log file will not be available."
+                )
+            except Exception as run_err:
+                self._log_progress(f"[RUN] Run-state init failed: {run_err}")
+                try:
+                    _persist_choice = (
+                        self.bayesian_persistence_mode.get()
+                        if hasattr(self, "bayesian_persistence_mode")
+                        else "never"
+                    )
+                except Exception:
+                    _persist_choice = "never"
+                if _persist_choice in ("auto", "always"):
+                    # Now on the main thread already — no root.after cross-
+                    # thread routing needed (that was only ever required
+                    # because the old code ran this from the worker).
+                    try:
+                        messagebox.showwarning(
+                            "Crash-resume disabled",
+                            "Bayesian crash-resume could not be enabled for "
+                            "this run because the SQLite store could not be "
+                            f"initialized:\n\n{run_err}\n\nThe run will "
+                            "continue in-memory. If it crashes you will not "
+                            "be able to resume.",
+                        )
+                    except Exception:
+                        pass
+
+        if not is_resuming():
+            try:
+                pending = find_incomplete_run()
+            except OSError as read_err:
+                # Round 8 item 2 (Codex): a read failure is NOT "positively
+                # nothing pending". Launching anyway would let this click's
+                # own start_run() overwrite a sidecar we never actually
+                # checked. Don't launch; let the user retry.
+                self._log_progress(
+                    f"[RUN] Could not check for an interrupted run: {read_err}"
+                )
+                try:
+                    messagebox.showerror(
+                        "Can't check for a saved run",
+                        "dasp could not check whether an earlier interrupted "
+                        "run is still saved, so nothing was started — that "
+                        "avoids silently overwriting it if there is one.\n\n"
+                        f"Details: {read_err}\n\nClick Run Analysis again to "
+                        "retry.",
+                    )
+                except Exception:
+                    pass
+                return False
+            if pending is not None and has_resumable_store(pending):
+                decision = self._prompt_resume_delete_or_keep(pending)
+                if decision is None:
+                    self._log_progress(
+                        "[RUN] Run cancelled — an interrupted run is still "
+                        "pending. Resume, delete, or decide later from Run "
+                        "Analysis."
+                    )
+                    return False
+                if decision is False:
+                    result = discard_incomplete_run(pending.run_id)
+                    if not result.fully_succeeded:
+                        # Round 8 item 3 (Codex): a Delete that didn't fully
+                        # succeed must not be treated as "safe to overwrite."
+                        self._log_progress(
+                            f"[RUN] Could not fully delete the interrupted "
+                            f"run {pending.run_id}: {result.errors}"
+                        )
+                        try:
+                            messagebox.showerror(
+                                "Couldn't delete the interrupted run",
+                                "The interrupted run could not be fully "
+                                "deleted, so nothing was started — starting "
+                                "fresh would otherwise risk overwriting its "
+                                f"saved-run slot.\n\nDetails: {result.errors}"
+                                "\n\nClick Run Analysis again to retry.",
+                            )
+                        except Exception:
+                            pass
+                        return False
+                    # DeepSeek review of #79 round 8: match the mismatch
+                    # path below, which already calls abandon_resume() after
+                    # a successful delete.
+                    abandon_resume()
+                    self._log_progress(
+                        f"[RUN] Deleted the interrupted run {pending.run_id}; "
+                        "starting fresh."
+                    )
+                    _register_fresh_run()
+                    return True
+                resumed = resume_run(pending.run_id)
+                if resumed is None:
+                    # Round 8 item 2: resume_run() failing is NOT "positively
+                    # nothing pending" either — the sidecar may still be
+                    # there (untrusted path, unreadable, or a race). Don't
+                    # launch fresh over it; let the user retry.
+                    try:
+                        messagebox.showwarning(
+                            "Resume failed",
+                            "The interrupted run could not be resumed (its "
+                            "SQLite store went missing, or its sidecar "
+                            "could not be read). Nothing was started.\n\n"
+                            "Click Run Analysis again to retry.",
+                        )
+                    except Exception:
+                        pass
+                    return False
+                self._pending_validation_indices = (
+                    list(resumed.validation_indices) if resumed.validation_indices else None
+                )
+                self._log_progress(
+                    f"[RUN] Resuming the interrupted run {resumed.run_id}; "
+                    "checking the loaded data against it now."
+                )
+                # Fall through: is_resuming() is now True, so the model-list
+                # and fingerprint checks below run exactly as they would for
+                # a startup resume.
+            else:
+                _register_fresh_run()
+                return True
+
+        # is_resuming() is True here — either from just above, or from a
+        # prior startup "Resume" answer.
+        meta = get_resumed_run()
+        # Round 8 item 1 (Codex): resuming must run the ORIGINAL run's
+        # models, never whatever happens to be selected this click (e.g.
+        # Stop a PLS run, select Ridge, click Resume — Ridge must not run
+        # in place of the still-unfinished PLS study). Ask rather than
+        # silently substituting either list.
+        if meta is not None and meta.model_names and selected_models is not None:
+            if set(meta.model_names) != set(selected_models):
+                try:
+                    proceed = messagebox.askyesno(
+                        "Resuming different models",
+                        f"The interrupted run {meta.run_id} was searching: "
+                        f"{', '.join(meta.model_names)}.\n\n"
+                        "Your current model selection is: "
+                        f"{', '.join(selected_models) if selected_models else '(none)'}.\n\n"
+                        "Resuming continues the run's ORIGINAL models — "
+                        "your current selection is ignored for this click.\n\n"
+                        "  • Yes — resume the original models.\n"
+                        "  • No — don't run anything now. Change your "
+                        "selection to match, or delete the interrupted run "
+                        "first.",
+                        icon="question",
+                    )
+                except Exception:
+                    proceed = False
+                if not proceed:
+                    self._log_progress(
+                        "[RUN] Resume kept — the current model selection "
+                        f"doesn't match the interrupted run's models "
+                        f"({', '.join(meta.model_names)})."
+                    )
+                    return False
+                self._pending_bayesian_models = list(meta.model_names)
+                self._log_progress(
+                    "[RUN] Resuming with the interrupted run's original "
+                    f"models: {', '.join(meta.model_names)}"
+                )
+
+        fingerprint = fingerprint_dataset(self.X, self.y)
+        started = ""
+        if meta is not None:
+            started = f" from {meta.started_iso[:16].replace('T', ' ')}"
+        try:
+            matches, stored_fp = verify_resume_fingerprint(fingerprint)
+        except Exception as verify_err:
+            title = "Can't check the interrupted run"
+            lead = (
+                f"dasp could not read the record of the interrupted run{started}, "
+                "so it cannot confirm that the data you loaded is the data that "
+                "run used."
+            )
+            details = str(verify_err)
+        else:
+            if matches:
+                self._pending_bayesian_run_id = meta.run_id if meta is not None else None
+                return True
+            if stored_fp:
+                title = "Different data than the interrupted run"
+                lead = (
+                    "The data you loaded is not the same as the data the "
+                    f"interrupted run{started} used (different samples, values "
+                    "or wavelengths)."
+                )
+                details = (
+                    f"data fingerprint {fingerprint[:8]} loaded, "
+                    f"{stored_fp[:8]} in the interrupted run"
+                )
+            else:
+                title = "Can't check the interrupted run"
+                lead = (
+                    "Another analysis (possibly in another dasp window) has "
+                    "replaced the record of the interrupted run, so the data "
+                    "you loaded cannot be checked against it."
+                )
+                details = "resume record now names a different run"
+        if meta is not None:
+            details = f"run {meta.run_id}; {details}"
+        self._log_progress(
+            f"[RUN] Resume paused: {lead} The saved run was kept. Details: {details}"
+        )
+
+        start_fresh = messagebox.askyesno(
+            title,
+            f"{lead}\n\n"
+            "Nothing was run and nothing was deleted.\n\n"
+            "Start a fresh analysis with the current data instead?\n\n"
+            "  • Yes — delete the interrupted run and start fresh now. "
+            "(There is only one saved-run slot; keeping the old run while "
+            "starting a new one would silently orphan it — it could never "
+            "be offered again.)\n"
+            "  • No — keep the interrupted run. Load the data it used and click "
+            "Run Analysis again to continue it.\n\n"
+            f"Details: {details}",
+            icon="warning",
+            default="no",
+        )
+        if not start_fresh:
+            self._log_progress(
+                "[RUN] Resume kept. Load the matching data and click Run Analysis."
+            )
+            return False
+        # User decision on #79: a fresh run's own start_run() would overwrite
+        # the single shared sidecar, orphaning the interrupted run's SQLite
+        # store (it could never be found/offered again). Delete it explicitly
+        # instead of silently abandoning it.
+        if meta is not None:
+            try:
+                result = discard_incomplete_run(meta.run_id)
+            except Exception as _del_err:
+                self._log_progress(
+                    f"[RUN] Could not delete the interrupted run: {_del_err}"
+                )
+                try:
+                    messagebox.showerror(
+                        "Couldn't delete the interrupted run",
+                        "The interrupted run could not be deleted, so nothing "
+                        f"was started.\n\nDetails: {_del_err}\n\nClick Run "
+                        "Analysis again to retry.",
+                    )
+                except Exception:
+                    pass
+                return False  # round 8 item 3: don't launch over a failed delete
+            if not result.fully_succeeded:
+                self._log_progress(
+                    f"[RUN] Could not fully delete the interrupted run: "
+                    f"{result.errors}"
+                )
+                try:
+                    messagebox.showerror(
+                        "Couldn't delete the interrupted run",
+                        "The interrupted run could not be fully deleted, so "
+                        "nothing was started — starting fresh would "
+                        "otherwise risk overwriting its saved-run slot.\n\n"
+                        f"Details: {result.errors}\n\nClick Run Analysis "
+                        "again to retry.",
+                    )
+                except Exception:
+                    pass
+                return False  # round 8 item 3: don't launch over a failed delete
+        abandon_resume()
+        # The captured partition belonged to the deleted run.
+        self._pending_validation_indices = None
+        self._log_progress(
+            "[RUN] Starting a fresh analysis with the current data; the "
+            "interrupted run was deleted so it can't be silently orphaned."
+        )
+        _register_fresh_run()
+        return True
+
+    def _complete_run_state_after_search(self, analysis_run_id, n_model_errors=0, controller=None):
+        """Release the resume record once a Bayesian search has finished.
+
+        Call right after the search returns, before post-search I/O (CSV,
+        report, ensembles), so a failure there cannot leave a finished run
+        resumable. The record is released only when every requested model
+        finished. It stays resumable, and this is a no-op except for the
+        in-process release below, when:
+
+        - ``analysis_run_id`` is None: this analysis registered no run (grid,
+          NSGA-II, multi-class SIMCA, or a failed ``start_run``). During a
+          pending resume the *active* run is the interrupted Bayesian run, so
+          completing it here would destroy that resume (GLM review of #79);
+        - the active run is no longer ``analysis_run_id``;
+        - ``n_model_errors`` > 0: a model's search raised, or returned no
+          usable results (e.g. a transient SQLite error, or every trial
+          hitting the 1e10 penalty path), so its study is unfinished (Codex
+          review of #79);
+        - the user pressed Stop: the trials so far stay resumable, and the
+          next launch offers to resume or discard them.
+
+        ``run_state.mark_complete`` then removes the sidecar only if the
+        sidecar's run id is still the active run's.
+
+        ``controller``: the ``SearchController`` THIS worker was started
+        with. Must be the caller's own snapshot, not ``self.search_controller``
+        — if the user pressed Stop and clicked Run Analysis again before this
+        worker finished, ``self.search_controller`` now refers to the NEW
+        run's (unstopped) controller, and reading it here would see "not
+        stopped" and wrongly release the old run's record (Codex review of
+        #79 round 7). Callers that are not a search worker (tests, and calls
+        with ``analysis_run_id=None``) may omit it; it falls back to
+        ``self.search_controller`` for them.
+        """
+        if analysis_run_id is None:
+            return
+        if controller is None:
+            controller = getattr(self, "search_controller", None)
+        stopped = controller is not None and controller.is_end_requested()
+        if n_model_errors or stopped:
+            why = (
+                f"{n_model_errors} model search(es) failed"
+                if n_model_errors
+                else "the search was stopped"
+            )
+            self._log_progress(
+                f"[RUN] {why.capitalize()}; the run stays paused and resumable "
+                "(offered the next time you click Run Analysis, or at the next "
+                "launch)."
+            )
+            # Codex/DeepSeek review of #79 round 7: leaving _active_run_id /
+            # _active_metadata / _active_storage_url set lets the NEXT
+            # start_run() call return this run's stale metadata idempotently
+            # (is_resuming() is False, so no fingerprint check ever runs).
+            # Release the in-process claim — nothing on disk is touched, so
+            # the sidecar + SQLite store stay exactly as they are and the
+            # next Run Analysis click (or app launch) still finds them via
+            # find_incomplete_run(). If there is nothing resumable (e.g. an
+            # 'auto' run stopped during in-memory warmup, before any SQLite
+            # file existed), this also drops the pointless sidecar so the
+            # next launch doesn't offer a phantom resume.
+            try:
+                from spectral_predict.run_state import clear_resume_state, get_active_run_id
+                if get_active_run_id() == analysis_run_id:
+                    clear_resume_state()
+            except Exception as _cr_err:
+                self._log_progress(
+                    f"[RUN] Could not release the paused run's in-memory claim: "
+                    f"{_cr_err}"
+                )
+            return
+        try:
+            from spectral_predict.run_state import get_active_run_id, mark_complete
+            if get_active_run_id() != analysis_run_id:
+                return
+            mark_complete()
+        except Exception as _mc_err:
+            # Don't re-raise — the search itself completed successfully and the
+            # user shouldn't see a "completion failed" error. But surface the
+            # failure: a stale sidecar would otherwise produce an unexplained
+            # "resume previous run?" dialog on next launch.
+            try:
+                self._log_progress(
+                    f"[RUN] mark_complete failed; sidecar will persist "
+                    f"and next launch may prompt to resume: {_mc_err}"
+                )
+            except Exception:
+                pass  # progress log itself broken — nothing else we can do
+
+    def _end_analysis_without_search(self, reason):
+        """Return the UI to idle when the worker stops before any search runs."""
+        try:
+            self.root.after(0, lambda: self._cancel_search_ui(reason))
+        except Exception:
+            pass
+
+    def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None, controller=None,
+                              analysis_run_id=_LAUNCH_CONTEXT_UNSET,
+                              uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET):
+        """Run analysis in background thread.
+
+        ``controller``: THIS worker's own ``SearchController``, captured by
+        ``_run_analysis`` on the main thread before the thread was started.
+        Falls back to ``self.search_controller`` when omitted (existing
+        tests call this method directly without it). Every stop-decision and
+        every ``controller=`` kwarg passed into a search call below uses
+        ``my_controller``, never ``self.search_controller`` — if the user
+        presses Stop and clicks Run Analysis again before this worker exits,
+        ``self.search_controller`` is replaced by the NEW run's controller,
+        and reading it here would see "not stopped" and wrongly release (or
+        run under) the OLD run's state (Codex review of #79 round 7).
+
+        ``analysis_run_id`` / ``uses_bayesian_run_state``: the frozen launch
+        decision from ``_confirm_resume_before_launch`` (round 8). When
+        ``_run_analysis`` starts this thread it always passes both
+        explicitly (``analysis_run_id`` may itself be None — that's a valid
+        frozen value, e.g. run-state unavailable). Left at the
+        ``_LAUNCH_CONTEXT_UNSET`` sentinel default, this worker falls back to
+        registering the run itself exactly as it did before round 8 — this
+        keeps direct calls (the existing test suite drives this method
+        without going through ``_run_analysis`` at all) working unchanged.
+        The real GUI path never takes the fallback branch, which is what
+        actually closes the round-8 races: a GUI setting flipped, or a
+        second click landing, after the gate decided can no longer change
+        what this worker does, because it never re-asks.
+        """
+        my_controller = controller if controller is not None else self.search_controller
+        # Bind the data once. The resume fingerprint check and the search must
+        # see the same arrays, even if the user loads other data or changes the
+        # target while this worker is setting up (Codex review of #79). Loading
+        # or re-targeting rebinds self.X / self.y, so references suffice.
+        X_run, y_run = self.X, self.y
+        X_original_run = self.X_original
+        # Round 8 (#79): normalize the sentinel before anything else, so
+        # analysis_run_id is always a real value (None or a run id string)
+        # for the rest of this function — including the `finally` safety net
+        # below — regardless of whether the caller (the real GUI gate, or a
+        # direct test call) provided a frozen launch context.
+        _launch_context_provided = uses_bayesian_run_state is not _LAUNCH_CONTEXT_UNSET
+        if analysis_run_id is _LAUNCH_CONTEXT_UNSET:
+            analysis_run_id = None
+        # Set True only once this worker goes through the normal completion
+        # path (_complete_run_state_after_search). Codex + DeepSeek review of
+        # #79 round 8: a one-class guard's early `return`, or an exception
+        # during setup, used to leave a registered/resumed run's in-process
+        # claim dangling — the sidecar then looked "still active" to the next
+        # Run Analysis click, which could silently reuse its stale metadata.
+        # The `finally` below releases that claim (keeping the sidecar and
+        # store on disk) for ANY exit that isn't the normal path.
+        _run_state_settled = False
         try:
             from spectral_predict.search import run_search
             from spectral_predict.report import write_markdown_report
@@ -26109,144 +26795,160 @@ class SpectralPredictApp:
             # storage; if they crashed and left a sidecar, the next launch's
             # "Resume?" dialog would be misleading because there are no
             # Optuna studies to actually resume from.
-            is_bayesian_run = (
-                hasattr(self, "optimization_method")
-                and self.optimization_method.get() == "unified"
-            )
+            #
+            # Round 8 (#79): the real GUI path (_run_analysis) always passes
+            # both analysis_run_id and uses_bayesian_run_state explicitly —
+            # they were decided and the run was registered/resumed on the
+            # main thread by _confirm_resume_before_launch BEFORE this
+            # thread was even created (Codex: a GUI setting flipped, or a
+            # second click racing this worker, must not change what a
+            # thread that's already running does). Only a direct call (the
+            # existing test suite) leaves them at the sentinel default, and
+            # self-registers here exactly as the pre-round-8 worker did.
+            if not _launch_context_provided:
+                is_bayesian_run = self._uses_bayesian_run_state()
+                analysis_run_id = None
+                if is_bayesian_run:
+                    try:
+                        fingerprint = fingerprint_dataset(X_run, y_run)
+                        _val_indices = (
+                            list(self.validation_indices)
+                            if getattr(self, "validation_indices", None)
+                            else None
+                        )
+                        meta = _start_run_state(
+                            label=tier,
+                            dataset_fingerprint=fingerprint,
+                            model_names=list(selected_models) if selected_models else [],
+                            n_trials_per_model=int(self.n_unified_trials.get())
+                            if hasattr(self, "n_unified_trials") else None,
+                            # T-41 + T-47: the literal 'never' below is a
+                            # safety-net fallback for a corrupted GUI state
+                            # (Tk var missing entirely), NOT the user-facing
+                            # default for unspecified input. Do NOT "fix" it
+                            # to 'auto' alongside the run_state.py field-default
+                            # flip — that would silently start writing SQLite
+                            # files when the GUI state is malformed. The
+                            # field default for unspecified input lives in
+                            # run_state.RunMetadata + start_run() (both 'auto').
+                            bayesian_persistence_mode=(  # T-41
+                                self.bayesian_persistence_mode.get()
+                                if hasattr(self, "bayesian_persistence_mode")
+                                else "never"
+                            ),
+                            gui_settings=capture_gui_settings(self),
+                            validation_indices=_val_indices,
+                        )
+                        analysis_run_id = meta.run_id
+                        self._log_progress(f"[RUN] Run id: {meta.run_id}")
+                    except ImportError as run_err:
+                        # The new run_state / run_logging modules failed to import.
+                        # Surface this clearly — the in-memory Optuna fallback still
+                        # works, but the user should know SQLite persistence + disk
+                        # logging are unavailable for this session.
+                        self._log_progress(
+                            f"[RUN] Run-state modules unavailable (ImportError): {run_err}. "
+                            "Falling back to in-memory Optuna; resume-on-restart "
+                            "and disk log file will not be available."
+                        )
+                    except Exception as run_err:
+                        # Logging-only failure path; in-memory Optuna fallback still works.
+                        self._log_progress(f"[RUN] Run-state init failed: {run_err}")
+                        # silent-failure HIGH#3: if the user explicitly asked for
+                        # crash-resume (auto/always) and start_run failed, surface
+                        # a visible warning so they know they're running without
+                        # persistence — otherwise their explicit choice is silently
+                        # downgraded to in-memory.
+                        try:
+                            _persist_choice = (
+                                self.bayesian_persistence_mode.get()
+                                if hasattr(self, "bayesian_persistence_mode")
+                                else "never"
+                            )
+                        except Exception:
+                            _persist_choice = "never"
+                        if _persist_choice in ("auto", "always"):
+                            # Worker-thread Tk operation: route through root.after to
+                            # avoid the "main thread is not in main loop" failure mode
+                            # that surfaces on Windows when blocking GUI calls fire
+                            # off the analysis worker.
+                            _warn_body = (
+                                "Bayesian crash-resume could not be enabled for "
+                                "this run because the SQLite store could not be "
+                                f"initialized:\n\n{run_err}\n\nThe run will "
+                                "continue in-memory. If it crashes you will not "
+                                "be able to resume."
+                            )
+                            try:
+                                self.root.after(
+                                    0,
+                                    lambda b=_warn_body: messagebox.showwarning(
+                                        "Crash-resume disabled", b
+                                    ),
+                                )
+                            except Exception:
+                                pass
+            else:
+                is_bayesian_run = uses_bayesian_run_state
+                if analysis_run_id is not None:
+                    self._log_progress(f"[RUN] Run id: {analysis_run_id}")
+
             if is_bayesian_run:
                 try:
                     from spectral_predict.run_state import (
                         is_resuming as _is_resuming,
                         verify_resume_fingerprint,
-                        clear_resume_state,
                     )
 
-                    fingerprint = fingerprint_dataset(self.X, self.y)
+                    fingerprint = fingerprint_dataset(X_run, y_run)
 
                     # Codex HIGH #7: if the user clicked "Resume" at app
                     # startup, enforce that the currently-loaded data
                     # matches the run they're resuming. Resuming on
                     # different data would silently pick up Optuna trials
                     # with stale objective values.
+                    #
+                    # The user already answered on the main thread
+                    # (_confirm_resume_before_launch). This re-check only
+                    # guards against the record changing in between. Any
+                    # failure stops here: it must not reach the logging-only
+                    # handler below and resume on unverified data. Nothing
+                    # is deleted.
                     if _is_resuming():
-                        matches, stored_fp = verify_resume_fingerprint(fingerprint)
-                        if not matches:
-                            # Kimi MAJOR #3b: capture run_id BEFORE state is
-                            # cleared, then discard the sidecar + SQLite (NOT
-                            # just clear the in-memory flag). If we only
-                            # cleared in-memory state, the sidecar would
-                            # persist and the user would be re-prompted to
-                            # resume the same rejected run on every launch.
-                            from spectral_predict import run_state as _rs
-                            rejected_id = _rs._active_run_id
+                        try:
+                            matches, _stored_fp = verify_resume_fingerprint(fingerprint)
+                        except Exception as verify_err:
                             self._log_progress(
-                                "[RUN] Resume rejected — current data does "
-                                f"not match the resumed run "
-                                f"(current={fingerprint[:8]}..., "
-                                f"stored={(stored_fp or '?')[:8]}...). "
-                                "Discarding stale sidecar + SQLite; "
-                                "starting a fresh run."
+                                f"[RUN] Resume could not be verified: {verify_err}"
                             )
-                            if rejected_id:
-                                _rs.discard_incomplete_run(rejected_id)
-                            else:
-                                _rs.clear_resume_state()
-                            # Pending indices were tied to the rejected run —
-                            # discard them too so a future load doesn't apply
-                            # them to mismatched data.
-                            self._pending_validation_indices = None
+                            matches = False
+                        if not matches:
+                            self._log_progress(
+                                "[RUN] The resumed run no longer matches at "
+                                "search start; nothing was run or deleted."
+                            )
+                            self._end_analysis_without_search(
+                                "Resume kept — could not verify the data; "
+                                "click Run Analysis to check again."
+                            )
+                            # This is a deliberate, fully-handled exit: the
+                            # resume stays exactly as resume_run() left it
+                            # (is_resuming() True, sidecar/store untouched) —
+                            # unlike a Stop/failure mid-search, there is
+                            # nothing to release here. Mark it settled so the
+                            # round-8 `finally` safety net below doesn't
+                            # clear_resume_state() and downgrade an intact,
+                            # still-resuming run to merely "resumable".
+                            _run_state_settled = True
+                            return
                         else:
                             # Fingerprint matched. Apply pending validation
                             # indices (T-49) before the search starts, so the
                             # post-search RMSEP is computed against the same
                             # partition the resumed trials trained on.
-                            self._apply_pending_validation_indices()
-
-                    # Capture validation indices so the same partition can
-                    # be reproduced on resume. Required for non-deterministic
-                    # algorithms (Random, Manual) where re-clicking "Create
-                    # Validation Set" would otherwise pick a different split,
-                    # potentially placing trial-trained samples into the new
-                    # validation partition (silent leakage on RMSEP). Labels
-                    # are passed as-is — start_run normalizes them (int-only
-                    # gets sorted; mixed/str preserves insertion order).
-                    _val_indices = (
-                        list(self.validation_indices)
-                        if getattr(self, "validation_indices", None)
-                        else None
-                    )
-
-                    meta = _start_run_state(
-                        label=tier,
-                        dataset_fingerprint=fingerprint,
-                        model_names=list(selected_models) if selected_models else [],
-                        n_trials_per_model=int(self.n_unified_trials.get())
-                        if hasattr(self, "n_unified_trials") else None,
-                        # T-41 + T-47: the literal 'never' below is a
-                        # safety-net fallback for a corrupted GUI state
-                        # (Tk var missing entirely), NOT the user-facing
-                        # default for unspecified input. Do NOT "fix" it
-                        # to 'auto' alongside the run_state.py field-default
-                        # flip — that would silently start writing SQLite
-                        # files when the GUI state is malformed. The
-                        # field default for unspecified input lives in
-                        # run_state.RunMetadata + start_run() (both 'auto').
-                        bayesian_persistence_mode=(  # T-41
-                            self.bayesian_persistence_mode.get()
-                            if hasattr(self, "bayesian_persistence_mode")
-                            else "never"
-                        ),
-                        gui_settings=capture_gui_settings(self),
-                        validation_indices=_val_indices,
-                    )
-                    self._log_progress(f"[RUN] Run id: {meta.run_id}")
-                except ImportError as run_err:
-                    # The new run_state / run_logging modules failed to import.
-                    # Surface this clearly — the in-memory Optuna fallback still
-                    # works, but the user should know SQLite persistence + disk
-                    # logging are unavailable for this session.
-                    self._log_progress(
-                        f"[RUN] Run-state modules unavailable (ImportError): {run_err}. "
-                        "Falling back to in-memory Optuna; resume-on-restart "
-                        "and disk log file will not be available."
-                    )
-                except Exception as run_err:
-                    # Logging-only failure path; in-memory Optuna fallback still works.
-                    self._log_progress(f"[RUN] Run-state init failed: {run_err}")
-                    # silent-failure HIGH#3: if the user explicitly asked for
-                    # crash-resume (auto/always) and start_run failed, surface
-                    # a visible warning so they know they're running without
-                    # persistence — otherwise their explicit choice is silently
-                    # downgraded to in-memory.
-                    try:
-                        _persist_choice = (
-                            self.bayesian_persistence_mode.get()
-                            if hasattr(self, "bayesian_persistence_mode")
-                            else "never"
-                        )
-                    except Exception:
-                        _persist_choice = "never"
-                    if _persist_choice in ("auto", "always"):
-                        # Worker-thread Tk operation: route through root.after to
-                        # avoid the "main thread is not in main loop" failure mode
-                        # that surfaces on Windows when blocking GUI calls fire
-                        # off the analysis worker.
-                        _warn_body = (
-                            "Bayesian crash-resume could not be enabled for "
-                            "this run because the SQLite store could not be "
-                            f"initialized:\n\n{run_err}\n\nThe run will "
-                            "continue in-memory. If it crashes you will not "
-                            "be able to resume."
-                        )
-                        try:
-                            self.root.after(
-                                0,
-                                lambda b=_warn_body: messagebox.showwarning(
-                                    "Crash-resume disabled", b
-                                ),
-                            )
-                        except Exception:
-                            pass
+                            self._apply_pending_validation_indices(X_run, y_run)
+                except ImportError:
+                    pass  # run_state unavailable; nothing to re-verify
 
             # Determine task type
             task_type_setting = self.task_type.get()
@@ -26260,7 +26962,7 @@ class SpectralPredictApp:
                 # (e.g. 3 integer-valued numeric values — GUI checked PLS-DA
                 # while this path resolved "regression", causing
                 # run_search to raise "No valid models found").
-                task_type = _infer_task_type_from_y(self.y) or "regression"
+                task_type = _infer_task_type_from_y(y_run) or "regression"
                 self._log_progress(f"Task type: {task_type} (auto-detected)")
             else:
                 # User explicitly selected task type
@@ -27806,22 +28508,22 @@ class SpectralPredictApp:
             self._log_progress(f"Region subsets: {'ENABLED' if enable_region_subsets else 'DISABLED'}")
             if enable_region_subsets:
                 self._log_progress(f"  Region analysis depth: {self.n_top_regions.get()} regions")
-            self._log_progress(f"Data: {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+            self._log_progress(f"Data: {len(X_run)} samples × {X_run.shape[1]} wavelengths")
             self._log_progress(f"{'='*70}\n")
 
             # Run search
             # Apply active group filter first
             if self.active_indices is not None:
-                ag_mask = self.X.index.isin(self.active_indices)
-                X_filtered = self.X[ag_mask]
-                y_filtered = self.y[ag_mask]
-                n_inactive = len(self.X) - len(X_filtered)
+                ag_mask = X_run.index.isin(self.active_indices)
+                X_filtered = X_run[ag_mask]
+                y_filtered = y_run[ag_mask]
+                n_inactive = len(X_run) - len(X_filtered)
                 self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
                     f"\n[i] Analysis Subset: {len(X_filtered)} samples ({n} filtered out)\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
             else:
-                X_filtered = self.X
-                y_filtered = self.y
+                X_filtered = X_run
+                y_filtered = y_run
 
             # Filter out excluded spectra
             if self.excluded_spectra:
@@ -28217,7 +28919,7 @@ class SpectralPredictApp:
             # Calculate excluded and validation counts for saving in results
             n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
             n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
-            n_total_original = len(self.X)  # Total samples before filtering
+            n_total_original = len(X_run)  # Total samples before filtering
 
             # Get imbalance handling parameters (if enabled)
             imbalance_method, imbalance_params = self._get_imbalance_params()
@@ -28328,6 +29030,7 @@ class SpectralPredictApp:
                     self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
 
                     oc_all_results = []
+                    oc_model_errors = 0
                     oc_best_overall = [None]
 
                     def oc_progress_wrapper(info):
@@ -28360,7 +29063,7 @@ class SpectralPredictApp:
                                 random_state=42,
                                 verbose=False,
                                 progress_callback=oc_progress_wrapper,
-                                controller=self.search_controller,
+                                controller=my_controller,
                                 baseline_method=bl_method_oc,
                                 baseline_params=bl_params_oc,
                                 smoothing=sm_enabled_oc,
@@ -28379,12 +29082,37 @@ class SpectralPredictApp:
                                 oc_results_df['Model'] = oc_model_name
                                 oc_all_results.append(oc_results_df)
                             else:
-                                self._log_progress(f"    No results returned")
+                                # Codex review of #79 round 7: every fit for this
+                                # model raised inside the objective, which the
+                                # backend turns into a 1e10 penalty per trial
+                                # rather than propagating — so no exception
+                                # reaches this except clause. An empty frame is
+                                # the only signal that the model's search
+                                # produced nothing usable; count it as failed so
+                                # the run stays resumable.
+                                oc_model_errors += 1
+                                self._log_progress(
+                                    f"    No usable results for {oc_model_name} "
+                                    "(all trials failed) — treated as failed. If "
+                                    "this keeps happening on retry, the saved "
+                                    "study for this model already has its full "
+                                    "trial count and every one is a failure; "
+                                    "delete the saved run at the next prompt "
+                                    "and start over (round 8 item 6)."
+                                )
                         except Exception as e:
+                            oc_model_errors += 1
                             self._log_progress(f"    Error in {oc_model_name}: {e}")
                             import traceback
                             self._log_progress(traceback.format_exc())
                             continue
+
+                    # Search finished: release the resume record now, before any
+                    # post-search I/O can fail (a finished run must not stay
+                    # resumable). A model that raised, or whose search returned
+                    # no usable results, keeps it resumable.
+                    self._complete_run_state_after_search(analysis_run_id, oc_model_errors, controller=my_controller)
+                    _run_state_settled = True
 
                     if oc_all_results:
                         results_df = pd.concat(oc_all_results, ignore_index=True)
@@ -28451,7 +29179,7 @@ class SpectralPredictApp:
                         analysis_wl_min=analysis_wl_min_value,
                         analysis_wl_max=analysis_wl_max_value,
                         progress_callback=self._progress_callback,
-                        controller=self.search_controller,
+                        controller=my_controller,
                         baseline_method=baseline_method_oc,
                         baseline_params=baseline_params_oc,
                         enable_smoothing=self.enable_smoothing.get(),
@@ -28510,7 +29238,7 @@ class SpectralPredictApp:
                     'n_samples_used': len(X_filtered),
                     'excluded_count': n_excluded,
                     'validation_count': n_validation,
-                    'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
+                    'total_samples_original': len(X_original_run) if X_original_run is not None else (len(X_run) if X_run is not None else 0)
                 }
                 self.last_training_config.update(self._get_analysis_subset_training_metadata())
 
@@ -28676,7 +29404,7 @@ class SpectralPredictApp:
                         smoothing_window=self.smoothing_window.get(),
                         smoothing_polyorder=self.smoothing_polyorder.get(),
                         progress_callback=self._progress_callback,
-                        controller=self.search_controller,
+                        controller=my_controller,
                         compute_top_decision_view=True,
                     )
                     mc_failed = False
@@ -28900,6 +29628,7 @@ class SpectralPredictApp:
                 region_pairwise = self.bayes_region_test_pairwise.get()
                 enable_uve = self.bayes_enable_uve.get()
 
+                unified_model_errors = 0
                 for model_name in selected_models:
                     self._log_progress(f"\n  Optimizing {model_name}...")
 
@@ -28922,7 +29651,7 @@ class SpectralPredictApp:
                             imbalance_params=imbalance_params,
                             region_test_all_individual=region_all,
                             region_test_pairwise=region_pairwise,
-                            controller=self.search_controller,
+                            controller=my_controller,
                             baseline_method=bl_method,
                             baseline_params=bl_params,
                             smoothing=sm_enabled,
@@ -28946,13 +29675,37 @@ class SpectralPredictApp:
                             results_df_model['Model'] = model_name
                             all_results.append(results_df_model)
                         else:
-                            self._log_progress(f"    ⚠️ No results returned")
+                            # Codex review of #79 round 7: a model whose every
+                            # trial raised inside the objective returns an
+                            # empty frame rather than an exception (the
+                            # backend absorbs the exception into a 1e10
+                            # penalty). Treat that as failed so the run stays
+                            # resumable — an "all fits failed" model must not
+                            # count as a clean finish.
+                            unified_model_errors += 1
+                            self._log_progress(
+                                f"    ⚠️ No usable results for {model_name} "
+                                "(all trials failed) — treated as failed. If "
+                                "this keeps happening on retry, the saved "
+                                "study for this model already has its full "
+                                "trial count and every one is a failure; "
+                                "delete the saved run at the next prompt and "
+                                "start over (round 8 item 6)."
+                            )
 
                     except Exception as e:
+                        unified_model_errors += 1
                         self._log_progress(f"    ✗ Error: {str(e)}")
                         import traceback
                         self._log_progress(f"    Traceback: {traceback.format_exc()}")
                         continue
+
+                # Search finished: release the resume record now, before the
+                # validation, CSV, report and ensemble steps can fail. A
+                # model that raised, or returned no usable results, keeps it
+                # resumable.
+                self._complete_run_state_after_search(analysis_run_id, unified_model_errors, controller=my_controller)
+                _run_state_settled = True
 
                 # Combine results from all models
                 if all_results:
@@ -29167,7 +29920,7 @@ class SpectralPredictApp:
                     random_state=42,  # Fixed seed (hardcoded throughout codebase)
                     verbose=1,
                     progress_callback=self._progress_callback,
-                    controller=self.search_controller,
+                    controller=my_controller,
                     models=selected_models,
                     selection_bias={"Min Error": 0.0, "Balanced": 1.0, "Knee Point": 2.0}.get(
                         self.nsga2_selection_method.get(), 0.0
@@ -29427,7 +30180,7 @@ class SpectralPredictApp:
                 imbalance_method=imbalance_method,
                 imbalance_params=imbalance_params,
                 # Search control (pause/resume/stop)
-                controller=self.search_controller,
+                controller=my_controller,
                 # Validation metrics for results table
                 X_validation=self.validation_X.values if (
                     self.validation_enabled.get() and
@@ -29461,7 +30214,7 @@ class SpectralPredictApp:
                 'n_samples_used': len(X_filtered),  # Actual calibration samples used
                 'excluded_count': n_excluded,
                 'validation_count': n_validation,
-                'total_samples_original': len(self.X_original) if self.X_original is not None else (len(self.X) if self.X is not None else 0)
+                'total_samples_original': len(X_original_run) if X_original_run is not None else (len(X_run) if X_run is not None else 0)
             }
             self.last_training_config.update(self._get_analysis_subset_training_metadata())
             print(f"\n> Stored training configuration:")
@@ -29591,27 +30344,10 @@ class SpectralPredictApp:
             # Disable search control buttons
             self.root.after(0, lambda: self._update_search_buttons('idle'))
 
-            # T-11 D: clean completion → drop the sidecar so the next launch
-            # doesn't offer a stale "resume?" dialog. Errors fall through to
-            # the except block below, which deliberately does NOT mark
-            # complete — leaving the sidecar lets the user resume from where
-            # they left off.
-            try:
-                from spectral_predict.run_state import mark_complete as _mark_complete
-                _mark_complete()
-            except Exception as _mc_err:
-                # Don't re-raise — the analysis itself completed successfully
-                # and the user shouldn't see a "completion failed" error. But
-                # surface the failure to the progress log: a stale sidecar
-                # would otherwise produce an unexplained "resume previous run?"
-                # dialog on next launch.
-                try:
-                    self._log_progress(
-                        f"[RUN] mark_complete failed; sidecar will persist "
-                        f"and next launch may prompt to resume: {_mc_err}"
-                    )
-                except Exception:
-                    pass  # progress log itself broken — nothing else we can do
+            # T-11 D: the Bayesian branches drop the resume sidecar right after
+            # their search finishes (_complete_run_state_after_search), not here:
+            # a failure in the CSV/report/ensemble steps above must not leave a
+            # finished run resumable (DeepSeek review of #79).
 
             # Analysis complete - status updated
 
@@ -29630,6 +30366,31 @@ class SpectralPredictApp:
             self.root.after(0, lambda: self._update_search_buttons('idle'))
 
             self.root.after(0, lambda: messagebox.showerror("Error", f"Analysis failed:\n{error_str}"))
+
+        finally:
+            # Codex + DeepSeek review of #79 round 8: every exit from the try
+            # block above that ISN'T the normal completion path (an early
+            # `return` — the one-class inlier/guard checks, or the resume
+            # fingerprint re-check above — or an exception anywhere in setup
+            # or the search itself) must still release this worker's
+            # in-process claim on a registered/resumed run. Leaving it set
+            # let the next Run Analysis click's start_run() idempotently
+            # return this now-dead run's stale metadata with no fingerprint
+            # check ever running. n_model_errors=1 forces
+            # _complete_run_state_after_search's "keep resumable" branch,
+            # which clears the in-process claim but never touches the
+            # sidecar or SQLite store on disk — exactly like a Stop.
+            if analysis_run_id is not None and not _run_state_settled:
+                try:
+                    self._complete_run_state_after_search(analysis_run_id, n_model_errors=1, controller=my_controller)
+                except Exception as _finally_err:
+                    try:
+                        self._log_progress(
+                            f"[RUN] Could not release the run's in-memory claim "
+                            f"after an unhandled exit: {_finally_err}"
+                        )
+                    except Exception:
+                        pass
 
     def _progress_callback(self, info):
         """Handle progress updates.
@@ -29658,9 +30419,83 @@ class SpectralPredictApp:
             except Exception:
                 pass
 
+    # Backend progress keys that a resuming user must see, mapped to
+    # (log prefix, status line, dialog title, dialog lead). Checked in order.
+    _RESUME_ISSUE_NOTICES = (
+        ("resume_declined", (
+            "[RUN] Resume: saved trials were NOT reused for this model; it starts over.",
+            "Resumed run: some saved trials could not be reused (different data "
+            "or software environment) — those models start over. See log.",
+            "Saved trials not reused",
+            "Part of the resumed run is starting over instead of continuing "
+            "from its saved trials.",
+        )),
+        ("resume_check_failed", (
+            "[RUN] Resume: could not check this model's saved trials; it starts over.",
+            "Resumed run: saved trials could not be checked for some models — "
+            "those models start over. See log.",
+            "Saved trials could not be checked",
+            "The saved study could not be read, so part of the resumed run is "
+            "starting over.",
+        )),
+        ("data_mismatch_resume", (
+            "[RUN] Resume: saved trials were reused, but they were run on DIFFERENT data.",
+            "Resumed run: saved trials were reused but the data differs — their "
+            "scores describe the old data. See log.",
+            "Resumed on different data",
+            "The run resumed its saved trials, but the data loaded now differs "
+            "from the data they were run on.",
+        )),
+        ("data_unverified_resume", (
+            "[RUN] Resume: saved trials were reused, but their data can't be verified.",
+            "Resumed run: saved trials were reused but the data they ran on "
+            "can't be verified. See log.",
+            "Resumed data can't be verified",
+            "The run resumed its saved trials, but the data they were run on "
+            "can't be verified against the data loaded now.",
+        )),
+    )
+
+    def _notify_resume_issue(self, info):
+        """Surface a resume-relevant backend event while a crash resume is active.
+
+        Called from the worker thread. Logs and updates the status line for
+        every event; the warning dialog is shown once per resumed run.
+        """
+        spec = next(
+            (s for key, s in self._RESUME_ISSUE_NOTICES if info.get(key)), None
+        )
+        if spec is None:
+            return
+        try:
+            from spectral_predict.run_state import get_storage_url, is_resuming
+        except ImportError:
+            return
+        if not is_resuming():
+            return
+        log_prefix, status, title, lead = spec
+        message = info.get('message', '')
+        self._log_progress(f"{log_prefix} {message}")
+        try:
+            self.root.after(0, lambda: self.progress_status.config(text=status))
+        except Exception:
+            pass
+        run_key = get_storage_url()  # unique per run
+        if getattr(self, "_resume_issue_warned_run", None) == run_key:
+            return
+        self._resume_issue_warned_run = run_key
+        try:
+            self.root.after(
+                0,
+                lambda t=title, b=f"{lead}\n\n{message}": messagebox.showwarning(t, b),
+            )
+        except Exception:
+            pass
+
     def _progress_callback_impl(self, info):
         msg = info.get('message', '')
         self._log_progress(msg)
+        self._notify_resume_issue(info)
 
         current = info.get('current', 0)
         total = info.get('total', 1)
