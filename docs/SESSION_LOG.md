@@ -1589,3 +1589,32 @@ should always block — they found two crash bugs no test covered.
       independent of the generic net).
     - Full non-GUI suite re-confirmed again after this round: 3395 passed, 26 skipped
       (938s) — unchanged. flake8 F821/F822/F823 clean.
+
+  - **Round 9 (Codex block on round 8, 2026-09-15):**
+    - *Damaged record:* `find_incomplete_run` renamed an unparseable sidecar to
+      `.corrupt` (or deleted it if the rename failed — on Windows `rename` fails when a
+      `.corrupt` from an earlier corruption already exists) and returned None, so the
+      next fresh run silently replaced it. Now raises `CorruptRunRecordError` with the
+      file untouched. Records with missing or mistyped required fields count too; a JSON
+      list used to escape as an uncaught `AttributeError`. The GUI asks at launch and on
+      Run Analysis. `set_aside_corrupt_run_record` re-reads the file and only renames
+      it if it is still damaged, to a unique timestamped name. `start_run` sets it
+      aside first. `resume_run` and `discard_incomplete_run` refuse a damaged record.
+    - *Gotcha:* `start_run` holds the non-reentrant `_lock`, so the set-aside call has
+      to come before `with _lock:`; calling it inside deadlocks.
+    - *Settings reconciliation:* after restoring settings the gate returns False (nothing
+      runs). The click's `selected_models`, tier and inlier label were computed before
+      the restore, and the restore can change `task_type`. So the user clicks again.
+      The persistence radio is excluded from the comparison: 'auto' and 'always' both
+      reload a saved study, and restoring it would reintroduce this PR's original bug.
+    - *Found while writing the e2e tests:* the worker bound `self.X` when the thread
+      started, not at the click the gate fingerprinted. The window is tiny in practice,
+      but it is now passed as `analysis_data`. The trial count is frozen the same way
+      (`analysis_n_trials`), and a resume uses the run's saved `n_trials_per_model`.
+    - A resume now always freezes the saved `model_names`, even when they match the
+      selection, so `_pending_bayesian_models` is set on every resume.
+      `test_resume_with_matching_models_does_not_ask` was updated for this.
+    - New `tests/gui/test_resume_round9.py` (15 tests, including 3 end-to-end
+      `_run_analysis` gate → fake thread → worker tests). The two `.corrupt` quarantine
+      tests in `tests/test_run_state.py` were replaced by damaged-record and set-aside
+      tests.

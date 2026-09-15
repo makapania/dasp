@@ -183,6 +183,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Wording: the "decide later" choice also says a new Bayesian analysis can't start
     until the saved run is resumed or deleted, and that Grid/NSGA-II searches aren't
     affected.
+- **Round 9 (Codex review of round 8).**
+  - **Behaviour change: a damaged saved-run record is reported, not silently moved.**
+    `run_state.find_incomplete_run` used to rename an unparseable record to `.corrupt`
+    (or delete it when the rename failed) and report "no saved run", so the next run
+    replaced it. It now raises `run_state.CorruptRunRecordError` and leaves the file
+    alone. Records with missing or mistyped required fields also count as damaged.
+    At launch and on Run Analysis the GUI asks whether to move it aside; "No" leaves it
+    and runs nothing. New `run_state.set_aside_corrupt_run_record()` renames it to a
+    unique `active_run.corrupt-<timestamp>.json`, but only if it is still damaged.
+    `start_run` sets a damaged record aside before writing and raises `OSError`
+    rather than overwrite it.
+  - **A resume uses the run's own trial count.** A resume always runs the saved
+    `model_names` and `n_trials_per_model`. When either differs from the current
+    controls, the GUI asks first.
+  - **Behaviour change: analysis settings that differ from the resumed run are shown
+    before anything runs.** Yes puts the run's settings back (nothing runs; click again
+    to resume). No deletes the run and starts fresh with the current settings. Cancel
+    changes nothing. The persistence radio, model checkboxes, trial count and
+    display-only options are not compared (`run_gui_settings.diff_gui_settings`). Model
+    hyperparameter ranges are not in the saved settings and are not checked.
+  - A one-class Bayesian run uses the model list frozen at the click. It no longer
+    re-reads the one-class checkboxes, which could run IsolationForest in place of a
+    resumed PCA-SIMCA run.
+  - The worker receives the data checked at the click (`analysis_data`) and the frozen
+    trial count (`analysis_n_trials`), instead of binding them when the thread starts.
+  - A model or trial override frozen for a resume is cleared when that run is deleted
+    or replaced by a fresh one.
+  - If the worker thread fails to start, the run the gate claimed is released and an
+    error is shown.
+  - If `mark_complete` can't delete a finished run's record (e.g. a Windows file lock),
+    the in-process claim is still released. The record stays on disk and is offered at
+    the next launch.
+  - User-facing text no longer says "sidecar" or "saved-run slot".
+  - **Known limitations (not addressed):**
+    - Two dasp windows share one `active_run.json` with no file lock. The last
+      `start_run` wins, and a window may offer or delete a run another window just
+      recorded. `discard_incomplete_run` and `set_aside_corrupt_run_record` re-read the
+      record first, which narrows but does not close the window.
+    - A finished run whose record couldn't be deleted is offered for resume again.
+    - A run whose SQLite store is missing or empty is not offered. Its record stays
+      until the next Bayesian run replaces it.
+    - A resume restores only the whitelisted GUI settings, not per-model
+      hyperparameter grids.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
   Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
   Bayesian rows store all estimator params under that prefix, so each base model trained

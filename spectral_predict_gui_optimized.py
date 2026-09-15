@@ -23726,6 +23726,7 @@ class SpectralPredictApp:
         """
         try:
             from spectral_predict.run_state import (
+                CorruptRunRecordError,
                 find_incomplete_run,
                 has_resumable_store,
                 resume_run,
@@ -23747,6 +23748,10 @@ class SpectralPredictApp:
 
         try:
             meta = find_incomplete_run()
+        except CorruptRunRecordError as corrupt_err:
+            # Round 9 item 3: offered, never silently moved aside or replaced.
+            self._offer_to_set_aside_corrupt_run_record(corrupt_err, at_launch=True)
+            return
         except OSError as read_err:
             # Codex meta-review A2: locked sidecar / dead network share.
             # Don't silently skip — the user has an unfinished run on disk
@@ -23970,6 +23975,60 @@ class SpectralPredictApp:
                     )
                 except Exception:
                     pass
+
+    def _offer_to_set_aside_corrupt_run_record(self, corrupt_err, at_launch):
+        """Tell the user the saved-run record is damaged; offer to move it aside.
+
+        Round 9 item 3 (Codex review of #79): the record used to be renamed or
+        deleted silently and reported as "no saved run", so the next Bayesian
+        run replaced it. A damaged record can't be resumed, but it may describe
+        a run the user cares about, so nothing happens to it without a Yes.
+
+        Returns True if the record was moved aside (or is no longer damaged), so
+        a new Bayesian run may be recorded; False otherwise.
+        """
+        from spectral_predict.run_state import set_aside_corrupt_run_record
+
+        later = (
+            "you'll be asked again next launch or when you start a Bayesian analysis"
+            if at_launch
+            else "nothing runs now; you'll be asked again next time"
+        )
+        self._log_progress(f"[RUN] Saved run record is damaged: {corrupt_err}")
+        try:
+            move = messagebox.askyesno(
+                "Saved run record is damaged",
+                "dasp found the record of an interrupted Bayesian run, but it is "
+                "damaged and can't be read, so that run can't be resumed.\n\n"
+                "Move the damaged record aside so a new Bayesian run can be saved?"
+                "\n\n"
+                "  • Yes — rename it (its contents are kept next to it for "
+                "inspection) and continue.\n"
+                f"  • No — leave it exactly as it is; {later}.\n\n"
+                f"Details: {corrupt_err}",
+                icon="warning",
+                default="no",
+            )
+        except Exception:
+            return False
+        if not move:
+            return False
+        try:
+            moved_to = set_aside_corrupt_run_record()
+        except OSError as move_err:
+            self._log_progress(f"[RUN] Could not move the damaged record aside: {move_err}")
+            try:
+                messagebox.showerror(
+                    "Couldn't move the damaged record",
+                    "The damaged run record could not be moved aside, so it was "
+                    f"left as it is.\n\nDetails: {move_err}",
+                )
+            except Exception:
+                pass
+            return False
+        if moved_to is not None:
+            self._log_progress(f"[RUN] Damaged run record moved aside to {moved_to}")
+        return True
 
     def _update_search_buttons(self, state):
         """Update button states based on search state.
@@ -24320,6 +24379,9 @@ class SpectralPredictApp:
                     uses_bayesian_run_state=getattr(
                         self, "_pending_uses_bayesian_run_state", False
                     ),
+                    analysis_n_trials=getattr(self, "_pending_bayesian_n_trials", None),
+                    # The data the gate just checked, bound on this thread.
+                    analysis_data=(self.X, self.y, self.X_original),
                 ),
                 daemon=True,
             )
@@ -26257,6 +26319,143 @@ class SpectralPredictApp:
         except Exception:
             return None  # can't ask — behave like "decide later"
 
+    def _offer_to_restore_resume_settings(self, meta, setting_diffs):
+        """Show settings that differ from the interrupted run; ask what to do.
+
+        Called by the launch gate while resuming (round 9 item 6). Returns
+        ``"restore"`` (the run's settings were put back — nothing runs on this
+        click: restoring changes many controls at once, possibly the task type,
+        and the click's model list, tier and inlier label were read before it),
+        ``"fresh"`` (the caller deletes the run and starts fresh with the current
+        settings), or None (decide later — nothing changes, nothing runs).
+        """
+        shown = setting_diffs[:12]
+        lines = [f"  • {name}: {saved!r} in the run, {current!r} now"
+                 for name, saved, current in shown]
+        if len(setting_diffs) > len(shown):
+            lines.append(f"  • … and {len(setting_diffs) - len(shown)} more")
+        self._log_progress(
+            f"[RUN] Resume paused — {len(setting_diffs)} setting(s) differ from the "
+            f"interrupted run {meta.run_id}: "
+            + "; ".join(f"{n}={s!r} (now {c!r})" for n, s, c in setting_diffs)
+        )
+        try:
+            answer = messagebox.askyesnocancel(
+                "Settings differ from the interrupted run",
+                f"The interrupted run {meta.run_id} used different analysis "
+                "settings than the ones set now:\n\n"
+                + "\n".join(lines)
+                + "\n\nNothing was run and nothing was deleted.\n\n"
+                "  • Yes — put the run's settings back. Check them, then click "
+                "Run Analysis again to resume.\n"
+                "  • No — delete the interrupted run and start fresh now with the "
+                "current settings.\n"
+                "  • Cancel — change nothing and run nothing; decide later.\n\n"
+                "Model hyperparameter ranges are not part of the saved settings "
+                "and are not checked.",
+                icon="warning",
+                default="cancel",
+            )
+        except Exception:
+            return None
+        if answer is None:
+            return None
+        if answer is False:
+            return "fresh"
+        from spectral_predict.run_gui_settings import restore_gui_settings
+
+        wanted = {name: saved for name, saved, _ in setting_diffs}
+        report = restore_gui_settings(self, wanted)
+        if report.errors:
+            self._log_progress(
+                f"[RUN] {len(report.errors)} setting(s) could not be restored: "
+                + "; ".join(report.errors)
+            )
+            try:
+                messagebox.showwarning(
+                    "Some settings not restored",
+                    f"Restored {report.total_restored} of {len(wanted)} settings. "
+                    "These could not be set:\n\n" + "\n".join(report.errors[:8]),
+                )
+            except Exception:
+                pass
+        else:
+            self._log_progress(
+                f"[RUN] Restored {report.total_restored} setting(s) from the "
+                "interrupted run. Click Run Analysis to resume."
+            )
+        return "restore"
+
+    def _reconcile_resume_models_and_trials(self, meta, selected_models):
+        """Freeze the interrupted run's models and trial count for a resume.
+
+        Round 8 item 1 (Codex): resuming must run the ORIGINAL run's models, never
+        whatever is selected this click (Stop a PLS run, select Ridge, click Run —
+        Ridge must not run in place of the unfinished PLS study). Round 9 item 6:
+        the same holds for the trial count; a different count changes when each
+        study counts as finished. Asks when either differs.
+
+        Returns True to continue the resume (overrides set on
+        ``_pending_bayesian_models`` / ``_pending_bayesian_n_trials``), False to
+        stay idle.
+        """
+        try:
+            current_trials = int(self.n_unified_trials.get())
+        except Exception:
+            current_trials = None
+        models_differ = bool(
+            meta.model_names
+            and selected_models is not None
+            and set(meta.model_names) != set(selected_models)
+        )
+        trials_differ = (
+            meta.n_trials_per_model is not None
+            and current_trials is not None
+            and meta.n_trials_per_model != current_trials
+        )
+        if models_differ or trials_differ:
+            lines = []
+            if models_differ:
+                lines.append(
+                    f"Models — run: {', '.join(meta.model_names)}; selected now: "
+                    f"{', '.join(selected_models) if selected_models else '(none)'}"
+                )
+            if trials_differ:
+                lines.append(
+                    f"Trials per model — run: {meta.n_trials_per_model}; set now: "
+                    f"{current_trials}"
+                )
+            try:
+                proceed = messagebox.askyesno(
+                    "Resuming different models" if models_differ
+                    else "Resuming a different trial count",
+                    f"The interrupted run {meta.run_id} differs from what is set "
+                    "now:\n\n" + "\n".join(lines) + "\n\n"
+                    "Resuming continues the run as it was saved — the current "
+                    "selection is ignored for this click.\n\n"
+                    "  • Yes — resume with the run's own models and trial count.\n"
+                    "  • No — don't run anything now. Change your selection to "
+                    "match, or delete the interrupted run first.",
+                    icon="question",
+                )
+            except Exception:
+                proceed = False
+            if not proceed:
+                self._log_progress(
+                    "[RUN] Resume kept — the current selection doesn't match the "
+                    f"interrupted run ({'; '.join(lines)})."
+                )
+                return False
+            self._log_progress(
+                "[RUN] Resuming with the interrupted run's own models and trial "
+                f"count ({'; '.join(lines)})."
+            )
+        if meta.model_names:
+            self._pending_bayesian_models = list(meta.model_names)
+        if meta.n_trials_per_model is not None:
+            self._pending_bayesian_n_trials = meta.n_trials_per_model
+        return True
+
     def _confirm_resume_before_launch(self, selected_models=None, tier=None):
         """The single main-thread authority for a Bayesian launch. Decides
         resume/delete/fresh and CLAIMS the run slot before the worker starts.
@@ -26316,11 +26515,13 @@ class SpectralPredictApp:
         self._pending_uses_bayesian_run_state = False
         self._pending_bayesian_run_id = None
         self._pending_bayesian_models = None
+        self._pending_bayesian_n_trials = None
         if not self._uses_bayesian_run_state():
             return True
         self._pending_uses_bayesian_run_state = True
         try:
             from spectral_predict.run_state import (
+                CorruptRunRecordError,
                 abandon_resume,
                 discard_incomplete_run,
                 fingerprint_dataset,
@@ -26332,7 +26533,7 @@ class SpectralPredictApp:
                 start_run,
                 verify_resume_fingerprint,
             )
-            from spectral_predict.run_gui_settings import capture_gui_settings
+            from spectral_predict.run_gui_settings import capture_gui_settings, diff_gui_settings
         except ImportError:
             return True  # without run_state no resume can be pending or registered
 
@@ -26346,6 +26547,9 @@ class SpectralPredictApp:
             ``start_run()`` itself. Failure here is logging-only (as it was
             in the worker) — the run still proceeds in-memory.
             """
+            # Anything frozen for a resume belongs to that run, not this one.
+            self._pending_bayesian_models = None
+            self._pending_bayesian_n_trials = None
             try:
                 fingerprint = fingerprint_dataset(self.X, self.y)
                 val_indices = (
@@ -26353,15 +26557,17 @@ class SpectralPredictApp:
                     if getattr(self, "validation_indices", None)
                     else None
                 )
+                n_trials = (
+                    int(self.n_unified_trials.get())
+                    if hasattr(self, "n_unified_trials")
+                    else None
+                )
+                self._pending_bayesian_n_trials = n_trials
                 meta = start_run(
                     label=tier,
                     dataset_fingerprint=fingerprint,
                     model_names=list(selected_models) if selected_models else [],
-                    n_trials_per_model=(
-                        int(self.n_unified_trials.get())
-                        if hasattr(self, "n_unified_trials")
-                        else None
-                    ),
+                    n_trials_per_model=n_trials,
                     # T-41 + T-47: 'never' here is a safety-net fallback for a
                     # corrupted GUI state (Tk var missing entirely), not the
                     # user-facing default — see the matching comment that used
@@ -26411,6 +26617,25 @@ class SpectralPredictApp:
         if not is_resuming():
             try:
                 pending = find_incomplete_run()
+            except CorruptRunRecordError as corrupt_err:
+                # Round 9 item 3: a fresh run would replace the damaged record.
+                if not self._offer_to_set_aside_corrupt_run_record(
+                    corrupt_err, at_launch=False
+                ):
+                    return False
+                try:
+                    pending = find_incomplete_run()
+                except (CorruptRunRecordError, OSError) as reread_err:
+                    self._log_progress(
+                        f"[RUN] Could not check for an interrupted run: {reread_err}"
+                    )
+                    return False
+                if pending is not None:
+                    # Another window recorded a run meanwhile; decide on the next click.
+                    self._log_progress(
+                        "[RUN] Another saved run appeared; click Run Analysis again."
+                    )
+                    return False
             except OSError as read_err:
                 # Round 8 item 2 (Codex): a read failure is NOT "positively
                 # nothing pending". Launching anyway would let this click's
@@ -26511,42 +26736,78 @@ class SpectralPredictApp:
         # is_resuming() is True here — either from just above, or from a
         # prior startup "Resume" answer.
         meta = get_resumed_run()
-        # Round 8 item 1 (Codex): resuming must run the ORIGINAL run's
-        # models, never whatever happens to be selected this click (e.g.
-        # Stop a PLS run, select Ridge, click Resume — Ridge must not run
-        # in place of the still-unfinished PLS study). Ask rather than
-        # silently substituting either list.
-        if meta is not None and meta.model_names and selected_models is not None:
-            if set(meta.model_names) != set(selected_models):
+
+        def _delete_resumed_run_and_start_fresh(meta):
+            """Delete the run being resumed, then register a fresh run. True to launch."""
+            # User decision on #79: a fresh run's own start_run() would overwrite
+            # the single shared sidecar, orphaning the interrupted run's SQLite
+            # store (it could never be found/offered again). Delete it explicitly
+            # instead of silently abandoning it.
+            if meta is not None:
                 try:
-                    proceed = messagebox.askyesno(
-                        "Resuming different models",
-                        f"The interrupted run {meta.run_id} was searching: "
-                        f"{', '.join(meta.model_names)}.\n\n"
-                        "Your current model selection is: "
-                        f"{', '.join(selected_models) if selected_models else '(none)'}.\n\n"
-                        "Resuming continues the run's ORIGINAL models — "
-                        "your current selection is ignored for this click.\n\n"
-                        "  • Yes — resume the original models.\n"
-                        "  • No — don't run anything now. Change your "
-                        "selection to match, or delete the interrupted run "
-                        "first.",
-                        icon="question",
-                    )
-                except Exception:
-                    proceed = False
-                if not proceed:
+                    result = discard_incomplete_run(meta.run_id)
+                except Exception as _del_err:
                     self._log_progress(
-                        "[RUN] Resume kept — the current model selection "
-                        f"doesn't match the interrupted run's models "
-                        f"({', '.join(meta.model_names)})."
+                        f"[RUN] Could not delete the interrupted run: {_del_err}"
                     )
-                    return False
-                self._pending_bayesian_models = list(meta.model_names)
-                self._log_progress(
-                    "[RUN] Resuming with the interrupted run's original "
-                    f"models: {', '.join(meta.model_names)}"
+                    try:
+                        messagebox.showerror(
+                            "Couldn't delete the interrupted run",
+                            "The interrupted run could not be deleted, so nothing "
+                            f"was started.\n\nDetails: {_del_err}\n\nClick Run "
+                            "Analysis again to retry.",
+                        )
+                    except Exception:
+                        pass
+                    return False  # round 8 item 3: don't launch over a failed delete
+                if not result.fully_succeeded:
+                    self._log_progress(
+                        f"[RUN] Could not fully delete the interrupted run: "
+                        f"{result.errors}"
+                    )
+                    try:
+                        messagebox.showerror(
+                            "Couldn't delete the interrupted run",
+                            "The interrupted run could not be fully deleted, so "
+                            "nothing was started — starting fresh would "
+                            "otherwise risk overwriting the saved run.\n\n"
+                            f"Details: {result.errors}\n\nClick Run Analysis "
+                            "again to retry.",
+                        )
+                    except Exception:
+                        pass
+                    return False  # round 8 item 3: don't launch over a failed delete
+            abandon_resume()
+            # The captured partition belonged to the deleted run.
+            self._pending_validation_indices = None
+            self._log_progress(
+                "[RUN] Starting a fresh analysis with the current settings and data; "
+                "the interrupted run was deleted so it can't be silently orphaned."
+            )
+            # Clears any model/trial override frozen for the deleted run (round 9
+            # item 2) before registering this click's own selection.
+            _register_fresh_run()
+            return True
+
+        if meta is not None:
+            # Round 9 item 6 (Codex): analysis settings that differ from the
+            # interrupted run's would make the resumed trials incomparable (or
+            # silently not reused). Show them; restore, start fresh, or wait.
+            try:
+                setting_diffs = diff_gui_settings(
+                    meta.gui_settings, capture_gui_settings(self)
                 )
+            except Exception as diff_err:
+                self._log_progress(f"[RUN] Could not compare settings: {diff_err}")
+                setting_diffs = []
+            if setting_diffs:
+                if self._offer_to_restore_resume_settings(meta, setting_diffs) == "fresh":
+                    return _delete_resumed_run_and_start_fresh(meta)
+                return False
+        if meta is not None and not self._reconcile_resume_models_and_trials(
+            meta, selected_models
+        ):
+            return False
 
         fingerprint = fingerprint_dataset(self.X, self.y)
         started = ""
@@ -26611,59 +26872,7 @@ class SpectralPredictApp:
                 "[RUN] Resume kept. Load the matching data and click Run Analysis."
             )
             return False
-        # User decision on #79: a fresh run's own start_run() would overwrite
-        # the single shared sidecar, orphaning the interrupted run's SQLite
-        # store (it could never be found/offered again). Delete it explicitly
-        # instead of silently abandoning it.
-        if meta is not None:
-            try:
-                result = discard_incomplete_run(meta.run_id)
-            except Exception as _del_err:
-                self._log_progress(
-                    f"[RUN] Could not delete the interrupted run: {_del_err}"
-                )
-                try:
-                    messagebox.showerror(
-                        "Couldn't delete the interrupted run",
-                        "The interrupted run could not be deleted, so nothing "
-                        f"was started.\n\nDetails: {_del_err}\n\nClick Run "
-                        "Analysis again to retry.",
-                    )
-                except Exception:
-                    pass
-                return False  # round 8 item 3: don't launch over a failed delete
-            if not result.fully_succeeded:
-                self._log_progress(
-                    f"[RUN] Could not fully delete the interrupted run: "
-                    f"{result.errors}"
-                )
-                try:
-                    messagebox.showerror(
-                        "Couldn't delete the interrupted run",
-                        "The interrupted run could not be fully deleted, so "
-                        "nothing was started — starting fresh would "
-                        "otherwise risk overwriting the saved run.\n\n"
-                        f"Details: {result.errors}\n\nClick Run Analysis "
-                        "again to retry.",
-                    )
-                except Exception:
-                    pass
-                return False  # round 8 item 3: don't launch over a failed delete
-        abandon_resume()
-        # The captured partition belonged to the deleted run.
-        self._pending_validation_indices = None
-        # Round 9 item 2 (Codex): a model-list override set earlier in THIS
-        # call (accepting the resumed run's original models, above) belonged
-        # to the run we just deleted. Clear it before registering fresh, or
-        # _run_analysis would hand the fresh worker the abandoned run's
-        # model list instead of the click's own selection.
-        self._pending_bayesian_models = None
-        self._log_progress(
-            "[RUN] Starting a fresh analysis with the current data; the "
-            "interrupted run was deleted so it can't be silently orphaned."
-        )
-        _register_fresh_run()
-        return True
+        return _delete_resumed_run_and_start_fresh(meta)
 
     def _complete_run_state_after_search(self, analysis_run_id, n_model_errors=0, controller=None):
         """Release the resume record once a Bayesian search has finished.
@@ -26787,8 +26996,17 @@ class SpectralPredictApp:
 
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None, controller=None,
                               analysis_run_id=_LAUNCH_CONTEXT_UNSET,
-                              uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET):
+                              uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET,
+                              analysis_n_trials=None, analysis_data=None):
         """Run analysis in background thread.
+
+        ``analysis_n_trials``: Bayesian trials per model frozen by the launch gate
+        (a resume uses the interrupted run's own count, round 9 item 6). None
+        reads the Trials control, as direct test calls do.
+
+        ``analysis_data``: ``(X, y, X_original)`` bound on the main thread at the
+        click, i.e. the data the launch gate fingerprinted (round 9). None binds
+        ``self.X`` / ``self.y`` / ``self.X_original`` here, as direct test calls do.
 
         ``controller``: THIS worker's own ``SearchController``, captured by
         ``_run_analysis`` on the main thread before the thread was started.
@@ -26816,12 +27034,19 @@ class SpectralPredictApp:
         what this worker does, because it never re-asks.
         """
         my_controller = controller if controller is not None else self.search_controller
+        def _bayes_n_trials():
+            # Frozen at launch when given; a resume keeps the run's own count.
+            return analysis_n_trials if analysis_n_trials is not None else self.n_unified_trials.get()
+
         # Bind the data once. The resume fingerprint check and the search must
         # see the same arrays, even if the user loads other data or changes the
         # target while this worker is setting up (Codex review of #79). Loading
         # or re-targeting rebinds self.X / self.y, so references suffice.
-        X_run, y_run = self.X, self.y
-        X_original_run = self.X_original
+        if analysis_data is not None:
+            X_run, y_run, X_original_run = analysis_data
+        else:
+            X_run, y_run = self.X, self.y
+            X_original_run = self.X_original
         # Round 8 (#79): normalize the sentinel before anything else, so
         # analysis_run_id is always a real value (None or a run id string)
         # for the rest of this function — including the `finally` safety net
@@ -29061,11 +29286,10 @@ class SpectralPredictApp:
                         self.root.after(0, lambda: self._update_search_buttons('idle'))
                         return
 
-                    # Collect selected one-class models
-                    enabled_oc_models = [
-                        name for name, var in self.one_class_model_checkboxes.items()
-                        if var.get()
-                    ]
+                    # The models frozen at launch (round 9 item 1): a resume runs
+                    # the interrupted run's own models, and the checkboxes may
+                    # have changed since the click. Never re-read them here.
+                    enabled_oc_models = list(selected_models or [])
                     if not enabled_oc_models:
                         enabled_oc_models = ['PCA-SIMCA', 'IsolationForest']
 
@@ -29099,7 +29323,7 @@ class SpectralPredictApp:
                     self._log_progress("\nRunning Bayesian One-Class Optimization...")
                     self._log_progress(f"   Models: {enabled_oc_models}")
                     self._log_progress(f"   Inlier class: {inlier_label}")
-                    self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
+                    self._log_progress(f"   Trials: {_bayes_n_trials()}")
 
                     oc_all_results = []
                     oc_model_errors = 0
@@ -29128,7 +29352,7 @@ class SpectralPredictApp:
                                 wavelengths=oc_wavelengths,
                                 model_name=oc_model_name,
                                 task_type='one_class',
-                                n_trials=self.n_unified_trials.get(),
+                                n_trials=_bayes_n_trials(),
                                 cv_folds=self.folds.get(),
                                 cv_strategy=self.cv_strategy.get(),
                                 cv_n_repeats=self.cv_n_repeats.get(),
@@ -29619,7 +29843,7 @@ class SpectralPredictApp:
                 # === BAYESIAN OPTIMIZATION (Joint Preprocessing + Model + Variable Selection) ===
                 self._log_progress("\n🎯 Running Bayesian Optimization...")
                 self._log_progress(f"   Jointly optimizing preprocessing + model + variable selection")
-                self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
+                self._log_progress(f"   Trials: {_bayes_n_trials()}")
                 self._log_progress(f"   This intelligently explores the full configuration space\n")
 
                 if not HAS_UNIFIED_BAYESIAN:
@@ -29712,7 +29936,7 @@ class SpectralPredictApp:
                             wavelengths=wavelengths,
                             model_name=model_name,
                             task_type=task_type,
-                            n_trials=self.n_unified_trials.get(),
+                            n_trials=_bayes_n_trials(),
                             cv_folds=self.folds.get(),
                             cv_strategy=self.cv_strategy.get(),
                             cv_n_repeats=self.cv_n_repeats.get(),

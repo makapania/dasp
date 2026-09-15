@@ -159,19 +159,33 @@ def test_discard_returns_false_for_unknown_id(fresh_state):
     assert result.fully_succeeded is False
 
 
-def test_corrupt_sidecar_self_heals(fresh_state):
-    """find_incomplete_run quarantines corrupt sidecars rather than deleting
-    them outright (PR #6 review: a downgrade from a future schema looks
-    identical to a corruption, so preserve the file for forensics)."""
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not valid json",
+        "[1, 2, 3]",
+        '{"run_id": "abc"}',
+        '{"run_id": "", "storage_path": "x", "storage_url": "", "started_iso": "t", '
+        '"model_names": []}',
+        '{"run_id": "abc", "storage_path": "x", "storage_url": "", "started_iso": "t", '
+        '"model_names": "PLS"}',
+        '{"run_id": "abc", "storage_path": "x", "storage_url": "", "started_iso": "t", '
+        '"model_names": [], "n_trials_per_model": "50"}',
+    ],
+)
+def test_damaged_sidecar_is_reported_and_left_untouched(fresh_state, content):
+    """#79 round 9 item 3: a damaged record is reported, never silently moved or
+    deleted and reported as 'no run' (which let the next run replace it)."""
     rs, rp, _ = fresh_state
 
     sidecar = rp.get_user_optuna_dir() / "active_run.json"
-    sidecar.write_text("{not valid json", encoding="utf-8")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(content, encoding="utf-8")
 
-    assert rs.find_incomplete_run() is None
-    # Original sidecar moved aside, not deleted.
-    assert not sidecar.exists()
-    assert sidecar.with_suffix(".corrupt").exists()
+    with pytest.raises(rs.CorruptRunRecordError):
+        rs.find_incomplete_run()
+    assert sidecar.read_text(encoding="utf-8") == content
+    assert list(sidecar.parent.glob("active_run.corrupt*")) == []
 
 
 def test_fingerprint_dataset_deterministic_and_distinguishes(fresh_state):
@@ -489,23 +503,77 @@ def test_mark_complete_raises_on_unlink_failure(fresh_state, monkeypatch):
     assert rs._active_run_id == meta.run_id
 
 
-def test_find_incomplete_run_quarantines_corrupt_sidecar(fresh_state):
-    """A2 regression: corrupt sidecar gets quarantined to .corrupt rather
-    than silently deleted, so a future-schema downgrade or an actual
-    corruption can be inspected after the fact.
-    """
+def test_set_aside_keeps_damaged_record_under_unique_names(fresh_state):
+    """Moving a damaged record aside keeps its contents and never overwrites an
+    earlier set-aside record."""
     rs, rp, _ = fresh_state
 
     sidecar = rp.get_user_optuna_dir() / "active_run.json"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text("{ this is not valid json", encoding="utf-8")
+    sidecar.write_text("{ first damaged", encoding="utf-8")
+    first = rs.set_aside_corrupt_run_record()
+    sidecar.write_text("{ second damaged", encoding="utf-8")
+    second = rs.set_aside_corrupt_run_record()
 
-    result = rs.find_incomplete_run()
-    assert result is None
     assert not sidecar.exists()
-    quarantined = sidecar.with_suffix(".corrupt")
-    assert quarantined.exists()
-    assert "not valid json" in quarantined.read_text(encoding="utf-8")
+    assert first != second
+    assert first.read_text(encoding="utf-8") == "{ first damaged"
+    assert second.read_text(encoding="utf-8") == "{ second damaged"
+    assert rs.find_incomplete_run() is None
+
+
+def test_set_aside_leaves_a_valid_record_alone(fresh_state):
+    """Another window may have replaced the damaged record with a valid one."""
+    rs, _, _ = fresh_state
+    meta = rs.start_run(label="t", bayesian_persistence_mode="always")
+    rs._reset_for_tests()
+
+    assert rs.set_aside_corrupt_run_record() is None
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_start_run_sets_damaged_record_aside_instead_of_overwriting(fresh_state):
+    rs, rp, _ = fresh_state
+
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{ damaged", encoding="utf-8")
+
+    meta = rs.start_run(label="t", bayesian_persistence_mode="always")
+
+    kept = list(sidecar.parent.glob("active_run.corrupt-*.json"))
+    assert len(kept) == 1 and kept[0].read_text(encoding="utf-8") == "{ damaged"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_start_run_does_not_overwrite_when_set_aside_fails(fresh_state, monkeypatch):
+    rs, rp, _ = fresh_state
+
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{ damaged", encoding="utf-8")
+
+    def locked(self, target):
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(type(sidecar), "rename", locked)
+    with pytest.raises(OSError):
+        rs.start_run(label="t", bayesian_persistence_mode="always")
+    assert sidecar.read_text(encoding="utf-8") == "{ damaged"
+    assert rs.get_active_run_id() is None
+
+
+def test_resume_and_discard_refuse_a_damaged_record(fresh_state):
+    rs, rp, _ = fresh_state
+
+    sidecar = rp.get_user_optuna_dir() / "active_run.json"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{ damaged", encoding="utf-8")
+
+    assert rs.resume_run("abc") is None
+    result = rs.discard_incomplete_run("abc")
+    assert not result.fully_succeeded and result.errors
+    assert sidecar.read_text(encoding="utf-8") == "{ damaged"
 
 
 def test_find_incomplete_run_propagates_oserror(fresh_state, monkeypatch):

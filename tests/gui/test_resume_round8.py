@@ -139,7 +139,8 @@ def test_resume_with_matching_models_does_not_ask(gui_app, paused_with_models):
 
     assert not ask.called
     assert launch is True
-    assert gui_app._pending_bayesian_models is None  # no override needed
+    # Round 9: a resume always runs the saved list, frozen at the click.
+    assert gui_app._pending_bayesian_models == list(meta.model_names)
 
 
 def test_end_to_end_resume_runs_original_models_not_current_selection(

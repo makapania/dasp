@@ -26,7 +26,8 @@ Public surface:
     mark_complete()
     get_storage_url() -> str | None
     is_resuming() -> bool
-    find_incomplete_run() -> RunMetadata | None
+    find_incomplete_run() -> RunMetadata | None   (raises CorruptRunRecordError)
+    set_aside_corrupt_run_record() -> Path | None
     has_resumable_store(meta) -> bool
     get_active_run_id() -> str | None
     get_resumed_run() -> RunMetadata | None
@@ -73,6 +74,20 @@ def _validate_persistence_mode(value: str) -> str:
 
 class ResumeVerificationError(RuntimeError):
     """The loaded data could not be checked against the run being resumed."""
+
+
+class CorruptRunRecordError(RuntimeError):
+    """The saved-run record exists but is not a valid run description.
+
+    Raised by `find_incomplete_run` instead of silently moving the record aside,
+    so the caller can tell the user and let them choose (#79 round 9). The file
+    is left untouched; `set_aside_corrupt_run_record` moves it out of the way.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"the saved-run record {path} is damaged: {reason}")
+        self.path = path
+        self.reason = reason
 
 
 _lock = threading.Lock()
@@ -381,6 +396,10 @@ def start_run(
     """
     _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
+    if _active_metadata is None:
+        # Never write over a damaged record: keep its contents under a new name
+        # (#79 round 9). A rename failure raises OSError, so nothing is replaced.
+        set_aside_corrupt_run_record()
     with _lock:
         # Cluster C fix: idempotent path returns the cached original metadata,
         # NOT a synthesized one. This ensures callers see the same fingerprint,
@@ -622,38 +641,94 @@ def find_incomplete_run() -> RunMetadata | None:
     the GUI calls this on startup to decide whether to show the resume
     dialog. The actual resume happens via `resume_run(run_id)`.
 
-    Codex meta-review A2: prior implementation caught only
-    `(JSONDecodeError, TypeError, KeyError)` and silently DELETED corrupt
-    sidecars. Two issues fixed here:
-      1. `OSError` / `PermissionError` / `UnicodeDecodeError` from
-         `read_text()` now bubble up — a locked or unreadable sidecar is
-         a caller-visible decision (start fresh? abort? retry?), not
-         something the library should silently swallow.
-      2. Unreadable-but-existing sidecars are quarantined (renamed to
-         `.corrupt`) rather than deleted — a downgrade from a future
-         schema looks identical to a corruption, and we want recovery
-         to remain possible.
+    Codex meta-review A2: `OSError` / `PermissionError` from `read_text()`
+    bubble up — a locked or unreadable sidecar is a caller-visible decision
+    (start fresh? abort? retry?), not something the library should swallow.
+
+    Raises:
+        CorruptRunRecordError: the sidecar exists but is not valid JSON, not
+            a JSON object, or lacks/mistypes a required field. The file is
+            NOT touched. It used to be renamed to `.corrupt` (or deleted when
+            the rename failed) and reported as "no run", so the caller's next
+            fresh run silently replaced it (Codex review of #79 round 8).
     """
     sidecar = _sidecar_path()
     try:
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-        return RunMetadata.from_dict(data)
+        raw = sidecar.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, TypeError, KeyError, UnicodeDecodeError):
-        try:
-            sidecar.rename(sidecar.with_suffix(".corrupt"))
-        except OSError:
-            # Quarantine failed — fall back to deletion as last resort
-            # so we don't keep prompting on a sidecar we can't parse.
-            try:
-                sidecar.unlink()
-            except OSError:
-                pass
-        return None
+    except UnicodeDecodeError as exc:
+        raise CorruptRunRecordError(sidecar, f"not UTF-8 text ({exc})") from exc
+    return _parse_run_record(sidecar, raw)
     # OSError (permission, locked file, dead network share) intentionally
-    # escapes — the GUI startup wraps this in its own handler and surfaces
-    # a warning to the user.
+    # escapes — the GUI wraps this in its own handler and tells the user.
+
+
+def _parse_run_record(path: Path, raw: str) -> RunMetadata:
+    """Parse sidecar text into metadata, or raise `CorruptRunRecordError`."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptRunRecordError(path, f"not valid JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise CorruptRunRecordError(path, "not a JSON object")
+    for key in ("run_id", "storage_path", "storage_url", "started_iso"):
+        if not isinstance(data.get(key), str):
+            raise CorruptRunRecordError(path, f"'{key}' is missing or not text")
+    if not data["run_id"]:
+        raise CorruptRunRecordError(path, "'run_id' is empty")
+    names = data.get("model_names")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise CorruptRunRecordError(path, "'model_names' is missing or not a list of names")
+    n_trials = data.get("n_trials_per_model")
+    if n_trials is not None and (not isinstance(n_trials, int) or isinstance(n_trials, bool)):
+        raise CorruptRunRecordError(path, "'n_trials_per_model' is not a whole number")
+    try:
+        return RunMetadata.from_dict(data)
+    except (TypeError, KeyError, ValueError) as exc:
+        raise CorruptRunRecordError(path, str(exc)) from exc
+
+
+def set_aside_corrupt_run_record() -> Path | None:
+    """Move a damaged saved-run record out of the way, keeping its contents.
+
+    Renames the sidecar to a new, unique ``active_run.corrupt-<timestamp>.json``
+    next to it (never overwriting an earlier one), so nothing is lost and a
+    new run can be recorded. Only acts if the record is STILL damaged when
+    re-read: another dasp window may have replaced it with a valid record in
+    the meantime, which must survive.
+
+    Returns:
+        The new path, or None when there was nothing damaged to move (no
+        record, or it is now valid).
+
+    Raises:
+        OSError: the record could not be read or renamed.
+    """
+    sidecar = _sidecar_path()
+    with _lock:
+        try:
+            raw = sidecar.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            pass  # damaged — move it
+        else:
+            try:
+                _parse_run_record(sidecar, raw)
+                return None
+            except CorruptRunRecordError:
+                pass
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        for attempt in range(100):
+            suffix = f"-{attempt}" if attempt else ""
+            target = sidecar.with_name(f"active_run.corrupt-{stamp}{suffix}.json")
+            if target.exists():
+                continue
+            sidecar.rename(target)
+            logger.warning("Moved damaged saved-run record aside to %s", target)
+            return target
+        raise OSError(f"no free name to set aside {sidecar}")
 
 
 def has_resumable_store(meta: RunMetadata) -> bool:
@@ -697,7 +772,11 @@ def resume_run(run_id: str) -> RunMetadata | None:
     """
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
 
-    meta = find_incomplete_run()
+    try:
+        meta = find_incomplete_run()
+    except CorruptRunRecordError as exc:
+        logger.warning("Resume refused: %s", exc)
+        return None
     if meta is None or meta.run_id != run_id:
         return None
 
@@ -750,7 +829,10 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     unlink is refused if it no longer matches — the replacement sidecar
     (and the run it names) survives untouched.
     """
-    meta = find_incomplete_run()
+    try:
+        meta = find_incomplete_run()
+    except CorruptRunRecordError as exc:
+        return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=[str(exc)])
     if meta is None or meta.run_id != run_id:
         return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=[])
 

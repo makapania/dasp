@@ -213,6 +213,49 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
 )
 
 
+# Settings a resume deliberately does not compare (#79 round 9): model checkboxes
+# and the trial count are reconciled separately; the persistence radio is the
+# user's own choice on resume (both 'auto' and 'always' reload a saved study);
+# the rest only change how finished results are displayed.
+RESUME_UNCOMPARED_SETTINGS: frozenset[str] = frozenset(
+    {
+        "use_pls", "use_plsda", "use_ridge", "use_lasso", "use_elasticnet",
+        "use_randomforest", "use_lightgbm", "use_xgboost", "use_catboost",
+        "use_neuralboosted", "use_svr", "use_svm", "use_mlp",
+        "use_ocsvm", "use_isolation_forest", "use_elliptic_envelope",
+        "use_lof", "use_pca_simca",
+        "model_tier",
+        "n_unified_trials",
+        "bayesian_persistence_mode",
+        "show_validation_metrics",
+        "validation_top_n",
+    }
+)
+
+
+def diff_gui_settings(
+    saved: dict[str, Any] | None, current: dict[str, Any]
+) -> list[tuple[str, Any, Any]]:
+    """List analysis settings whose saved value differs from the current one.
+
+    Only whitelisted keys present in ``saved`` are compared, minus
+    :data:`RESUME_UNCOMPARED_SETTINGS`. A key missing from ``current`` (no Tk var
+    on this build) is not a difference — restore can't set it either.
+
+    Returns:
+        ``(name, saved_value, current_value)`` tuples, sorted by name.
+    """
+    if not saved:
+        return []
+    whitelisted = set(CAPTURABLE_SETTINGS) - RESUME_UNCOMPARED_SETTINGS
+    diffs = [
+        (name, value, current[name])
+        for name, value in saved.items()
+        if name in whitelisted and name in current and current[name] != value
+    ]
+    return sorted(diffs, key=lambda item: item[0])
+
+
 @dataclass
 class RestoreReport:
     """Outcome of ``restore_gui_settings`` — surfaced to the GUI banner."""
