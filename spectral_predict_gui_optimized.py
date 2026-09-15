@@ -60,6 +60,7 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
         _orig_popen_init(self, *args, **kwargs)
     _subprocess.Popen.__init__ = _silent_popen_init
 import ast
+import logging
 import re
 from pathlib import Path
 import tkinter as tk
@@ -68,6 +69,10 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+
+# Child of "spectral_predict" so setup_app_logger's dasp.log handler receives GUI
+# warnings (__name__ is "__main__" when the GUI is run as a script).
+logger = logging.getLogger("spectral_predict.gui")
 
 
 def _normalize_mixed_type_labels(labels):
@@ -1941,17 +1946,11 @@ class SidebarNavigation:
 # wrong on the round-tripped CSV/JSON string path).
 
 def _parse_autoscale_flag(raw, default: bool = False) -> bool:
-    if raw is None:
-        return default
-    if isinstance(raw, str):
-        return raw.strip().lower() in ('true', '1', 'yes')
-    try:
-        import math as _math
-        if isinstance(raw, float) and _math.isnan(raw):
-            return default
-    except Exception:
-        pass
-    return bool(raw)
+    # Shared with the validation rebuild, the exporter and the one-class rebuild so an
+    # Autoscale cell like "on" means the same thing everywhere.
+    from spectral_predict.preprocess import parse_bool_cell
+
+    return parse_bool_cell(raw, default)
 
 
 # ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
@@ -24263,8 +24262,14 @@ class SpectralPredictApp:
         from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
         from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
         from sklearn.pipeline import Pipeline
-        from sklearn.preprocessing import StandardScaler
-        import ast
+        from sklearn.preprocessing import FunctionTransformer, StandardScaler
+        from spectral_predict.ga_preprocessing import chromosome_from_row, chromosome_to_steps
+        from spectral_predict.models import parse_row_params
+        from spectral_predict.preprocess import (
+            build_preprocessing_pipeline,
+            preprocessing_config_from_row,
+        )
+        from spectral_predict.search import SCALE_SENSITIVE_MODELS
         import re
 
         # GA preprocessing suffixes
@@ -24522,30 +24527,50 @@ class SpectralPredictApp:
                 window = row.Window
                 polyorder = row.Poly
 
-                # Parse parameters
-                if params_str and params_str != '{}':
-                    try:
-                        params_dict = ast.literal_eval(params_str)
-                    except:
-                        params_dict = {}
-                else:
-                    params_dict = {}
+                # Parse parameters (str(dict) from the searches; a dict cell is accepted too)
+                params_dict = parse_row_params(params_str)
 
                 # Create preprocessing pipeline
                 steps = []
                 ga_transform = None  # For GA preprocessing
                 preprocess_config = None  # For sklearn-clonable wrappers
+                # Rows the current search paths write (grid, Bayesian, NSGA-II) are rebuilt
+                # like the validation rebuild: preprocessing plus Autoscale, baseline and
+                # smoothing, with any wavelength subset taken AFTER preprocessing.
+                shared_prep = None
+                autoscale = False
 
                 # Check for GA preprocessing (has suffix like _pls, _tree, etc.)
                 is_ga_preprocess = any(preprocess.endswith(suffix) for suffix in GA_SUFFIXES)
 
-                # Check for NSGA-II preprocessing (deriv1, deriv2, snv_deriv1, snv_deriv2, etc.)
-                NSGA_PREPROCESS_TYPES = ['raw', 'snv', 'deriv1', 'deriv2', 'deriv3', 'deriv4',
+                # Legacy NSGA-II preprocessing names (deriv1, snv_deriv2, ...). Current
+                # NSGA-II rows store the normalised name ('deriv', 'snv_deriv').
+                NSGA_PREPROCESS_TYPES = ['deriv1', 'deriv2', 'deriv3', 'deriv4',
                                          'snv_deriv1', 'snv_deriv2', 'snv_deriv3', 'snv_deriv4',
                                          'deriv1_snv', 'deriv2_snv', 'deriv3_snv', 'deriv4_snv']
                 is_nsga_preprocess = preprocess in NSGA_PREPROCESS_TYPES
 
-                if is_ga_preprocess:
+                # Exhaustive-search rows carry a preprocessing chromosome and a
+                # PreprocessBase like 'snv_deriv1_w11' that build_preprocessing_pipeline
+                # rejects. Decode the genes as the validation rebuild does (shared
+                # parser and per-spectrum steps), as clonable Pipeline steps.
+                row_dict = row._asdict()
+                try:
+                    chromosome = chromosome_from_row(row_dict)
+                except ValueError as e:
+                    self._log_progress(f"    [WARN] {e}; rebuilding from the preprocessing name")
+                    chromosome = None
+
+                if chromosome is not None:
+                    shared_prep = chromosome_to_steps(
+                        chromosome,
+                        autoscale=preprocessing_config_from_row(row_dict)['autoscale'],
+                    )
+                    autoscale = any(name == 'autoscale' for name, _ in shared_prep)
+                    steps.extend(shared_prep)
+                    self._log_progress(f"    [Chromosome] Reconstructed preprocessing from genes {list(chromosome)}")
+
+                elif is_ga_preprocess:
                     # Parse GA preprocessing name and build transform
                     preprocess_config = parse_ga_preprocess_name(preprocess)
                     ga_transform = build_ga_transform(preprocess_config)
@@ -24558,116 +24583,80 @@ class SpectralPredictApp:
                     ga_transform = build_ga_transform(preprocess_config)
                     self._log_progress(f"    [NSGA] Reconstructed preprocessing: {preprocess_config['type']} w={preprocess_config['window']}")
 
-                # Add derivative/SNV preprocessing if applicable (Grid Search format)
-                # FIX: Properly apply SNV preprocessing (was previously just 'pass')
-                elif preprocess in ['snv', 'sg1', 'sg2', 'deriv_snv', 'snv_deriv']:
-                    if preprocess == 'snv':
-                        # SNV only - apply actual SNV transformation
-                        steps.append(('snv', SNV()))
-                    elif preprocess in ['sg1', 'sg2']:
-                        # Savitzky-Golay derivative
-                        deriv_order = 1 if preprocess == 'sg1' else 2
-                        # Safe conversion with NaN checks
-                        safe_window = int(window) if window and not pd.isna(window) else 15
-                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
-                        steps.append(('derivative', SavgolDerivative(
-                            window=safe_window,
-                            polyorder=safe_polyorder,
-                            deriv=deriv_order
-                        )))
-                    elif preprocess == 'deriv_snv':
-                        # Derivative then SNV (order matters!)
-                        deriv_order = int(deriv) if deriv and not pd.isna(deriv) else 1
-                        safe_window = int(window) if window and not pd.isna(window) else 15
-                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
-                        steps.append(('derivative', SavgolDerivative(
-                            window=safe_window,
-                            polyorder=safe_polyorder,
-                            deriv=deriv_order
-                        )))
-                        steps.append(('snv', SNV()))
-                    elif preprocess == 'snv_deriv':
-                        # SNV then derivative
-                        deriv_order = int(deriv) if deriv and not pd.isna(deriv) else 1
-                        safe_window = int(window) if window and not pd.isna(window) else 15
-                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
-                        steps.append(('snv', SNV()))
-                        steps.append(('derivative', SavgolDerivative(
-                            window=safe_window,
-                            polyorder=safe_polyorder,
-                            deriv=deriv_order
-                        )))
+                # Legacy grid names: Savitzky-Golay derivative
+                elif preprocess in ['sg1', 'sg2']:
+                    deriv_order = 1 if preprocess == 'sg1' else 2
+                    # Safe conversion with NaN checks
+                    safe_window = int(window) if window and not pd.isna(window) else 15
+                    safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
+                    steps.append(('derivative', SavgolDerivative(
+                        window=safe_window,
+                        polyorder=safe_polyorder,
+                        deriv=deriv_order
+                    )))
+
+                else:
+                    # Shared with the validation rebuild. Previously only 'snv',
+                    # 'snv_deriv' and 'deriv_snv' got preprocessing here: 'deriv', every
+                    # '+'-affixed name ('als+snv', 'raw+autoscale') and the Autoscale /
+                    # baseline / smoothing columns were silently ignored.
+                    prep_config = preprocessing_config_from_row(row_dict)
+                    autoscale = prep_config['autoscale']
+                    shared_prep = build_preprocessing_pipeline(**prep_config)
+                    steps.extend(shared_prep)
 
                 # SPECIAL CASE: PLS-DA needs pls -> scaler -> lr pipeline
                 # PLS-DA uses PLSTransformer to reduce dimensions, then LogisticRegression to classify
                 if model_name == "PLS-DA" and task_type == "classification":
                     from sklearn.linear_model import LogisticRegression
                     from spectral_predict.models import (
-                        PLSDA_HEAD_DEFAULTS,
                         PLSTransformer,
+                        plsda_head_kwargs,
                         split_plsda_params,
                     )
 
                     # T-51 B0: canonical pls__*/lr__* or bare + legacy lr_* keys.
-                    pls_params, head_params = split_plsda_params(params_dict)
+                    pls_params, _ = split_plsda_params(params_dict)
                     n_components = pls_params.pop('n_components', 5)
 
                     pls = PLSTransformer(n_components=n_components, scale=False)
                     if pls_params:
-                        try:
-                            pls.set_params(**pls_params)
-                        except ValueError as e:
-                            self._log_progress(
-                                f"    [WARN] Could not set PLS-DA transformer params {pls_params}: {e}"
-                            )
+                        # PLSTransformer.set_params never raises (it setattr's any key).
+                        pls.set_params(**pls_params)
                     steps.append(('pls', pls))
                     steps.append(('scaler', StandardScaler()))
-                    steps.append((
-                        'lr',
-                        LogisticRegression(**{**PLSDA_HEAD_DEFAULTS, **head_params}, random_state=42),
-                    ))
+                    # Head matches search time: C/solver/max_iter plus the recorded
+                    # lr__random_state and lr__class_weight.
+                    steps.append(('lr', LogisticRegression(**plsda_head_kwargs(params_dict))))
                 else:
-                    # Generic model building for all other models
-                    # Add scaler for models that need it
-                    if model_name not in ['PLS', 'RandomForest', 'XGBoost', 'LightGBM', 'CatBoost']:
+                    from spectral_predict.models import estimator_params_from_row
+
+                    # Generic model building for all other models. Scale-sensitive models
+                    # get a per-model scaler unless the row was autoscaled, matching
+                    # grid/Bayesian search (T-36).
+                    if model_name in SCALE_SENSITIVE_MODELS and not autoscale:
                         steps.append(('scaler', StandardScaler()))
 
-                    # Create model with exact parameters from search results
-                    # FIX: Pass ALL hyperparameters, not just a whitelist
-                    # get_model() creates a base model; we then apply all params via set_params()
+                    # Rows captured from a fitted Pipeline (Bayesian search) store the
+                    # estimator's params as model__*; grid rows store bare names. Both
+                    # become bare estimator params here. Filtering model__* keys out
+                    # instead (as before) trained Bayesian rows with default
+                    # hyperparameters.
+                    estimator_params = estimator_params_from_row(params_dict)
 
-                    # Extract params that get_model() signature accepts
-                    get_model_params = {}
-                    if 'n_components' in params_dict:
-                        get_model_params['n_components'] = params_dict['n_components']
-                    if 'max_n_components' in params_dict:
-                        get_model_params['max_n_components'] = params_dict['max_n_components']
-                    if 'max_iter' in params_dict:
-                        get_model_params['max_iter'] = params_dict['max_iter']
+                    # max_n_components only bounds get_model's clip; the stored
+                    # n_components is applied through set_params below, unclipped.
+                    estimator_params.pop('max_n_components', None)
+                    model = get_model(model_name, task_type=task_type)
 
-                    model = get_model(model_name, task_type=task_type, **get_model_params)
-
-                    # Apply ALL remaining hyperparameters via set_params()
-                    # This ensures tuned values like alpha, n_estimators, max_depth, etc. are used
-                    # Filter out Pipeline-specific params that shouldn't go to the model
-                    remaining_params = {k: v for k, v in params_dict.items()
-                                       if k not in {'n_components', 'max_n_components', 'max_iter'}
-                                       and not any(k.startswith(p) for p in ['steps', 'memory', 'verbose', 'scaler__', 'model__'])}
-                    if remaining_params:
+                    if estimator_params:
                         try:
-                            model.set_params(**remaining_params)
+                            model.set_params(**estimator_params)
                         except Exception as e:
-                            # Some params may not apply (e.g., nested pipeline params)
                             # Log but continue with base model
-                            self._log_progress(f"    [WARN] Could not set params {remaining_params}: {e}")
+                            self._log_progress(f"    [WARN] Could not set params {estimator_params}: {e}")
 
                     steps.append(('model', model))
-
-                # Create pipeline
-                if len(steps) > 1:
-                    pipeline = Pipeline(steps)
-                else:
-                    pipeline = model
 
                 # Check for wavelength subset (NSGA-II and other methods store selected wavelengths in all_vars)
                 wavelength_subset = None
@@ -24675,6 +24664,20 @@ class SpectralPredictApp:
                     wavelength_subset = parse_wavelength_subset(row.all_vars, X_train.columns)
                     if wavelength_subset:
                         self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
+
+                if shared_prep is not None and wavelength_subset is not None:
+                    # Select the subset from the preprocessed full spectrum, as search did
+                    # (derivatives and SNV need the neighbouring / whole spectrum).
+                    all_cols = list(X_train.columns)
+                    subset_idx = [all_cols.index(c) for c in wavelength_subset]
+                    select = FunctionTransformer(np.take, kw_args={'indices': subset_idx, 'axis': 1})
+                    steps.insert(len(shared_prep), ('wavelength_subset', select))
+
+                # Create pipeline
+                if len(steps) > 1:
+                    pipeline = Pipeline(steps)
+                else:
+                    pipeline = steps[0][1]
 
                 # Apply preprocessing and wavelength subsetting as needed
                 # Cases:
@@ -24726,8 +24729,8 @@ class SpectralPredictApp:
                         )
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
-                elif wavelength_subset is not None:
-                    # NSGA-II or other method with wavelength selection
+                elif wavelength_subset is not None and shared_prep is None:
+                    # Legacy preprocessing names with wavelength selection
                     # Subset X_train to selected wavelengths and wrap model
                     X_train_subset = X_train[wavelength_subset]
                     pipeline.fit(X_train_subset, y_train)
@@ -35496,16 +35499,7 @@ Performance (Classification):
         # T-36: prefer the explicit Autoscale column over the parsed display-name suffix.
         # This matches the validation-rebuild parser in search.py:529-540.
         autoscale_raw = config.get('Autoscale', autoscale_detected)
-        try:
-            import pandas as _pd
-            if isinstance(autoscale_raw, float) and _pd.isna(autoscale_raw):
-                autoscale_loaded = False
-            elif isinstance(autoscale_raw, str):
-                autoscale_loaded = autoscale_raw.strip().lower() in ('true', '1', 'yes')
-            else:
-                autoscale_loaded = bool(autoscale_raw)
-        except Exception:
-            autoscale_loaded = bool(autoscale_detected)
+        autoscale_loaded = _parse_autoscale_flag(autoscale_raw, default=False)
 
         # Convert from search.py naming to GUI naming
         if preprocess == 'deriv' and deriv == 1:
@@ -38004,7 +37998,10 @@ F1 Score:  {f1:.4f}
             print(f"Error computing learning curve: {e}")
             import traceback
             traceback.print_exc()
-            self.root.after(0, lambda: self._on_learning_curve_error(str(e)))
+            # Bind now: Python unbinds `e` when the except block ends, before the
+            # deferred callback runs.
+            error_msg = str(e)
+            self.root.after(0, lambda: self._on_learning_curve_error(error_msg))
 
     def _on_learning_curve_error(self, error_msg):
         """Handle learning curve computation error."""

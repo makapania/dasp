@@ -594,3 +594,143 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         steps.append(("imbalance", imbalance_transformer))
 
     return steps
+
+
+# Baseline methods a results row's display name can carry as a "+"-separated prefix.
+_DISPLAY_BASELINE_TAGS = ("als", "polynomial", "rubber_band", "airpls", "advanced")
+_DERIVATIVE_PREPROCESS_NAMES = ("deriv", "snv_deriv", "deriv_snv")
+_LEGACY_DEFAULT_DERIV = 1
+_LEGACY_DEFAULT_WINDOW = 15
+
+# String spellings of a true flag in results tables / CSVs (case and whitespace ignored).
+TRUTHY_CELL_STRINGS = frozenset({"true", "1", "1.0", "yes", "on"})
+
+
+def _row_value_missing(value) -> bool:
+    if value is None:
+        return True
+    try:
+        return bool(value != value)  # NaN is the only scalar not equal to itself
+    except (TypeError, ValueError):
+        return False
+
+
+def parse_bool_cell(raw, default: bool = False) -> bool:
+    """Parse a boolean flag cell (``Autoscale``, ``smoothing``) from a results row or config.
+
+    ``bool("False")`` is True, so strings are matched against ``TRUTHY_CELL_STRINGS``:
+    ``" TRUE "`` is true; ``"0"``, ``"off"`` and ``""`` are false. ``None`` and NaN give
+    ``default``; anything else goes through ``bool``.
+
+    Args:
+        raw: The cell value.
+        default: Value for a missing cell (``None`` / NaN).
+
+    Returns:
+        The parsed flag.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in TRUTHY_CELL_STRINGS
+    if _row_value_missing(raw):
+        return default
+    try:
+        return bool(raw)
+    except (TypeError, ValueError):  # pd.NA refuses bool()
+        return default
+
+
+def _row_positive_int(value):
+    if _row_value_missing(value) or not value:
+        return None
+    return int(value) if value > 0 else None
+
+
+def preprocessing_config_from_row(row) -> dict:
+    """Return the ``build_preprocessing_pipeline`` keyword arguments a results row used.
+
+    Reads the explicit columns that grid, Bayesian and NSGA-II rows write
+    (``PreprocessBase``/``Preprocess``, ``Deriv``, ``Window``, ``Poly``, ``Autoscale``,
+    ``baseline_method``, ``baseline_params``, ``smoothing*``) and falls back to the
+    ``+``-separated display name (``als+sg0+snv+autoscale``) for older rows. Explicit
+    columns win over the display name. Preprocessing chromosomes
+    (``preprocess_chromosome``) are not decoded here.
+
+    Args:
+        row: A results row as a mapping (``pd.Series``, ``dict``, ``namedtuple._asdict()``).
+
+    Returns:
+        Kwargs for ``build_preprocessing_pipeline(**config)``. ``preprocess_name`` is
+        ``'raw'``, ``'snv'``, ``'deriv'``, ``'snv_deriv'`` or ``'deriv_snv'`` for rows
+        the search paths write.
+    """
+    import ast
+
+    preprocess_name = row.get("PreprocessBase", None)
+    if _row_value_missing(preprocess_name) or preprocess_name == "":
+        preprocess_name = row.get("Preprocess", "raw")
+    if _row_value_missing(preprocess_name) or preprocess_name == "":
+        preprocess_name = "raw"
+
+    baseline_method = row.get("baseline_method", None)
+    if _row_value_missing(baseline_method):
+        baseline_method = None
+
+    smoothing = parse_bool_cell(row.get("smoothing", False))
+    smoothing_window = row.get("smoothing_window", 17)
+    smoothing_window = 17 if _row_value_missing(smoothing_window) else int(smoothing_window)
+    smoothing_polyorder = row.get("smoothing_polyorder", 2)
+    smoothing_polyorder = (
+        2 if _row_value_missing(smoothing_polyorder) else int(smoothing_polyorder)
+    )
+
+    autoscale = parse_bool_cell(row.get("Autoscale", False))
+
+    if "+" in str(preprocess_name):
+        core_parts = []
+        for part in str(preprocess_name).split("+"):
+            if part in _DISPLAY_BASELINE_TAGS:
+                if baseline_method is None:
+                    baseline_method = part
+            elif part == "sg0":
+                smoothing = True
+            elif part == "autoscale":
+                autoscale = True
+            else:
+                core_parts.append(part)
+        preprocess_name = "_".join(core_parts) if core_parts else "raw"
+
+    baseline_params_raw = row.get("baseline_params", None)
+    baseline_params = None
+    if isinstance(baseline_params_raw, dict):
+        baseline_params = baseline_params_raw
+    elif isinstance(baseline_params_raw, str) and baseline_params_raw.strip():
+        try:
+            parsed = ast.literal_eval(baseline_params_raw)
+        except (ValueError, SyntaxError):
+            parsed = None
+        if isinstance(parsed, dict):
+            baseline_params = parsed
+
+    deriv = _row_positive_int(row.get("Deriv", 0))
+    window = _row_positive_int(row.get("Window", None))
+    if preprocess_name in _DERIVATIVE_PREPROCESS_NAMES:
+        # Rows missing Deriv/Window (hand-edited or older CSVs) used to crash the
+        # rebuild in SavgolDerivative.transform; these are the GUI's historic defaults.
+        # A missing Poly stays None, so SavgolDerivative uses its per-order default.
+        deriv = deriv if deriv is not None else _LEGACY_DEFAULT_DERIV
+        window = window if window is not None else _LEGACY_DEFAULT_WINDOW
+
+    return {
+        "preprocess_name": preprocess_name,
+        "deriv": deriv,
+        "window": window,
+        "polyorder": _row_positive_int(row.get("Poly", None)),
+        "baseline_method": baseline_method,
+        "baseline_params": baseline_params,
+        "smoothing": smoothing,
+        "smoothing_window": smoothing_window,
+        "smoothing_polyorder": smoothing_polyorder,
+        "autoscale": autoscale,
+    }

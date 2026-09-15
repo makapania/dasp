@@ -8,6 +8,7 @@ This test verifies:
 4. Model counts match tier definitions
 """
 
+import sys
 import pytest
 import numpy as np
 import pandas as pd

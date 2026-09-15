@@ -198,6 +198,130 @@ def split_plsda_params(
     return transformer_params, head_params
 
 
+# Seed every search path passes to the PLS-DA head unless the row records another one.
+PLSDA_HEAD_DEFAULT_RANDOM_STATE = 42
+
+
+def plsda_head_kwargs(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the ``LogisticRegression`` kwargs that rebuild a row's PLS-DA head.
+
+    Starts from :data:`PLSDA_HEAD_DEFAULTS` plus the row's C/solver/max_iter (via
+    :func:`split_plsda_params`), then restores the row's recorded
+    ``lr__random_state`` and ``lr__class_weight``. Rows captured from the fitted
+    pipeline always carry both; without them a rebuild would reseed the head with 42
+    (diverging from a search run with another seed and a stochastic solver) and train
+    it unweighted.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Hand-edited or re-serialised rows may spell these ``42.0`` or ``'None'``; integral
+    floats become ints and the string ``'None'`` becomes ``None``.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Returns:
+        Kwargs for ``LogisticRegression(**kwargs)``.
+
+    Raises:
+        ValueError: If ``lr__random_state`` or ``lr__class_weight`` holds a value
+            ``LogisticRegression`` cannot accept.
+    """
+    _, head_params = split_plsda_params(params)
+    kwargs: dict[str, Any] = {
+        **PLSDA_HEAD_DEFAULTS,
+        **head_params,
+        "random_state": PLSDA_HEAD_DEFAULT_RANDOM_STATE,
+    }
+    if params and "lr__random_state" in params:
+        kwargs["random_state"] = _coerce_head_random_state(params["lr__random_state"])
+    if params and "lr__class_weight" in params:
+        kwargs["class_weight"] = _coerce_head_class_weight(params["lr__class_weight"])
+    return kwargs
+
+
+def _coerce_head_random_state(value: Any) -> int | None:
+    if value is None or value == "None":
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"lr__random_state must be an integer or None, got {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return int(value)
+    raise ValueError(f"lr__random_state must be an integer or None, got {value!r}")
+
+
+def _coerce_head_class_weight(value: Any) -> str | dict | None:
+    if value is None or value == "None":
+        return None
+    if value == "balanced" or isinstance(value, dict):
+        return value
+    raise ValueError(f"lr__class_weight must be None, 'balanced' or a dict, got {value!r}")
+
+
+def parse_row_params(value: Any) -> dict[str, Any]:
+    """Return a results row's ``Params`` cell as a dict.
+
+    Search rows (grid, Bayesian, NSGA-II) store ``str(dict)``; in-memory result rows
+    can hold the dict itself. Anything unparseable (NaN, empty, malformed text, a
+    non-dict literal) gives ``{}``.
+
+    Args:
+        value: The row's ``Params`` value.
+
+    Returns:
+        A new dict of the stored params.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        import ast
+
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+# Pipeline step prefixes under which a results row stores the final estimator's params.
+_ESTIMATOR_STEP_PREFIXES = ("model__", "pls__")
+
+
+def estimator_params_from_row(params: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return the final-estimator hyperparameters stored in a results-row ``Params`` dict.
+
+    Rows captured from a fitted ``Pipeline`` (Bayesian search, PLS-DA) store estimator
+    params under the step prefix (``model__alpha``, ``pls__n_components``); grid rows
+    store bare names. This strips ``model__`` / ``pls__``, drops every other
+    step-qualified key (``scaler__``, ``imbalance__``, ``lr__``) and Pipeline meta keys,
+    and keeps bare keys. A prefixed key wins over the same bare key.
+
+    Not for PLS-DA head params: use :func:`plsda_head_kwargs`.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
+    Returns:
+        Params ready for ``estimator.set_params(**params)``.
+    """
+    bare: dict[str, Any] = {}
+    prefixed: dict[str, Any] = {}
+    for key, value in (params or {}).items():
+        if not isinstance(key, str) or key in _PIPELINE_META_KEYS:
+            continue
+        prefix = next((p for p in _ESTIMATOR_STEP_PREFIXES if key.startswith(p)), None)
+        if prefix is not None:
+            prefixed[key[len(prefix):]] = value
+        elif "__" not in key:
+            bare[key] = value
+    return {**bare, **prefixed}
+
+
 def get_model(model_name, task_type='regression', n_components=10, max_n_components=10, max_iter=500, n_jobs=-1):
     """
     Get a single model instance with default hyperparameters.

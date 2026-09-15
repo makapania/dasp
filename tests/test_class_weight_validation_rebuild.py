@@ -256,7 +256,8 @@ class TestCatBoostPath:
 
     def test_catboost_sets_auto_class_weights(self, imbalanced_y):
         from catboost import CatBoostClassifier
-        model = CatBoostClassifier(iterations=2, verbose=0)
+        from spectral_predict.models import CATBOOST_RUNTIME_PARAMS
+        model = CatBoostClassifier(iterations=2, verbose=0, **CATBOOST_RUNTIME_PARAMS)
 
         result = _apply_class_weight_discriminator_for_rebuilt_model(
             model, "CatBoost", "classification", imbalanced_y, imbalance_method="class_weight"

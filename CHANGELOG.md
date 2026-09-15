@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Results-row rebuild helpers on the declared composition surface
+  (`docs/AGENT_COMPOSITION.md` §8b): `models.parse_row_params`,
+  `models.estimator_params_from_row`, `models.plsda_head_kwargs`,
+  `preprocess.preprocessing_config_from_row`, `ga_preprocessing.chromosome_from_row` and
+  `ga_preprocessing.chromosome_to_steps`.
+
 - **T-51 PR A** — opt-in extra hyperparameter axes for the unified Bayesian search.
   `run_unified_bayesian` gains `enabled_extra_axes`, `search_space` and
   `n_startup_trials`. The new `spectral_predict.search_spaces` module provides
@@ -60,6 +66,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worded as "resumed, but …". The resume banner no longer promises unconditional reuse.
 - `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
   (e.g. an embedded NUL) instead of crashing the startup check.
+- **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
+  Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
+  Bayesian rows store all estimator params under that prefix, so each base model trained
+  with defaults (e.g. RandomForest `n_estimators`/`max_features`, SVM `C`/`gamma`, MLP
+  `activation`, Ridge `alpha`, boosting learning rates and regularisation). The prefix is
+  now stripped through the new shared `models.estimator_params_from_row`, which the
+  validation rebuild also uses. Grid-search rows (bare keys) are unaffected, except
+  that PLS `n_components` above 10 is no longer clipped to 10 in ensembles.
+  **Ensemble results built from Bayesian rows change.**
+- **Ensemble models are rebuilt with the row's full preprocessing.** Only `snv`,
+  `snv_deriv` and `deriv_snv` rows got preprocessing. `deriv` rows (no derivative),
+  every `+`-affixed name (`raw+autoscale`, `als+snv`) and the `Autoscale`, baseline and
+  smoothing columns were ignored, and the per-model scaler was added even when the
+  search had autoscaled. Wavelength subsets of grid/Bayesian rows were taken *before*
+  preprocessing. The ensemble rebuild now shares `preprocess.preprocessing_config_from_row`
+  with the validation rebuild, skips the per-model scaler for autoscaled rows, and takes
+  subsets after preprocessing, as the search does. `raw`/`snv` rows are now plain
+  Pipelines rather than GUI preprocessing wrappers, so ensembles of them refit base
+  models per CV fold (the ensemble default). Legacy `sg1`/`sg2`, `deriv1`-style and GA
+  preprocessing names keep their old path. Validation rebuild: a NaN `smoothing` cell
+  (mixed results tables) no longer turns smoothing on, and a NaN `PreprocessBase` falls
+  back to `Preprocess`. **Ensemble results change.**
+- Validation rebuild and ensemble reconstruction accept a `Params` cell holding a dict
+  (in-memory result rows) as well as `str(dict)`, via the shared `models.parse_row_params`.
+- **Exhaustive-preprocessing rows are rebuilt from their chromosome in ensembles**, as the
+  validation rebuild already did (their `PreprocessBase`, e.g. `snv_deriv1_w11`, is not a
+  pipeline name). New `ga_preprocessing.chromosome_from_row` / `chromosome_to_steps` share
+  the parsing and the per-spectrum steps with the search-time transform, which is
+  bit-identical after the refactor. The steps start with a float64 conversion, as the
+  search transform does, so float32 spectra (SPC files) match the validation rebuild.
+- Validation rebuild: a legacy row in a mixed results table (`preprocess_chromosome`
+  NaN, `ga_genes` set) decodes its `ga_genes` chromosome again instead of falling back to
+  the preprocessing name. A malformed or out-of-range chromosome raises `ValueError` and
+  that row falls back to its name, instead of an `IndexError`.
+- A derivative row with a missing `Deriv` / `Window` rebuilds with 1 / 15 (the GUI's old
+  defaults) in both paths; validation used to fail on it.
+- **One parser for `Autoscale` / `smoothing` flag cells.** New `preprocess.parse_bool_cell`
+  (strings `'true'`, `'1'`, `'1.0'`, `'yes'`, `'on'`, case- and whitespace-insensitive;
+  NaN/`None` give the default) is used by the validation rebuild, the ensemble rebuild,
+  the GUI model loader, the code exporter and the one-class validation rebuild. They
+  previously disagreed on `'on'` / `'1.0'`, and the one-class rebuild read a `smoothing`
+  cell of `'False'` as on.
+- Malformed preprocessing chromosomes (huge integers, 0-d arrays, deeply nested
+  literals) always raise `ValueError`, so the row falls back to its name or is skipped
+  instead of escaping the GUI's and validation's error handling. `'[]'` falls back to
+  `ga_genes` like an empty list.
+- `plsda_head_kwargs` coerces `lr__random_state=42.0` to `42` and `'None'` to `None`,
+  and raises `ValueError` on values `LogisticRegression` would reject.
+- **PLS-DA heads rebuilt from a row keep the search's seed and class weighting.**
+  Validation rebuild and ensemble reconstruction forced `random_state=42`; ensemble
+  reconstruction also dropped `class_weight`. Both now restore the row's
+  `lr__random_state` and `lr__class_weight` (new `models.plsda_head_kwargs`), so a
+  search run with another seed and a stochastic solver (`saga`) refits the same head.
+  Rows without a recorded seed keep 42.
+- **Ensemble refits of CatBoost models saved before the `catboost_info/` fix** no longer
+  write that directory. Per-fold clones get `allow_writing_files=False`, found by walking
+  params, attributes and step lists (the GUI wrappers' `get_params(deep=True)` is
+  shallow), so CatBoost nested in a Pipeline, a GUI wrapper or a VotingRegressor is
+  covered. Previously the refit failed in an
+  unwritable cwd and the model silently got NaN out-of-fold predictions.
+- **GUI NameErrors.** The GUI module had no `logger`, so Model Development refit crashed
+  when the task radio disagreed with the saved result's Task (and in two other warning
+  branches); it now logs to `spectral_predict.gui`, which reaches `dasp.log`. The
+  learning-curve error callback referenced the except-bound `e` after the block ended
+  and raised instead of showing the error.
 - **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
   - **Behaviour change: a failed 'auto' SQLite migration no longer deletes anything.**
     The cleanup called `optuna.delete_study` by name, and nothing could prove this
@@ -125,8 +196,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refit and exported scripts lost the head for rows that spell it `lr_C` / `lr_solver` /
   `lr_max_iter`, and ensemble training ignored it for every row. Refits of grid searches
   whose `plsda_lr_C_list` differs from 1.0 therefore change, and now match the search's
-  head params. Known remaining gap (pre-existing): `class_weight` is not re-applied in
-  ensemble training.
+  head params. Ensemble training re-applying `class_weight` and the head seed is covered
+  by the PLS-DA head entry above.
   `build_model('PLS-DA', params)` no longer raises on `lr_*` or `pls__*` keys.
   Search-time scores, the default Bayesian search and study names are unchanged; no
   version bump.
