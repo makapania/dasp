@@ -425,22 +425,16 @@ def test_capture_skips_var_with_raising_get(fresh_state):
     assert "smoothing_window" not in captured
 
 
-def test_restore_then_override_persistence_mode_order(fresh_state):
-    """Document the order-dependent contract used by `_check_for_incomplete_run`:
-    restore first (which would set bayesian_persistence_mode back to 'auto'),
-    then force 'always'. If a future refactor inverts the order the resume
-    would silently ignore the SQLite URL."""
+def test_restore_keeps_captured_persistence_mode(fresh_state):
+    """Resume restores the crashed run's own persistence mode and nothing forces
+    'always' afterwards: 'auto' reloads a matching saved study by itself
+    (tests/test_resume_under_auto_after_crash.py)."""
     _, _, rgs, _ = fresh_state
-    gui = _FakeGUI(bayesian_persistence_mode="auto", use_snv=True)
+    gui = _FakeGUI(bayesian_persistence_mode="never", use_snv=True)
     settings = {"bayesian_persistence_mode": "auto", "use_snv": False}
 
     rgs.restore_gui_settings(gui, settings)
     assert gui.bayesian_persistence_mode.get() == "auto"
-
-    # GUI's `_check_for_incomplete_run` then overrides to 'always' — this
-    # final write must happen AFTER restore, not before.
-    gui.bayesian_persistence_mode.set("always")
-    assert gui.bayesian_persistence_mode.get() == "always"
 
 
 def test_external_validation_controls_in_whitelist(fresh_state):

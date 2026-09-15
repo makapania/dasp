@@ -44,6 +44,245 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Resuming a crashed Bayesian run no longer changes the persistence setting.**
+  Accepting "Resume previous run?" used to force *Crash-resume persistence* to
+  *Always on*, because 'auto' once ignored the saved study. 'auto' now reloads a saved
+  study whose configuration and data match, so the setting is left as the user (or the
+  restored run settings) had it, and the banner no longer mentions Always-on. The
+  prompt is also skipped when the crashed run saved nothing: a run under *Always off*,
+  or an 'auto' run that crashed during its in-memory warmup. Before, those prompted and
+  then reported "Resume failed". The stale sidecar is kept (a cross-process
+  check-then-delete is unsafe) and replaced by the next Bayesian run. New
+  `run_state.has_resumable_store(meta)`.
+- **A resumed run that cannot reuse saved trials now says so.** An 'auto' run whose
+  SQLite file exists now reports "previous results computed in a different numerical
+  environment". Before, only 'always' did, so after e.g. a NumPy update an accepted
+  resume silently started over. Declines (environment change, older study format,
+  different or unrecorded data) carry a `resume_declined` progress key, but only when
+  the declined study has completed trials. A failed study check under 'auto' emits
+  `resume_check_failed`. During a resume the GUI logs these, updates the status line
+  and warns once per run. It does the same for 'always' resumes that replay trials from
+  different (`data_mismatch_resume`) or unverifiable (`data_unverified_resume`) data,
+  worded as "resumed, but …". The resume banner no longer promises unconditional reuse.
+- **Behaviour change: data that doesn't match the resumed run no longer deletes it.**
+  Clicking Run Analysis on a resumed run with different data used to discard the
+  sidecar *and the SQLite store* and silently start fresh. Now nothing is deleted. The
+  check runs on the main thread before the analysis starts, so there is no timeout.
+  A resume that cannot be verified is not treated as a match: an unreadable or
+  missing record now raises `run_state.ResumeVerificationError`. A dialog shows both
+  data fingerprints, or why they couldn't be checked, and offers two choices:
+  - **No (default):** keep the saved run. Nothing runs, so you can load the matching
+    data and click Run again to resume.
+  - **Yes:** delete the interrupted run and start fresh now (round 7: there is only
+    one sidecar slot, so leaving the old run in place while a new one starts would
+    silently overwrite its sidecar and orphan its SQLite store — it could never be
+    offered again).
+
+  Pending validation indices are kept while the resume is pending and cleared on a
+  fresh start. Keeping the run returns the UI fully to idle and ends the search
+  controller. New `run_state.get_resumed_run()`.
+- **A grid, NSGA-II or multi-class SIMCA run no longer removes a pending Bayesian
+  resume.** Every successful analysis called `run_state.mark_complete()`, which
+  deleted the resumed run's sidecar. It is now called only for the run the analysis
+  registered. Multi-class SIMCA registers none, because it does not use Optuna.
+- **Finished one-class Bayesian runs no longer ask "Resume previous run?" on every
+  launch.** The one-class branch returned without releasing its resume record. Every
+  Bayesian branch now releases it right after the search, before CSV, report and
+  ensemble steps, so a failure in those steps can no longer leave a finished run
+  resumable.
+- **Behaviour change: a Bayesian run stays resumable if any model's search raised, or
+  if the user pressed Stop.** It used to be released whenever the analysis finished.
+  The next launch offers to resume or discard it.
+- The analysis worker binds the loaded data once and uses those arrays for both the
+  resume check and the search. Loading other data or changing the target while it
+  starts can no longer run the search on data that was not checked.
+- New `run_state.get_active_run_id()` and `SearchController.is_end_requested()`.
+- `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
+  (e.g. an embedded NUL) instead of crashing the startup check.
+- **Round 7 (reviews of #79): a paused or failed run is now offered again — resume,
+  delete, or decide later — every time it could otherwise be silently reused or
+  silently orphaned.** User decision: a saved paused/failed/crashed Bayesian run is
+  asked about until it is resumed to completion or deleted.
+  - **Behaviour change:** clicking Run Analysis while an un-decided resumable run sits
+    on disk (paused via Stop or left over from a model failure earlier this session,
+    or from a startup "decide later" answer) now shows the same three-way choice as
+    the startup dialog — *Resume* / *Delete* / *Decide later* — before the click's own
+    `start_run()` can silently overwrite the shared sidecar. *Resume* falls through to
+    the existing data-fingerprint check; *Delete* removes it and starts fresh; *Decide
+    later* cancels the click and touches nothing.
+  - A Stop or a model failure used to leave the run's in-process state active but not
+    flagged as resuming, so the *next* `start_run()` idempotently returned that stale
+    metadata with no fingerprint check ever running (`_confirm_resume_before_launch`
+    only checks while `is_resuming()`). `_complete_run_state_after_search` now releases
+    the in-process claim (`run_state.clear_resume_state`) on Stop/failure — the sidecar
+    and SQLite store are untouched, so the next click or launch still finds them.
+  - **Stop → Run race:** if the user pressed Stop and clicked Run Analysis again
+    before the old worker noticed, `self.search_controller` was already the new run's
+    (unstopped) controller by the time the old worker checked whether it had been
+    stopped, so it wrongly released the old run's record. Each worker now captures its
+    own `SearchController` when `_run_analysis` starts it, and uses only that one for
+    every stop decision and every search call.
+  - **A second Run Analysis click is refused while a previous worker is still alive**,
+    rather than racing two workers on `self.search_controller` and on run_state's
+    single active run.
+  - **A model whose search comes back with no usable results now counts as failed,
+    same as a raised exception.** When every trial for a model fails inside the
+    objective, the backend absorbs the exception into a 1e10 penalty per trial and
+    returns an empty results frame rather than raising — which the GUI's "0 errors"
+    count had been treating as a clean finish, releasing a run that produced nothing.
+  - `_uses_bayesian_run_state` now also checks `HAS_UNIFIED_BAYESIAN`. A build where
+    `unified_bayesian` failed to import used to register a run and then bail out
+    before ever completing it, leaving a permanent phantom resume prompt.
+  - The training-config `total_samples_original` metadata read `self.X_original` /
+    `self.X` again after the worker bound `X_run`/`y_run` to a snapshot at start —
+    changing data while the worker was still setting up could report a stale count
+    against the wrong dataset. Both branches now use the worker's own bound snapshot.
+  - The mismatch dialog's "Yes, start fresh" now deletes the interrupted run instead of
+    just abandoning it in memory, for the same orphaning reason as above (see the
+    updated behaviour-change entry further up).
+- **Round 8 (Codex + DeepSeek review of round 7): `_confirm_resume_before_launch` is now
+  the single main-thread authority for a Bayesian launch.** It snapshots the
+  optimization method, task type, selected models, persistence mode and the loaded
+  data, decides resume/delete/fresh, and claims the run slot (registers or resumes it)
+  *before* the worker thread is even created. The frozen decision passes into
+  `_run_analysis_thread` as plain arguments; the worker never re-derives any of it from
+  live Tk state and never re-decides. Everything round 7 verified as working (the
+  controller race fix, empty-frame-as-error, the `HAS_UNIFIED_BAYESIAN` gate, the bound
+  `X`/`y` snapshots, explicit-deletion wording, grid/NSGA-II staying unaffected) is
+  unchanged.
+  - **Resuming a run whose model selection changed now asks, and defaults to the
+    run's original models.** Stopping a PLS search, selecting Ridge, and clicking
+    Resume used to run Ridge in Ridge's place while PLS's study stayed unfinished, and
+    then release the record as if the whole run had completed. A mismatch between the
+    resumed run's saved `model_names` and the current click's selection now asks; "Yes"
+    substitutes the run's own models for this click, "No" cancels it.
+  - **Behaviour change: a read failure, or a failed `resume_run()`, no longer starts a
+    fresh analysis.** Both used to fall through to "launch anyway," letting this
+    click's own registration silently overwrite a saved run's sidecar that was never
+    actually confirmed absent. Both now refuse to launch and ask the user to retry.
+  - **Behaviour change: a Delete that doesn't fully succeed no longer starts a fresh
+    analysis either** (in both the pending-run three-way dialog and the mismatch
+    dialog) — same reasoning: an unconfirmed delete must not be treated as "safe to
+    overwrite."
+  - `run_state.discard_incomplete_run` re-reads the sidecar's run id immediately before
+    unlinking it, and refuses if it no longer matches — its own initial
+    `find_incomplete_run()` read and the unlink were not atomic, so another dasp
+    instance's `start_run()` in between could have replaced the sidecar with its own
+    run, which the old code deleted anyway.
+  - **Every exit from the worker after a run is registered/resumed now either completes
+    normally or releases the in-process claim while keeping the sidecar.** A `try`/
+    `finally` around the whole worker body closes this uniformly: the one-class
+    inlier/guard checks' early `return`s, and any exception during setup, used to leave
+    the claim dangling, so the next `start_run()` could idempotently reuse stale
+    metadata with no fingerprint check ever running. The resume fingerprint re-check's
+    own early return (a deliberately-handled exit: the resume stays exactly as it was)
+    is explicitly excluded from this generic cleanup.
+  - A model whose saved study already has its full trial count, but every trial is a
+    penalty, now says so and points at Delete as the fix, instead of just "treated as
+    failed" (which would otherwise re-prompt forever with no next step spelled out).
+  - Wording: the "decide later" choice also says a new Bayesian analysis can't start
+    until the saved run is resumed or deleted, and that Grid/NSGA-II searches aren't
+    affected.
+- **Round 9 (Codex review of round 8).**
+  - **Behaviour change: a damaged saved-run record is reported, not silently moved.**
+    `run_state.find_incomplete_run` used to rename an unparseable record to `.corrupt`
+    (or delete it when the rename failed) and report "no saved run", so the next run
+    replaced it. It now raises `run_state.CorruptRunRecordError` and leaves the file
+    alone. Records with missing or mistyped required fields also count as damaged.
+    At launch and on Run Analysis the GUI asks whether to move it aside; "No" leaves it
+    and runs nothing. New `run_state.set_aside_corrupt_run_record()` renames it to a
+    unique `active_run.corrupt-<timestamp>.json`, but only if it is still damaged.
+    `start_run` sets a damaged record aside before writing and raises `OSError`
+    rather than overwrite it.
+  - **A resume uses the run's own trial count.** A resume always runs the saved
+    `model_names` and `n_trials_per_model`. When either differs from the current
+    controls, the GUI asks first.
+  - **Behaviour change: analysis settings that differ from the resumed run are shown
+    before anything runs.** Yes puts the run's settings back (nothing runs; click again
+    to resume). No deletes the run and starts fresh with the current settings. Cancel
+    changes nothing. The persistence radio, model checkboxes, trial count and
+    display-only options are not compared (`run_gui_settings.diff_gui_settings`). Model
+    hyperparameter ranges are not in the saved settings and are not checked.
+  - A one-class Bayesian run uses the model list frozen at the click. It no longer
+    re-reads the one-class checkboxes, which could run IsolationForest in place of a
+    resumed PCA-SIMCA run.
+  - The worker receives the data checked at the click (`analysis_data`) and the frozen
+    trial count (`analysis_n_trials`), instead of binding them when the thread starts.
+  - A model or trial override frozen for a resume is cleared when that run is deleted
+    or replaced by a fresh one.
+  - If the worker thread fails to start, the run the gate claimed is released and an
+    error is shown.
+  - If `mark_complete` can't delete a finished run's record (e.g. a Windows file lock),
+    the in-process claim is still released. The record stays on disk and is offered at
+    the next launch.
+  - User-facing text no longer says "sidecar" or "saved-run slot".
+  - **Round 10 (Codex review of round 9):**
+    - The worker dispatches on the optimization method and task type read at the
+      click. Switching Grid to Bayesian while a Grid run was starting could run a
+      Bayesian search on a resumed run's storage with no data check.
+    - `bayes_enable_autoscale`, `k_neighbors`, `n_bins` and `boost_factor` are now
+      captured and compared on resume. They are part of the Bayesian study name, so
+      changing one used to silently start a new study.
+    - **Behaviour change:** `discard_incomplete_run` deletes the store before the
+      record, and keeps the record when the store is locked. Before, a locked store
+      left a deleted record and a store no retry could reach. A store that is
+      already gone counts as deleted, so a retry after a half-finished delete
+      completes.
+    - A record that becomes damaged after a resume was claimed is offered for moving
+      aside from Run Analysis. Before, only restarting dasp got out of that state.
+  - **Round 11 (Codex review of round 10):**
+    - The Bayesian branches read their settings (CV, baseline, smoothing, regions,
+      UVE, autoscale, imbalance, persistence) from a snapshot taken at the click
+      (`analysis_settings`). Changing one during a multi-model run used to give later
+      models a different study. When that run finished, the record of the approved
+      one was released while its studies were still unfinished.
+      `_get_baseline_params_for_method` and `_get_imbalance_params` take an optional
+      `get` reader.
+    - If a delete removes the store but can't remove the record, the resume is
+      released. A later click with matching data used to "resume" a run whose trials
+      were gone.
+    - `discard_incomplete_run` also keeps the record when the store path can't be
+      resolved (`OSError`), so the delete can be retried.
+    - After a damaged record is moved aside, the claim is released before the re-read,
+      so a failing re-read can no longer leave the resume stuck.
+  - **Round 12 (Codex review of round 11):**
+    - Calibration rows (validation holdout, excluded spectra, active subset) and the
+      CV folds used to drop too-small classes are frozen at the click
+      (`analysis_rows`, snapshot settings). Changing them after the click used to
+      change the rows the Bayesian search trained on.
+    - **Behaviour change:** a resume checks the validation holdout. If the current
+      holdout differs from the run's, a dialog offers to use the run's split, delete
+      the run and start fresh, or cancel. With no holdout set, the run's split is
+      restored without asking. The restore happens on the main thread before launch.
+      It used to happen in the worker, which kept a different manual split.
+    - **Behaviour change:** a Bayesian launch stops with "Invalid settings" when a
+      setting the search needs can't be read (e.g. a blank number box). With a launch
+      snapshot, the worker never falls back to a live control.
+    - A delete that removed the record but not the store also releases the resume.
+      The dialog says the run can no longer be resumed instead of offering a retry.
+  - **Round 13 (Codex review of round 12):**
+    - A resumed run that held nothing out is compared too. Creating a validation
+      holdout before resuming changes the rows that run trained on, so the same
+      three-way dialog now appears (use the run's split — here, no holdout — delete
+      and start fresh, or cancel).
+    - A failed validation restore changes nothing. It used to clear `validation_X`
+      before checking the run's samples were present, which left the current
+      validation set half-cleared and silently skipped validation metrics in a later
+      run. Both replacement slices are built before anything is replaced.
+    - A blank detail box belonging to a switched-off option (e.g. the smoothing
+      window with Bayesian smoothing off) no longer blocks the launch.
+    - The pending-run Delete message no longer offers a retry once the record or the
+      store was deleted.
+  - **Known limitations (not addressed):**
+    - Two dasp windows share one `active_run.json` with no file lock. The last
+      `start_run` wins, and a window may offer or delete a run another window just
+      recorded. `discard_incomplete_run` and `set_aside_corrupt_run_record` re-read the
+      record first, which narrows but does not close the window.
+    - A finished run whose record couldn't be deleted is offered for resume again.
+    - A run whose SQLite store is missing or empty is not offered. Its record stays
+      until the next Bayesian run replaces it.
+    - A resume restores only the whitelisted GUI settings, not per-model
+      hyperparameter grids.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
   Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
   Bayesian rows store all estimator params under that prefix, so each base model trained
@@ -109,7 +348,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branches); it now logs to `spectral_predict.gui`, which reaches `dasp.log`. The
   learning-curve error callback referenced the except-bound `e` after the block ended
   and raised instead of showing the error.
-
 - **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
   - **Behaviour change: a failed 'auto' SQLite migration no longer deletes anything.**
     The cleanup called `optuna.delete_study` by name, and nothing could prove this

@@ -26,7 +26,12 @@ Public surface:
     mark_complete()
     get_storage_url() -> str | None
     is_resuming() -> bool
-    find_incomplete_run() -> RunMetadata | None
+    find_incomplete_run() -> RunMetadata | None   (raises CorruptRunRecordError)
+    set_aside_corrupt_run_record() -> Path | None
+    has_resumable_store(meta) -> bool
+    get_active_run_id() -> str | None
+    get_resumed_run() -> RunMetadata | None
+    abandon_resume()
     resume_run(run_id)
     discard_incomplete_run(run_id)
 """
@@ -38,6 +43,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 import tempfile
 import threading
 import uuid
@@ -64,6 +70,24 @@ def _validate_persistence_mode(value: str) -> str:
             f"persistence mode must be one of {_VALID_PERSISTENCE_MODES}, got {value!r}"
         )
     return value
+
+
+class ResumeVerificationError(RuntimeError):
+    """The loaded data could not be checked against the run being resumed."""
+
+
+class CorruptRunRecordError(RuntimeError):
+    """The saved-run record exists but is not a valid run description.
+
+    Raised by `find_incomplete_run` instead of silently moving the record aside,
+    so the caller can tell the user and let them choose (#79 round 9). The file
+    is left untouched; `set_aside_corrupt_run_record` moves it out of the way.
+    """
+
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"the saved-run record {path} is damaged: {reason}")
+        self.path = path
+        self.reason = reason
 
 
 _lock = threading.Lock()
@@ -372,6 +396,10 @@ def start_run(
     """
     _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
+    if _active_metadata is None:
+        # Never write over a damaged record: keep its contents under a new name
+        # (#79 round 9). A rename failure raises OSError, so nothing is replaced.
+        set_aside_corrupt_run_record()
     with _lock:
         # Cluster C fix: idempotent path returns the cached original metadata,
         # NOT a synthesized one. This ensures callers see the same fingerprint,
@@ -516,24 +544,31 @@ def verify_resume_fingerprint(current_fingerprint: str) -> tuple[bool, str | Non
         - the stored fingerprint is unknown/empty (older sidecars), OR
         - the current and stored fingerprints are identical.
     Otherwise returns (False, stored_fingerprint) and the caller should
-    refuse to proceed — typically by calling `clear_resume_state()` and
-    surfacing an error to the user.
+    refuse to proceed and tell the user.
+
+    Raises:
+        ResumeVerificationError: while resuming, if the sidecar is missing,
+            unreadable or not a JSON object. A resume that cannot be verified
+            must stop the run, never count as a match (Codex review of #79).
     """
     if not _is_resuming:
         return True, None
     if not _active_run_id:
-        return True, None
+        raise ResumeVerificationError("resume is active but has no run id")
 
     sidecar = _sidecar_path()
-    if not sidecar.exists():
-        # Sidecar was deleted between resume_run() and now — treat as
-        # "nothing to verify" since the resume metadata is gone anyway.
-        return True, None
-
     try:
         data = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return True, None
+    except FileNotFoundError as exc:
+        raise ResumeVerificationError(
+            f"the resume record {sidecar} no longer exists"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ResumeVerificationError(
+            f"the resume record {sidecar} could not be read: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ResumeVerificationError(f"the resume record {sidecar} is not a JSON object")
 
     # Kimi MAJOR #2: a second app instance could have overwritten the sidecar
     # between resume_run() and now. If the sidecar's run_id no longer
@@ -554,11 +589,9 @@ def verify_resume_fingerprint(current_fingerprint: str) -> tuple[bool, str | Non
 def clear_resume_state() -> None:
     """Drop the resume flag without deleting the sidecar / SQLite.
 
-    Fallback path used when the GUI cannot determine the rejected run_id
-    (e.g. import-time / partial-init failure); in normal operation,
-    fingerprint mismatches go through `discard_incomplete_run` instead
-    (Kimi MAJOR #3b). The sidecar persists; future launches will re-offer
-    it for inspection.
+    The sidecar persists; future launches will re-offer it for inspection.
+    A data-fingerprint mismatch no longer uses this: the GUI keeps the resume
+    pending or, on the user's choice, calls `abandon_resume`.
 
     T-41: also cleans up empty SQLite files from all-in-memory sessions so
     the next launch doesn't offer a phantom "Resume?" with nothing to resume.
@@ -573,6 +606,34 @@ def clear_resume_state() -> None:
         _is_resuming = False
 
 
+def abandon_resume() -> None:
+    """Stop resuming the active run without touching any file.
+
+    Used when the user deliberately starts a fresh analysis instead of resuming
+    (e.g. the loaded data does not match the interrupted run). Nothing is deleted:
+    the old SQLite store stays on disk for normal retention cleanup. The next
+    `start_run` generates a new run id and storage path and overwrites the sidecar,
+    so the old store can no longer be resumed by accident. If no run is started,
+    the sidecar still names the old run and the next launch offers it again.
+    """
+    global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
+    with _lock:
+        _active_storage_url = None
+        _active_run_id = None
+        _active_metadata = None
+        _is_resuming = False
+
+
+def get_active_run_id() -> str | None:
+    """Run id of the active (started or resumed) run, or ``None``."""
+    return _active_run_id
+
+
+def get_resumed_run() -> RunMetadata | None:
+    """Metadata of the run being resumed, or ``None`` when not resuming."""
+    return _active_metadata if _is_resuming else None
+
+
 def find_incomplete_run() -> RunMetadata | None:
     """Look for a sidecar from a previously crashed/aborted run.
 
@@ -580,38 +641,118 @@ def find_incomplete_run() -> RunMetadata | None:
     the GUI calls this on startup to decide whether to show the resume
     dialog. The actual resume happens via `resume_run(run_id)`.
 
-    Codex meta-review A2: prior implementation caught only
-    `(JSONDecodeError, TypeError, KeyError)` and silently DELETED corrupt
-    sidecars. Two issues fixed here:
-      1. `OSError` / `PermissionError` / `UnicodeDecodeError` from
-         `read_text()` now bubble up — a locked or unreadable sidecar is
-         a caller-visible decision (start fresh? abort? retry?), not
-         something the library should silently swallow.
-      2. Unreadable-but-existing sidecars are quarantined (renamed to
-         `.corrupt`) rather than deleted — a downgrade from a future
-         schema looks identical to a corruption, and we want recovery
-         to remain possible.
+    Codex meta-review A2: `OSError` / `PermissionError` from `read_text()`
+    bubble up — a locked or unreadable sidecar is a caller-visible decision
+    (start fresh? abort? retry?), not something the library should swallow.
+
+    Raises:
+        CorruptRunRecordError: the sidecar exists but is not valid JSON, not
+            a JSON object, or lacks/mistypes a required field. The file is
+            NOT touched. It used to be renamed to `.corrupt` (or deleted when
+            the rename failed) and reported as "no run", so the caller's next
+            fresh run silently replaced it (Codex review of #79 round 8).
     """
     sidecar = _sidecar_path()
     try:
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-        return RunMetadata.from_dict(data)
+        raw = sidecar.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, TypeError, KeyError, UnicodeDecodeError):
-        try:
-            sidecar.rename(sidecar.with_suffix(".corrupt"))
-        except OSError:
-            # Quarantine failed — fall back to deletion as last resort
-            # so we don't keep prompting on a sidecar we can't parse.
-            try:
-                sidecar.unlink()
-            except OSError:
-                pass
-        return None
+    except UnicodeDecodeError as exc:
+        raise CorruptRunRecordError(sidecar, f"not UTF-8 text ({exc})") from exc
+    return _parse_run_record(sidecar, raw)
     # OSError (permission, locked file, dead network share) intentionally
-    # escapes — the GUI startup wraps this in its own handler and surfaces
-    # a warning to the user.
+    # escapes — the GUI wraps this in its own handler and tells the user.
+
+
+def _parse_run_record(path: Path, raw: str) -> RunMetadata:
+    """Parse sidecar text into metadata, or raise `CorruptRunRecordError`."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CorruptRunRecordError(path, f"not valid JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise CorruptRunRecordError(path, "not a JSON object")
+    for key in ("run_id", "storage_path", "storage_url", "started_iso"):
+        if not isinstance(data.get(key), str):
+            raise CorruptRunRecordError(path, f"'{key}' is missing or not text")
+    if not data["run_id"]:
+        raise CorruptRunRecordError(path, "'run_id' is empty")
+    names = data.get("model_names")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise CorruptRunRecordError(path, "'model_names' is missing or not a list of names")
+    n_trials = data.get("n_trials_per_model")
+    if n_trials is not None and (not isinstance(n_trials, int) or isinstance(n_trials, bool)):
+        raise CorruptRunRecordError(path, "'n_trials_per_model' is not a whole number")
+    try:
+        return RunMetadata.from_dict(data)
+    except (TypeError, KeyError, ValueError) as exc:
+        raise CorruptRunRecordError(path, str(exc)) from exc
+
+
+def set_aside_corrupt_run_record() -> Path | None:
+    """Move a damaged saved-run record out of the way, keeping its contents.
+
+    Renames the sidecar to a new, unique ``active_run.corrupt-<timestamp>.json``
+    next to it (never overwriting an earlier one), so nothing is lost and a
+    new run can be recorded. Only acts if the record is STILL damaged when
+    re-read: another dasp window may have replaced it with a valid record in
+    the meantime, which must survive.
+
+    Returns:
+        The new path, or None when there was nothing damaged to move (no
+        record, or it is now valid).
+
+    Raises:
+        OSError: the record could not be read or renamed.
+    """
+    sidecar = _sidecar_path()
+    with _lock:
+        try:
+            raw = sidecar.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except UnicodeDecodeError:
+            pass  # damaged — move it
+        else:
+            try:
+                _parse_run_record(sidecar, raw)
+                return None
+            except CorruptRunRecordError:
+                pass
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        for attempt in range(100):
+            suffix = f"-{attempt}" if attempt else ""
+            target = sidecar.with_name(f"active_run.corrupt-{stamp}{suffix}.json")
+            if target.exists():
+                continue
+            sidecar.rename(target)
+            logger.warning("Moved damaged saved-run record aside to %s", target)
+            return target
+        raise OSError(f"no free name to set aside {sidecar}")
+
+
+def has_resumable_store(meta: RunMetadata) -> bool:
+    """Whether an incomplete run left a SQLite store that could hold trials.
+
+    False for a run started under 'never' (no storage URL) and for an 'auto' run
+    that crashed during its in-memory warmup (the file is only created when a study
+    migrates). The GUI uses this to skip the "Resume previous run?" prompt when there
+    is nothing to resume. It does not validate the path; ``resume_run`` still does.
+    The sidecar is deliberately left alone, never deleted here: the next Bayesian
+    run's ``start_run`` replaces it. A check-then-delete cannot be made safe across
+    processes, because another window may write its own sidecar in between (Codex
+    review of #79).
+    """
+    if not meta.storage_url or not meta.storage_path:
+        return False
+    try:
+        st = Path(meta.storage_path).stat()
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        # Unknown is not "absent": prompt, and let resume_run decide and report.
+        return True
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
 def resume_run(run_id: str) -> RunMetadata | None:
@@ -631,14 +772,20 @@ def resume_run(run_id: str) -> RunMetadata | None:
     """
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
 
-    meta = find_incomplete_run()
+    try:
+        meta = find_incomplete_run()
+    except CorruptRunRecordError as exc:
+        logger.warning("Resume refused: %s", exc)
+        return None
     if meta is None or meta.run_id != run_id:
         return None
 
     optuna_dir = get_user_optuna_dir().resolve()
     try:
         storage_path = Path(meta.storage_path).resolve()
-    except OSError:
+    except (OSError, ValueError) as exc:
+        # ValueError: e.g. an embedded NUL from a corrupted/tampered sidecar.
+        logger.warning("Resume refused: sidecar storage path is unusable: %s", exc)
         return None
     if not storage_path.is_relative_to(optuna_dir):
         # Tampered sidecar — refuse to use the path or the URL derived
@@ -671,8 +818,21 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     Code-reviewer: also path-validates `storage_path` against the project's
     user-optuna directory before unlinking, refusing to follow a tampered
     sidecar that points outside.
+
+    Codex review of #79 round 8: the initial `find_incomplete_run()` call
+    above and the `sidecar.unlink()` below are not atomic. Another dasp
+    instance can replace the sidecar with its OWN run's between the two —
+    the same class of cross-process race already fixed for the startup
+    cleanup path (round 2: no automatic delete there at all, because a
+    check-then-delete can't be made safe). Here the delete is the whole
+    point, so instead the run id is re-read right before unlinking, and the
+    unlink is refused if it no longer matches — the replacement sidecar
+    (and the run it names) survives untouched.
     """
-    meta = find_incomplete_run()
+    try:
+        meta = find_incomplete_run()
+    except CorruptRunRecordError as exc:
+        return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=[str(exc)])
     if meta is None or meta.run_id != run_id:
         return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=[])
 
@@ -680,35 +840,56 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     optuna_dir = get_user_optuna_dir().resolve()
     errors: list[str] = []
 
-    sidecar_deleted = False
-    try:
-        if sidecar.exists():
-            sidecar.unlink()
-            sidecar_deleted = True
-    except OSError as e:
-        errors.append(f"sidecar unlink failed: {e}")
-
+    # Codex review of #79 round 9: the store goes first. Deleting the record
+    # first and then failing on a locked store left a store no retry could find
+    # (the record naming it was gone). A store already absent counts as deleted,
+    # so a retry after a half-finished delete can complete.
     storage_deleted = False
+    storage_retryable_failure = False
     try:
         storage_path = Path(meta.storage_path).resolve()
     except OSError as e:
+        # Transient (e.g. an unavailable drive): keep the record for a retry.
         errors.append(f"storage_path resolve failed: {e}")
-        return DiscardResult(
-            sidecar_deleted=sidecar_deleted,
-            storage_deleted=False,
-            errors=errors,
-        )
-    if not storage_path.is_relative_to(optuna_dir):
-        errors.append(
-            f"storage_path outside optuna dir, refusing to unlink: {storage_path}"
-        )
+        storage_retryable_failure = True
+    except ValueError as e:  # e.g. an embedded NUL: retrying can't help
+        errors.append(f"storage path unusable: {e}")
     else:
-        try:
-            if storage_path.exists():
-                storage_path.unlink()
+        if not storage_path.is_relative_to(optuna_dir):
+            errors.append(
+                f"storage_path outside optuna dir, refusing to unlink: {storage_path}"
+            )
+        else:
+            try:
+                storage_path.unlink(missing_ok=True)
                 storage_deleted = True
-        except OSError as e:
-            errors.append(f"storage unlink failed: {e}")
+            except OSError as e:
+                errors.append(f"storage unlink failed: {e}")
+                storage_retryable_failure = True
+            except ValueError as e:  # e.g. an embedded NUL: retrying can't help
+                errors.append(f"storage path unusable: {e}")
+
+    sidecar_deleted = False
+    if storage_retryable_failure:
+        # Keep the record so Delete can be retried once the lock clears.
+        return DiscardResult(sidecar_deleted=False, storage_deleted=False, errors=errors)
+    try:
+        if sidecar.exists():
+            try:
+                current = json.loads(sidecar.read_text(encoding="utf-8"))
+                current_run_id = current.get("run_id") if isinstance(current, dict) else None
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                current_run_id = None
+            if current_run_id != run_id:
+                errors.append(
+                    "sidecar no longer names this run (replaced by another "
+                    "dasp instance); refusing to delete it"
+                )
+            else:
+                sidecar.unlink()
+                sidecar_deleted = True
+    except OSError as e:
+        errors.append(f"sidecar unlink failed: {e}")
 
     return DiscardResult(
         sidecar_deleted=sidecar_deleted,
