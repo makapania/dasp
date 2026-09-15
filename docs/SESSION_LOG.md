@@ -1115,3 +1115,30 @@ Rejected: branch-protection "required checks" concerns (main is unprotected); GL
 "FixedTrial.params is pre-populated" block (it starts empty; verified).
 Lesson: black/flake8 non-blocking was fine for style, but pyflakes F821-class checks
 should always block — they found two crash bugs no test covered.
+
+### 2026-09-14 — Post-merge Bayesian/search-space fixes (branch fix/post-merge-bayesian-search-spaces)
+
+- **Advisory existence checks must not feed deletion guards.** `_sqlite_file_exists`
+  returns False on `OSError`. That is right for gating a resume, but the T-41 migration
+  cleanup then read a locked file as "absent" and authorised `optuna.delete_study` on
+  the earlier run's study. Deletion now uses the tri-state `_sqlite_file_state`, where
+  None means unknown and never deletes. To inject the fault, monkeypatch `ub.Path` with
+  a `Path` subclass whose `is_file` raises.
+- **`convert_study_to_dataframe` raised NameError on `baseline_params`.** It is a
+  run-level value, hashed into the study name and never stored as a trial attr, so it
+  has to be passed in. No test ran a Bayesian search with `baseline_method` set, so
+  flake8 F821 was the only warning.
+- **The PR B "harmless" `svm_gamma` cross-product entry above was wrong in effect.**
+  Those pairs used to raise, and after PR B they ran with every trial penalised. They
+  are now rejected via `BundleSpec.family_task_types`. That field is left out of the
+  identity, so revision 1 and existing study names hold.
+- **Optuna matches categorical choices by `==` (`list.index`), not by type.** `1`, `1.0`
+  and `True` are one choice. The type-tagged uniqueness check suits identity hashing
+  but cannot catch them.
+- **`np.float64` and `np.str_` subclass `float`/`str`**, so `isinstance` literal checks
+  accepted them while rejecting `np.int64`. Their NumPy 2 `repr` (`np.str_('x')`)
+  breaks `ast.literal_eval` of `Params`. `resolve_bundles` now converts them with
+  `np.generic.item()`.
+- **A text-mode Python read/write converts CRLF files to LF**, which shows as a
+  whole-file diff. `unified_bayesian.py` and `models.py` are CRLF in the index,
+  `search_spaces.py` is LF. Restore CRLF before committing.

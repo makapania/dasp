@@ -196,6 +196,44 @@ def test_unanswerable_check_never_authorises_deletion(
     assert _completed(slow_sqlite, name) == WARMUP + 1
 
 
+class _StatFailsPath(type(Path())):
+    """A path whose existence check raises, as a locked or AV-scanned file can."""
+
+    def is_file(self, *args: Any, **kwargs: Any) -> bool:
+        raise PermissionError("simulated locked database file")
+
+
+def test_file_check_oserror_is_unknown_not_absent(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "x.sqlite3"
+    db.write_bytes(b"x")
+    url = f"sqlite:///{db.as_posix()}"
+    monkeypatch.setattr(ub, "Path", _StatFailsPath)
+    assert ub._sqlite_file_state(url) is None
+    assert ub._sqlite_file_exists(url) is False, "advisory check still reports not-found"
+
+
+def test_file_check_oserror_never_authorises_deletion(
+    slow_sqlite: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex post-merge HIGH: an OSError on the file check was read as "file absent",
+    so a non-duplicate migration failure deleted the earlier run's study."""
+    first = _run(WARMUP + 1)
+    name = first.study_name
+    monkeypatch.setattr(ub, "Path", _StatFailsPath)
+
+    def failing_migration(*args: Any, **kwargs: Any):
+        raise RuntimeError("simulated WAL/permission failure")
+
+    monkeypatch.setattr(ub, "_migrate_study_to_sqlite", failing_migration)
+    messages: list[dict] = []
+    _run(WARMUP + 2, progress_callback=messages.append)
+    assert any(m.get("t41_decision") == "migration_failed_inmemory" for m in messages), (
+        "setup did not reach the failed-migration branch"
+    )
+    assert name in optuna.study.get_all_study_names(storage=slow_sqlite)
+    assert _completed(slow_sqlite, name) == WARMUP + 1
+
+
 def test_existing_unfingerprinted_study_is_never_stamped(slow_sqlite: str) -> None:
     """A legacy study resumed via 'always' must not acquire the current data's identity."""
     X, y, wl = _data()

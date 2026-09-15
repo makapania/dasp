@@ -38,6 +38,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
+  - An 'auto' persistence run could delete an earlier run's persisted study. If the
+    SQLite file check raised `OSError` (locked or scanned file), the check reported
+    "no file", and a later non-duplicate migration failure then called
+    `optuna.delete_study` on that name. The check now returns exists, absent or
+    unknown, and unknown never authorises a deletion.
+  - `run_unified_bayesian` raised `NameError` while building its results table whenever
+    `baseline_method` was set and any trial applied baseline correction.
+    `convert_study_to_dataframe` gains a `baseline_params` keyword. Baseline rows now
+    carry the run's `baseline_params`, so the validation rebuild uses non-default
+    ALS/polynomial settings.
+  - `svm_gamma` resolved for `SVM` + regression and `SVR` + classification, where every
+    trial silently became a penalty. Those pairs now raise `ExtraAxesConfigError`.
+    `BundleSpec` gains an optional `family_task_types`. The bundle's revision and space
+    identity are unchanged, so existing `svm_gamma` studies still resume.
+  - `model_name="pls-da"` is normalised to `"PLS-DA"`. Before this, `plsda_head` never
+    resolved and every trial failed to build. Lowercase callers now get the `PLS-DA`
+    study name.
+  - Categorical choices that compare equal (`1` and `1.0`, `True` and `1`) are
+    rejected. Optuna treats them as one choice, so a trial could fit one value and
+    record the other.
+  - NumPy scalars in bundle `constants` and `choices` are converted to Python
+    builtins. Before this, `np.str_` or `np.float64` reached the `Params` string, which
+    `ast.literal_eval` cannot parse, and `np.int64` was rejected.
+  - Two latent flake8 F821 names (`PersistenceMode` annotation, a dead `return model`
+    in `models.get_model`).
+
 - **CatBoost no longer writes `catboost_info/`.** Every CatBoost fit wrote a
   training-log directory into the current working directory, so fits failed with
   `Can't create train working dir: catboost_info` when the cwd was unwritable (an

@@ -60,6 +60,10 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score, classification_report
 )
 from typing import Dict, List, Optional, Callable, Tuple, Any, Mapping, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation only; imported lazily at runtime (see run_unified_bayesian)
+    from spectral_predict.run_state import PersistenceMode
 
 # Import existing infrastructure
 from spectral_predict.preprocess import SNV, SavgolDerivative, SavgolSmooth
@@ -2279,22 +2283,40 @@ def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> 
     return digest.hexdigest()[:16]
 
 
-def _sqlite_file_exists(storage_url: str) -> bool:
-    """True if a ``sqlite:///`` storage URL points at an existing, non-empty file.
+_SQLITE_URL_PREFIX = "sqlite:///"
 
-    Never opens or creates the database. A zero-byte file (a crash before the
-    schema was written) counts as absent, because listing its studies would write
-    the schema.
+
+def _sqlite_file_state(storage_url: str) -> bool | None:
+    """Tri-state existence of the file behind a ``sqlite:///`` storage URL.
+
+    ``True``: an existing, non-empty file. ``False``: positively absent (or a
+    zero-byte file, a crash before the schema was written, because listing its
+    studies would write the schema). ``None``: unknown, either because the check
+    raised ``OSError`` (locked, permission, vanished mid-check) or because the URL
+    is not a SQLite file URL. Never opens or creates the database.
+
+    Callers must treat ``None`` conservatively: it never authorises a resume, and
+    never authorises a deletion.
     """
-    prefix = "sqlite:///"
-    if not storage_url.startswith(prefix):
+    if not storage_url.startswith(_SQLITE_URL_PREFIX):
+        return None
+    path = Path(storage_url[len(_SQLITE_URL_PREFIX):].split("?", 1)[0])
+    if not str(path):
         return False
-    path = Path(storage_url[len(prefix):].split("?", 1)[0])
     try:
-        return bool(str(path)) and path.is_file() and path.stat().st_size > 0
-    except OSError:
-        # Vanished or locked between checks: advisory, so report absent, never raise.
-        return False
+        return path.is_file() and path.stat().st_size > 0
+    except OSError as exc:
+        logger.warning("T-41: could not check whether %s exists: %s", path, exc)
+        return None
+
+
+def _sqlite_file_exists(storage_url: str) -> bool:
+    """True only if a ``sqlite:///`` URL positively points at an existing, non-empty file.
+
+    Advisory (resume gating): an unknown state reports False. Deletion decisions
+    must use :func:`_sqlite_file_state`, where unknown is distinct from absent.
+    """
+    return _sqlite_file_state(storage_url) is True
 
 
 def _study_exists(storage_url: str, study_name: str) -> bool | None:
@@ -2558,6 +2580,9 @@ def run_unified_bayesian(
     # Normalize model name to expected case for build_model
     model_name_map = {
         'pls': 'PLS',
+        # suggest_model_params accepts 'pls-da'; without this entry the
+        # case-sensitive PLS-DA checks (head params, plsda_head bundle) miss it.
+        'pls-da': 'PLS-DA',
         'ridge': 'Ridge',
         'lasso': 'Lasso',
         'elasticnet': 'ElasticNet',
@@ -3224,12 +3249,21 @@ def run_unified_bayesian(
                     # 11..N land directly in SQLite.
                     # Only a study this attempt creates may be deleted on failure.
                     # `_target_absent` is True only when the storage positively
-                    # reported the name missing (or the file does not exist yet);
-                    # an unanswerable check (None) never authorises a deletion.
-                    if _sqlite_file_exists(storage_url):
+                    # reported the name missing, or the SQLite file positively does
+                    # not exist yet. An unanswerable check (None) from either never
+                    # authorises a deletion: a stat that raised OSError is NOT
+                    # "file absent" (the file may hold the earlier run's study).
+                    _file_state = _sqlite_file_state(storage_url)
+                    if _file_state is False:
+                        _target_absent = True
+                    elif _file_state is True or not storage_url.startswith(
+                        _SQLITE_URL_PREFIX
+                    ):
+                        # Existing file, or a non-file storage with no file to
+                        # check: only the storage's own listing can say "absent".
                         _target_absent = _study_exists(storage_url, study_name) is False
                     else:
-                        _target_absent = True
+                        _target_absent = False
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state,
@@ -3436,6 +3470,7 @@ def run_unified_bayesian(
         cv_strategy=cv_strategy,
         cv_n_repeats=cv_n_repeats,
         n_samples_used=n_samples,
+        baseline_params=baseline_params,
     )
 
     if verbose:
@@ -3492,6 +3527,7 @@ def convert_study_to_dataframe(
     cv_strategy: str = 'kfold',
     cv_n_repeats: int = 5,
     n_samples_used: Optional[int] = None,
+    baseline_params: dict | None = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -3517,6 +3553,11 @@ def convert_study_to_dataframe(
         Baseline correction method used (for display name prefixes)
     smoothing : bool
         Whether smoothing was available as an Optuna toggle
+    baseline_params : dict or None
+        Run-level baseline-method parameters (the same ``baseline_params`` passed to
+        :func:`run_unified_bayesian`; not stored per trial). Written to the
+        ``baseline_params`` column of trials that applied baseline correction so the
+        validation rebuild reproduces non-default settings.
 
     Returns
     -------
