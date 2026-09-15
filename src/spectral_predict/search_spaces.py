@@ -63,6 +63,26 @@ OBJECTIVE_RESERVED_NAMES: frozenset[str] = frozenset(
 )
 
 
+def _to_builtin(value: Any) -> Any:
+    """Normalise NumPy scalars and ``str``/``int``/``float`` subclasses to builtins.
+
+    Values written into model params must round-trip through the leaderboard ``Params``
+    string, and ``repr`` of a NumPy scalar (``np.str_('x')``) does not survive
+    ``ast.literal_eval``. Anything else is returned unchanged for validation to judge.
+    """
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    return value
+
+
 class ExtraAxesConfigError(ValueError):
     """An extra-axes configuration is invalid.
 
@@ -106,6 +126,18 @@ class AxisSpec:
     step: int | None = None
     param_name: str | None = None
     applies_when_id: str | None = None
+
+    def __post_init__(self) -> None:
+        # NumPy scalars compare equal to builtins by NumPy's rules but hash by value:
+        # np.float32(0.1) == 0.1 is True, yet it holds 0.10000000149. Normalising at
+        # construction keeps "equal implies equal hash" (Codex review of #78).
+        object.__setattr__(self, "low", _to_builtin(self.low))
+        object.__setattr__(self, "high", _to_builtin(self.high))
+        object.__setattr__(self, "step", _to_builtin(self.step))
+        if isinstance(self.choices, (tuple, list)):
+            object.__setattr__(
+                self, "choices", type(self.choices)(_to_builtin(c) for c in self.choices)
+            )
 
     @property
     def optuna_name(self) -> str:
@@ -626,26 +658,6 @@ def _no_cross(
 
 
 _LITERAL_TYPES = (bool, int, float, str, type(None))
-
-
-def _to_builtin(value: Any) -> Any:
-    """Normalise NumPy scalars and ``str``/``int``/``float`` subclasses to builtins.
-
-    Values written into model params must round-trip through the leaderboard ``Params``
-    string, and ``repr`` of a NumPy scalar (``np.str_('x')``) does not survive
-    ``ast.literal_eval``. Anything else is returned unchanged for validation to judge.
-    """
-    if isinstance(value, np.generic):
-        value = value.item()
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, str):
-        return str(value)
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        return float(value)
-    return value
 
 
 def _normalised_copy(bundle: BundleSpec) -> BundleSpec:

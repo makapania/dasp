@@ -2981,10 +2981,10 @@ def run_unified_bayesian(
                             "data_mismatch_resume": True,
                         })
                 elif _stored_fp is None:
-                    # A legacy study (or an unreadable attr): still resumed, but say so.
+                    # Legacy study or unreadable attrs: still resumed, but say so.
                     _msg = (
-                        f"Resuming a persisted {model_name} study recorded before data "
-                        "fingerprints existed; the data it ran on can't be verified."
+                        f"Resuming a persisted {model_name} study with a missing or "
+                        "unreadable data fingerprint; the data it ran on can't be verified."
                     )
                     logger.warning("T-41: %s", _msg)
                     if progress_callback is not None:

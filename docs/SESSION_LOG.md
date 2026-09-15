@@ -76,6 +76,9 @@ configuration sharing one storage URL.
   first version treated a listing error as "absent" and would have deleted).
   `_study_exists` returns `None` when unsure.
 - **A partial study created by the failing attempt is still deleted.**
+  *Correction (PR #78):* no longer true. The failed-migration delete was removed, and a
+  failed migration now only warns. See the post-merge Bayesian/search-space fixes
+  entry.
 - **Review round 2** (DeepSeek ready, GLM merge-with-fixes), all applied:
   - **The fingerprint is written ONLY on a study with no trials.** Writing it onto a
     legacy study resumed via 'always' would claim that study's old trials came from
@@ -1141,6 +1144,15 @@ should always block — they found two crash bugs no test covered.
   raised on `hash()` before #78, because `constants` defaults to a dict. Fixed with
   `field(hash=False)` on the mapping fields. They still count for `__eq__`, so the
   hash stays consistent with equality.
+- **NumPy scalars break dataclass eq/hash consistency.** `np.float32(0.1) == 0.1` is
+  True, because NumPy 2 casts the Python float to float32, but the float32 hashes its
+  true value, 0.10000000149. `AxisSpec.__post_init__` therefore converts `low`/`high`/
+  `step`/`choices` with `.item()`. As a result, `np.float32(0.1)` and `0.1` are now
+  unequal, which matches their already-different space identities (Codex review of
+  #78).
+- **`_sqlite_path_from_url` is not a drop-in for `_sqlite_file_exists`.** It uses
+  `urlparse`, which turns a relative `sqlite:///rel.db` into `/rel.db` on POSIX, while
+  SQLAlchemy treats that URL as relative. It was left unshared.
 - **`convert_study_to_dataframe` raised NameError on `baseline_params`.** It is a
   run-level value, hashed into the study name and never stored as a trial attr, so it
   has to be passed in. No test ran a Bayesian search with `baseline_method` set, so

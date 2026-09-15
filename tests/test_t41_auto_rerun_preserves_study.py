@@ -338,7 +338,7 @@ def test_always_resume_of_unfingerprinted_study_warns_unverified(
     assert len(resumed.trials) == 2, "still resumed"
     assert any(m.get("data_unverified_resume") for m in messages)
     assert not any(m.get("data_mismatch_resume") for m in messages)
-    assert "can't be verified" in caplog.text
+    assert "missing or unreadable data fingerprint" in caplog.text
 
 
 def test_always_resume_with_matching_fingerprint_does_not_warn(slow_sqlite: str) -> None:

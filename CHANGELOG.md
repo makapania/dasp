@@ -50,11 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
     The migration failure is now logged as a warning that names the study and storage;
     a partial copy of the study may remain there. The copy carries this run's data
-    fingerprint, so a later 'auto' run on the same data resumes it, or discard it with
+    fingerprint (Optuna 5.0 copies study attributes before trials), so a later 'auto'
+    run on the same data resumes it, or discard it with
     the run's saved state. The resume-gating file check now calls `stat` directly and
     never treats a SQLite URI filename as an existing file.
-  - An 'always' run that resumes a persisted study with no stored data fingerprint (a
-    legacy study) now warns that the data it ran on can't be verified. The progress
+  - An 'always' run that resumes a persisted study whose data fingerprint is missing
+    (a legacy study) or unreadable now warns that the data it ran on can't be verified. The progress
     event carries `data_unverified_resume: True`. The study is still resumed.
   - `run_unified_bayesian` raised `NameError` while building its results table whenever
     `baseline_method` was set and any trial applied baseline correction.
@@ -68,7 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     identity are unchanged, so existing `svm_gamma` studies for the supported
     `SVM` + classification and `SVR` + regression pairs still resume.
     `BundleSpec` is now hashable. Its `constants` and `family_task_types` mappings are
-    left out of `__hash__` but still count for equality.
+    left out of `__hash__` but still count for equality. `AxisSpec` converts NumPy
+    bounds, steps and choices to Python builtins when it is constructed. Before this,
+    `np.float32(0.1)` compared equal to `0.1` but hashed its true value. The curated
+    bundles' space identities are unchanged.
   - `model_name="pls-da"` is normalised to `"PLS-DA"`. Before this, `plsda_head` never
     resolved and every trial failed to build. Lowercase callers now get the `PLS-DA`
     study name.

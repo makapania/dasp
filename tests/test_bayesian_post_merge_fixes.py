@@ -151,6 +151,43 @@ def test_curated_bundles_are_hashable(bid: str) -> None:
     assert {bundle}
 
 
+def _float_bound_bundle(low: Any) -> BundleSpec:
+    return BundleSpec(
+        id="b", families=frozenset({"PLS"}), task_types=frozenset({"regression"}),
+        axes=(AxisSpec(key="tol", kind="float", low=low, high=np.float32(1.0), log=True),),
+    )
+
+
+@pytest.mark.parametrize(
+    "numpy_low", [np.float32(0.1), np.float32(0.5), np.float64(0.1), np.float16(0.25)]
+)
+def test_equal_bundles_hash_equal_with_numpy_bounds(numpy_low: Any) -> None:
+    """Codex P2: np.float32(0.1) == 0.1 under NumPy rules while hashing its true value,
+    so equal bundles hashed differently. Bounds are normalised at construction."""
+    numpy_bundle = _float_bound_bundle(numpy_low)
+    same_value = _float_bound_bundle(numpy_low.item())
+    assert numpy_bundle == same_value
+    assert hash(numpy_bundle) == hash(same_value)
+    assert len({numpy_bundle, same_value}) == 1
+    literal = _float_bound_bundle(float(str(numpy_low)))
+    # Equality must imply equal hashes for the literal spelling too.
+    assert numpy_bundle != literal or hash(numpy_bundle) == hash(literal)
+    assert (numpy_bundle == literal) == (
+        canonical_space_identity((numpy_bundle,), False)
+        == canonical_space_identity((literal,), False)
+    )
+    assert type(numpy_bundle.axes[0].low) is float and type(numpy_bundle.axes[0].high) is float
+
+
+def test_numpy_int_step_and_choices_normalised_at_construction() -> None:
+    axis = AxisSpec(key="max_iter", kind="int", low=np.int64(400), high=np.int32(600),
+                    step=np.int16(10))
+    assert (type(axis.low), type(axis.high), type(axis.step)) == (int, int, int)
+    cat = AxisSpec(key="m", kind="categorical", choices=(np.str_("a"), np.bool_(True)))
+    assert [type(c) for c in cat.choices] == [str, bool]
+    assert hash(cat) == hash(AxisSpec(key="m", kind="categorical", choices=("a", True)))
+
+
 def _rebuilt_with_fresh_dicts(bundle: BundleSpec) -> BundleSpec:
     return BundleSpec(
         id=bundle.id, families=bundle.families, task_types=bundle.task_types,
