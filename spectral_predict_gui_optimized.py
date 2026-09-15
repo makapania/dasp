@@ -24247,9 +24247,10 @@ class SpectralPredictApp:
         except Exception as resume_err:  # never launch on an unchecked resume
             self._log_progress(f"[RUN] Resume check failed: {resume_err}")
             messagebox.showerror(
-                "Resume could not be verified",
-                f"The interrupted run could not be checked:\n\n{resume_err}\n\n"
-                "Nothing was run and nothing was deleted.",
+                "Can't check the interrupted run",
+                "dasp could not check whether the data you loaded matches the "
+                "interrupted run, so the analysis did not start. Nothing was "
+                f"deleted.\n\nDetails: {resume_err}",
             )
             launch = False
         if not launch:
@@ -26009,11 +26010,12 @@ class SpectralPredictApp:
             # log line so the warning still surfaces somewhere.
             self._log_progress(f"[OC Params] {body}")
 
-    def _apply_pending_validation_indices(self):
+    def _apply_pending_validation_indices(self, X=None, y=None):
         """Apply validation indices captured at the prior run's start_run.
 
         Called after the dataset_fingerprint check passes in
-        `_run_analysis_thread`. The indices are DataFrame labels; reapply
+        `_run_analysis_thread`, with the worker's bound ``X``/``y`` (defaults to
+        ``self.X``/``self.y``). The indices are DataFrame labels; reapply
         them to populate `self.validation_X` / `self.validation_y` /
         `self.validation_indices` so the post-search validation step uses
         the same partition the resumed trials trained on.
@@ -26037,13 +26039,15 @@ class SpectralPredictApp:
             )
             self._pending_validation_indices = None
             return
-        if self.X is None or self.y is None:
+        X = self.X if X is None else X
+        y = self.y if y is None else y
+        if X is None or y is None:
             return  # caller's fingerprint check should have caught this
 
         try:
             missing_labels = [
                 i for i in pending
-                if i not in self.X.index or i not in self.y.index
+                if i not in X.index or i not in y.index
             ]
             if missing_labels:
                 self._log_progress(
@@ -26054,8 +26058,8 @@ class SpectralPredictApp:
                 self._pending_validation_indices = None
                 return
 
-            new_validation_X = self.X.loc[pending]
-            new_validation_y = self.y.loc[pending]
+            new_validation_X = X.loc[pending]
+            new_validation_y = y.loc[pending]
             self.validation_indices = set(pending)
             self.validation_X = new_validation_X
             self.validation_y = new_validation_y
@@ -26075,6 +26079,22 @@ class SpectralPredictApp:
         finally:
             self._pending_validation_indices = None
 
+    def _uses_bayesian_run_state(self):
+        """True if Run Analysis will run an Optuna (unified Bayesian) search.
+
+        Only those searches register a resumable run. Multi-class SIMCA has its
+        own grid pipeline and ignores the optimization method, so it must not
+        claim (and later complete) a pending Bayesian resume.
+        """
+        return (
+            hasattr(self, "optimization_method")
+            and self.optimization_method.get() == "unified"
+            and not (
+                hasattr(self, "task_type")
+                and self.task_type.get() == "multiclass_simca"
+            )
+        )
+
     def _confirm_resume_before_launch(self):
         """Check a pending crash resume against the loaded data. Main thread only.
 
@@ -26089,10 +26109,7 @@ class SpectralPredictApp:
           the resume pending (False). "Yes" abandons it in memory only
           (``run_state.abandon_resume``) and starts fresh (True).
         """
-        if not (
-            hasattr(self, "optimization_method")
-            and self.optimization_method.get() == "unified"
-        ):
+        if not self._uses_bayesian_run_state():
             return True
         try:
             from spectral_predict.run_state import (
@@ -26109,55 +26126,57 @@ class SpectralPredictApp:
 
         fingerprint = fingerprint_dataset(self.X, self.y)
         meta = get_resumed_run()
-        run_desc = ""
+        started = ""
         if meta is not None:
-            run_desc = (
-                f" (run {meta.run_id}, started "
-                f"{meta.started_iso[:16].replace('T', ' ')})"
-            )
+            started = f" from {meta.started_iso[:16].replace('T', ' ')}"
         try:
             matches, stored_fp = verify_resume_fingerprint(fingerprint)
         except Exception as verify_err:
-            title = "Resume could not be verified"
-            reason = (
-                "The loaded data could not be checked against the interrupted "
-                f"run you chose to resume{run_desc}:\n\n{verify_err}"
+            title = "Can't check the interrupted run"
+            lead = (
+                f"dasp could not read the record of the interrupted run{started}, "
+                "so it cannot confirm that the data you loaded is the data that "
+                "run used."
             )
-            self._log_progress(f"[RUN] Resume could not be verified: {verify_err}")
+            details = str(verify_err)
         else:
             if matches:
                 return True
-            title = "Loaded data does not match the interrupted run"
             if stored_fp:
-                detail = (
-                    f"Interrupted run data fingerprint: {stored_fp[:8]}…\n"
-                    f"Loaded data fingerprint: {fingerprint[:8]}…"
+                title = "Different data than the interrupted run"
+                lead = (
+                    "The data you loaded is not the same as the data the "
+                    f"interrupted run{started} used (different samples, values "
+                    "or wavelengths)."
+                )
+                details = (
+                    f"data fingerprint {fingerprint[:8]} loaded, "
+                    f"{stored_fp[:8]} in the interrupted run"
                 )
             else:
-                detail = (
-                    "The resume record on disk now belongs to a different run "
-                    "(another dasp window may have started one), so it cannot "
-                    "be checked against the loaded data."
+                title = "Can't check the interrupted run"
+                lead = (
+                    "Another analysis (possibly in another dasp window) has "
+                    "replaced the record of the interrupted run, so the data "
+                    "you loaded cannot be checked against it."
                 )
-            reason = (
-                "The data loaded now does not match the interrupted run you "
-                f"chose to resume{run_desc}.\n\n{detail}"
-            )
-            self._log_progress(
-                "[RUN] Resume paused — the loaded data does not match the "
-                f"interrupted run{run_desc}. current={fingerprint[:8]}..., "
-                f"stored={(stored_fp or '?')[:8]}... The saved run was kept."
-            )
+                details = "resume record now names a different run"
+        if meta is not None:
+            details = f"run {meta.run_id}; {details}"
+        self._log_progress(
+            f"[RUN] Resume paused: {lead} The saved run was kept. Details: {details}"
+        )
 
         start_fresh = messagebox.askyesno(
             title,
-            f"{reason}\n\n"
+            f"{lead}\n\n"
             "Nothing was run and nothing was deleted.\n\n"
             "Start a fresh analysis with the current data instead?\n\n"
-            "  • Yes — start fresh now. The saved run will not be resumed; its "
-            "file stays on disk.\n"
-            "  • No — keep the saved run. Load the data of the interrupted run "
-            "and click Run Analysis again to resume.",
+            "  • Yes — start fresh now. The interrupted run will not be resumed; "
+            "its saved file stays on disk.\n"
+            "  • No — keep the interrupted run. Load the data it used and click "
+            "Run Analysis again to continue it.\n\n"
+            f"Details: {details}",
             icon="warning",
             default="no",
         )
@@ -26175,26 +26194,52 @@ class SpectralPredictApp:
         )
         return True
 
-    def _mark_run_state_complete(self, analysis_run_id):
-        """Mark the run this analysis registered as complete (removes its sidecar).
+    def _complete_run_state_after_search(self, analysis_run_id, n_model_errors=0):
+        """Release the resume record once a Bayesian search has finished.
 
-        ``analysis_run_id`` is None when the analysis registered no run (grid,
-        NSGA-II, or a failed ``start_run``); then nothing is touched.
-        ``mark_complete`` acts on the *active* run, which during a pending
-        resume is the interrupted Bayesian run, so calling it for any other
-        search would destroy that resume (GLM review of #79).
+        Call right after the search returns, before post-search I/O (CSV,
+        report, ensembles), so a failure there cannot leave a finished run
+        resumable. The record is released only when every requested model
+        finished. It stays resumable, and this is a no-op, when:
+
+        - ``analysis_run_id`` is None: this analysis registered no run (grid,
+          NSGA-II, multi-class SIMCA, or a failed ``start_run``). During a
+          pending resume the *active* run is the interrupted Bayesian run, so
+          completing it here would destroy that resume (GLM review of #79);
+        - the active run is no longer ``analysis_run_id``;
+        - ``n_model_errors`` > 0: a model's search raised (e.g. a transient
+          SQLite error), so its study is unfinished (Codex review of #79);
+        - the user pressed Stop: the trials so far stay resumable, and the
+          next launch offers to resume or discard them.
+
+        ``run_state.mark_complete`` then removes the sidecar only if the
+        sidecar's run id is still the active run's.
         """
         if analysis_run_id is None:
             return
+        controller = getattr(self, "search_controller", None)
+        stopped = controller is not None and controller.is_end_requested()
+        if n_model_errors or stopped:
+            why = (
+                f"{n_model_errors} model search(es) failed"
+                if n_model_errors
+                else "the search was stopped"
+            )
+            self._log_progress(
+                f"[RUN] {why.capitalize()}; the run stays resumable (it will be "
+                "offered at the next launch)."
+            )
+            return
         try:
-            from spectral_predict.run_state import mark_complete as _mark_complete
-            _mark_complete()
+            from spectral_predict.run_state import get_active_run_id, mark_complete
+            if get_active_run_id() != analysis_run_id:
+                return
+            mark_complete()
         except Exception as _mc_err:
-            # Don't re-raise — the analysis itself completed successfully
-            # and the user shouldn't see a "completion failed" error. But
-            # surface the failure to the progress log: a stale sidecar
-            # would otherwise produce an unexplained "resume previous run?"
-            # dialog on next launch.
+            # Don't re-raise — the search itself completed successfully and the
+            # user shouldn't see a "completion failed" error. But surface the
+            # failure: a stale sidecar would otherwise produce an unexplained
+            # "resume previous run?" dialog on next launch.
             try:
                 self._log_progress(
                     f"[RUN] mark_complete failed; sidecar will persist "
@@ -26212,6 +26257,11 @@ class SpectralPredictApp:
 
     def _run_analysis_thread(self, selected_models, tier, resolved_inlier_label=None):
         """Run analysis in background thread."""
+        # Bind the data once. The resume fingerprint check and the search must
+        # see the same arrays, even if the user loads other data or changes the
+        # target while this worker is setting up (Codex review of #79). Loading
+        # or re-targeting rebinds self.X / self.y, so references suffice.
+        X_run, y_run = self.X, self.y
         try:
             from spectral_predict.search import run_search
             from spectral_predict.report import write_markdown_report
@@ -26240,10 +26290,7 @@ class SpectralPredictApp:
             # storage; if they crashed and left a sidecar, the next launch's
             # "Resume?" dialog would be misleading because there are no
             # Optuna studies to actually resume from.
-            is_bayesian_run = (
-                hasattr(self, "optimization_method")
-                and self.optimization_method.get() == "unified"
-            )
+            is_bayesian_run = self._uses_bayesian_run_state()
             # Only the run this analysis started or resumed may be marked
             # complete; a grid/NSGA run must not remove a pending resume.
             analysis_run_id = None
@@ -26254,7 +26301,7 @@ class SpectralPredictApp:
                         verify_resume_fingerprint,
                     )
 
-                    fingerprint = fingerprint_dataset(self.X, self.y)
+                    fingerprint = fingerprint_dataset(X_run, y_run)
 
                     # Codex HIGH #7: if the user clicked "Resume" at app
                     # startup, enforce that the currently-loaded data
@@ -26291,7 +26338,7 @@ class SpectralPredictApp:
                             # indices (T-49) before the search starts, so the
                             # post-search RMSEP is computed against the same
                             # partition the resumed trials trained on.
-                            self._apply_pending_validation_indices()
+                            self._apply_pending_validation_indices(X_run, y_run)
 
                     # Capture validation indices so the same partition can
                     # be reproduced on resume. Required for non-deterministic
@@ -26392,7 +26439,7 @@ class SpectralPredictApp:
                 # (e.g. 3 integer-valued numeric values — GUI checked PLS-DA
                 # while this path resolved "regression", causing
                 # run_search to raise "No valid models found").
-                task_type = _infer_task_type_from_y(self.y) or "regression"
+                task_type = _infer_task_type_from_y(y_run) or "regression"
                 self._log_progress(f"Task type: {task_type} (auto-detected)")
             else:
                 # User explicitly selected task type
@@ -27938,22 +27985,22 @@ class SpectralPredictApp:
             self._log_progress(f"Region subsets: {'ENABLED' if enable_region_subsets else 'DISABLED'}")
             if enable_region_subsets:
                 self._log_progress(f"  Region analysis depth: {self.n_top_regions.get()} regions")
-            self._log_progress(f"Data: {len(self.X)} samples × {self.X.shape[1]} wavelengths")
+            self._log_progress(f"Data: {len(X_run)} samples × {X_run.shape[1]} wavelengths")
             self._log_progress(f"{'='*70}\n")
 
             # Run search
             # Apply active group filter first
             if self.active_indices is not None:
-                ag_mask = self.X.index.isin(self.active_indices)
-                X_filtered = self.X[ag_mask]
-                y_filtered = self.y[ag_mask]
-                n_inactive = len(self.X) - len(X_filtered)
+                ag_mask = X_run.index.isin(self.active_indices)
+                X_filtered = X_run[ag_mask]
+                y_filtered = y_run[ag_mask]
+                n_inactive = len(X_run) - len(X_filtered)
                 self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
                     f"\n[i] Analysis Subset: {len(X_filtered)} samples ({n} filtered out)\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
             else:
-                X_filtered = self.X
-                y_filtered = self.y
+                X_filtered = X_run
+                y_filtered = y_run
 
             # Filter out excluded spectra
             if self.excluded_spectra:
@@ -28349,7 +28396,7 @@ class SpectralPredictApp:
             # Calculate excluded and validation counts for saving in results
             n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
             n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
-            n_total_original = len(self.X)  # Total samples before filtering
+            n_total_original = len(X_run)  # Total samples before filtering
 
             # Get imbalance handling parameters (if enabled)
             imbalance_method, imbalance_params = self._get_imbalance_params()
@@ -28460,6 +28507,7 @@ class SpectralPredictApp:
                     self._log_progress(f"   Trials: {self.n_unified_trials.get()}")
 
                     oc_all_results = []
+                    oc_model_errors = 0
                     oc_best_overall = [None]
 
                     def oc_progress_wrapper(info):
@@ -28513,10 +28561,16 @@ class SpectralPredictApp:
                             else:
                                 self._log_progress(f"    No results returned")
                         except Exception as e:
+                            oc_model_errors += 1
                             self._log_progress(f"    Error in {oc_model_name}: {e}")
                             import traceback
                             self._log_progress(traceback.format_exc())
                             continue
+
+                    # Search finished: release the resume record now, before any
+                    # post-search I/O can fail (a finished run must not stay
+                    # resumable). A model that raised keeps it resumable.
+                    self._complete_run_state_after_search(analysis_run_id, oc_model_errors)
 
                     if oc_all_results:
                         results_df = pd.concat(oc_all_results, ignore_index=True)
@@ -29032,6 +29086,7 @@ class SpectralPredictApp:
                 region_pairwise = self.bayes_region_test_pairwise.get()
                 enable_uve = self.bayes_enable_uve.get()
 
+                unified_model_errors = 0
                 for model_name in selected_models:
                     self._log_progress(f"\n  Optimizing {model_name}...")
 
@@ -29081,10 +29136,15 @@ class SpectralPredictApp:
                             self._log_progress(f"    ⚠️ No results returned")
 
                     except Exception as e:
+                        unified_model_errors += 1
                         self._log_progress(f"    ✗ Error: {str(e)}")
                         import traceback
                         self._log_progress(f"    Traceback: {traceback.format_exc()}")
                         continue
+
+                # Search finished: release the resume record now, before the
+                # validation, CSV, report and ensemble steps can fail.
+                self._complete_run_state_after_search(analysis_run_id, unified_model_errors)
 
                 # Combine results from all models
                 if all_results:
@@ -29723,12 +29783,10 @@ class SpectralPredictApp:
             # Disable search control buttons
             self.root.after(0, lambda: self._update_search_buttons('idle'))
 
-            # T-11 D: clean completion → drop the sidecar so the next launch
-            # doesn't offer a stale "resume?" dialog. Errors fall through to
-            # the except block below, which deliberately does NOT mark
-            # complete — leaving the sidecar lets the user resume from where
-            # they left off.
-            self._mark_run_state_complete(analysis_run_id)
+            # T-11 D: the Bayesian branches drop the resume sidecar right after
+            # their search finishes (_complete_run_state_after_search), not here:
+            # a failure in the CSV/report/ensemble steps above must not leave a
+            # finished run resumable (DeepSeek review of #79).
 
             # Analysis complete - status updated
 

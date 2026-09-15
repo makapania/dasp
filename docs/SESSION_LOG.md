@@ -1373,6 +1373,31 @@ should always block — they found two crash bugs no test covered.
       *active* run, and `resume_run` makes the interrupted run active. The worker
       now calls `_mark_run_state_complete(analysis_run_id)`, and the id is set only
       when this analysis's `start_run` succeeded.
+  - **Round 6: when a run's record is released.**
+    - *One-class never released it.* The one-class (and multi-class SIMCA) branches
+      `return` long before the old end-of-worker `mark_complete`, so a finished
+      one-class unified run left a resume prompt on every launch. This also exists on
+      main.
+    - *Post-search I/O came first.* `to_csv`, the report and ensembles all ran before
+      `mark_complete`, so if any of them failed the finished run stayed resumable.
+    - Now `_complete_run_state_after_search(analysis_run_id, n_model_errors)` runs
+      right after each Bayesian model loop, in the one-class and the main unified
+      branches.
+    - It releases nothing if a model raised or the user pressed Stop
+      (`SearchController.is_end_requested`). **Decision:** a stopped run stays
+      resumable, and the startup prompt lets the user discard it. Before, Stop
+      returned normally and the run was released.
+    - Multi-class SIMCA ignores the optimization method but was registering a run.
+      Under a pending resume, `start_run` returned the *resumed* metadata, so SIMCA
+      would have completed and deleted it. It is excluded now
+      (`_uses_bayesian_run_state`).
+    - *Data could change after verification.* The worker read `self.X`/`self.y`
+      again when filtering. It now binds `X_run, y_run` once and uses them for the
+      fingerprint, validation-index restore, task inference and filtering.
+    - Not done: sampling `fingerprint_dataset` from the DataFrame without
+      `np.asarray`. For mixed-dtype frames, `str()` of the values would change
+      (int `1` vs upcast `1.0`), which changes fingerprints of existing sidecars
+      and turns a crash resume across the upgrade into a false mismatch.
   - GUI `_RESUME_ISSUE_NOTICES` maps `resume_declined`, `resume_check_failed`,
     `data_mismatch_resume` and `data_unverified_resume` to per-kind wording, with one
     dialog per resumed run.

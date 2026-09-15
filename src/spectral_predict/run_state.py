@@ -28,6 +28,7 @@ Public surface:
     is_resuming() -> bool
     find_incomplete_run() -> RunMetadata | None
     has_resumable_store(meta) -> bool
+    get_active_run_id() -> str | None
     get_resumed_run() -> RunMetadata | None
     abandon_resume()
     resume_run(run_id)
@@ -602,6 +603,11 @@ def abandon_resume() -> None:
         _active_run_id = None
         _active_metadata = None
         _is_resuming = False
+
+
+def get_active_run_id() -> str | None:
+    """Run id of the active (started or resumed) run, or ``None``."""
+    return _active_run_id
 
 
 def get_resumed_run() -> RunMetadata | None:

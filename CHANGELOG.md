@@ -80,9 +80,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Pending validation indices are kept while the resume is pending and cleared on a
   fresh start. Keeping the run returns the UI fully to idle and ends the search
   controller. New `run_state.get_resumed_run()`.
-- **A grid or NSGA-II run no longer removes a pending Bayesian resume.** Every
-  successful analysis called `run_state.mark_complete()`, which deleted the resumed
-  run's sidecar. It is now called only for the run the analysis registered.
+- **A grid, NSGA-II or multi-class SIMCA run no longer removes a pending Bayesian
+  resume.** Every successful analysis called `run_state.mark_complete()`, which
+  deleted the resumed run's sidecar. It is now called only for the run the analysis
+  registered. Multi-class SIMCA registers none, because it does not use Optuna.
+- **Finished one-class Bayesian runs no longer ask "Resume previous run?" on every
+  launch.** The one-class branch returned without releasing its resume record. Every
+  Bayesian branch now releases it right after the search, before CSV, report and
+  ensemble steps, so a failure in those steps can no longer leave a finished run
+  resumable.
+- **Behaviour change: a Bayesian run stays resumable if any model's search raised, or
+  if the user pressed Stop.** It used to be released whenever the analysis finished.
+  The next launch offers to resume or discard it.
+- The analysis worker binds the loaded data once and uses those arrays for both the
+  resume check and the search. Loading other data or changing the target while it
+  starts can no longer run the search on data that was not checked.
+- New `run_state.get_active_run_id()` and `SearchController.is_end_requested()`.
 - `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
   (e.g. an embedded NUL) instead of crashing the startup check.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**

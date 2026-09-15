@@ -135,8 +135,11 @@ def test_mismatch_no_keeps_saved_run_and_returns_to_idle(gui_app, resumed):
         worker = _click_run(gui_app, *_dataset(2))
 
     assert ask.call_count == 1
-    assert "does not match" in ask.call_args[0][0]
-    assert "nothing was deleted" in ask.call_args[0][1]
+    assert ask.call_args[0][0] == "Different data than the interrupted run"
+    body = ask.call_args[0][1]
+    assert body.startswith("The data you loaded is not the same as the data")
+    assert "nothing was deleted" in body
+    assert body.rstrip().splitlines()[-1].startswith("Details:"), "technical detail last"
     assert ask.call_args.kwargs.get("default") == "no"
     assert worker is None, "no worker may start on mismatched data"
     assert not started
@@ -201,8 +204,10 @@ def test_verification_exception_stops_and_asks(gui_app, resumed, monkeypatch):
         worker = _click_run(gui_app, X, y)  # even with matching data
 
     assert worker is None and not started
-    assert ask.call_args[0][0] == "Resume could not be verified"
-    assert "disk on fire" in ask.call_args[0][1]
+    assert ask.call_args[0][0] == "Can't check the interrupted run"
+    body = ask.call_args[0][1]
+    assert body.startswith("dasp could not read the record")
+    assert body.rstrip().splitlines()[-1].startswith("Details:") and "disk on fire" in body
     _assert_idle_and_kept(gui_app, rs, meta, store)
 
 
@@ -213,7 +218,7 @@ def test_unreadable_sidecar_is_not_a_match(gui_app, resumed):
         worker = _click_run(gui_app, X, y)
 
     assert worker is None and not started
-    assert ask.call_args[0][0] == "Resume could not be verified"
+    assert ask.call_args[0][0] == "Can't check the interrupted run"
     assert store.exists() and rs.is_resuming()
 
 
@@ -235,20 +240,35 @@ def test_worker_recheck_failure_stops_before_start_run(gui_app, resumed, monkeyp
 
 
 def test_non_bayesian_completion_keeps_pending_resume(gui_app, resumed):
-    """GLM review: a grid/NSGA-II run (no registered run id) must not mark the pending
-    Bayesian resume complete, which would delete its sidecar."""
+    """GLM review: a run with no registered id (grid/NSGA-II/SIMCA) must not complete
+    the pending Bayesian resume, which would delete its sidecar."""
     rs, meta, store, started, _ = resumed
-    gui_app._mark_run_state_complete(None)
+    from spectral_predict.search_controller import SearchController
+
+    gui_app.search_controller = SearchController()
+    gui_app._complete_run_state_after_search(None)
+    gui_app._complete_run_state_after_search("some_other_run")
     assert rs.find_incomplete_run().run_id == meta.run_id
     assert rs.is_resuming()
 
-    gui_app._mark_run_state_complete(meta.run_id)  # the resumed Bayesian run finishing
+    gui_app._complete_run_state_after_search(meta.run_id)  # the resumed run finishing
     assert rs.find_incomplete_run() is None
     assert store.exists()
 
 
-def test_worker_marks_complete_only_for_its_registered_run():
+def test_multiclass_simca_does_not_use_bayesian_run_state(gui_app, resumed):
+    gui_app.task_type.set("multiclass_simca")
+    try:
+        assert gui_app._uses_bayesian_run_state() is False
+        with patch("tkinter.messagebox.askyesno") as ask:
+            assert gui_app._confirm_resume_before_launch() is True
+        assert not ask.called
+    finally:
+        gui_app.task_type.set("regression")
+
+
+def test_worker_has_no_end_of_run_mark_complete():
     source = inspect.getsource(gui_module.SpectralPredictApp._run_analysis_thread)
-    assert "self._mark_run_state_complete(analysis_run_id)" in source
-    assert "_mark_complete()" not in source
+    assert "mark_complete()" not in source
+    assert source.count("self._complete_run_state_after_search(analysis_run_id") == 2
     assert source.count("analysis_run_id = meta.run_id") == 1

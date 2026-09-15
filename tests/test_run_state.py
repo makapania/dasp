@@ -914,8 +914,10 @@ def test_abandon_resume_touches_no_files_and_next_run_is_new(fresh_state):
 
 def test_get_resumed_run_is_none_for_a_normal_run(fresh_state):
     rs, _, _ = fresh_state
-    rs.start_run(label="t", bayesian_persistence_mode="auto")
+    assert rs.get_active_run_id() is None
+    meta = rs.start_run(label="t", bayesian_persistence_mode="auto")
     assert rs.get_resumed_run() is None
+    assert rs.get_active_run_id() == meta.run_id
 
 
 def test_unresumable_sidecar_is_never_deleted_by_run_state(fresh_state):
