@@ -448,8 +448,6 @@ def get_model(model_name, task_type='regression', n_components=10, max_n_compone
     else:
         raise ValueError(f"Unknown task_type: {task_type}")
 
-    return model
-
 
 def build_model(model_name, params, task_type='regression'):
     """

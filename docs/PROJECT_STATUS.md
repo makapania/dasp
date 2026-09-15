@@ -1328,7 +1328,7 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 >
 > **Type design:** `PersistenceMode = Literal["auto","always","never"]` shared between `RunMetadata` and `run_unified_bayesian`; validated at all three call boundaries (`__post_init__`, `start_run`, `run_unified_bayesian` entry); `from_dict` coerces corrupted sidecar values to `'never'` with warning instead of crashing the resume flow.
 >
-> **Architecture (final):** auto-decision callback aborts in-memory `optimize()` via `cb_study.stop()`; outer scope detects `_auto_migrated` and restarts `optimize()` on the migrated SQLite-backed study so trials 11..N persist directly. Multi-model migration failures use `optuna.delete_study` (study-scoped) not `Path.unlink` (file-scoped) so prior models' trials survive a later model's failed migration on the shared SQLite.
+> **Architecture (final):** auto-decision callback aborts in-memory `optimize()` via `cb_study.stop()`; outer scope detects `_auto_migrated` and restarts `optimize()` on the migrated SQLite-backed study so trials 11..N persist directly. A failed migration deletes nothing: it logs a warning naming the study and storage and stays in memory, so prior models' trials on the shared SQLite always survive. The earlier `optuna.delete_study` cleanup was removed in PR #78 because it could delete another run's study.
 >
 > **Test coverage:** 127/127 passing across `test_t41_bayesian_sqlite_auto_calculator` (23) + `test_run_state` (29) + `test_unified_bayesian_baseline` (36) + `test_autoscale_bayesian` (14) + `test_cv_pls_clamp` (25). New test classes added in `081ad6a`: `TestPersistenceModeValidation`, `TestCleanupByTrialCount`, `TestWALPragmaReturnValue`, `TestMigrationOrphanCleanup`.
 >

@@ -416,7 +416,17 @@ What to know:
   bundle with your own, pass `{**BUNDLES, "my_pls_tol": pls_tol}`. There are no one-class
   bundles yet (T-51 PR C).
 - **An id that doesn't apply to this model is skipped**, so one selection can be shared
-  across a multi-model loop. If none applies, a single warning is logged.
+  across a multi-model loop. If none applies, a single warning is logged. The exception
+  is a pair a bundle names but cannot serve: `svm_gamma` with `SVM` + regression or
+  `SVR` + classification raises `ExtraAxesConfigError` (neither pair has an estimator).
+  A custom `BundleSpec` can declare the same restriction with
+  `family_task_types={"SVM": frozenset({"classification"})}`.
+- **Categorical choices must be distinct under `==`.** Optuna matches a value to its
+  choice by equality, so `(1, 1.0)`, `(True, 1)` or `(0.0, -0.0)` raise
+  `ExtraAxesConfigError`. NumPy scalars in `choices` and `constants` (`np.str_`,
+  `np.int64`, ...) are converted to Python builtins, so `Params` stays parseable.
+- **Spell PLS-DA `"PLS-DA"` or `"pls-da"`.** Both select `plsda_head`; `"PLS"` with
+  `task_type="classification"` does not.
 - **Enabling bundles gives the run its own study name.** It never resumes, or
   pollutes, a default study. A custom space that selects nothing keeps the default name.
 - **`n_startup_trials` is not part of the study identity.** It changes future sampling

@@ -76,6 +76,9 @@ configuration sharing one storage URL.
   first version treated a listing error as "absent" and would have deleted).
   `_study_exists` returns `None` when unsure.
 - **A partial study created by the failing attempt is still deleted.**
+  *Correction (PR #78):* no longer true. The failed-migration delete was removed, and a
+  failed migration now only warns. See the post-merge Bayesian/search-space fixes
+  entry.
 - **Review round 2** (DeepSeek ready, GLM merge-with-fixes), all applied:
   - **The fingerprint is written ONLY on a study with no trials.** Writing it onto a
     legacy study resumed via 'always' would claim that study's old trials came from
@@ -1115,3 +1118,56 @@ Rejected: branch-protection "required checks" concerns (main is unprotected); GL
 "FixedTrial.params is pre-populated" block (it starts empty; verified).
 Lesson: black/flake8 non-blocking was fine for style, but pyflakes F821-class checks
 should always block — they found two crash bugs no test covered.
+
+### 2026-09-14 — Post-merge Bayesian/search-space fixes (branch fix/post-merge-bayesian-search-spaces)
+
+- **The T-41 failed-migration cleanup delete was removed; it cannot be made safe.**
+  It deleted by name. Three rounds of guards each failed open:
+  - a locked file read as "absent" because `_sqlite_file_exists` returns False on
+    `OSError`;
+  - a tri-state fix that still used `Path.is_file()`, which swallows every `OSError`;
+    its test was falsely green because it overrode `is_file` to raise (DeepSeek);
+  - `sqlite:///file:x.db?uri=true` parsed as a missing path (Codex).
+
+  Even perfect checks leave a race: another process creates the study between the
+  check and `copy_study`, then the copy fails with a lock error rather than
+  `DuplicatedStudyError`, and the delete removes that study (Codex). Decision
+  (orchestrator): never delete. Warn with the study name and storage, and leave any
+  partial copy. It carries the data fingerprint, so an 'auto' re-run resumes it.
+  `tests/test_t41_auto_rerun_preserves_study.py` asserts every failure mode keeps
+  earlier studies, and that `unified_bayesian` source contains no `delete_study`.
+- **`Path.is_file()` / `exists()` never raise `OSError`.** On Python 3.14 `is_file` is
+  `os.path.isfile`, which returns False on any error. Call `path.stat()` directly when
+  the error matters. Inject such faults by patching `Path.stat` for one path, never by
+  overriding the predicate under test.
+- **Frozen dataclasses with dict fields are unhashable.** Every `BundleSpec` already
+  raised on `hash()` before #78, because `constants` defaults to a dict. Fixed with
+  `field(hash=False)` on the mapping fields. They still count for `__eq__`, so the
+  hash stays consistent with equality.
+- **NumPy scalars break dataclass eq/hash consistency.** `np.float32(0.1) == 0.1` is
+  True, because NumPy 2 casts the Python float to float32, but the float32 hashes its
+  true value, 0.10000000149. `AxisSpec.__post_init__` therefore converts `low`/`high`/
+  `step`/`choices` with `.item()`. As a result, `np.float32(0.1)` and `0.1` are now
+  unequal, which matches their already-different space identities (Codex review of
+  #78).
+- **`_sqlite_path_from_url` is not a drop-in for `_sqlite_file_exists`.** It uses
+  `urlparse`, which turns a relative `sqlite:///rel.db` into `/rel.db` on POSIX, while
+  SQLAlchemy treats that URL as relative. It was left unshared.
+- **`convert_study_to_dataframe` raised NameError on `baseline_params`.** It is a
+  run-level value, hashed into the study name and never stored as a trial attr, so it
+  has to be passed in. No test ran a Bayesian search with `baseline_method` set, so
+  flake8 F821 was the only warning.
+- **The PR B "harmless" `svm_gamma` cross-product entry above was wrong in effect.**
+  Those pairs used to raise, and after PR B they ran with every trial penalised. They
+  are now rejected via `BundleSpec.family_task_types`. That field is left out of the
+  identity, so revision 1 and existing study names hold.
+- **Optuna matches categorical choices by `==` (`list.index`), not by type.** `1`, `1.0`
+  and `True` are one choice. The type-tagged uniqueness check suits identity hashing
+  but cannot catch them.
+- **`np.float64` and `np.str_` subclass `float`/`str`**, so `isinstance` literal checks
+  accepted them while rejecting `np.int64`. Their NumPy 2 `repr` (`np.str_('x')`)
+  breaks `ast.literal_eval` of `Params`. `resolve_bundles` now converts them with
+  `np.generic.item()`.
+- **A text-mode Python read/write converts CRLF files to LF**, which shows as a
+  whole-file diff. `unified_bayesian.py` and `models.py` are CRLF in the index,
+  `search_spaces.py` is LF. Restore CRLF before committing.
