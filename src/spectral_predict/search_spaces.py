@@ -33,8 +33,10 @@ import json
 import math
 import numbers
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
+
+import numpy as np
 
 SPACE_SCHEMA_VERSION = 1
 
@@ -59,6 +61,26 @@ OBJECTIVE_RESERVED_NAMES: frozenset[str] = frozenset(
         "region_id",
     }
 )
+
+
+def _to_builtin(value: Any) -> Any:
+    """Normalise NumPy scalars and ``str``/``int``/``float`` subclasses to builtins.
+
+    Values written into model params must round-trip through the leaderboard ``Params``
+    string, and ``repr`` of a NumPy scalar (``np.str_('x')``) does not survive
+    ``ast.literal_eval``. Anything else is returned unchanged for validation to judge.
+    """
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, str):
+        return str(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return float(value)
+    return value
 
 
 class ExtraAxesConfigError(ValueError):
@@ -105,6 +127,18 @@ class AxisSpec:
     param_name: str | None = None
     applies_when_id: str | None = None
 
+    def __post_init__(self) -> None:
+        # NumPy scalars compare equal to builtins by NumPy's rules but hash by value:
+        # np.float32(0.1) == 0.1 is True, yet it holds 0.10000000149. Normalising at
+        # construction keeps "equal implies equal hash" (Codex review of #78).
+        object.__setattr__(self, "low", _to_builtin(self.low))
+        object.__setattr__(self, "high", _to_builtin(self.high))
+        object.__setattr__(self, "step", _to_builtin(self.step))
+        if isinstance(self.choices, (tuple, list)):
+            object.__setattr__(
+                self, "choices", type(self.choices)(_to_builtin(c) for c in self.choices)
+            )
+
     @property
     def optuna_name(self) -> str:
         return self.param_name or self.key
@@ -123,16 +157,25 @@ class BundleSpec:
         label: Short GUI label.
         help: GUI/doc help text.
         revision: Bump on any semantic change to this bundle.
+        family_task_types: Optional per-family restriction of ``task_types``, for
+            bundles whose families are task-specific (SVM classifies, SVR regresses).
+            A family listed here resolves only for its listed tasks; requesting the
+            bundle for a listed family with any other task in ``task_types`` raises
+            :class:`ExtraAxesConfigError`. Not part of the space identity: it never
+            changes the effective space of a pair that resolves.
     """
 
     id: str
     families: frozenset[str]
     task_types: frozenset[str]
     axes: tuple[AxisSpec, ...]
-    constants: Mapping[str, Any] = field(default_factory=dict)
+    # Mapping fields are excluded from __hash__ (still compared by __eq__), so a bundle
+    # stays hashable while callers keep passing plain dicts.
+    constants: Mapping[str, Any] = field(default_factory=dict, hash=False)
     label: str = ""
     help: str = ""
     revision: int = 1
+    family_task_types: Mapping[str, frozenset[str]] | None = field(default=None, hash=False)
 
 
 _SUPERVISED = frozenset({"regression", "classification"})
@@ -278,6 +321,13 @@ def _supervised_bundles() -> tuple[BundleSpec, ...]:
             id="svm_gamma",
             families=frozenset({"SVM", "SVR"}),
             task_types=_SUPERVISED,
+            # build_model has no SVM regressor and no SVR classifier: without this, those
+            # pairs resolved and every trial failed to build (a silent 1e10 penalty).
+            # Revision stays 1: the space of every pair that resolves is unchanged.
+            family_task_types={
+                "SVM": frozenset({"classification"}),
+                "SVR": frozenset({"regression"}),
+            },
             axes=(
                 AxisSpec(
                     key="gamma",
@@ -537,6 +587,14 @@ def resolve_bundles(
         if model_name in registry[bundle_id].families
         and task_type in registry[bundle_id].task_types
     ]
+    for bundle in applicable:
+        restriction = bundle.family_task_types or {}
+        if model_name in restriction and task_type not in restriction[model_name]:
+            raise ExtraAxesConfigError(
+                f"Bundle {bundle.id!r} does not support {model_name} with task "
+                f"{task_type!r}; for {model_name} it supports only "
+                f"{sorted(restriction[model_name])}"
+            )
     reserved = set(base_param_names) | OBJECTIVE_RESERVED_NAMES
     # Owners are structured tuples: string owners could be forged by a key such as
     # "const:tol" and make an axis indistinguishable from a constant.
@@ -569,7 +627,7 @@ def resolve_bundles(
                 )
             _claim(keys, key, owner, "both write model param")
             _no_cross(names, keys, None, key, owner)
-    return tuple(copy.deepcopy(bundle) for bundle in applicable)
+    return tuple(_normalised_copy(bundle) for bundle in applicable)
 
 
 def _claim(
@@ -602,8 +660,21 @@ def _no_cross(
 _LITERAL_TYPES = (bool, int, float, str, type(None))
 
 
+def _normalised_copy(bundle: BundleSpec) -> BundleSpec:
+    """Deep copy of a validated bundle with builtin categorical choices and constants."""
+    axes = tuple(
+        axis
+        if axis.choices is None
+        else replace(axis, choices=tuple(_to_builtin(c) for c in axis.choices))
+        for axis in bundle.axes
+    )
+    constants = {key: _to_builtin(value) for key, value in bundle.constants.items()}
+    return copy.deepcopy(replace(bundle, axes=axes, constants=constants))
+
+
 def _require_literal(bundle_id: str, what: str, value: Any) -> None:
     # Identity hashing and Params round-trips need plain, order-stable literals.
+    value = _to_builtin(value)
     if not isinstance(value, _LITERAL_TYPES):
         raise ExtraAxesConfigError(
             f"Bundle {bundle_id!r} {what}: {type(value).__name__} is not allowed; "
@@ -654,6 +725,21 @@ def _validate_bundle(bundle_id: str, bundle: BundleSpec) -> None:
         raise ExtraAxesConfigError(f"Bundle {bundle_id!r} revision must be an int >= 1")
     if not bundle.axes and not bundle.constants:
         raise ExtraAxesConfigError(f"Bundle {bundle_id!r} has no axes and no constants")
+    if bundle.family_task_types is not None:
+        if not isinstance(bundle.family_task_types, Mapping):
+            raise ExtraAxesConfigError(f"Bundle {bundle_id!r} family_task_types must be a mapping")
+        for family, tasks in bundle.family_task_types.items():
+            _require_name(bundle_id, "family_task_types family", family)
+            _require_str_set(bundle_id, f"family_task_types[{family!r}]", tasks)
+            if (
+                family not in bundle.families
+                or not tasks
+                or not set(tasks) <= set(bundle.task_types)
+            ):
+                raise ExtraAxesConfigError(
+                    f"Bundle {bundle_id!r} family_task_types[{family!r}] must name one of its "
+                    "families and a non-empty subset of its task_types"
+                )
     for axis in bundle.axes:
         _validate_axis(bundle_id, axis)
     for key, value in bundle.constants.items():
@@ -681,9 +767,17 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
             raise ExtraAxesConfigError(f"{where}: categorical axis needs non-empty choices")
         for choice in axis.choices:
             _require_literal(bundle_id, f"axis {axis.key!r} choice", choice)
-        tagged = [json.dumps(_tagged(choice)) for choice in axis.choices]
-        if len(set(tagged)) != len(tagged):
-            raise ExtraAxesConfigError(f"{where}: duplicate categorical choices")
+        # Optuna maps a value back to its choice with list.index, i.e. by ==, so choices
+        # that compare equal (1 and 1.0, True and 1, 0.0 and -0.0) are one choice to it:
+        # a trial could apply one and record the other.
+        choices = [_to_builtin(choice) for choice in axis.choices]
+        for index, choice in enumerate(choices):
+            for earlier in choices[:index]:
+                if choice == earlier:
+                    raise ExtraAxesConfigError(
+                        f"{where}: duplicate categorical choices {earlier!r} and {choice!r}; "
+                        "they compare equal, so Optuna treats them as one choice"
+                    )
         return
     if axis.kind not in ("int", "float"):
         raise ExtraAxesConfigError(f"{where}: unknown kind {axis.kind!r}")
@@ -726,13 +820,13 @@ def _validate_axis(bundle_id: str, axis: AxisSpec) -> None:
 def _tagged(value: Any) -> Any:
     """Type-tag a value so ``1``, ``1.0``, ``True`` and ``'1'`` serialise distinctly.
 
-    Numeric and ``str`` subclasses (e.g. NumPy scalars used as int/float *bounds*, or
-    ``np.str_`` choices) are normalised to ``int``/``float``/``str`` first, and ``-0.0``
-    to ``0.0``, so equivalent values hash alike. NumPy numeric scalars are still rejected
-    as categorical choices and constants by validation, because those values are written
-    into model params and must round-trip through the leaderboard ``Params`` string
-    (``repr(np.int64(3))`` does not survive ``ast.literal_eval``).
+    NumPy scalars and numeric/``str`` subclasses are normalised to builtins first, and
+    ``-0.0`` to ``0.0``, so equivalent values hash alike. Categorical choices and
+    constants are additionally normalised by :func:`resolve_bundles` before they are
+    written into model params, because those must round-trip through the leaderboard
+    ``Params`` string (``repr(np.str_('x'))`` does not survive ``ast.literal_eval``).
     """
+    value = _to_builtin(value)
     if isinstance(value, str):
         value = str(value)
     elif isinstance(value, numbers.Integral) and not isinstance(value, bool):

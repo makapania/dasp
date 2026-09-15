@@ -96,6 +96,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   learning-curve error callback referenced the except-bound `e` after the block ended
   and raised instead of showing the error.
 
+- **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
+  - **Behaviour change: a failed 'auto' SQLite migration no longer deletes anything.**
+    The cleanup called `optuna.delete_study` by name, and nothing could prove this
+    attempt had created that study. Three ways it deleted someone else's:
+    - a locked or permission-denied file read as "no file" (`Path.is_file` swallows
+      those errors);
+    - a `sqlite:///file:x.db?uri=true` URL parsed as a missing path;
+    - another process created the study between the check and the copy, and the copy
+      then failed with a transient lock error.
+
+    The migration failure is now logged as a warning that names the study and storage;
+    a partial copy of the study may remain there. The copy carries this run's data
+    fingerprint (Optuna 5.0 copies study attributes before trials), so a later 'auto'
+    run on the same data resumes it, or discard it with
+    the run's saved state. The resume-gating file check now calls `stat` directly and
+    never treats a SQLite URI filename as an existing file.
+  - An 'always' run that resumes a persisted study whose data fingerprint is missing
+    (a legacy study) or unreadable now warns that the data it ran on can't be verified. The progress
+    event carries `data_unverified_resume: True`. The study is still resumed.
+  - `run_unified_bayesian` raised `NameError` while building its results table whenever
+    `baseline_method` was set and any trial applied baseline correction.
+    `convert_study_to_dataframe` gains a `baseline_params` keyword. Baseline rows now
+    carry the run's `baseline_params`, so the validation rebuild uses non-default
+    ALS/polynomial settings. An empty results frame now also has the
+    `baseline_method` and `baseline_params` columns.
+  - `svm_gamma` resolved for `SVM` + regression and `SVR` + classification, where every
+    trial silently became a penalty. Those pairs now raise `ExtraAxesConfigError`.
+    `BundleSpec` gains an optional `family_task_types`. The bundle's revision and space
+    identity are unchanged, so existing `svm_gamma` studies for the supported
+    `SVM` + classification and `SVR` + regression pairs still resume.
+    `BundleSpec` is now hashable. Its `constants` and `family_task_types` mappings are
+    left out of `__hash__` but still count for equality. `AxisSpec` converts NumPy
+    bounds, steps and choices to Python builtins when it is constructed. Before this,
+    `np.float32(0.1)` compared equal to `0.1` but hashed its true value. The curated
+    bundles' space identities are unchanged.
+  - `model_name="pls-da"` is normalised to `"PLS-DA"`. Before this, `plsda_head` never
+    resolved and every trial failed to build. Lowercase callers now get the `PLS-DA`
+    study name.
+  - Categorical choices that compare equal (`1` and `1.0`, `True` and `1`) are
+    rejected. Optuna treats them as one choice, so a trial could fit one value and
+    record the other.
+  - NumPy scalars in bundle `constants` and `choices` are converted to Python
+    builtins. Before this, `np.str_` or `np.float64` reached the `Params` string, which
+    `ast.literal_eval` cannot parse, and `np.int64` was rejected.
+  - Two latent flake8 F821 names (`PersistenceMode` annotation, a dead `return model`
+    in `models.get_model`).
+
 - **CatBoost no longer writes `catboost_info/`.** Every CatBoost fit wrote a
   training-log directory into the current working directory, so fits failed with
   `Can't create train working dir: catboost_info` when the cwd was unwritable (an

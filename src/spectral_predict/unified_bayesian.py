@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 import ast
 import numbers
+import stat
 from pathlib import Path
 
 import numpy as np
@@ -60,6 +61,10 @@ from sklearn.metrics import (
     f1_score, precision_score, recall_score, classification_report
 )
 from typing import Dict, List, Optional, Callable, Tuple, Any, Mapping, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # annotation only; imported lazily at runtime (see run_unified_bayesian)
+    from spectral_predict.run_state import PersistenceMode
 
 # Import existing infrastructure
 from spectral_predict.preprocess import SNV, SavgolDerivative, SavgolSmooth
@@ -2279,29 +2284,40 @@ def _data_fingerprint(X: np.ndarray, y: np.ndarray, wavelengths: np.ndarray) -> 
     return digest.hexdigest()[:16]
 
 
-def _sqlite_file_exists(storage_url: str) -> bool:
-    """True if a ``sqlite:///`` storage URL points at an existing, non-empty file.
+_SQLITE_URL_PREFIX = "sqlite:///"
 
-    Never opens or creates the database. A zero-byte file (a crash before the
-    schema was written) counts as absent, because listing its studies would write
-    the schema.
+
+def _sqlite_file_exists(storage_url: str) -> bool:
+    """True only if a ``sqlite:///`` URL positively points at an existing, non-empty file.
+
+    Gates the 'auto' resume check, which must never open or create the database, so
+    anything short of proof reports False (that run simply stays in memory):
+
+    - a zero-byte file (a crash before the schema was written; listing its studies
+      would write the schema);
+    - a SQLite URI filename (``sqlite:///file:x.db?uri=true``), whose path cannot be
+      resolved without SQLite's own URI parsing;
+    - any ``stat`` error. ``stat`` is called directly because ``Path.is_file`` swallows
+      every ``OSError`` (on Python 3.14 it is ``os.path.isfile``).
+
+    Nothing is ever deleted on the strength of a False here.
     """
-    prefix = "sqlite:///"
-    if not storage_url.startswith(prefix):
+    if not storage_url.startswith(_SQLITE_URL_PREFIX):
         return False
-    path = Path(storage_url[len(prefix):].split("?", 1)[0])
+    raw_path, _, query = storage_url[len(_SQLITE_URL_PREFIX):].partition("?")
+    if raw_path.startswith("file:") or "uri=true" in query.lower():
+        return False
     try:
-        return bool(str(path)) and path.is_file() and path.stat().st_size > 0
-    except OSError:
-        # Vanished or locked between checks: advisory, so report absent, never raise.
+        st = Path(raw_path).stat()
+    except (OSError, ValueError):
         return False
+    return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
 def _study_exists(storage_url: str, study_name: str) -> bool | None:
     """Whether ``study_name`` is in the storage; ``None`` if that cannot be determined.
 
-    Callers must treat ``None`` conservatively: it never authorises a resume, and
-    never authorises a deletion.
+    Callers must treat ``None`` conservatively: it never authorises a resume.
     """
     try:
         return study_name in optuna.study.get_all_study_names(storage=storage_url)
@@ -2558,6 +2574,9 @@ def run_unified_bayesian(
     # Normalize model name to expected case for build_model
     model_name_map = {
         'pls': 'PLS',
+        # suggest_model_params accepts 'pls-da'; without this entry the
+        # case-sensitive PLS-DA checks (head params, plsda_head bundle) miss it.
+        'pls-da': 'PLS-DA',
         'ridge': 'Ridge',
         'lasso': 'Lasso',
         'elasticnet': 'ElasticNet',
@@ -2961,6 +2980,19 @@ def run_unified_bayesian(
                             "message": f"[T-41] WARNING: {_msg}",
                             "data_mismatch_resume": True,
                         })
+                elif _stored_fp is None:
+                    # Legacy study or unreadable attrs: still resumed, but say so.
+                    _msg = (
+                        f"Resuming a persisted {model_name} study with a missing or "
+                        "unreadable data fingerprint; the data it ran on can't be verified."
+                    )
+                    logger.warning("T-41: %s", _msg)
+                    if progress_callback is not None:
+                        progress_callback({
+                            "stage": "unified_bayesian",
+                            "message": f"[T-41] WARNING: {_msg}",
+                            "data_unverified_resume": True,
+                        })
             # Pre-fingerprint studies carry the bare base name, so their
             # environment is unknown rather than known to differ.
             _legacy = sorted(n for n in _existing if n == _study_base)
@@ -3222,14 +3254,6 @@ def run_unified_bayesian(
                     # _study_ref here doesn't redirect writes. Stop the in-memory
                     # loop, the outer scope restarts on _study_ref[0] so trials
                     # 11..N land directly in SQLite.
-                    # Only a study this attempt creates may be deleted on failure.
-                    # `_target_absent` is True only when the storage positively
-                    # reported the name missing (or the file does not exist yet);
-                    # an unanswerable check (None) never authorises a deletion.
-                    if _sqlite_file_exists(storage_url):
-                        _target_absent = _study_exists(storage_url, study_name) is False
-                    else:
-                        _target_absent = True
                     try:
                         migrated = _migrate_study_to_sqlite(
                             cb_study, storage_url, study_name, random_state,
@@ -3241,42 +3265,24 @@ def run_unified_bayesian(
                         cb_study.stop()
                         return
                     except Exception as exc:
-                        # Partial-success cleanup: copy_study may have created the
-                        # study row in SQLite before load_study failed. Use
-                        # optuna.delete_study to remove ONLY this study from
-                        # the database — multi-model runs share one SQLite file,
-                        # so unlinking the file would nuke prior models' trials.
+                        # No cleanup delete, deliberately (Codex review of #78). Nothing
+                        # can prove this attempt created the stored study: between any
+                        # absence check and copy_study, another process may create it,
+                        # and a transient lock error is not a DuplicatedStudyError.
+                        # Deleting by name could destroy that study. A partial copy may
+                        # remain; it carries this run's data fingerprint, so a later
+                        # 'auto' run resumes it, or the user discards it.
                         # _auto_migrated stays False so the outer scope doesn't
                         # try to restart on a half-broken study.
                         logger.warning(
-                            "T-41: SQLite migration failed; staying in-memory (no crash-resume for this run): %s",
+                            "T-41: SQLite migration of study %r to %s failed; staying "
+                            "in-memory (no crash-resume for this run). Nothing was deleted: "
+                            "a partial copy of this study may remain in that storage. "
+                            "Reason: %s",
+                            study_name,
+                            storage_url,
                             exc,
                         )
-                        try:
-                            # DuplicatedStudyError: copy_study found the name taken
-                            # at copy time and wrote nothing, so the study belongs to
-                            # someone else (closes the check-then-copy race).
-                            if isinstance(exc, optuna.exceptions.DuplicatedStudyError) or (
-                                not _target_absent
-                            ):
-                                logger.warning(
-                                    "T-41: not deleting %s after the failed migration: "
-                                    "this attempt did not create it (it may hold earlier "
-                                    "results).",
-                                    study_name,
-                                )
-                            else:
-                                optuna.delete_study(
-                                    study_name=study_name,
-                                    storage=storage_url,
-                                )
-                        except Exception as cleanup_exc:
-                            # KeyError if the study row was never written, or
-                            # any other delete failure — log and continue.
-                            logger.warning(
-                                "T-41: could not delete failed-migration study from SQLite: %s",
-                                cleanup_exc,
-                            )
                         if progress_callback:
                             progress_callback({
                                 "stage": "unified_bayesian",
@@ -3436,6 +3442,7 @@ def run_unified_bayesian(
         cv_strategy=cv_strategy,
         cv_n_repeats=cv_n_repeats,
         n_samples_used=n_samples,
+        baseline_params=baseline_params,
     )
 
     if verbose:
@@ -3492,6 +3499,7 @@ def convert_study_to_dataframe(
     cv_strategy: str = 'kfold',
     cv_n_repeats: int = 5,
     n_samples_used: Optional[int] = None,
+    baseline_params: dict | None = None,
 ) -> pd.DataFrame:
     """Convert Optuna study to results DataFrame.
 
@@ -3517,6 +3525,11 @@ def convert_study_to_dataframe(
         Baseline correction method used (for display name prefixes)
     smoothing : bool
         Whether smoothing was available as an Optuna toggle
+    baseline_params : dict or None
+        Run-level baseline-method parameters (the same ``baseline_params`` passed to
+        :func:`run_unified_bayesian`; not stored per trial). Written to the
+        ``baseline_params`` column of trials that applied baseline correction so the
+        validation rebuild reproduces non-default settings.
 
     Returns
     -------
@@ -3714,7 +3727,7 @@ def convert_study_to_dataframe(
         cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
                 'early_stopping_rounds', 'trial_number', 'Folds', 'Optimization',
-                'imbalance_method', 'imbalance_params']
+                'imbalance_method', 'imbalance_params', 'baseline_method', 'baseline_params']
         if task_type == 'one_class':
             cols.extend([
                 'Sensitivity', 'Specificity', 'Precision', 'F1', 'Accuracy', 'BalancedAcc', 'AUC',
