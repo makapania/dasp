@@ -1673,3 +1673,16 @@ should always block — they found two crash bugs no test covered.
       given.
     - *Remaining out of scope (pre-existing, not run_state):* grid, one-class grid,
       NSGA-II and post-search validation/config still read live Tk state.
+  - **Round 13 (Codex block on round 12, 2026-09-15) — final round before merge:**
+    - *Empty saved holdout:* the round-12 reconciliation returned early when the run
+      had no saved validation indices, so creating a holdout before resuming silently
+      changed the training rows (the backend only warns). Now every difference is
+      compared, including saved-empty.
+    - *Half-cleared validation set (regression introduced in round 12):* the restore
+      set `validation_X = None` before verifying the saved labels exist. On failure the
+      GUI kept `validation_indices`/`validation_y` with `validation_X` None, and the
+      next run excluded those rows but skipped validation metrics. The restore now
+      builds `X.loc[saved]`/`y.loc[saved]` first and only then replaces state; it no
+      longer goes through `_apply_pending_validation_indices` (whose "already populated"
+      no-op was the round-12 bug in the first place).
+    - Required-setting check is conditional on the option's toggle.

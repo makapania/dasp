@@ -260,6 +260,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       snapshot, the worker never falls back to a live control.
     - A delete that removed the record but not the store also releases the resume.
       The dialog says the run can no longer be resumed instead of offering a retry.
+  - **Round 13 (Codex review of round 12):**
+    - A resumed run that held nothing out is compared too. Creating a validation
+      holdout before resuming changes the rows that run trained on, so the same
+      three-way dialog now appears (use the run's split — here, no holdout — delete
+      and start fresh, or cancel).
+    - A failed validation restore changes nothing. It used to clear `validation_X`
+      before checking the run's samples were present, which left the current
+      validation set half-cleared and silently skipped validation metrics in a later
+      run. Both replacement slices are built before anything is replaced.
+    - A blank detail box belonging to a switched-off option (e.g. the smoothing
+      window with Bayesian smoothing off) no longer blocks the launch.
+    - The pending-run Delete message no longer offers a retry once the record or the
+      store was deleted.
   - **Known limitations (not addressed):**
     - Two dasp windows share one `active_run.json` with no file lock. The last
       `start_run` wins, and a window may offer or delete a run another window just

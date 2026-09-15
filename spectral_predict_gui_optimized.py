@@ -2643,6 +2643,12 @@ BAYESIAN_REQUIRED_SETTINGS = (
     "validation_enabled", "enable_imbalance_handling", "imbalance_method",
 )
 
+# Values only read when their option is on; blank ones don't block a launch.
+BAYESIAN_CONDITIONAL_SETTINGS = (
+    ("bayes_enable_smoothing", ("smoothing_window", "smoothing_polyorder")),
+    ("bayes_enable_baseline", ("bayes_baseline_method",)),
+)
+
 
 def _launch_settings_snapshot(app):
     """Analysis settings at the click, or None if they can't be captured (#79 round 11)."""
@@ -26440,27 +26446,33 @@ class SpectralPredictApp:
         saved = list(meta.validation_indices or [])
         if saved_settings.get("validation_enabled") is False:
             saved = []  # the run held nothing out, whatever indices it recorded
-        if not saved:
-            self._pending_validation_indices = None
-            return "ok"
+        saved_set = set(saved)
         try:
             enabled = bool(self.validation_enabled.get())
         except Exception:
             enabled = False
         current = set(self.validation_indices or []) if enabled else set()
-        if current == set(saved):
+        if current == saved_set:
             self._pending_validation_indices = None
             return "ok"
+        # Round 13 (Codex): an EMPTY saved holdout is a difference too — the run
+        # trained on every row, so holding rows out now changes its training data.
         if current:
+            moved = len(current - saved_set)
+            run_had = (
+                f"held out {len(saved)} validation samples"
+                if saved
+                else "held nothing out (it trained on every row)"
+            )
             try:
                 answer = messagebox.askyesnocancel(
                     "Validation set differs from the interrupted run",
-                    f"The interrupted run {meta.run_id} held out {len(saved)} "
-                    f"validation samples; the validation set now holds out "
-                    f"{len(current)} ({len(current - set(saved))} of them were "
-                    "used for training by that run).\n\n"
+                    f"The interrupted run {meta.run_id} {run_had}; the validation "
+                    f"set now holds out {len(current)} sample(s), {moved} of which "
+                    "that run trained on.\n\n"
                     "Nothing was run and nothing was deleted.\n\n"
-                    "  • Yes — use the run's own validation set and resume.\n"
+                    "  • Yes — use the run's own validation set"
+                    f"{' (no holdout)' if not saved else ''} and resume.\n"
                     "  • No — delete the interrupted run and start fresh with the "
                     "current validation set.\n"
                     "  • Cancel — change nothing and run nothing.",
@@ -26474,21 +26486,65 @@ class SpectralPredictApp:
                 return None
             if answer is False:
                 return "fresh"
-        # Restore the run's split here, not in the worker, so it is frozen at the click.
-        self.validation_X = None
-        self._pending_validation_indices = saved
-        self._apply_pending_validation_indices(self.X, self.y)
-        if set(self.validation_indices or []) != set(saved):
-            try:
-                messagebox.showerror(
-                    "Can't restore the validation set",
-                    "The interrupted run's validation samples are not all in the "
-                    "loaded data, so its validation set can't be restored. Nothing "
-                    "was run.",
+        # Restore the run's split here, not in the worker, so it is frozen at the
+        # click. Round 13 (Codex): build both replacement slices BEFORE touching any
+        # current validation state — a failure used to leave validation_X cleared
+        # but the indices in place, so a later run silently skipped its metrics.
+        if saved:
+            X_now, y_now = self.X, self.y
+            missing = [
+                label for label in saved
+                if X_now is None or y_now is None
+                or label not in X_now.index or label not in y_now.index
+            ]
+            if missing:
+                self._log_progress(
+                    f"[RUN] Resume kept — {len(missing)} of the interrupted run's "
+                    "validation samples are not in the loaded data."
                 )
+                try:
+                    messagebox.showerror(
+                        "Can't restore the validation set",
+                        "The interrupted run's validation samples are not all in "
+                        "the loaded data, so its validation set can't be restored. "
+                        "Nothing was run and nothing was changed.",
+                    )
+                except Exception:
+                    pass
+                return None
+            try:
+                new_validation_X = X_now.loc[saved]
+                new_validation_y = y_now.loc[saved]
+            except Exception as slice_err:
+                self._log_progress(
+                    f"[RUN] Resume kept — validation restore failed: {slice_err}"
+                )
+                try:
+                    messagebox.showerror(
+                        "Can't restore the validation set",
+                        "The interrupted run's validation set could not be rebuilt "
+                        f"from the loaded data.\n\nDetails: {slice_err}\n\nNothing "
+                        "was run and nothing was changed.",
+                    )
+                except Exception:
+                    pass
+                return None
+            self.validation_indices = set(saved)
+            self.validation_X = new_validation_X
+            self.validation_y = new_validation_y
+            status = f"Validation set restored from resume: {len(saved)} samples"
+        else:
+            self.validation_indices = set()
+            self.validation_X = None
+            self.validation_y = None
+            status = "Validation set cleared to match the resumed run (no holdout)"
+        self._pending_validation_indices = None
+        self._log_progress(f"[RUN] {status}.")
+        if hasattr(self, "validation_status_label"):
+            try:
+                self.validation_status_label.config(text=status)
             except Exception:
                 pass
-            return None
         return "ok"
 
     def _reconcile_resume_models_and_trials(self, meta, selected_models):
@@ -26628,7 +26684,13 @@ class SpectralPredictApp:
         # snapshot. A setting that can't be read (e.g. a blank number box) must
         # stop the launch, not fall back to whatever the box holds later.
         snapshot = _launch_settings_snapshot(self) or {}
-        unreadable = sorted(set(BAYESIAN_REQUIRED_SETTINGS) - set(snapshot))
+        required = set(BAYESIAN_REQUIRED_SETTINGS)
+        # Detail boxes of a switched-off option are never read, so a blank one
+        # must not block the launch (round 13, Codex).
+        for toggle, details in BAYESIAN_CONDITIONAL_SETTINGS:
+            if not snapshot.get(toggle):
+                required -= set(details)
+        unreadable = sorted(required - set(snapshot))
         if unreadable:
             self._log_progress(f"[RUN] Can't read settings: {', '.join(unreadable)}")
             try:
@@ -26802,10 +26864,16 @@ class SpectralPredictApp:
                             messagebox.showerror(
                                 "Couldn't delete the interrupted run",
                                 "The interrupted run could not be fully "
-                                "deleted, so nothing was started — starting "
-                                "fresh would otherwise risk overwriting the "
-                                f"saved run.\n\nDetails: {result.errors}"
-                                "\n\nClick Run Analysis again to retry.",
+                                "deleted, so nothing was started.\n\n"
+                                f"Details: {result.errors}\n\n"
+                                + (
+                                    # Its trials or its record are gone, so a
+                                    # retry has nothing left to delete.
+                                    "It can no longer be resumed. Click Run "
+                                    "Analysis again to start fresh."
+                                    if (result.storage_deleted or result.sidecar_deleted)
+                                    else "Click Run Analysis again to retry."
+                                ),
                             )
                         except Exception:
                             pass
