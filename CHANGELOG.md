@@ -230,6 +230,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       completes.
     - A record that becomes damaged after a resume was claimed is offered for moving
       aside from Run Analysis. Before, only restarting dasp got out of that state.
+  - **Round 11 (Codex review of round 10):**
+    - The Bayesian branches read their settings (CV, baseline, smoothing, regions,
+      UVE, autoscale, imbalance, persistence) from a snapshot taken at the click
+      (`analysis_settings`). Changing one during a multi-model run used to give later
+      models a different study. When that run finished, the record of the approved
+      one was released while its studies were still unfinished.
+      `_get_baseline_params_for_method` and `_get_imbalance_params` take an optional
+      `get` reader.
+    - If a delete removes the store but can't remove the record, the resume is
+      released. A later click with matching data used to "resume" a run whose trials
+      were gone.
+    - `discard_incomplete_run` also keeps the record when the store path can't be
+      resolved (`OSError`), so the delete can be retried.
+    - After a damaged record is moved aside, the claim is released before the re-read,
+      so a failing re-read can no longer leave the resume stuck.
   - **Known limitations (not addressed):**
     - Two dasp windows share one `active_run.json` with no file lock. The last
       `start_run` wins, and a window may offer or delete a run another window just

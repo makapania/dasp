@@ -2632,6 +2632,16 @@ def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, 
 _LAUNCH_CONTEXT_UNSET = object()
 
 
+def _launch_settings_snapshot(app):
+    """Analysis settings at the click, or None if they can't be captured (#79 round 11)."""
+    try:
+        from spectral_predict.run_gui_settings import capture_gui_settings
+
+        return capture_gui_settings(app)
+    except Exception:
+        return None
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -23350,25 +23360,29 @@ class SpectralPredictApp:
         if hasattr(self, 'imbalance_banner_label'):
             self.imbalance_banner_label.config(text="")
 
-    def _get_imbalance_params(self):
-        """Get current imbalance handling parameters for analysis."""
-        if not self.enable_imbalance_handling.get():
+    def _get_imbalance_params(self, get=None):
+        """Get current imbalance handling parameters for analysis.
+
+        ``get(name)`` reads a setting; defaults to the live Tk variable.
+        """
+        get = get or (lambda name: getattr(self, name).get())
+        if not get("enable_imbalance_handling"):
             return None, None
 
-        method = self.imbalance_method.get()
+        method = get("imbalance_method")
 
         # Build parameter dict based on method
         params = {}
         if method in ['smote', 'adasyn', 'borderline_smote', 'smote_tomek', 'smote_enn']:
-            params['k_neighbors'] = self.k_neighbors.get()
+            params['k_neighbors'] = get("k_neighbors")
         elif method in ['smogn', 'oversample', 'smotetomek']:
             # Regression resampling methods use both k_neighbors and n_bins
-            params['k_neighbors'] = self.k_neighbors.get()
-            params['n_bins'] = self.n_bins.get()
+            params['k_neighbors'] = get("k_neighbors")
+            params['n_bins'] = get("n_bins")
         elif method in ['undersample', 'binning']:
-            params['n_bins'] = self.n_bins.get()
+            params['n_bins'] = get("n_bins")
         elif method == 'rare_boost':
-            params['boost_factor'] = self.boost_factor.get()
+            params['boost_factor'] = get("boost_factor")
 
         return method, params
 
@@ -23515,36 +23529,37 @@ class SpectralPredictApp:
 
         return True, self.smoothing_window.get(), self.smoothing_polyorder.get()
 
-    def _get_baseline_params_for_method(self, method: str) -> tuple:
+    def _get_baseline_params_for_method(self, method: str, get=None) -> tuple:
         """Get baseline params for a specific method, reading detail values from shared widgets.
 
         Unlike _get_baseline_params(), this takes the method as an argument
         rather than reading self.baseline_method, and always returns params
         (never checks self.enable_baseline).
         """
+        get = get or (lambda name: getattr(self, name).get())
         params = {}
         if method == 'polynomial':
-            params['degree'] = self.baseline_poly_degree.get()
+            params['degree'] = get("baseline_poly_degree")
         elif method == 'als':
             try:
-                params['lam'] = float(self.baseline_asls_lambda.get())
+                params['lam'] = float(get("baseline_asls_lambda"))
             except ValueError:
                 params['lam'] = 1e5
             try:
-                params['p'] = float(self.baseline_asls_p.get())
+                params['p'] = float(get("baseline_asls_p"))
             except ValueError:
                 params['p'] = 0.01
         elif method == 'rubber_band':
             pass
         elif method == 'airpls':
             try:
-                params['lam'] = float(self.baseline_airpls_lambda.get())
+                params['lam'] = float(get("baseline_airpls_lambda"))
             except ValueError:
                 params['lam'] = 1e5
         elif method == 'advanced':
-            params['algorithm'] = self.baseline_advanced_algorithm.get()
+            params['algorithm'] = get("baseline_advanced_algorithm")
             try:
-                params['lam'] = float(self.baseline_advanced_lam.get())
+                params['lam'] = float(get("baseline_advanced_lam"))
             except ValueError:
                 params['lam'] = 1e5
         return method, params
@@ -24385,6 +24400,9 @@ class SpectralPredictApp:
                     # The mode the gate decided for; a later radio change must
                     # not turn this launch into an unchecked Bayesian run.
                     analysis_modes=(self.optimization_method.get(), self.task_type.get()),
+                    # Settings as approved at the click; a change during a
+                    # multi-model run must not give later models other studies.
+                    analysis_settings=_launch_settings_snapshot(self),
                 ),
                 daemon=True,
             )
@@ -26768,6 +26786,13 @@ class SpectralPredictApp:
                         f"[RUN] Could not fully delete the interrupted run: "
                         f"{result.errors}"
                     )
+                    if result.storage_deleted:
+                        # Round 11 (Codex): its trials are gone, so it can't be
+                        # resumed any more. Release the claim; the leftover record
+                        # names a missing store, is never offered again, and the
+                        # next Bayesian run replaces it.
+                        abandon_resume()
+                        self._pending_validation_indices = None
                     try:
                         messagebox.showerror(
                             "Couldn't delete the interrupted run",
@@ -26800,6 +26825,10 @@ class SpectralPredictApp:
         except CorruptRunRecordError as corrupt_err:
             if not self._offer_to_set_aside_corrupt_run_record(corrupt_err, at_launch=False):
                 return False
+            # Moved aside (or valid again): the claim on the damaged record is
+            # released before anything else can fail (round 11, Codex).
+            abandon_resume()
+            self._pending_validation_indices = None
             try:
                 still_there = find_incomplete_run()
             except (CorruptRunRecordError, OSError) as reread_err:
@@ -26811,8 +26840,6 @@ class SpectralPredictApp:
                     "[RUN] The run record is readable again; click Run Analysis again."
                 )
                 return False
-            abandon_resume()
-            self._pending_validation_indices = None
             self._log_progress(
                 "[RUN] The interrupted run's record was damaged and has been moved "
                 "aside; starting a fresh analysis."
@@ -27031,7 +27058,7 @@ class SpectralPredictApp:
                               analysis_run_id=_LAUNCH_CONTEXT_UNSET,
                               uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET,
                               analysis_n_trials=None, analysis_data=None,
-                              analysis_modes=None):
+                              analysis_modes=None, analysis_settings=None):
         """Run analysis in background thread.
 
         ``analysis_n_trials``: Bayesian trials per model frozen by the launch gate
@@ -27046,6 +27073,11 @@ class SpectralPredictApp:
         (round 10, Codex): dispatch uses these, so switching Grid to Bayesian while
         the worker starts can't reach a resumed run's storage unchecked. None reads
         the live controls, as direct test calls do.
+
+        ``analysis_settings``: ``capture_gui_settings`` snapshot taken at the click
+        (round 11, Codex). The Bayesian branches read their settings from it, so
+        changing e.g. autoscale while PLS runs can't give Ridge a different study
+        than the one the resume was approved for. None reads the live controls.
 
         ``controller``: THIS worker's own ``SearchController``, captured by
         ``_run_analysis`` on the main thread before the thread was started.
@@ -27073,6 +27105,11 @@ class SpectralPredictApp:
         what this worker does, because it never re-asks.
         """
         my_controller = controller if controller is not None else self.search_controller
+
+        def _setting(name):
+            if analysis_settings is not None and name in analysis_settings:
+                return analysis_settings[name]
+            return getattr(self, name).get()
         def _bayes_n_trials():
             # Frozen at launch when given; a resume keeps the run's own count.
             return analysis_n_trials if analysis_n_trials is not None else self.n_unified_trials.get()
@@ -29260,7 +29297,7 @@ class SpectralPredictApp:
             n_total_original = len(X_run)  # Total samples before filtering
 
             # Get imbalance handling parameters (if enabled)
-            imbalance_method, imbalance_params = self._get_imbalance_params()
+            imbalance_method, imbalance_params = self._get_imbalance_params(get=_setting)
             if imbalance_method:
                 self._log_progress(f"Imbalance handling: {imbalance_method} with params {imbalance_params}")
 
@@ -29350,17 +29387,17 @@ class SpectralPredictApp:
                     X_oc_np = X_filtered.values if hasattr(X_filtered, 'values') else X_filtered
                     y_oc_np = y_filtered.values if hasattr(y_filtered, 'values') else y_filtered
 
-                    if self.bayes_enable_baseline.get():
+                    if _setting("bayes_enable_baseline"):
                         bl_method_oc, bl_params_oc = self._get_baseline_params_for_method(
-                            self.bayes_baseline_method.get()
+                            _setting("bayes_baseline_method"), get=_setting
                         )
                     else:
                         bl_method_oc, bl_params_oc = None, None
 
-                    if self.bayes_enable_smoothing.get():
+                    if _setting("bayes_enable_smoothing"):
                         sm_enabled_oc = True
-                        sm_win_oc = self.smoothing_window.get()
-                        sm_poly_oc = self.smoothing_polyorder.get()
+                        sm_win_oc = _setting("smoothing_window")
+                        sm_poly_oc = _setting("smoothing_polyorder")
                     else:
                         sm_enabled_oc, sm_win_oc, sm_poly_oc = False, 17, 2
 
@@ -29397,9 +29434,9 @@ class SpectralPredictApp:
                                 model_name=oc_model_name,
                                 task_type='one_class',
                                 n_trials=_bayes_n_trials(),
-                                cv_folds=self.folds.get(),
-                                cv_strategy=self.cv_strategy.get(),
-                                cv_n_repeats=self.cv_n_repeats.get(),
+                                cv_folds=_setting("folds"),
+                                cv_strategy=_setting("cv_strategy"),
+                                cv_n_repeats=_setting("cv_n_repeats"),
                                 random_state=42,
                                 verbose=False,
                                 progress_callback=oc_progress_wrapper,
@@ -29409,10 +29446,10 @@ class SpectralPredictApp:
                                 smoothing=sm_enabled_oc,
                                 smoothing_window=sm_win_oc,
                                 smoothing_polyorder=sm_poly_oc,
-                                enable_autoscale=self.bayes_enable_autoscale.get(),  # decoupled from grid Basic Settings
+                                enable_autoscale=_setting("bayes_enable_autoscale"),  # decoupled from grid Basic Settings
                                 inlier_class_label=inlier_label,
-                                enable_uve=self.bayes_enable_uve.get(),
-                                enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
+                                enable_uve=_setting("bayes_enable_uve"),
+                                enable_sqlite_persistence=_setting("bayesian_persistence_mode"),  # T-41
                             )
                             if oc_results_df is not None and len(oc_results_df) > 0:
                                 best = oc_results_df.iloc[0]
@@ -29953,23 +29990,23 @@ class SpectralPredictApp:
                     self._progress_callback(info)
 
                 # Extract baseline/smoothing params from Bayesian-specific controls
-                if self.bayes_enable_baseline.get():
+                if _setting("bayes_enable_baseline"):
                     bl_method, bl_params = self._get_baseline_params_for_method(
-                        self.bayes_baseline_method.get()
+                        _setting("bayes_baseline_method"), get=_setting
                     )
                 else:
                     bl_method, bl_params = None, None
 
-                if self.bayes_enable_smoothing.get():
+                if _setting("bayes_enable_smoothing"):
                     sm_enabled = True
-                    sm_win = self.smoothing_window.get()
-                    sm_poly = self.smoothing_polyorder.get()
+                    sm_win = _setting("smoothing_window")
+                    sm_poly = _setting("smoothing_polyorder")
                 else:
                     sm_enabled, sm_win, sm_poly = False, 17, 2
 
-                region_all = self.bayes_region_test_all.get()
-                region_pairwise = self.bayes_region_test_pairwise.get()
-                enable_uve = self.bayes_enable_uve.get()
+                region_all = _setting("bayes_region_test_all")
+                region_pairwise = _setting("bayes_region_test_pairwise")
+                enable_uve = _setting("bayes_enable_uve")
 
                 unified_model_errors = 0
                 for model_name in selected_models:
@@ -29984,9 +30021,9 @@ class SpectralPredictApp:
                             model_name=model_name,
                             task_type=task_type,
                             n_trials=_bayes_n_trials(),
-                            cv_folds=self.folds.get(),
-                            cv_strategy=self.cv_strategy.get(),
-                            cv_n_repeats=self.cv_n_repeats.get(),
+                            cv_folds=_setting("folds"),
+                            cv_strategy=_setting("cv_strategy"),
+                            cv_n_repeats=_setting("cv_n_repeats"),
                             random_state=42,  # Fixed seed (hardcoded throughout codebase)
                             verbose=False,
                             progress_callback=unified_progress_wrapper,
@@ -30000,9 +30037,9 @@ class SpectralPredictApp:
                             smoothing=sm_enabled,
                             smoothing_window=sm_win,
                             smoothing_polyorder=sm_poly,
-                            enable_autoscale=self.bayes_enable_autoscale.get(),  # decoupled from grid Basic Settings
+                            enable_autoscale=_setting("bayes_enable_autoscale"),  # decoupled from grid Basic Settings
                             enable_uve=enable_uve,
-                            enable_sqlite_persistence=self.bayesian_persistence_mode.get(),  # T-41
+                            enable_sqlite_persistence=_setting("bayesian_persistence_mode"),  # T-41
                         )
 
                         if len(results_df_model) > 0:

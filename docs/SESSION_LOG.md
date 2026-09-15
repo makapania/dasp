@@ -1640,3 +1640,21 @@ should always block — they found two crash bugs no test covered.
       It now also runs at the top of the resuming branch.
       `test_unreadable_sidecar_is_not_a_match` now expects the damaged-record dialog
       first.
+  - **Round 11 (Codex block on round 10, 2026-09-15):**
+    - *Settings read live during the model loop (existed before this PR):* the
+      Bayesian branches called `self.<var>.get()` once per model, so a change during
+      PLS gave Ridge a different study name. The run then completed and released a
+      record whose approved Ridge study never finished. The fix is a
+      `capture_gui_settings` snapshot passed as `analysis_settings`, read through a
+      `_setting(name)` helper in the worker. The baseline and imbalance helpers accept
+      that reader. Other worker paths (grid, NSGA-II, post-search) still read live; they
+      don't touch run_state.
+    - *Store-first delete regression from round 10:* store deleted but record unlink
+      failed → the gate kept `is_resuming()` → the next matching click resumed a run
+      with no store (it silently started over). The resume is now released whenever
+      `storage_deleted` is True. The leftover record names a missing store, so
+      `has_resumable_store` hides it and the next `start_run` replaces it.
+    - A store-path `resolve()` `OSError` is now retryable (record kept); a `ValueError`
+      still is not.
+    - After a successful move-aside, `abandon_resume()` runs before the re-read, so a
+      re-read `OSError` can't leave a claim on a record that no longer exists.

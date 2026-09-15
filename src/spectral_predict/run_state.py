@@ -848,8 +848,12 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     storage_retryable_failure = False
     try:
         storage_path = Path(meta.storage_path).resolve()
-    except (OSError, ValueError) as e:
+    except OSError as e:
+        # Transient (e.g. an unavailable drive): keep the record for a retry.
         errors.append(f"storage_path resolve failed: {e}")
+        storage_retryable_failure = True
+    except ValueError as e:  # e.g. an embedded NUL: retrying can't help
+        errors.append(f"storage path unusable: {e}")
     else:
         if not storage_path.is_relative_to(optuna_dir):
             errors.append(
