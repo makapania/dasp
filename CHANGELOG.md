@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Results-row rebuild helpers on the declared composition surface
+  (`docs/AGENT_COMPOSITION.md` §8b): `models.parse_row_params`,
+  `models.estimator_params_from_row`, `models.plsda_head_kwargs` and
+  `preprocess.preprocessing_config_from_row`.
+
 - **T-51 PR A** — opt-in extra hyperparameter axes for the unified Bayesian search.
   `run_unified_bayesian` gains `enabled_extra_axes`, `search_space` and
   `n_startup_trials`. The new `spectral_predict.search_spaces` module provides
@@ -47,6 +52,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   validation rebuild also uses. Grid-search rows (bare keys) are unaffected, except
   that PLS `n_components` above 10 is no longer clipped to 10 in ensembles.
   **Ensemble results built from Bayesian rows change.**
+- **Ensemble models are rebuilt with the row's full preprocessing.** Only `snv`,
+  `snv_deriv` and `deriv_snv` rows got preprocessing. `deriv` rows (no derivative),
+  every `+`-affixed name (`raw+autoscale`, `als+snv`) and the `Autoscale`, baseline and
+  smoothing columns were ignored, and the per-model scaler was added even when the
+  search had autoscaled. Wavelength subsets of grid/Bayesian rows were taken *before*
+  preprocessing. The ensemble rebuild now shares `preprocess.preprocessing_config_from_row`
+  with the validation rebuild, skips the per-model scaler for autoscaled rows, and takes
+  subsets after preprocessing, as the search does. `raw`/`snv` rows are now plain
+  Pipelines rather than GUI preprocessing wrappers, so ensembles of them refit base
+  models per CV fold (the ensemble default). Legacy `sg1`/`sg2`, `deriv1`-style and GA
+  preprocessing names keep their old path. Validation rebuild: a NaN `smoothing` cell
+  (mixed results tables) no longer turns smoothing on, and a NaN `PreprocessBase` falls
+  back to `Preprocess`. **Ensemble results change.**
+- **NSGA-II rows rebuild with their hyperparameters.** They store `Params` as a dict,
+  and validation rebuild and ensemble reconstruction only parsed strings, so both used
+  defaults. New shared `models.parse_row_params` accepts either.
+- `plsda_head_kwargs` coerces `lr__random_state=42.0` to `42` and `'None'` to `None`,
+  and raises `ValueError` on values `LogisticRegression` would reject.
 - **PLS-DA heads rebuilt from a row keep the search's seed and class weighting.**
   Validation rebuild and ensemble reconstruction forced `random_state=42`; ensemble
   reconstruction also dropped `class_weight`. Both now restore the row's
@@ -54,8 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   search run with another seed and a stochastic solver (`saga`) refits the same head.
   Rows without a recorded seed keep 42.
 - **Ensemble refits of CatBoost models saved before the `catboost_info/` fix** no longer
-  write that directory. Per-fold clones get `allow_writing_files=False` (including
-  CatBoost steps nested in a Pipeline or wrapper); previously the refit failed in an
+  write that directory. Per-fold clones get `allow_writing_files=False`, found by walking
+  params, attributes and step lists (the GUI wrappers' `get_params(deep=True)` is
+  shallow), so CatBoost nested in a Pipeline, a GUI wrapper or a VotingRegressor is
+  covered. Previously the refit failed in an
   unwritable cwd and the model silently got NaN out-of-fold predictions.
 - **GUI NameErrors.** The GUI module had no `logger`, so Model Development refit crashed
   when the task radio disagreed with the saved result's Task (and in two other warning

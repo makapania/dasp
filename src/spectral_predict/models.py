@@ -215,8 +215,18 @@ def plsda_head_kwargs(params: Mapping[str, Any] | None) -> dict[str, Any]:
     Args:
         params: Parsed ``Params`` dict from a results row, or ``None``.
 
+    Hand-edited or re-serialised rows may spell these ``42.0`` or ``'None'``; integral
+    floats become ints and the string ``'None'`` becomes ``None``.
+
+    Args:
+        params: Parsed ``Params`` dict from a results row, or ``None``.
+
     Returns:
         Kwargs for ``LogisticRegression(**kwargs)``.
+
+    Raises:
+        ValueError: If ``lr__random_state`` or ``lr__class_weight`` holds a value
+            ``LogisticRegression`` cannot accept.
     """
     _, head_params = split_plsda_params(params)
     kwargs: dict[str, Any] = {
@@ -224,11 +234,58 @@ def plsda_head_kwargs(params: Mapping[str, Any] | None) -> dict[str, Any]:
         **head_params,
         "random_state": PLSDA_HEAD_DEFAULT_RANDOM_STATE,
     }
-    for name in ("random_state", "class_weight"):
-        key = f"lr__{name}"
-        if params and key in params:
-            kwargs[name] = params[key]
+    if params and "lr__random_state" in params:
+        kwargs["random_state"] = _coerce_head_random_state(params["lr__random_state"])
+    if params and "lr__class_weight" in params:
+        kwargs["class_weight"] = _coerce_head_class_weight(params["lr__class_weight"])
     return kwargs
+
+
+def _coerce_head_random_state(value: Any) -> int | None:
+    if value is None or value == "None":
+        return None
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"lr__random_state must be an integer or None, got {value!r}")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return int(value)
+    raise ValueError(f"lr__random_state must be an integer or None, got {value!r}")
+
+
+def _coerce_head_class_weight(value: Any) -> str | dict | None:
+    if value is None or value == "None":
+        return None
+    if value == "balanced" or isinstance(value, dict):
+        return value
+    raise ValueError(f"lr__class_weight must be None, 'balanced' or a dict, got {value!r}")
+
+
+def parse_row_params(value: Any) -> dict[str, Any]:
+    """Return a results row's ``Params`` cell as a dict.
+
+    Grid and Bayesian rows store ``str(dict)``; NSGA-II rows (and results saved from
+    them) store the dict itself. Anything unparseable (NaN, empty, malformed text,
+    a non-dict literal) gives ``{}``.
+
+    Args:
+        value: The row's ``Params`` value.
+
+    Returns:
+        A new dict of the stored params.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        import ast
+
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
 
 
 # Pipeline step prefixes under which a results row stores the final estimator's params.

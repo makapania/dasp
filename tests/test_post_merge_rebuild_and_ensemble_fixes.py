@@ -199,3 +199,146 @@ def test_ensemble_refit_of_legacy_catboost_writes_no_train_dir(
     # The loaded (fitted) original is untouched; only the per-fold clones changed.
     member = loaded.named_steps["model"] if nested else loaded
     assert "allow_writing_files" not in member.get_params()
+
+
+class _ShallowWrapper:
+    """Mimics the GUI wrappers: get_params(deep=True) returns a shallow dict."""
+
+    def __init__(self, pipeline=None):
+        self.pipeline = pipeline
+
+    def get_params(self, deep=True):
+        return {"pipeline": self.pipeline}
+
+    def set_params(self, **params):
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+    def fit(self, X, y):
+        self.pipeline.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.pipeline.predict(X)
+
+
+def test_refit_clone_reaches_catboost_behind_shallow_get_params() -> None:
+    from sklearn.ensemble import VotingRegressor
+
+    from spectral_predict.ensemble import _clone_for_refit
+
+    def legacy():
+        return catboost.CatBoostRegressor(iterations=5, verbose=False)
+
+    wrapped = _ShallowWrapper(Pipeline([("scaler", StandardScaler()), ("model", legacy())]))
+    voting = VotingRegressor([("cb", legacy()), ("ridge", Ridge())])
+    for model, reach in [
+        (wrapped, lambda m: [m.pipeline.named_steps["model"]]),
+        (voting, lambda m: [m.estimators[0][1]]),
+    ]:
+        clone_ = _clone_for_refit(model)
+        for member in reach(clone_):
+            assert member.get_params()["allow_writing_files"] is False
+        for member in reach(model):
+            assert "allow_writing_files" not in member.get_params()
+
+
+# --- Row parsing helpers --------------------------------------------------------------
+
+
+def test_plsda_head_kwargs_coerces_serialised_seed_and_class_weight() -> None:
+    kwargs = plsda_head_kwargs({"lr__random_state": 42.0, "lr__class_weight": "None"})
+    assert kwargs["random_state"] == 42 and isinstance(kwargs["random_state"], int)
+    assert kwargs["class_weight"] is None
+    assert plsda_head_kwargs({"lr__random_state": "None"})["random_state"] is None
+    assert plsda_head_kwargs({"lr__random_state": np.int64(9)})["random_state"] == 9
+    assert plsda_head_kwargs({"lr__class_weight": {0: 1.0, 1: 3.0}})["class_weight"] == {
+        0: 1.0,
+        1: 3.0,
+    }
+    LogisticRegression(**plsda_head_kwargs({"lr__random_state": 7.0}))  # accepted by sklearn
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"lr__random_state": 4.5},
+        {"lr__random_state": "7"},
+        {"lr__random_state": True},
+        {"lr__class_weight": "balanced_subsample"},
+        {"lr__class_weight": 3},
+    ],
+)
+def test_plsda_head_kwargs_rejects_unusable_values(params) -> None:
+    with pytest.raises(ValueError, match="lr__"):
+        plsda_head_kwargs(params)
+
+
+def test_parse_row_params_accepts_dict_and_string() -> None:
+    from spectral_predict.models import parse_row_params
+
+    stored = {"n_estimators": 25, "max_features": 0.3}
+    assert parse_row_params(stored) == stored
+    assert parse_row_params(stored) is not stored
+    assert parse_row_params(str(stored)) == stored
+    for junk in (None, float("nan"), "", "{not a dict", "[1, 2]"):
+        assert parse_row_params(junk) == {}
+
+
+def test_validation_rebuild_accepts_nsga2_dict_params() -> None:
+    """NSGA-II rows store Params as a dict; the rebuild used to fall back to defaults."""
+    row = pd.Series({"Model": "RandomForest", "Params": None}, dtype=object)
+    row["Params"] = {"n_estimators": 25, "max_features": 0.3, "max_depth": 4}
+    rebuilt = _rebuild_model_from_row(row, "regression")
+    assert (rebuilt.n_estimators, rebuilt.max_features, rebuilt.max_depth) == (25, 0.3, 4)
+
+
+def test_preprocessing_config_from_row_reads_columns_and_display_name() -> None:
+    from spectral_predict.preprocess import preprocessing_config_from_row
+
+    bayes = {
+        "Preprocess": "polynomial+sg0+snv_deriv+autoscale",
+        "PreprocessBase": "snv_deriv",
+        "Deriv": 1,
+        "Window": 11,
+        "Poly": 2,
+        "Autoscale": True,
+        "baseline_method": "polynomial",
+        "baseline_params": "{'degree': 3}",
+        "smoothing": True,
+        "smoothing_window": 13,
+        "smoothing_polyorder": 3,
+    }
+    assert preprocessing_config_from_row(bayes) == {
+        "preprocess_name": "snv_deriv",
+        "deriv": 1,
+        "window": 11,
+        "polyorder": 2,
+        "baseline_method": "polynomial",
+        "baseline_params": {"degree": 3},
+        "smoothing": True,
+        "smoothing_window": 13,
+        "smoothing_polyorder": 3,
+        "autoscale": True,
+    }
+    # Old row: only the display name, with NaN cells from a mixed results table.
+    nan = float("nan")
+    old = {
+        "PreprocessBase": nan,
+        "Preprocess": "als+raw+autoscale",
+        "Deriv": nan,
+        "Window": nan,
+        "Poly": nan,
+        "Autoscale": nan,
+        "smoothing": nan,
+        "smoothing_window": nan,
+    }
+    config = preprocessing_config_from_row(old)
+    assert config["preprocess_name"] == "raw"
+    assert config["baseline_method"] == "als"
+    assert config["autoscale"] is True
+    assert config["smoothing"] is False  # NaN is not "smoothing on"
+    assert (config["deriv"], config["window"], config["polyorder"]) == (None, None, None)
+    assert config["smoothing_window"] == 17
+    assert preprocessing_config_from_row({"Autoscale": "False"})["autoscale"] is False

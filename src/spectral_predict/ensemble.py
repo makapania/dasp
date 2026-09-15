@@ -24,8 +24,7 @@ def _clone_for_refit(model):
     CatBoost models saved before ``allow_writing_files=False`` was set at construction
     would otherwise write ``catboost_info/`` into the cwd on refit, and fail (NaN OOF
     predictions) when the cwd is unwritable. The kwargs go on the unfitted clone, since
-    CatBoost rejects ``set_params`` on a fitted model; nested members (Pipeline steps,
-    wrapper estimators) are reached through ``get_params(deep=True)``.
+    CatBoost rejects ``set_params`` on a fitted model.
     """
     fold_model = clone(model)
     try:
@@ -34,13 +33,47 @@ def _clone_for_refit(model):
         return fold_model
     from .models import CATBOOST_RUNTIME_PARAMS
 
-    members = [fold_model]
-    if hasattr(fold_model, "get_params"):
-        members.extend(fold_model.get_params(deep=True).values())
-    for member in members:
+    for member in _iter_nested_estimators(fold_model):
         if isinstance(member, CatBoost):
             member.set_params(**CATBOOST_RUNTIME_PARAMS)
     return fold_model
+
+
+def _iter_nested_estimators(root):
+    """Yield every estimator reachable from ``root``, each once.
+
+    ``get_params(deep=True)`` is not enough: the GUI wrappers (WavelengthSubsetWrapper
+    and friends) return shallow dicts even for ``deep=True``. This walks each
+    estimator's shallow params and instance attributes, and lists / tuples / sets /
+    dicts inside them (Pipeline.steps, VotingRegressor.estimators).
+    """
+    seen = set()
+    stack = [root]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        if isinstance(obj, (list, tuple, set, frozenset)):
+            children = list(obj)
+        elif isinstance(obj, dict):
+            children = list(obj.values())
+        elif hasattr(obj, "get_params") and not isinstance(obj, type):
+            yield obj
+            children = []
+            try:
+                children.extend(obj.get_params(deep=False).values())
+            except Exception:  # noqa: BLE001 - a broken get_params must not stop the refit
+                pass
+            children.extend(getattr(obj, "__dict__", {}).values())
+        else:
+            continue
+        stack.extend(
+            child
+            for child in children
+            if isinstance(child, (list, tuple, set, frozenset, dict))
+            or (hasattr(child, "get_params") and not isinstance(child, type))
+        )
 
 
 class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):

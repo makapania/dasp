@@ -31,7 +31,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from spectral_predict import unified_bayesian as ub
-from spectral_predict.models import PLSTransformer, estimator_params_from_row, get_model
+from spectral_predict.models import (
+    PLSTransformer,
+    build_model,
+    estimator_params_from_row,
+    get_model,
+)
 from tests.test_t51_supervised_bundles import (
     ROUND_TRIPS,
     _round_trip_data,
@@ -54,9 +59,14 @@ def _reconstruct(app, row: dict, X: pd.DataFrame, y: np.ndarray, task: str):
     return reconstructed[0][0]
 
 
+def _inner(fitted):
+    """The model pipeline, unwrapping a GUI preprocessing wrapper if there is one."""
+    return getattr(fitted, "pipeline", fitted)
+
+
 def _assert_row_params_applied(fitted, row_params: dict) -> None:
     """Every estimator param the row stores reaches the reconstructed estimator."""
-    inner = fitted.pipeline  # the GUI preprocessing wrapper holds the model pipeline
+    inner = _inner(fitted)
     if hasattr(inner, "named_steps") and "lr" in inner.named_steps:  # PLS-DA
         params = inner.get_params(deep=True)
         expected = {k: v for k, v in row_params.items() if k.startswith(("pls__", "lr__"))}
@@ -76,7 +86,7 @@ def test_ensemble_reconstruction_matches_bayesian_search_model(gui_app, name):
 
     fitted = _reconstruct(gui_app, case["row"], X, case["y"], case["task"])
 
-    assert_estimator_carries(fitted.pipeline, case)
+    assert_estimator_carries(_inner(fitted), case)
     _assert_row_params_applied(fitted, case["row_params"])
     np.testing.assert_allclose(
         predictions(fitted, case["X_test"], case["task"]),
@@ -136,11 +146,8 @@ def test_ensemble_reconstruction_grid_row_with_bare_params_still_applies(gui_app
         gui_app, {"Model": "RandomForest", "Params": str(grid_params)}, X, y, "regression"
     )
 
-    model = (
-        fitted.pipeline.named_steps["model"]
-        if hasattr(fitted.pipeline, "named_steps")
-        else fitted.pipeline
-    )
+    inner = _inner(fitted)
+    model = inner.named_steps["model"] if hasattr(inner, "named_steps") else inner
     for key, value in grid_params.items():
         assert model.get_params()[key] == value, key
     np.testing.assert_allclose(fitted.predict(X_test), reference.predict(X_test), rtol=1e-6)
@@ -185,10 +192,215 @@ def test_ensemble_reconstruction_plsda_head_keeps_seed_and_class_weight(gui_app)
             gui_app, {"Model": "PLS-DA", "Params": str(row_params)}, X, y, "classification"
         )
 
-    lr = fitted.pipeline.named_steps["lr"]
+    lr = _inner(fitted).named_steps["lr"]
     assert lr.random_state == 7
     assert lr.class_weight == "balanced"
     np.testing.assert_allclose(fitted.predict_proba(X_test), ref_proba, rtol=1e-6, atol=1e-8)
+
+
+# --- Row preprocessing: Autoscale, derivatives, baseline, smoothing, subsets ----------
+
+WL = [1000 + 2 * i for i in range(30)]
+
+
+def _bayesian_preprocessed(X: np.ndarray, config: dict, baseline_method=None) -> np.ndarray:
+    """The matrix the Bayesian objective fits on (``apply_preprocessing``)."""
+    return ub.apply_preprocessing(
+        X, {"deriv": 0, "window": 0, "polyorder": 0, **config}, baseline_method=baseline_method
+    )
+
+
+PREP_CASES = {
+    # name: (model, estimator pipeline, preprocessing config, baseline, row preprocessing cols)
+    "PLS-autoscale": (
+        "PLS",
+        lambda: Pipeline([("model", PLSRegression(n_components=4, scale=False))]),
+        {"name": "raw", "apply_autoscale": True},
+        None,
+        {"Preprocess": "raw+autoscale", "PreprocessBase": "raw", "Autoscale": True},
+    ),
+    "SVR-autoscale": (
+        "SVR",
+        lambda: Pipeline([("model", build_model("SVR", {"C": 5.0, "gamma": 0.01}))]),
+        {"name": "raw", "apply_autoscale": True},
+        None,
+        {"Preprocess": "raw+autoscale", "PreprocessBase": "raw", "Autoscale": True},
+    ),
+    "MLP-autoscale": (
+        "MLP",
+        lambda: Pipeline(
+            [
+                (
+                    "model",
+                    build_model(
+                        "MLP", {"hidden_layer_sizes": (16,), "alpha": 1e-3, "max_iter": 200}
+                    ),
+                )
+            ]
+        ),
+        {"name": "snv", "apply_autoscale": True},
+        None,
+        {"Preprocess": "snv+autoscale", "PreprocessBase": "snv", "Autoscale": True},
+    ),
+    "PLS-deriv": (
+        "PLS",
+        lambda: Pipeline([("model", PLSRegression(n_components=4, scale=False))]),
+        {"name": "deriv1", "deriv": 1, "window": 11, "polyorder": 2},
+        None,
+        {"Preprocess": "deriv", "PreprocessBase": "deriv", "Deriv": 1, "Window": 11, "Poly": 2},
+    ),
+    "PLS-baseline-smoothing-autoscale": (
+        "PLS",
+        lambda: Pipeline([("model", PLSRegression(n_components=4, scale=False))]),
+        {
+            "name": "snv_deriv1",
+            "deriv": 1,
+            "window": 11,
+            "polyorder": 2,
+            "apply_baseline": True,
+            "apply_smoothing": True,
+            "apply_autoscale": True,
+        },
+        "polynomial",
+        {
+            "Preprocess": "polynomial+sg0+snv_deriv+autoscale",
+            "PreprocessBase": "snv_deriv",
+            "Deriv": 1,
+            "Window": 11,
+            "Poly": 2,
+            "Autoscale": True,
+            "baseline_method": "polynomial",
+            "smoothing": True,
+            "smoothing_window": 17,
+            "smoothing_polyorder": 2,
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PREP_CASES))
+def test_ensemble_reconstruction_honours_row_preprocessing(gui_app, name):
+    model_name, make_reference, config, baseline, prep_cols = PREP_CASES[name]
+    X, y, X_test = _round_trip_data("regression")
+    reference = make_reference()
+    row_params = ub._capture_serializable_params(reference)
+    # Train and test are preprocessed together so the stateful autoscale step sees the
+    # training rows only: fit it on train, then apply it to test.
+    X_all = _bayesian_preprocessed(
+        np.vstack([X.values, X_test]), {**config, "apply_autoscale": False}, baseline
+    )
+    X_tr, X_te = X_all[: len(X)], X_all[len(X) :]
+    if config.get("apply_autoscale"):
+        scaler = StandardScaler().fit(X_tr)
+        X_tr, X_te = scaler.transform(X_tr), scaler.transform(X_te)
+    reference.fit(X_tr, y)
+
+    fitted = _reconstruct(
+        gui_app, {"Model": model_name, "Params": str(row_params), **prep_cols}, X, y, "regression"
+    )
+
+    _assert_row_params_applied(fitted, row_params)
+    inner = _inner(fitted)
+    names = [n for n, _ in inner.steps] if hasattr(inner, "steps") else []
+    assert "scaler" not in names or not config.get("apply_autoscale"), names
+    np.testing.assert_allclose(
+        np.ravel(fitted.predict(X_test)), np.ravel(reference.predict(X_te)), rtol=1e-6, atol=1e-8
+    )
+
+
+def test_ensemble_reconstruction_subsets_after_preprocessing(gui_app):
+    X, y, X_test = _round_trip_data("regression")
+    subset = [2, 3, 5, 8, 13, 21, 22, 23]
+    all_vars = ", ".join(f"{WL[i]:.1f}" for i in subset)
+    reference = Pipeline([("model", PLSRegression(n_components=3, scale=False))])
+    row_params = ub._capture_serializable_params(reference)
+    prep = {"name": "snv_deriv1", "deriv": 1, "window": 11, "polyorder": 2}
+    reference.fit(_bayesian_preprocessed(X.values, prep)[:, subset], y)
+
+    fitted = _reconstruct(
+        gui_app,
+        {
+            "Model": "PLS",
+            "Params": str(row_params),
+            "Preprocess": "snv_deriv",
+            "Deriv": 1,
+            "Window": 11,
+            "Poly": 2,
+            "all_vars": all_vars,
+        },
+        X,
+        y,
+        "regression",
+    )
+
+    np.testing.assert_allclose(
+        np.ravel(fitted.predict(X_test)),
+        np.ravel(reference.predict(_bayesian_preprocessed(X_test, prep)[:, subset])),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+
+
+def test_ensemble_reconstruction_accepts_nsga2_dict_params(gui_app):
+    """NSGA-II rows store Params as the dict itself, not str(dict)."""
+    X, y, X_test = _round_trip_data("regression")
+    params = {"n_estimators": 25, "max_features": 0.3, "max_depth": 4, "random_state": 42}
+    reference = get_model("RandomForest", "regression").set_params(**params).fit(X.values, y)
+    top_models_df = pd.DataFrame(
+        [
+            {
+                "Model": "RandomForest",
+                "Params": None,
+                "Preprocess": "raw",
+                "Deriv": None,
+                "Window": None,
+                "Poly": None,
+            }
+        ]
+    )
+    top_models_df.at[0, "Params"] = params  # a dict cell, as convert_nsga2_to_v1_format writes
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        reconstructed = gui_app._reconstruct_models_from_results(top_models_df, X, y, "regression")
+
+    fitted = reconstructed[0][0]
+    inner = _inner(fitted)
+    model = inner.named_steps["model"] if hasattr(inner, "named_steps") else inner
+    assert model.n_estimators == 25 and model.max_features == 0.3
+    np.testing.assert_allclose(fitted.predict(X_test), reference.predict(X_test), rtol=1e-6)
+
+
+def test_ensemble_refit_reaches_catboost_inside_gui_wrapper(tmp_path, monkeypatch):
+    """GUI wrappers return shallow get_params(deep=True); the refit must still reach CatBoost."""
+    catboost = pytest.importorskip("catboost")
+    from spectral_predict.ensemble import RegionAwareWeightedEnsemble
+    from spectral_predict_gui_optimized import WavelengthSubsetWrapper
+
+    X, y, _ = _round_trip_data("regression")
+    cols = list(X.columns[:12])
+    fit_dir = tmp_path / "fit"
+    fit_dir.mkdir()
+    monkeypatch.chdir(fit_dir)
+    legacy = catboost.CatBoostRegressor(iterations=10, depth=2, random_state=0, verbose=False)
+    wrapped = WavelengthSubsetWrapper(
+        Pipeline([("scaler", StandardScaler()), ("model", legacy)]), cols
+    )
+    wrapped.fit(X, y)
+
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    (blocked / "catboost_info").write_text("not a directory", encoding="utf-8")
+    monkeypatch.chdir(blocked)
+
+    ensemble = RegionAwareWeightedEnsemble(
+        models=[wrapped, Ridge().fit(X, y)], model_names=["CatBoost", "Ridge"], n_regions=2, cv=3
+    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*failed during OOF prediction.*")
+        ensemble.fit(X, y)
+
+    assert np.all(np.isfinite(ensemble.predict(X)))
+    assert (blocked / "catboost_info").is_file()
 
 
 # --- NameErrors -----------------------------------------------------------------------

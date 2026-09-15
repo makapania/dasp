@@ -1113,9 +1113,36 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
 - **Testing a Tk deferred callback:** monkeypatch `app.root.after` to record the function and
   call it after the method returns. Tk's real loop would swallow the NameError via
   `report_callback_exception`, so `root.update()` alone does not fail the test.
-- **Not fixed (out of scope / questions):** ensemble reconstruction ignores the row's
-  `Autoscale` flag (it always adds a per-model scaler for non-tree models and never
-  autoscales PLS/trees). XGBoost classification `sample_weight` is fit-time and not in
+- **Not fixed (questions):** XGBoost classification `sample_weight` is fit-time and not in
   `Params`, so ensembles don't re-apply it (GUI ensembles are regression-only, so moot
   today). `models.py` has a pre-existing, unreachable F821 (`return model` at the end of
   `get_model`).
+
+#### PR #77 review round (Codex block, GLM, DeepSeek)
+
+- **The GUI ensemble rebuild ignored most preprocessing, not just Autoscale.** It matched
+  literal `Preprocess` names only: `snv`/`snv_deriv`/`deriv_snv` built steps, `raw`/`snv`
+  went to a GA wrapper, and **`deriv` (the grid/Bayesian/NSGA-II name for plain
+  derivatives) and every `+`-affixed display name fell through with no preprocessing**.
+  Bayesian and NSGA-II rows also store the *normalised* name (`deriv`, not `deriv1`), so
+  the `NSGA_PREPROCESS_TYPES` numbered list never matched current rows. The validation
+  rebuild's inline row parsing is now `preprocess.preprocessing_config_from_row`, shared by
+  both paths.
+- **Changing wrapper types changes ensemble CV mode.** `_is_wrapped_model` keys on the
+  class name; any wrapped base model switches `create_ensemble(refit_base_models=False)`
+  for the whole ensemble. `raw`/`snv` rows are now plain Pipelines, so ensembles of them
+  refit per fold (the default). Subsets use `FunctionTransformer(np.take, indices, axis=1)`
+  after the preprocessing steps: clonable and picklable, positional like the validation
+  path.
+- **The validation rebuild read `smoothing` as `bool(cell)` before its float check**, so a
+  NaN cell (mixed grid + NSGA-II table) meant smoothing ON. The shared helper treats NaN
+  as off.
+- **GUI wrappers' `get_params(deep=True)` is shallow**, so walking `get_params(deep=True)`
+  misses estimators inside them. `ensemble._iter_nested_estimators` walks shallow params,
+  `__dict__`, and list/tuple/dict containers, with an id() visited set.
+- **Test recipe for Bayesian preprocessing parity:** `unified_bayesian.apply_preprocessing`
+  steps are per-spectrum (stateless) except autoscale, so preprocess train+test together
+  with `apply_autoscale=False`, then fit a `StandardScaler` on the train rows.
+- Still open: rows carrying a `preprocess_chromosome` are rebuilt from the name in
+  ensembles (validation decodes the chromosome). Legacy `sg1`/`sg2`, `deriv1`-style and GA
+  names keep the old wrapper path.
