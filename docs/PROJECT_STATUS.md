@@ -11,6 +11,7 @@
 | **#70** | Test-order leak fix: `reimport_modules` fixture in `tests/conftest.py` | GLM review: merge-with-nits; nits applied (parent imported first, name-order docstring). |
 | **#71** | CI fix: 5 drifted tests, `test_export_code` `sys.executable`, actions v7, docs `paths-ignore`, PR-run concurrency cancel, `timeout-minutes: 180`, black/flake8 informational. | Kimi: merge-with-nits (SVR GUI test now runs at `comprehensive` tier, noted on PR). Its CI run: **ubuntu + optional-deps green (first time)**; Windows 1 failed / 3194 passed — `test_catboost_via_gui` now reaches CatBoost and hits a real bug (below). |
 | **#73** | CatBoost no longer writes `catboost_info/` into the cwd (failed fits when cwd unwritable — installed app in Program Files; Windows CI). `models.CATBOOST_RUNTIME_PARAMS` at every construction; `strip_runtime_params` at every param capture so row params, fingerprints, study names, T2b pins unchanged. Exported scripts now include `allow_writing_files: False`. | Agent-implemented. 23 new tests (16 fail/error on main). Full non-GUI suite 3113 passed / 0 failed; `test_catboost_via_gui` passes. GLM: merge; Kimi: merge-with-nits. |
+| **#74** | T-51 PR B: 11 opt-in supervised bundles (`rf_features`, `xgb_regularization`, `xgb_child`, `xgb_sampling`, `lgbm_regularization`, `lgbm_sampling`, `lgbm_child`, `catboost_sampling`, `svm_gamma`, `mlp_activation`, `plsda_head`) + `apply_extra_axes` duplicate guard. Default path/pins untouched. Enable from Python only until PR D (see `docs/AGENT_COMPOSITION.md` §7b). | Agent-implemented. 134 + 7 GUI new tests; full non-GUI suite 3248 passed / 0 failed. Kimi: merge. GLM: BLOCK — verified false positive (`FixedTrial.params` starts empty; T9 35/35 pass). |
 | **#75** | Removed the Linux Xvfb GUI CI job. T-CI-2 closed: no deadlock — `test_xgboost_via_gui` legitimately needs ~60 min (passes on Windows), far beyond that job's 180s per-test timeout. App is Windows-only; Windows job runs `tests/gui`. | GLM 5.3 Flash (write mode, worktree) diagnosed from the timeout stack dump; Claude reviewed. |
 | **#72** | T-51 PR B0: PLS-DA head params (C/solver/max_iter) survive validation rebuild, Tab 7 refit, ensemble training, export, `build_model`. Shared `models.split_plsda_params`. | Agent-implemented. 34 new tests (16 fail on main). Full non-GUI suite: only known baseline. Kimi + GLM: merge-with-nits, no blockers. CHANGELOG corrected re ensemble `class_weight`. Gotchas: SESSION_LOG 2026-09-14 "T-51 PR B0". |
 
@@ -26,7 +27,7 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
 ### 2b. In progress
-- **T-51 PR B (#74)** open: 11 supervised bundles, agent-implemented; full non-GUI suite 3248 passed / 0 failed. GLM + Kimi reviews running. Agent's questions: should `plsda_head` also apply to model name `PLS` in classification? Tab 7 refit of Bayesian XGBoost rows prints an XGBoost 'params not used' warning (pre-existing, predictions unaffected) — ticket?
+- Nothing in flight. Next T-51 steps: **PR C** (one-class bundles `if_max_samples`, `lof_metric`, `ocsvm_poly`), **PR D** (GUI card so users can enable bundles), E/F (one-class clamp, own approval).
 
 ### 3. Decisions for the user
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
@@ -46,12 +47,13 @@ axis.key))` after `_suggest` in PR B, when bundles land.
    - `split_plsda_params` is public but not on the `docs/AGENT_COMPOSITION.md` surface.
    - Dead `except ValueError` around `PLSTransformer.set_params` in ensemble reconstruction (it never raises).
 3. **#73 follow-ups:** (a) CatBoost models saved before #73 still write `catboost_info/` if refit after load — consider `set_params(allow_writing_files=False)` at load. (b) Tests constructing CatBoost directly can litter the repo root: `tests/test_t20_saved_model_export_parity.py` (~814-935), `tests/test_class_weight_validation_rebuild.py` (~259). (c) Before #73 most search paths *silently* swallowed CatBoost failures (discovery fell back to LightGBM, diagnostics NaN, Bayesian 1e10 penalty, run_search dropped configs) — worth surfacing failures. (d) `docs/AGENT_COMPOSITION.md` §7 says `models_to_test` overrides tier; it only filters within the tier (needs `enabled_models`). (e) New public names (`CATBOOST_RUNTIME_PARAMS`, `with_catboost_runtime_params`, `strip_runtime_params`, `split_plsda_params`) not on the declared surface. (f) Delete `src/spectral_predict/nsga2_search.py.backup` (grep trap; ask user).
-4. **Possible second order-leak:** `tests/test_baseline_advanced.py` (~L90-106) clears
+4. **#74 follow-ups / questions for user:** (a) should `plsda_head` apply to model name `PLS` in classification (needs rebuild/Tab 7 to treat it as PLS-DA)? (b) `svm_gamma` resolves for SVM+regression / SVR+classification, which have no estimator — every trial silently gets the 1e10 penalty with only a warning; narrow or warn. (c) Tab 7 refit of Bayesian XGBoost rows prints XGBoost 'params not used' warning (pre-existing, predictions unaffected). (d) `apply_extra_axes` constant-clash message says 'suggested parameter' also for axis keys.
+5. **Possible second order-leak:** `tests/test_baseline_advanced.py` (~L90-106) clears
    and restores all of `sys.modules`; modules first imported inside that block are
    dropped afterwards. Not observed failing; check if order flakes recur.
-5. **`SESSION_LOG.md` is ~1000 lines** (limit ~200): archive older entries to
+6. **`SESSION_LOG.md` is >1000 lines** (limit ~200): archive older entries to
    `docs/SESSION_LOG_ARCHIVE.md`.
-6. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
+7. **Pre-existing follow-ups found during T-51 step 1** (SESSION_LOG 2026-09-13):
    - the unscaled Bayesian importance proxy
    - unscaled NSGA-II display metrics
    - NSGA-II `'SVM'` chromosomes always scoring the 1e10 penalty
