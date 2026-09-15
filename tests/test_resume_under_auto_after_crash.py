@@ -139,6 +139,85 @@ def test_auto_resumes_a_crashed_migrated_run(crashed_auto_run) -> None:
     assert sum(s == completed for _, s, _, _ in after) == TARGET, "continues to the target"
 
 
+def test_accepted_resume_after_environment_change_is_announced(
+    crashed_auto_run, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex review of #79: after e.g. a NumPy update the study name changes, so 'auto'
+    cannot resume. It must say so (and flag the decline) rather than silently restart."""
+    from spectral_predict import unified_bayesian as ub
+
+    rs, data = crashed_auto_run
+    meta = rs.find_incomplete_run()
+    assert rs.resume_run(meta.run_id) is not None
+    url = rs.get_storage_url()
+    (old_name,) = optuna.study.get_all_study_names(storage=url)
+    before = _snapshot(url, old_name)
+
+    real_env = ub._numerical_environment
+
+    def updated_numpy() -> dict:
+        env = real_env()
+        env["packages"] = dict(env["packages"], numpy="99.0.0")
+        return env
+
+    monkeypatch.setattr(ub, "_numerical_environment", updated_numpy)
+    messages: list[dict] = []
+    study = _run("PLS", data, messages)
+
+    notices = [m for m in messages if m.get("environment_changed")]
+    assert notices, "the environment-change diagnostic must run for an accepted 'auto' resume"
+    assert all(m.get("resume_declined") for m in notices)
+    assert old_name in notices[0]["message"]
+    assert not any(m.get("t41_decision") == "auto_resumed_existing_study" for m in messages)
+    assert study.study_name != old_name
+    assert _snapshot(url, old_name) == before, "the old study is preserved untouched"
+
+
+def test_resumed_run_on_different_data_flags_the_decline(crashed_auto_run) -> None:
+    rs, (X, y, wl) = crashed_auto_run
+    meta = rs.find_incomplete_run()
+    assert rs.resume_run(meta.run_id) is not None
+    url = rs.get_storage_url()
+    (name,) = optuna.study.get_all_study_names(storage=url)
+    before = _snapshot(url, name)
+
+    y_changed = y.copy()
+    y_changed[0] += 1.0  # same shape and configuration, so the same study name
+    messages: list[dict] = []
+    _run("PLS", (X, y_changed, wl), messages)
+
+    declined = [m for m in messages if m.get("resume_declined")]
+    assert [m.get("t41_decision") for m in declined] == ["auto_existing_study_data_mismatch"]
+    assert _snapshot(url, name) == before
+
+
+def test_auto_without_a_store_never_lists_studies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new 'auto' diagnostics must not open or create storage when no file exists."""
+    import importlib
+
+    from spectral_predict import unified_bayesian as ub
+
+    db = tmp_path / "absent.sqlite3"
+    url = f"sqlite:///{db.as_posix()}?check_same_thread=False&timeout=30"
+    monkeypatch.setattr(
+        importlib.import_module("spectral_predict.run_state"), "get_storage_url", lambda: url
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("studies were enumerated without an existing store")
+
+    monkeypatch.setattr(optuna.study, "get_all_study_names", forbidden)
+    X, y, wl = _data()
+    ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=wl, model_name="PLS", task_type="regression",
+        n_trials=3, cv_folds=3, random_state=7, verbose=False,
+        enable_sqlite_persistence="auto",
+    )
+    assert not db.exists()
+
+
 def test_auto_resume_leaves_unmigrated_models_fresh(crashed_auto_run) -> None:
     """Multi-model run: only PLS reached SQLite; Ridge starts over and PLS is untouched."""
     rs, data = crashed_auto_run

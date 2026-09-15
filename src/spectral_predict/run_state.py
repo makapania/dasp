@@ -28,6 +28,7 @@ Public surface:
     is_resuming() -> bool
     find_incomplete_run() -> RunMetadata | None
     has_resumable_store(meta) -> bool
+    clear_unresumable_never_sidecar(meta) -> bool
     resume_run(run_id)
     discard_incomplete_run(run_id)
 """
@@ -637,6 +638,41 @@ def has_resumable_store(meta: RunMetadata) -> bool:
     return stat.S_ISREG(st.st_mode) and st.st_size > 0
 
 
+def clear_unresumable_never_sidecar(meta: RunMetadata) -> bool:
+    """Remove the sidecar of a 'never' run that has no store. Never touches SQLite.
+
+    Such a sidecar can never become resumable, even if another instance is still
+    running that search, so removing it only stops the startup check from finding it
+    again. 'auto' and 'always' sidecars without a store are left alone: a live
+    instance may still be in its in-memory warmup and migrate later, and removing its
+    sidecar would silently cost it crash recovery.
+
+    Returns:
+        True if the sidecar was removed.
+    """
+    if meta.bayesian_persistence_mode != "never" or has_resumable_store(meta):
+        return False
+    with _lock:
+        sidecar = _sidecar_path()
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            return False
+        except OSError as exc:
+            logger.warning("Could not read resume sidecar %s: %s", sidecar, exc)
+            return False
+        if data.get("run_id") != meta.run_id:
+            return False  # replaced by another run since it was read
+        try:
+            sidecar.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            logger.warning("Could not remove stale 'never' sidecar %s: %s", sidecar, exc)
+            return False
+    return True
+
+
 def resume_run(run_id: str) -> RunMetadata | None:
     """Activate a previously-incomplete run by run_id.
 
@@ -661,7 +697,9 @@ def resume_run(run_id: str) -> RunMetadata | None:
     optuna_dir = get_user_optuna_dir().resolve()
     try:
         storage_path = Path(meta.storage_path).resolve()
-    except OSError:
+    except (OSError, ValueError) as exc:
+        # ValueError: e.g. an embedded NUL from a corrupted/tampered sidecar.
+        logger.warning("Resume refused: sidecar storage path is unusable: %s", exc)
         return None
     if not storage_path.is_relative_to(optuna_dir):
         # Tampered sidecar — refuse to use the path or the URL derived

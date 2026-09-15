@@ -45,7 +45,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restored run settings) had it, and the banner no longer mentions Always-on. The
   prompt is also skipped when the crashed run saved nothing: a run under *Always off*,
   or an 'auto' run that crashed during its in-memory warmup. Before, those prompted and
-  then reported "Resume failed". New `run_state.has_resumable_store(meta)`.
+  then reported "Resume failed". A stale *Always off* sidecar is removed (never any
+  SQLite file). New `run_state.has_resumable_store(meta)` and
+  `run_state.clear_unresumable_never_sidecar(meta)`.
+- **A resumed run that cannot reuse saved trials now says so.** An 'auto' run whose
+  SQLite file exists now reports "previous results computed in a different numerical
+  environment". Before, only 'always' did, so after e.g. a NumPy update an accepted
+  resume silently started over. Declines (environment change, older study format,
+  different or unrecorded data) carry a `resume_declined` progress key. During a resume
+  the GUI logs it, updates the status line and warns once. The resume banner no longer
+  promises unconditional reuse.
+- `run_state.resume_run` refuses a sidecar storage path that raises `ValueError`
+  (e.g. an embedded NUL) instead of crashing the startup check.
 - **Bayesian search and extra-axes post-merge fixes** (reviews of T-51 PR B / T-41):
   - **Behaviour change: a failed 'auto' SQLite migration no longer deletes anything.**
     The cleanup called `optuna.delete_study` by name, and nothing could prove this

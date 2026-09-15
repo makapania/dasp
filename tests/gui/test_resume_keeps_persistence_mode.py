@@ -77,3 +77,59 @@ def test_no_prompt_when_nothing_was_saved(gui_app, run_state_tmp, mode):
     assert not warn.called
     assert not rs.is_resuming()
     assert gui_app.bayesian_persistence_mode.get() == mode
+    # A 'never' sidecar can never become resumable and is cleared; an 'auto' one may
+    # belong to a live instance still in warmup, so it stays.
+    assert (rs.find_incomplete_run() is None) == (mode == "never")
+
+
+def test_banner_does_not_promise_unconditional_reuse(gui_app, run_state_tmp):
+    _crashed_run(run_state_tmp, "auto", gui_mode=None, with_store=True)
+    with patch("tkinter.messagebox.askyesnocancel", return_value=True):
+        gui_app._check_for_incomplete_run()
+    banner = gui_app.progress_status.cget("text")
+    assert "reused when the data" in banner
+
+
+@pytest.fixture
+def immediate_after(gui_app, monkeypatch):
+    """Run root.after callbacks synchronously so worker-thread UI updates are observable."""
+    def run_now(_ms, func=None, *args):
+        if func is not None:
+            func(*args)
+    monkeypatch.setattr(gui_app.root, "after", run_now)
+    logged: list[str] = []
+    real_log = gui_app._log_progress
+    monkeypatch.setattr(gui_app, "_log_progress", lambda m: (logged.append(m), real_log(m)))
+    return logged
+
+
+def test_declined_resume_is_surfaced(gui_app, run_state_tmp, immediate_after):
+    """A resumed run whose saved study is not reused must tell the user."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "auto", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+    event = {
+        "stage": "unified_bayesian",
+        "message": "[T-41] A persisted study named for this PLS configuration exists but "
+                   "was run on different or unrecorded data, so it is NOT resumed.",
+        "t41_decision": "auto_existing_study_data_mismatch",
+        "resume_declined": True,
+    }
+
+    with patch("tkinter.messagebox.showwarning") as warn:
+        gui_app._progress_callback(event)
+        gui_app._progress_callback(dict(event))  # second model: no second dialog
+
+    assert warn.call_count == 1
+    assert "not reused" in warn.call_args[0][0].lower()
+    assert any(m.startswith("[RUN] Resume: saved trials were NOT reused") for m in immediate_after)
+    assert "could not be reused" in gui_app.progress_status.cget("text")
+
+
+def test_declined_event_outside_resume_is_only_logged(gui_app, run_state_tmp, immediate_after):
+    event = {"message": "Previous Bayesian results ...", "environment_changed": True,
+             "resume_declined": True}
+    with patch("tkinter.messagebox.showwarning") as warn:
+        gui_app._progress_callback(event)
+    assert not warn.called
+    assert not any(m.startswith("[RUN] Resume:") for m in immediate_after)

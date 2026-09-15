@@ -1198,3 +1198,20 @@ should always block — they found two crash bugs no test covered.
   the environment hash. Only a 0.5.0b3 dev build from 2026-09-13/14 could leave one.
   Multi-model runs gate each study by name: migrated models resume, unmigrated ones
   start fresh.
+- **Review round on #79 (Codex block, DeepSeek/GLM nits):**
+  - *Codex:* after a Python or NumPy update the study name's environment suffix
+    changes, so an accepted resume under 'auto' silently started over. The
+    `environment_changed`/`legacy_study_format` notices were gated on 'always'. They
+    now also run for 'auto' when `_sqlite_file_exists` is already True, so the
+    'auto'/'never' promise of not touching absent storage holds. A test forbids
+    `get_all_study_names` when the file is absent. The data-mismatch sub-warning stays
+    'always'-only: under 'auto' that case is already the declined gate branch.
+  - Declines carry `unified_bayesian.RESUME_DECLINED_KEY`. The GUI's
+    `_progress_callback_impl` → `_notify_resume_declined` acts only while
+    `is_resuming()`: a log line, a status line, and one warning per run (keyed by
+    storage URL).
+  - `Path.resolve()` raises `ValueError` on an embedded NUL. `resume_run` caught only
+    `OSError`.
+  - Only 'never' sidecars without a store are cleared at startup. Clearing an
+    'auto' one could strip crash recovery from a live instance still in its
+    in-memory warmup (the sidecar is one global file).
