@@ -24296,6 +24296,7 @@ class SpectralPredictApp:
         from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
         from sklearn.pipeline import Pipeline
         from sklearn.preprocessing import FunctionTransformer, StandardScaler
+        from spectral_predict.ga_preprocessing import chromosome_from_row, chromosome_to_steps
         from spectral_predict.models import parse_row_params
         from spectral_predict.preprocess import (
             build_preprocessing_pipeline,
@@ -24559,7 +24560,7 @@ class SpectralPredictApp:
                 window = row.Window
                 polyorder = row.Poly
 
-                # Parse parameters (NSGA-II rows store the dict itself, not str(dict))
+                # Parse parameters (str(dict) from the searches; a dict cell is accepted too)
                 params_dict = parse_row_params(params_str)
 
                 # Create preprocessing pipeline
@@ -24582,7 +24583,27 @@ class SpectralPredictApp:
                                          'deriv1_snv', 'deriv2_snv', 'deriv3_snv', 'deriv4_snv']
                 is_nsga_preprocess = preprocess in NSGA_PREPROCESS_TYPES
 
-                if is_ga_preprocess:
+                # Exhaustive-search rows carry a preprocessing chromosome and a
+                # PreprocessBase like 'snv_deriv1_w11' that build_preprocessing_pipeline
+                # rejects. Decode the genes as the validation rebuild does (shared
+                # parser and per-spectrum steps), as clonable Pipeline steps.
+                row_dict = row._asdict()
+                try:
+                    chromosome = chromosome_from_row(row_dict)
+                except ValueError as e:
+                    self._log_progress(f"    [WARN] {e}; rebuilding from the preprocessing name")
+                    chromosome = None
+
+                if chromosome is not None:
+                    shared_prep = chromosome_to_steps(
+                        chromosome,
+                        autoscale=preprocessing_config_from_row(row_dict)['autoscale'],
+                    )
+                    autoscale = any(name == 'autoscale' for name, _ in shared_prep)
+                    steps.extend(shared_prep)
+                    self._log_progress(f"    [Chromosome] Reconstructed preprocessing from genes {list(chromosome)}")
+
+                elif is_ga_preprocess:
                     # Parse GA preprocessing name and build transform
                     preprocess_config = parse_ga_preprocess_name(preprocess)
                     ga_transform = build_ga_transform(preprocess_config)
@@ -24595,26 +24616,24 @@ class SpectralPredictApp:
                     ga_transform = build_ga_transform(preprocess_config)
                     self._log_progress(f"    [NSGA] Reconstructed preprocessing: {preprocess_config['type']} w={preprocess_config['window']}")
 
-                # Legacy grid names
+                # Legacy grid names: Savitzky-Golay derivative
                 elif preprocess in ['sg1', 'sg2']:
-                    if preprocess in ['sg1', 'sg2']:
-                        # Savitzky-Golay derivative
-                        deriv_order = 1 if preprocess == 'sg1' else 2
-                        # Safe conversion with NaN checks
-                        safe_window = int(window) if window and not pd.isna(window) else 15
-                        safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
-                        steps.append(('derivative', SavgolDerivative(
-                            window=safe_window,
-                            polyorder=safe_polyorder,
-                            deriv=deriv_order
-                        )))
+                    deriv_order = 1 if preprocess == 'sg1' else 2
+                    # Safe conversion with NaN checks
+                    safe_window = int(window) if window and not pd.isna(window) else 15
+                    safe_polyorder = int(polyorder) if polyorder and not pd.isna(polyorder) else 2
+                    steps.append(('derivative', SavgolDerivative(
+                        window=safe_window,
+                        polyorder=safe_polyorder,
+                        deriv=deriv_order
+                    )))
 
                 else:
                     # Shared with the validation rebuild. Previously only 'snv',
                     # 'snv_deriv' and 'deriv_snv' got preprocessing here: 'deriv', every
                     # '+'-affixed name ('als+snv', 'raw+autoscale') and the Autoscale /
                     # baseline / smoothing columns were silently ignored.
-                    prep_config = preprocessing_config_from_row(row._asdict())
+                    prep_config = preprocessing_config_from_row(row_dict)
                     autoscale = prep_config['autoscale']
                     shared_prep = build_preprocessing_pipeline(**prep_config)
                     steps.extend(shared_prep)

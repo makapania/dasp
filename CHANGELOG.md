@@ -16,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Results-row rebuild helpers on the declared composition surface
   (`docs/AGENT_COMPOSITION.md` §8b): `models.parse_row_params`,
-  `models.estimator_params_from_row`, `models.plsda_head_kwargs` and
-  `preprocess.preprocessing_config_from_row`.
+  `models.estimator_params_from_row`, `models.plsda_head_kwargs`,
+  `preprocess.preprocessing_config_from_row`, `ga_preprocessing.chromosome_from_row` and
+  `ga_preprocessing.chromosome_to_steps`.
 
 - **T-51 PR A** — opt-in extra hyperparameter axes for the unified Bayesian search.
   `run_unified_bayesian` gains `enabled_extra_axes`, `search_space` and
@@ -65,9 +66,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   preprocessing names keep their old path. Validation rebuild: a NaN `smoothing` cell
   (mixed results tables) no longer turns smoothing on, and a NaN `PreprocessBase` falls
   back to `Preprocess`. **Ensemble results change.**
-- **NSGA-II rows rebuild with their hyperparameters.** They store `Params` as a dict,
-  and validation rebuild and ensemble reconstruction only parsed strings, so both used
-  defaults. New shared `models.parse_row_params` accepts either.
+- Validation rebuild and ensemble reconstruction accept a `Params` cell holding a dict
+  (in-memory result rows) as well as `str(dict)`, via the shared `models.parse_row_params`.
+- **Exhaustive-preprocessing rows are rebuilt from their chromosome in ensembles**, as the
+  validation rebuild already did (their `PreprocessBase`, e.g. `snv_deriv1_w11`, is not a
+  pipeline name). New `ga_preprocessing.chromosome_from_row` / `chromosome_to_steps` share
+  the parsing and the per-spectrum steps with the search-time transform, which is
+  bit-identical after the refactor.
+- A derivative row with a missing `Deriv` / `Window` rebuilds with 1 / 15 (the GUI's old
+  defaults) in both paths; validation used to fail on it. A `smoothing` cell of `'False'`
+  no longer reads as on.
 - `plsda_head_kwargs` coerces `lr__random_state=42.0` to `42` and `'None'` to `None`,
   and raises `ValueError` on values `LogisticRegression` would reject.
 - **PLS-DA heads rebuilt from a row keep the search's seed and class weighting.**

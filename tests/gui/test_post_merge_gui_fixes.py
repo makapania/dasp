@@ -341,8 +341,8 @@ def test_ensemble_reconstruction_subsets_after_preprocessing(gui_app):
     )
 
 
-def test_ensemble_reconstruction_accepts_nsga2_dict_params(gui_app):
-    """NSGA-II rows store Params as the dict itself, not str(dict)."""
+def test_ensemble_reconstruction_accepts_dict_params_cell(gui_app):
+    """In-memory result rows can hold Params as a dict rather than str(dict)."""
     X, y, X_test = _round_trip_data("regression")
     params = {"n_estimators": 25, "max_features": 0.3, "max_depth": 4, "random_state": 42}
     reference = get_model("RandomForest", "regression").set_params(**params).fit(X.values, y)
@@ -358,7 +358,7 @@ def test_ensemble_reconstruction_accepts_nsga2_dict_params(gui_app):
             }
         ]
     )
-    top_models_df.at[0, "Params"] = params  # a dict cell, as convert_nsga2_to_v1_format writes
+    top_models_df.at[0, "Params"] = params  # a dict cell, as in-memory rows can hold
 
     with contextlib.redirect_stdout(io.StringIO()):
         reconstructed = gui_app._reconstruct_models_from_results(top_models_df, X, y, "regression")
@@ -401,6 +401,107 @@ def test_ensemble_refit_reaches_catboost_inside_gui_wrapper(tmp_path, monkeypatc
 
     assert np.all(np.isfinite(ensemble.predict(X)))
     assert (blocked / "catboost_info").is_file()
+
+
+# --- Chromosome rows and missing derivative windows: parity with validation rebuild ----
+
+
+def _validation_rmsep(row: dict, X: pd.DataFrame, y: np.ndarray, X_val: np.ndarray, y_val):
+    """RMSEP from the public validation rebuild for a single results row."""
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    df = pd.DataFrame([{"CompositeScore": 0.0, "Task": "regression", **row}])
+    with contextlib.redirect_stdout(io.StringIO()):
+        out = compute_validation_metrics_for_top_models(
+            df, X.values, y, X_val, y_val, "regression", np.array(WL, dtype=float), top_n=1
+        )
+    return float(out.loc[0, "RMSEP"])
+
+
+def _val_split():
+    X, y, _ = _round_trip_data("regression")
+    rng = np.random.default_rng(5)
+    X_val = rng.standard_normal((20, X.shape[1]))
+    y_val = X_val[:, 0] - 0.7 * X_val[:, 3] + 0.4 * X_val[:, 7]
+    return X, y, X_val, y_val
+
+
+CHROMOSOME_ROWS = {
+    # Exhaustive-search row shape (search.py _build_preprocessing_configs): the base name
+    # carries the derivative order and window, which build_preprocessing_pipeline rejects.
+    "exhaustive-snv_deriv1_w11": {
+        "Model": "PLS",
+        "Params": str({"n_components": 4, "scale": False}),
+        "LVs": 4,
+        "Preprocess": "snv_deriv",
+        "PreprocessBase": "snv_deriv1_w11",
+        "preprocess_chromosome": "[6, 3, 0]",
+        "Deriv": 1,
+        "Window": 11,
+        "Poly": 2,
+        "Autoscale": False,
+    },
+    # 3-gene chromosome with autoscale on: no per-model scaler for the SVR.
+    "exhaustive-autoscale-svr": {
+        "Model": "SVR",
+        "Params": str({"C": 5.0, "gamma": 0.01}),
+        "Preprocess": "deriv+autoscale",
+        "PreprocessBase": "deriv1_w13",
+        "preprocess_chromosome": "[2, 4, 1]",
+        "Deriv": 1,
+        "Window": 13,
+        "Poly": 2,
+        "Autoscale": True,
+    },
+    # A chromosome row whose Preprocess is not caught by GA_SUFFIXES or any known name.
+    "chromosome-unrecognised-name": {
+        "Model": "Ridge",
+        "Params": str({"alpha": 3.0}),
+        "Preprocess": "deriv2_w9",
+        "preprocess_chromosome": "[3, 2]",
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(CHROMOSOME_ROWS))
+def test_ensemble_reconstruction_decodes_preprocess_chromosome(gui_app, name):
+    row = CHROMOSOME_ROWS[name]
+    X, y, X_val, y_val = _val_split()
+
+    fitted = _reconstruct(gui_app, row, X, y, "regression")
+    rmse = float(np.sqrt(np.mean((np.ravel(fitted.predict(X_val)) - y_val) ** 2)))
+
+    inner = _inner(fitted)
+    names = [n for n, _ in inner.steps]
+    if row.get("Autoscale"):
+        assert "autoscale" in names and "scaler" not in names, names
+    np.testing.assert_allclose(rmse, _validation_rmsep(row, X, y, X_val, y_val), rtol=1e-9)
+
+    # Clonable for per-fold refits.
+    from sklearn.base import clone
+
+    refit = clone(fitted).fit(X, y)
+    np.testing.assert_allclose(refit.predict(X_val), fitted.predict(X_val), rtol=1e-9)
+
+
+def test_ensemble_reconstruction_defaults_missing_derivative_window(gui_app):
+    """A snv_deriv row with Window=NaN rebuilt with window 15 before ae15e64; keep that."""
+    row = {
+        "Model": "Ridge",
+        "Params": str({"alpha": 2.0}),
+        "Preprocess": "snv_deriv",
+        "Deriv": 1,
+        "Window": np.nan,
+        "Poly": 2,
+    }
+    X, y, X_val, y_val = _val_split()
+
+    fitted = _reconstruct(gui_app, row, X, y, "regression")
+
+    savgol = _inner(fitted).named_steps["savgol"]
+    assert (savgol.deriv, savgol.window, savgol.polyorder) == (1, 15, 2)
+    rmse = float(np.sqrt(np.mean((np.ravel(fitted.predict(X_val)) - y_val) ** 2)))
+    np.testing.assert_allclose(rmse, _validation_rmsep(row, X, y, X_val, y_val), rtol=1e-9)
 
 
 # --- NameErrors -----------------------------------------------------------------------

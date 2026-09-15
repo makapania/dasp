@@ -42,6 +42,7 @@ from .preprocess import SNV, SavgolDerivative
 # expanded from 2 genes to 3, with backward-compat decode for legacy
 # 2-gene callers and saved-CSV ga_genes columns).
 from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
 
 # Import LightGBM for fitness evaluation (required dependency)
 from lightgbm import LGBMRegressor, LGBMClassifier
@@ -220,47 +221,102 @@ def chromosome_to_transform(genes: np.ndarray) -> Tuple[str, Optional[Callable]]
     if preproc_type == 'raw':
         return (name, None)
 
-    def transform(X, pt=preproc_type, w=window):
+    steps = _spectrum_steps(preproc_type, window)
+
+    def transform(X, steps=steps):
         X_out = np.asarray(X, dtype=np.float64)
-
-        if pt == 'snv':
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv1':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'deriv2':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv3':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'deriv4':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'snv_deriv1':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv2':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-
+        for _, step in steps:
+            X_out = clone(step).fit_transform(X_out)
         return X_out
 
     return (name, transform)
+
+
+def _spectrum_steps(preproc_type: str, window: int) -> list:
+    """Per-spectrum sklearn steps for one chromosome preprocessing type.
+
+    Single source for :func:`chromosome_to_transform` (the search / validation closure)
+    and :func:`chromosome_to_steps` (clonable Pipeline steps for model rebuilds).
+    SNV and Savitzky-Golay derivatives are stateless, so applying these steps with
+    ``fit_transform`` per call reproduces the closure exactly.
+    """
+    if preproc_type == 'raw':
+        return []
+    if preproc_type == 'snv':
+        return [('snv', SNV())]
+    deriv = int(preproc_type.replace('snv', '').replace('_', '').replace('deriv', ''))
+    # deriv1/deriv2 use SavgolDerivative's polyorder default; deriv3/4 are pinned.
+    polyorder = {3: 4, 4: 5}.get(deriv)
+    savgol = ('savgol', SavgolDerivative(deriv=deriv, window=window, polyorder=polyorder))
+    if preproc_type.startswith('snv_'):
+        return [('snv', SNV()), savgol]
+    if preproc_type.endswith('_snv'):
+        return [savgol, ('snv', SNV())]
+    return [savgol]
+
+
+def chromosome_to_steps(genes, *, autoscale: bool = False) -> list:
+    """Return clonable Pipeline steps equivalent to a preprocessing chromosome.
+
+    The per-spectrum steps match :func:`chromosome_to_transform`; a ``StandardScaler``
+    step named ``'autoscale'`` follows when the chromosome's autoscale gene is set or
+    ``autoscale`` is true (a row's ``Autoscale`` column), as the validation rebuild
+    applies it.
+
+    Args:
+        genes: ``[preproc_idx, window_idx]`` or ``[preproc_idx, window_idx, autoscale]``.
+        autoscale: Also autoscale when the chromosome itself does not say so.
+
+    Returns:
+        List of ``(name, transformer)`` tuples, possibly empty.
+    """
+    genes = np.asarray(genes)
+    steps = _spectrum_steps(PREPROC_TYPES[genes[0]], WINDOW_SIZES[genes[1]])
+    if autoscale or _decode_autoscale_gene(genes):
+        steps.append(('autoscale', StandardScaler()))
+    return steps
+
+
+def chromosome_from_row(row) -> Optional[np.ndarray]:
+    """Return a results row's preprocessing chromosome, or ``None`` if it has none.
+
+    Reads ``preprocess_chromosome``, falling back to the pre-2026-05-06 ``ga_genes``
+    column only when ``preprocess_chromosome`` is absent. Accepts a list, an array or
+    the ``str(list)`` a results CSV stores.
+
+    Args:
+        row: A results row as a mapping (``pd.Series``, ``dict``).
+
+    Returns:
+        The genes as an integer array, or ``None`` when the row carries no chromosome.
+
+    Raises:
+        ValueError: If a chromosome is present but cannot be parsed.
+    """
+    raw = row.get('preprocess_chromosome', None)
+    if raw is None:
+        raw = row.get('ga_genes', None)
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple, np.ndarray)):
+        if len(raw) == 0:
+            return None
+        return np.asarray(raw)
+    if isinstance(raw, str):
+        if raw == '':
+            return None
+        import ast
+
+        try:
+            return np.asarray(ast.literal_eval(raw))
+        except (ValueError, SyntaxError) as e:
+            raise ValueError(f"Unparseable preprocess_chromosome {raw[:100]!r}: {e}") from e
+    try:
+        if pd.isna(raw):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return np.asarray(raw)
 
 
 def get_config_description(genes: np.ndarray) -> str:

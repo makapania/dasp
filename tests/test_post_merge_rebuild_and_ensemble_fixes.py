@@ -286,8 +286,8 @@ def test_parse_row_params_accepts_dict_and_string() -> None:
         assert parse_row_params(junk) == {}
 
 
-def test_validation_rebuild_accepts_nsga2_dict_params() -> None:
-    """NSGA-II rows store Params as a dict; the rebuild used to fall back to defaults."""
+def test_validation_rebuild_accepts_dict_params_cell() -> None:
+    """In-memory result rows can hold Params as a dict; the rebuild used to ignore it."""
     row = pd.Series({"Model": "RandomForest", "Params": None}, dtype=object)
     row["Params"] = {"n_estimators": 25, "max_features": 0.3, "max_depth": 4}
     rebuilt = _rebuild_model_from_row(row, "regression")
@@ -342,3 +342,107 @@ def test_preprocessing_config_from_row_reads_columns_and_display_name() -> None:
     assert (config["deriv"], config["window"], config["polyorder"]) == (None, None, None)
     assert config["smoothing_window"] == 17
     assert preprocessing_config_from_row({"Autoscale": "False"})["autoscale"] is False
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [("False", False), ("false", False), ("0", False), ("True", True), ("1", True), (0.0, False)],
+)
+def test_preprocessing_config_from_row_parses_smoothing_strings(cell, expected) -> None:
+    from spectral_predict.preprocess import preprocessing_config_from_row
+
+    assert preprocessing_config_from_row({"smoothing": cell})["smoothing"] is expected
+
+
+@pytest.mark.parametrize("name", ["deriv", "snv_deriv", "deriv_snv"])
+def test_preprocessing_config_from_row_defaults_missing_derivative_settings(name) -> None:
+    from spectral_predict.preprocess import preprocessing_config_from_row
+
+    nan = float("nan")
+    config = preprocessing_config_from_row(
+        {"Preprocess": name, "Deriv": nan, "Window": nan, "Poly": nan}
+    )
+    assert (config["deriv"], config["window"], config["polyorder"]) == (1, 15, None)
+    # An explicit order is kept; only the window is defaulted.
+    config = preprocessing_config_from_row({"Preprocess": name, "Deriv": 2, "Window": None})
+    assert (config["deriv"], config["window"]) == (2, 15)
+
+
+def test_validation_rebuild_scores_row_with_missing_derivative_window() -> None:
+    """On main this row raised in SavgolDerivative.transform and got RMSEP=NaN."""
+    from spectral_predict.preprocess import SNV, SavgolDerivative
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    rng = np.random.default_rng(4)
+    X = rng.standard_normal((50, 30)).cumsum(axis=1)
+    y = X[:, 3] - X[:, 10]
+    X_val = rng.standard_normal((15, 30)).cumsum(axis=1)
+    y_val = X_val[:, 3] - X_val[:, 10]
+    df = pd.DataFrame(
+        [
+            {
+                "CompositeScore": 0.0,
+                "Task": "regression",
+                "Model": "Ridge",
+                "Params": str({"alpha": 2.0}),
+                "Preprocess": "snv_deriv",
+                "Deriv": 1,
+                "Window": np.nan,
+                "Poly": 2,
+            }
+        ]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = compute_validation_metrics_for_top_models(
+            df, X, y, X_val, y_val, "regression", np.arange(1000.0, 1060.0, 2.0), top_n=1
+        )
+
+    reference = Pipeline(
+        [
+            ("snv", SNV()),
+            ("savgol", SavgolDerivative(deriv=1, window=15, polyorder=2)),
+            ("scaler", StandardScaler()),
+            ("model", Ridge(alpha=2.0, random_state=42)),
+        ]
+    ).fit(X, y)
+    expected = np.sqrt(np.mean((reference.predict(X_val) - y_val) ** 2))
+    np.testing.assert_allclose(out.loc[0, "RMSEP"], expected, rtol=1e-9)
+
+
+# --- Preprocessing chromosomes --------------------------------------------------------
+
+
+def test_chromosome_from_row_shapes() -> None:
+    from spectral_predict.ga_preprocessing import chromosome_from_row
+
+    assert list(chromosome_from_row({"preprocess_chromosome": "[6, 3, 0]"})) == [6, 3, 0]
+    assert list(chromosome_from_row({"preprocess_chromosome": [2, 4]})) == [2, 4]
+    assert list(chromosome_from_row({"ga_genes": "[1, 0]"})) == [1, 0]  # pre-rename CSVs
+    for row in ({}, {"preprocess_chromosome": ""}, {"preprocess_chromosome": float("nan")}):
+        assert chromosome_from_row(row) is None
+    with pytest.raises(ValueError, match="preprocess_chromosome"):
+        chromosome_from_row({"preprocess_chromosome": "[6, 3"})
+
+
+def test_chromosome_to_steps_matches_search_transform() -> None:
+    from sklearn.base import clone
+
+    from spectral_predict.ga_preprocessing import (
+        PREPROC_TYPES,
+        chromosome_to_steps,
+        chromosome_to_transform,
+    )
+
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((12, 80)).cumsum(axis=1)
+    for p in range(len(PREPROC_TYPES)):
+        genes = [p, 6]  # window 17 is legal for every derivative order
+        _, transform = chromosome_to_transform(np.array(genes))
+        steps = chromosome_to_steps(genes)
+        expected = X if transform is None else transform(X)
+        got = Pipeline([(n, clone(s)) for n, s in steps]).fit_transform(X) if steps else X
+        np.testing.assert_array_equal(got, expected)
+    assert chromosome_to_steps([0, 6]) == []
+    assert [n for n, _ in chromosome_to_steps([0, 6, 1])] == ["autoscale"]
+    assert [n for n, _ in chromosome_to_steps([1, 6], autoscale=True)] == ["snv", "autoscale"]

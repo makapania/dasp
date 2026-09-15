@@ -39,6 +39,7 @@ PRIMITIVES: dict[str, list[str]] = {
         "align_xy",
     ],
     "preprocess": ["build_preprocessing_pipeline", "preprocessing_config_from_row"],
+    "ga_preprocessing": ["chromosome_from_row", "chromosome_to_steps"],
     "unified_bayesian": ["apply_preprocessing", "run_unified_bayesian"],
     "search_spaces": ["AxisSpec", "BundleSpec", "ExtraAxesConfigError"],
     "variable_selection": [

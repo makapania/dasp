@@ -1143,6 +1143,30 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
 - **Test recipe for Bayesian preprocessing parity:** `unified_bayesian.apply_preprocessing`
   steps are per-spectrum (stateless) except autoscale, so preprocess train+test together
   with `apply_autoscale=False`, then fit a `StandardScaler` on the train rows.
-- Still open: rows carrying a `preprocess_chromosome` are rebuilt from the name in
-  ensembles (validation decodes the chromosome). Legacy `sg1`/`sg2`, `deriv1`-style and GA
-  names keep the old wrapper path.
+- Legacy `sg1`/`sg2`, `deriv1`-style and GA names keep the old wrapper path.
+
+#### PR #77 review round 3 (Codex block on ae15e64, GLM)
+
+- **Exhaustive-search rows have an unbuildable `PreprocessBase`** (`snv_deriv1_w11`, the
+  chromosome name). Preferring `PreprocessBase` made `build_preprocessing_pipeline` raise,
+  and the GUI's per-row `except` silently dropped the model from the ensemble. The rebuild
+  must check `preprocess_chromosome` first, as validation does. The search-time closure
+  (`chromosome_to_transform`) is not clonable. `ga_preprocessing._spectrum_steps` now feeds
+  both the closure and `chromosome_to_steps` (Pipeline steps), verified bit-identical over
+  all 14 types x 17 windows x {2,3}-gene chromosomes, including identical ValueErrors for
+  illegal window/polyorder pairs.
+- **The GUI rebuild's per-row `except` turns any rebuild error into a silently shorter
+  ensemble.** Regressions there show up only as "Failed to reconstruct" in the progress
+  log, so tests must assert that one model came back.
+- **Missing `Window` on a derivative row:** on main the validation rebuild passed
+  `window=None` to `SavgolDerivative` and failed in `transform` (`None % 2`), while the old
+  GUI defaulted deriv=1/window=15. The shared helper now applies 1/15 for derivative names.
+- **GLM's round-1 claim was wrong: NSGA-II writes `str(dict)` Params** (`decode_solution`,
+  nsga2_search.py ~2453), so NSGA-II rows never rebuilt with defaults. Dict cells are real
+  only for in-memory result rows (scoring.py ~308). `parse_row_params` keeps dict support
+  as defence; the docs no longer claim NSGA-II writes dicts. Verify reviewer claims about
+  row shapes against the writer before building on them.
+- `smoothing` string cells: `bool('False')` is True; parse strings like `Autoscale`.
+- `chromosome_from_row` keeps validation's `ga_genes` fallback (pre-rename CSVs). The GUI
+  Refine tab uses `ga_genes` for GA-PLS wavelength indices, so such a column in a results
+  table would be decoded as a preprocessing chromosome by both paths (pre-existing risk).

@@ -394,7 +394,7 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
     n_lvs = row.get("LVs", None)
 
     # Parse params using ast.literal_eval (same as Model Dev tab)
-    # NSGA-II rows store Params as the dict itself, not str(dict).
+    # Params is normally str(dict); in-memory result rows can hold the dict itself.
     model_kwargs = parse_row_params(params_str)
 
     # Get model instance with n_components
@@ -982,36 +982,22 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             # produced silent garbage (X[:, [3,5,1]] instead of a transform).
             # Read `preprocess_chromosome` first; fall back to `ga_genes` for
             # result CSVs written before the rename.
-            ga_genes_str = row.get("preprocess_chromosome", None)
-            if ga_genes_str is None:
-                ga_genes_str = row.get("ga_genes", None)
             use_ga_transform = False
             ga_transform = None
             ga_genes = None
 
-            # Handle ga_genes_str being None, empty string, NaN scalar, list, or array
-            ga_genes_is_valid = False
-            if ga_genes_str is not None:
-                if isinstance(ga_genes_str, (list, np.ndarray)):
-                    ga_genes_is_valid = len(ga_genes_str) > 0
-                elif isinstance(ga_genes_str, str):
-                    ga_genes_is_valid = ga_genes_str != ""
-                else:
-                    try:
-                        ga_genes_is_valid = not pd.isna(ga_genes_str)
-                    except (ValueError, TypeError):
-                        ga_genes_is_valid = True
+            # Parsing (preprocess_chromosome, legacy ga_genes fallback, list / array /
+            # str(list) / NaN) is shared with the GUI ensemble rebuild.
+            try:
+                from spectral_predict.ga_preprocessing import chromosome_from_row
 
-            if ga_genes_is_valid:
+                ga_genes = chromosome_from_row(row)
+            except ValueError as e:
+                print(f"  [Warning] Could not reconstruct GA transform: {e}")
+                ga_genes = None
+
+            if ga_genes is not None:
                 try:
-                    # Parse genes from string (stored as list representation)
-                    import ast
-
-                    if isinstance(ga_genes_str, str):
-                        ga_genes = np.array(ast.literal_eval(ga_genes_str))
-                    else:
-                        ga_genes = np.array(ga_genes_str)
-
                     # Import GA reconstruction function
                     from spectral_predict.ga_preprocessing import (
                         chromosome_to_transform,
@@ -1031,11 +1017,7 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                     if not autoscale and _decode_autoscale_gene(ga_genes):
                         autoscale = True
                 except Exception as e:
-                    genes_preview = (
-                        str(ga_genes_str)[:100]
-                        if isinstance(ga_genes_str, str)
-                        else str(ga_genes_str)
-                    )
+                    genes_preview = str(ga_genes)[:100]
                     print(f"  [Warning] Could not reconstruct GA transform: {e}")
                     print(f"            GA genes data: {genes_preview}")
                     use_ga_transform = False

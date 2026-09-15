@@ -264,9 +264,9 @@ def _coerce_head_class_weight(value: Any) -> str | dict | None:
 def parse_row_params(value: Any) -> dict[str, Any]:
     """Return a results row's ``Params`` cell as a dict.
 
-    Grid and Bayesian rows store ``str(dict)``; NSGA-II rows (and results saved from
-    them) store the dict itself. Anything unparseable (NaN, empty, malformed text,
-    a non-dict literal) gives ``{}``.
+    Search rows (grid, Bayesian, NSGA-II) store ``str(dict)``; in-memory result rows
+    can hold the dict itself. Anything unparseable (NaN, empty, malformed text, a
+    non-dict literal) gives ``{}``.
 
     Args:
         value: The row's ``Params`` value.

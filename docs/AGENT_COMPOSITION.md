@@ -469,29 +469,36 @@ rather than an array.
 
 ### 8b. Rebuild a model from a results row
 
-A results row does not store a fitted model. It stores what to build, and the three
-search paths spell it differently: grid rows keep bare estimator params
+A results row does not store a fitted model. It stores what to build, as `str(dict)`,
+and the search paths spell the keys differently: grid rows keep bare estimator params
 (`{'alpha': 0.5}`), Bayesian rows keep the fitted Pipeline's params (`model__alpha`,
-`scaler__with_mean`), NSGA-II rows keep the dict itself rather than `str(dict)`, and
-PLS-DA rows use `pls__*` / `lr__*`. Don't parse these by hand:
+`scaler__with_mean`), and PLS-DA rows use `pls__*` / `lr__*`. In-memory result rows can
+hold the dict itself. Exhaustive-preprocessing rows also carry a `preprocess_chromosome`
+whose `PreprocessBase` (`snv_deriv1_w11`) `build_preprocessing_pipeline` rejects. Don't
+parse these by hand:
 
 ```python
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from spectral_predict.models import estimator_params_from_row, parse_row_params, plsda_head_kwargs
 from spectral_predict.preprocess import build_preprocessing_pipeline, preprocessing_config_from_row
+from spectral_predict.ga_preprocessing import chromosome_from_row, chromosome_to_steps
 
-params = parse_row_params(row["Params"])                  # str or dict -> dict
+params = parse_row_params(row["Params"])                  # str(dict) or dict -> dict
 estimator.set_params(**estimator_params_from_row(params))   # strips model__ / pls__
 head = LogisticRegression(**plsda_head_kwargs(params))      # PLS-DA: C, solver, seed, class_weight
 prep = preprocessing_config_from_row(row)                   # Autoscale, baseline, smoothing
-steps = build_preprocessing_pipeline(**prep)
+genes = chromosome_from_row(row)                            # None unless exhaustive search
+if genes is not None:
+    steps = chromosome_to_steps(genes, autoscale=prep["autoscale"])
+else:
+    steps = build_preprocessing_pipeline(**prep)
 ```
 
 If `prep["autoscale"]` is true, the search skipped the per-model `StandardScaler` for
 scale-sensitive models (SVM/SVR/MLP/Ridge/Lasso/ElasticNet/NeuralBoosted), so don't add
-one. Wavelength subsets (`all_vars`) are taken **after** preprocessing. Rows that
-carry a `preprocess_chromosome` are not covered by `preprocessing_config_from_row`.
+one. Wavelength subsets (`all_vars`) are taken **after** preprocessing.
+`preprocessing_config_from_row` fills a missing derivative order / window with 1 / 15.
 
 ---
 
@@ -504,6 +511,7 @@ listed is an internal implementation detail that may change without notice.
 |---|---|
 | `io` | `read_spectra`, `read_asd_dir`, `read_csv_spectra`, `read_reference_csv`, `align_xy` |
 | `preprocess` | `build_preprocessing_pipeline`, `preprocessing_config_from_row` |
+| `ga_preprocessing` | `chromosome_from_row`, `chromosome_to_steps` |
 | `unified_bayesian` | `apply_preprocessing`, `run_unified_bayesian` (including its `enabled_extra_axes`, `search_space` and `n_startup_trials` keywords) |
 | `search_spaces` | `AxisSpec`, `BundleSpec`, `ExtraAxesConfigError`; the `BUNDLES` registry (read-only) |
 | `variable_selection` | score-array: `cars_selection`, `ipls_selection`, `spa_selection`, `uve_selection`; interval-subset: `ipls_forward`, `ipls_backward`, `mc_sipls`, `mwpls` |

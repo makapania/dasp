@@ -598,6 +598,9 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 
 # Baseline methods a results row's display name can carry as a "+"-separated prefix.
 _DISPLAY_BASELINE_TAGS = ("als", "polynomial", "rubber_band", "airpls", "advanced")
+_DERIVATIVE_PREPROCESS_NAMES = ("deriv", "snv_deriv", "deriv_snv")
+_LEGACY_DEFAULT_DERIV = 1
+_LEGACY_DEFAULT_WINDOW = 15
 
 
 def _row_value_missing(value) -> bool:
@@ -648,6 +651,8 @@ def preprocessing_config_from_row(row) -> dict:
     smoothing_raw = row.get("smoothing", False)
     if isinstance(smoothing_raw, float):
         smoothing = False if _row_value_missing(smoothing_raw) else smoothing_raw > 0
+    elif isinstance(smoothing_raw, str):
+        smoothing = smoothing_raw.strip().lower() in ("true", "1", "yes")
     else:
         smoothing = bool(smoothing_raw)
     smoothing_window = row.get("smoothing_window", 17)
@@ -692,10 +697,19 @@ def preprocessing_config_from_row(row) -> dict:
         if isinstance(parsed, dict):
             baseline_params = parsed
 
+    deriv = _row_positive_int(row.get("Deriv", 0))
+    window = _row_positive_int(row.get("Window", None))
+    if preprocess_name in _DERIVATIVE_PREPROCESS_NAMES:
+        # Rows missing Deriv/Window (hand-edited or older CSVs) used to crash the
+        # rebuild in SavgolDerivative.transform; these are the GUI's historic defaults.
+        # A missing Poly stays None, so SavgolDerivative uses its per-order default.
+        deriv = deriv if deriv is not None else _LEGACY_DEFAULT_DERIV
+        window = window if window is not None else _LEGACY_DEFAULT_WINDOW
+
     return {
         "preprocess_name": preprocess_name,
-        "deriv": _row_positive_int(row.get("Deriv", 0)),
-        "window": _row_positive_int(row.get("Window", None)),
+        "deriv": deriv,
+        "window": window,
         "polyorder": _row_positive_int(row.get("Poly", None)),
         "baseline_method": baseline_method,
         "baseline_params": baseline_params,
