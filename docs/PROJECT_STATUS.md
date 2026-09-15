@@ -26,14 +26,15 @@ axis.key))` after `_suggest` in PR B, when bundles land.
 |---|---|---|
 | #63 `feat/T17-multitarget-regression` | T-17 multi-target regression (+16k lines, stale since 2026-07-08) | **User leaning toward not using it** (value vs. difficulty). Leave open; close only on the user's word. |
 
-### 2b. In progress
-- **Post-merge review round (Codex + DeepSeek Flash + GLM 5.3)** of #68-#75 found real pre-existing bugs (SESSION_LOG 2026-09-14 "Post-merge review round"). Fix PRs, each re-reviewed by the same trio:
-  - **#78** Bayesian/search_spaces: deletion guard, `convert_study_to_dataframe` NameError, svm_gamma pairs, 'pls-da', equal categorical choices, numpy scalars, F821s. Re-review blocked it (Codex+DeepSeek): `is_file()` swallows OSError on 3.14; **decision: remove the automatic delete after a failed auto-migration entirely** (name-based delete can't be made race-safe); URI-form sqlite paths; also warn when 'always' resumes a legacy unfingerprinted study (user chose option b). Rework in progress.
-  - **#77** GUI ensemble: `model__` params dropped, PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors. Re-review (Codex block): CatBoost inside GUI wrappers, ensemble ignores Autoscale/baseline/smoothing, NSGA-II dict Params, malformed head values. Rework in progress.
-  - **#76** CI: per-sha push concurrency, blocking flake8 F821/F822/F823 gate, test `sys` imports, CatBoost test litter. **Merge last** (gate fails until #78 and #77 land).
-- **Queued after #78 (user-approved): remove the crash-resume radio flip.** Since T-41 (e99d35a, 2026-05-01) GUI resume forces persistence to 'Always on' because 'auto' used to ignore the saved study. #69 taught 'auto' to resume a matching existing study, so the flip should be unnecessary; it also silently changes the user's visible setting. PR: stop flipping + banner text, test crash→resume under 'auto' continues saved trials, check 'never' shows no resume.
+### 2b. Post-merge review round — results
+Codex + DeepSeek Flash + GLM 5.3 reviewed everything merged (#68-#75); real pre-existing bugs found (SESSION_LOG 2026-09-14 "Post-merge review round"). Fix PRs, each re-reviewed by the same trio until clean:
+- **#78 merged** — no automatic study deletion after failed auto-migration (removed; name-based delete can't be race-safe); `convert_study_to_dataframe` baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars → builtins (AxisSpec eq/hash); legacy-study 'always' resume warning; F821s. 3 review rounds.
+- **#77 merged** — ensembles: tuned `model__*` params, row preprocessing (Autoscale/baseline/smoothing/deriv, subset after prep, chromosome rows incl. float64), PLS-DA class_weight/seed, legacy CatBoost refit (recursive clone), GUI NameErrors; new shared helpers `models.parse_row_params/estimator_params_from_row/plsda_head_kwargs`, `preprocess.preprocessing_config_from_row/parse_bool_cell`, `ga_preprocessing.chromosome_from_row/chromosome_to_steps` (declared surface §8b). **Ensemble scores change** (base models now get tuned params + correct preprocessing). 5 review rounds; search-time numerics verified bit-identical by Codex.
+- **#76 merged** — CI: per-sha push concurrency; blocking flake8 F821/F822/F823 gate (main is clean); CatBoost test litter.
+- **#79 open (round 3 rework)** — resume no longer flips persistence to 'Always on'; 'auto' resumes crashed runs (proven with a real killed subprocess); no resume prompt when nothing was saved ('never' / crash in warmup); user-visible notice when saved trials can't be reused (data/env mismatch). Codex round-2 block: sidecar cleanup cross-process race → cleanup removed; decline notice on zero-trial studies.
 
 ### 3. Decisions for the user
+- **Pending:** when the GUI rejects a resume because the loaded data doesn't match the crashed run, it currently *deletes* that run's SQLite store (`discard_incomplete_run`, GUI ~26108-26130, pre-existing). Proposed: keep the file, clear only the resume marker. Awaiting user (a) keep / (b) delete.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
   Until then the CI lint steps are `continue-on-error`. A mass reformat conflicts with
   every open branch, so do it between feature PRs if at all.
