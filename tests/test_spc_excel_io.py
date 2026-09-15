@@ -10,6 +10,7 @@ Usage:
     python test_spc_excel_io.py
 """
 
+import sys
 from pathlib import Path
 import numpy as np
 import pandas as pd

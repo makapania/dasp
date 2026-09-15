@@ -49,6 +49,7 @@ import pytest
 
 from spectral_predict.code_generator import CodeGenerator, ExportOptions
 from spectral_predict.model_io import load_model, save_model
+from spectral_predict.models import CATBOOST_RUNTIME_PARAMS
 
 
 # ---------------------------------------------------------------------------
@@ -792,7 +793,10 @@ def test_lightgbm_multiclass_classification_parity(tmp_path):
 # CatBoost uses different kwarg names from the rest of the boosting family:
 # ``thread_count`` (not ``n_jobs``), and ``verbose=0`` (the codegen injects
 # this automatically when missing — set it explicitly here so merged params
-# are identical).
+# are identical). The in-process models also get CATBOOST_RUNTIME_PARAMS
+# (allow_writing_files=False, so fitting doesn't litter catboost_info/ into the
+# cwd); it is a runtime kwarg that production strips from stored params and the
+# codegen re-injects, so ``params`` passed to metadata/export stays clean.
 _CATBOOST_BASE_PARAMS = {
     "n_estimators": 30,
     "max_depth": 4,
@@ -811,7 +815,7 @@ def test_catboost_regression_parity(tmp_path):
     X_train, y_train, X_test = _make_regression_data()
     params = dict(_CATBOOST_BASE_PARAMS)
     _run_parity(
-        model=CatBoostRegressor(**params),
+        model=CatBoostRegressor(**params, **CATBOOST_RUNTIME_PARAMS),
         model_name="CatBoost",
         task_type="regression",
         X_train=X_train,
@@ -831,7 +835,7 @@ def test_catboost_binary_classification_parity_no_imbalance(tmp_path):
     X_train, y_train, X_test = _make_binary_classification_data()
     params = dict(_CATBOOST_BASE_PARAMS)
     _run_parity(
-        model=CatBoostClassifier(**params),
+        model=CatBoostClassifier(**params, **CATBOOST_RUNTIME_PARAMS),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
@@ -860,7 +864,9 @@ def test_catboost_binary_classification_parity_class_weight(tmp_path):
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
     base_params = dict(_CATBOOST_BASE_PARAMS)  # no auto_class_weights — bare
     _run_parity(
-        model=CatBoostClassifier(**base_params, auto_class_weights="Balanced"),
+        model=CatBoostClassifier(
+            **base_params, **CATBOOST_RUNTIME_PARAMS, auto_class_weights="Balanced"
+        ),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
@@ -902,7 +908,9 @@ def test_catboost_binary_classification_parity_auto_with_correction(tmp_path):
     X_train, y_train, X_test = _make_binary_classification_data(imbalanced=True)
     base_params = dict(_CATBOOST_BASE_PARAMS)  # no auto_class_weights — bare
     _run_parity(
-        model=CatBoostClassifier(**base_params, auto_class_weights="Balanced"),
+        model=CatBoostClassifier(
+            **base_params, **CATBOOST_RUNTIME_PARAMS, auto_class_weights="Balanced"
+        ),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
@@ -932,7 +940,7 @@ def test_catboost_multiclass_classification_parity(tmp_path):
     X_train, y_train, X_test = _make_multiclass_classification_data(n_classes=3)
     params = dict(_CATBOOST_BASE_PARAMS)
     _run_parity(
-        model=CatBoostClassifier(**params),
+        model=CatBoostClassifier(**params, **CATBOOST_RUNTIME_PARAMS),
         model_name="CatBoost",
         task_type="classification",
         X_train=X_train,
