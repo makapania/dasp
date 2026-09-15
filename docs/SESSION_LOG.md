@@ -1192,6 +1192,20 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
 - Chromosome genes are bounds-checked (`_checked_genes`): an out-of-range `WINDOW_SIZES`
   index used to raise `IndexError`, which the GUI's `except ValueError` did not catch.
 
+#### PR #77 round 5 (merge-with-nits)
+
+- **Malformed input raises more than ValueError.** `np.asarray([10**30, 3]).astype(int64)`
+  raises `OverflowError`, `len()` of a 0-d array raises `TypeError`, and `ast.literal_eval`
+  of a deeply nested string can raise `RecursionError`/`MemoryError`. Callers that recover
+  on `ValueError` need the parser to normalise all of them (`_MALFORMED_CHROMOSOME_ERRORS`).
+  Also build the error message from a guarded, truncated `repr`, because repr itself can
+  recurse.
+- **Widening one copy of a parser creates divergence.** Round 4 widened the truthy strings
+  in `preprocess.py` only, and four sibling copies (GUI `_parse_autoscale_flag`, the GUI
+  model loader, `CodeGenerator._autoscale_enabled`, the one-class validation rebuild)
+  kept `{true, 1, yes}`. They now all call `preprocess.parse_bool_cell`, and a source-scan
+  test rejects a reintroduced `in ('true', '1'...)` tuple in those modules.
+
 User asked for Codex, DeepSeek Flash and GLM 5.3 on everything merged this session
 (earlier reviews were Kimi/GLM only; DeepSeek had hung). DeepSeek via opencode worked
 once prompts forbade `gh`/`git fetch`; one run died on a self-typoed absolute path

@@ -79,9 +79,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the preprocessing name. A malformed or out-of-range chromosome raises `ValueError` and
   that row falls back to its name, instead of an `IndexError`.
 - A derivative row with a missing `Deriv` / `Window` rebuilds with 1 / 15 (the GUI's old
-  defaults) in both paths; validation used to fail on it. `smoothing` / `Autoscale` string
-  cells are matched explicitly (`'true'`, `'1'`, `'1.0'`, `'yes'`, `'on'`), so `'False'`
-  no longer reads as on.
+  defaults) in both paths; validation used to fail on it.
+- **One parser for `Autoscale` / `smoothing` flag cells.** New `preprocess.parse_bool_cell`
+  (strings `'true'`, `'1'`, `'1.0'`, `'yes'`, `'on'`, case- and whitespace-insensitive;
+  NaN/`None` give the default) is used by the validation rebuild, the ensemble rebuild,
+  the GUI model loader, the code exporter and the one-class validation rebuild. They
+  previously disagreed on `'on'` / `'1.0'`, and the one-class rebuild read a `smoothing`
+  cell of `'False'` as on.
+- Malformed preprocessing chromosomes (huge integers, 0-d arrays, deeply nested
+  literals) always raise `ValueError`, so the row falls back to its name or is skipped
+  instead of escaping the GUI's and validation's error handling. `'[]'` falls back to
+  `ga_genes` like an empty list.
 - `plsda_head_kwargs` coerces `lr__random_state=42.0` to `42` and `'None'` to `None`,
   and raises `ValueError` on values `LogisticRegression` would reject.
 - **PLS-DA heads rebuilt from a row keep the search's seed and class weighting.**

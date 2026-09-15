@@ -509,6 +509,8 @@ If `prep["autoscale"]` is true, the search skipped the per-model `StandardScaler
 scale-sensitive models (SVM/SVR/MLP/Ridge/Lasso/ElasticNet/NeuralBoosted), so don't add
 one. Wavelength subsets (`all_vars`) are taken **after** preprocessing.
 `preprocessing_config_from_row` fills a missing derivative order / window with 1 / 15.
+Parse `Autoscale` / `smoothing` flag cells with `preprocess.parse_bool_cell`
+(`bool("False")` is `True`); every rebuild path in DASP uses it.
 
 ---
 
@@ -520,7 +522,7 @@ listed is an internal implementation detail that may change without notice.
 | Module | Primitives |
 |---|---|
 | `io` | `read_spectra`, `read_asd_dir`, `read_csv_spectra`, `read_reference_csv`, `align_xy` |
-| `preprocess` | `build_preprocessing_pipeline`, `preprocessing_config_from_row` |
+| `preprocess` | `build_preprocessing_pipeline`, `preprocessing_config_from_row`, `parse_bool_cell` |
 | `ga_preprocessing` | `chromosome_from_row`, `chromosome_to_steps` |
 | `unified_bayesian` | `apply_preprocessing`, `run_unified_bayesian` (including its `enabled_extra_axes`, `search_space` and `n_startup_trials` keywords) |
 | `search_spaces` | `AxisSpec`, `BundleSpec`, `ExtraAxesConfigError`; the `BUNDLES` registry (read-only) |

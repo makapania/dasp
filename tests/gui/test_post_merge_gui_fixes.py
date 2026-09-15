@@ -512,6 +512,51 @@ def test_ensemble_reconstruction_defaults_missing_derivative_window(gui_app):
     np.testing.assert_allclose(rmse, _validation_rmsep(row, X, y, X_val, y_val), rtol=1e-9)
 
 
+def test_ensemble_loop_survives_malformed_chromosome_rows(gui_app, monkeypatch):
+    """One bad chromosome must not cost the other models."""
+    X, y, X_val, _ = _val_split()
+    good = CHROMOSOME_ROWS["exhaustive-snv_deriv1_w11"]
+    # Bad genes but a buildable name: falls back to the name, with a log line.
+    fallback = {**good, "PreprocessBase": "snv_deriv", "preprocess_chromosome": "[6, 99]"}
+    # Bad genes and an unbuildable name: skipped, with a log line.
+    skipped = {**good, "preprocess_chromosome": "[100000000000000000000000000000, 3]"}
+    plain = {"Model": "Ridge", "Params": str({"alpha": 1.0}), "Preprocess": "raw"}
+    top_models_df = pd.DataFrame([good, fallback, skipped, plain])
+    logs: list[str] = []
+    monkeypatch.setattr(gui_app, "_log_progress", logs.append)
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        reconstructed = gui_app._reconstruct_models_from_results(top_models_df, X, y, "regression")
+
+    assert [meta["preprocess"] for _, _, meta in reconstructed] == ["snv_deriv", "snv_deriv", "raw"]
+    assert any("[6, 99]" in line and "window gene" in line for line in logs), logs
+    assert any("Failed to reconstruct" in line for line in logs), logs
+    for model, _, _ in reconstructed:
+        assert np.all(np.isfinite(np.ravel(model.predict(X_val))))
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected"),
+    [
+        ("True ", True),
+        ("TRUE", True),
+        ("on", True),
+        ("1.0", True),
+        ("0", False),
+        ("", False),
+        (float("nan"), False),
+        (None, False),
+    ],
+)
+def test_gui_autoscale_flag_parser_matches_backend(cell, expected):
+    from spectral_predict.preprocess import parse_bool_cell
+    from spectral_predict_gui_optimized import _parse_autoscale_flag
+
+    assert _parse_autoscale_flag(cell) is expected
+    assert parse_bool_cell(cell) is expected
+    assert _parse_autoscale_flag(None, default=True) is True
+
+
 # --- NameErrors -----------------------------------------------------------------------
 
 

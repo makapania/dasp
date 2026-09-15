@@ -530,3 +530,98 @@ def test_validation_rebuild_scores_legacy_ga_genes_row_in_mixed_table() -> None:
     model.fit(transform(X), y)
     expected = np.sqrt(np.mean((model.predict(transform(X_val)) - y_val) ** 2))
     np.testing.assert_allclose(out.loc[0, "RMSEP"], expected, rtol=1e-9)
+
+
+def _deep_list(depth: int):
+    value: list = [6, 3]
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        "[100000000000000000000000000000, 3]",  # OverflowError converting to int64
+        [10**30, 3],
+        np.array(6),  # 0-d array
+        np.array([[6, 3]]),
+        "[" * 5000 + "6, 3" + "]" * 5000,  # deeply nested literal
+        _deep_list(3000),
+        {"a": 1},
+    ],
+    ids=["huge-int-str", "huge-int-list", "0d-array", "2d-array", "deep-str", "deep-list", "dict"],
+)
+def test_malformed_chromosome_always_raises_value_error(cell) -> None:
+    from spectral_predict.ga_preprocessing import chromosome_from_row, chromosome_to_steps
+
+    with pytest.raises(ValueError, match="chromosome"):
+        chromosome_from_row({"preprocess_chromosome": cell})
+    if not isinstance(cell, str):
+        with pytest.raises(ValueError, match="chromosome"):
+            chromosome_to_steps(cell)
+
+
+def test_empty_list_string_falls_back_like_empty_list() -> None:
+    from spectral_predict.ga_preprocessing import chromosome_from_row
+
+    for empty in ("[]", " [] ", [], (), np.array([])):
+        row = {"preprocess_chromosome": empty, "ga_genes": "[2, 6]"}
+        assert list(chromosome_from_row(row)) == [2, 6], empty
+        assert chromosome_from_row({"preprocess_chromosome": empty}) is None
+
+
+# --- One flag parser for Autoscale / smoothing everywhere ------------------------------
+
+BOOL_CELLS = [
+    ("True", True),
+    ("True ", True),
+    ("TRUE", True),
+    (" yes", True),
+    ("1", True),
+    ("1.0", True),
+    ("on", True),
+    ("False", False),
+    ("0", False),
+    ("off", False),
+    ("", False),
+    (True, True),
+    (False, False),
+    (np.bool_(True), True),
+    (1, True),
+    (0, False),
+    (float("nan"), False),
+    (None, False),
+    (pd.NA, False),
+]
+
+
+@pytest.mark.parametrize(("cell", "expected"), BOOL_CELLS)
+def test_row_flag_parsers_agree(cell, expected) -> None:
+    from spectral_predict.code_generator import CodeGenerator
+    from spectral_predict.preprocess import parse_bool_cell, preprocessing_config_from_row
+
+    assert parse_bool_cell(cell) is expected
+    assert preprocessing_config_from_row({"Autoscale": cell})["autoscale"] is expected
+    assert preprocessing_config_from_row({"smoothing": cell})["smoothing"] is expected
+    assert CodeGenerator({"autoscale": cell})._autoscale_enabled() is expected
+
+
+def test_no_divergent_truthy_string_sets_remain() -> None:
+    """Every Autoscale / smoothing string parser goes through preprocess.parse_bool_cell."""
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    sources = [
+        root / "spectral_predict_gui_optimized.py",
+        root / "src" / "spectral_predict" / "code_generator.py",
+        root / "src" / "spectral_predict" / "contamination.py",
+        root / "src" / "spectral_predict" / "search.py",
+        root / "src" / "spectral_predict" / "preprocess.py",
+    ]
+    pattern = re.compile(r"""in \(\s*['"]true['"]\s*,\s*['"]1['"]""")
+    for path in sources:
+        assert not pattern.search(path.read_text(encoding="utf-8")), path
+    contamination = (sources[2]).read_text(encoding="utf-8")
+    assert "parse_bool_cell(row.get('Autoscale'" in contamination
+    assert "parse_bool_cell(row.get('smoothing'" in contamination

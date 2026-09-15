@@ -599,10 +599,11 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
 # Baseline methods a results row's display name can carry as a "+"-separated prefix.
 _DISPLAY_BASELINE_TAGS = ("als", "polynomial", "rubber_band", "airpls", "advanced")
 _DERIVATIVE_PREPROCESS_NAMES = ("deriv", "snv_deriv", "deriv_snv")
-# bool("False") is True, so string cells in results tables are matched explicitly.
-_TRUTHY_CELL_STRINGS = ("true", "1", "1.0", "yes", "on")
 _LEGACY_DEFAULT_DERIV = 1
 _LEGACY_DEFAULT_WINDOW = 15
+
+# String spellings of a true flag in results tables / CSVs (case and whitespace ignored).
+TRUTHY_CELL_STRINGS = frozenset({"true", "1", "1.0", "yes", "on"})
 
 
 def _row_value_missing(value) -> bool:
@@ -612,6 +613,32 @@ def _row_value_missing(value) -> bool:
         return bool(value != value)  # NaN is the only scalar not equal to itself
     except (TypeError, ValueError):
         return False
+
+
+def parse_bool_cell(raw, default: bool = False) -> bool:
+    """Parse a boolean flag cell (``Autoscale``, ``smoothing``) from a results row or config.
+
+    ``bool("False")`` is True, so strings are matched against ``TRUTHY_CELL_STRINGS``:
+    ``" TRUE "`` is true; ``"0"``, ``"off"`` and ``""`` are false. ``None`` and NaN give
+    ``default``; anything else goes through ``bool``.
+
+    Args:
+        raw: The cell value.
+        default: Value for a missing cell (``None`` / NaN).
+
+    Returns:
+        The parsed flag.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, str):
+        return raw.strip().lower() in TRUTHY_CELL_STRINGS
+    if _row_value_missing(raw):
+        return default
+    try:
+        return bool(raw)
+    except (TypeError, ValueError):  # pd.NA refuses bool()
+        return default
 
 
 def _row_positive_int(value):
@@ -650,13 +677,7 @@ def preprocessing_config_from_row(row) -> dict:
     if _row_value_missing(baseline_method):
         baseline_method = None
 
-    smoothing_raw = row.get("smoothing", False)
-    if isinstance(smoothing_raw, float):
-        smoothing = False if _row_value_missing(smoothing_raw) else smoothing_raw > 0
-    elif isinstance(smoothing_raw, str):
-        smoothing = smoothing_raw.strip().lower() in _TRUTHY_CELL_STRINGS
-    else:
-        smoothing = bool(smoothing_raw)
+    smoothing = parse_bool_cell(row.get("smoothing", False))
     smoothing_window = row.get("smoothing_window", 17)
     smoothing_window = 17 if _row_value_missing(smoothing_window) else int(smoothing_window)
     smoothing_polyorder = row.get("smoothing_polyorder", 2)
@@ -664,14 +685,7 @@ def preprocessing_config_from_row(row) -> dict:
         2 if _row_value_missing(smoothing_polyorder) else int(smoothing_polyorder)
     )
 
-    # bool("False") is True, so the string path is parsed explicitly.
-    autoscale_raw = row.get("Autoscale", False)
-    if _row_value_missing(autoscale_raw):
-        autoscale = False
-    elif isinstance(autoscale_raw, str):
-        autoscale = autoscale_raw.strip().lower() in _TRUTHY_CELL_STRINGS
-    else:
-        autoscale = bool(autoscale_raw)
+    autoscale = parse_bool_cell(row.get("Autoscale", False))
 
     if "+" in str(preprocess_name):
         core_parts = []

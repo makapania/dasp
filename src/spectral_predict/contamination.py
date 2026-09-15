@@ -1137,22 +1137,14 @@ def compute_validation_metrics_for_top_one_class_models(
             baseline_method = row.get('baseline_method', None)
             if isinstance(baseline_method, float) and pd.isna(baseline_method):
                 baseline_method = None
-            smoothing_raw = row.get('smoothing', False)
-            if isinstance(smoothing_raw, float) and pd.isna(smoothing_raw):
-                smoothing = False
-            else:
-                smoothing = bool(smoothing_raw)
+            from .preprocess import parse_bool_cell
+
+            smoothing = parse_bool_cell(row.get('smoothing', False))
             smoothing_window = _maybe_int(row.get('smoothing_window'), 17)
             smoothing_polyorder = _maybe_int(row.get('smoothing_polyorder'), 2)
             # T-36: parse autoscale flag with the same robust handling as search.py
             # (handles bool, numpy.bool_, int 0/1, NaN-float, and string "true"/"false").
-            autoscale_raw = row.get('Autoscale', False)
-            if isinstance(autoscale_raw, float) and pd.isna(autoscale_raw):
-                autoscale = False
-            elif isinstance(autoscale_raw, str):
-                autoscale = autoscale_raw.strip().lower() in ('true', '1', 'yes')
-            else:
-                autoscale = bool(autoscale_raw)
+            autoscale = parse_bool_cell(row.get('Autoscale', False))
 
             # T-36 fix (post-merge review v2): mirror search.py's display-name
             # fallback so legacy .dasp files without an explicit Autoscale /

@@ -1286,16 +1286,9 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
         """Robust parse of self.config['autoscale'] — handles bool, int, NaN, and the
         string forms ('True'/'False'/'1'/'0') that round-tripped CSVs may contain.
         Plain bool() is wrong on the string path: bool('False') is True."""
-        raw = self.config.get('autoscale', False)
-        if isinstance(raw, str):
-            return raw.strip().lower() in ('true', '1', 'yes')
-        try:
-            import math
-            if isinstance(raw, float) and math.isnan(raw):
-                return False
-        except Exception:
-            pass
-        return bool(raw)
+        from .preprocess import parse_bool_cell
+
+        return parse_bool_cell(self.config.get('autoscale', False))
 
     def _split_pls_da_params(self, params: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Split params into PLS and LogisticRegression sets for PLS-DA.

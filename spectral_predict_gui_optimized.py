@@ -1946,17 +1946,11 @@ class SidebarNavigation:
 # wrong on the round-tripped CSV/JSON string path).
 
 def _parse_autoscale_flag(raw, default: bool = False) -> bool:
-    if raw is None:
-        return default
-    if isinstance(raw, str):
-        return raw.strip().lower() in ('true', '1', 'yes')
-    try:
-        import math as _math
-        if isinstance(raw, float) and _math.isnan(raw):
-            return default
-    except Exception:
-        pass
-    return bool(raw)
+    # Shared with the validation rebuild, the exporter and the one-class rebuild so an
+    # Autoscale cell like "on" means the same thing everywhere.
+    from spectral_predict.preprocess import parse_bool_cell
+
+    return parse_bool_cell(raw, default)
 
 
 # ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
@@ -35458,16 +35452,7 @@ Performance (Classification):
         # T-36: prefer the explicit Autoscale column over the parsed display-name suffix.
         # This matches the validation-rebuild parser in search.py:529-540.
         autoscale_raw = config.get('Autoscale', autoscale_detected)
-        try:
-            import pandas as _pd
-            if isinstance(autoscale_raw, float) and _pd.isna(autoscale_raw):
-                autoscale_loaded = False
-            elif isinstance(autoscale_raw, str):
-                autoscale_loaded = autoscale_raw.strip().lower() in ('true', '1', 'yes')
-            else:
-                autoscale_loaded = bool(autoscale_raw)
-        except Exception:
-            autoscale_loaded = bool(autoscale_detected)
+        autoscale_loaded = _parse_autoscale_flag(autoscale_raw, default=False)
 
         # Convert from search.py naming to GUI naming
         if preprocess == 'deriv' and deriv == 1:

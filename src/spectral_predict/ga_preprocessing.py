@@ -260,30 +260,41 @@ def _to_float64(X):
     return np.asarray(X, dtype=np.float64)
 
 
+# Everything malformed input can raise while being parsed or converted. Callers (GUI
+# ensemble rebuild, validation rebuild) recover from ValueError only.
+_MALFORMED_CHROMOSOME_ERRORS = (
+    TypeError, ValueError, OverflowError, RecursionError, MemoryError, IndexError, SyntaxError,
+)
+
+
+def _chromosome_preview(genes) -> str:
+    try:
+        text = repr(genes)
+    except _MALFORMED_CHROMOSOME_ERRORS:
+        text = f"<unprintable {type(genes).__name__}>"
+    return text if len(text) <= 100 else text[:100] + "..."
+
+
 def _checked_genes(genes) -> np.ndarray:
     """Return ``genes`` as an int array, or raise ValueError if it is not a valid chromosome."""
+    preview = _chromosome_preview(genes)
     try:
         arr = np.asarray(genes)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: {e}") from e
-    if arr.ndim != 1 or len(arr) not in (2, 3):
-        raise ValueError(
-            f"Invalid preprocessing chromosome {genes!r}: expected 2 or 3 genes"
-        )
-    try:
+        if arr.ndim != 1 or len(arr) not in (2, 3):
+            raise ValueError("expected a flat list of 2 or 3 genes")
         as_int = arr.astype(np.int64)
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: {e}") from e
-    if not np.array_equal(as_int, arr):
-        raise ValueError(f"Invalid preprocessing chromosome {genes!r}: genes must be integers")
+        if not np.array_equal(as_int, arr):
+            raise ValueError("genes must be integers")
+    except _MALFORMED_CHROMOSOME_ERRORS as e:
+        raise ValueError(f"Invalid preprocessing chromosome {preview}: {e}") from e
     if not 0 <= as_int[0] < len(PREPROC_TYPES):
         raise ValueError(
-            f"Invalid preprocessing chromosome {genes!r}: preprocessing gene {as_int[0]} "
+            f"Invalid preprocessing chromosome {preview}: preprocessing gene {as_int[0]} "
             f"is outside 0..{len(PREPROC_TYPES) - 1}"
         )
     if not 0 <= as_int[1] < len(WINDOW_SIZES):
         raise ValueError(
-            f"Invalid preprocessing chromosome {genes!r}: window gene {as_int[1]} "
+            f"Invalid preprocessing chromosome {preview}: window gene {as_int[1]} "
             f"is outside 0..{len(WINDOW_SIZES) - 1}"
         )
     return as_int
@@ -320,26 +331,44 @@ def chromosome_to_steps(genes, *, autoscale: bool = False) -> list:
     return steps
 
 
-def _chromosome_cell_missing(raw) -> bool:
+def _chromosome_cell(raw):
+    """Parse one chromosome cell; ``None`` when it is missing or an empty sequence.
+
+    Raises:
+        ValueError: If the cell holds text that is not a Python literal.
+    """
     if raw is None:
-        return True
-    if isinstance(raw, (list, tuple, np.ndarray)):
-        return len(raw) == 0
+        return None
     if isinstance(raw, str):
-        return raw.strip() == ''
+        if raw.strip() == '':
+            return None
+        import ast
+
+        try:
+            raw = ast.literal_eval(raw)
+        except _MALFORMED_CHROMOSOME_ERRORS as e:
+            raise ValueError(
+                f"Unparseable preprocess_chromosome {_chromosome_preview(raw)}: {e}"
+            ) from e
+    if isinstance(raw, np.ndarray):
+        return None if raw.size == 0 else raw
+    if isinstance(raw, (list, tuple)):
+        return None if len(raw) == 0 else raw
     try:
-        return bool(pd.isna(raw))
-    except (TypeError, ValueError):
-        return False
+        if bool(pd.isna(raw)):
+            return None
+    except _MALFORMED_CHROMOSOME_ERRORS:
+        pass
+    return raw
 
 
 def chromosome_from_row(row) -> Optional[np.ndarray]:
     """Return a results row's preprocessing chromosome, or ``None`` if it has none.
 
     Reads ``preprocess_chromosome``, falling back to the pre-2026-05-06 ``ga_genes``
-    column when ``preprocess_chromosome`` is absent or empty (``None``, ``''``, NaN in a
-    mixed results table). Accepts a list, an array or the ``str(list)`` a results CSV
-    stores.
+    column when ``preprocess_chromosome`` is absent or empty (``None``, ``''``, ``'[]'``,
+    ``[]``, NaN in a mixed results table). Accepts a list, an array or the ``str(list)``
+    a results CSV stores.
 
     Args:
         row: A results row as a mapping (``pd.Series``, ``dict``).
@@ -348,21 +377,15 @@ def chromosome_from_row(row) -> Optional[np.ndarray]:
         The genes as an integer array, or ``None`` when the row carries no chromosome.
 
     Raises:
-        ValueError: If a chromosome is present but cannot be parsed or is out of range.
+        ValueError: For any malformed chromosome (unparseable text, wrong shape,
+            non-integer or out-of-range genes).
     """
-    raw = row.get('preprocess_chromosome', None)
-    if _chromosome_cell_missing(raw):
-        raw = row.get('ga_genes', None)
-    if _chromosome_cell_missing(raw):
+    genes = _chromosome_cell(row.get('preprocess_chromosome', None))
+    if genes is None:
+        genes = _chromosome_cell(row.get('ga_genes', None))
+    if genes is None:
         return None
-    if isinstance(raw, str):
-        import ast
-
-        try:
-            raw = ast.literal_eval(raw)
-        except (ValueError, SyntaxError) as e:
-            raise ValueError(f"Unparseable preprocess_chromosome {raw[:100]!r}: {e}") from e
-    return _checked_genes(raw)
+    return _checked_genes(genes)
 
 
 def get_config_description(genes: np.ndarray) -> str:
