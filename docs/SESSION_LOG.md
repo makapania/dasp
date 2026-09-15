@@ -1086,3 +1086,32 @@ pre-fetch refs and forbid `gh`/`git fetch` in agent prompts to rule out prompts/
   keys into `kwargs` and forwards them to the booster. Predictions still match the
   search-time model, because the unprefixed values are applied as well. It happens with
   or without bundles.
+
+### 2026-09-14 — Post-merge review round (Codex + DeepSeek Flash + GLM 5.3) of #68-#75
+
+User asked for Codex, DeepSeek Flash and GLM 5.3 on everything merged this session
+(earlier reviews were Kimi/GLM only; DeepSeek had hung). DeepSeek via opencode worked
+once prompts forbade `gh`/`git fetch`; one run died on a self-typoed absolute path
+(`sporheim`) — tell it to read files only via `git show <sha>:<relpath>`.
+Codex found the most. Verified real bugs (all pre-existing or edge cases, none caused
+by the PRs' default paths):
+- **Deletion guard fails open:** `_sqlite_file_exists` returns False on OSError, and the
+  migration code treats False as "file absent" → `_target_absent=True` → a failed
+  migration can `delete_study` a pre-existing study.
+- **`convert_study_to_dataframe` NameError:** `baseline_params` undefined (flake8 F821)
+  — crashes result conversion for any Bayesian trial with `apply_baseline=True`.
+- **Ensemble reconstruction drops tuned params:** GUI `_reconstruct_models_from_results`
+  filters out `model__*` keys instead of stripping the prefix; Bayesian rows store
+  estimator params as `model__*`, so ensembles train with defaults. Also drops PLS-DA
+  `class_weight` and forces `random_state=42` (validation rebuild too).
+- **GUI NameErrors:** `logger` undefined in `_run_refined_model_thread` (Tab 7 task-type
+  mismatch branch); deferred `lambda: ...(str(e))` after `except ... as e` (Py3 unbinds e).
+- `svm_gamma` resolves for SVM+regression / SVR+classification (silent 1e10 penalty);
+  `'pls-da'` not normalised; categorical `(1, 1.0)` conflated by Optuna; `np.str_`
+  constants break `ast.literal_eval` of Params; legacy CatBoost refit in ensemble.py.
+- **CI:** push runs share one concurrency group, so a newer merge cancels an older
+  *pending* main run; `continue-on-error` flake8 hid the F821 bugs above.
+Rejected: branch-protection "required checks" concerns (main is unprotected); GLM's
+"FixedTrial.params is pre-populated" block (it starts empty; verified).
+Lesson: black/flake8 non-blocking was fine for style, but pyflakes F821-class checks
+should always block — they found two crash bugs no test covered.
