@@ -140,6 +140,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The mismatch dialog's "Yes, start fresh" now deletes the interrupted run instead of
     just abandoning it in memory, for the same orphaning reason as above (see the
     updated behaviour-change entry further up).
+- **Round 8 (Codex + DeepSeek review of round 7): `_confirm_resume_before_launch` is now
+  the single main-thread authority for a Bayesian launch.** It snapshots the
+  optimization method, task type, selected models, persistence mode and the loaded
+  data, decides resume/delete/fresh, and claims the run slot (registers or resumes it)
+  *before* the worker thread is even created. The frozen decision passes into
+  `_run_analysis_thread` as plain arguments; the worker never re-derives any of it from
+  live Tk state and never re-decides. Everything round 7 verified as working (the
+  controller race fix, empty-frame-as-error, the `HAS_UNIFIED_BAYESIAN` gate, the bound
+  `X`/`y` snapshots, explicit-deletion wording, grid/NSGA-II staying unaffected) is
+  unchanged.
+  - **Resuming a run whose model selection changed now asks, and defaults to the
+    run's original models.** Stopping a PLS search, selecting Ridge, and clicking
+    Resume used to run Ridge in Ridge's place while PLS's study stayed unfinished, and
+    then release the record as if the whole run had completed. A mismatch between the
+    resumed run's saved `model_names` and the current click's selection now asks; "Yes"
+    substitutes the run's own models for this click, "No" cancels it.
+  - **Behaviour change: a read failure, or a failed `resume_run()`, no longer starts a
+    fresh analysis.** Both used to fall through to "launch anyway," letting this
+    click's own registration silently overwrite a saved run's sidecar that was never
+    actually confirmed absent. Both now refuse to launch and ask the user to retry.
+  - **Behaviour change: a Delete that doesn't fully succeed no longer starts a fresh
+    analysis either** (in both the pending-run three-way dialog and the mismatch
+    dialog) — same reasoning: an unconfirmed delete must not be treated as "safe to
+    overwrite."
+  - `run_state.discard_incomplete_run` re-reads the sidecar's run id immediately before
+    unlinking it, and refuses if it no longer matches — its own initial
+    `find_incomplete_run()` read and the unlink were not atomic, so another dasp
+    instance's `start_run()` in between could have replaced the sidecar with its own
+    run, which the old code deleted anyway.
+  - **Every exit from the worker after a run is registered/resumed now either completes
+    normally or releases the in-process claim while keeping the sidecar.** A `try`/
+    `finally` around the whole worker body closes this uniformly: the one-class
+    inlier/guard checks' early `return`s, and any exception during setup, used to leave
+    the claim dangling, so the next `start_run()` could idempotently reuse stale
+    metadata with no fingerprint check ever running. The resume fingerprint re-check's
+    own early return (a deliberately-handled exit: the resume stays exactly as it was)
+    is explicitly excluded from this generic cleanup.
+  - A model whose saved study already has its full trial count, but every trial is a
+    penalty, now says so and points at Delete as the fix, instead of just "treated as
+    failed" (which would otherwise re-prompt forever with no next step spelled out).
+  - Wording: the "decide later" choice also says a new Bayesian analysis can't start
+    until the saved run is resumed or deleted, and that Grid/NSGA-II searches aren't
+    affected.
 - **Ensembles trained from Bayesian results now use the tuned hyperparameters.**
   Ensemble model reconstruction discarded every `model__*` key in a row's `Params`, and
   Bayesian rows store all estimator params under that prefix, so each base model trained

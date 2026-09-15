@@ -1500,3 +1500,92 @@ should always block — they found two crash bugs no test covered.
       re-confirmed unaffected: 3395 passed, 26 skipped (984s) — identical to the
       documented baseline. Targeted resume battery: 156 passed (up from 154 with the
       two added startup tests).
+  - **Round 8 (Codex + DeepSeek review of round 7, commit b45bfac). Adopted design:
+    `_confirm_resume_before_launch` becomes the single main-thread authority for a
+    Bayesian launch** — it snapshots optimization method, task type, selected models,
+    persistence mode and the loaded data, decides resume/delete/fresh, and claims the
+    run slot (registers or resumes it) before the worker thread exists, then freezes
+    that decision into `_run_analysis_thread`'s arguments (`analysis_run_id`,
+    `uses_bayesian_run_state`). The worker never calls `self._uses_bayesian_run_state()`
+    or `start_run()` itself for a real GUI launch again.
+    - **Backward-compat shim, not optional:** the exhaustive existing test suite drives
+      `_run_analysis_thread` directly, bypassing `_run_analysis`/
+      `_confirm_resume_before_launch` entirely. Making the frozen args *required* would
+      have broken ~40 tests across three files. Fix: a private sentinel
+      `_LAUNCH_CONTEXT_UNSET` as both args' default — left at the sentinel, the worker
+      falls back to registering itself exactly as the pre-round-8 worker did (the
+      legacy path). The real GUI path (`_run_analysis`) always passes both explicitly,
+      even when `analysis_run_id` is `None` (a legitimate frozen value, e.g. run-state
+      import failed) — so it never takes the fallback branch, which is what actually
+      closes the races below.
+    - *Resume must run the run's ORIGINAL models, confirmed (Codex traced it exactly:
+      Stop a PLS run, select Ridge, click Resume — Ridge ran in Ridge's place while
+      PLS's study stayed unfinished, and the record released as if the whole run had
+      finished).* Fix: compare `get_resumed_run().model_names` against the click's
+      selection; on mismatch, ask (default substitutes the run's own models via a new
+      `self._pending_bayesian_models` override that `_run_analysis` reads before
+      constructing the thread args). Skipped when the saved run's `model_names` is
+      empty (older/degraded sidecars — nothing to compare).
+    - *A read failure or a failed `resume_run()` used to fall through to "launch
+      anyway," confirmed.* Both are now a hard refuse-to-launch: only "positively
+      nothing pending" (a clean `None` from `find_incomplete_run()`, or
+      `has_resumable_store()` False) or "the user explicitly chose Delete and it fully
+      succeeded" may let this click's own registration touch the shared sidecar.
+    - *Delete not fully succeeding used to launch anyway too, confirmed*, in BOTH the
+      pending-run three-way dialog and the mismatch dialog's "Yes, start fresh" — same
+      fix, same reasoning.
+    - *`discard_incomplete_run`'s own initial `find_incomplete_run()` read and its later
+      `sidecar.unlink()` are not atomic, confirmed* — same class of bug as the round-2
+      cross-process sidecar-cleanup race (SESSION_LOG 2026-09-14), just inside the
+      delete path this time instead of an automatic cleanup path. Fixed by re-reading
+      the sidecar's `run_id` immediately before unlinking and refusing if it no longer
+      matches. Storage-path deletion doesn't need the same guard: the path is derived
+      from the run id itself (`<run_id>.sqlite3`), so it can only ever belong to the run
+      this call already confirmed.
+    - *Early exits after registration skipping cleanup, confirmed* — the one-class
+      inlier/guard `return`s, and any setup exception, left the in-process claim
+      dangling with no cleanup at all (not even the round-7 Stop/failure path, which
+      only runs from two specific call sites deep inside the search loops). Fixed with
+      a `try`/`finally` around the ENTIRE worker body: a local `_run_state_settled`
+      flag is set `True` only by the two normal `_complete_run_state_after_search`
+      call sites; the `finally` calls it with `n_model_errors=1` (forcing its
+      "stays resumable" branch, which calls `clear_resume_state()`) for ANY OTHER exit
+      where `analysis_run_id is not None`. Grid/NSGA-II (`analysis_run_id` always
+      `None`) are untouched by construction.
+    - **Gotcha found while adding this:** the worker's own resume-fingerprint re-check
+      (Codex HIGH #7, round 6) has its OWN early `return` — a deliberately-handled
+      exit where the resume is left exactly as `resume_run()` set it
+      (`is_resuming()` stays `True`, nothing on disk touched). The generic `finally`
+      net doesn't know that and would have called `clear_resume_state()` on it too,
+      downgrading an intact, still-resuming run to merely "resumable" — caught by
+      `test_data_changed_between_click_and_worker_stops_a_resume` failing. Fixed by
+      setting `_run_state_settled = True` at that specific `return`, marking it as
+      already-handled rather than relying on the generic net.
+    - *Penalty-only completed studies re-prompting forever, addressed as wording,
+      confirmed already covered functionally.* `convert_study_to_dataframe` (round 7)
+      already turns an all-penalty completed study into an empty results frame — the
+      exact same signal as "every trial failed" — so the round-7 "no usable results"
+      fix already keeps it resumable. Nothing to fix behaviourally; the log line was
+      updated to say Delete is the way out, since the same message would otherwise
+      repeat every retry with no actionable next step.
+    - Test-file rework this round required, not just additive:
+      `test_resume_data_mismatch_keeps_run.py`'s `_FakeThread`/`_run_worker`/
+      `start_run_spy` were built around registration happening *inside* the worker
+      (a `_StopBeforeSearch` `BaseException` raised from a patched `rs.start_run` was
+      the "stop before running a real search" tripwire). Registration for a fresh
+      launch now happens on the main thread, before the worker exists at all, so that
+      tripwire moved to a `run_unified_bayesian` stand-in instead — testing the thing
+      these tests actually care about ("the search must not run") directly rather than
+      via a proxy that no longer fires at the right time. `_FakeThread` also needed to
+      carry `kwargs` (the frozen `analysis_run_id`/`uses_bayesian_run_state`), since
+      `_run_analysis` now passes them as `Thread(..., kwargs=...)`.
+    - New `tests/gui/test_resume_round8.py` (14 tests). Every test covering a *fix* (not
+      the pre-existing/wording-only items) was individually reverted and re-verified to
+      fail: the model-reconciliation ask (3 tests), the read-failure/resume-failure
+      refuse-to-launch (2), the delete-partial-failure refuse-to-launch (3, including
+      the `discard_incomplete_run` unit test), the frozen-flag-over-live-state tests
+      (2), and the `finally`-safety-net tests (3, with the 4th — the fingerprint
+      re-check exclusion — correctly staying green either way, proving it's
+      independent of the generic net).
+    - Full non-GUI suite re-confirmed again after this round: 3395 passed, 26 skipped
+      (938s) — unchanged. flake8 F821/F822/F823 clean.

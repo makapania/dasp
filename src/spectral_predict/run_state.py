@@ -739,6 +739,16 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     Code-reviewer: also path-validates `storage_path` against the project's
     user-optuna directory before unlinking, refusing to follow a tampered
     sidecar that points outside.
+
+    Codex review of #79 round 8: the initial `find_incomplete_run()` call
+    above and the `sidecar.unlink()` below are not atomic. Another dasp
+    instance can replace the sidecar with its OWN run's between the two —
+    the same class of cross-process race already fixed for the startup
+    cleanup path (round 2: no automatic delete there at all, because a
+    check-then-delete can't be made safe). Here the delete is the whole
+    point, so instead the run id is re-read right before unlinking, and the
+    unlink is refused if it no longer matches — the replacement sidecar
+    (and the run it names) survives untouched.
     """
     meta = find_incomplete_run()
     if meta is None or meta.run_id != run_id:
@@ -751,8 +761,19 @@ def discard_incomplete_run(run_id: str) -> DiscardResult:
     sidecar_deleted = False
     try:
         if sidecar.exists():
-            sidecar.unlink()
-            sidecar_deleted = True
+            try:
+                current = json.loads(sidecar.read_text(encoding="utf-8"))
+                current_run_id = current.get("run_id") if isinstance(current, dict) else None
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+                current_run_id = None
+            if current_run_id != run_id:
+                errors.append(
+                    "sidecar no longer names this run (replaced by another "
+                    "dasp instance); refusing to delete it"
+                )
+            else:
+                sidecar.unlink()
+                sidecar_deleted = True
     except OSError as e:
         errors.append(f"sidecar unlink failed: {e}")
 

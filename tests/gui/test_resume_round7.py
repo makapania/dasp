@@ -241,13 +241,18 @@ def test_click_run_delete_choice_removes_saved_run_and_starts_fresh(gui_app, pau
     rs, meta, (X, y) = paused_no_resume_flag
     gui_app.X, gui_app.y = _regression_data(7)  # any data — deletion doesn't check it
     with patch("tkinter.messagebox.askyesnocancel", return_value=False) as ask:
-        launch = gui_app._confirm_resume_before_launch()
+        launch = gui_app._confirm_resume_before_launch(["PLS"], "quick")
 
     assert ask.called
     assert launch is True
     assert not rs.is_resuming()
-    assert rs.find_incomplete_run() is None, "the saved run must be deleted, not left dangling"
-    assert not Path(meta.storage_path).exists()
+    assert not Path(meta.storage_path).exists(), "the old SQLite file must be deleted"
+    # Round 8: _confirm_resume_before_launch now registers the fresh run
+    # itself (moved from the worker), so a NEW run replaces the deleted one
+    # rather than leaving nothing registered at all.
+    new_meta = rs.find_incomplete_run()
+    assert new_meta is not None and new_meta.run_id != meta.run_id
+    assert gui_app._pending_bayesian_run_id == new_meta.run_id
 
 
 def test_click_run_cancel_choice_launches_nothing_and_keeps_saved_run(gui_app, paused_no_resume_flag):

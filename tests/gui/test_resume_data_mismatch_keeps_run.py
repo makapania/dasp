@@ -24,14 +24,23 @@ import spectral_predict_gui_optimized as gui_module
 
 
 class _StopBeforeSearch(BaseException):
-    """Raised from the start_run spy; BaseException escapes the worker's handlers."""
+    """Raised from the run_unified_bayesian stand-in; BaseException escapes
+    the worker's handlers.
+
+    Round 8 (#79): registration for a FRESH launch now happens on the main
+    thread, inside ``_confirm_resume_before_launch``, before the worker
+    thread is even created — so it can no longer serve as this test file's
+    "stop before the real search" tripwire. The tripwire moves to the
+    search call itself, which is exactly the point these tests actually
+    care about ("the search must not run").
+    """
 
 
 class _FakeThread:
     created: list["_FakeThread"] = []
 
-    def __init__(self, target, args=(), daemon=None):
-        self.target, self.args = target, args
+    def __init__(self, target, args=(), kwargs=None, daemon=None):
+        self.target, self.args, self.kwargs = target, args, dict(kwargs or {})
         _FakeThread.created.append(self)
 
     def start(self):
@@ -82,10 +91,21 @@ def resumed(gui_app, tmp_path, monkeypatch, reimport_modules):
     real_start_run = rs.start_run
 
     def start_run_spy(*args, **kwargs):
-        started.append(real_start_run(*args, **kwargs))
-        raise _StopBeforeSearch
+        # Round 8: a fresh launch now registers on the main thread (inside
+        # _confirm_resume_before_launch), so this fires during _click_run
+        # itself rather than inside a later _run_worker() call. It no
+        # longer needs to abort execution — the actual "don't let a real
+        # search run" tripwire is the run_unified_bayesian stand-in below.
+        meta = real_start_run(*args, **kwargs)
+        started.append(meta)
+        return meta
 
     monkeypatch.setattr(rs, "start_run", start_run_spy)
+
+    def _stop_before_search(*args, **kwargs):
+        raise _StopBeforeSearch
+
+    monkeypatch.setattr(gui_module, "run_unified_bayesian", _stop_before_search)
     monkeypatch.setattr(
         "spectral_predict.search.run_search",
         Mock(side_effect=AssertionError("the search must not start")),
@@ -109,9 +129,9 @@ def _click_run(gui_app, X, y) -> _FakeThread | None:
 
 
 def _run_worker(worker: _FakeThread) -> bool:
-    """Run the worker body synchronously; True if it reached start_run."""
+    """Run the worker body synchronously; True if it reached the search call."""
     try:
-        worker.target(*worker.args)
+        worker.target(*worker.args, **worker.kwargs)
     except _StopBeforeSearch:
         return True
     return False
@@ -174,8 +194,22 @@ def test_retry_with_matching_data_resumes(gui_app, resumed):
         assert _run_worker(worker)
 
     assert not ask.called
-    assert started[0].run_id == meta.run_id, "start_run returned the resumed run"
-    assert rs.is_resuming() and rs.get_storage_url() == meta.storage_url
+    # Round 8: a matched resume no longer calls start_run() at all (it's
+    # already registered by resume_run() — calling start_run() again would
+    # just be a wasted, redundant idempotent lookup). The gate communicates
+    # the resumed run id to the launch via _pending_bayesian_run_id instead.
+    assert not started, "a matched resume must not re-register via start_run"
+    assert gui_app._pending_bayesian_run_id == meta.run_id
+    # _run_worker's _StopBeforeSearch tripwire is a BaseException reaching
+    # this worker exactly the way an unhandled crash mid-search would (it
+    # exists only so this test doesn't run a real Bayesian search). The
+    # round-8 `finally` safety net treats that identically to a genuine
+    # interruption: release the in-process claim, but never touch the
+    # sidecar or store — so the next launch's three-way prompt still finds
+    # this exact run, even though is_resuming() itself is no longer True.
+    assert not rs.is_resuming()
+    assert rs.find_incomplete_run().run_id == meta.run_id
+    assert store.exists()
 
 
 def test_start_fresh_deletes_old_run_instead_of_orphaning_it(gui_app, resumed):
@@ -275,5 +309,9 @@ def test_multiclass_simca_does_not_use_bayesian_run_state(gui_app, resumed):
 def test_worker_has_no_end_of_run_mark_complete():
     source = inspect.getsource(gui_module.SpectralPredictApp._run_analysis_thread)
     assert "mark_complete()" not in source
-    assert source.count("self._complete_run_state_after_search(analysis_run_id") == 2
+    # 2 per-branch releases (one-class, main unified) + 1 in the round-8
+    # `finally` safety net that releases the in-process claim for any exit
+    # that doesn't go through one of those two (Codex + DeepSeek review of
+    # #79 round 8).
+    assert source.count("self._complete_run_state_after_search(analysis_run_id") == 3
     assert source.count("analysis_run_id = meta.run_id") == 1
