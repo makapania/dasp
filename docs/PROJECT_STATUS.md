@@ -34,7 +34,7 @@ Codex + DeepSeek Flash + GLM 5.3 reviewed everything merged (#68-#75); real pre-
 - **#79 open (round 3 rework)** — resume no longer flips persistence to 'Always on'; 'auto' resumes crashed runs (proven with a real killed subprocess); no resume prompt when nothing was saved ('never' / crash in warmup); user-visible notice when saved trials can't be reused (data/env mismatch). Codex round-2 block: sidecar cleanup cross-process race → cleanup removed; decline notice on zero-trial studies.
 
 ### 3. Decisions for the user
-- **Pending:** when the GUI rejects a resume because the loaded data doesn't match the crashed run, it currently *deletes* that run's SQLite store (`discard_incomplete_run`, GUI ~26108-26130, pre-existing). Proposed: keep the file, clear only the resume marker. Awaiting user (a) keep / (b) delete.
+- **Decided 2026-09-14:** when the loaded data doesn't match a resumed run, keep the saved SQLite store and sidecar, tell the user it doesn't match so they can load the right data, and offer an explicit "start fresh" (clears only the resume marker). Being implemented in #79.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted, ~1.8k flake8 issues.
   Until then the CI lint steps are `continue-on-error`. A mass reformat conflicts with
   every open branch, so do it between feature PRs if at all.
