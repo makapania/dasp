@@ -245,6 +245,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       resolved (`OSError`), so the delete can be retried.
     - After a damaged record is moved aside, the claim is released before the re-read,
       so a failing re-read can no longer leave the resume stuck.
+  - **Round 12 (Codex review of round 11):**
+    - Calibration rows (validation holdout, excluded spectra, active subset) and the
+      CV folds used to drop too-small classes are frozen at the click
+      (`analysis_rows`, snapshot settings). Changing them after the click used to
+      change the rows the Bayesian search trained on.
+    - **Behaviour change:** a resume checks the validation holdout. If the current
+      holdout differs from the run's, a dialog offers to use the run's split, delete
+      the run and start fresh, or cancel. With no holdout set, the run's split is
+      restored without asking. The restore happens on the main thread before launch.
+      It used to happen in the worker, which kept a different manual split.
+    - **Behaviour change:** a Bayesian launch stops with "Invalid settings" when a
+      setting the search needs can't be read (e.g. a blank number box). With a launch
+      snapshot, the worker never falls back to a live control.
+    - A delete that removed the record but not the store also releases the resume.
+      The dialog says the run can no longer be resumed instead of offering a retry.
   - **Known limitations (not addressed):**
     - Two dasp windows share one `active_run.json` with no file lock. The last
       `start_run` wins, and a window may offer or delete a run another window just

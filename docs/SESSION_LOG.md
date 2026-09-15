@@ -1658,3 +1658,18 @@ should always block — they found two crash bugs no test covered.
       still is not.
     - After a successful move-aside, `abandon_resume()` runs before the re-read, so a
       re-read `OSError` can't leave a claim on a record that no longer exists.
+  - **Round 12 (Codex block on round 11, 2026-09-15):**
+    - *More live reads before the search:* the row filtering in the worker read
+      `validation_enabled`, `validation_indices`, `excluded_spectra`, `active_indices`,
+      `cv_strategy` and `folds` (for the drop-too-small-classes step) live. They are
+      now frozen via `analysis_rows` and the settings snapshot.
+    - *Validation split:* `_apply_pending_validation_indices` skips when a validation set
+      is already populated, so a different manual split silently won over the resumed
+      run's split. New `_reconcile_resume_validation_split` runs on the main thread after
+      the fingerprint matches; `analysis_rows` is captured after it.
+    - *Blank IntVar:* `capture_gui_settings` omits a var whose `.get()` raises, and
+      `_setting` then fell back to the live var. The launch now requires
+      `BAYESIAN_REQUIRED_SETTINGS`, and `_setting` never falls back when a snapshot is
+      given.
+    - *Remaining out of scope (pre-existing, not run_state):* grid, one-class grid,
+      NSGA-II and post-search validation/config still read live Tk state.

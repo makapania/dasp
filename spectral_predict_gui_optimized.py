@@ -2632,6 +2632,18 @@ def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, 
 _LAUNCH_CONTEXT_UNSET = object()
 
 
+# Settings the Bayesian worker reads through its launch snapshot (#79 round 12).
+# Imbalance/baseline detail values are read only for the chosen method; a missing
+# one fails that run visibly instead of blocking every launch.
+BAYESIAN_REQUIRED_SETTINGS = (
+    "bayes_baseline_method", "bayes_enable_autoscale", "bayes_enable_baseline",
+    "bayes_enable_smoothing", "bayes_enable_uve", "bayes_region_test_all",
+    "bayes_region_test_pairwise", "bayesian_persistence_mode", "cv_n_repeats",
+    "cv_strategy", "folds", "smoothing_polyorder", "smoothing_window",
+    "validation_enabled", "enable_imbalance_handling", "imbalance_method",
+)
+
+
 def _launch_settings_snapshot(app):
     """Analysis settings at the click, or None if they can't be captured (#79 round 11)."""
     try:
@@ -24402,7 +24414,12 @@ class SpectralPredictApp:
                     analysis_modes=(self.optimization_method.get(), self.task_type.get()),
                     # Settings as approved at the click; a change during a
                     # multi-model run must not give later models other studies.
-                    analysis_settings=_launch_settings_snapshot(self),
+                    analysis_settings=getattr(self, "_pending_analysis_settings", None),
+                    analysis_rows=(
+                        None if self.active_indices is None else list(self.active_indices),
+                        list(self.excluded_spectra or []),
+                        list(self.validation_indices or []),
+                    ),
                 ),
                 daemon=True,
             )
@@ -26407,6 +26424,73 @@ class SpectralPredictApp:
             )
         return "restore"
 
+    def _reconcile_resume_validation_split(self, meta):
+        """Make the validation holdout match the interrupted run's before resuming.
+
+        Round 12 (Codex review of #79): the saved trials were trained without the
+        run's holdout rows. A different holdout now would put samples those trials
+        trained on into validation (and vice versa), so the saved studies would no
+        longer describe the calibration set. Called on the main thread once the
+        data matches; the split it settles is what the worker receives.
+
+        Returns ``"ok"`` (split matches or was restored; resume), ``"fresh"`` (the
+        user chose to delete the run and start fresh), or None (don't run).
+        """
+        saved_settings = meta.gui_settings or {}
+        saved = list(meta.validation_indices or [])
+        if saved_settings.get("validation_enabled") is False:
+            saved = []  # the run held nothing out, whatever indices it recorded
+        if not saved:
+            self._pending_validation_indices = None
+            return "ok"
+        try:
+            enabled = bool(self.validation_enabled.get())
+        except Exception:
+            enabled = False
+        current = set(self.validation_indices or []) if enabled else set()
+        if current == set(saved):
+            self._pending_validation_indices = None
+            return "ok"
+        if current:
+            try:
+                answer = messagebox.askyesnocancel(
+                    "Validation set differs from the interrupted run",
+                    f"The interrupted run {meta.run_id} held out {len(saved)} "
+                    f"validation samples; the validation set now holds out "
+                    f"{len(current)} ({len(current - set(saved))} of them were "
+                    "used for training by that run).\n\n"
+                    "Nothing was run and nothing was deleted.\n\n"
+                    "  • Yes — use the run's own validation set and resume.\n"
+                    "  • No — delete the interrupted run and start fresh with the "
+                    "current validation set.\n"
+                    "  • Cancel — change nothing and run nothing.",
+                    icon="warning",
+                    default="cancel",
+                )
+            except Exception:
+                answer = None
+            if answer is None:
+                self._log_progress("[RUN] Resume kept — the validation set differs.")
+                return None
+            if answer is False:
+                return "fresh"
+        # Restore the run's split here, not in the worker, so it is frozen at the click.
+        self.validation_X = None
+        self._pending_validation_indices = saved
+        self._apply_pending_validation_indices(self.X, self.y)
+        if set(self.validation_indices or []) != set(saved):
+            try:
+                messagebox.showerror(
+                    "Can't restore the validation set",
+                    "The interrupted run's validation samples are not all in the "
+                    "loaded data, so its validation set can't be restored. Nothing "
+                    "was run.",
+                )
+            except Exception:
+                pass
+            return None
+        return "ok"
+
     def _reconcile_resume_models_and_trials(self, meta, selected_models):
         """Freeze the interrupted run's models and trial count for a resume.
 
@@ -26537,8 +26621,27 @@ class SpectralPredictApp:
         self._pending_bayesian_run_id = None
         self._pending_bayesian_models = None
         self._pending_bayesian_n_trials = None
+        self._pending_analysis_settings = None
         if not self._uses_bayesian_run_state():
             return True
+        # Round 12 (Codex): the Bayesian worker reads its settings only from this
+        # snapshot. A setting that can't be read (e.g. a blank number box) must
+        # stop the launch, not fall back to whatever the box holds later.
+        snapshot = _launch_settings_snapshot(self) or {}
+        unreadable = sorted(set(BAYESIAN_REQUIRED_SETTINGS) - set(snapshot))
+        if unreadable:
+            self._log_progress(f"[RUN] Can't read settings: {', '.join(unreadable)}")
+            try:
+                messagebox.showerror(
+                    "Invalid settings",
+                    "These analysis settings are empty or invalid, so nothing was "
+                    f"started:\n\n{', '.join(unreadable)}\n\nFix them and click "
+                    "Run Analysis again.",
+                )
+            except Exception:
+                pass
+            return False
+        self._pending_analysis_settings = snapshot
         self._pending_uses_bayesian_run_state = True
         try:
             from spectral_predict.run_state import (
@@ -26786,21 +26889,27 @@ class SpectralPredictApp:
                         f"[RUN] Could not fully delete the interrupted run: "
                         f"{result.errors}"
                     )
-                    if result.storage_deleted:
-                        # Round 11 (Codex): its trials are gone, so it can't be
-                        # resumed any more. Release the claim; the leftover record
-                        # names a missing store, is never offered again, and the
-                        # next Bayesian run replaces it.
+                    released = result.storage_deleted or result.sidecar_deleted
+                    if released:
+                        # Rounds 11-12 (Codex): once its trials or its record are
+                        # gone it can't be resumed. Release the claim; a leftover
+                        # record names a missing store (never offered again, the
+                        # next Bayesian run replaces it) and a leftover store is
+                        # left for normal retention cleanup.
                         abandon_resume()
                         self._pending_validation_indices = None
+                    next_step = (
+                        "It can no longer be resumed. Click Run Analysis again to "
+                        "start fresh."
+                        if released
+                        else "Click Run Analysis again to retry."
+                    )
                     try:
                         messagebox.showerror(
                             "Couldn't delete the interrupted run",
                             "The interrupted run could not be fully deleted, so "
-                            "nothing was started — starting fresh would "
-                            "otherwise risk overwriting the saved run.\n\n"
-                            f"Details: {result.errors}\n\nClick Run Analysis "
-                            "again to retry.",
+                            "nothing was started.\n\n"
+                            f"Details: {result.errors}\n\n{next_step}",
                         )
                     except Exception:
                         pass
@@ -26885,6 +26994,12 @@ class SpectralPredictApp:
             details = str(verify_err)
         else:
             if matches:
+                if meta is not None:
+                    split = self._reconcile_resume_validation_split(meta)
+                    if split == "fresh":
+                        return _delete_resumed_run_and_start_fresh(meta)
+                    if split is None:
+                        return False
                 self._pending_bayesian_run_id = meta.run_id if meta is not None else None
                 return True
             if stored_fp:
@@ -27058,7 +27173,8 @@ class SpectralPredictApp:
                               analysis_run_id=_LAUNCH_CONTEXT_UNSET,
                               uses_bayesian_run_state=_LAUNCH_CONTEXT_UNSET,
                               analysis_n_trials=None, analysis_data=None,
-                              analysis_modes=None, analysis_settings=None):
+                              analysis_modes=None, analysis_settings=None,
+                              analysis_rows=None):
         """Run analysis in background thread.
 
         ``analysis_n_trials``: Bayesian trials per model frozen by the launch gate
@@ -27078,6 +27194,11 @@ class SpectralPredictApp:
         (round 11, Codex). The Bayesian branches read their settings from it, so
         changing e.g. autoscale while PLS runs can't give Ridge a different study
         than the one the resume was approved for. None reads the live controls.
+
+        ``analysis_rows``: ``(active_indices, excluded_spectra, validation_indices)``
+        at the click (round 12, Codex), after the gate restored a resumed run's
+        validation split, so the calibration rows can't change after approval.
+        None reads the live attributes.
 
         ``controller``: THIS worker's own ``SearchController``, captured by
         ``_run_analysis`` on the main thread before the thread was started.
@@ -27107,7 +27228,9 @@ class SpectralPredictApp:
         my_controller = controller if controller is not None else self.search_controller
 
         def _setting(name):
-            if analysis_settings is not None and name in analysis_settings:
+            # With a launch snapshot, never fall back to the live control (round 12):
+            # a missing key raises, so the run fails visibly instead of drifting.
+            if analysis_settings is not None:
                 return analysis_settings[name]
             return getattr(self, name).get()
         def _bayes_n_trials():
@@ -28888,8 +29011,16 @@ class SpectralPredictApp:
 
             # Run search
             # Apply active group filter first
-            if self.active_indices is not None:
-                ag_mask = X_run.index.isin(self.active_indices)
+            if analysis_rows is not None:
+                _active_rows, _excluded_rows, _validation_rows = analysis_rows
+                _validation_on = _setting("validation_enabled")
+            else:
+                _active_rows = self.active_indices
+                _excluded_rows = self.excluded_spectra
+                _validation_rows = self.validation_indices
+                _validation_on = self.validation_enabled.get()
+            if _active_rows is not None:
+                ag_mask = X_run.index.isin(_active_rows)
                 X_filtered = X_run[ag_mask]
                 y_filtered = y_run[ag_mask]
                 n_inactive = len(X_run) - len(X_filtered)
@@ -28901,24 +29032,24 @@ class SpectralPredictApp:
                 y_filtered = y_run
 
             # Filter out excluded spectra
-            if self.excluded_spectra:
-                mask = ~X_filtered.index.isin(self.excluded_spectra)
+            if _excluded_rows:
+                mask = ~X_filtered.index.isin(_excluded_rows)
                 X_filtered = X_filtered[mask]
                 y_filtered = y_filtered[mask]
 
                 # Update progress with exclusion info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
-                    f"\n[i] Excluding {len(self.excluded_spectra)} user-selected spectra from analysis...\n"))
+                    f"\n[i] Excluding {len(_excluded_rows)} user-selected spectra from analysis...\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
 
 
             # Filter out validation set (if enabled)
-            if self.validation_enabled.get() and self.validation_indices:
+            if _validation_on and _validation_rows:
                 # Remove validation samples from training data
-                X_filtered = X_filtered[~X_filtered.index.isin(self.validation_indices)]
-                y_filtered = y_filtered[~y_filtered.index.isin(self.validation_indices)]
+                X_filtered = X_filtered[~X_filtered.index.isin(_validation_rows)]
+                y_filtered = y_filtered[~y_filtered.index.isin(_validation_rows)]
 
-                n_val = len(self.validation_indices)
+                n_val = len(_validation_rows)
                 n_cal = len(X_filtered)
 
                 # Update progress with validation info
@@ -28970,8 +29101,8 @@ class SpectralPredictApp:
             # never seeing them at predict time.
             if (task_type == 'classification'
                     and y_filtered is not None
-                    and self.cv_strategy.get() in ('kfold', 'repeated_kfold')):
-                _n_folds = self.folds.get()
+                    and _setting("cv_strategy") in ('kfold', 'repeated_kfold')):
+                _n_folds = _setting("folds")
                 _classes, _counts = np.unique(np.asarray(y_filtered), return_counts=True)
                 _rare_mask = _counts < _n_folds
                 if _rare_mask.any() and len(_classes) - int(_rare_mask.sum()) >= 2:
@@ -29292,8 +29423,8 @@ class SpectralPredictApp:
                 self._log_progress(f"   Reason: PLS requires n_components ≤ min(n_features, n_samples)\n")
 
             # Calculate excluded and validation counts for saving in results
-            n_excluded = len(self.excluded_spectra) if self.excluded_spectra else 0
-            n_validation = len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0
+            n_excluded = len(_excluded_rows) if _excluded_rows else 0
+            n_validation = len(_validation_rows) if _validation_on and _validation_rows else 0
             n_total_original = len(X_run)  # Total samples before filtering
 
             # Get imbalance handling parameters (if enabled)
