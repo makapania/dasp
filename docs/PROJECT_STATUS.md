@@ -4,54 +4,31 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-15)
 
-### 1. First job: finish PR #79 (resume) — round 9
-**Branch** `fix/resume-no-persistence-flip` @ `8f4cf54` (round 8, pushed; full non-GUI suite
-3395 passed; F821 clean). **Round-9 work in progress** is on a separate branch
-`wip/79-round9` @ `1900cfc` (one commit on top of `8f4cf54`, **untested**, only `py_compile`
-checked) — interrupted by an API session limit. Continue from it, then fast-forward/merge it
-into the PR branch once tests pass. Worktree used so far:
-`.claude/worktrees/agent-ab48c23611b807093` (now on `wip/79-round9`).
+### 1. PR #79 (crash-resume) is MERGED — `a5f9a70`. Nothing pending on it.
+13 review rounds. Rounds 1-8 were reviewed by Codex + DeepSeek Flash + GLM 5.3; rounds 9-13
+by Codex alone (it blocked 8-12 and returned **MERGE** on 13 with no findings). Branches and
+worktrees are deleted. Full non-GUI suite 3405 passed / 26 skipped; `tests/gui/test_resume_*.py`
+91 passed; F821 clean.
 
-**What #79 does (rounds 1-8, reviewed each round by Codex + DeepSeek Flash + GLM 5.3):**
-- GUI crash-resume no longer forces the persistence radio to 'Always on'; 'auto' resumes a
-  crashed run (proven with a real killed subprocess).
-- No resume prompt when nothing was saved ('never', or crash during auto's in-memory warmup).
-- User-visible notice whenever saved trials can't be reused (data/env mismatch, legacy study,
-  failed check); env-change diagnostics also run under 'auto' when the store exists.
-- **User decisions (binding):**
-  1. Data mismatch on resume → nothing deleted, nothing runs; dialog: keep the saved run and
-     load the right data, or start fresh (start fresh *deletes* the interrupted run — only one
-     saved run is kept).
-  2. **Pause/Stop exists so runs can be resumed.** A saved paused/failed/crashed Bayesian run
-     is always offered — at launch (Yes resume / No delete / Cancel decide later) and when
-     clicking Run in-session (Resume / Delete / Decide later) — until resumed to completion or
-     deleted. Decide later = don't launch a new Bayesian run this click (Grid/NSGA-II
-     unaffected); wording says so.
-- Round 8 design: `_confirm_resume_before_launch` is the single main-thread launch gate
-  (snapshots method/task/models/persistence/data, decides resume/delete/fresh, claims the run
-  slot before the worker starts, passes frozen `analysis_run_id`/`uses_bayesian_run_state`).
-  `_LAUNCH_CONTEXT_UNSET` sentinel keeps old self-registering worker behaviour for tests that
-  call the worker directly (no production caller). Worker try/finally releases the in-process
-  claim on non-completion exits. Resume reconciles saved `model_names` with the selection.
-  Read failures / incomplete deletes don't launch; `discard_incomplete_run` re-checks run id.
+**The design, worth knowing before touching the GUI's Run Analysis path:**
+`_confirm_resume_before_launch` is the single main-thread launch gate. It decides
+resume/delete/fresh, claims the run, and freezes everything the worker needs — models, trial
+count, data, optimization method + task type, a `capture_gui_settings` snapshot, and the
+calibration rows (holdout / excluded / active). The worker reads those arguments, never live
+Tk state. **Nearly every Codex block in rounds 9-12 was a place where the worker still
+re-read something the gate had decided.** Add a new Bayesian input → add it to the snapshot
+(`BAYESIAN_REQUIRED_SETTINGS`) and to `CAPTURABLE_SETTINGS`, or a changed control silently
+starts a different study and the finished run releases the saved one's record.
 
-**Round-8 review:** DeepSeek + GLM merge-with-nits; **Codex block.** Round-9 scope (decided —
-fix single-instance bugs, *document* multi-instance limits):
-| # | Item | State on `wip/79-round9` |
-|---|---|---|
-| 1 | One-class resume (PCA-SIMCA→IsolationForest) rereads live checkboxes (GUI ~28993/29114) — use frozen model list | **not done** |
-| 2 | Stale `_pending_bayesian_models` override leaks into a fresh run after delete / mismatch start-fresh | done, untested |
-| 3 | Malformed/corrupt sidecar swallowed (run_state ~643) → fresh launch overwrites it; surface as corrupt state, offer Delete/Cancel | **not done** |
-| 4 | Claim leak if `Thread()`/`start()` raises after the gate claimed (GUI ~24314) | done, untested |
-| 5 | `mark_complete` unlink failure (Windows lock) leaves claim unreleased (run_state ~477) | partial |
-| 6 | Reconciliation restores model names only — show trials/settings differences in the dialog; use saved `n_trials_per_model` for resume; full hyperparameter restore = known limitation | **not done** |
-| — | End-to-end GUI-handoff tests through real `_run_analysis` (gate → fake thread → worker) covering one-failing-model keep, setup-exception release, click-time data | **not done** |
-| — | Remove "sidecar"/"saved-run slot" from user-facing text | done, untested |
-| — | "Known limitations" in PR body/CHANGELOG/SESSION_LOG: two dasp windows sharing `active_run.json` (needs file locking); non-atomic cross-process re-read→unlink; absent/empty store edge cases | **not done** |
+**Binding user decisions (unchanged):** a data mismatch never deletes anything by itself; a
+saved paused/failed/crashed run is offered until it is resumed to completion or deleted;
+resume never changes the persistence radio.
 
-Then: full non-GUI suite + `tests/gui/test_resume_*.py` + F821 check → push to the PR branch →
-**Codex-only** final review; if it only raises multi-instance/out-of-scope items, merge.
-Implementation agents hit Opus weekly and Sonnet session limits this session — check limits.
+**Known limitations (in CHANGELOG under 0.5.0b3):** two dasp windows share one
+`active_run.json` with no file locking; a finished run whose record couldn't be deleted is
+offered again; a run whose store is missing/empty is not offered; resume restores only
+whitelisted GUI settings, not hyperparameter grids. Also out of scope and still live: grid,
+one-class grid, NSGA-II and post-search paths read live Tk state (they don't touch run_state).
 
 ### 2. Merged this session (2026-09-14/15)
 | PR | What |
@@ -67,13 +44,13 @@ Implementation agents hit Opus weekly and Sonnet session limits this session —
 | #76 | CI: per-sha push concurrency; **blocking flake8 F821/F822/F823 gate** |
 | #77 | Ensembles: tuned `model__*` params + correct row preprocessing (incl. chromosome rows, float64), PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors; shared row helpers on declared surface §8b. **Ensemble scores change.** 5 review rounds. |
 | #78 | Bayesian: no automatic study deletion after failed migration; baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars; legacy-study warning. 3 review rounds. |
+| #79 | Crash-resume: persistence setting kept; saved run offered until resumed or deleted; damaged record reported not replaced; everything the Bayesian worker uses frozen at the click. 13 rounds. See §1. |
 
 Review process used (user preference): **Codex + DeepSeek Flash + GLM 5.3** on every PR,
 re-review each round until clean. A post-merge round on #68-#75 found real pre-existing bugs
 (fixed in #76-#78). See SESSION_LOG 2026-09-14 "Post-merge review round".
 
 ### 3. Open PRs / decisions for the user
-- **#79** — see §1.
 - **#63** T-17 multi-target regression (+16k lines, stale since 2026-07-08): user leaning
   toward not using it. Leave open; close only on the user's word.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted; CI lint steps are
