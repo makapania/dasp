@@ -519,3 +519,31 @@ check exists: `_setting` must never fall back to the live var when a snapshot wa
   `with _lock:` in `start_run`, not inside it.
 - A batch-edit script once converted the whole 60k-line GUI file from CRLF to LF (a
   122k-line diff); check `git diff --stat` after any scripted edit.
+
+### 2026-09-15 — T-51 PR C: one-class bundles (PR #80, branch feat/T51-pr-c-one-class-bundles)
+
+- **The mechanism needed nothing.** PRs A/B built resolution, gating, identity hashing and
+  the base-sampler collision check generically; PR C is three `BundleSpec`s plus their entry
+  in `BUNDLES`. `suggest_one_class_params` and `contamination.build_one_class_model` are
+  untouched (`build_one_class_model` does `Estimator(**params)`, so any opened key lands on
+  the estimator as named). Check that first before planning work for PR E/F.
+- **Gotcha — a "documented" plan value can still be redundant.** Plan §5 lists
+  `max_samples` cat[auto, 0.5, 0.8, 1.0] for IsolationForest. `'auto'` is
+  `min(256, n_samples)`, so under 256 inliers 1.0 selects exactly what 'auto' does (probed
+  on sklearn 1.9.1: n=24 → `max_samples_=24` for both; they diverge only at n=400 → 256 vs
+  400). Two such trials are identical fits with distinct fit fingerprints, so dedup misses,
+  and a quarter of the TPE categorical mass sits on a duplicate — the same reason the plan
+  dropped `minkowski` from `lof_metric`. Dropped 1.0; deviation recorded in the bundle
+  comment, the test's transcribed plan table and the PR body. Found by the GLM 5.3 review,
+  not by me: worth probing every categorical choice against the *estimator's* semantics,
+  not just the distribution.
+- **Adding to `BUNDLES` breaks registry-wide assertions in the PR B tests.**
+  `tests/test_t51_supervised_bundles.py` iterated all of `BUNDLES` (fitting supervised
+  models) and carried an explicit `test_no_one_class_bundles_in_pr_b` guard. Scoped those to
+  a `SUPERVISED_BUNDLES` subset and turned the guard into a supervised/one-class
+  disjointness check. PR D/E/F will hit the same tests.
+- `optuna.trial.FixedTrial.params` only contains names suggested so far, so seeding an axis
+  name in the fixed dict does not defeat `apply_extra_axes`'s clash guard — the tests
+  exercise the real path.
+- Mixed-type categorical choices (`"auto"` with floats) are fine for Optuna and for the
+  identity hash; `_validate_axis` rejects choices that compare equal, not ones of mixed type.

@@ -2,7 +2,27 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-15)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-15, end of session)
+
+### 0. First job: decide PR #80 (T-51 PR C, one-class bundles), then start PR D
+**PR #80** `feat/T51-pr-c-one-class-bundles` @ `05223ca` is **open, green and waiting on the
+user's merge decision only** — nothing is half-finished. Full non-GUI suite 3437 passed /
+26 skipped on that commit; F821 clean; GLM 5.3 reviewed it (MERGE-WITH-NITS, every point
+addressed). It was not sent to Codex: the change is additive, off by default, and cannot
+affect an existing run. Ask, then merge (squash) or send for a second opinion.
+
+What it adds: `if_max_samples` (IsolationForest), `lof_metric` (LOF), `ocsvm_poly`
+(OneClassSVM `degree`/`coef0`, written only on the kernels that read them). All off unless
+named in `enabled_extra_axes`, all `task_type='one_class'` only.
+
+**Deliberate deviation from plan §5:** `max_samples=1.0` is NOT offered. `'auto'` is
+`min(256, n_samples)`, so below 256 inliers 1.0 and 'auto' fit identically (verified on
+sklearn 1.9.1) — identical fits with distinct fingerprints, and a quarter of the TPE mass on
+a duplicate. Same rule that dropped `minkowski`. Recorded in the bundle comment, the test's
+plan table and the PR body.
+
+**Then PR D:** the GUI card that enables bundles, which is what makes PR B + PR C reachable
+without writing Python. After that, E/F (one-class clamp; F needs its own approval).
 
 ### 1. PR #79 (crash-resume) is MERGED — `a5f9a70`. Nothing pending on it.
 13 review rounds. Rounds 1-8 were reviewed by Codex + DeepSeek Flash + GLM 5.3; rounds 9-13
@@ -51,6 +71,7 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
 (fixed in #76-#78). See SESSION_LOG 2026-09-14 "Post-merge review round".
 
 ### 3. Open PRs / decisions for the user
+- **#80** T-51 PR C, one-class bundles: green, awaiting a merge decision. See section 0.
 - **#63** T-17 multi-target regression (+16k lines, stale since 2026-07-08): user leaning
   toward not using it. Leave open; close only on the user's word.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted; CI lint steps are
@@ -61,8 +82,8 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
   classification; `AGENT_COMPOSITION.md` §7b already tells them to spell it `PLS-DA`.
 
 ### 4. Queued work
-1. **T-51 next:** PR C (one-class bundles `if_max_samples`, `lof_metric`, `ocsvm_poly`), then
-   PR D (GUI card to enable bundles), E/F (one-class clamp, own approval).
+1. **T-51 next:** PR D (GUI card to enable bundles) once #80 is merged, then E/F (one-class
+   clamp; F needs its own approval). PR C is done and sitting in #80.
 2. **Smaller follow-ups:**
    - `split_plsda_params` passes `C` through uncoerced (hand-edited CSV `'0.05'` would crash).
    - Tab 7 re-applies stored params over a user's `n_components` edit — intended?
