@@ -41,6 +41,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   save/load and export. With no bundle enabled, searches and study names are unchanged.
   `apply_extra_axes` now also rejects two axes that share an Optuna name or key when
   `resolve_bundles` is bypassed.
+- **T-51 PR C** — three opt-in one-class bundles in `search_spaces.BUNDLES`, all off by
+  default and resolving only for `task_type='one_class'`: `if_max_samples`
+  (IsolationForest `max_samples` from {auto, 0.5, 0.8, 1.0}), `lof_metric` (LOF `metric`
+  from {euclidean, manhattan, cosine}) and `ocsvm_poly` (One-Class SVM `degree` int 2-3 on
+  poly trials, `coef0` -1 to 1 on poly and sigmoid trials — both suggested every trial but
+  written only where the kernel uses them, so rbf trials are unchanged). Enable them from
+  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
+  control yet (PR D). Enabling any bundle gives the run its own study name, so a
+  default-space study is never resumed or polluted. The benchmark showed no gain from
+  floating these axes; they are for deliberate exploration.
+  **Known limitation on very small one-class sets:** `if_max_samples`' fractions need at
+  least two inliers in every training fold (`int(fraction * rows)` is 0 for a one-row
+  fold and the fit then fails); `auto` and `1.0` can fit one. When too few folds
+  succeed, a fractional trial scores `+inf`, records a skip reason and is left out of
+  the leaderboard. **But** with 3 inliers under repeated 2-fold CV and at least two
+  repeats, half the folds are enough: the trial IS scored, from only the folds that
+  succeeded, and the leaderboard row carries no partial-CV marker and may leave some
+  inliers out of scoring entirely. That is an incomplete CV metric, not merely a wasted
+  trial. Avoid that configuration, or make sure every training fold holds at least two
+  inliers.
 
 ### Fixed
 

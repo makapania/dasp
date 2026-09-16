@@ -373,8 +373,116 @@ def _supervised_bundles() -> tuple[BundleSpec, ...]:
     )
 
 
+_ONE_CLASS = frozenset({"one_class"})
+
+# One-class runs train on inliers only and are scored on a small, skewed sample, so an
+# opened axis is far likelier to fit noise than to pay off (plan section 10).
+_ONE_CLASS_CAVEAT = (
+    " One-class axes are for exploring a model's behaviour, not for expected gains: the"
+    " benchmark showed no improvement from floating these."
+)
+
+
+def _one_class_bundles() -> tuple[BundleSpec, ...]:
+    """Curated one-class bundles (T-51 PR C, plan section 5).
+
+    Same rule as the supervised bundles: every axis opens a parameter
+    ``suggest_one_class_params`` neither suggests nor derives. ``build_one_class_model``
+    passes ``params`` straight to the sklearn constructor, so each key lands on the
+    estimator as named.
+    """
+    return (
+        BundleSpec(
+            id="if_max_samples",
+            families=frozenset({"IsolationForest"}),
+            task_types=_ONE_CLASS,
+            axes=(
+                AxisSpec(
+                    key="max_samples",
+                    kind="categorical",
+                    # 'auto' is min(256, n_samples); the floats are int(fraction * n) of
+                    # the training inliers. Below 257 inliers 1.0 selects exactly what
+                    # 'auto' does, so those two are one choice there (identical fits
+                    # under distinct fingerprints); above it 1.0 is the only way to use
+                    # every inlier, because even 0.8 stays under 'auto''s 256 cap until
+                    # n=320. Kept, per plan section 5, with the coincidence documented
+                    # rather than dropping full-sample exploration for larger sets.
+                    choices=("auto", 0.5, 0.8, 1.0),
+                ),
+            ),
+            label="IsolationForest: samples per tree",
+            help=(
+                "Tunes how much of the training data each tree sees: 'auto' (min(256, n), "
+                "the default) or a fraction 0.5/0.8/1.0 of the inliers. With 256 inliers "
+                "or fewer, 1.0 and 'auto' are the same subsample. The fractions need at "
+                "least two inliers in every training fold ('auto' and 1.0 can fit one): too "
+                "few successful folds score the trial as unusable, but under repeated CV "
+                "half the folds are enough and the row is then scored from those alone, "
+                "with no marker saying so."
+                + _WIDEN_CAVEAT
+                + _ONE_CLASS_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="lof_metric",
+            families=frozenset({"LOF"}),
+            task_types=_ONE_CLASS,
+            axes=(
+                AxisSpec(
+                    key="metric",
+                    kind="categorical",
+                    # 'minkowski' is omitted: at the default p=2 it duplicates
+                    # 'euclidean'. LOF's algorithm='auto' picks brute force for cosine.
+                    choices=("euclidean", "manhattan", "cosine"),
+                ),
+            ),
+            label="LOF: distance metric",
+            help=(
+                "Tunes the neighbour distance metric: euclidean (the default), manhattan "
+                "or cosine. Cosine compares spectral shape and ignores overall intensity."
+                + _WIDEN_CAVEAT
+                + _ONE_CLASS_CAVEAT
+            ),
+        ),
+        BundleSpec(
+            id="ocsvm_poly",
+            families=frozenset({"OneClassSVM"}),
+            task_types=_ONE_CLASS,
+            axes=(
+                # Written only on the kernels that read them, so an inapplicable value
+                # can't give identical fits distinct fingerprints (plan section 3.0).
+                AxisSpec(
+                    key="degree",
+                    kind="int",
+                    low=2,
+                    high=3,
+                    applies_when_id="oc_kernel_is_poly",
+                ),
+                AxisSpec(
+                    key="coef0",
+                    kind="float",
+                    low=-1.0,
+                    high=1.0,
+                    applies_when_id="oc_kernel_poly_or_sigmoid",
+                ),
+            ),
+            label="One-Class SVM: poly/sigmoid shape",
+            help=(
+                "Tunes the polynomial degree (2-3, poly kernel only) and the kernel's "
+                "independent term coef0 (-1 to 1, poly and sigmoid only); the base search "
+                "leaves them at degree=3, coef0=0. Both are suggested on every trial but "
+                "written only on the kernels that use them, so rbf trials are unchanged."
+                + _WIDEN_CAVEAT
+                + _ONE_CLASS_CAVEAT
+            ),
+        ),
+    )
+
+
 # Curated registry, keyed by bundle id. Every bundle is off unless named by the caller.
-BUNDLES: dict[str, BundleSpec] = {bundle.id: bundle for bundle in _supervised_bundles()}
+BUNDLES: dict[str, BundleSpec] = {
+    bundle.id: bundle for bundle in _supervised_bundles() + _one_class_bundles()
+}
 
 
 class _RecordingTrial:
