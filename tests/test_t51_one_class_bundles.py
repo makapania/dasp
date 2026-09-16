@@ -378,3 +378,86 @@ def test_min_train_fold_rows_is_not_part_of_the_space_identity():
         (relaxed,), False
     )
     assert hash(bundle) != hash(relaxed), "but they are still distinct bundles"
+
+
+def test_numeric_labels_with_a_text_inlier_label_are_not_refused():
+    """Codex review of bd38ce1: the guard counted raw values while the objective
+    compares strings, so 30 integer-labelled inliers with inlier_class_label='1'
+    counted as zero and a working run was refused."""
+    rng = np.random.RandomState(0)
+    X = np.vstack([rng.randn(30, 8) * 0.3, rng.randn(8, 8) + 3.0])
+    y = np.array([1] * 30 + [0] * 8)  # integer labels, text label below
+    results_df, _ = ub.run_unified_bayesian(
+        X=X,
+        y=y,
+        wavelengths=np.arange(8, dtype=float),
+        model_name="IsolationForest",
+        task_type="one_class",
+        n_trials=2,
+        cv_folds=3,
+        random_state=42,
+        verbose=False,
+        inlier_class_label="1",
+        enabled_extra_axes=("if_max_samples",),
+    )
+    assert results_df is not None and len(results_df) > 0
+
+
+def test_rows_dropped_for_missing_targets_are_not_counted():
+    """Codex review of bd38ce1: the NaN drop happens AFTER bundle resolution, so a
+    check placed beside resolve_bundles counted rows that never reach a fit.
+
+    Supervised path with a custom bundle, mirroring the reported repro: four rows,
+    two of them with no target, and a bundle needing two training rows per fold.
+    Counting before the drop sees 4 rows (min fold 2 -> passes, then the one-row fit
+    raises inside the objective and scores 1e10); counting after sees 2 (min fold 1).
+    """
+    from spectral_predict.search_spaces import AxisSpec, BundleSpec
+
+    demanding = BundleSpec(
+        id="needs_two_rows",
+        families=frozenset({"PLS"}),
+        task_types=frozenset({"regression"}),
+        axes=(AxisSpec(key="tol", kind="float", low=1e-7, high=1e-4, log=True),),
+        min_train_fold_rows=2,
+    )
+    rng = np.random.RandomState(0)
+    X = rng.randn(4, 5)
+    y = np.array([1.0, 2.0, np.nan, np.nan])
+    with pytest.raises(ExtraAxesConfigError, match="training rows per fold"):
+        ub.run_unified_bayesian(
+            X=X,
+            y=y,
+            wavelengths=np.arange(5, dtype=float),
+            model_name="PLS",
+            task_type="regression",
+            n_trials=1,
+            cv_folds=2,
+            random_state=42,
+            verbose=False,
+            enabled_extra_axes=("needs_two_rows",),
+            search_space={"needs_two_rows": demanding},
+        )
+
+
+def test_the_refusal_message_points_the_right_way():
+    """More folds make training folds larger; the first wording said 'fewer'."""
+    rng = np.random.RandomState(0)
+    X = np.vstack([rng.randn(3, 6) * 0.3, rng.randn(3, 6) + 3.0])
+    y = np.array(["clean"] * 3 + ["contaminated"] * 3)
+    with pytest.raises(ExtraAxesConfigError) as excinfo:
+        ub.run_unified_bayesian(
+            X=X, y=y, wavelengths=np.arange(6, dtype=float),
+            model_name="IsolationForest", task_type="one_class", n_trials=1,
+            cv_folds=2, random_state=42, verbose=False,
+            inlier_class_label="clean", enabled_extra_axes=("if_max_samples",),
+        )
+    assert "more folds" in str(excinfo.value).lower()
+    # ... and the advice works: 3 folds of 3 inliers leaves 2 training rows.
+    results_df, _ = ub.run_unified_bayesian(
+        X=X, y=y, wavelengths=np.arange(6, dtype=float),
+        model_name="IsolationForest", task_type="one_class", n_trials=1,
+        cv_folds=3, random_state=42, verbose=False,
+        inlier_class_label="clean", enabled_extra_axes=("if_max_samples",),
+    )
+    assert results_df is not None
