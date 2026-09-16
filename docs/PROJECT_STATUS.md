@@ -91,7 +91,6 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
    - `apply_extra_axes` constant-clash message wording.
    - #73: surface CatBoost/model failures that search paths used to swallow silently;
      `docs/AGENT_COMPOSITION.md` §7 wrongly says `models_to_test` overrides tier.
-   - Delete `src/spectral_predict/nsga2_search.py.backup` (grep trap) — ask user.
    - `tests/test_baseline_advanced.py` (~L90-106) clears/restores all of `sys.modules`
      (possible order-leak; not observed failing).
    - Pre-existing from T-51 step 1: unscaled Bayesian importance proxy; unscaled NSGA-II
@@ -111,6 +110,9 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
 - **DeepSeek via opencode:** tell it to read files only via `git show <sha>:<relpath>` — it
   once mistyped an absolute path and aborted.
 - **Parallel agents:** give each a unique PR-body filename (a shared `pr_body.md` got clobbered).
+- **GLM 5.3 (opencode, read-only) earns its keep on search-space work:** on #80 it probed the
+  real estimators in `.venv314` and caught that `max_samples=1.0` duplicates `'auto'` below
+  256 samples. Point it at a commit sha and tell it to use `git show`; forbid `gh`/`git fetch`.
 - **Implementation agents often end their turn while a background test run is still going** —
   tell them to block on it, and check.
 - **opencode read-only** can't read outside the repo root (scratchpad worktrees, temp
