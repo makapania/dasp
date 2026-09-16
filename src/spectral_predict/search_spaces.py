@@ -401,14 +401,19 @@ def _one_class_bundles() -> tuple[BundleSpec, ...]:
                     key="max_samples",
                     kind="categorical",
                     # 'auto' is min(256, n_samples); the floats are fractions of the
-                    # training inliers. Already in the grid path's own IF grid.
-                    choices=("auto", 0.5, 0.8, 1.0),
+                    # training inliers. 1.0 is deliberately NOT offered (plan section 5
+                    # lists it): below 256 inliers it selects exactly what 'auto' does,
+                    # so identical fits would get distinct fingerprints and a quarter of
+                    # the TPE mass would sit on a duplicate. One-class folds are almost
+                    # always well under 256, and above it 0.5/0.8 already exceed 'auto'.
+                    choices=("auto", 0.5, 0.8),
                 ),
             ),
             label="IsolationForest: samples per tree",
             help=(
                 "Tunes how much of the training data each tree sees: 'auto' (min(256, n), "
-                "the default) or a fraction 0.5/0.8/1.0 of the inliers."
+                "the default) or half/80% of the inliers. A full-sample choice is omitted "
+                "because below 256 inliers it is the same as 'auto'."
                 + _WIDEN_CAVEAT
                 + _ONE_CLASS_CAVEAT
             ),

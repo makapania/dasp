@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolve_bundles` is bypassed.
 - **T-51 PR C** — three opt-in one-class bundles in `search_spaces.BUNDLES`, all off by
   default and resolving only for `task_type='one_class'`: `if_max_samples`
-  (IsolationForest `max_samples` from {auto, 0.5, 0.8, 1.0}), `lof_metric` (LOF `metric`
+  (IsolationForest `max_samples` from {auto, 0.5, 0.8}), `lof_metric` (LOF `metric`
   from {euclidean, manhattan, cosine}) and `ocsvm_poly` (One-Class SVM `degree` int 2-3 on
   poly trials, `coef0` -1 to 1 on poly and sigmoid trials — both suggested every trial but
   written only where the kernel uses them, so rbf trials are unchanged). Enable them from

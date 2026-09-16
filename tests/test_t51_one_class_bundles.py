@@ -35,7 +35,11 @@ ONE_CLASS = frozenset({"one_class"})
 PLAN_TABLE: dict[str, dict[str, Any]] = {
     "if_max_samples": {
         "families": {"IsolationForest"},
-        "axes": [("max_samples", "categorical", None, None, ("auto", 0.5, 0.8, 1.0), None)],
+        # Deviation from plan section 5, which also lists 1.0: below 256 inliers
+        # max_samples=1.0 selects exactly what 'auto' does (verified on sklearn 1.9.1),
+        # so offering both duplicates a choice the way 'minkowski' duplicated
+        # 'euclidean' - the same redundancy rule the plan applies to lof_metric.
+        "axes": [("max_samples", "categorical", None, None, ("auto", 0.5, 0.8), None)],
     },
     "lof_metric": {
         "families": {"LOF"},
@@ -170,6 +174,61 @@ def test_ocsvm_poly_writes_only_what_the_kernel_uses(kernel, expect_degree, expe
     model = build_one_class_model("OneClassSVM", params)
     assert model.degree == (2 if expect_degree else 3)  # sklearn default is 3
     assert model.coef0 == (0.5 if expect_coef0 else 0.0)
+
+
+FIT_MATRIX = (
+    [
+        pytest.param("IsolationForest", "if_max_samples", {"max_samples": value},
+                     id=f"IsolationForest-max_samples-{value}")
+        for value in ("auto", 0.5, 0.8)
+    ]
+    + [
+        pytest.param("LOF", "lof_metric", {"metric": value}, id=f"LOF-metric-{value}")
+        for value in ("euclidean", "manhattan", "cosine")
+    ]
+    + [
+        pytest.param("OneClassSVM", "ocsvm_poly",
+                     {"kernel": kernel, "degree": 2, "coef0": 0.5},
+                     id=f"OneClassSVM-kernel-{kernel}")
+        for kernel in ("rbf", "poly", "sigmoid")
+    ]
+)
+
+
+@pytest.mark.parametrize(("model_name", "bundle_id", "chosen"), FIT_MATRIX)
+def test_every_bundle_value_really_fits(model_name, bundle_id, chosen, one_class_data):
+    """Every offered value must fit and predict, not just construct (PR B's T8b)."""
+    X, y, _ = one_class_data
+    base = {
+        "IsolationForest": {"n_estimators": 50, "contamination": 0.05, "max_features": 1.0},
+        "LOF": {"n_neighbors": 5, "contamination": 0.05},
+        "OneClassSVM": {"nu": 0.05, "gamma": "scale"},
+    }[model_name]
+    params = _params_for(model_name, bundle_id, {**base, **chosen})
+    model = build_one_class_model(model_name, params)
+    inliers = X.values[(y == "clean").values]
+    model.fit(inliers)
+    predictions = model.predict(X.values)
+    assert set(np.unique(predictions)) <= {-1, 1}
+    assert len(predictions) == len(X)
+
+
+@pytest.mark.parametrize("model_name", ["IsolationForest", "LOF", "OneClassSVM"])
+def test_one_shared_selection_of_every_id_resolves(model_name):
+    """The PR D pattern: hand every id to each model; only its own must resolve."""
+    base = discover_suggested_names(
+        lambda t: ub.suggest_one_class_params(t, model_name)
+    ) | discover_derived_keys(lambda t: ub.suggest_one_class_params(t, model_name))
+    resolved = resolve_bundles(
+        model_name, "one_class", tuple(BUNDLES), None, base_param_names=base
+    )
+    expected = sorted(
+        b.id
+        for b in BUNDLES.values()
+        if model_name in b.families and "one_class" in b.task_types
+    )
+    assert [b.id for b in resolved] == expected
+    assert expected, "each one-class family owns a bundle"
 
 
 def test_one_class_bundle_values_reach_a_real_run(one_class_data):
