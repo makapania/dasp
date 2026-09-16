@@ -338,10 +338,9 @@ def test_every_bundle_in_the_registry_is_off_by_default():
                 assert resolve_bundles(family, task, (), None) == ()
 
 
-def test_numeric_labels_with_a_text_inlier_label_are_not_refused():
-    """Codex review of bd38ce1: the guard counted raw values while the objective
-    compares strings, so 30 integer-labelled inliers with inlier_class_label='1'
-    counted as zero and a working run was refused."""
+def test_numeric_labels_with_a_text_inlier_label_still_run():
+    """Integer labels with a text inlier_class_label: the objective compares them as
+    strings, so this is a supported combination an enabled bundle must not disturb."""
     rng = np.random.RandomState(0)
     X = np.vstack([rng.randn(30, 8) * 0.3, rng.randn(8, 8) + 3.0])
     y = np.array([1] * 30 + [0] * 8)  # integer labels, text label below
@@ -359,3 +358,44 @@ def test_numeric_labels_with_a_text_inlier_label_are_not_refused():
         enabled_extra_axes=("if_max_samples",),
     )
     assert results_df is not None and len(results_df) > 0
+
+
+def test_tiny_one_class_data_behaves_as_documented():
+    """Pins the documented limitation (Codex review of 7dafc19).
+
+    Three inliers under repeated 2-fold CV leaves one-row training folds, which the
+    fractions cannot fit. Half the folds are enough to score a trial, so a fractional
+    row CAN still reach the leaderboard - scored from the successful folds alone, with
+    nothing marking it as partial. That is why the help text warns instead of promising
+    the trials are merely wasted.
+    """
+    rng = np.random.RandomState(0)
+    X = np.vstack([rng.randn(3, 10) * 0.3, rng.randn(6, 10) + 3.0])
+    y = np.array(["clean"] * 3 + ["contam"] * 6)
+    results_df, study = ub.run_unified_bayesian(
+        X=X,
+        y=y,
+        wavelengths=np.arange(400.0, 500.0, 10.0),
+        model_name="IsolationForest",
+        task_type="one_class",
+        n_trials=6,
+        cv_folds=2,
+        cv_strategy="repeated_kfold",
+        cv_n_repeats=2,
+        random_state=42,
+        verbose=False,
+        inlier_class_label="clean",
+        enabled_extra_axes=("if_max_samples",),
+    )
+    scored = [t for t in study.trials if t.value is not None and np.isfinite(t.value)]
+    fractional = [
+        t for t in scored if isinstance(t.params.get("max_samples"), float)
+    ]
+    assert fractional, (
+        "documented behaviour: a fractional trial can still be scored here, from the "
+        "folds that succeeded"
+    )
+    if results_df is not None and len(results_df):
+        assert "partial_cv" not in results_df.columns, (
+            "if a partial-CV marker is ever added, relax the documented warning"
+        )

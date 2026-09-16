@@ -52,12 +52,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default-space study is never resumed or polluted. The benchmark showed no gain from
   floating these axes; they are for deliberate exploration.
   **Known limitation on very small one-class sets:** `if_max_samples`' fractions need at
-  least two inliers in every training fold, because `int(fraction * rows)` is 0 for a
-  one-row fold and the fit then fails. Those trials are scored as unusable (with the
-  fold's reason recorded) while `auto` and `1.0` still work; with 3 inliers under
-  repeated 2-fold CV a fraction can also be scored from only the folds that succeeded.
-  Enabling the bundle on such data therefore wastes trials rather than producing wrong
-  results.
+  least two inliers in every training fold (`int(fraction * rows)` is 0 for a one-row
+  fold and the fit then fails); `auto` and `1.0` can fit one. When too few folds
+  succeed, a fractional trial scores `+inf`, records a skip reason and is left out of
+  the leaderboard. **But** with 3 inliers under repeated 2-fold CV and at least two
+  repeats, half the folds are enough: the trial IS scored, from only the folds that
+  succeeded, and the leaderboard row carries no partial-CV marker and may leave some
+  inliers out of scoring entirely. That is an incomplete CV metric, not merely a wasted
+  trial. Avoid that configuration, or make sure every training fold holds at least two
+  inliers.
 
 ### Fixed
 

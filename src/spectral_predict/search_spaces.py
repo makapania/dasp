@@ -415,9 +415,10 @@ def _one_class_bundles() -> tuple[BundleSpec, ...]:
                 "Tunes how much of the training data each tree sees: 'auto' (min(256, n), "
                 "the default) or a fraction 0.5/0.8/1.0 of the inliers. With 256 inliers "
                 "or fewer, 1.0 and 'auto' are the same subsample. The fractions need at "
-                "least two inliers in every training fold: int(fraction * rows) is 0 for a "
-                "one-row fold and the fit then fails, scoring that trial as unusable while "
-                "'auto' and 1.0 still work."
+                "least two inliers in every training fold ('auto' and 1.0 can fit one): too "
+                "few successful folds score the trial as unusable, but under repeated CV "
+                "half the folds are enough and the row is then scored from those alone, "
+                "with no marker saying so."
                 + _WIDEN_CAVEAT
                 + _ONE_CLASS_CAVEAT
             ),
