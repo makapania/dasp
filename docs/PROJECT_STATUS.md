@@ -15,11 +15,15 @@ What it adds: `if_max_samples` (IsolationForest), `lof_metric` (LOF), `ocsvm_pol
 (OneClassSVM `degree`/`coef0`, written only on the kernels that read them). All off unless
 named in `enabled_extra_axes`, all `task_type='one_class'` only.
 
-**Deliberate deviation from plan §5:** `max_samples=1.0` is NOT offered. `'auto'` is
-`min(256, n_samples)`, so below 256 inliers 1.0 and 'auto' fit identically (verified on
-sklearn 1.9.1) — identical fits with distinct fingerprints, and a quarter of the TPE mass on
-a duplicate. Same rule that dropped `minkowski`. Recorded in the bundle comment, the test's
-plan table and the PR body.
+**Reviewed by GLM 5.3 and then Codex.** Codex BLOCKed `05223ca` with two should-fixes,
+both real and both fixed in `1039685`: (1) dropping `max_samples=1.0` was wrong - at n=300
+'auto' is 256 but 0.8 is only 240, so 1.0 is the only full-sample choice above 256. It is
+restored per plan section 5 with the under-257 coincidence with 'auto' documented instead.
+(2) a fraction of a one-row training fold is zero samples and sklearn raises, so every
+trial failed into a penalty on tiny data; new `BundleSpec.min_train_fold_rows` makes
+`run_unified_bayesian` refuse the bundle up front. Follow the full-suite run after any
+`BundleSpec` field change - it caught a third issue (the rebuild helper in
+`test_bayesian_post_merge_fixes.py`).
 
 **Then PR D:** the GUI card that enables bundles, which is what makes PR B + PR C reachable
 without writing Python. After that, E/F (one-class clamp; F needs its own approval).
