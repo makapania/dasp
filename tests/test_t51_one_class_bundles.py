@@ -364,3 +364,17 @@ def test_every_bundle_in_the_registry_is_off_by_default():
         for family in bundle.families:
             for task in bundle.task_types:
                 assert resolve_bundles(family, task, (), None) == ()
+
+
+def test_min_train_fold_rows_is_not_part_of_the_space_identity():
+    """It gates whether a run may start, never what is sampled once it does."""
+    from dataclasses import replace
+
+    from spectral_predict.search_spaces import canonical_space_identity
+
+    bundle = BUNDLES["if_max_samples"]
+    relaxed = replace(bundle, min_train_fold_rows=0)
+    assert canonical_space_identity((bundle,), False) == canonical_space_identity(
+        (relaxed,), False
+    )
+    assert hash(bundle) != hash(relaxed), "but they are still distinct bundles"
