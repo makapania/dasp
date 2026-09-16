@@ -163,6 +163,11 @@ class BundleSpec:
             bundle for a listed family with any other task in ``task_types`` raises
             :class:`ExtraAxesConfigError`. Not part of the space identity: it never
             changes the effective space of a pair that resolves.
+        min_train_fold_rows: Smallest training fold this bundle's values can be fitted
+            on. ``run_unified_bayesian`` refuses the bundle when the data and CV
+            settings give a smaller fold, instead of letting every trial fail into a
+            penalty. Not part of the space identity: it gates whether a run may start,
+            never what is sampled once it does.
     """
 
     id: str
@@ -176,6 +181,7 @@ class BundleSpec:
     help: str = ""
     revision: int = 1
     family_task_types: Mapping[str, frozenset[str]] | None = field(default=None, hash=False)
+    min_train_fold_rows: int = 0
 
 
 _SUPERVISED = frozenset({"regression", "classification"})
@@ -400,20 +406,23 @@ def _one_class_bundles() -> tuple[BundleSpec, ...]:
                 AxisSpec(
                     key="max_samples",
                     kind="categorical",
-                    # 'auto' is min(256, n_samples); the floats are fractions of the
-                    # training inliers. 1.0 is deliberately NOT offered (plan section 5
-                    # lists it): below 256 inliers it selects exactly what 'auto' does,
-                    # so identical fits would get distinct fingerprints and a quarter of
-                    # the TPE mass would sit on a duplicate. One-class folds are almost
-                    # always well under 256, and above it 0.5/0.8 already exceed 'auto'.
-                    choices=("auto", 0.5, 0.8),
+                    # 'auto' is min(256, n_samples); the floats are int(fraction * n) of
+                    # the training inliers. Below 257 inliers 1.0 selects exactly what
+                    # 'auto' does, so those two are one choice there (identical fits
+                    # under distinct fingerprints); above it 1.0 is the only way to use
+                    # every inlier, because even 0.8 stays under 'auto''s 256 cap until
+                    # n=320. Kept, per plan section 5, with the coincidence documented
+                    # rather than dropping full-sample exploration for larger sets.
+                    choices=("auto", 0.5, 0.8, 1.0),
                 ),
             ),
+            # int(fraction * n) is 0 for a one-row training fold, and sklearn raises.
+            min_train_fold_rows=2,
             label="IsolationForest: samples per tree",
             help=(
                 "Tunes how much of the training data each tree sees: 'auto' (min(256, n), "
-                "the default) or half/80% of the inliers. A full-sample choice is omitted "
-                "because below 256 inliers it is the same as 'auto'."
+                "the default) or a fraction 0.5/0.8/1.0 of the inliers. With 256 inliers "
+                "or fewer, 1.0 and 'auto' are the same subsample."
                 + _WIDEN_CAVEAT
                 + _ONE_CLASS_CAVEAT
             ),
@@ -805,6 +814,12 @@ def _require_str_set(bundle_id: str, what: str, value: Any) -> None:
 
 
 def _validate_bundle(bundle_id: str, bundle: BundleSpec) -> None:
+    if not isinstance(bundle.min_train_fold_rows, int) or isinstance(
+        bundle.min_train_fold_rows, bool
+    ) or bundle.min_train_fold_rows < 0:
+        raise ExtraAxesConfigError(
+            f"Bundle {bundle_id!r} min_train_fold_rows must be an int >= 0"
+        )
     if bundle.id != bundle_id:
         raise ExtraAxesConfigError(
             f"Registry key {bundle_id!r} holds a bundle whose id is {bundle.id!r}"

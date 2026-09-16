@@ -43,14 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resolve_bundles` is bypassed.
 - **T-51 PR C** — three opt-in one-class bundles in `search_spaces.BUNDLES`, all off by
   default and resolving only for `task_type='one_class'`: `if_max_samples`
-  (IsolationForest `max_samples` from {auto, 0.5, 0.8}), `lof_metric` (LOF `metric`
+  (IsolationForest `max_samples` from {auto, 0.5, 0.8, 1.0}), `lof_metric` (LOF `metric`
   from {euclidean, manhattan, cosine}) and `ocsvm_poly` (One-Class SVM `degree` int 2-3 on
   poly trials, `coef0` -1 to 1 on poly and sigmoid trials — both suggested every trial but
   written only where the kernel uses them, so rbf trials are unchanged). Enable them from
   Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
   control yet (PR D). Enabling any bundle gives the run its own study name, so a
   default-space study is never resumed or polluted. The benchmark showed no gain from
-  floating these axes; they are for deliberate exploration.
+  floating these axes; they are for deliberate exploration. A bundle can declare a
+  minimum training-fold size (`BundleSpec.min_train_fold_rows`); `if_max_samples` needs
+  2, because a fraction of a one-row fold is zero samples and sklearn raises. Too small
+  a fold now raises `ExtraAxesConfigError` before the study is created instead of
+  failing every trial into a penalty.
 
 ### Fixed
 

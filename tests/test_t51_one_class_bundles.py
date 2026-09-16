@@ -35,11 +35,7 @@ ONE_CLASS = frozenset({"one_class"})
 PLAN_TABLE: dict[str, dict[str, Any]] = {
     "if_max_samples": {
         "families": {"IsolationForest"},
-        # Deviation from plan section 5, which also lists 1.0: below 256 inliers
-        # max_samples=1.0 selects exactly what 'auto' does (verified on sklearn 1.9.1),
-        # so offering both duplicates a choice the way 'minkowski' duplicated
-        # 'euclidean' - the same redundancy rule the plan applies to lof_metric.
-        "axes": [("max_samples", "categorical", None, None, ("auto", 0.5, 0.8), None)],
+        "axes": [("max_samples", "categorical", None, None, ("auto", 0.5, 0.8, 1.0), None)],
     },
     "lof_metric": {
         "families": {"LOF"},
@@ -180,7 +176,7 @@ FIT_MATRIX = (
     [
         pytest.param("IsolationForest", "if_max_samples", {"max_samples": value},
                      id=f"IsolationForest-max_samples-{value}")
-        for value in ("auto", 0.5, 0.8)
+        for value in ("auto", 0.5, 0.8, 1.0)
     ]
     + [
         pytest.param("LOF", "lof_metric", {"metric": value}, id=f"LOF-metric-{value}")
@@ -188,9 +184,10 @@ FIT_MATRIX = (
     ]
     + [
         pytest.param("OneClassSVM", "ocsvm_poly",
-                     {"kernel": kernel, "degree": 2, "coef0": 0.5},
-                     id=f"OneClassSVM-kernel-{kernel}")
+                     {"kernel": kernel, "degree": degree, "coef0": coef0},
+                     id=f"OneClassSVM-{kernel}-d{degree}-c{coef0}")
         for kernel in ("rbf", "poly", "sigmoid")
+        for degree, coef0 in ((2, -1.0), (3, 1.0))
     ]
 )
 
@@ -274,3 +271,96 @@ def test_enabled_bundle_gives_the_run_its_own_study_name(one_class_data):
         )
         names.append(study.study_name)
     assert names[0] != names[1]
+
+
+# --- Codex review of 05223ca ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n_rows", "expected"),
+    [
+        # sklearn: 'auto' is min(256, n); a fraction is int(fraction * n).
+        (24, {"auto": 24, 0.5: 12, 0.8: 19, 1.0: 24}),
+        (300, {"auto": 256, 0.5: 150, 0.8: 240, 1.0: 300}),
+    ],
+)
+def test_max_samples_choices_are_distinct_above_256(n_rows, expected):
+    """1.0 duplicates 'auto' only below 257 rows; above it, it is the only full sample.
+
+    Dropping 1.0 (as an earlier commit did) would have removed full-sample exploration
+    for larger sets on the false premise that 0.5/0.8 exceed 'auto' there: at 300 rows
+    0.8 is 240, still under 'auto''s 256.
+    """
+    from sklearn.ensemble import IsolationForest
+
+    X = np.random.RandomState(0).randn(n_rows, 5)
+    resolved = {
+        choice: IsolationForest(max_samples=choice, random_state=42, n_jobs=1)
+        .fit(X)
+        .max_samples_
+        for choice in BUNDLES["if_max_samples"].axes[0].choices
+    }
+    assert resolved == expected
+    if n_rows > 256:
+        assert len(set(resolved.values())) == len(resolved), "all four are distinct"
+
+
+def test_if_max_samples_declares_its_minimum_training_fold():
+    assert BUNDLES["if_max_samples"].min_train_fold_rows == 2
+    assert all(
+        BUNDLES[bid].min_train_fold_rows == 0 for bid in ("lof_metric", "ocsvm_poly")
+    )
+
+
+def test_a_one_row_training_fold_is_refused_not_silently_penalised():
+    """int(fraction * 1) is 0 and sklearn raises, so every trial would score 1e10."""
+    rng = np.random.RandomState(0)
+    X = np.vstack([rng.randn(3, 6) * 0.3, rng.randn(3, 6) + 3.0])
+    y = np.array(["clean"] * 3 + ["contaminated"] * 3)
+    with pytest.raises(ExtraAxesConfigError, match="training rows per fold"):
+        ub.run_unified_bayesian(
+            X=X,
+            y=y,
+            wavelengths=np.arange(6, dtype=float),
+            model_name="IsolationForest",
+            task_type="one_class",
+            n_trials=1,
+            cv_folds=2,
+            random_state=42,
+            verbose=False,
+            inlier_class_label="clean",
+            enabled_extra_axes=("if_max_samples",),
+        )
+
+
+def test_enough_inliers_is_not_refused(one_class_data):
+    """The guard must not fire on ordinary data (30 inliers, 3 folds)."""
+    X, y, wavelengths = one_class_data
+    results_df, _ = ub.run_unified_bayesian(
+        X=X.values,
+        y=y.values,
+        wavelengths=wavelengths,
+        model_name="IsolationForest",
+        task_type="one_class",
+        n_trials=2,
+        cv_folds=3,
+        random_state=42,
+        verbose=False,
+        inlier_class_label="clean",
+        enabled_extra_axes=("if_max_samples",),
+    )
+    assert results_df is not None and len(results_df) > 0
+
+
+def test_registry_keys_are_exactly_the_two_plan_tables():
+    """Restores the exact-membership check that scoping the PR B tests narrowed."""
+    from tests.test_t51_supervised_bundles import PLAN_TABLE as SUPERVISED_PLAN
+
+    assert set(BUNDLES) == set(SUPERVISED_PLAN) | set(PLAN_TABLE)
+
+
+def test_every_bundle_in_the_registry_is_off_by_default():
+    for bundle in BUNDLES.values():
+        for family in bundle.families:
+            for task in bundle.task_types:
+                assert resolve_bundles(family, task, (), None) == ()
