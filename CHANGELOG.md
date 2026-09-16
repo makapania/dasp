@@ -50,11 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
   control yet (PR D). Enabling any bundle gives the run its own study name, so a
   default-space study is never resumed or polluted. The benchmark showed no gain from
-  floating these axes; they are for deliberate exploration. A bundle can declare a
-  minimum training-fold size (`BundleSpec.min_train_fold_rows`); `if_max_samples` needs
-  2, because a fraction of a one-row fold is zero samples and sklearn raises. Too small
-  a fold now raises `ExtraAxesConfigError` before the study is created instead of
-  failing every trial into a penalty.
+  floating these axes; they are for deliberate exploration.
+  **Known limitation on very small one-class sets:** `if_max_samples`' fractions need at
+  least two inliers in every training fold, because `int(fraction * rows)` is 0 for a
+  one-row fold and the fit then fails. Those trials are scored as unusable (with the
+  fold's reason recorded) while `auto` and `1.0` still work; with 3 inliers under
+  repeated 2-fold CV a fraction can also be scored from only the folds that succeeded.
+  Enabling the bundle on such data therefore wastes trials rather than producing wrong
+  results.
 
 ### Fixed
 

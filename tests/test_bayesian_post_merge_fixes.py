@@ -196,7 +196,6 @@ def _rebuilt_with_fresh_dicts(bundle: BundleSpec) -> BundleSpec:
         family_task_types=(
             None if bundle.family_task_types is None else dict(bundle.family_task_types)
         ),
-        min_train_fold_rows=bundle.min_train_fold_rows,
     )
 
 

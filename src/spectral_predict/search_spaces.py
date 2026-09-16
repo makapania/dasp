@@ -163,11 +163,6 @@ class BundleSpec:
             bundle for a listed family with any other task in ``task_types`` raises
             :class:`ExtraAxesConfigError`. Not part of the space identity: it never
             changes the effective space of a pair that resolves.
-        min_train_fold_rows: Smallest training fold this bundle's values can be fitted
-            on. ``run_unified_bayesian`` refuses the bundle when the data and CV
-            settings give a smaller fold, instead of letting every trial fail into a
-            penalty. Not part of the space identity: it gates whether a run may start,
-            never what is sampled once it does.
     """
 
     id: str
@@ -181,7 +176,6 @@ class BundleSpec:
     help: str = ""
     revision: int = 1
     family_task_types: Mapping[str, frozenset[str]] | None = field(default=None, hash=False)
-    min_train_fold_rows: int = 0
 
 
 _SUPERVISED = frozenset({"regression", "classification"})
@@ -416,13 +410,14 @@ def _one_class_bundles() -> tuple[BundleSpec, ...]:
                     choices=("auto", 0.5, 0.8, 1.0),
                 ),
             ),
-            # int(fraction * n) is 0 for a one-row training fold, and sklearn raises.
-            min_train_fold_rows=2,
             label="IsolationForest: samples per tree",
             help=(
                 "Tunes how much of the training data each tree sees: 'auto' (min(256, n), "
                 "the default) or a fraction 0.5/0.8/1.0 of the inliers. With 256 inliers "
-                "or fewer, 1.0 and 'auto' are the same subsample."
+                "or fewer, 1.0 and 'auto' are the same subsample. The fractions need at "
+                "least two inliers in every training fold: int(fraction * rows) is 0 for a "
+                "one-row fold and the fit then fails, scoring that trial as unusable while "
+                "'auto' and 1.0 still work."
                 + _WIDEN_CAVEAT
                 + _ONE_CLASS_CAVEAT
             ),
@@ -814,12 +809,6 @@ def _require_str_set(bundle_id: str, what: str, value: Any) -> None:
 
 
 def _validate_bundle(bundle_id: str, bundle: BundleSpec) -> None:
-    if not isinstance(bundle.min_train_fold_rows, int) or isinstance(
-        bundle.min_train_fold_rows, bool
-    ) or bundle.min_train_fold_rows < 0:
-        raise ExtraAxesConfigError(
-            f"Bundle {bundle_id!r} min_train_fold_rows must be an int >= 0"
-        )
     if bundle.id != bundle_id:
         raise ExtraAxesConfigError(
             f"Registry key {bundle_id!r} holds a bundle whose id is {bundle.id!r}"

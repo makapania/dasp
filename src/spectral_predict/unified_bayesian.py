@@ -778,30 +778,6 @@ def apply_preprocessing(
     return X
 
 
-def _smallest_training_fold(
-    y, task_type: str, cv_folds: int, cv_strategy: str, inlier_class_label=None
-) -> int:
-    """Rows in the smallest training fold, for extra-axes fold requirements (T-51 PR C).
-
-    One-class models train on inliers only, so only those rows count. Mirrors the fold
-    arithmetic in ``contamination.run_one_class_cv``: LOO trains on all but one row,
-    k-fold on all but the largest test fold.
-    """
-    rows = len(np.asarray(y))
-    if task_type == 'one_class' and inlier_class_label is not None:
-        # The same string comparison the objective uses to build y_oc, so numeric
-        # labels with a text inlier_class_label (or the reverse) count identically.
-        # Comparing raw values here refused runs that work (Codex review of bd38ce1).
-        y_str = np.asarray(y, dtype=str)
-        rows = int(np.sum(y_str == str(inlier_class_label)))
-    if rows <= 0:
-        return 0
-    if cv_strategy == 'loo':
-        return rows - 1
-    folds = max(int(cv_folds), 2)
-    return rows - int(np.ceil(rows / folds))
-
-
 def suggest_model_params(
     trial: Trial,
     model_name: str,
@@ -2719,26 +2695,6 @@ def run_unified_bayesian(
         print(f"Warning: Dropping {n_dropped} sample(s) with NaN target values before optimization.")
         X = X[~nan_mask]
         y = y[~nan_mask]
-
-    # T-51 PR C (Codex review of bd38ce1): checked HERE, on the cleaned y, not
-    # beside resolve_bundles above - the NaN drop happens in between, so an earlier
-    # check could pass on rows that never reach a fit. A bundle whose values need a
-    # minimum training-fold size refuses the run rather than letting every trial fail
-    # into a 1e10 penalty, which reads as "this model is bad" instead of "this bundle
-    # cannot run on this data". Same spirit as run_one_class_cv's too-few-inliers guard.
-    _demanding = [b for b in _resolved_extra_axes if b.min_train_fold_rows > 0]
-    if _demanding:
-        _min_fold = _smallest_training_fold(
-            y, task_type, cv_folds, cv_strategy, inlier_class_label
-        )
-        for _bundle in _demanding:
-            if _min_fold < _bundle.min_train_fold_rows:
-                raise ExtraAxesConfigError(
-                    f"Bundle {_bundle.id!r} needs at least "
-                    f"{_bundle.min_train_fold_rows} training rows per fold, but "
-                    f"{cv_strategy} with {cv_folds} folds leaves {_min_fold}. "
-                    "Use more folds (or LOO), add data, or run without this bundle."
-                )
 
     n_samples, n_features = X.shape
 

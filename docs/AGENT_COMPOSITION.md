@@ -353,7 +353,7 @@ name it:
 | `svm_gamma` | SVM (classification), SVR (regression) | `gamma` [1e-5, 10] log, written only on trials whose kernel is `rbf` |
 | `mlp_activation` | MLP / both | `activation` ∈ {`relu`, `tanh`, `logistic`} |
 | `plsda_head` | PLS-DA / classification | logistic-head `lr_C` [1e-3, 1e3] log; stored in `Params` as `lr__C` |
-| `if_max_samples` | IsolationForest / one-class | `max_samples` ∈ {`auto`, 0.5, 0.8, 1.0} (default pins `auto`; with ≤256 inliers 1.0 and `auto` are the same subsample). Needs ≥2 training rows per fold |
+| `if_max_samples` | IsolationForest / one-class | `max_samples` ∈ {`auto`, 0.5, 0.8, 1.0} (default pins `auto`; with ≤256 inliers 1.0 and `auto` are the same subsample). The fractions need ≥2 inliers per training fold, else those trials score as unusable |
 | `lof_metric` | LOF / one-class | `metric` ∈ {`euclidean`, `manhattan`, `cosine`} |
 | `ocsvm_poly` | OneClassSVM / one-class | `degree` int [2, 3] (poly kernel only), `coef0` [-1, 1] (poly and sigmoid only) |
 
