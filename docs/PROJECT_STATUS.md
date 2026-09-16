@@ -55,7 +55,10 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
   toward not using it. Leave open; close only on the user's word.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted; CI lint steps are
   informational. Do it between feature PRs if at all.
-- **Pending question:** should `plsda_head` also apply to model name `PLS` in classification?
+- **Settled 2026-09-15:** `plsda_head` stays PLS-DA-only. The GUI cannot tick PLS in
+  classification (`CLASSIFICATION_MODELS` excludes it, and `_on_task_type_changed` unticks
+  and disables it on every data load), so only direct backend callers can pass `PLS` +
+  classification; `AGENT_COMPOSITION.md` §7b already tells them to spell it `PLS-DA`.
 
 ### 4. Queued work
 1. **T-51 next:** PR C (one-class bundles `if_max_samples`, `lof_metric`, `ocsvm_poly`), then
