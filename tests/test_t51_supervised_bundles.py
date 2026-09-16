@@ -157,9 +157,17 @@ PLAN_TABLE: dict[str, dict[str, Any]] = {
 # classifier, so those registry cross-products are never real runs.
 _NO_ESTIMATOR = {("SVM", "regression"), ("SVR", "classification")}
 
+# PR C added one-class bundles to the same registry; this file covers the supervised
+# ones (tests/test_t51_one_class_bundles.py covers the rest).
+SUPERVISED_BUNDLES = {
+    bid: bundle
+    for bid, bundle in BUNDLES.items()
+    if set(bundle.task_types) <= SUPERVISED
+}
+
 CASES = [
     pytest.param(bid, family, task, id=f"{bid}-{family}-{task}")
-    for bid, bundle in sorted(BUNDLES.items())
+    for bid, bundle in sorted(SUPERVISED_BUNDLES.items())
     for family in sorted(bundle.families)
     for task in sorted(bundle.task_types)
     if (family, task) not in _NO_ESTIMATOR
@@ -201,7 +209,7 @@ def search_time_pipeline(model_name: str, task: str, params: dict[str, Any]) -> 
 
 
 def test_registry_matches_plan_table() -> None:
-    assert set(BUNDLES) == set(PLAN_TABLE)
+    assert set(SUPERVISED_BUNDLES) == set(PLAN_TABLE)
     for bid, spec in PLAN_TABLE.items():
         bundle = BUNDLES[bid]
         assert bundle.id == bid
@@ -217,12 +225,16 @@ def test_registry_matches_plan_table() -> None:
         assert all(a.param_name is None and a.step is None for a in bundle.axes), bid
 
 
-def test_no_one_class_bundles_in_pr_b() -> None:
-    assert all("one_class" not in b.task_types for b in BUNDLES.values())
+def test_supervised_and_one_class_bundles_stay_disjoint() -> None:
+    """A bundle is supervised or one-class, never both: the samplers differ."""
+    for bundle in BUNDLES.values():
+        tasks = set(bundle.task_types)
+        assert tasks <= SUPERVISED or tasks == {"one_class"}, bundle.id
+    assert set(BUNDLES) - set(SUPERVISED_BUNDLES), "PR C's one-class bundles are registered"
 
 
 def test_every_bundle_is_off_by_default() -> None:
-    for bundle in BUNDLES.values():
+    for bundle in SUPERVISED_BUNDLES.values():
         for family in bundle.families:
             for task in bundle.task_types:
                 assert resolve_bundles(family, task, (), None) == ()
@@ -237,7 +249,13 @@ def test_preflight_against_real_sampler(bid: str, family: str, task: str) -> Non
 @pytest.mark.parametrize(
     ("family", "task"),
     sorted(
-        {(f, t) for b in BUNDLES.values() for f in b.families for t in b.task_types} - _NO_ESTIMATOR
+        {
+            (f, t)
+            for b in SUPERVISED_BUNDLES.values()
+            for f in b.families
+            for t in b.task_types
+        }
+        - _NO_ESTIMATOR
     ),
 )
 def test_all_registry_bundles_enabled_together_resolve(family: str, task: str) -> None:
@@ -248,6 +266,7 @@ def test_all_registry_bundles_enabled_together_resolve(family: str, task: str) -
     expected = sorted(
         b.id for b in BUNDLES.values() if family in b.families and task in b.task_types
     )
+    assert expected and all(bid in SUPERVISED_BUNDLES for bid in expected)
     assert [b.id for b in resolved] == expected
 
 

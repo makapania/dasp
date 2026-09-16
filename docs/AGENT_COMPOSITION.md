@@ -353,6 +353,9 @@ name it:
 | `svm_gamma` | SVM (classification), SVR (regression) | `gamma` [1e-5, 10] log, written only on trials whose kernel is `rbf` |
 | `mlp_activation` | MLP / both | `activation` ∈ {`relu`, `tanh`, `logistic`} |
 | `plsda_head` | PLS-DA / classification | logistic-head `lr_C` [1e-3, 1e3] log; stored in `Params` as `lr__C` |
+| `if_max_samples` | IsolationForest / one-class | `max_samples` ∈ {`auto`, 0.5, 0.8, 1.0} (default pins `auto`) |
+| `lof_metric` | LOF / one-class | `metric` ∈ {`euclidean`, `manhattan`, `cosine`} |
+| `ocsvm_poly` | OneClassSVM / one-class | `degree` int [2, 3] (poly kernel only), `coef0` [-1, 1] (poly and sigmoid only) |
 
 Each `BundleSpec` also carries a `label` and `help` string. Pass one selection to every
 model in a loop: ids that don't apply to a model are skipped for it.
@@ -413,8 +416,10 @@ What to know:
   tuned values (MLP `hidden_layer_sizes`), raises `ExtraAxesConfigError` before any
   study is created. So do unknown ids, malformed axes, and a bare-string selection.
 - **`search_space` replaces the curated registry for that call.** To combine a curated
-  bundle with your own, pass `{**BUNDLES, "my_pls_tol": pls_tol}`. There are no one-class
-  bundles yet (T-51 PR C).
+  bundle with your own, pass `{**BUNDLES, "my_pls_tol": pls_tol}`.
+- **One-class bundles exist but are for exploration, not gains.** The benchmark showed no
+  improvement from floating these axes; they are there so a one-class run can be widened
+  deliberately. They resolve only for `task_type='one_class'`.
 - **An id that doesn't apply to this model is skipped**, so one selection can be shared
   across a multi-model loop. If none applies, a single warning is logged. The exception
   is a pair a bundle names but cannot serve: `svm_gamma` with `SVM` + regression or
