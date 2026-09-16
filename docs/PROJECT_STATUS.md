@@ -76,8 +76,10 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
    - Pre-existing from T-51 step 1: unscaled Bayesian importance proxy; unscaled NSGA-II
      display metrics; NSGA-II 'SVM' chromosomes always 1e10; `MODELS_WITH_FEATURE_IMPORTANCE`
      lacks 'SVM'; GUI refit double-scaling under autoscale.
-3. **`SESSION_LOG.md` is well over 1000 lines** (limit ~200): archive older entries to
-   `docs/SESSION_LOG_ARCHIVE.md`.
+3. **`SESSION_LOG.md` housekeeping done 2026-09-15** (1705 → 521 lines): batches 6 and 7 in
+   `docs/SESSION_LOG_ARCHIVE.md` hold everything before 2026-09-14 plus the full #79
+   round-by-round history. Keep it short the same way: archive verbatim, and condense a
+   finished PR's narrative down to its durable lessons.
 
 ### 5. Tooling notes (2026-09-14/15)
 - **Codex:** on this ChatGPT-account login only `gpt-6-astra` works for the "astra"
