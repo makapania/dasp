@@ -2,31 +2,33 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-15, end of session)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-16)
 
-### 0. First job: decide PR #80 (T-51 PR C, one-class bundles), then start PR D
-**PR #80** `feat/T51-pr-c-one-class-bundles` @ `05223ca` is **open, green and waiting on the
-user's merge decision only** — nothing is half-finished. Full non-GUI suite 3437 passed /
-26 skipped on that commit; F821 clean; GLM 5.3 reviewed it (MERGE-WITH-NITS, every point
-addressed). It was not sent to Codex: the change is additive, off by default, and cannot
-affect an existing run. Ask, then merge (squash) or send for a second opinion.
+### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
+`main` is clean, no open work branches, no worktrees. PR #80 (T-51 PR C) merged as
+`f401c29`; PR #79 (crash-resume) merged as `a5f9a70`.
 
-What it adds: `if_max_samples` (IsolationForest), `lof_metric` (LOF), `ocsvm_poly`
-(OneClassSVM `degree`/`coef0`, written only on the kernels that read them). All off unless
-named in `enabled_extra_axes`, all `task_type='one_class'` only.
+**PR D** adds the GUI card that turns bundles on, which is what makes PR B (11 supervised
+bundles) and PR C (3 one-class bundles) reachable without writing Python. Plan:
+`docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md` §4. After it: E/F
+(one-class clamp; F needs its own approval and edits `suggest_one_class_params`, the one
+planned exception to the no-sampler-edits rule).
 
-**Reviewed by GLM 5.3 and then Codex.** Codex BLOCKed `05223ca` with two should-fixes,
-both real and both fixed in `1039685`: (1) dropping `max_samples=1.0` was wrong - at n=300
-'auto' is 256 but 0.8 is only 240, so 1.0 is the only full-sample choice above 256. It is
-restored per plan section 5 with the under-257 coincidence with 'auto' documented instead.
-(2) a fraction of a one-row training fold is zero samples and sklearn raises, so every
-trial failed into a penalty on tiny data; new `BundleSpec.min_train_fold_rows` makes
-`run_unified_bayesian` refuse the bundle up front. Follow the full-suite run after any
-`BundleSpec` field change - it caught a third issue (the rebuild helper in
-`test_bayesian_post_merge_fixes.py`).
+**Before writing PR D, read these two — both cost a full review round in PR C:**
+1. **Adding to `BUNDLES` breaks registry-wide assertions** in
+   `tests/test_t51_supervised_bundles.py` (they iterate the whole registry and fit
+   supervised models). PR C scoped them to a `SUPERVISED_BUNDLES` subset; PR D will hit
+   the same tests if it adds or changes bundles.
+2. **A new GUI input that feeds the Bayesian study-name hash must go in
+   `CAPTURABLE_SETTINGS` AND `BAYESIAN_REQUIRED_SETTINGS`** (see §1). A bundle-enable
+   control is exactly such an input: miss it and a changed control silently starts a
+   different study while the finished run releases the saved one's record.
 
-**Then PR D:** the GUI card that enables bundles, which is what makes PR B + PR C reachable
-without writing Python. After that, E/F (one-class clamp; F needs its own approval).
+**PR C's known limitation, if PR D surfaces these bundles in the GUI:** `if_max_samples`'
+fractions need >= 2 inliers per training fold. Too few successful folds → the trial scores
++inf and never reaches the leaderboard; but under repeated CV half the folds suffice, so
+the row IS scored from those alone, unmarked, possibly omitting inliers. The GUI should not
+promise more than that. Wording is in the bundle `help` text — reuse it, don't reinvent it.
 
 ### 1. PR #79 (crash-resume) is MERGED — `a5f9a70`. Nothing pending on it.
 13 review rounds. Rounds 1-8 were reviewed by Codex + DeepSeek Flash + GLM 5.3; rounds 9-13
@@ -69,13 +71,13 @@ one-class grid, NSGA-II and post-search paths read live Tk state (they don't tou
 | #77 | Ensembles: tuned `model__*` params + correct row preprocessing (incl. chromosome rows, float64), PLS-DA class_weight/seed, legacy CatBoost refit, GUI NameErrors; shared row helpers on declared surface §8b. **Ensemble scores change.** 5 review rounds. |
 | #78 | Bayesian: no automatic study deletion after failed migration; baseline_params NameError; svm_gamma pair rejection; 'pls-da'; equal categorical choices; numpy scalars; legacy-study warning. 3 review rounds. |
 | #79 | Crash-resume: persistence setting kept; saved run offered until resumed or deleted; damaged record reported not replaced; everything the Bayesian worker uses frozen at the click. 13 rounds. See §1. |
+| #80 | T-51 PR C: 3 opt-in one-class bundles (`if_max_samples`, `lof_metric`, `ocsvm_poly`). Python-only until PR D. GLM 5.3 + 4 Codex rounds; see SESSION_LOG 2026-09-16. |
 
 Review process used (user preference): **Codex + DeepSeek Flash + GLM 5.3** on every PR,
 re-review each round until clean. A post-merge round on #68-#75 found real pre-existing bugs
 (fixed in #76-#78). See SESSION_LOG 2026-09-14 "Post-merge review round".
 
 ### 3. Open PRs / decisions for the user
-- **#80** T-51 PR C, one-class bundles: green, awaiting a merge decision. See section 0.
 - **#63** T-17 multi-target regression (+16k lines, stale since 2026-07-08): user leaning
   toward not using it. Leave open; close only on the user's word.
 - **Repo-wide black/flake8 pass?** ~212 files would be reformatted; CI lint steps are
@@ -86,8 +88,8 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
   classification; `AGENT_COMPOSITION.md` §7b already tells them to spell it `PLS-DA`.
 
 ### 4. Queued work
-1. **T-51 next:** PR D (GUI card to enable bundles) once #80 is merged, then E/F (one-class
-   clamp; F needs its own approval). PR C is done and sitting in #80.
+1. **T-51 next:** PR D (GUI card to enable bundles) — see §0 — then E/F (one-class clamp;
+   F needs its own approval).
 2. **Smaller follow-ups:**
    - `split_plsda_params` passes `C` through uncoerced (hand-edited CSV `'0.05'` would crash).
    - Tab 7 re-applies stored params over a user's `n_components` edit — intended?
