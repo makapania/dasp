@@ -589,3 +589,33 @@ adding "one small safety check" to a data-only PR.
   `def`s, so a helper placed between the two samplers breaks the pin; and scripted patching
   left an LF block in a CRLF file, which showed up as a phantom diff against main (check
   `git diff <base> --stat` after any scripted edit).
+
+### 2026-09-23 — CARS top-N padding: requesting more vars than CARS kept pads with the longest wavelengths (reported from Border Cave NIRS project; VERIFIED in default paths 2026-09-23, not fixed)
+
+**Observed** (Border Cave analysis, `analysis/bayes_varsel/`, driving `unified_bayesian` from a script): a
+frozen `topN_cars` pipeline asked for N = 500 wavelengths against a CARS selection of about 70. The fitted subset was the CARS
+core plus about 430 wavelengths from the *long end* of the spectrum. An independent re-implementation of dasp's CARS reproduced the
+core exactly (109/109 in one case), so the padding comes from the top-N step, not from CARS.
+
+**Mechanism (read from code, not yet test-pinned):** `cars_selection` returns a sparse importance array (zeros for
+unselected variables). Top-N is taken as `np.argsort(importances, kind='stable')[-n_vars:]`. When
+`n_vars > count_nonzero(importances)`, the extra picks are zero-importance ties, and the stable sort breaks the ties by index,
+so the tail is the highest indices, i.e. the longest wavelengths. The results are silently mislabelled
+`top{N}_cars` and the models may fit on arbitrary long-wavelength (often noisy, >2400 nm) variables.
+
+**Same idiom at:** `unified_bayesian.py` ~1398/1426/1602/1627; `search.py` ~3930, ~4052, ~5540, ~6914. Not yet checked
+which paths can actually request N above the CARS count (grid search may cap via the method-optimal count; the Bayesian
+subset-size suggestion may not). Affects any sparse selector, e.g. SPA, UVE-thresholded or CARS hybrids, not only CARS.
+
+**Likely fix direction:** cap `n_vars` at `count_nonzero(importances)` for sparse selectors (or skip the trial), and record the
+true selected count in the result row. Add a test that asks for N above the CARS count and asserts no zero-importance
+variables are returned.
+
+**Verdict (2026-09-23): real in default paths, not only when forced.** No top-N site caps N at
+`count_nonzero(importances)`. Grid (`search.py` ~3859/3930): CARS-family methods run *every* user variable
+count (GUI defaults 10/20/50/100/250) and then add the method-optimal count as one extra run; only that extra run
+is exact. Bayesian (`unified_bayesian.py` ~1552/1627, one-class ~1336/1426): `n_vars` is sampled from
+`SUBSET_SIZES` = 10..1000 regardless of subset_type, and 'cars' is always in `available_methods`. One-class grid
+(`search.py` ~6914) is the same shape. Evidence, BoneCollagen (49 x 2151), `cars_selection` random_state=42:
+raw kept 159 (15 iterations, the Bayesian setting) / 193 (50 iterations); SNV kept 238 / 193. So the default grid's top-250
+pads with 12-91 zero-importance long-wavelength variables, and Bayesian N=500/1000 pads with 262-841. N <= 100 never pads here.
