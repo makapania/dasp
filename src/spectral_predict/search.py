@@ -102,6 +102,7 @@ from .variable_selection import (
     fipls_cars_selection,
     mc_sipls,
     mwpls,
+    _cap_top_n,
 )
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
@@ -3920,14 +3921,27 @@ def run_search(
 
                                 # Run subsets with user-selected counts
                                 results_added_for_method = 0
+                                fitted_counts_seen = set()
                                 for n_top in valid_variable_counts:
+                                    # Sparse selectors: never pad past the selected variables. The
+                                    # tag keeps the requested count; n_vars records the fitted one.
+                                    n_fit = _cap_top_n(importances, n_top, varsel_method)
+                                    if n_fit in fitted_counts_seen or (
+                                        method_has_natural_optimal and n_fit == n_method_optimal
+                                    ):
+                                        capped = f" caps to {n_fit} selected vars," if n_fit != n_top else ""
+                                        print(
+                                            f"  -> top-{n_top} ({varsel_method}){capped} already tested, skipping"
+                                        )
+                                        continue
+                                    fitted_counts_seen.add(n_fit)
                                     print(
                                         f"  -> Testing top-{n_top} vars ({varsel_method})...",
                                         end=" ",
                                     )
                                     # Select top N most important features based on preprocessed importances
                                     # Use stable sort to ensure deterministic feature ordering when importances are tied
-                                    top_indices = np.argsort(importances, kind="stable")[-n_top:][
+                                    top_indices = np.argsort(importances, kind="stable")[-n_fit:][
                                         ::-1
                                     ]
 
@@ -6910,8 +6924,22 @@ def run_one_class_search(
                     n_features_current,
                 )
 
+                fitted_counts_seen = set()
                 for n_vars in valid_counts:
-                    top_indices = np.argsort(importances, kind="stable")[-n_vars:]
+                    # Sparse selectors: cap at the selected count (tag keeps the requested
+                    # count, the row's n_vars records the fitted one); skip repeat subsets.
+                    n_fit = _cap_top_n(importances, n_vars, varsel_method)
+                    if n_fit in fitted_counts_seen:
+                        logger.info(
+                            "  top-%d (%s) fits %d vars, already tested, skipping",
+                            n_vars,
+                            varsel_method,
+                            n_fit,
+                        )
+                        current_config += n_model_params  # keep progress reaching total_configs
+                        continue
+                    fitted_counts_seen.add(n_fit)
+                    top_indices = np.argsort(importances, kind="stable")[-n_fit:]
                     X_subset = X_preprocessed[:, top_indices]
                     wavelengths_subset = wavelengths_current[top_indices]
 
@@ -7018,7 +7046,7 @@ def run_one_class_search(
                                     if model_name == "PCA-SIMCA"
                                     else None
                                 ),
-                                "n_vars": n_vars,
+                                "n_vars": len(top_indices),
                                 "full_vars": n_features_current,
                                 "SubsetTag": subset_tag,
                                 "Imbalance": "—",
@@ -7326,6 +7354,8 @@ def multiclass_varsel_mask(
                 f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))})."
             )
         k = int(min(max(int(n_select), 1), n_features))
+        # Sparse selectors: never pad the mask past the selected variables.
+        k = _cap_top_n(scores, k, method)
         top_idx = np.argsort(scores, kind="stable")[-k:]
         mask = np.zeros(n_features, dtype=bool)
         mask[top_idx] = True
