@@ -4,6 +4,13 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-16)
 
+### Pending decision (2026-09-23): sparse-selector top-N cap, branch `fix/sparse-selector-topn-cap`
+CARS-family top-N subsets padded with zero-importance long wavelengths whenever N > the number CARS kept (default grid
+top-250 and Bayesian N=500/1000 on BoneCollagen). The branch caps N for named sparse methods, dedupes capped counts, and
+fixes the one-class `n_vars` column and the Bayesian dedup fingerprint. New tests pass; the non-GUI suite's only failures are the 4
+pre-existing `test_bayesian_environment_fingerprint` cases. **No PR opened, awaiting the user.** Details: SESSION_LOG
+2026-09-23 "CARS top-N padding".
+
 ### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
 `main` is clean, no open work branches, no worktrees. PR #80 (T-51 PR C) merged as
 `f401c29`; PR #79 (crash-resume) merged as `a5f9a70`.

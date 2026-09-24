@@ -72,7 +72,7 @@ from spectral_predict.baseline import BaselineALS, BaselineAirPLS, BaselinePolyn
 from spectral_predict.models import build_model, get_feature_importances, strip_runtime_params
 from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
-    spa_selection, uve_selection, cars_selection
+    spa_selection, uve_selection, cars_selection, _cap_top_n
 )
 from spectral_predict.scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
 from spectral_predict.search_spaces import (
@@ -1341,6 +1341,7 @@ def create_unified_objective(
 
                 top_indices = None
                 subset_tag = 'full'
+                fit_tag = None  # identity tag when a sparse cap changes the fitted count
 
                 if subset_type == 'region':
                     # Check cache first
@@ -1423,8 +1424,15 @@ def create_unified_objective(
                             )
                             importance_cache[imp_cache_key] = importances
 
-                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                        # Sparse selectors (CARS): never pad past the selected variables.
+                        # The tag keeps the requested count; n_vars records the fitted one,
+                        # and fit_tag makes capped trials share a dedup fingerprint.
                         subset_tag = f"top{n_vars}_{subset_type}"
+                        n_fit = _cap_top_n(importances, n_vars, subset_type)
+                        if n_fit != n_vars:
+                            fit_tag = f"top{n_fit}_{subset_type}"
+                            n_vars = n_fit
+                        top_indices = np.argsort(importances, kind='stable')[-n_vars:]
 
                 # Apply subset
                 if top_indices is not None and len(top_indices) > 0:
@@ -1445,7 +1453,7 @@ def create_unified_objective(
                 oc_fingerprint = _build_fit_fingerprint(
                     preprocess_config=preprocess_config,
                     subset_type=subset_type,
-                    subset_tag=subset_tag,
+                    subset_tag=fit_tag or subset_tag,
                     n_vars=X_for_cv.shape[1],
                     top_indices=top_indices,
                     model_name=model_name,
@@ -1551,6 +1559,7 @@ def create_unified_objective(
             subset_type = trial.suggest_categorical('subset_type', available_methods)
             subset_size = trial.suggest_categorical('n_vars', SUBSET_SIZES)
             region_idx = trial.suggest_int('region_id', 0, max(0, n_top_regions - 1))
+            fit_tag = None  # identity tag when a sparse cap changes the fitted count
 
             if subset_type == 'region':
                 # Check cache first
@@ -1623,9 +1632,15 @@ def create_unified_objective(
                         )
                         importance_cache[imp_cache_key] = importances
 
-                    # Select top variables
-                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
+                    # Select top variables. Sparse selectors (CARS): never pad past the
+                    # selected variables. The tag keeps the requested count; n_vars records
+                    # the fitted one, and fit_tag makes capped trials share a dedup fingerprint.
                     subset_tag = f"top{n_vars}_{subset_type}"
+                    n_fit = _cap_top_n(importances, n_vars, subset_type)
+                    if n_fit != n_vars:
+                        fit_tag = f"top{n_fit}_{subset_type}"
+                        n_vars = n_fit
+                    top_indices = np.argsort(importances, kind='stable')[-n_vars:]
 
             # 4. Apply subset if selected
             if top_indices is not None and len(top_indices) > 0:
@@ -1785,7 +1800,7 @@ def create_unified_objective(
             fingerprint = _build_fit_fingerprint(
                 preprocess_config=preprocess_config,
                 subset_type=subset_type,
-                subset_tag=subset_tag,
+                subset_tag=fit_tag or subset_tag,
                 n_vars=n_vars,
                 top_indices=top_indices,
                 model_name=model_name,

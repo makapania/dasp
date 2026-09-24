@@ -14,6 +14,31 @@ from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 
 
+# Selectors whose score arrays are sparse: a zero means "not selected", so a top-N
+# subset must never reach past the non-zero entries (the stable argsort would fill
+# the gap with the highest-index zeros, i.e. the longest wavelengths).
+SPARSE_SELECTOR_METHODS = frozenset({
+    "cars", "cars-aware", "cars-tree",
+    "uve_cars", "uve_cars_tree", "uve_cars_spa", "uve_spa",
+    "fipls_spa", "fipls_cars",
+    "spa", "vcpa-iriv",
+})
+
+
+def _cap_top_n(importances: np.ndarray, n_requested: int, method: str) -> int:
+    """Cap a requested top-N count at a sparse selector's non-zero count.
+
+    Dense methods (and sparse ones whose score array has no zeros) return
+    ``n_requested`` unchanged.
+    """
+    if method not in SPARSE_SELECTOR_METHODS:
+        return int(n_requested)
+    n_nonzero = int(np.count_nonzero(importances))
+    if n_nonzero == 0:
+        return int(n_requested)
+    return int(min(n_requested, n_nonzero))
+
+
 def _get_cv_n_jobs():
     """Get n_jobs for CV, respecting frozen app constraints."""
     from spectral_predict.search import _frozen_needs_threading_fallback
