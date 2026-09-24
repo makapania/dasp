@@ -621,11 +621,14 @@ raw kept 159 (15 iterations, the Bayesian setting) / 193 (50 iterations); SNV ke
 pads with 12-91 zero-importance long-wavelength variables, and Bayesian N=500/1000 pads with 262-841. N <= 100 never pads here.
 
 **Fix (branch `fix/sparse-selector-topn-cap`, Codex-reviewed plan: AGREE-WITH-CHANGES).** `variable_selection.SPARSE_SELECTOR_METHODS`
-(CARS family, uve_*/fipls_* hybrids, spa, vcpa-iriv) + `_cap_top_n` caps N at the non-zero count, by method name only.
+(CARS family incl. the multiclass API's `cars_tree` spelling, uve_*/fipls_* hybrids, spa, vcpa-iriv, ga) + `_cap_top_n` caps N at the non-zero count, by method name only.
 Codex warned against keying on "any zeros": `_apply_edge_mask`, tree importances, Lasso and the uniform fallback all
 produce legitimate zeros. The tag keeps the requested count (`top250_cars`); `n_vars` records the fitted count (user's
 choice). Gotchas: (1) grid must dedupe on the *capped* count, including against the method-optimal run (which already
 equals the non-zero count and is tagged plain `cars`); (2) the one-class grid wrote the *requested* `n_vars` to the row,
 now `len(top_indices)`; (3) the Bayesian fingerprint includes `subset_tag`, so capped trials would never dedupe. They now
-fingerprint with `fit_tag` = `top{fitted}_{method}`. Not covered: GA (selection-frequency zeros) and the 'importance'
-fallback when CARS raises inside `compute_importances`, which stays uncapped. Tests: `tests/test_sparse_selector_topn_cap.py`.
+fingerprint with `fit_tag` = `top{fitted}_{method}`; (4) `multiclass_varsel_mask`'s `_mask_from_scores` had the same padding
+(found by the DeepSeek review) and is now capped. GLM/DeepSeek review round 1 also added `ga` and fixed the one-class progress
+counter on skipped counts. Known, accepted: when CARS raises inside Bayesian `compute_importances`, the 'importance' fallback
+is returned under the name 'cars' and IS capped at its non-zero count (drops zero-importance proxy vars; defensible, untested).
+`ipls` (zero = interval R2 <= 0, a score, not non-selection) is deliberately not capped. Tests: `tests/test_sparse_selector_topn_cap.py`.

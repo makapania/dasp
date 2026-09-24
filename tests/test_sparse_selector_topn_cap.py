@@ -163,3 +163,42 @@ def test_bayesian_cars_trials_never_pad(monkeypatch):
         # The tag keeps the requested count (clamped to the preprocessed width).
         requested = int(t.user_attrs["subset_tag"].removeprefix("top").removesuffix("_cars"))
         assert len(SELECTED) < requested <= t.params["n_vars"]
+
+
+def test_grid_search_never_pads_ga_subsets(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "ga_pls_selection", _fake_cars)
+    X, y = _regression_data()
+    results, _ = search.run_search(
+        X,
+        y,
+        task_type="regression",
+        folds=3,
+        models_to_test=["PLS"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=True,
+        enable_region_subsets=False,
+        variable_selection_methods=["ga"],
+        variable_counts=[10, 50, 100],
+        tier="quick",
+    )
+    tags = results["SubsetTag"].astype(str)
+    ga_rows = results[tags.str.endswith("_ga")]
+    assert not ga_rows.empty
+    for _, row in ga_rows.iterrows():
+        assert _vars(row["all_vars"]) <= SELECTED_WL, row["SubsetTag"]
+    # top50 and top100 both cap to the 15 selected vars: only top50 is fitted.
+    assert set(ga_rows["SubsetTag"]) == {"top10_ga", "top50_ga"}
+    assert set(ga_rows["n_vars"]) == {10, len(SELECTED)}
+
+
+def test_multiclass_mask_never_pads_cars(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", _fake_cars)
+    rng = np.random.RandomState(2)
+    X = rng.randn(45, N_FEATURES)
+    y = np.repeat(["a", "b", "c"], 15)
+    mask = search.multiclass_varsel_mask(X, y, WAVELENGTHS.astype(float), "cars", n_select=100)
+    assert np.flatnonzero(mask).tolist() == SELECTED.tolist()

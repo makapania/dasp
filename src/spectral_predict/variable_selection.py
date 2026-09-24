@@ -18,10 +18,11 @@ from sklearn.metrics import mean_squared_error, r2_score
 # subset must never reach past the non-zero entries (the stable argsort would fill
 # the gap with the highest-index zeros, i.e. the longest wavelengths).
 SPARSE_SELECTOR_METHODS = frozenset({
-    "cars", "cars-aware", "cars-tree",
+    "cars", "cars-aware", "cars-tree", "cars_tree",  # multiclass API spells it cars_tree
     "uve_cars", "uve_cars_tree", "uve_cars_spa", "uve_spa",
     "fipls_spa", "fipls_cars",
     "spa", "vcpa-iriv",
+    "ga",  # selection frequency: zero = never selected by any GA run
 })
 
 
