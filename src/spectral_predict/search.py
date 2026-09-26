@@ -6930,18 +6930,21 @@ def run_one_class_search(
                     n_features_current,
                 )
 
+                if _cap_top_n(importances, 1, varsel_method) == 0:
+                    logger.warning(
+                        "%s has no selected variables left after edge masking, skipping",
+                        varsel_method,
+                    )
+                    n_skip = len(valid_counts) * n_model_params
+                    current_config += n_skip
+                    skipped_configs += n_skip
+                    continue
+
                 fitted_counts_seen = set()
                 for n_vars in valid_counts:
                     # Sparse selectors: cap at the selected count (tag keeps the requested
                     # count, the row's n_vars records the fitted one); skip repeat subsets.
                     n_fit = _cap_top_n(importances, n_vars, varsel_method)
-                    if n_fit == 0:
-                        logger.warning(
-                            "%s has no selected variables left after edge masking, skipping",
-                            varsel_method,
-                        )
-                        current_config += n_model_params  # keep progress reaching total_configs
-                        continue
                     if n_fit in fitted_counts_seen:
                         logger.info(
                             "  top-%d (%s) fits %d vars, already tested, skipping",
@@ -6950,6 +6953,7 @@ def run_one_class_search(
                             n_fit,
                         )
                         current_config += n_model_params  # keep progress reaching total_configs
+                        skipped_configs += n_model_params
                         continue
                     fitted_counts_seen.add(n_fit)
                     top_indices = np.argsort(importances, kind="stable")[-n_fit:]
@@ -8091,6 +8095,9 @@ def run_multiclass_simca_search(
         nothing; Wold sets its own count on the model's native path), so sweeping
         multiple Top-N sizes for them yields duplicate rows differing only in the
         ``NSelect`` column. Collapse those paths to a single representative size.
+        Other paths keep every size here; sizes that resolve to an already-fitted
+        mask (sparse selectors capped at their selected count, interval methods that
+        ignore ``n_select``) are skipped in the search loop instead.
         """
         if vp == "none" or vp in _WOLD_METHODS:
             return n_select_list[:1]
@@ -8246,8 +8253,10 @@ def run_multiclass_simca_search(
                                 logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
                                 continue  # skip this row, do not crash the run
                             if isinstance(varsel_value, np.ndarray):
+                                # repr: n_components may be a per-class dict (unhashable).
                                 mask_key = (
-                                    engine, varsel_path, _alpha, _ncomp, varsel_value.tobytes()
+                                    engine, varsel_path, repr(_alpha), repr(_ncomp),
+                                    varsel_value.tobytes(),
                                 )
                                 if mask_key in fitted_masks:
                                     logger.info(

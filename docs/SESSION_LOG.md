@@ -650,3 +650,11 @@ cases" says nothing about T3. On the blessing machine (this one: `.venv314`, dig
 are CARS requests of 50-1000 that now fit 6-25 vars (same params, new values), and TPE diverges from trial 20. Trace re-blessed
 in `tests/fixtures/t51_default_path_baseline.json` (3 identical captures; names/env/sampler hashes untouched). Any change to
 default Bayesian trial values must re-bless it; run the suite on the blessing machine before claiming green.
+
+**Round 3 (2026-09-26, Codex MERGE-WITH-CHANGES, GLM 5.3 MERGE).** (9) Multiclass `n_components` may be a per-class
+dict, which is unhashable: the mask-dedup key crashed the whole search with `TypeError`. The key now uses `repr(_alpha)`
+and `repr(_ncomp)`. Any set/dict key built from a multiclass grid axis needs this. (10) The one-class skips advanced
+`current_config` but not `skipped_configs` ("0 skipped" in the completion message); both do now, and an empty sparse
+selection skips the whole method once, before the counts loop. `AGENT_COMPOSITION.md` §3a's top-N snippet now caps sparse
+arrays. Accepted and left as is: a failed multiclass fit still marks its mask as tested (a later NSelect with the same mask
+would fail the same way).

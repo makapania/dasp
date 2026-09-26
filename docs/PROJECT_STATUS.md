@@ -12,8 +12,8 @@ DeepSeek reviewed (both MERGE-WITH-CHANGES); their fixes are in. New tests pass;
 pre-existing `test_bayesian_environment_fingerprint` cases. **PR #81 open.** Round 2 (2026-09-26): Codex BLOCKED, GLM 5.3
 MERGE-WITH-CHANGES; fixed empty sparse selections after edge masking (now skipped, never padded), multiclass duplicate
 capped masks, test gaps, and re-blessed the T3 trajectory fixture the PR had broken. Full non-GUI suite on `.venv314`: only
-the T3 pair failed before the re-bless. No marker for pre-fix Bayesian studies (user: unpublished, not needed). **Awaiting
-Codex + GLM round-3 review.** Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 5-8).
+the T3 pair failed before the re-bless. No marker for pre-fix Bayesian studies (user: unpublished, not needed). Round 3: GLM 5.3 MERGE, Codex MERGE-WITH-CHANGES
+(per-class dict `n_components` crashed the multiclass dedup; one-class skip counts), both fixed. Full non-GUI suite on `.venv314`: 3467 passed, 26 skipped, 0 failed. **Ready to merge.** Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 5-8).
 
 ### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
 `main` is clean, no open work branches, no worktrees. PR #80 (T-51 PR C) merged as

@@ -259,7 +259,10 @@ def test_multiclass_mask_rejects_empty_sparse_selection(monkeypatch):
         search.multiclass_varsel_mask(X, y, WAVELENGTHS.astype(float), "cars", n_select=10)
 
 
-def test_multiclass_search_fits_each_capped_mask_once(monkeypatch):
+@pytest.mark.parametrize(
+    "n_components", [0.99, {"a": 2, "b": 2, "c": 2}], ids=["fraction", "per_class_dict"]
+)
+def test_multiclass_search_fits_each_capped_mask_once(monkeypatch, n_components):
     import spectral_predict.search as search
 
     monkeypatch.setattr(search, "cars_selection", _fake_cars)
@@ -274,6 +277,7 @@ def test_multiclass_search_fits_each_capped_mask_once(monkeypatch):
         preprocessing_methods={"raw": True},
         varsel_paths=["cars"],
         variable_selection_n_select=[10, 50, 100],
+        n_components=n_components,
         min_class_samples=5,
         cv_splits=3,
     )
@@ -340,3 +344,73 @@ def test_bayesian_capped_requests_replay_one_fit(monkeypatch, task_type):
     assert second.user_attrs.get(ub.DUPLICATE_OF_TRIAL_ATTR) == first.number
     assert second.value == first.value
     assert len(results) == 1
+
+
+def _one_class_data() -> tuple[pd.DataFrame, pd.Series]:
+    rng = np.random.RandomState(1)
+    X = np.vstack([rng.randn(30, N_FEATURES) * 0.3, rng.randn(8, N_FEATURES) + 3.0])
+    return (
+        pd.DataFrame(X, columns=[str(w) for w in WAVELENGTHS]),
+        pd.Series(["clean"] * 30 + ["contaminated"] * 8),
+    )
+
+
+def _run_one_class(search, preprocessing: str) -> tuple[pd.DataFrame, dict]:
+    X, y = _one_class_data()
+    messages = []
+    results = search.run_one_class_search(
+        X=X,
+        y=y,
+        inlier_class_label="clean",
+        folds=3,
+        preprocessing_methods=[preprocessing],
+        window_sizes=[17],
+        enabled_models=["IsolationForest"],
+        variable_selection_methods=["cars"],
+        variable_counts=[10, 50, 100],
+        progress_callback=messages.append,
+    )
+    return results, messages[-1]
+
+
+def test_one_class_reports_capped_counts_as_skipped(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", _fake_cars)
+    _, final = _run_one_class(search, "raw")
+    assert final["current"] == final["total"]
+    # top100 caps to the same 15 vars as top50: its model params are skipped, not "0 skipped".
+    assert not final["message"].endswith(" 0 skipped"), final["message"]
+
+
+def test_one_class_skips_cars_when_edge_masking_removes_every_selection(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", _edge_only_cars)
+    results, final = _run_one_class(search, "deriv1")
+    assert not results["SubsetTag"].astype(str).str.startswith("cars_top").any()
+    assert final["current"] == final["total"]
+    assert not final["message"].endswith(" 0 skipped"), final["message"]
+
+
+def test_bayesian_empty_sparse_selection_is_penalised_not_padded(monkeypatch):
+    pytest.importorskip("optuna")
+    import spectral_predict.unified_bayesian as ub
+
+    monkeypatch.setattr(ub, "cars_selection", lambda X, y, *a, **k: np.zeros(np.asarray(X).shape[1]))
+    monkeypatch.setattr(ub, "TPESampler", lambda *a, **k: _FixedSampler())
+    X_df, y_s = _regression_data()
+    results, study = ub.run_unified_bayesian(
+        X=X_df.to_numpy(),
+        y=y_s.to_numpy(),
+        wavelengths=WAVELENGTHS.astype(float),
+        model_name="PLS",
+        task_type="regression",
+        n_trials=2,
+        cv_folds=3,
+        random_state=0,
+        verbose=False,
+        enable_sqlite_persistence="never",
+    )
+    assert [t.value for t in study.trials] == [1e10, 1e10]
+    assert len(results) == 0
