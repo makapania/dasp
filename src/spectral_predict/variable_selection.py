@@ -30,14 +30,14 @@ def _cap_top_n(importances: np.ndarray, n_requested: int, method: str) -> int:
     """Cap a requested top-N count at a sparse selector's non-zero count.
 
     Dense methods (and sparse ones whose score array has no zeros) return
-    ``n_requested`` unchanged.
+    ``n_requested`` unchanged. A sparse method whose scores are all zero (nothing
+    selected, e.g. derivative edge masking removed every selected variable)
+    returns 0: callers must skip that subset rather than slice ``[-0:]``, which
+    would select every column.
     """
     if method not in SPARSE_SELECTOR_METHODS:
         return int(n_requested)
-    n_nonzero = int(np.count_nonzero(importances))
-    if n_nonzero == 0:
-        return int(n_requested)
-    return int(min(n_requested, n_nonzero))
+    return int(min(n_requested, np.count_nonzero(importances)))
 
 
 def _get_cv_n_jobs():

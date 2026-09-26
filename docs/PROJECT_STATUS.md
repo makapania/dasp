@@ -9,8 +9,11 @@ CARS-family top-N subsets padded with zero-importance long wavelengths whenever 
 top-250 and Bayesian N=500/1000 on BoneCollagen). The branch caps N for named sparse methods, dedupes capped counts, and
 fixes the one-class `n_vars` column, the Bayesian dedup fingerprint and the multiclass mask API. GLM +
 DeepSeek reviewed (both MERGE-WITH-CHANGES); their fixes are in. New tests pass; the non-GUI suite's only failures are the 4
-pre-existing `test_bayesian_environment_fingerprint` cases. **PR #81 open, awaiting merge.** Details: SESSION_LOG
-2026-09-23 "CARS top-N padding".
+pre-existing `test_bayesian_environment_fingerprint` cases. **PR #81 open.** Round 2 (2026-09-26): Codex BLOCKED, GLM 5.3
+MERGE-WITH-CHANGES; fixed empty sparse selections after edge masking (now skipped, never padded), multiclass duplicate
+capped masks, test gaps, and re-blessed the T3 trajectory fixture the PR had broken. Full non-GUI suite on `.venv314`: only
+the T3 pair failed before the re-bless. No marker for pre-fix Bayesian studies (user: unpublished, not needed). **Awaiting
+Codex + GLM round-3 review.** Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 5-8).
 
 ### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
 `main` is clean, no open work branches, no worktrees. PR #80 (T-51 PR C) merged as

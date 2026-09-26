@@ -1429,6 +1429,11 @@ def create_unified_objective(
                         # and fit_tag makes capped trials share a dedup fingerprint.
                         subset_tag = f"top{n_vars}_{subset_type}"
                         n_fit = _cap_top_n(importances, n_vars, subset_type)
+                        if n_fit == 0:
+                            logging.debug(
+                                f"Trial {trial.number}: {subset_type} selected no variables, skipping"
+                            )
+                            return float('inf')
                         if n_fit != n_vars:
                             fit_tag = f"top{n_fit}_{subset_type}"
                             n_vars = n_fit
@@ -1637,6 +1642,11 @@ def create_unified_objective(
                     # the fitted one, and fit_tag makes capped trials share a dedup fingerprint.
                     subset_tag = f"top{n_vars}_{subset_type}"
                     n_fit = _cap_top_n(importances, n_vars, subset_type)
+                    if n_fit == 0:
+                        logging.debug(
+                            f"Trial {trial.number}: {subset_type} selected no variables, skipping"
+                        )
+                        return 1e10  # same penalty as the invalid-PLS skip below
                     if n_fit != n_vars:
                         fit_tag = f"top{n_fit}_{subset_type}"
                         n_vars = n_fit

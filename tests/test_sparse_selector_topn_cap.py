@@ -56,8 +56,19 @@ class TestCapTopN:
         assert "importance" not in SPARSE_SELECTOR_METHODS
         assert _cap_top_n(imp, 100, "importance") == 100
 
-    def test_all_zero_is_left_alone(self):
-        assert _cap_top_n(np.zeros(N_FEATURES), 50, "cars") == 50
+    def test_all_zero_sparse_selects_nothing(self):
+        # 0, not the requested count: callers skip rather than slice [-0:] (every column).
+        assert _cap_top_n(np.zeros(N_FEATURES), 50, "cars") == 0
+
+    def test_all_zero_dense_unchanged(self):
+        assert _cap_top_n(np.zeros(N_FEATURES), 50, "importance") == 50
+
+    def test_exact_and_single_variable(self):
+        imp = _sparse_importances(N_FEATURES)
+        assert _cap_top_n(imp, len(SELECTED), "cars") == len(SELECTED)
+        one = np.zeros(N_FEATURES)
+        one[3] = 0.5
+        assert _cap_top_n(one, 100, "cars") == 1
 
 
 def test_grid_search_never_pads_cars_subsets(monkeypatch):
@@ -155,6 +166,9 @@ def test_bayesian_cars_trials_never_pad(monkeypatch):
 
     # Derivative preprocessing remaps wavelengths, so check counts, not names:
     # padding would show up as more fitted variables than CARS selected.
+    # A replayed duplicate returns before the subset attrs are set.
+    cars_trials = [t for t in cars_trials if "selected_wavelengths" in t.user_attrs]
+    over_requested = [t for t in over_requested if "selected_wavelengths" in t.user_attrs]
     for t in cars_trials:
         n_fit = len(_vars(t.user_attrs["selected_wavelengths"]))
         assert n_fit == t.user_attrs["n_vars"] <= len(SELECTED), t.params
@@ -202,3 +216,127 @@ def test_multiclass_mask_never_pads_cars(monkeypatch):
     y = np.repeat(["a", "b", "c"], 15)
     mask = search.multiclass_varsel_mask(X, y, WAVELENGTHS.astype(float), "cars", n_select=100)
     assert np.flatnonzero(mask).tolist() == SELECTED.tolist()
+
+
+def _edge_only_cars(X, y, *args, **kwargs):
+    # Scores only inside the SG derivative edge zone, so edge masking removes them all.
+    imp = np.zeros(np.asarray(X).shape[1])
+    imp[:3] = [1.0, 2.0, 3.0]
+    return imp
+
+
+def test_grid_skips_cars_when_edge_masking_removes_every_selection(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", _edge_only_cars)
+    X, y = _regression_data()
+    results, _ = search.run_search(
+        X,
+        y,
+        task_type="regression",
+        folds=3,
+        models_to_test=["PLS"],
+        preprocessing_methods={"sg1": True},
+        window_sizes=[17],
+        enable_variable_subsets=True,
+        enable_region_subsets=False,
+        variable_selection_methods=["cars"],
+        variable_counts=[10, 50],
+        tier="quick",
+    )
+    tags = results["SubsetTag"].astype(str)
+    assert not (tags.str.endswith("_cars") | (tags == "cars")).any()
+
+
+def test_multiclass_mask_rejects_empty_sparse_selection(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", lambda X, y, *a, **k: np.zeros(X.shape[1]))
+    rng = np.random.RandomState(2)
+    X = rng.randn(45, N_FEATURES)
+    y = np.repeat(["a", "b", "c"], 15)
+    with pytest.raises(search.MulticlassVarselUnsupported):
+        search.multiclass_varsel_mask(X, y, WAVELENGTHS.astype(float), "cars", n_select=10)
+
+
+def test_multiclass_search_fits_each_capped_mask_once(monkeypatch):
+    import spectral_predict.search as search
+
+    monkeypatch.setattr(search, "cars_selection", _fake_cars)
+    rng = np.random.RandomState(3)
+    X = np.vstack([rng.randn(15, N_FEATURES) + shift for shift in (0.0, 2.0, 4.0)])
+    y = np.repeat(["a", "b", "c"], 15)
+    results = search.run_multiclass_simca_search(
+        X,
+        y,
+        wavelengths=WAVELENGTHS.astype(float),
+        engines=["pca-simca"],
+        preprocessing_methods={"raw": True},
+        varsel_paths=["cars"],
+        variable_selection_n_select=[10, 50, 100],
+        min_class_samples=5,
+        cv_splits=3,
+    )
+    cars_rows = results[results["varsel_path"] == "cars"]
+    # 50 and 100 both cap to the 15 selected variables: fitted once.
+    assert sorted(cars_rows["NSelect"]) == [10, 50]
+    assert sorted(cars_rows["n_vars"]) == [10, len(SELECTED)]
+
+
+class _FixedSampler:
+    """Every param at its first choice / lower bound, except n_vars alternating 50/100
+    and subset_type forced to CARS, so consecutive trials differ only in a requested
+    count that caps to the same selection."""
+
+    def __new__(cls):
+        import optuna
+
+        class _Sampler(optuna.samplers.RandomSampler):
+            def sample_independent(self, study, trial, param_name, param_distribution):
+                if param_name == "n_vars":
+                    return 50 if trial.number % 2 == 0 else 100
+                if param_name == "subset_type":
+                    return "cars"
+                if isinstance(param_distribution, optuna.distributions.CategoricalDistribution):
+                    return param_distribution.choices[0]
+                return param_distribution.low
+
+        return _Sampler(seed=0)
+
+
+@pytest.mark.parametrize("task_type", ["regression", "one_class"])
+def test_bayesian_capped_requests_replay_one_fit(monkeypatch, task_type):
+    optuna = pytest.importorskip("optuna")
+    import spectral_predict.unified_bayesian as ub
+
+    monkeypatch.setattr(ub, "cars_selection", _fake_cars)
+    monkeypatch.setattr(ub, "TPESampler", lambda *a, **k: _FixedSampler())
+    if task_type == "one_class":
+        rng = np.random.RandomState(4)
+        X = np.vstack([rng.randn(30, N_FEATURES) * 0.3, rng.randn(8, N_FEATURES) + 3.0])
+        y = np.array(["clean"] * 30 + ["contaminated"] * 8)
+        model_name, extra = "IsolationForest", {"inlier_class_label": "clean"}
+    else:
+        X_df, y_s = _regression_data()
+        X, y = X_df.to_numpy(), y_s.to_numpy()
+        model_name, extra = "PLS", {}
+
+    results, study = ub.run_unified_bayesian(
+        X=X,
+        y=y,
+        wavelengths=WAVELENGTHS.astype(float),
+        model_name=model_name,
+        task_type=task_type,
+        n_trials=2,
+        cv_folds=3,
+        random_state=0,
+        verbose=False,
+        enable_sqlite_persistence="never",
+        **extra,
+    )
+    first, second = study.trials[:2]
+    assert (first.params["n_vars"], second.params["n_vars"]) == (50, 100)
+    assert first.params["subset_type"] == second.params["subset_type"] == "cars"
+    assert second.user_attrs.get(ub.DUPLICATE_OF_TRIAL_ATTR) == first.number
+    assert second.value == first.value
+    assert len(results) == 1

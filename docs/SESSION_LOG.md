@@ -632,3 +632,21 @@ fingerprint with `fit_tag` = `top{fitted}_{method}`; (4) `multiclass_varsel_mask
 counter on skipped counts. Known, accepted: when CARS raises inside Bayesian `compute_importances`, the 'importance' fallback
 is returned under the name 'cars' and IS capped at its non-zero count (drops zero-importance proxy vars; defensible, untested).
 `ipls` (zero = interval R2 <= 0, a score, not non-selection) is deliberately not capped. Tests: `tests/test_sparse_selector_topn_cap.py`.
+
+**Round 2 (2026-09-26, Codex BLOCK + GLM 5.3 MERGE-WITH-CHANGES).** (5) An all-zero sparse score array used to return the
+*requested* N, i.e. the old padding. It is reachable: the grid's all-zero uniform fallback runs *before* `_apply_edge_mask`, so
+a CARS selection lying wholly in an SG derivative edge zone reached the top-N step all-zero (Codex repro: `top10_cars` fitted
+1102-1111). `_cap_top_n` now returns 0 for that case and every caller skips (grid breaks out of the counts, one-class skips
+with the progress bump, multiclass raises `MulticlassVarselUnsupported`, Bayesian returns the usual penalty). Never slice
+`[-0:]`: it selects every column. (6) `run_multiclass_simca_search` swept every NSelect for mask paths, so capped counts gave
+identical fits ranked side by side; it now skips a resolved mask already fitted for the same prep/engine/path/alpha/ncomp.
+(7) A replayed Bayesian duplicate returns before `selected_wavelengths`/`n_vars` user_attrs are set; tests reading them must
+skip replays. Forcing params in a Bayesian test: patch `unified_bayesian.TPESampler` (the in-memory study builds it
+directly at ~2837), not `_make_tpe_sampler` (only the SQLite reattach uses that). Not done, by user decision: no
+study-name/version marker for pre-fix studies (the fix was never published, so old studies are dev-only).
+(8) **The PR broke `test_t3_default_trajectory_matches_main` and round 1 missed it.** That test skips unless the machine's
+numerical-env digest matches the fixture's, so on a non-blessing machine "the suite is green but for the 4 fingerprint
+cases" says nothing about T3. On the blessing machine (this one: `.venv314`, digest `322dc72485c2`) it failed: trials 4/6/8/13/14
+are CARS requests of 50-1000 that now fit 6-25 vars (same params, new values), and TPE diverges from trial 20. Trace re-blessed
+in `tests/fixtures/t51_default_path_baseline.json` (3 identical captures; names/env/sampler hashes untouched). Any change to
+default Bayesian trial values must re-bless it; run the suite on the blessing machine before claiming green.
