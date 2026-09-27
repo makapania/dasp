@@ -4,20 +4,15 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-16)
 
-### Pending decision (2026-09-23): sparse-selector top-N cap, branch `fix/sparse-selector-topn-cap`
-CARS-family top-N subsets padded with zero-importance long wavelengths whenever N > the number CARS kept (default grid
-top-250 and Bayesian N=500/1000 on BoneCollagen). The branch caps N for named sparse methods, dedupes capped counts, and
-fixes the one-class `n_vars` column, the Bayesian dedup fingerprint and the multiclass mask API. GLM +
-DeepSeek reviewed (both MERGE-WITH-CHANGES); their fixes are in. New tests pass; the non-GUI suite's only failures are the 4
-pre-existing `test_bayesian_environment_fingerprint` cases. **PR #81 open.** Round 2 (2026-09-26): Codex BLOCKED, GLM 5.3
-MERGE-WITH-CHANGES; fixed empty sparse selections after edge masking (now skipped, never padded), multiclass duplicate
-capped masks, test gaps, and re-blessed the T3 trajectory fixture the PR had broken. Full non-GUI suite on `.venv314`: only
-the T3 pair failed before the re-bless. No marker for pre-fix Bayesian studies (user: unpublished, not needed). Round 3: GLM 5.3 MERGE, Codex MERGE-WITH-CHANGES
-(per-class dict `n_components` crashed the multiclass dedup; one-class skip counts), both fixed. Full non-GUI suite on `.venv314`: 3467 passed, 26 skipped, 0 failed. **Ready to merge.** Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 5-8).
+### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
+CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian). Three
+review rounds (GLM/DeepSeek, then Codex + GLM 5.3 twice). **It re-blessed the T3 trajectory fixture**: that test runs only
+on the blessing machine (`.venv314` here, digest `322dc72485c2`), so run the suite here before claiming green on anything
+that changes default Bayesian trial values. Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 1-10).
 
 ### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
-`main` is clean, no open work branches, no worktrees. PR #80 (T-51 PR C) merged as
-`f401c29`; PR #79 (crash-resume) merged as `a5f9a70`.
+`main` is clean. PR #81 merged as `e3c6d59`, PR #80 (T-51 PR C) as `f401c29`, PR #79
+(crash-resume) as `a5f9a70`. PR D planning started 2026-09-26: the §4 plan's GUI line numbers predate #79.
 
 **PR D** adds the GUI card that turns bundles on, which is what makes PR B (11 supervised
 bundles) and PR C (3 one-class bundles) reachable without writing Python. Plan:
