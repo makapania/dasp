@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -180,15 +181,18 @@ def test_bad_startup_value_blocks_a_bayesian_launch(gui_app, worker_env, fake_th
     assert err.called and "Startup trials" in err.call_args[0][1]
 
 
-def test_grid_launch_ignores_the_startup_box(gui_app, worker_env, fake_thread, models):
+@pytest.mark.parametrize("method", ["grid", "nsga2"])
+def test_non_bayesian_launch_ignores_the_startup_box(
+    gui_app, worker_env, fake_thread, models, method
+):
     gui_app.X, gui_app.y = _regression_data()
     models("PLS")
-    gui_app.optimization_method.set("grid")
+    gui_app.optimization_method.set(method)
     getattr(gui_app, N_STARTUP_TRIALS_SETTING).set("abc")
     before = len(_FakeThread.created)
     with patch("tkinter.messagebox.showerror") as err:
         gui_app._run_analysis()
-    assert len(_FakeThread.created) == before + 1, "grid search launched"
+    assert len(_FakeThread.created) == before + 1, f"{method} search launched"
     assert not err.called
 
 
@@ -327,8 +331,12 @@ def test_advisory_caption_updates(gui_app, models):
     try:
         gui_app.task_type.set("regression")
         models("XGBoost")
-        getattr(gui_app, _axis("xgb_sampling")).set(True)
-        gui_app._refresh_extra_axes_advisory()
+        before = gui_app._extra_axes_advisory.get()
+        assert "Extra axes" not in before
+        # A resume's partial restore sets the var without a click; the caption follows.
+        from spectral_predict.run_gui_settings import restore_gui_settings
+
+        restore_gui_settings(gui_app, {_axis("xgb_sampling"): True})
         text = gui_app._extra_axes_advisory.get()
         assert "Extra axes apply to XGBoost" in text
         assert "search dimensions (XGBoost)" in text
@@ -342,33 +350,58 @@ def test_advisory_caption_updates(gui_app, models):
 def test_gui_launched_bundle_run_has_the_python_study_name(
     gui_app, worker_env, fake_thread, models, monkeypatch
 ):
-    """A real (tiny) XGBoost run from the GUI gets the same study as the direct call."""
+    """A real (tiny) XGBoost run launched from the GUI persists the study a direct call names.
+
+    The GUI run uses persistence 'always' and its study name is read back from the
+    SQLite store. The direct call is specified independently from the GUI's own
+    controls (not from the arguments the GUI passed), with 'never' so it writes nothing.
+    """
     pytest.importorskip("xgboost")
+    import optuna
+
     from spectral_predict.unified_bayesian import run_unified_bayesian
 
-    names, passed = [], []
-
-    def real(*args, **kwargs):
-        results, study = run_unified_bayesian(*args, **kwargs)
-        names.append(study.study_name)
-        passed.append((args, kwargs))
-        return results, study
-
-    gui_app.X, gui_app.y = _regression_data()
+    rs = worker_env
+    X, y = _regression_data()
+    gui_app.X, gui_app.y = X, y
+    toggles = ("validation_enabled", "bayes_enable_baseline", "bayes_enable_smoothing")
+    saved = {name: getattr(gui_app, name).get() for name in toggles}
+    for name in toggles:
+        getattr(gui_app, name).set(False)
     models("XGBoost")
-    gui_app.bayesian_persistence_mode.set("never")
     getattr(gui_app, _axis("xgb_sampling")).set(True)
-    monkeypatch.setattr(gui_module, "run_unified_bayesian", real)
     monkeypatch.setattr("spectral_predict.report.write_markdown_report", lambda *a, **k: None)
 
-    _click_and_run(gui_app)
-    assert len(names) == 1
-    args, kwargs = passed[0]
-    assert kwargs["enabled_extra_axes"] == ("xgb_sampling",)
+    try:
+        launched, _ = _click_and_run(gui_app)
+    finally:
+        for name, value in saved.items():
+            getattr(gui_app, name).set(value)
+    assert launched
 
-    # Same inputs as the GUI's call, from Python: the bundle id alone decides identity.
-    direct_kwargs = {k: v for k, v in kwargs.items() if k not in ("progress_callback", "controller")}
-    _, direct = run_unified_bayesian(*args, **direct_kwargs)
-    _, plain = run_unified_bayesian(*args, **dict(direct_kwargs, enabled_extra_axes=()))
-    assert names[0] == direct.study_name
-    assert names[0] != plain.study_name, "the bundle gives the run its own study"
+    stores = list(rs._sidecar_path().parent.glob("*.sqlite3"))
+    assert len(stores) == 1, "persistence 'always' created the store"
+    (persisted,) = optuna.study.get_all_study_names(storage=f"sqlite:///{stores[0].as_posix()}")
+
+    direct = dict(
+        wavelengths=np.asarray([float(c) for c in X.columns]),
+        model_name="XGBoost",
+        task_type="regression",
+        n_trials=1,
+        cv_folds=gui_app.folds.get(),
+        cv_strategy=gui_app.cv_strategy.get(),
+        cv_n_repeats=gui_app.cv_n_repeats.get(),
+        random_state=42,
+        verbose=False,
+        enable_autoscale=gui_app.bayes_enable_autoscale.get(),
+        enable_uve=gui_app.bayes_enable_uve.get(),
+        region_test_all_individual=gui_app.bayes_region_test_all.get(),
+        region_test_pairwise=gui_app.bayes_region_test_pairwise.get(),
+        enable_sqlite_persistence="never",
+    )
+    _, with_bundle = run_unified_bayesian(
+        X.to_numpy(), y.to_numpy(), enabled_extra_axes=("xgb_sampling",), **direct
+    )
+    _, plain = run_unified_bayesian(X.to_numpy(), y.to_numpy(), **direct)
+    assert persisted == with_bundle.study_name
+    assert persisted != plain.study_name, "the bundle gives the run its own study"

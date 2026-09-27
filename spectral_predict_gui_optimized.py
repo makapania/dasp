@@ -17091,7 +17091,6 @@ class SpectralPredictApp:
                     family_row,
                     text=bundle.label or bundle.id,
                     variable=getattr(self, f"{EXTRA_AXES_VAR_PREFIX}{bundle.id}"),
-                    command=self._refresh_extra_axes_advisory,
                 )
                 checkbutton.pack(side=tk.LEFT, padx=(0, 10))
                 if bundle.help:
@@ -17116,9 +17115,13 @@ class SpectralPredictApp:
             style='Caption.TLabel', wraplength=520,
         ).pack(anchor=tk.W, pady=(6, 0))
 
-        # Keep the advisory current: model checkboxes, the task type and the
-        # dimension-changing Bayesian options all feed it.
+        # Keep the advisory current: the bundle vars (traced, so a resume restore
+        # updates it too, not just a click), model checkboxes, the task type and
+        # the dimension-changing Bayesian options all feed it.
+        from spectral_predict.run_gui_settings import extra_axes_setting_names
+
         watched = [
+            *extra_axes_setting_names(),
             "task_type", "bayes_enable_baseline", "bayes_enable_smoothing",
             "bayes_enable_autoscale", *self._STANDARD_MODEL_VARS.values(),
         ]
@@ -17172,6 +17175,9 @@ class SpectralPredictApp:
             from spectral_predict.run_gui_settings import EXTRA_AXES_VAR_PREFIX
             from spectral_predict.search_spaces import BUNDLES
 
+            if self.task_type.get() == "multiclass_simca":
+                advisory.set("Multi-class SIMCA has no Bayesian search; extra axes do not apply.")
+                return
             task = self._extra_axes_task()
             if task == "one_class":
                 models = [
