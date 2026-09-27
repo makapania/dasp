@@ -4,6 +4,9 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-16)
 
+> **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
+> The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
+
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian). Three
 review rounds (GLM/DeepSeek, then Codex + GLM 5.3 twice). **It re-blessed the T3 trajectory fixture**: that test runs only
