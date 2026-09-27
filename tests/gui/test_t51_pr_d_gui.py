@@ -33,6 +33,28 @@ def _axis(bundle_id: str) -> str:
     return f"{EXTRA_AXES_VAR_PREFIX}{bundle_id}"
 
 
+@pytest.fixture(autouse=True)
+def _restore_shared_gui_state(gui_app):
+    """The session app is shared: undo what these tests change as a side effect.
+
+    Ticking model boxes switches the tier to 'custom' (a later test's
+    ``_on_tier_changed`` then returns early), and task-type changes rewrite the
+    imbalance method (Codex round-2 review).
+    """
+    # Restore order matters: setting task_type rewrites imbalance_method, and
+    # ticking model boxes rewrites model_tier.
+    names = ("task_type", "optimization_method", "model_tier", "imbalance_method")
+    saved = {name: getattr(gui_app, name).get() for name in names}
+    models_saved = {
+        var: getattr(gui_app, var).get() for var in gui_app._STANDARD_MODEL_VARS.values()
+    }
+    yield
+    for var, value in models_saved.items():
+        getattr(gui_app, var).set(value)
+    for name, value in saved.items():
+        getattr(gui_app, name).set(value)
+
+
 @pytest.fixture
 def models(gui_app):
     """Select supervised models by name; restores every model checkbox after."""
