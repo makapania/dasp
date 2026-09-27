@@ -2632,6 +2632,8 @@ def _detect_refine_task_type(config: dict, y: "pd.Series | None") -> tuple[str, 
 _LAUNCH_CONTEXT_UNSET = object()
 
 
+from spectral_predict.run_gui_settings import extra_axes_settings as _extra_axes_settings
+
 # Settings the Bayesian worker reads through its launch snapshot (#79 round 12).
 # Imbalance/baseline detail values are read only for the chosen method; a missing
 # one fails that run visibly instead of blocking every launch.
@@ -2641,6 +2643,8 @@ BAYESIAN_REQUIRED_SETTINGS = (
     "bayes_region_test_pairwise", "bayesian_persistence_mode", "cv_n_repeats",
     "cv_strategy", "folds", "smoothing_polyorder", "smoothing_window",
     "validation_enabled", "enable_imbalance_handling", "imbalance_method",
+    # T-51 PR D: bundles change the study name; startup trials change sampling.
+    *_extra_axes_settings(),
 )
 
 # Values only read when their option is on; blank ones don't block a launch.
@@ -3383,6 +3387,17 @@ class SpectralPredictApp:
         # auto-decide; 'always' = SQLite from trial 0; 'never' = pure
         # in-memory, ignore active storage URL.
         self.bayesian_persistence_mode = tk.StringVar(value='auto')
+        # T-51 PR D: opt-in extra hyperparameter axes, one BooleanVar per registry
+        # bundle, and the TPE startup-trial count (blank = backend default). Created
+        # here, not with the collapsible card, so every launch can capture them.
+        from spectral_predict.run_gui_settings import (
+            N_STARTUP_TRIALS_SETTING,
+            extra_axes_setting_names,
+        )
+
+        for _axis_var in extra_axes_setting_names():
+            setattr(self, _axis_var, tk.BooleanVar(value=False))
+        setattr(self, N_STARTUP_TRIALS_SETTING, tk.StringVar(value=""))
 
         # Smoothing
         self.enable_smoothing = tk.BooleanVar(value=False)
@@ -12691,6 +12706,8 @@ class SpectralPredictApp:
         ttk.Label(self.bayes_options_frame, text=_persist_tooltip,
                   style='Caption.TLabel', wraplength=500,
                   ).grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+        # Row 8: T-51 PR D — opt-in extra hyperparameter axes (collapsed by default)
+        self._build_extra_axes_card(self.bayes_options_frame, row=8)
 
         # Initially hide if not Bayesian
         if self.optimization_method.get() == "unified":
@@ -17023,8 +17040,166 @@ class SpectralPredictApp:
             return False
         return True
 
+    # ---- T-51 PR D: Bayesian extra hyperparameter axes -------------------------
+
+    # GUI model name -> its Tk checkbox var, in the order _run_analysis lists them.
+    _STANDARD_MODEL_VARS = {
+        "PLS": "use_pls", "PLS-DA": "use_plsda", "Ridge": "use_ridge",
+        "Lasso": "use_lasso", "ElasticNet": "use_elasticnet",
+        "RandomForest": "use_randomforest", "MLP": "use_mlp",
+        "NeuralBoosted": "use_neuralboosted", "SVR": "use_svr", "SVM": "use_svm",
+        "XGBoost": "use_xgboost", "LightGBM": "use_lightgbm", "CatBoost": "use_catboost",
+    }
+
+    def _build_extra_axes_card(self, parent, row):
+        """Collapsible card of opt-in Optuna bundles, built from the registry.
+
+        The Tk vars already exist (created in __init__ so every launch can capture
+        them); this only builds widgets. Bundles are grouped by model family.
+        """
+        from spectral_predict.run_gui_settings import (
+            EXTRA_AXES_VAR_PREFIX,
+            N_STARTUP_TRIALS_SETTING,
+        )
+        from spectral_predict.search_spaces import BUNDLES
+
+        section, content = self._create_collapsible_section(
+            parent, "Extra hyperparameter axes (advanced)", expanded=False
+        )
+        section.grid(row=row, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(8, 0))
+        ttk.Label(
+            content,
+            text=(
+                "Each ticked bundle opens hyperparameters the default Bayesian search "
+                "holds fixed, for the models it names. A model with a ticked bundle "
+                "runs its own study, so it does not resume a study run without it. "
+                "Bundles for another task type are greyed out and not sent."
+            ),
+            style='Caption.TLabel', wraplength=520,
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        groups = {}
+        for bundle in BUNDLES.values():
+            groups.setdefault(" / ".join(sorted(bundle.families)), []).append(bundle)
+        self._extra_axes_checkbuttons = {}
+        for family, bundles in groups.items():
+            family_row = ttk.Frame(content)
+            family_row.pack(anchor=tk.W, fill='x', pady=(2, 0))
+            ttk.Label(family_row, text=f"{family}:", width=18).pack(side=tk.LEFT, anchor=tk.N)
+            for bundle in bundles:
+                checkbutton = ttk.Checkbutton(
+                    family_row,
+                    text=bundle.label or bundle.id,
+                    variable=getattr(self, f"{EXTRA_AXES_VAR_PREFIX}{bundle.id}"),
+                    command=self._refresh_extra_axes_advisory,
+                )
+                checkbutton.pack(side=tk.LEFT, padx=(0, 10))
+                if bundle.help:
+                    CreateToolTip(checkbutton, text=bundle.help, delay=500)
+                self._extra_axes_checkbuttons[bundle.id] = checkbutton
+
+        startup_row = ttk.Frame(content)
+        startup_row.pack(anchor=tk.W, fill='x', pady=(6, 0))
+        ttk.Label(startup_row, text="TPE startup trials:").pack(side=tk.LEFT)
+        ttk.Entry(
+            startup_row, textvariable=getattr(self, N_STARTUP_TRIALS_SETTING), width=6
+        ).pack(side=tk.LEFT, padx=(5, 5))
+        ttk.Label(
+            startup_row,
+            text="(blank = default 20; random trials before TPE starts modelling)",
+            style='Caption.TLabel',
+        ).pack(side=tk.LEFT)
+
+        self._extra_axes_advisory = tk.StringVar(value="")
+        ttk.Label(
+            content, textvariable=self._extra_axes_advisory,
+            style='Caption.TLabel', wraplength=520,
+        ).pack(anchor=tk.W, pady=(6, 0))
+
+        # Keep the advisory current: model checkboxes, the task type and the
+        # dimension-changing Bayesian options all feed it.
+        watched = [
+            "task_type", "bayes_enable_baseline", "bayes_enable_smoothing",
+            "bayes_enable_autoscale", *self._STANDARD_MODEL_VARS.values(),
+        ]
+        for name in watched:
+            var = getattr(self, name, None)
+            if var is not None:
+                var.trace_add('write', lambda *_: self._refresh_extra_axes_advisory())
+        for var in getattr(self, "one_class_model_checkboxes", {}).values():
+            var.trace_add('write', lambda *_: self._refresh_extra_axes_advisory())
+        self._refresh_extra_axes_state()
+
+    def _selected_standard_models(self):
+        """Ticked supervised models, in the order the analysis runs them."""
+        return [
+            model for model, var_name in self._STANDARD_MODEL_VARS.items()
+            if getattr(self, var_name).get()
+        ]
+
+    def _extra_axes_task(self):
+        """The task type bundles are filtered by, or None when it can't be known yet."""
+        task = self.task_type.get()
+        if task == "auto":
+            if self.y is None:
+                return None
+            return _infer_task_type_from_y(self.y) or "regression"
+        if task in ("regression", "classification", "one_class"):
+            return task
+        return None  # multiclass_simca has no Bayesian search
+
+    def _refresh_extra_axes_state(self):
+        """Grey out bundles for other task types (decision 1: by task type only)."""
+        checkbuttons = getattr(self, "_extra_axes_checkbuttons", None)
+        if not checkbuttons:
+            return
+        from spectral_predict.search_spaces import BUNDLES
+
+        task = self._extra_axes_task()
+        multiclass = self.task_type.get() == "multiclass_simca"
+        for bundle_id, checkbutton in checkbuttons.items():
+            applies = not multiclass and (task is None or task in BUNDLES[bundle_id].task_types)
+            checkbutton.state(['!disabled'] if applies else ['disabled'])
+        self._refresh_extra_axes_advisory()
+
+    def _refresh_extra_axes_advisory(self):
+        """Recompute the dimension caption; never let it break the GUI."""
+        advisory = getattr(self, "_extra_axes_advisory", None)
+        if advisory is None:
+            return
+        try:
+            from spectral_predict.extra_axes_advisory import advisory_text
+            from spectral_predict.run_gui_settings import EXTRA_AXES_VAR_PREFIX
+            from spectral_predict.search_spaces import BUNDLES
+
+            task = self._extra_axes_task()
+            if task == "one_class":
+                models = [
+                    name for name, var in self.one_class_model_checkboxes.items() if var.get()
+                ]
+            else:
+                models = self._selected_standard_models()
+            enabled = [
+                bundle_id for bundle_id, bundle in BUNDLES.items()
+                if task in bundle.task_types
+                and getattr(self, f"{EXTRA_AXES_VAR_PREFIX}{bundle_id}").get()
+            ]
+            advisory.set(
+                advisory_text(
+                    models, task, enabled,
+                    baseline=bool(self.bayes_enable_baseline.get()),
+                    smoothing=bool(self.bayes_enable_smoothing.get()),
+                    autoscale=bool(self.bayes_enable_autoscale.get()),
+                )
+            )
+        except Exception as exc:  # the caption is advisory only
+            logging.getLogger(__name__).debug("extra-axes advisory failed: %s", exc)
+            advisory.set("")
+
     def _on_task_type_changed(self):
         """Handle task type changes - filter models and update tier selection."""
+        # T-51 PR D: before the early returns below, so every path greys the bundles.
+        self._refresh_extra_axes_state()
         task_type = self.task_type.get()
 
         # Determine actual task type (for auto-detect, check the data)
@@ -23894,9 +24069,16 @@ class SpectralPredictApp:
                 if resumed.gui_settings:
                     try:
                         from spectral_predict.run_gui_settings import (
+                            normalize_saved_settings,
                             restore_gui_settings,
                         )
-                        report = restore_gui_settings(self, resumed.gui_settings)
+
+                        # A FULL restore: settings the snapshot predates (T-51 PR D
+                        # extra axes) go back to their old defaults. Only here, never
+                        # inside restore_gui_settings, which also applies partial patches.
+                        report = restore_gui_settings(
+                            self, normalize_saved_settings(resumed.gui_settings)
+                        )
                         # Surface restore errors in the banner itself, not just
                         # the scrollable log — a "Restored N settings" message
                         # with hidden errors is a silent-failure trap.
@@ -23955,7 +24137,8 @@ class SpectralPredictApp:
                     "selection), and click Run Analysis. Saved trials are "
                     "reused when the data, settings and software environment "
                     "match (and persistence is not Always off); the log says "
-                    "if they are not."
+                    "if they are not. Changing Bayesian extra axes starts a "
+                    "new study."
                     f"{restore_summary}"
                 )
 
@@ -24160,33 +24343,7 @@ class SpectralPredictApp:
                 engine for engine, var in self.mc_engine_vars.items() if var.get()
             ]
         else:
-            selected_models = []
-            if self.use_pls.get():
-                selected_models.append("PLS")
-            if self.use_plsda.get():
-                selected_models.append("PLS-DA")
-            if self.use_ridge.get():
-                selected_models.append("Ridge")
-            if self.use_lasso.get():
-                selected_models.append("Lasso")
-            if self.use_elasticnet.get():
-                selected_models.append("ElasticNet")
-            if self.use_randomforest.get():
-                selected_models.append("RandomForest")
-            if self.use_mlp.get():
-                selected_models.append("MLP")
-            if self.use_neuralboosted.get():
-                selected_models.append("NeuralBoosted")
-            if self.use_svr.get():
-                selected_models.append("SVR")
-            if self.use_svm.get():
-                selected_models.append("SVM")
-            if self.use_xgboost.get():
-                selected_models.append("XGBoost")
-            if self.use_lightgbm.get():
-                selected_models.append("LightGBM")
-            if self.use_catboost.get():
-                selected_models.append("CatBoost")
+            selected_models = self._selected_standard_models()
 
         # Get tier selection
         tier = self.model_tier.get()
@@ -26396,7 +26553,9 @@ class SpectralPredictApp:
                 "current settings.\n"
                 "  • Cancel — change nothing and run nothing; decide later.\n\n"
                 "Model hyperparameter ranges are not part of the saved settings "
-                "and are not checked.",
+                "and are not checked. Changing Bayesian extra axes or startup "
+                "trials changes how a resumed search continues; extra axes start "
+                "a new study.",
                 icon="warning",
                 default="cancel",
             )
@@ -26699,6 +26858,26 @@ class SpectralPredictApp:
                     "These analysis settings are empty or invalid, so nothing was "
                     f"started:\n\n{', '.join(unreadable)}\n\nFix them and click "
                     "Run Analysis again.",
+                )
+            except Exception:
+                pass
+            return False
+        # T-51 PR D: the startup-trials box is a free-text StringVar, so presence is
+        # not enough; a bad value blocks the launch here instead of failing each model.
+        from spectral_predict.run_gui_settings import (
+            N_STARTUP_TRIALS_SETTING,
+            parse_n_startup_trials,
+        )
+
+        try:
+            parse_n_startup_trials(snapshot.get(N_STARTUP_TRIALS_SETTING))
+        except ValueError as exc:
+            self._log_progress(f"[RUN] {exc}")
+            try:
+                messagebox.showerror(
+                    "Invalid settings",
+                    f"{exc}\n\nLeave it blank for the default, fix it, and click Run "
+                    "Analysis again.",
                 )
             except Exception:
                 pass
@@ -27304,6 +27483,26 @@ class SpectralPredictApp:
         def _bayes_n_trials():
             # Frozen at launch when given; a resume keeps the run's own count.
             return analysis_n_trials if analysis_n_trials is not None else self.n_unified_trials.get()
+
+        def _extra_axes_for(resolved_task):
+            # T-51 PR D: ticked bundles for the task this worker resolved, and the TPE
+            # startup count, both read from the launch snapshot like every setting.
+            from spectral_predict.run_gui_settings import (
+                EXTRA_AXES_VAR_PREFIX,
+                N_STARTUP_TRIALS_SETTING,
+                parse_n_startup_trials,
+            )
+            from spectral_predict.search_spaces import BUNDLES
+
+            enabled = tuple(
+                sorted(
+                    bundle_id
+                    for bundle_id, bundle in BUNDLES.items()
+                    if resolved_task in bundle.task_types
+                    and _setting(f"{EXTRA_AXES_VAR_PREFIX}{bundle_id}")
+                )
+            )
+            return enabled, parse_n_startup_trials(_setting(N_STARTUP_TRIALS_SETTING))
 
         # Bind the data once. The resume fingerprint check and the search must
         # see the same arrays, even if the user loads other data or changes the
@@ -29626,6 +29825,9 @@ class SpectralPredictApp:
                     for oc_model_name in enabled_oc_models:
                         self._log_progress(f"\n  Optimizing {oc_model_name}...")
                         try:
+                            # A bad bundle raises here or in the backend; either way the
+                            # handler below counts the model as failed (run stays resumable).
+                            oc_extra_axes, oc_n_startup = _extra_axes_for('one_class')
                             oc_results_df, _ = run_unified_bayesian(
                                 X=X_oc_np,
                                 y=y_oc_np,
@@ -29649,6 +29851,8 @@ class SpectralPredictApp:
                                 inlier_class_label=inlier_label,
                                 enable_uve=_setting("bayes_enable_uve"),
                                 enable_sqlite_persistence=_setting("bayesian_persistence_mode"),  # T-41
+                                enabled_extra_axes=oc_extra_axes,  # T-51 PR D
+                                n_startup_trials=oc_n_startup,
                             )
                             if oc_results_df is not None and len(oc_results_df) > 0:
                                 best = oc_results_df.iloc[0]
@@ -30212,6 +30416,9 @@ class SpectralPredictApp:
                     self._log_progress(f"\n  Optimizing {model_name}...")
 
                     try:
+                        # A bad bundle raises here or in the backend; either way the
+                        # handler below counts the model as failed (run stays resumable).
+                        model_extra_axes, model_n_startup = _extra_axes_for(task_type)
                         # Run unified Bayesian optimization
                         results_df_model, study = run_unified_bayesian(
                             X=X_np,
@@ -30239,6 +30446,8 @@ class SpectralPredictApp:
                             enable_autoscale=_setting("bayes_enable_autoscale"),  # decoupled from grid Basic Settings
                             enable_uve=enable_uve,
                             enable_sqlite_persistence=_setting("bayesian_persistence_mode"),  # T-41
+                            enabled_extra_axes=model_extra_axes,  # T-51 PR D
+                            n_startup_trials=model_n_startup,
                         )
 
                         if len(results_df_model) > 0:

@@ -658,3 +658,23 @@ and `repr(_ncomp)`. Any set/dict key built from a multiclass grid axis needs thi
 selection skips the whole method once, before the counts loop. `AGENT_COMPOSITION.md` §3a's top-N snippet now caps sparse
 arrays. Accepted and left as is: a failed multiclass fit still marks its mask as tested (a later NSelect with the same mask
 would fail the same way).
+
+### 2026-09-26 — T-51 PR D (GUI card for extra axes): implementation gotchas
+
+Plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` (revision 3; three plan-review rounds, Codex + GLM 5.3).
+- **Legacy snapshots are normalised in two places only:** inside `diff_gui_settings`, and at the startup full-restore
+  call site. Never inside `restore_gui_settings`. The settings-diff dialog passes it a *partial patch*; filling
+  defaults there reset other keys and looped forever (Codex reproduced this on plan revision 1). Test:
+  `test_partial_restore_writes_only_the_given_keys`.
+- **The PR D Tk vars are created in `__init__`, not with the collapsible card.** `capture_gui_settings` skips missing
+  attributes, and a missing required key blocks every Bayesian launch.
+- **The launch gate checks only presence,** so the startup StringVar needs its own value check (`parse_n_startup_trials`).
+  The worker parses the frozen string again, so a direct worker call with a bad value fails that model (counted, run
+  stays resumable) instead of reaching the backend.
+- **Advisory:** `subset_type`/`n_vars`/`region_id` are suggested inline in the objective (both branches), so
+  `extra_axes_advisory.SHARED_SUBSET_AXES` is a constant, drift-guarded against real studies' params. The one-class
+  objective returns `inf` *before* suggesting them when `y_oc` is None. A test that forgets `inlier_class_label` sees
+  no subset params at all.
+- **Tooling:** in this Git Bash, Python edit scripts fed through a heredoc sometimes turned a `\n` in the replacement
+  into a real newline, leaving a broken f-string in the GUI file. Use the Edit tool for any text containing
+  backslashes, and `ast.parse` the GUI file after scripted edits.

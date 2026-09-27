@@ -1270,6 +1270,29 @@ Choose how hyperparameters are searched:
 |-----------|---------|-------------|
 | Trials | 500 | Number of optimization iterations |
 
+**Extra hyperparameter axes (advanced)**: a collapsed section inside *Bayesian Options*.
+By default the Bayesian search holds some hyperparameters fixed; for example, it does not
+tune XGBoost's `subsample`. Each checkbox is an opt-in *bundle* that opens a few of these
+for the models it names, grouped by model family. Hover over a bundle for what it opens
+and its caveats. The same bundles are available from Python as `enabled_extra_axes`
+(`docs/AGENT_COMPOSITION.md` §7b).
+
+- **Only models the bundle names are affected.** Bundles for another task type are greyed
+  out and not sent, e.g. the one-class bundles during regression.
+- **A model with a ticked bundle runs its own study.** Resuming a run whose bundles
+  differ from the current ticks shows the *Settings differ* dialog, and Yes puts the run's
+  ticks back. A run saved before this section existed counts as "all bundles off".
+- **TPE startup trials:** the number of random trials before TPE starts modelling the
+  search space. Leave it blank for the default of 20. It does not change the study
+  name, but a resume must use the same value, so a change also shows the *Settings
+  differ* dialog. It must be blank or a whole number of 1 or more; anything else stops
+  the launch.
+- **The caption under the bundles** gives the largest number of search dimensions among
+  the selected models. A common rule of thumb for startup trials is at least three times
+  that. Treat it as an upper-bound guide: opening axes improves the best candidates but
+  lowers the average one, and widened spaces often peak earlier. Validate externally.
+- Bundle ids are fixed. A bundle is never renamed, because a saved run refers to it by id.
+
 **NSGA-II Parameters**:
 
 | Parameter | Default | Description |
