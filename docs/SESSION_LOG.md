@@ -678,3 +678,14 @@ Plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` (revision 3; three plan-revie
 - **Tooling:** in this Git Bash, Python edit scripts fed through a heredoc sometimes turned a `\n` in the replacement
   into a real newline, leaving a broken f-string in the GUI file. Use the Edit tool for any text containing
   backslashes, and `ast.parse` the GUI file after scripted edits.
+- **Reviews and results (2026-09-27):**
+  - GLM 5.3 said MERGE. Codex said MERGE-WITH-CHANGES in rounds 1 and 2; everything is fixed in `51acba2`
+    and `cf59dbc`. PR #82 is open and not merged.
+  - Full non-GUI suite: 3496 passed / 26 skipped. Full GUI suite on the final commit: 290 passed / 7 skipped /
+    1 failed, and that one (`test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`)
+    **also fails on `main`**.
+  - The full GUI suite takes about 38 min here. A `timeout 900` wrapper killed an earlier run silently: `| tail`
+    still exits 0. Run it in the background with no timeout.
+- **Shared-app leakage:** ticking model boxes flips `model_tier` to 'custom', and a later test's
+  `_on_tier_changed()` then returns early. Setting `task_type` rewrites `imbalance_method`. Restore `task_type`
+  first and `imbalance_method` last. `tests/gui/test_t51_pr_d_gui.py::_restore_shared_gui_state` does this.
