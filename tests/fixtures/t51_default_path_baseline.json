@@ -1,5 +1,5 @@
 {
-  "_comment": "T-51 PR A default-path baseline. Captured on main after PR #67. Re-bless only by a reviewed commit (plan section 6, T2b/T3).",
+  "_comment": "T-51 PR A default-path baseline. Captured on main after PR #67. Re-bless only by a reviewed commit (plan section 6, T2b/T3). Trace re-blessed 2026-09-26 on branch fix/sparse-selector-topn-cap (PR #81): CARS trials requesting more variables than CARS selected now fit the selected count, so their values (and the TPE trajectory after startup) changed. Study names, environment and sampler sources unchanged.",
   "dasp_version": "0.5.0b3",
   "default_study_base_names": {
     "PCA-SIMCA|one_class": "unified_bayesian_PCA-SIMCA_0b7db3ef",
@@ -90,7 +90,7 @@
         "region_id": 7,
         "subset_type": "cars"
       },
-      "value": 0.05975916531198102
+      "value": 0.1292869414611978
     },
     {
       "number": 5,
@@ -113,7 +113,7 @@
         "savgol_window": 21,
         "subset_type": "cars"
       },
-      "value": 4.691828646146729
+      "value": 1.9399385883615674
     },
     {
       "number": 7,
@@ -137,7 +137,7 @@
         "savgol_window": 17,
         "subset_type": "cars"
       },
-      "value": 0.17436721722850435
+      "value": 0.7108009094553238
     },
     {
       "number": 9,
@@ -197,7 +197,7 @@
         "savgol_window": 45,
         "subset_type": "cars"
       },
-      "value": 0.14707644963878255
+      "value": 0.06700987283268682
     },
     {
       "number": 14,
@@ -208,7 +208,7 @@
         "region_id": 4,
         "subset_type": "cars"
       },
-      "value": 0.059678272142839196
+      "value": 0.12445564935339445
     },
     {
       "number": 15,
@@ -272,114 +272,121 @@
     {
       "number": 20,
       "params": {
-        "n_components": 6,
-        "n_vars": 250,
-        "preprocessing": "raw",
-        "region_id": 4,
-        "subset_type": "importance"
+        "n_components": 16,
+        "n_vars": "full",
+        "preprocessing": "deriv4_snv",
+        "region_id": 8,
+        "savgol_window": 51,
+        "subset_type": "region"
       },
-      "value": 0.05975904429291993
+      "value": 19.178868325023956
     },
     {
       "number": 21,
       "params": {
-        "n_components": 5,
-        "n_vars": 100,
-        "preprocessing": "raw",
-        "region_id": 5,
-        "subset_type": "importance"
+        "n_components": 15,
+        "n_vars": 50,
+        "preprocessing": "deriv3",
+        "region_id": 6,
+        "savgol_window": 31,
+        "subset_type": "cars"
       },
-      "value": 0.05974925227633932
+      "value": 0.12772345428464996
     },
     {
       "number": 22,
       "params": {
-        "n_components": 9,
-        "n_vars": 250,
-        "preprocessing": "raw",
-        "region_id": 3,
-        "subset_type": "importance"
+        "n_components": 19,
+        "n_vars": 500,
+        "preprocessing": "deriv1",
+        "region_id": 8,
+        "savgol_window": 31,
+        "subset_type": "region"
       },
-      "value": 0.06005534533276649
+      "value": 0.1204382335125655
     },
     {
       "number": 23,
       "params": {
-        "n_components": 13,
-        "n_vars": 250,
-        "preprocessing": "raw",
-        "region_id": 0,
-        "subset_type": "cars"
+        "n_components": 8,
+        "n_vars": 500,
+        "preprocessing": "deriv1",
+        "region_id": 7,
+        "savgol_window": 39,
+        "subset_type": "region"
       },
-      "value": 0.05977679239218586
+      "value": 0.07563844297054323
     },
     {
       "number": 24,
       "params": {
-        "n_components": 5,
-        "n_vars": 250,
-        "preprocessing": "raw",
-        "region_id": 5,
-        "subset_type": "importance"
+        "n_components": 6,
+        "n_vars": 500,
+        "preprocessing": "deriv1",
+        "region_id": 8,
+        "savgol_window": 41,
+        "subset_type": "region"
       },
-      "value": 0.05974925227633932
+      "value": 0.07184892908611654
     },
     {
       "number": 25,
       "params": {
-        "n_components": 3,
-        "n_vars": 100,
-        "preprocessing": "snv_deriv1",
-        "region_id": 5,
-        "savgol_window": 33,
-        "subset_type": "importance"
+        "n_components": 7,
+        "n_vars": 500,
+        "preprocessing": "deriv3_snv",
+        "region_id": 8,
+        "savgol_window": 37,
+        "subset_type": "region"
       },
-      "value": 4.329491156415767
+      "value": 5.018797997164444
     },
     {
       "number": 26,
       "params": {
-        "n_components": 10,
-        "n_vars": 100,
-        "preprocessing": "raw",
-        "region_id": 8,
-        "subset_type": "importance"
+        "n_components": 3,
+        "n_vars": 500,
+        "preprocessing": "snv",
+        "region_id": 9,
+        "subset_type": "region"
       },
-      "value": 0.060052797853604525
+      "value": 4.707447311052174
     },
     {
       "number": 27,
       "params": {
-        "n_components": 3,
-        "n_vars": 250,
+        "n_components": 10,
+        "n_vars": 500,
         "preprocessing": "deriv1",
         "region_id": 8,
         "savgol_window": 51,
-        "subset_type": "importance"
+        "subset_type": "region"
       },
-      "value": 0.060198202280881824
+      "value": 0.05381485670910874
     },
     {
       "number": 28,
       "params": {
-        "n_components": 3,
-        "n_vars": "full",
-        "preprocessing": "raw",
-        "region_id": 2,
-        "subset_type": "importance"
+        "n_components": 12,
+        "n_vars": 500,
+        "preprocessing": "deriv4_snv",
+        "region_id": 9,
+        "savgol_window": 51,
+        "subset_type": "region"
       },
-      "value": 0.057939836593898224
+      "value": 19.19333806702949
     },
     {
       "number": 29,
       "params": {
-        "n_components": 3,
-        "n_vars": "full",
-        "preprocessing": "raw",
-        "region_id": 2,
-        "subset_type": "cars"
+        "n_components": 17,
+        "n_vars": 10,
+        "preprocessing": "deriv1",
+        "region_id": 5,
+        "savgol_window": 47,
+        "subset_type": "region"
       },
-      "value": 0.057939836593898224
+      "value": 0.06701679976513149
     }
   ],
   "reference_commit": "2860d1713701645e01dd762d103be0e56d402e5f",

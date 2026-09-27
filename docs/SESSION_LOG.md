@@ -590,7 +590,7 @@ adding "one small safety check" to a data-only PR.
   left an LF block in a CRLF file, which showed up as a phantom diff against main (check
   `git diff <base> --stat` after any scripted edit).
 
-### 2026-09-23 — CARS top-N padding: requesting more vars than CARS kept pads with the longest wavelengths (reported from Border Cave NIRS project; VERIFIED in default paths 2026-09-23, not fixed)
+### 2026-09-23 — CARS top-N padding: requesting more vars than CARS kept pads with the longest wavelengths (reported from Border Cave NIRS project; VERIFIED in default paths 2026-09-23; fix on branch)
 
 **Observed** (Border Cave analysis, `analysis/bayes_varsel/`, driving `unified_bayesian` from a script): a
 frozen `topN_cars` pipeline asked for N = 500 wavelengths against a CARS selection of about 70. The fitted subset was the CARS
@@ -619,3 +619,42 @@ is exact. Bayesian (`unified_bayesian.py` ~1552/1627, one-class ~1336/1426): `n_
 (`search.py` ~6914) is the same shape. Evidence, BoneCollagen (49 x 2151), `cars_selection` random_state=42:
 raw kept 159 (15 iterations, the Bayesian setting) / 193 (50 iterations); SNV kept 238 / 193. So the default grid's top-250
 pads with 12-91 zero-importance long-wavelength variables, and Bayesian N=500/1000 pads with 262-841. N <= 100 never pads here.
+
+**Fix (branch `fix/sparse-selector-topn-cap`, Codex-reviewed plan: AGREE-WITH-CHANGES).** `variable_selection.SPARSE_SELECTOR_METHODS`
+(CARS family incl. the multiclass API's `cars_tree` spelling, uve_*/fipls_* hybrids, spa, vcpa-iriv, ga) + `_cap_top_n` caps N at the non-zero count, by method name only.
+Codex warned against keying on "any zeros": `_apply_edge_mask`, tree importances, Lasso and the uniform fallback all
+produce legitimate zeros. The tag keeps the requested count (`top250_cars`); `n_vars` records the fitted count (user's
+choice). Gotchas: (1) grid must dedupe on the *capped* count, including against the method-optimal run (which already
+equals the non-zero count and is tagged plain `cars`); (2) the one-class grid wrote the *requested* `n_vars` to the row,
+now `len(top_indices)`; (3) the Bayesian fingerprint includes `subset_tag`, so capped trials would never dedupe. They now
+fingerprint with `fit_tag` = `top{fitted}_{method}`; (4) `multiclass_varsel_mask`'s `_mask_from_scores` had the same padding
+(found by the DeepSeek review) and is now capped. GLM/DeepSeek review round 1 also added `ga` and fixed the one-class progress
+counter on skipped counts. Known, accepted: when CARS raises inside Bayesian `compute_importances`, the 'importance' fallback
+is returned under the name 'cars' and IS capped at its non-zero count (drops zero-importance proxy vars; defensible, untested).
+`ipls` (zero = interval R2 <= 0, a score, not non-selection) is deliberately not capped. Tests: `tests/test_sparse_selector_topn_cap.py`.
+
+**Round 2 (2026-09-26, Codex BLOCK + GLM 5.3 MERGE-WITH-CHANGES).** (5) An all-zero sparse score array used to return the
+*requested* N, i.e. the old padding. It is reachable: the grid's all-zero uniform fallback runs *before* `_apply_edge_mask`, so
+a CARS selection lying wholly in an SG derivative edge zone reached the top-N step all-zero (Codex repro: `top10_cars` fitted
+1102-1111). `_cap_top_n` now returns 0 for that case and every caller skips (grid breaks out of the counts, one-class skips
+with the progress bump, multiclass raises `MulticlassVarselUnsupported`, Bayesian returns the usual penalty). Never slice
+`[-0:]`: it selects every column. (6) `run_multiclass_simca_search` swept every NSelect for mask paths, so capped counts gave
+identical fits ranked side by side; it now skips a resolved mask already fitted for the same prep/engine/path/alpha/ncomp.
+(7) A replayed Bayesian duplicate returns before `selected_wavelengths`/`n_vars` user_attrs are set; tests reading them must
+skip replays. Forcing params in a Bayesian test: patch `unified_bayesian.TPESampler` (the in-memory study builds it
+directly at ~2837), not `_make_tpe_sampler` (only the SQLite reattach uses that). Not done, by user decision: no
+study-name/version marker for pre-fix studies (the fix was never published, so old studies are dev-only).
+(8) **The PR broke `test_t3_default_trajectory_matches_main` and round 1 missed it.** That test skips unless the machine's
+numerical-env digest matches the fixture's, so on a non-blessing machine "the suite is green but for the 4 fingerprint
+cases" says nothing about T3. On the blessing machine (this one: `.venv314`, digest `322dc72485c2`) it failed: trials 4/6/8/13/14
+are CARS requests of 50-1000 that now fit 6-25 vars (same params, new values), and TPE diverges from trial 20. Trace re-blessed
+in `tests/fixtures/t51_default_path_baseline.json` (3 identical captures; names/env/sampler hashes untouched). Any change to
+default Bayesian trial values must re-bless it; run the suite on the blessing machine before claiming green.
+
+**Round 3 (2026-09-26, Codex MERGE-WITH-CHANGES, GLM 5.3 MERGE).** (9) Multiclass `n_components` may be a per-class
+dict, which is unhashable: the mask-dedup key crashed the whole search with `TypeError`. The key now uses `repr(_alpha)`
+and `repr(_ncomp)`. Any set/dict key built from a multiclass grid axis needs this. (10) The one-class skips advanced
+`current_config` but not `skipped_configs` ("0 skipped" in the completion message); both do now, and an empty sparse
+selection skips the whole method once, before the counts loop. `AGENT_COMPOSITION.md` §3a's top-N snippet now caps sparse
+arrays. Accepted and left as is: a failed multiclass fit still marks its mask as tested (a later NSelect with the same mask
+would fail the same way).

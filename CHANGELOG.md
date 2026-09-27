@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
+  Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
+  than it selected used to fill the gap with zero-score variables from the long end of the
+  spectrum, while the row was still labelled `top{N}_cars`. N is now capped at the
+  selected count in the grid, one-class, multiclass and Bayesian searches: the tag keeps
+  the requested N, `n_vars` records the fitted count, and requests that cap to the same
+  subset are fitted once. A method left with no selected variables (e.g. every one fell
+  in a derivative's edge zone) is skipped instead of falling back to arbitrary
+  wavelengths. **Scores of affected CARS-family rows change**, and multiclass rows
+  re-validated after the fix give corrected metrics.
 - **Resuming a crashed Bayesian run no longer changes the persistence setting.**
   Accepting "Resume previous run?" used to force *Crash-resume persistence* to
   *Always on*, because 'auto' once ignored the saved study. 'auto' now reloads a saved

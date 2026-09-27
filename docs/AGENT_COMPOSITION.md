@@ -142,6 +142,9 @@ importances = cars_selection(X_pp, y.to_numpy(dtype=float),
                              n_iterations=50, pls_components=5, cv_folds=5)
 
 top_n = 100
+# Sparse arrays (CARS family, SPA, VCPA-IRIV, GA): cap at the selected count, or the
+# tail of the cutoff is zero-score ties, i.e. arbitrary unselected variables.
+top_n = min(top_n, np.count_nonzero(importances))
 keep = np.argsort(importances)[::-1][:top_n]      # you choose the cutoff
 X_sel = X_pp[:, np.sort(keep)]
 ```

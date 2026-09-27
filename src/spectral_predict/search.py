@@ -102,6 +102,7 @@ from .variable_selection import (
     fipls_cars_selection,
     mc_sipls,
     mwpls,
+    _cap_top_n,
 )
 from .wavelength_selection import vcpa_iriv
 from .ga_pls import ga_pls_selection
@@ -3920,14 +3921,33 @@ def run_search(
 
                                 # Run subsets with user-selected counts
                                 results_added_for_method = 0
+                                fitted_counts_seen = set()
                                 for n_top in valid_variable_counts:
+                                    # Sparse selectors: never pad past the selected variables. The
+                                    # tag keeps the requested count; n_vars records the fitted one.
+                                    n_fit = _cap_top_n(importances, n_top, varsel_method)
+                                    if n_fit == 0:
+                                        print(
+                                            f"  -> WARNING: {varsel_method} has no selected variables "
+                                            "left after edge masking, skipping its subsets"
+                                        )
+                                        break
+                                    if n_fit in fitted_counts_seen or (
+                                        method_has_natural_optimal and n_fit == n_method_optimal
+                                    ):
+                                        capped = f" caps to {n_fit} selected vars," if n_fit != n_top else ""
+                                        print(
+                                            f"  -> top-{n_top} ({varsel_method}){capped} already tested, skipping"
+                                        )
+                                        continue
+                                    fitted_counts_seen.add(n_fit)
                                     print(
                                         f"  -> Testing top-{n_top} vars ({varsel_method})...",
                                         end=" ",
                                     )
                                     # Select top N most important features based on preprocessed importances
                                     # Use stable sort to ensure deterministic feature ordering when importances are tied
-                                    top_indices = np.argsort(importances, kind="stable")[-n_top:][
+                                    top_indices = np.argsort(importances, kind="stable")[-n_fit:][
                                         ::-1
                                     ]
 
@@ -6910,8 +6930,33 @@ def run_one_class_search(
                     n_features_current,
                 )
 
+                if _cap_top_n(importances, 1, varsel_method) == 0:
+                    logger.warning(
+                        "%s has no selected variables left after edge masking, skipping",
+                        varsel_method,
+                    )
+                    n_skip = len(valid_counts) * n_model_params
+                    current_config += n_skip
+                    skipped_configs += n_skip
+                    continue
+
+                fitted_counts_seen = set()
                 for n_vars in valid_counts:
-                    top_indices = np.argsort(importances, kind="stable")[-n_vars:]
+                    # Sparse selectors: cap at the selected count (tag keeps the requested
+                    # count, the row's n_vars records the fitted one); skip repeat subsets.
+                    n_fit = _cap_top_n(importances, n_vars, varsel_method)
+                    if n_fit in fitted_counts_seen:
+                        logger.info(
+                            "  top-%d (%s) fits %d vars, already tested, skipping",
+                            n_vars,
+                            varsel_method,
+                            n_fit,
+                        )
+                        current_config += n_model_params  # keep progress reaching total_configs
+                        skipped_configs += n_model_params
+                        continue
+                    fitted_counts_seen.add(n_fit)
+                    top_indices = np.argsort(importances, kind="stable")[-n_fit:]
                     X_subset = X_preprocessed[:, top_indices]
                     wavelengths_subset = wavelengths_current[top_indices]
 
@@ -7018,7 +7063,7 @@ def run_one_class_search(
                                     if model_name == "PCA-SIMCA"
                                     else None
                                 ),
-                                "n_vars": n_vars,
+                                "n_vars": len(top_indices),
                                 "full_vars": n_features_current,
                                 "SubsetTag": subset_tag,
                                 "Imbalance": "—",
@@ -7326,6 +7371,10 @@ def multiclass_varsel_mask(
                 f"(shape={scores.shape}, finite={np.all(np.isfinite(scores))})."
             )
         k = int(min(max(int(n_select), 1), n_features))
+        # Sparse selectors: never pad the mask past the selected variables.
+        k = _cap_top_n(scores, k, method)
+        if k == 0:
+            raise MulticlassVarselUnsupported(f"{method!r} selected no variables.")
         top_idx = np.argsort(scores, kind="stable")[-k:]
         mask = np.zeros(n_features, dtype=bool)
         mask[top_idx] = True
@@ -8046,6 +8095,9 @@ def run_multiclass_simca_search(
         nothing; Wold sets its own count on the model's native path), so sweeping
         multiple Top-N sizes for them yields duplicate rows differing only in the
         ``NSelect`` column. Collapse those paths to a single representative size.
+        Other paths keep every size here; sizes that resolve to an already-fitted
+        mask (sparse selectors capped at their selected count, interval methods that
+        ignore ``n_select``) are skipped in the search loop instead.
         """
         if vp == "none" or vp in _WOLD_METHODS:
             return n_select_list[:1]
@@ -8099,6 +8151,10 @@ def run_multiclass_simca_search(
                 "Preprocessing '%s' failed: %s — emitting NaN rows for its configs",
                 preprocess_cfg["name"], pp_reason,
             )
+        # Resolved masks already fitted for this preprocessing. Sparse selectors cap the
+        # Top-N at their selected count, so several NSelect values can resolve to the same
+        # mask; fitting it again would add an identical leaderboard row.
+        fitted_masks = set()
 
         for engine in engines:
             if _user_stopped:
@@ -8196,6 +8252,20 @@ def run_multiclass_simca_search(
                             except MulticlassVarselUnsupported as exc:
                                 logger.warning("Skipping varsel path %s: %s", varsel_path, exc)
                                 continue  # skip this row, do not crash the run
+                            if isinstance(varsel_value, np.ndarray):
+                                # repr: n_components may be a per-class dict (unhashable).
+                                mask_key = (
+                                    engine, varsel_path, repr(_alpha), repr(_ncomp),
+                                    varsel_value.tobytes(),
+                                )
+                                if mask_key in fitted_masks:
+                                    logger.info(
+                                        "  NSelect=%s (%s) resolves to an already-tested mask "
+                                        "of %d vars, skipping",
+                                        _n_select, varsel_path, int(varsel_value.sum()),
+                                    )
+                                    continue
+                                fitted_masks.add(mask_key)
 
                             try:
                                 # Full fit -> per-class n_components, varsel mask, modeled set.
