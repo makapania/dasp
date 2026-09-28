@@ -708,3 +708,29 @@ recipe's external holdout. Scratch outputs only (not in the repo).
   30-seed frequency report gave the most reproducible region picture.
 - **Gotcha:** dasp CARS fits PLS with `scale=True` and ranks by |coef| in original units; MC used unscaled PLS. This is
   the likely cause of their dry/SLA region disagreement (500-750 nm: MC ~15% of bands, dasp ~1%). Untested.
+
+## 2026-09-28 - Whole-codebase adversarial review: 133 findings kept (129 confirmed); full list in docs/reviews/
+Full list with IDs, failure scenarios and verifier reasoning: `docs/reviews/2026-09-28-adversarial-review.md`. Method:
+a Claude workflow with 11 areas, each finding re-checked by a skeptic told to refute it (1 refuted). Severity is the
+verifier's: 2 critical, 30 high, 61 medium, 40 low. Duplicate pairs: R009/R026, R010/R064, R014/R019. Themes, by harm:
+1. **What is saved, exported or predicted is not what was validated.** Y-transform save paths lose or double-apply
+   preprocessing (R001 critical, R020); early stopping + Y-transform trains the final model on untransformed y
+   (R014/R019); a stale bias correction is saved into a new model (R010); Tab 7 maps wavelengths ±0.5 to the first hit
+   while predict uses ±0.01 (R009); the export bundle preprocesses twice (R015); the code export mis-maps
+   preprocessing (R058); `all_vars` is written with %g, so subset models are validated on the full spectrum (R031).
+2. **CV scores inflated by leakage.** Booster early stopping uses the CV test fold as eval_set: one root cause in
+   `cv_utils.py:634`, repeated in the Bayesian (R003) and NSGA-II (R022) paths, and TPE optimises the biased score.
+   Ensemble R2CV uses base models trained on the validation fold (R002 critical; repro: true CV R² 0.23 vs reported
+   0.875); ensemble weights are fitted in-sample (R021).
+3. **GUI analyses the wrong rows.** A new dataset keeps the old exclusions and validation split (R004); validation
+   snapshots go stale (R005); two exclusion paths exclude the wrong sample or none (R006, R007); Data Management
+   bypasses X_original (R037).
+4. **Interference and contaminant removal methods are mathematically wrong.** The default EstimatedEPO removes noise
+   directions, not the contaminant (R024); OSC removes the y-PREDICTIVE direction (R025); the Interference tab's
+   exclusion, OSC and DOSC always crash (R075); JYPLS-inv omits centering (R091); compute_leverage gives every sample
+   1.0 (R092).
+5. **Readers.** The OPUS reader returns the background single-channel, not absorbance (R017); `read_ascii_spectra` is
+   defined twice in io.py and the later one breaks folder import (R062).
+6. **Classification metrics:** labels other than {0,1} give NaN/crash (R029); LOO averages per-fold F1 over 1-sample
+   folds (R030).
+Fix order proposed: themes 1-2 first (they change reported and deployed numbers), then 5 (R017), 3 and 4.
