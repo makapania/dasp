@@ -4,16 +4,35 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. In progress 2026-09-27: whole-codebase adversarial review. Then T-51 PR E.
-**PR D (PR #82) MERGED 2026-09-27 as `85790dd`** (squash; branch deleted). Reviews: GLM 5.3 MERGE; Codex
-MERGE-WITH-CHANGES twice, both fixed. Non-GUI suite 3496 passed / 26 skipped on `.venv314`; GUI suite 290 / 7 skipped /
-1 failed (the failure is pre-existing on `main`, see §4).
-- **Adversarial review of all of `main` started 2026-09-27** (Claude multi-agent workflow: 11 code areas, each finding
-  independently re-checked by a skeptic). Results will be recorded in SESSION_LOG under "2026-09-27 adversarial review".
-  If this line is still here with no such entry, the session ended before it finished: re-run it.
-- **Also started: seed-stability test of the leaf_phys_nir "MC-PLS stability" selector** (see §4 item 3). Outputs live
-  in a local scratch dir only; the conclusion goes into SESSION_LOG.
-- Deleted stale remote branches `ci/t-ci-1-hygiene-2026-05-08` and `feat/T16-phase2-permutation` (user's word).
+### 0. Next: work through the 2026-09-28 review results. Suggested order below; nothing is started.
+Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
+- **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
+  independent refuter; 2 critical, 30 high). IDs are R001-R133; themes in SESSION_LOG 2026-09-28.
+- **Improvement roadmap:** `docs/reviews/2026-09-28-improvement-roadmap.md` (7 lenses: calibration transfer,
+  contamination, modelling workflow, speed, GUI usability, visuals, structure). IDs QW*/F*/CT*/CS*/MW*/SP*/LF*/ST*.
+- **Selector test:** the MC-PLS selector is not adopted; its generic form is MW1 (see §4 item 3).
+
+**Combined order (user has not approved it yet; confirm before starting).** Wave 1 fixes the numbers users report
+and deploy.
+1. **CV leakage:** booster early stopping on the CV test fold (R028, the root cause in cv_utils; R003, R022, R126),
+   and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
+2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
+   correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
+3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
+   should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
+4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
+   GUI exclusion and dataset-switch bugs (R004-R007, R037).
+Wave 2 stops the app misleading:
+5. **QW2 + QW6:** calibration-transfer relabel, TSR default, resubstitution R² label, JYPLS-inv centring (R091), dead
+   interference controls.
+6. **QW3:** contaminant maths. EPO `pca_diff` removes noise (R024), OSC removes the predictive direction (R025), the
+   Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
+7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
+   metrics R029/R030.
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).
+Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
+DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
+selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.
 
 **What PR D is** (plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` rev 3, three plan-review rounds):
 - **The card:** Bayesian Options gains a collapsed "Extra hyperparameter axes (advanced)" card. It has one checkbox
