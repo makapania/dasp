@@ -4,14 +4,16 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. First job: merge T-51 PR D (PR #82, branch `feat/T51-pr-d-gui`), then PR E
-**State at hand-off (2026-09-27):** PR D is implemented, reviewed and green, but **not merged**. The user has not
-yet said to merge it.
-- **Reviews:** GLM 5.3 said MERGE on round 1. Codex said MERGE-WITH-CHANGES on rounds 1 and 2; both rounds' findings
-  are fixed in `51acba2` and `cf59dbc`. The last commit is a test-fixture fix that Codex has not re-read.
-- **Tests on `.venv314` (the T3 blessing machine):** full non-GUI suite 3496 passed / 26 skipped. The full GUI suite
-  ran on the final commit; its result is in SESSION_LOG 2026-09-26 "T-51 PR D".
-- **To do:** merge it (squash, like #80/#81), delete the branch, and update this section.
+### 0. In progress 2026-09-27: whole-codebase adversarial review. Then T-51 PR E.
+**PR D (PR #82) MERGED 2026-09-27 as `85790dd`** (squash; branch deleted). Reviews: GLM 5.3 MERGE; Codex
+MERGE-WITH-CHANGES twice, both fixed. Non-GUI suite 3496 passed / 26 skipped on `.venv314`; GUI suite 290 / 7 skipped /
+1 failed (the failure is pre-existing on `main`, see §4).
+- **Adversarial review of all of `main` started 2026-09-27** (Claude multi-agent workflow: 11 code areas, each finding
+  independently re-checked by a skeptic). Results will be recorded in SESSION_LOG under "2026-09-27 adversarial review".
+  If this line is still here with no such entry, the session ended before it finished: re-run it.
+- **Also started: seed-stability test of the leaf_phys_nir "MC-PLS stability" selector** (see §4 item 3). Outputs live
+  in a local scratch dir only; the conclusion goes into SESSION_LOG.
+- Deleted stale remote branches `ci/t-ci-1-hygiene-2026-05-08` and `feat/T16-phase2-permutation` (user's word).
 
 **What PR D is** (plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` rev 3, three plan-review rounds):
 - **The card:** Bayesian Options gains a collapsed "Extra hyperparameter axes (advanced)" card. It has one checkbox
@@ -100,7 +102,7 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
   classification; `AGENT_COMPOSITION.md` §7b already tells them to spell it `PLS-DA`.
 
 ### 4. Queued work
-1. **T-51 next:** merge PR D (see §0), then E/F (one-class clamp; F needs its own approval).
+1. **T-51 next:** PR E, then F (one-class clamp; F needs its own approval). PR D is merged.
 2. **Smaller follow-ups:**
    - **Already failing on `main`:**
      `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
@@ -119,7 +121,14 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
    - Pre-existing from T-51 step 1: unscaled Bayesian importance proxy; unscaled NSGA-II
      display metrics; NSGA-II 'SVM' chromosomes always 1e10; `MODELS_WITH_FEATURE_IMPORTANCE`
      lacks 'SVM'; GUI refit double-scaling under autoscale.
-3. **`SESSION_LOG.md` housekeeping done 2026-09-15** (1705 → 521 lines): batches 6 and 7 in
+3. **Candidate selector: Monte-Carlo PLS stability selection** (from the leaf_phys_nir project,
+   `loop/selection.py::_rank_by_cars` there, which is misnamed and is NOT CARS). Its pitch is a full ranking of every
+   band (fits the top-N grid, unlike CARS's 0-outside-subset scores), it's cheap (no inner CV), and it gives a
+   per-band selection frequency. Its counts have only ~9-14 distinct values over 2151 bands, so it needs a tie-break.
+   It predicted as well as dasp CARS on leaf data (single seed). Cross-seed band stability was untested as of
+   2026-09-27, and an experiment is running. Decide after the result. If adopted it's supervised-only, so disable it
+   in one-class mode like UVE.
+4. **`SESSION_LOG.md` housekeeping done 2026-09-15** (1705 → 521 lines): batches 6 and 7 in
    `docs/SESSION_LOG_ARCHIVE.md` hold everything before 2026-09-14 plus the full #79
    round-by-round history. Keep it short the same way: archive verbatim, and condense a
    finished PR's narrative down to its durable lessons.
