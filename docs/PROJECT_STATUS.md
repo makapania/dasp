@@ -2,42 +2,45 @@
 
 > Historical material (completed-work narratives, old hand-offs, per-PR details, superseded sections) was moved verbatim to [PROJECT_STATUS_ARCHIVE.md](PROJECT_STATUS_ARCHIVE.md) on 2026-09-15. Grep it for history.
 
-## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-16)
+## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
+
+### 0. First job: merge T-51 PR D (PR #82, branch `feat/T51-pr-d-gui`), then PR E
+**State at hand-off (2026-09-27):** PR D is implemented, reviewed and green, but **not merged**. The user has not
+yet said to merge it.
+- **Reviews:** GLM 5.3 said MERGE on round 1. Codex said MERGE-WITH-CHANGES on rounds 1 and 2; both rounds' findings
+  are fixed in `51acba2` and `cf59dbc`. The last commit is a test-fixture fix that Codex has not re-read.
+- **Tests on `.venv314` (the T3 blessing machine):** full non-GUI suite 3496 passed / 26 skipped. The full GUI suite
+  ran on the final commit; its result is in SESSION_LOG 2026-09-26 "T-51 PR D".
+- **To do:** merge it (squash, like #80/#81), delete the branch, and update this section.
+
+**What PR D is** (plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` rev 3, three plan-review rounds):
+- **The card:** Bayesian Options gains a collapsed "Extra hyperparameter axes (advanced)" card. It has one checkbox
+  per registry bundle (`bayes_axis_<id>`), a TPE startup-trials box (`bayes_n_startup_trials`; blank = 20) and a
+  dimension caption (`src/spectral_predict/extra_axes_advisory.py`).
+- **Frozen at the click:** all new vars are in `CAPTURABLE_SETTINGS` and `BAYESIAN_REQUIRED_SETTINGS`, and both
+  worker call sites read them from the snapshot, filtered by the resolved task.
+- **Old snapshots:** they are normalised with `LEGACY_DEFAULTS` inside `diff_gui_settings` and at the startup
+  full-restore call site. **Never inside `restore_gui_settings`**, which also applies the dialog's partial patches;
+  doing that loops.
+- **Adding a bundle to the registry now needs no GUI work.** The card, capture and required lists are all generated
+  from `BUNDLES`, and a test fails if a bundle has no var.
+
+**After PR D: T-51 PR E, then F** (old plan `docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md` §1, §5).
+- **PR E:** the one-class clamp before the fingerprint, with a record. PCA-SIMCA `LVs` reporting. Use the
+  PCA-SIMCA-only `oc_revision=1` in `config_components`, **not** a global version bump.
+- **PR F:** the one-class ceiling moves into `suggest_int`. **It needs its own approval from the user**, and it edits
+  `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
+  pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
 > **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
 > The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
 
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
-CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian). Three
-review rounds (GLM/DeepSeek, then Codex + GLM 5.3 twice). **It re-blessed the T3 trajectory fixture**: that test runs only
-on the blessing machine (`.venv314` here, digest `322dc72485c2`), so run the suite here before claiming green on anything
-that changes default Bayesian trial values. Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 1-10).
-
-### 0. First job: T-51 PR D (GUI card to enable bundles). Nothing is half-finished.
-`main` is clean. PR #81 merged as `e3c6d59`, PR #80 (T-51 PR C) as `f401c29`, PR #79
-(crash-resume) as `a5f9a70`. PR D planning started 2026-09-26: the §4 plan's GUI line numbers predate #79.
-
-**PR D** adds the GUI card that turns bundles on, which is what makes PR B (11 supervised
-bundles) and PR C (3 one-class bundles) reachable without writing Python. Plan:
-`docs/plans/2026-09-13-T51-optuna-axes-implementation-plan.md` §4. After it: E/F
-(one-class clamp; F needs its own approval and edits `suggest_one_class_params`, the one
-planned exception to the no-sampler-edits rule).
-
-**Before writing PR D, read these two — both cost a full review round in PR C:**
-1. **Adding to `BUNDLES` breaks registry-wide assertions** in
-   `tests/test_t51_supervised_bundles.py` (they iterate the whole registry and fit
-   supervised models). PR C scoped them to a `SUPERVISED_BUNDLES` subset; PR D will hit
-   the same tests if it adds or changes bundles.
-2. **A new GUI input that feeds the Bayesian study-name hash must go in
-   `CAPTURABLE_SETTINGS` AND `BAYESIAN_REQUIRED_SETTINGS`** (see §1). A bundle-enable
-   control is exactly such an input: miss it and a changed control silently starts a
-   different study while the finished run releases the saved one's record.
-
-**PR C's known limitation, if PR D surfaces these bundles in the GUI:** `if_max_samples`'
-fractions need >= 2 inliers per training fold. Too few successful folds → the trial scores
-+inf and never reaches the leaderboard; but under repeated CV half the folds suffice, so
-the row IS scored from those alone, unmarked, possibly omitting inliers. The GUI should not
-promise more than that. Wording is in the bundle `help` text — reuse it, don't reinvent it.
+CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
+There were three review rounds.
+- **It re-blessed the T3 trajectory fixture.** That test runs only on the blessing machine (`.venv314` here, digest
+  `322dc72485c2`). Run the suite here before claiming green on anything that changes default Bayesian trial values.
+- Details: SESSION_LOG 2026-09-23 "CARS top-N padding" (items 1-10).
 
 ### 1. PR #79 (crash-resume) is MERGED — `a5f9a70`. Nothing pending on it.
 13 review rounds. Rounds 1-8 were reviewed by Codex + DeepSeek Flash + GLM 5.3; rounds 9-13
@@ -97,9 +100,14 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
   classification; `AGENT_COMPOSITION.md` §7b already tells them to spell it `PLS-DA`.
 
 ### 4. Queued work
-1. **T-51 next:** PR D (GUI card to enable bundles) — see §0 — then E/F (one-class clamp;
-   F needs its own approval).
+1. **T-51 next:** merge PR D (see §0), then E/F (one-class clamp; F needs its own approval).
 2. **Smaller follow-ups:**
+   - **Already failing on `main`:**
+     `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+     (the worker never starts). Its `_FakeThread` accepts no `kwargs`; it probably predates #79's
+     launch changes, but this is unverified. Found by the full GUI suite on 2026-09-27.
+   - The PR D GUI tests leave the result-filter values and traces a real run creates on the shared
+     session app. Existing real-run tests do the same. Codex round 2 flagged it; it is harmless today.
    - `split_plsda_params` passes `C` through uncoerced (hand-edited CSV `'0.05'` would crash).
    - Tab 7 re-applies stored params over a user's `n_components` edit — intended?
    - Tab 7 refit of Bayesian XGBoost rows prints XGBoost "params not used" warning (harmless).

@@ -35,8 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `catboost_sampling` (also sets `bootstrap_type='Bernoulli'`, which `subsample` needs
   for multiclass), `svm_gamma` (written only on RBF-kernel trials), `mlp_activation` and
   `plsda_head` (the PLS-DA logistic head's `C`, stored as `lr__C`). Enable them from
-  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
-  control yet (PR D). Enabled bundles give the run its own study name. Sampled values are
+  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; the GUI card is PR D
+  (below). Enabled bundles give the run its own study name. Sampled values are
   stored in `Params` as estimator parameters and survive rebuild, Tab 7 refit,
   save/load and export. With no bundle enabled, searches and study names are unchanged.
   `apply_extra_axes` now also rejects two axes that share an Optuna name or key when
@@ -47,8 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from {euclidean, manhattan, cosine}) and `ocsvm_poly` (One-Class SVM `degree` int 2-3 on
   poly trials, `coef0` -1 to 1 on poly and sigmoid trials — both suggested every trial but
   written only where the kernel uses them, so rbf trials are unchanged). Enable them from
-  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; there is no GUI
-  control yet (PR D). Enabling any bundle gives the run its own study name, so a
+  Python with `run_unified_bayesian(..., enabled_extra_axes=(...))`; the GUI card is PR D
+  (below). Enabling any bundle gives the run its own study name, so a
   default-space study is never resumed or polluted. The benchmark showed no gain from
   floating these axes; they are for deliberate exploration.
   **Known limitation on very small one-class sets:** `if_max_samples`' fractions need at
@@ -61,6 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inliers out of scoring entirely. That is an incomplete CV metric, not merely a wasted
   trial. Avoid that configuration, or make sure every training fold holds at least two
   inliers.
+- **T-51 PR D** — GUI controls for the opt-in bundles: *Bayesian Options → Extra
+  hyperparameter axes (advanced)*.
+  - **The card:** one checkbox per registry bundle, grouped by model, plus a *TPE startup
+    trials* box (blank = the default 20). Bundles for another task type are greyed out and
+    never sent.
+  - **Frozen at the click:** both are captured with the run's settings and are required
+    Bayesian settings.
+  - **Resume:** a resume whose bundles or startup value differ shows the *Settings differ*
+    dialog. A run saved before this change counts as "all bundles off, startup blank".
+  - **Launch check:** a startup value that is not blank or a whole number >= 1 stops the
+    launch.
+  - **Caption:** shows the largest search dimension among the selected models, as an
+    upper-bound guide.
+  - **Rollback:** do not downgrade past this version while a run is pending that was
+    started with a bundle ticked or a startup value set. The older build ignores both and
+    would continue that run with the default search space.
 
 ### Fixed
 

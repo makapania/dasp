@@ -122,7 +122,14 @@ def gui_app(session_app):
 
     yield app
 
-    # State will be reset for next test
+    # T-51 PR D: the session app is shared, so a ticked bundle or a bad startup
+    # value left by one test must not leak into the next launch test.
+    from spectral_predict.run_gui_settings import LEGACY_DEFAULTS
+
+    for name, value in LEGACY_DEFAULTS.items():
+        var = getattr(app, name, None)
+        if var is not None:
+            var.set(value)
 
 
 @pytest.fixture

@@ -88,4 +88,6 @@ dasp/
 ## Development Notes
 
 - Tier (Quick/Standard/Comprehensive) only affects which models are tested
-- All hyperparameters are exposed and user-editable
+- Grid-search hyperparameters are exposed and user-editable; the Bayesian search holds some
+  fixed and opens them only through opt-in bundles (GUI: Bayesian Options → Extra
+  hyperparameter axes; Python: `enabled_extra_axes`)

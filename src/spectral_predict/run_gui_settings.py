@@ -15,7 +15,11 @@ user. The whitelist pins the contract to the analysis-defining surface.
 
 Drift handling:
 - New settings: add to ``CAPTURABLE_SETTINGS``. Older sidecars without
-  the new key are treated as "no value to restore" (no crash, no warning).
+  the new key are treated as "no value to restore" (no crash, no warning),
+  unless the key is in ``LEGACY_DEFAULTS``: then comparison, and a full
+  restore through ``normalize_saved_settings``, treat it as that key's
+  pre-existing value (T-51 PR D). ``restore_gui_settings`` itself never
+  fills defaults, so a partial patch writes only the keys it is given.
 - Removed settings: stale keys in older sidecars are silently dropped at
   restore time (reported as ``RestoreReport.skipped_unknown``).
 - Whitelisted but absent on the GUI (partially-initialized): reported as
@@ -36,7 +40,44 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from spectral_predict.search_spaces import BUNDLES
+
 logger = logging.getLogger(__name__)
+
+# T-51 PR D: one Tk var per opt-in Bayesian extra-axes bundle, plus the TPE
+# startup-trial count (a StringVar; blank means the backend default).
+EXTRA_AXES_VAR_PREFIX = "bayes_axis_"
+N_STARTUP_TRIALS_SETTING = "bayes_n_startup_trials"
+
+
+def extra_axes_setting_names() -> tuple[str, ...]:
+    """Tk var names of the extra-axes bundle checkboxes, in registry order."""
+    return tuple(f"{EXTRA_AXES_VAR_PREFIX}{bundle_id}" for bundle_id in BUNDLES)
+
+
+def extra_axes_settings() -> tuple[str, ...]:
+    """Every Tk var name PR D adds: the bundle checkboxes and the startup count."""
+    return extra_axes_setting_names() + (N_STARTUP_TRIALS_SETTING,)
+
+
+def parse_n_startup_trials(text: Any) -> int | None:
+    """Parse the startup-trials box: blank -> None, else an integer >= 1.
+
+    Raises:
+        ValueError: anything else (``"abc"``, ``"0"``, ``"20.5"``).
+    """
+    stripped = "" if text is None else str(text).strip()
+    if not stripped:
+        return None
+    try:
+        value = int(stripped)
+    except ValueError:
+        raise ValueError(
+            f"Startup trials must be blank or a whole number >= 1, got {text!r}."
+        ) from None
+    if value < 1:
+        raise ValueError(f"Startup trials must be blank or a whole number >= 1, got {text!r}.")
+    return value
 
 
 # Curated whitelist of analysis-defining Tk variable names. Only these are
@@ -216,7 +257,30 @@ CAPTURABLE_SETTINGS: tuple[str, ...] = (
     "boost_factor",
     # --- ensembles ---
     "enable_ensembles",
+    # --- T-51 PR D: Bayesian extra-axes bundles + TPE startup trials ---
+    *extra_axes_settings(),
 )
+
+
+# The value each setting had before it existed, for snapshots saved by an older
+# build. Only these keys are filled; other missing keys stay "no value".
+LEGACY_DEFAULTS: dict[str, Any] = {
+    **{name: False for name in extra_axes_setting_names()},
+    N_STARTUP_TRIALS_SETTING: "",
+}
+
+
+def normalize_saved_settings(saved: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Fill keys a saved snapshot predates with their :data:`LEGACY_DEFAULTS`.
+
+    Use it before comparing a saved snapshot, and before a FULL restore of one.
+    Never apply it to a partial patch: widening a patch with defaults would reset
+    settings the user did not ask to restore. Empty/None snapshots are returned
+    unchanged (nothing was recorded, so there is nothing to compare or restore).
+    """
+    if not saved:
+        return saved
+    return {**LEGACY_DEFAULTS, **saved}
 
 
 # Settings a resume deliberately does not compare (#79 round 9): model checkboxes
@@ -245,14 +309,17 @@ def diff_gui_settings(
     """List analysis settings whose saved value differs from the current one.
 
     Only whitelisted keys present in ``saved`` are compared, minus
-    :data:`RESUME_UNCOMPARED_SETTINGS`. A key missing from ``current`` (no Tk var
-    on this build) is not a difference — restore can't set it either.
+    :data:`RESUME_UNCOMPARED_SETTINGS`. ``saved`` is normalised first, so a key it
+    predates compares as its :data:`LEGACY_DEFAULTS` value. A key missing from
+    ``current`` (no Tk var on this build) is not a difference — restore can't set
+    it either.
 
     Returns:
         ``(name, saved_value, current_value)`` tuples, sorted by name.
     """
     if not saved:
         return []
+    saved = normalize_saved_settings(saved)
     whitelisted = set(CAPTURABLE_SETTINGS) - RESUME_UNCOMPARED_SETTINGS
     diffs = [
         (name, value, current[name])
@@ -448,6 +515,16 @@ def summarize_gui_settings(settings: dict[str, Any] | None) -> str:
         extras.append("exhaustive-preprocessing=on")
     if _bool("enable_imbalance_handling"):
         extras.append(f"imbalance={_val('imbalance_method')}")
+    enabled_axes = [
+        name.removeprefix(EXTRA_AXES_VAR_PREFIX)
+        for name in extra_axes_setting_names()
+        if _bool(name)
+    ]
+    if enabled_axes:
+        extras.append(f"extra-axes={','.join(enabled_axes)}")
+    startup = str(settings.get(N_STARTUP_TRIALS_SETTING) or "").strip()
+    if startup:
+        extras.append(f"startup-trials={startup}")
     if extras:
         lines.append("Extras: " + ", ".join(extras))
 
