@@ -689,3 +689,22 @@ Plan: `docs/plans/2026-09-26-T51-PR-D-gui-plan.md` (revision 3; three plan-revie
 - **Shared-app leakage:** ticking model boxes flips `model_tier` to 'custom', and a later test's
   `_on_tier_changed()` then returns early. Setting `task_type` rewrites `imbalance_method`. Restore `task_type`
   first and `imbalance_method` last. `tests/gui/test_t51_pr_d_gui.py::_restore_shared_gui_state` does this.
+
+## 2026-09-28 - MC-PLS stability selector (leaf_phys_nir) vs dasp CARS: seed-stability test — do NOT add as a selector
+Candidate from the leaf_phys_nir project (`loop/selection.py::_rank_by_cars`, which is misnamed: it is Monte-Carlo PLS
+stability selection, not CARS). Test: 4 targets (dry/wet × SLA/LMA), 30 selector seeds each. Each target used its
+rank-1 leaf recipe, rebuilt to 1e-13 of the ledger R²; only the selector and its seed varied, and scores are on the
+recipe's external holdout. Scratch outputs only (not in the repo).
+- **Band identity:** MC top-k mean pairwise Jaccard 0.29-0.39, against a null of k/(2p-k) ≈ 0.04-0.07. Only 2-11 bands
+  are picked by all 30 seeds. dasp CARS is lower (0.16-0.34).
+- **Regions (25 nm) favour dasp CARS:** MC r 0.49-0.65, dasp CARS r 0.71-0.94.
+- **Holdout R²:** dasp CARS is never worse. Dry/SLA ties (0.772 vs 0.772); dasp is higher on wet/SLA (0.864 vs 0.799),
+  wet/LMA (0.830 vs 0.798) and dry/LMA (0.803 vs 0.785). MC's seed SD is 0.015-0.032; dasp's is 0.009-0.016.
+- **The earlier single-seed "MC 0.794 vs dasp 0.772" was a lucky seed** (93rd percentile of MC's seed distribution).
+- **Tie-break:** MC's counts have ~10 distinct values, so ties fill 66-72 top-k slots. Ranking ties by mean |coef| over
+  surviving iterations raises Jaccard 0.37→0.48 at no R² cost.
+- **Decision:** don't add it as a selector. The worthwhile generic feature is **seed-frequency reporting for any
+  score-array selector**: run it over N seeds and report per-band and per-region selection frequency. dasp CARS with a
+  30-seed frequency report gave the most reproducible region picture.
+- **Gotcha:** dasp CARS fits PLS with `scale=True` and ranks by |coef| in original units; MC used unscaled PLS. This is
+  the likely cause of their dry/SLA region disagreement (500-750 nm: MC ~15% of bands, dasp ~1%). Untested.

@@ -121,13 +121,10 @@ re-review each round until clean. A post-merge round on #68-#75 found real pre-e
    - Pre-existing from T-51 step 1: unscaled Bayesian importance proxy; unscaled NSGA-II
      display metrics; NSGA-II 'SVM' chromosomes always 1e10; `MODELS_WITH_FEATURE_IMPORTANCE`
      lacks 'SVM'; GUI refit double-scaling under autoscale.
-3. **Candidate selector: Monte-Carlo PLS stability selection** (from the leaf_phys_nir project,
-   `loop/selection.py::_rank_by_cars` there, which is misnamed and is NOT CARS). Its pitch is a full ranking of every
-   band (fits the top-N grid, unlike CARS's 0-outside-subset scores), it's cheap (no inner CV), and it gives a
-   per-band selection frequency. Its counts have only ~9-14 distinct values over 2151 bands, so it needs a tie-break.
-   It predicted as well as dasp CARS on leaf data (single seed). Cross-seed band stability was untested as of
-   2026-09-27, and an experiment is running. Decide after the result. If adopted it's supervised-only, so disable it
-   in one-class mode like UVE.
+3. **MC-PLS stability selector (from leaf_phys_nir): tested 2026-09-28, NOT adopting.** It did not predict better
+   than dasp CARS (dasp was equal or higher on 4/4 targets), was more seed-dependent, and gave less reproducible
+   regions. The spin-off worth doing is **seed-frequency reporting for any selector**: run it over N seeds and report
+   per-band and per-region selection frequency. See SESSION_LOG 2026-09-28.
 4. **`SESSION_LOG.md` housekeeping done 2026-09-15** (1705 → 521 lines): batches 6 and 7 in
    `docs/SESSION_LOG_ARCHIVE.md` hold everything before 2026-09-14 plus the full #79
    round-by-round history. Keep it short the same way: archive verbatim, and condense a
