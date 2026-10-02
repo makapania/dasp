@@ -4,7 +4,24 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. Next: work through the 2026-09-28 review results. Suggested order below; nothing is started.
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 3 of 11 branches merged
+Every Wave 1/2 item was cross-checked by **Codex gpt-6-astra and GLM 5.3** before fixing (the 09-28 reviews were
+Claude-only). Nothing refuted; corrections: R001/R020 latent behind R048; R085 is not the holdout bug; QW1 gain
+~1.5-4x not 60x; QW5 half exists; CTAI is "paired regression in satellite PCA space". User decisions: booster tree
+count = one value from the pooled CV curve (SESSION_LOG 2026-10-02); chemometrics validation conventions (CLAUDE.md).
+**Merged:** #83 fix/ct-honest-labels (QW2, R091, R085); #84 fix/ensemble-cv (R002, R021, R018, R105: honest
+ensemble CV, wrappers moved to `model_wrappers.py`, legacy-pickle-safe loading); #85 feat/dpi-fonts (QW7).
+**Open, each in Codex + GLM review rounds:** fix/booster-early-stopping (fit at max R, truncate to k),
+fix/ytransform-save, fix/wavelength-mapping (final confirm), fix/readers (final confirm), fix/gui-dataset-state
+(calibration identity digest), perf/thread-budget, fix/contaminant-maths (final round; auto EPO count is advisory in
+the GUI, revertible flag `_CONTAM_AUTO_COUNT_ADVISORY`), fix/classification-metrics (raw integer labels in every
+engine except XGBoost). **QW4 (holdout direction) held** until fix/gui-dataset-state merges (same code).
+Known pre-existing test failure on main: `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+(its fake Thread rejects `kwargs=`). Pre-existing: regression code export without CV raises NameError (`_lins_ccc`).
+**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?);
+comma ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call).
+
+### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
   independent refuter; 2 critical, 30 high). IDs are R001-R133; themes in SESSION_LOG 2026-09-28.
@@ -36,7 +53,11 @@ Wave 2 stops the app misleading:
    Diagnostics sub-tab reads never-assigned self.X_train/self.wavelengths.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Implemented on `feat/dpi-fonts`** (not merged
+   yet). It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
+   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
+   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.
@@ -60,8 +81,6 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
   `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
   pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
-> **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
-> The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
 
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
