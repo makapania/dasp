@@ -742,3 +742,22 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - fix/readers: OPUS block priority (R017) and one ASCII reader (R062)
+- **brukeropus gotchas.** `OPUSFile.__getattr__` returns None (not AttributeError) for any absent name, so
+  `hasattr(opus_file, 'a')` is always True; trust `data_keys` (1-D blocks only; `series_keys` are 2-D). A non-OPUS file
+  does not raise in `read_opus`: it returns `is_opus=False`, and `__getattr__` then recurses on `self.params`
+  (RecursionError, which `hasattr` does not catch). The reader now checks `is_opus` first and takes the first usable
+  block in `OPUS_BLOCK_PRIORITY` (a, t, r, other processed types, then sm, then rf, with a UserWarning for sm/rf);
+  metadata `opus_block` records the key. No real OPUS fixture exists in the repo or example/; tests use fakes.
+- **Wrapper merge order.** io.py's vendor wrappers built `{normalised keys..., **file_metadata}`, so reader keys won.
+  OPUS data_type became the raw 'transmittance'/'reference'. PerkinElmer file_format became 'sp' and x_unit the
+  non-canonical 'wavenumber_cm-1', which the GUI's `_apply_x_unit_metadata` treats as nm (read_sp_dir passed it
+  through as well). Reader keys now go first, and the PerkinElmer reader emits 'cm-1'/'nm'.
+- **ASCII.** The later `read_ascii_spectra` (pd.read_csv, header=0, no folders) shadowed the folder-aware one, and
+  five tests asserted the lost first row (2001 -> 2000). There is now one implementation. The delimiter comes from the
+  first fully numeric row (the old folder parser chose it from the first line, so a heading with more spaces than
+  tabs over tab-separated data picked ' ' and then parsed nothing). Lines before that row are the header. Files are opened as utf-8-sig so a BOM does not turn row 1 into a
+  header. The x unit is taken only from explicit unit tokens in the headings, because our own writer labels x
+  "Wavelength" whatever its unit. `_parse_ascii_file` now returns `(df, info)` and raises. Unknown kwargs raise
+  TypeError (they used to go to pd.read_csv; no caller passes any).

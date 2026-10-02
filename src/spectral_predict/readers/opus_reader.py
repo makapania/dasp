@@ -7,10 +7,88 @@ This module requires the optional 'brukeropus' library.
 Install with: pip install brukeropus
 """
 
-import pandas as pd
-import numpy as np
+from __future__ import annotations
+
+import warnings
 from pathlib import Path
-from typing import Tuple, Dict, List, Optional
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+# OPUS data blocks in the order the reader prefers them, as
+# (brukeropus attribute key, data_type reported in metadata). The keys are the
+# attribute names brukeropus (1.4.x) gives each 1-D block on its OPUSFile object
+# (see brukeropus.file.constants). Processed result spectra come first: Bruker
+# files routinely carry the absorbance (AB) block *together with* the single-channel
+# sample (ScSm) and background reference (ScRf) blocks, and the reference is the
+# same instrument background in every file of a batch.
+OPUS_BLOCK_PRIORITY: tuple[tuple[str, str], ...] = (
+    ('a', 'absorbance'),
+    ('t', 'transmittance'),
+    ('r', 'reflectance'),
+    ('logr', 'log_reflectance'),
+    ('km', 'kubelka_munk'),
+    ('atr', 'atr'),
+    ('pas', 'photoacoustic'),
+    ('ra', 'raman'),
+    ('e', 'emission'),
+    ('sm', 'sample'),
+    ('rf', 'reference'),
+)
+
+# Single-channel blocks are only used when no processed spectrum is present.
+_SINGLE_CHANNEL_KEYS = {'sm': 'sample (ScSm)', 'rf': 'background reference (ScRf)'}
+
+
+def _select_opus_block(
+    opus_file: Any, available_keys: list[str]
+) -> tuple[Optional[str], Optional[str], Optional[np.ndarray], Optional[np.ndarray], list[str]]:
+    """Return the first usable data block of an OPUS file in priority order.
+
+    Args:
+        opus_file: Object returned by ``brukeropus.read_opus``.
+        available_keys: The file's ``data_keys`` (1-D blocks). When empty, each
+            priority key is looked up as an attribute instead.
+
+    Returns:
+        ``(key, data_type, x, y, rejected)``. ``key`` is None when no block is
+        usable. ``rejected`` lists ``"key: reason"`` for present but unusable blocks.
+    """
+    rejected: list[str] = []
+    for key, data_type in OPUS_BLOCK_PRIORITY:
+        if available_keys and key not in available_keys:
+            continue
+        try:
+            block = getattr(opus_file, key, None)
+        except (AttributeError, TypeError, RecursionError):
+            block = None
+        x = getattr(block, 'x', None) if block is not None else None
+        y = getattr(block, 'y', None) if block is not None else None
+        if x is None or y is None:
+            if available_keys:
+                rejected.append(f"{key}: no x/y arrays")
+            continue
+        try:
+            x_arr = np.asarray(x, dtype=float)
+            y_arr = np.asarray(y, dtype=float)
+        except (TypeError, ValueError):
+            rejected.append(f"{key}: non-numeric data")
+            continue
+        if x_arr.ndim != 1 or y_arr.ndim != 1:
+            rejected.append(f"{key}: not a 1-D spectrum (shape {y_arr.shape})")
+            continue
+        if x_arr.size == 0 or y_arr.size == 0:
+            rejected.append(f"{key}: empty")
+            continue
+        if x_arr.size != y_arr.size:
+            rejected.append(f"{key}: x has {x_arr.size} points, y has {y_arr.size}")
+            continue
+        if not np.isfinite(y_arr).any():
+            rejected.append(f"{key}: no finite values")
+            continue
+        return key, data_type, x_arr, y_arr, rejected
+    return None, None, None, None, rejected
 
 
 def read_opus_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
@@ -19,6 +97,12 @@ def read_opus_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
 
     OPUS files use numbered extensions (.0, .1, .2, etc.) and contain
     binary spectral data from Bruker FTIR instruments.
+
+    A file usually holds several data blocks. Exactly one is returned: the
+    first usable block in ``OPUS_BLOCK_PRIORITY`` (absorbance, transmittance,
+    reflectance and other processed spectra, then the single-channel sample, and
+    the background reference only as a last resort, with a warning).
+    ``metadata['opus_block']`` records which brukeropus block key was used.
 
     Parameters
     ----------
@@ -64,78 +148,31 @@ def read_opus_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     except Exception as e:
         raise ValueError(f"Failed to read OPUS file {filepath.name}: {e}")
 
-    # Extract spectral data - try different data types in order of preference
-    # Priority: absorbance > transmittance > sample > reference
-    spectrum = None
-    data_type = None
-    x_data = None
-    y_data = None
+    # brukeropus returns an object with is_opus=False (rather than raising) when the
+    # file lacks the OPUS magic header. Its __getattr__ then recurses, so stop here.
+    if getattr(opus_file, 'is_opus', True) is False:
+        raise ValueError(f"Not a valid Bruker OPUS file: {filepath.name}")
 
-    # Check what data is available
-    available_keys = getattr(opus_file, 'data_keys', [])
+    available_keys = list(getattr(opus_file, 'data_keys', None) or [])
+    block_key, data_type, x_data, y_data, rejected = _select_opus_block(opus_file, available_keys)
 
-    # Try absorbance first (most common for analysis)
-    if 'a' in available_keys or hasattr(opus_file, 'a'):
-        try:
-            abs_data = opus_file.a
-            if hasattr(abs_data, 'x') and hasattr(abs_data, 'y'):
-                x_data = abs_data.x  # wavenumbers (cm⁻¹)
-                y_data = abs_data.y  # absorbance values
-                data_type = 'absorbance'
-        except (AttributeError, TypeError):
-            pass
-
-    # Try transmittance if absorbance not available
-    if spectrum is None and ('t' in available_keys or hasattr(opus_file, 't')):
-        try:
-            trans_data = opus_file.t
-            if hasattr(trans_data, 'x') and hasattr(trans_data, 'y'):
-                x_data = trans_data.x
-                y_data = trans_data.y
-                data_type = 'transmittance'
-        except (AttributeError, TypeError):
-            pass
-
-    # Try sample spectrum if neither absorbance nor transmittance available
-    if spectrum is None and ('sm' in available_keys or hasattr(opus_file, 'sm')):
-        try:
-            sample_data = opus_file.sm
-            if hasattr(sample_data, 'x') and hasattr(sample_data, 'y'):
-                x_data = sample_data.x
-                y_data = sample_data.y
-                data_type = 'sample'
-        except (AttributeError, TypeError):
-            pass
-
-    # Try reference spectrum as last resort
-    if spectrum is None and ('rf' in available_keys or hasattr(opus_file, 'rf')):
-        try:
-            ref_data = opus_file.rf
-            if hasattr(ref_data, 'x') and hasattr(ref_data, 'y'):
-                x_data = ref_data.x
-                y_data = ref_data.y
-                data_type = 'reference'
-        except (AttributeError, TypeError):
-            pass
-
-    if x_data is None or y_data is None:
+    if block_key is None:
+        detail = f" Unusable blocks: {rejected}." if rejected else ""
         raise ValueError(
             f"No spectral data found in {filepath.name}. "
-            f"Available data keys: {available_keys}"
+            f"Available data keys: {available_keys}.{detail}"
         )
 
-    # Convert to numpy arrays if needed
-    x_data = np.array(x_data)
-    y_data = np.array(y_data)
+    if rejected:
+        print(f"Warning: {filepath.name}: skipped unusable OPUS blocks {rejected}")
 
-    # Check for valid data
-    if len(x_data) == 0 or len(y_data) == 0:
-        raise ValueError(f"Empty spectral data in {filepath.name}")
-
-    if len(x_data) != len(y_data):
-        raise ValueError(
-            f"Mismatched data lengths in {filepath.name}: "
-            f"x={len(x_data)}, y={len(y_data)}"
+    if block_key in _SINGLE_CHANNEL_KEYS:
+        warnings.warn(
+            f"{filepath.name} has no processed spectrum (absorbance, transmittance, "
+            f"reflectance, ...); using the single-channel {_SINGLE_CHANNEL_KEYS[block_key]} "
+            f"block '{block_key}'. Values are raw detector intensities, not absorbance.",
+            UserWarning,
+            stacklevel=2,
         )
 
     # OPUS files typically use wavenumbers (cm⁻¹), need to convert to wavelengths (nm)
@@ -156,9 +193,12 @@ def read_opus_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     spectrum = spectrum[~spectrum.index.duplicated(keep='first')]
 
     # Extract metadata
+    block_label = getattr(getattr(opus_file, block_key, None), 'label', None)
     metadata = {
         'filename': filepath.name,
         'data_type': data_type,
+        'opus_block': block_key,
+        'opus_block_label': block_label if isinstance(block_label, str) else None,
         'wavenumber_range': (float(x_data.min()), float(x_data.max())),
         'n_points': len(spectrum),
         'file_format': 'opus',
@@ -166,20 +206,14 @@ def read_opus_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     }
 
     # Try to extract additional metadata if available
-    try:
-        # Sample name
-        if hasattr(opus_file, 'snm'):
-            metadata['sample_name'] = str(opus_file.snm)
-
-        # Sample form/type
-        if hasattr(opus_file, 'sfm'):
-            metadata['sample_form'] = str(opus_file.sfm)
-
-        # Instrument parameters (if available)
-        # The opus_file object may have various instrument parameters
-        # but they're not consistently documented in the API
-    except Exception:
-        pass  # Metadata extraction is best-effort
+    # brukeropus's __getattr__ returns None (not AttributeError) for absent parameters.
+    for attr, meta_key in (('snm', 'sample_name'), ('sfm', 'sample_form')):
+        try:
+            value = getattr(opus_file, attr, None)
+        except Exception:  # metadata extraction is best-effort
+            value = None
+        if value is not None:
+            metadata[meta_key] = str(value)
 
     return spectrum, metadata
 
@@ -257,6 +291,7 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
     # Read each file
     spectra = {}
     data_types = []
+    opus_blocks = []
     duplicate_stems = []
     failed_files = []
 
@@ -276,6 +311,7 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
             spectrum, file_metadata = read_opus_file(opus_file)
             spectra[stem] = spectrum
             data_types.append(file_metadata.get('data_type', 'unknown'))
+            opus_blocks.append(file_metadata.get('opus_block', 'unknown'))
         except Exception as e:
             print(f"Warning: Could not read {opus_file.name}: {e}")
             failed_files.append(opus_file.name)
@@ -315,6 +351,17 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
     from collections import Counter
     type_counts = Counter(data_types)
     dominant_type = type_counts.most_common(1)[0][0] if type_counts else 'unknown'
+    block_counts = Counter(opus_blocks)
+    if len(type_counts) > 1:
+        # e.g. some files carry AB and others only single channels: the rows of X are
+        # then in different units, which no downstream step can reconcile.
+        warnings.warn(
+            f"OPUS files in {directory} contain different data types "
+            f"{dict(type_counts)}; the combined matrix mixes them. Check the "
+            f"per-file blocks before modelling.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Compile metadata
     metadata = {
@@ -323,6 +370,7 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
         'file_format': 'opus',
         'data_types': dict(type_counts),
         'dominant_data_type': dominant_type,
+        'opus_blocks': dict(block_counts),
         'n_failed': len(failed_files),
         'failed_files': failed_files[:10] if failed_files else [],
         'x_unit': 'cm-1',

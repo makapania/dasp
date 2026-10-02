@@ -106,15 +106,17 @@ def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     # Wavelengths: typically 2500-25000 nm (2.5-25 μm for IR)
     x_min, x_max = x_data.min(), x_data.max()
 
+    # Use the canonical 'cm-1'/'nm' strings every other reader emits: the GUI's
+    # x-unit handling treats anything that is not 'cm-1' as nm.
     if x_max <= 5000 and x_min >= 100:
         # Likely wavenumbers (cm⁻¹)
-        x_unit = 'wavenumber_cm-1'
+        x_unit = 'cm-1'
     elif x_max >= 1000 and x_min >= 100:
         # Likely wavelengths (nm)
-        x_unit = 'wavelength_nm'
+        x_unit = 'nm'
     else:
         # Ambiguous - assume wavenumbers (more common for IR)
-        x_unit = 'wavenumber_cm-1'
+        x_unit = 'cm-1'
         print(
             f"Warning: Could not determine x-axis units for {filepath.name}. "
             f"Assuming wavenumbers (cm⁻¹). Range: {x_min:.1f}-{x_max:.1f}"
