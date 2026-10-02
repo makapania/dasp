@@ -773,3 +773,9 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `test_resume_round9::test_e2e_one_failing_model_keeps_run_resumable` + `test_resume_round11::
   test_settings_changed_mid_run_do_not_reach_later_models` (`_select_models` unticked only PLS/Ridge; the launch tier
   also ticks ElasticNet). Fixed in the tests. Default GUI selection now passes forward and reversed.
+- **Suite timings (24-thread box at 100% from ~10 concurrent agents; ratios only):** non-GUI on main f6a2287 (no
+  addopts, all 3522) 21.0 min; branch with `-o addopts=""` (3592 incl. 70 new) 17.7 min; branch default selection
+  16.7 min. GUI default selection (253) ~80 s on both main and branch. So most of QW10's time saving must come from
+  the 34 comprehensive GUI tests (not timed here; `test_xgboost_via_gui` alone ~60 min on CI). The biggest remaining
+  default-run costs are not marked slow: `test_wavelength_filtering_integration.py::TestScenario8Consistency` (2
+  tests, 130 s) and five 24 s `test_t41_auto_rerun_preserves_study.py` tests.
