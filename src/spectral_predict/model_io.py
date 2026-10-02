@@ -124,6 +124,77 @@ def _encoder_provably_fits(model: Any, label_encoder: Any) -> bool:
     return codes.size == n_codes and bool(np.array_equal(np.sort(codes), np.arange(n_codes)))
 
 
+def _effective_task_type(metadata: Dict[str, Any], model: Any) -> Optional[str]:
+    """The task type to dispatch on.
+
+    An explicit ``task_type`` wins. Files without one (absent or null, legacy) are
+    classifiers when the fitted estimator says so (sklearn ``is_classifier`` or a
+    ``classes_`` attribute), otherwise regression, as they always defaulted to.
+    """
+    task_type = metadata.get('task_type')
+    if task_type is not None:
+        return task_type
+    try:
+        from sklearn.base import is_classifier
+
+        if is_classifier(model):
+            return 'classification'
+    except Exception:  # noqa: BLE001 - an exotic estimator must not break prediction
+        pass
+    return 'classification' if getattr(model, 'classes_', None) is not None else 'regression'
+
+
+_UNOWNED_ENCODER_WARNING = (
+    "this file was saved before label-encoder ownership was recorded (R016) and its "
+    "stored encoder cannot be shown to belong to the model; returning the model's own "
+    "labels without decoding. Retrain and save the model again if text labels are expected."
+)
+_INVALID_CODES_WARNING = (
+    "the model's classes are not codes of its saved label encoder; returning the "
+    "model's own labels without decoding."
+)
+
+
+def _decoding_encoder(
+    model: Any, label_encoder: Any, metadata: Dict[str, Any]
+) -> tuple[Optional[Any], Optional[str]]:
+    """The encoder allowed to decode this classifier's outputs, or (None, reason).
+
+    A stamped (``label_encoder_owned``) encoder decodes when the model's classes are
+    valid codes for it. An unstamped legacy encoder decodes only when it provably fits
+    (the model's classes are exactly its codes). Shared by prediction and by the
+    probability-column names of ``predict_with_uncertainty``.
+    """
+    if label_encoder is None:
+        return None, None
+    if metadata.get('label_encoder_owned'):
+        if _encoder_codes_valid(model, label_encoder):
+            return label_encoder, None
+        return None, _INVALID_CODES_WARNING
+    if _encoder_provably_fits(model, label_encoder):
+        return label_encoder, None
+    return None, _UNOWNED_ENCODER_WARNING
+
+
+def _class_names(model: Any, label_encoder: Any, metadata: Dict[str, Any], n_columns: int):
+    """Names for ``predict_proba`` columns, in the model's column order, or None.
+
+    Columns follow ``model.classes_``; they are decoded through the encoder only when it
+    may decode this model (same rule as prediction). Never more names than columns.
+    """
+    classes = _model_classes(model)
+    encoder, _ = _decoding_encoder(model, label_encoder, metadata)
+    if classes is None:
+        if encoder is not None and len(encoder.classes_) == n_columns:
+            return encoder.classes_.tolist()
+        return None
+    if encoder is not None and not _is_text_classes(classes):
+        names = encoder.inverse_transform(_integer_codes(classes)).tolist()
+    else:
+        names = classes.tolist()
+    return names if len(names) == n_columns else None
+
+
 _RETRAIN = "Retrain the model in Model Development and save it again."
 
 
@@ -270,7 +341,14 @@ def save_model(
         Can be None if model was trained on raw data.
     label_encoder : sklearn.preprocessing.LabelEncoder or None
         Label encoder for classification with text labels (e.g., "low", "medium", "high").
-        Used to convert between text labels and numeric codes.
+        Used to convert between text labels and numeric codes. **Passing one asserts
+        that ``model`` was trained on this encoder's codes**: the file records
+        ``label_encoder_owned`` and prediction decodes through it. Pass ``None`` for a
+        model trained on raw labels (numeric class values included); never pass an
+        encoder left over from another search. An encoder the model's classes prove
+        stale (booleans, non-integer values, codes outside the encoder) is dropped
+        with a warning, but a stale encoder whose codes happen to be valid cannot be
+        detected.
     cv_residuals : np.ndarray or None
         Cross-validation residuals (predictions - actuals) for uncertainty estimation.
         Shape: (n_cv_samples,) for regression or (n_cv_samples, n_classes) for classification probabilities.
@@ -985,34 +1063,18 @@ def predict_with_model(
 
     # If label_encoder exists, convert predictions back to original text labels.
     # Only a classifier's predictions are codes, and only an encoder that belongs to
-    # this model may decode them (R016).
+    # this model may decode them (R016). Legacy files without task_type are judged by
+    # the fitted estimator.
     label_encoder = model_dict.get('label_encoder')
-    if label_encoder is not None and task_type == 'classification':
+    if label_encoder is not None and _effective_task_type(metadata, model) == 'classification':
         if pd.api.types.is_string_dtype(predictions.dtype):
             pass  # already decoded text labels (some models decode internally)
-        elif metadata.get('label_encoder_owned'):
-            if _encoder_codes_valid(model, label_encoder):
-                predictions = label_encoder.inverse_transform(predictions.astype(int))
-            else:
-                warnings.warn(
-                    "predict_with_model: the model's classes are not codes of its saved "
-                    "label encoder; returning the model's own labels without decoding.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-        elif _encoder_provably_fits(model, label_encoder):
-            predictions = label_encoder.inverse_transform(predictions.astype(int))
         else:
-            # A .dasp saved before the R016 fix can carry a stale search encoder next
-            # to a model trained on raw labels; decoding would relabel every class.
-            warnings.warn(
-                "predict_with_model: this file was saved before label-encoder ownership "
-                "was recorded (R016) and its stored encoder cannot be shown to belong to "
-                "the model; returning the model's own labels without decoding. Retrain "
-                "and save the model again if text labels are expected.",
-                UserWarning,
-                stacklevel=2,
-            )
+            encoder, reason = _decoding_encoder(model, label_encoder, metadata)
+            if encoder is not None:
+                predictions = encoder.inverse_transform(predictions.astype(int))
+            else:
+                warnings.warn(f"predict_with_model: {reason}", UserWarning, stacklevel=2)
 
     # NOTE: Bias correction is applied after model.predict(), which returns
     # original-scale values even when TransformedTargetRegressor is used.
@@ -1091,7 +1153,7 @@ def predict_with_uncertainty(
 
     model = model_dict['model']
     metadata = model_dict['metadata']
-    task_type = metadata.get('task_type', 'regression')
+    task_type = _effective_task_type(metadata, model)
 
     # Check for data type mismatch
     data_type_warning = None
@@ -1271,13 +1333,15 @@ def predict_with_uncertainty(
                 uncertainty['confidence'] = confidence
                 has_uncertainty = True
 
-                # Add class names if label_encoder exists
-                if 'label_encoder' in model_dict and model_dict['label_encoder'] is not None:
-                    uncertainty['class_names'] = model_dict['label_encoder'].classes_.tolist()
-                else:
-                    # Try to get from model classes if available
-                    if hasattr(model, 'classes_'):
-                        uncertainty['class_names'] = model.classes_.tolist()
+                # Column names follow model.classes_ (one per probability column),
+                # decoded only through an encoder that may decode this model. Naming
+                # them from every encoder class mislabelled raw-label models and gave
+                # more names than columns (IndexError in the Tab 8 display).
+                names = _class_names(
+                    model, model_dict.get('label_encoder'), metadata, probabilities.shape[1]
+                )
+                if names is not None:
+                    uncertainty['class_names'] = names
             except Exception as e:
                 # Model doesn't support predict_proba or failed
                 uncertainty['error'] = f"Could not compute probabilities: {str(e)}"

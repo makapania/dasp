@@ -308,3 +308,39 @@ def test_ensemble_reconstruction_uses_the_named_columns_and_excludes_bad_rows(gu
     assert len(rebuilt) == 1, logs
     assert rebuilt[0][2]["wavelengths"] == [1000.02, 1001.0]
     assert sum("Failed to reconstruct" in line for line in logs) == 2
+
+
+def test_tab8_uncertainty_display_with_superset_encoder(gui_app, tmp_path):
+    """Codex round 4: class names came from every encoder class (3) while the model
+    gave 2 probability columns, so _display_uncertainty raised IndexError."""
+    import warnings
+
+    from sklearn.ensemble import RandomForestClassifier
+
+    from spectral_predict.model_io import predict_with_uncertainty, save_model
+
+    rng = np.random.default_rng(6)
+    y = np.repeat(np.array(["a", "b"]), 10)
+    X = rng.normal(size=(20, 12)) + (y == "b")[:, None]
+    encoder = LabelEncoder().fit(["a", "b", "c"])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+    metadata = {
+        "model_name": "RF",
+        "task_type": "classification",
+        "wavelengths": [1000.0 + i for i in range(12)],
+        "n_vars": 12,
+    }
+    save_model(model, None, metadata, tmp_path / "rf.dasp", label_encoder=encoder)
+    loaded = load_model(tmp_path / "rf.dasp")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = predict_with_uncertainty(loaded, X, validate_wavelengths=False)
+
+    names = [f"s{i}" for i in range(len(X))]
+    gui_app.predictions_df = pd.DataFrame({"Sample": names, "RF": result["predictions"]})
+    gui_app.predictions_uncertainty = {"RF": result["uncertainty"]}
+    gui_app._display_uncertainty()
+
+    rows = gui_app.uncertainty_tree.get_children()
+    assert len(rows) == len(X)
+    assert list(gui_app.uncertainty_tree["columns"])[-2:] == ["P(a)", "P(b)"]

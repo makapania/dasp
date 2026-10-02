@@ -866,3 +866,98 @@ def test_rerank_moves_validation_attrs_with_their_rows():
     assert out.attrs["validation_failures"] == {pls_pos: "PLS failed"}
     assert out.attrs["validation_succeeded"] == [ridge_pos]
     assert sorted(out.attrs["validation_attempted"]) == [0, 1]
+
+
+# --------------------------------------------------------------------------------------
+# Review round 4: legacy files without task_type; probability column names
+# --------------------------------------------------------------------------------------
+
+
+def _plsda():
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.models import PLSTransformer
+
+    return Pipeline(
+        [
+            ("pls", PLSTransformer(n_components=2)),
+            ("scaler", StandardScaler()),
+            ("lr", LogisticRegression(max_iter=500)),
+        ]
+    )
+
+
+def _rewrite_metadata(path: Path, edit) -> None:
+    with zipfile.ZipFile(path) as zf:
+        members = {name: zf.read(name) for name in zf.namelist()}
+    meta = json.loads(members["metadata.json"])
+    edit(meta)
+    members["metadata.json"] = json.dumps(meta).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+
+
+@pytest.mark.parametrize("estimator", ["rf", "plsda"])
+@pytest.mark.parametrize("task", ["missing", "null"])
+def test_classifier_without_task_type_still_decodes_its_own_encoder(tmp_path, estimator, task):
+    """Codex round 4: task_type absent/None used to fall to 'regression' and return
+    integer codes for an owned encoder."""
+    X, y = _clf_data(["a", "b", "c"])
+    encoder = LabelEncoder().fit(y)
+    model = (
+        RandomForestClassifier(n_estimators=20, random_state=0) if estimator == "rf" else _plsda()
+    )
+    model.fit(X, encoder.transform(y))
+    path = tmp_path / "no_task.dasp"
+    save_model(model, None, _clf_metadata(X.shape[1]), path, label_encoder=encoder)
+    if task == "missing":
+        _rewrite_metadata(path, lambda m: m.pop("task_type"))
+    else:
+        _rewrite_metadata(path, lambda m: m.update(task_type=None))
+
+    loaded = load_model(path)
+    got = predict_with_model(loaded, X, validate_wavelengths=False)
+    np.testing.assert_array_equal(got, encoder.inverse_transform(model.predict(X)))
+
+
+def test_regression_without_task_type_is_never_decoded(tmp_path):
+    X, _ = _clf_data(["a", "b", "c"])
+    model = PLSRegression(n_components=2).fit(X, X[:, 0])
+    path = tmp_path / "reg.dasp"
+    save_model(model, None, _clf_metadata(X.shape[1]), path)
+    _rewrite_metadata(path, lambda m: m.pop("task_type"))
+    got = predict_with_model(load_model(path), X, validate_wavelengths=False)
+    np.testing.assert_allclose(np.ravel(got), np.ravel(model.predict(X)))
+
+
+def _uncertainty(loaded, X):
+    from spectral_predict.model_io import predict_with_uncertainty
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return predict_with_uncertainty(loaded, X, validate_wavelengths=False)
+
+
+def test_probability_columns_follow_model_classes_for_a_superset_encoder(tmp_path):
+    X, y = _clf_data(["a", "b"])
+    encoder = LabelEncoder().fit(["a", "b", "c"])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+    result = _uncertainty(_save_load(tmp_path, model, encoder, X.shape[1]), X)
+    assert result["uncertainty"]["probabilities"].shape[1] == 2
+    assert result["uncertainty"]["class_names"] == ["a", "b"]
+
+
+def test_probability_columns_of_a_raw_label_legacy_model_are_its_own_classes(tmp_path):
+    X, y = _clf_data([1, 2, 3])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, y)
+    loaded = _legacy_with_encoder(tmp_path, model, LabelEncoder().fit(list("abcd")), X.shape[1])
+    assert _uncertainty(loaded, X)["uncertainty"]["class_names"] == [1, 2, 3]
+
+
+def test_probability_columns_of_a_bool_label_model(tmp_path):
+    X, y = _clf_data([False, True])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, y.astype(bool))
+    loaded = _legacy_with_encoder(tmp_path, model, LabelEncoder().fit(["neg", "pos"]), X.shape[1])
+    assert _uncertainty(loaded, X)["uncertainty"]["class_names"] == [False, True]

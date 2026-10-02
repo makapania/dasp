@@ -821,7 +821,12 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
     are matched exactly.
   - Multi-class holdout val_* need no pre-clear: the supervised helper re-initialises every val column to NaN for
     ALL rows on entry (whole-column assignment). Pinned by a test instead of new code.
+- **Review round 4 (Codex MERGE-WITH-FIXES):** files with absent/null `task_type` are classifiers when the fitted
+  estimator is (`model_io._effective_task_type`: sklearn `is_classifier` or `classes_`), so an owned encoder still
+  decodes them; explicit regression/one_class/multiclass_simca dispatch is unchanged. The decoding decision is one
+  helper (`_decoding_encoder`) shared by prediction and `predict_with_uncertainty`, whose probability column names
+  now follow `model.classes_` (decoded only through a qualifying encoder, never more names than columns). That
+  fixes the Tab 8 `_display_uncertainty` IndexError with a superset encoder.
 - **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
-  when validation is missing; `predict_with_uncertainty` (~1219) labels probability columns with every encoder
-  class even when the model saw fewer; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
+  when validation is missing; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
   merely re-saved without retraining would lose its retrain warning.

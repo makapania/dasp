@@ -119,7 +119,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keeps (`label_encoder_owned`), and `label_mapping` keys are strings. Older `.dasp`
   files are decoded only when their encoder provably belongs to the model (its classes
   are exactly the encoder's codes); otherwise they predict their raw labels with a
-  warning. Model Development no longer turns a results row without its wavelength list
+  warning. Probability columns in prediction uncertainty are named after the model's own
+  classes, which also fixes an error in the Prediction tab's uncertainty table when the
+  encoder knew more classes than the model saw. Model Development no longer turns a results row without its wavelength list
   into a full-spectrum refit: it shows an error unless the row is tagged full-spectrum
   with a matching variable count, or its `top_vars` is the complete trained subset.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**

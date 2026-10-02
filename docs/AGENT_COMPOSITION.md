@@ -485,6 +485,17 @@ the stored scaler and PCA reducer; the regression path above uses the preprocess
 only. For multi-class models it returns a dict (`p_values`, `decision_matrix`, …)
 rather than an array.
 
+**Classifiers and `label_encoder`.** Pass `save_model(..., label_encoder=le)` only when
+the model was trained on `le.transform(y)`. Passing it asserts that ownership: the file
+records `label_encoder_owned`, and `predict_with_model` decodes predictions (and
+`predict_with_uncertainty` names probability columns) through it. A model trained on raw
+labels, numeric class values included, gets `label_encoder=None`. `save_model` drops an
+encoder the model's classes prove stale (booleans, non-integer values, codes outside the
+encoder), but it cannot detect a stale encoder whose codes happen to be valid, so never
+pass one left over from another fit. Files saved before ownership was recorded are
+decoded only when the model's classes are exactly the encoder's codes; otherwise they
+return raw labels with a warning.
+
 ### 8b. Rebuild a model from a results row
 
 A results row does not store a fitted model. It stores what to build, as `str(dict)`,
