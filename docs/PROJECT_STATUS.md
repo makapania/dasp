@@ -38,6 +38,7 @@ and deploy.
    (Windows). GUI fixture now restores full launch state; three order-dependent GUI tests fixed (SESSION_LOG).
    Suite (loaded machine): non-GUI 21.0 min on main (full) -> 17.7 min full / 16.7 min default on the branch;
    GUI default selection ~80 s either way. The 34 comprehensive GUI tests were not timed.
+   Review round 1 (Codex + GLM: MERGE-WITH-FIXES) addressed in `450d748`; origin/main (PR #83) merged in.
 4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
    GUI exclusion and dataset-switch bugs (R004-R007, R037).
 Wave 2 stops the app misleading:
