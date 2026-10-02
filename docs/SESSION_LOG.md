@@ -798,6 +798,22 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   Development still cannot fit XGBoost on numeric labels that are not 0..K-1.
 - Test gotcha: validation-rebuild tests need round wavelengths; `all_vars` is written with `%g` (R031, being fixed on
   fix/wavelength-mapping), so `np.linspace` wavelengths silently fail to map back.
+- **Round 4: one label-policy helper, `scoring.classification_fit_labels`** (used by Bayesian, NSGA-II incl.
+  `_compute_top_variables`, the validation rebuild and the GUI). Integer-valued numeric labels (bool included) are
+  fitted raw; text and NON-INTEGER numeric labels ({0.1,0.2}, which sklearn reads as continuous so stratified CV
+  refuses them) are label-encoded as before (user decision). Grid search previously failed outright on fractional
+  labels (StratifiedKFold "continuous"); run_search now encodes them too and returns the encoder (trivial fix), and
+  Model Development encodes them likewise.
+- **Gotcha: the Bayesian data fingerprint is dtype-sensitive.** LabelEncoder used to turn int32 / float64 / bool
+  {0,1} into int64; fitting them "raw" changed the fingerprint and broke `auto` resume of unchanged studies. Labels
+  already 0..K-1 now return exactly that int64 array (policy "codes").
+- Resuming a pre-raw1 {1,2,100} study now emits "Resume declined for <model>: label policy changed" with
+  `label_policy_changed` + `resume_declined` (GUI shows the resume-issue dialog); the old study stays in the SQLite
+  file, and the run record is released after that notice, as for the environment-changed case.
+- GUI: Bayesian holdout rebuild decodes its temporary codes back to raw integer labels (`_holdout_labels_as_fitted`);
+  NSGA-II holdout encodes training AND validation labels with the search encoder (`_encode_holdout_pair`; raw text
+  training labels against coded validation labels scored 0); display encoders are None for raw numeric labels
+  (`_display_label_encoder`), and the class legend decodes keys only when every key is a code of the encoder.
 - Model Development repeated CV now reduces to one prediction per sample (vote / mean / mean proba) before headline
   metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
 - NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv

@@ -59,6 +59,7 @@ from .models import CATBOOST_RUNTIME_PARAMS, get_feature_importances, strip_runt
 from .variable_selection import cars_selection
 from .scoring import (
     align_proba_to_classes,
+    classification_fit_labels,
     classification_metrics,
     compute_specificity,
     lins_ccc,
@@ -1177,24 +1178,22 @@ class SpectralOptimizationProblem(Problem):
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
 
-        # Classification labels, as in search.run_search: text labels are
-        # label-encoded, numeric labels are fitted as given (PLS-DA regresses on
-        # the label values, so re-coding {1, 2, 100} would fit a model Model
-        # Development cannot reproduce). XGBoost only accepts 0..K-1, so it is
-        # fitted on self.y_xgb codes and decoded back before scoring.
+        # Classification labels follow scoring.classification_fit_labels, as in
+        # the grid search: integer-valued numeric labels are fitted as given
+        # (PLS-DA regresses on the label values, so re-coding {1, 2, 100} would
+        # fit a model Model Development cannot reproduce); text and non-integer
+        # numeric labels are label-encoded and the encoder is returned. XGBoost
+        # only accepts 0..K-1, so it is fitted on self.y_xgb codes and decoded
+        # back before scoring.
         self.label_encoder = None
         self.y_xgb = self.y
         if task_type == 'classification':
-            y_arr = np.asarray(y)
-            if not pd.api.types.is_numeric_dtype(y_arr.dtype):
-                self.label_encoder = LabelEncoder()
-                if y_arr.dtype == object:
-                    y_arr = y_arr.astype(str)
-                self.y = self.label_encoder.fit_transform(y_arr)
-                self.y_xgb = self.y
-            else:
-                self.y = y_arr
-                self.y_xgb = np.searchsorted(np.unique(y_arr), y_arr)
+            from .scoring import classification_fit_labels
+
+            _fit = classification_fit_labels(y)
+            self.y = _fit.y_fit
+            self.label_encoder = _fit.encoder
+            self.y_xgb = classification_fit_labels(y, model_name='XGBoost').y_fit
 
         # Fitness cache
         self.cache_enabled = cache_enabled
@@ -1932,13 +1931,8 @@ def run_nsga2_search(
     # Validate imbalance configuration for classification
     if task_type == 'classification' and imbalance_method is not None:
         # Need to encode y first for validation
-        y_for_validation = y
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            from sklearn.preprocessing import LabelEncoder as LE
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y_for_validation = LE().fit_transform(y_arr)
+        # (same label policy as the fits: non-integer labels are encoded)
+        y_for_validation = classification_fit_labels(y).y_fit
         validate_classification_config(
             y=y_for_validation,
             imbalance_method=imbalance_method,
@@ -1964,12 +1958,7 @@ def run_nsga2_search(
     # (CARS-Tree uses numeric targets internally)
     y_for_importance = y
     if task_type == 'classification':
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            label_encoder_for_importance = LabelEncoder()
-            y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y_for_importance = label_encoder_for_importance.fit_transform(y_arr)
+        y_for_importance = problem.y  # the labels the models are fitted on
 
     # Compute CARS-Tree importance for principled wavelength guidance (if use_guidance=True)
     # CARS-Tree uses hybrid split+gain importance (denser than plain CARS)
@@ -3068,15 +3057,9 @@ def _compute_classification_cv_metrics(
     logger = logging.getLogger(__name__)
 
     try:
-        # Text labels are label-encoded; numeric labels are fitted as given,
-        # as in the grid search (PLS-DA regresses on the label values).
-        y_arr = np.asarray(y)
-        if pd.api.types.is_numeric_dtype(y_arr.dtype):
-            y = y_arr
-        else:
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y = LabelEncoder().fit_transform(y_arr)
+        # Label policy (scoring.classification_fit_labels): integer-valued
+        # numeric labels fitted as given, text / non-integer labels encoded.
+        y = classification_fit_labels(y).y_fit
 
         # Decode solution
         preproc_idx = int(solution[0])
@@ -3437,7 +3420,14 @@ def _compute_top_variables(
                 capped = max(1, n_features_subset - 1)
                 model.set_params(n_components=capped)
 
-        model.fit(X_subset, y)
+        # Same label policy as the search (XGBoost needs 0..K-1 codes; without
+        # this it failed and top_vars silently fell back to index order).
+        y_fit = (
+            classification_fit_labels(y, model_name=model_type).y_fit
+            if task_type == 'classification'
+            else y
+        )
+        model.fit(X_subset, y_fit)
 
         # Get feature importances using the same function as Grid Search
         importances = get_feature_importances(model, model_type)
@@ -3508,17 +3498,12 @@ def _compute_calibration_metrics(
     )
 
     try:
-        # Text labels are label-encoded; numeric labels are fitted as given, as
-        # in the grid search. XGBoost (0..K-1 only) is re-coded further below.
+        # Label policy (scoring.classification_fit_labels): integer-valued
+        # numeric labels fitted as given, text / non-integer labels encoded.
+        # XGBoost (0..K-1 only) is re-coded further below.
         user_classes = None
         if task_type == 'classification':
-            y_arr = np.asarray(y)
-            if pd.api.types.is_numeric_dtype(y_arr.dtype):
-                y = y_arr
-            else:
-                if y_arr.dtype == object:
-                    y_arr = y_arr.astype(str)
-                y = LabelEncoder().fit_transform(y_arr)
+            y = classification_fit_labels(y).y_fit
 
         # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])

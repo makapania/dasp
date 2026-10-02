@@ -125,9 +125,10 @@ def _wavelengths(X):
     return np.arange(1000.0, 1000.0 + 2 * X.shape[1], 2.0)
 
 
-def _bayes(X, y, model_name, n_trials=3):
+def _bayes(X, y, model_name, n_trials=3, **kw):
     from spectral_predict.unified_bayesian import run_unified_bayesian
 
+    kw.setdefault("enable_sqlite_persistence", "never")
     return run_unified_bayesian(
         X=X,
         y=y,
@@ -137,8 +138,8 @@ def _bayes(X, y, model_name, n_trials=3):
         n_trials=n_trials,
         cv_folds=3,
         n_top_regions=2,
-        enable_sqlite_persistence="never",
         verbose=False,
+        **kw,
     )
 
 
@@ -198,3 +199,204 @@ def test_bayesian_label_identity_segment_only_when_needed():
     assert names["codes"] == names["text"]
     # numeric labels that are not 0..K-1: a new study, never resumed with old trials
     assert names["uneven"] != names["codes"]
+
+
+# ---------------------------------------------------------------------------
+# Label policy unit tests (scoring.classification_fit_labels)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "y",
+    [
+        np.array([0, 1, 1, 0], dtype=np.int32),
+        np.array([0.0, 1.0, 1.0, 0.0]),
+        np.array([False, True, True, False]),
+        np.array([0, 2, 1, 2], dtype=np.int64),
+    ],
+    ids=["int32", "float64", "bool", "int64-3class"],
+)
+def test_already_coded_labels_give_the_legacy_int64_array(y):
+    from sklearn.preprocessing import LabelEncoder
+
+    from spectral_predict.scoring import classification_fit_labels
+    from spectral_predict.unified_bayesian import _data_fingerprint
+
+    fit = classification_fit_labels(y)
+    legacy = LabelEncoder().fit_transform(y)
+    assert fit.policy == "codes"
+    assert fit.y_fit.dtype == legacy.dtype
+    np.testing.assert_array_equal(fit.y_fit, legacy)
+    X = np.ones((len(y), 3))
+    wl = np.arange(3.0)
+    assert _data_fingerprint(X, fit.y_fit, wl) == _data_fingerprint(X, legacy, wl)
+
+
+@pytest.mark.parametrize(
+    "y,policy",
+    [
+        (np.array([1, 2, 100, 2]), "raw"),
+        (np.array([-1, 1, 1, -1]), "raw"),
+        (np.array([1.0, 2.0, 2.0]), "raw"),
+        (np.array([0.1, 0.2, 0.2]), "encoded"),
+        (np.array(["a", "b", "a"], dtype=object), "encoded"),
+    ],
+)
+def test_label_policy(y, policy):
+    from spectral_predict.scoring import classification_fit_labels
+
+    fit = classification_fit_labels(y)
+    assert fit.policy == policy
+    if policy == "raw":
+        np.testing.assert_array_equal(fit.y_fit, y)
+        xgb = classification_fit_labels(y, model_name="XGBoost")
+        assert xgb.policy == "xgb_codes"
+        np.testing.assert_array_equal(xgb.label_classes[xgb.y_fit], y)
+    if policy == "encoded":
+        np.testing.assert_array_equal(fit.encoder.inverse_transform(fit.y_fit), y)
+
+
+# ---------------------------------------------------------------------------
+# Fractional class labels (encoded, as before) in every engine
+# ---------------------------------------------------------------------------
+
+
+def test_fractional_labels_work_in_grid_bayesian_and_nsga2():
+    from spectral_predict.nsga2_search import _compute_classification_cv_metrics
+    from spectral_predict.search import run_search
+
+    X, y = _data((0.1, 0.2))
+    df_b, _ = _bayes(X, y, "PLS-DA", n_trials=2)
+    assert len(df_b) > 0 and np.isfinite(df_b.iloc[0]["Accuracycv"])
+    cv_m = _compute_classification_cv_metrics(
+        X, y, _solution(X.shape[1]), X.shape[1], ["PLS-DA"], cv_folds=3
+    )
+    assert np.isfinite(cv_m["F1cv"])
+    Xdf = pd.DataFrame(X, columns=_wavelengths(X))
+    df_g, enc = run_search(
+        Xdf,
+        pd.Series(y),
+        "classification",
+        folds=3,
+        models_to_test=["PLS-DA"],
+        preprocessing_methods={"raw": True},
+        max_n_components=2,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+    )
+    assert enc is not None and list(enc.classes_) == [0.1, 0.2]
+    assert np.isfinite(pd.to_numeric(df_g["Accuracycv"])).all()
+
+
+# ---------------------------------------------------------------------------
+# Binary {-1,1} / bool, multiclass XGBoost decode, XGBoost with class weights
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("labels", [(-1, 1), (False, True)])
+def test_nsga2_binary_signed_and_bool_labels_match_codes(labels):
+    from spectral_predict.nsga2_search import _compute_classification_cv_metrics
+
+    X, codes = _data((0, 1))
+    y = np.array([labels[c] for c in codes])
+    sol = _solution(X.shape[1])
+    got = _compute_classification_cv_metrics(X, y, sol, X.shape[1], ["PLS-DA"], cv_folds=3)
+    ref = _compute_classification_cv_metrics(X, codes, sol, X.shape[1], ["PLS-DA"], cv_folds=3)
+    for k in ("F1cv", "MCCcv", "ROC_AUCcv", "Specificitycv"):
+        assert got[k] == pytest.approx(ref[k]), k
+
+
+@pytest.mark.parametrize("imbalance_method", [None, "class_weight"])
+def test_xgboost_multiclass_uneven_labels_decoded_in_both_engines(imbalance_method):
+    pytest.importorskip("xgboost")
+    from spectral_predict.nsga2_search import _compute_classification_cv_metrics
+
+    X, y = _data((1, 2, 100), n_per_class=(20, 14, 8))
+    ref_codes = np.searchsorted([1, 2, 100], y)
+    sol = _solution(X.shape[1], model_param=0)
+    got = _compute_classification_cv_metrics(
+        X, y, sol, X.shape[1], ["XGBoost"], cv_folds=3, imbalance_method=imbalance_method
+    )
+    ref = _compute_classification_cv_metrics(
+        X, ref_codes, sol, X.shape[1], ["XGBoost"], cv_folds=3, imbalance_method=imbalance_method
+    )
+    # same model on codes; scoring in user labels gives identical numbers
+    for k in ("F1cv", "MCCcv", "ROC_AUCcv", "LogLosscv"):
+        assert got[k] == pytest.approx(ref[k]), k
+    df, _ = _bayes(X, y, "XGBoost", n_trials=2, imbalance_method=imbalance_method)
+    assert len(df) > 0
+    assert set(df.iloc[0]["per_class_metrics"]) == {"1", "2", "100"}
+
+
+def test_validation_helper_rebuilds_xgboost_rows_on_codes_and_decodes():
+    pytest.importorskip("xgboost")
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    X, y = _data((1, 2, 100))
+    df, _ = _bayes(X, y, "XGBoost", n_trials=2)
+    out = compute_validation_metrics_for_top_models(
+        df.copy(), X, y, X, y, "classification", _wavelengths(X), top_n=len(df)
+    )
+    rows = out.dropna(subset=["val_Accuracy"])
+    assert len(rows) > 0
+    for _, r in rows.iterrows():
+        assert r["val_Accuracy"] == pytest.approx(r["Accuracy"])
+        assert r["val_F1"] == pytest.approx(r["F1"])
+
+
+# ---------------------------------------------------------------------------
+# Resume across the label policy (persistence on a temporary SQLite file)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sqlite_storage(tmp_path, monkeypatch):
+    from spectral_predict import run_state
+
+    url = f"sqlite:///{(tmp_path / 'resume.sqlite3').as_posix()}"
+    monkeypatch.setattr(run_state, "get_storage_url", lambda: url)
+    return url
+
+
+@pytest.mark.parametrize("dtype", [np.int32, np.float64, bool])
+def test_already_coded_labels_keep_the_pre_policy_fingerprint(sqlite_storage, dtype):
+    import optuna
+    from sklearn.preprocessing import LabelEncoder
+
+    from spectral_predict.unified_bayesian import DATA_FINGERPRINT_ATTR, _data_fingerprint
+
+    X, codes = _data((0, 1))
+    y = codes.astype(dtype)
+    _, study = _bayes(X, y, "PLS-DA", n_trials=1, enable_sqlite_persistence="always")
+    stored = optuna.load_study(study_name=study.study_name, storage=sqlite_storage).user_attrs
+    # what the pre-policy code stamped: LabelEncoder output (int64)
+    legacy = _data_fingerprint(X, LabelEncoder().fit_transform(y), _wavelengths(X))
+    assert stored[DATA_FINGERPRINT_ATTR] == legacy
+    # and the study name has no label segment, so an old study is found and resumed
+    _, again = _bayes(X, y, "PLS-DA", n_trials=2, enable_sqlite_persistence="auto")
+    assert again.study_name == study.study_name
+    assert len([t for t in again.trials if t.state.is_finished()]) >= 2
+
+
+def test_pre_policy_study_is_reported_as_resume_declined(sqlite_storage):
+    from spectral_predict.unified_bayesian import RESUME_DECLINED_KEY
+
+    X, codes = _data((0, 1, 2))
+    # Same configuration fitted under the old policy (codes) -> pre-policy name
+    _, old = _bayes(X, codes, "PLS-DA", n_trials=1, enable_sqlite_persistence="always")
+    y_uneven = np.array([(1, 2, 100)[c] for c in codes])
+    events = []
+    _, new = _bayes(
+        X,
+        y_uneven,
+        "PLS-DA",
+        n_trials=1,
+        enable_sqlite_persistence="always",
+        progress_callback=events.append,
+    )
+    assert new.study_name != old.study_name
+    notices = [e for e in events if e.get("label_policy_changed")]
+    assert len(notices) == 1
+    assert notices[0].get(RESUME_DECLINED_KEY) is True
+    assert "label policy changed" in notices[0]["message"]
+    assert old.study_name in notices[0]["message"]

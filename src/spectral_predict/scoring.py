@@ -12,12 +12,15 @@ F1, Precision, Recall (= sensitivity) use that positive class and Specificity
 is the true-negative rate of the first sorted class, so a monotone relabelling
 of the classes gives identical metrics. Multiclass metrics are macro averages.
 
-The convention lives only in the metrics. Every engine fits the user's own
-labels (text labels label-encoded), so a PLS-DA model with unevenly spaced
-numeric labels (e.g. {1, 2, 100}) is the same model in every engine. The one
-exception is XGBoost, which only accepts 0..K-1: the Bayesian and NSGA-II
-searches fit it on codes and decode its predictions before scoring (the grid
-and Model Development still cannot fit XGBoost on such labels). Covered: the single-label classifier metrics of the
+The convention lives only in the metrics. Which labels are fitted is set by
+:func:`classification_fit_labels`: integer-valued numeric labels (bool
+included) are fitted as given, so a PLS-DA model with unevenly spaced labels
+(e.g. {1, 2, 100}) is the same model in every engine; text and non-integer
+numeric labels (e.g. {0.1, 0.2}) are label-encoded. The one exception is
+XGBoost, which only accepts 0..K-1: the Bayesian and NSGA-II searches and the
+validation rebuild fit it on codes and decode its predictions before scoring
+(the grid and Model Development still cannot fit XGBoost on such labels).
+Covered: the single-label classifier metrics of the
 grid search (folds, pooled CV, calibration,
 ``compute_validation_metrics_for_top_models``), the Bayesian and NSGA-II
 searches (pooled CV and calibration; NSGA-II's accuracy objective is the pooled
@@ -36,6 +39,7 @@ import ast
 import logging
 import warnings
 from bisect import bisect_left
+from typing import Any, NamedTuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -668,6 +672,80 @@ def compute_cv_anova_pvalue(
         return 1.0  # PRESS >= SSY: model no better than mean.
 
     return float(f_dist.sf(f_stat, a, df2))
+
+
+# ============================================================================
+# CLASSIFICATION LABEL POLICY (which labels a classifier is fitted on)
+# ============================================================================
+
+
+class FitLabels(NamedTuple):
+    """Result of :func:`classification_fit_labels`.
+
+    Attributes:
+        y_fit: Labels to fit the model on.
+        policy: ``"codes"`` (already 0..K-1), ``"raw"`` (integer-valued,
+            fitted as given), ``"xgb_codes"`` (integer-valued but XGBoost needs
+            0..K-1: fitted on codes, decode with ``label_classes``),
+            ``"encoded"`` (text or non-integer numeric labels, label-encoded).
+        label_classes: Sorted user labels to decode ``"xgb_codes"`` fits
+            (``label_classes[code]``); None otherwise.
+        encoder: The fitted ``LabelEncoder`` for ``"encoded"`` labels (metric
+            keys are then codes it decodes); None otherwise.
+    """
+
+    y_fit: np.ndarray
+    policy: str
+    label_classes: Optional[np.ndarray]
+    encoder: Optional[Any]
+
+
+def labels_are_integer_valued(y) -> bool:
+    """True for bool / integer labels and floats that are all whole numbers."""
+    y = np.asarray(y)
+    if y.dtype.kind in "biu":
+        return True
+    if y.dtype.kind == "f":
+        return bool(np.all(np.isfinite(y)) and np.all(y == np.round(y)))
+    return False
+
+
+def classification_fit_labels(y, model_name: Optional[str] = None) -> FitLabels:
+    """Labels a classifier is fitted on, under dasp's label policy.
+
+    Integer-valued numeric labels (bool included) are fitted as given, because
+    PLS-DA regresses on the label values and Model Development / saved models
+    refit the user's labels. Labels that are already 0..K-1 are returned as
+    the same int64 array ``LabelEncoder`` produced before this policy, so data
+    fingerprints of existing studies still match. XGBoost only accepts 0..K-1,
+    so for it integer labels are re-coded and must be decoded before scoring.
+    Text labels and non-integer numeric labels (e.g. {0.1, 0.2}, which
+    sklearn treats as continuous) are label-encoded, as before.
+
+    Args:
+        y: Classification labels.
+        model_name: Model being fitted; only ``"XGBoost"`` changes the result.
+
+    Returns:
+        :class:`FitLabels`.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    y_arr = np.asarray(y)
+    if pd.api.types.is_numeric_dtype(y_arr.dtype) and labels_are_integer_valued(y_arr):
+        classes = np.unique(y_arr)
+        codes = np.searchsorted(classes, y_arr).astype(np.int64)
+        if np.array_equal(classes, np.arange(len(classes))):
+            return FitLabels(codes, "codes", None, None)
+        if model_name == "XGBoost":
+            return FitLabels(codes, "xgb_codes", classes, None)
+        return FitLabels(y_arr, "raw", None, None)
+    if y_arr.dtype == object:
+        types = {type(v) for v in y_arr.ravel().tolist()}
+        if len(types) > 1:
+            y_arr = y_arr.astype(str)
+    encoder = LabelEncoder()
+    return FitLabels(encoder.fit_transform(y_arr).astype(np.int64), "encoded", None, encoder)
 
 
 # ============================================================================

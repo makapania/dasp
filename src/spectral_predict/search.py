@@ -75,6 +75,7 @@ from .models import get_model_grids, get_feature_importances, strip_runtime_para
 from .scoring import (
     add_result,
     align_proba_to_classes,
+    classification_fit_labels,
     classification_metrics,
     compute_cv_anova_pvalue,
     create_results_dataframe,
@@ -1188,11 +1189,22 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             )
 
             # Fit on training data
-            model.fit(X_train_final, y_train, **fit_kwargs)
+            # Label policy (scoring.classification_fit_labels): the row's model
+            # was fitted on the user's labels, except XGBoost, which only accepts
+            # 0..K-1 and is fitted on codes and decoded back before scoring.
+            _xgb_classes = None
+            y_train_fit = y_train
+            if task_type == "classification" and model_name == "XGBoost":
+                _fit_labels = classification_fit_labels(y_train, model_name="XGBoost")
+                if _fit_labels.policy == "xgb_codes":
+                    y_train_fit, _xgb_classes = _fit_labels.y_fit, _fit_labels.label_classes
+            model.fit(X_train_final, y_train_fit, **fit_kwargs)
 
             # Predict on validation data
             y_pred = model.predict(X_val_final)
             y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+            if _xgb_classes is not None:
+                y_pred = _xgb_classes[y_pred.astype(int)]
 
             # === STEP 5: Calculate metrics ===
             if task_type == "regression":
@@ -1212,7 +1224,11 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                     try:
                         y_proba_val = align_proba_to_classes(
                             model.predict_proba(X_val_final),
-                            getattr(model, "classes_", np.unique(y_train)),
+                            (
+                                _xgb_classes[np.asarray(model.classes_, dtype=int)]
+                                if _xgb_classes is not None
+                                else getattr(model, "classes_", np.unique(y_train))
+                            ),
                             val_classes,
                         )
                     except (AttributeError, NotImplementedError) as e:
@@ -1511,8 +1527,9 @@ def run_search(
     -------
     tuple of (pd.DataFrame, LabelEncoder or None)
         ``df_ranked`` — ranked results with all model runs — and the fitted
-        ``label_encoder`` used for classification with text labels (``None`` for
-        regression). **This is a 2-tuple, not a bare DataFrame**; unpack it as
+        ``label_encoder`` used for classification with text labels or non-integer
+        numeric labels (``None`` for regression and for integer-valued labels,
+        which are fitted as given). **This is a 2-tuple, not a bare DataFrame**; unpack it as
         ``df_ranked, label_encoder = run_search(...)``. Treating the result as a
         DataFrame raises ``AttributeError: 'tuple' object has no attribute ...``.
     """
@@ -1563,8 +1580,12 @@ def run_search(
     # list with the second sorted label as the binary positive class.
     label_encoder = None
     if task_type == "classification":
-        # Check if labels are non-numeric (text labels like "low", "medium", "high")
-        if not pd.api.types.is_numeric_dtype(y_np.dtype):
+        # Encode text labels ("low", "medium", "high") and non-integer numeric
+        # labels ({0.1, 0.2}: sklearn reads them as continuous and stratified
+        # CV refuses them); integer-valued labels are fitted as given.
+        from .scoring import labels_are_integer_valued
+
+        if not pd.api.types.is_numeric_dtype(y_np.dtype) or not labels_are_integer_valued(y_np):
             from sklearn.preprocessing import LabelEncoder
 
             label_encoder = LabelEncoder()

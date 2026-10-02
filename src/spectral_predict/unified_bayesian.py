@@ -261,12 +261,6 @@ def _supports_early_stopping(model_name: str) -> bool:
 LABEL_FIT_POLICY = "raw1"
 
 
-def _labels_are_codes(y) -> bool:
-    """True when the labels are exactly 0..K-1 (re-coding would be a no-op)."""
-    classes = np.unique(np.asarray(y))
-    return bool(np.array_equal(classes, np.arange(len(classes))))
-
-
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
     """Return model params that can round-trip through str() and ast.literal_eval()."""
     try:
@@ -2691,27 +2685,27 @@ def run_unified_bayesian(
 
     n_samples, n_features = X.shape
 
-    # Classification labels. As in search.run_search, text labels are
-    # label-encoded and numeric labels are fitted as given: PLS-DA regresses on
-    # the label values, so re-coding {1, 2, 100} to {0, 1, 2} would fit a model
-    # that Model Development and saved models (raw labels) cannot reproduce.
-    # XGBoost is the exception: it only accepts 0..K-1, so it is fitted on codes
-    # and its predictions are decoded back to the user's labels before scoring
-    # (label_classes below). An XGBoost label-encoding wrapper usable by every
-    # engine, grid and Model Development included, is a follow-up.
-    label_encoder = None
+    # Classification labels follow scoring.classification_fit_labels, as in the
+    # grid search and Model Development: integer-valued numeric labels (bool
+    # included) are fitted as given, because PLS-DA regresses on the label
+    # values and re-coding {1, 2, 100} to {0, 1, 2} would fit a model that Model
+    # Development and saved models (raw labels) cannot reproduce. Labels that
+    # are already 0..K-1 become the same int64 array LabelEncoder produced, so
+    # data fingerprints of existing studies still match. Text and non-integer
+    # numeric labels are label-encoded as before. XGBoost only accepts 0..K-1:
+    # it is fitted on codes and decoded back before scoring (label_classes). An
+    # XGBoost label-encoding wrapper for every engine is a follow-up.
     label_classes = None
     _label_fit_segment = False
     if task_type == 'classification':
-        from sklearn.preprocessing import LabelEncoder
-        _label_fit_segment = pd.api.types.is_numeric_dtype(y.dtype) and not _labels_are_codes(y)
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            label_encoder = LabelEncoder()
-            y = label_encoder.fit_transform(y)
-        elif model_name == 'XGBoost' and not _labels_are_codes(y):
-            label_encoder = LabelEncoder()
-            y = label_encoder.fit_transform(y)
-            label_classes = label_encoder.classes_
+        from spectral_predict.scoring import classification_fit_labels
+
+        _fit_labels = classification_fit_labels(y, model_name=model_name)
+        y = _fit_labels.y_fit
+        label_classes = _fit_labels.label_classes
+        # Only studies whose fitted labels changed under this policy get the
+        # |labels= study-name segment.
+        _label_fit_segment = _fit_labels.policy in ("raw", "xgb_codes")
 
     # Guard against None params
     if imbalance_params is None:
@@ -2910,7 +2904,14 @@ def run_unified_bayesian(
     # Numeric labels that are not 0..K-1 are now fitted as given (PLS-DA scores
     # change), so those studies get their own name; every other study name is
     # unchanged. Keep this segment AFTER any |boost_rounds= segment.
+    # Base of the same study's name before the label policy, so an old study can
+    # be recognised and the user told why it is not resumed.
+    _pre_label_policy_base = None
     if _label_fit_segment:
+        _pre_label_policy_base = (
+            f"unified_bayesian_{model_name}_"
+            f"{_hashlib.sha256(config_components.encode('utf-8')).hexdigest()[:8]}"
+        )
         config_components += f"|labels={LABEL_FIT_POLICY}"
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
 
@@ -3079,6 +3080,30 @@ def run_unified_bayesian(
                         f"{', '.join(_incompatible)}",
                         "environment_changed",
                         _incompatible,
+                    ))
+                # Studies of this configuration saved before the label policy fitted
+                # {1, 2, 100}-style labels as codes: their scores describe another
+                # model, so they are not resumed. Say so instead of starting over
+                # silently (the old study stays in the database untouched).
+                _label_policy_old = (
+                    sorted(
+                        n for n in _existing
+                        if n == _pre_label_policy_base
+                        or n.startswith(f"{_pre_label_policy_base}_")
+                    )
+                    if _pre_label_policy_base is not None
+                    else []
+                )
+                if _label_policy_old:
+                    _notes.append((
+                        f"Resume declined for {model_name}: label policy changed. "
+                        f"Previous Bayesian results were fitted on re-coded class labels "
+                        f"(0..K-1); numeric labels are now fitted as given, so their "
+                        f"cached scores describe a different model and will NOT be "
+                        f"reused — starting a fresh study. The previous results are "
+                        f"preserved: {', '.join(_label_policy_old)}",
+                        "label_policy_changed",
+                        _label_policy_old,
                     ))
                 if _legacy:
                     _notes.append((

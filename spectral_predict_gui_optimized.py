@@ -1939,6 +1939,62 @@ class SidebarNavigation:
                 section['content'].config(bg=sidebar_bg)
 
 
+# ===== HELPERS: CLASSIFICATION LABEL POLICY IN THE GUI =====
+# The searches fit integer-valued numeric labels as given and label-encode only
+# text / non-integer labels (scoring.classification_fit_labels). The GUI must
+# hand the validation rebuild the labels the models were fitted on, and only
+# decode metric keys with an encoder when those keys really are codes.
+
+def _display_label_encoder(y):
+    """LabelEncoder for display/decoding, or None when labels are fitted raw.
+
+    Integer-valued numeric labels are fitted (and keyed in per-class metrics)
+    as the user's own values, so decoding them through an encoder would show
+    e.g. class 1 as "2" for labels {1, 2, 100}.
+    """
+    from spectral_predict.scoring import classification_fit_labels
+
+    return classification_fit_labels(np.asarray(y)).encoder
+
+
+def _holdout_labels_as_fitted(encoder, y_train_codes, y_val_codes, y_train_raw):
+    """Return (y_train, y_val) in the label space the searches fitted.
+
+    The Bayesian holdout block maps validation labels onto the training classes
+    through a temporary LabelEncoder. For integer-valued numeric labels the
+    models were fitted on the raw values (PLS-DA regresses on them), so the
+    codes are decoded back; text / non-integer labels stay encoded.
+    """
+    if _display_label_encoder(y_train_raw) is None:
+        return (
+            encoder.inverse_transform(np.asarray(y_train_codes, dtype=int)),
+            encoder.inverse_transform(np.asarray(y_val_codes, dtype=int)),
+        )
+    return y_train_codes, y_val_codes
+
+
+def _encode_holdout_pair(encoder, y_train, y_val):
+    """Encode training and validation labels with the same search encoder.
+
+    Used by the NSGA-II holdout block: when the search label-encoded the target
+    (text / non-integer labels), its models were fitted on codes, so both label
+    vectors handed to the validation rebuild must be codes. Raises ValueError
+    when a label is unknown to the encoder.
+    """
+    if encoder is None:
+        return y_train, y_val
+
+    def _enc(values):
+        values = np.asarray(values)
+        try:
+            return encoder.transform(values)
+        except (ValueError, TypeError):
+            # the NSGA-II encoder may have been fitted on str-normalised labels
+            return encoder.transform(values.astype(str))
+
+    return _enc(y_train), _enc(y_val)
+
+
 # ===== HELPER: ROBUST AUTOSCALE FLAG PARSE =====
 # Pulled out of the metadata save / code-export sites so we share the same
 # string-aware parsing the code generator uses (`bool("False")` is True in
@@ -30637,6 +30693,12 @@ class SpectralPredictApp:
                                         )
                                         raise ValueError("No validation labels match training classes")
 
+                                # The Bayesian models were fitted on the raw labels when
+                                # they are integer-valued: rebuild them on the same values.
+                                y_train_np, y_val_np = _holdout_labels_as_fitted(
+                                    temp_encoder, y_train_np, y_val_np, y_np_clean
+                                )
+
                             # Compute validation metrics
                             results_df = compute_validation_metrics_for_top_models(
                                 df_results=results_df,
@@ -30673,12 +30735,11 @@ class SpectralPredictApp:
                     else:
                         self._log_progress(f"    CV Error: {best.get('CV Error', 'N/A'):.4f}")
 
-                # Store label_encoder for classification (needed for legend display)
+                # Store label_encoder for classification (needed for legend display).
+                # None when the labels were fitted raw (integer-valued numeric): the
+                # per-class keys are then the user's own labels, not codes.
                 if task_type == 'classification':
-                    from sklearn.preprocessing import LabelEncoder
-                    label_encoder = LabelEncoder()
-                    label_encoder.fit(y_np)
-                    self.label_encoder = label_encoder
+                    self.label_encoder = _display_label_encoder(y_np)
                 else:
                     self.label_encoder = None
 
@@ -30787,8 +30848,13 @@ class SpectralPredictApp:
                                 if len(_types) > 1:
                                     y_val_np = _normalize_mixed_type_labels(y_val_np)
                             try:
-                                y_val_np = label_encoder.transform(y_val_np)
-                                self._log_progress("  Encoded validation labels using training encoder")
+                                # Training labels too: the NSGA-II models were fitted on
+                                # these codes (passing raw training labels with coded
+                                # validation labels scored every row as wrong).
+                                y_np_clean, y_val_np = _encode_holdout_pair(
+                                    label_encoder, y_np_clean, y_val_np
+                                )
+                                self._log_progress("  Encoded training + validation labels using training encoder")
                             except ValueError as e:
                                 self._log_progress(f"  [Warning] Could not encode validation labels: {e}")
 
@@ -33362,17 +33428,20 @@ For detailed documentation, see the User Guide.
         # Add class values description label (maps C0, C1, etc. to original Y values)
         # Use label_encoder to get original text labels if available
         encoder = getattr(self, 'label_encoder', None)
-        if encoder is not None and hasattr(encoder, 'classes_'):
+        n_enc = len(getattr(encoder, 'classes_', [])) if encoder is not None else 0
+
+        def _is_code(label):
+            # Decode only keys that really are 0..K-1 codes of this encoder.
+            # Raw numeric keys (labels fitted as given, e.g. {1, 2, 100}) must
+            # not be read as indices.
+            text = str(label).strip()
+            return text.isdigit() and int(text) < n_enc
+
+        if n_enc and all(_is_code(lbl) for lbl in class_labels):
             # Map encoded values back to original labels
-            class_value_parts = []
-            for i, encoded_label in enumerate(class_labels):
-                try:
-                    # encoded_label is the numeric class (0, 1, 2...)
-                    # encoder.classes_[encoded_label] gives original text
-                    original_name = encoder.classes_[int(encoded_label)]
-                    class_value_parts.append(f"C{encoded_label}={original_name}")
-                except (IndexError, ValueError):
-                    class_value_parts.append(f"C{i}={encoded_label}")
+            class_value_parts = [
+                f"C{lbl}={encoder.classes_[int(str(lbl).strip())]}" for lbl in class_labels
+            ]
         else:
             # No encoder - just show class labels as-is
             class_value_parts = [f"C{i}={label}" for i, label in enumerate(class_labels)]
@@ -40712,8 +40781,15 @@ F1 Score:  {f1:.4f}
             # This matches the logic in search.py lines 127-143
             local_label_encoder = None
             if task_type == "classification":
-                # Check if labels are non-numeric (text labels like "Clean", "Contaminated", etc.)
-                if not pd.api.types.is_numeric_dtype(y_series.dtype):
+                # Encode text labels ("Clean", "Contaminated", ...) and non-integer
+                # numeric labels ({0.1, 0.2}: sklearn reads them as continuous);
+                # integer-valued labels are fitted as given, as in every search
+                # (scoring.classification_fit_labels).
+                from spectral_predict.scoring import labels_are_integer_valued
+                if (
+                    not pd.api.types.is_numeric_dtype(y_series.dtype)
+                    or not labels_are_integer_valued(y_series.to_numpy())
+                ):
                     from sklearn.preprocessing import LabelEncoder
                     local_label_encoder = LabelEncoder()
                     y_original = y_series.copy()  # Keep original for logging
