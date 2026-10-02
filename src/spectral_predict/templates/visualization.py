@@ -164,7 +164,8 @@ plt.show()
 
 
 def get_visualization_code(task_type: str, include_spectra: bool = False,
-                          include_variable_importance: bool = False) -> str:
+                          include_variable_importance: bool = False,
+                          include_cv_plots: bool = True) -> str:
     """
     Get visualization code based on options.
 
@@ -176,6 +177,10 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
         Include spectra plot
     include_variable_importance : bool
         Include variable importance plot
+    include_cv_plots : bool
+        Include the plots of cross-validated predictions. They read
+        ``y_pred_cv`` / ``all_y_true_arr``, which only the CV block defines, so
+        pass False when the script has no CV section.
 
     Returns
     -------
@@ -184,7 +189,11 @@ def get_visualization_code(task_type: str, include_spectra: bool = False,
     """
     code_parts = [VISUALIZATION_IMPORTS]
 
-    if task_type == 'regression':
+    if not include_cv_plots:
+        code_parts.append(
+            '\n# Cross-validated prediction plots omitted: this script has no CV section.\n'
+        )
+    elif task_type == 'regression':
         code_parts.append(PRED_VS_ACTUAL_TEMPLATE)
         code_parts.append(RESIDUALS_TEMPLATE)
     elif task_type == 'one_class':

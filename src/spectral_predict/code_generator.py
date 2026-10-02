@@ -133,6 +133,13 @@ class CodeGenerator:
             _es_int = None
         self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
         self.imbalance_method = model_config.get('imbalance_method', None)
+        if self.task_type == 'one_class':
+            # Imbalance handling does not apply to one-class models: they fit on
+            # inliers only with no y (contamination.run_one_class_cv), and the GUI
+            # hides the imbalance card for one-class. A stale imbalance_method in
+            # the config would otherwise route export through the regression
+            # imbalance CV/final-model code.
+            self.imbalance_method = None
         self.inlier_class_label = model_config.get('inlier_class_label', '')
 
         # Update options with target column from config
@@ -371,11 +378,16 @@ class CodeGenerator:
         # See _render_fit_fold_helper for the in-app parity rationale.
         model_cv_code = (
             self._render_model() + '\n' +
-            get_metric_helpers_template(self.task_type) + '\n' +
-            self._render_fit_fold_helper() + '\n' +
-            self._render_cross_validation() + '\n' +
-            self._render_metrics()
+            get_metric_helpers_template(self.task_type)
         )
+        # Honour include_cross_validation as generate_script does.
+        if self.options.include_cross_validation:
+            model_cv_code += (
+                '\n' +
+                self._render_fit_fold_helper() + '\n' +
+                self._render_cross_validation() + '\n' +
+                self._render_metrics()
+            )
         cells.append(self._make_code_cell(model_cv_code))
 
         # Final model
@@ -1910,14 +1922,7 @@ y_pred_cv = all_y_pred_arr
 
 accuracy = float(accuracy_score(all_y_true_arr, all_y_pred_arr))
 f1 = float(f1_score(all_y_true_arr, all_y_pred_arr, average=average_method, zero_division=0))
-
-print(f"\\nCross-validation Results ({self.cv_folds}-fold):")
-print(f"  Accuracy: {{accuracy:.4f}} (pooled across folds — matches Model Development)")
-print(f"  F1 Score (weighted): {{f1:.4f}} (pooled across folds)")
-print("\\nConfusion Matrix:")
-print(confusion_matrix(all_y_true_arr, all_y_pred_arr))
-print("\\nClassification Report:")
-print(classification_report(all_y_true_arr, all_y_pred_arr))
+# Results are printed by the shared metrics block (_render_metrics) that follows.
 '''
 
         return f'''
@@ -2059,7 +2064,18 @@ if sample_weight is not None:
         fit_kwargs['sample_weight'] = sample_weight
 
 model.fit(X_train_full, y_train_full, **fit_kwargs)
+
+# Calibration metrics on the original (un-resampled) training data, as in the
+# plain final-model block.
+y_pred_cal = model.predict({x_var}).ravel()
+cal_rmse = np.sqrt(np.mean((y - y_pred_cal) ** 2))
+cal_r2 = 1 - np.sum((y - y_pred_cal) ** 2) / np.sum((y - y.mean()) ** 2)
+cal_ccc = _lins_ccc(y, y_pred_cal)
+
 print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_train_full.shape[1]}} features")
+print(f"  Calibration RMSE: {{cal_rmse:.4f}}")
+print(f"  Calibration R²:   {{cal_r2:.4f}}")
+print(f"  Calibration CCC:  {{cal_ccc:.4f}}")
 '''
 
     def _render_visualization(self) -> str:
@@ -2068,7 +2084,8 @@ print(f"\\nFinal model trained on {{X_train_full.shape[0]}} samples with {{X_tra
         return get_visualization_code(
             self.task_type,
             include_spectra=True,
-            include_variable_importance=has_var_sel
+            include_variable_importance=has_var_sel,
+            include_cv_plots=self.options.include_cross_validation,
         )
 
     # =========================================================================

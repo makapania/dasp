@@ -1033,21 +1033,40 @@ _OC_CFG = {'model_name': 'IsolationForest', 'preprocessing': 'snv', 'task_type':
            'params': {}, 'cv_folds': 3, 'inlier_class_label': '1'}
 
 
-@pytest.mark.parametrize('config, y_kind, include_cv, expect', [
+_REG_IMB_CFG = {**_REG_CFG, 'model_name': 'Ridge', 'params': {'alpha': 1.0},
+                'imbalance_method': 'binning'}
+# Imbalance handling does not apply to one-class; a stale imbalance_method used
+# to route one-class export through the regression imbalance code (_lins_ccc).
+_OC_IMB_CFG = {**_OC_CFG, 'imbalance_method': 'binning'}
+
+
+@pytest.mark.parametrize('config, y_kind, fmt, include_cv, viz, expect', [
     # Final-model block prints calibration CCC via _lins_ccc, which used to be
     # defined only inside the CV block -> NameError with CV disabled.
-    (_REG_CFG, 'reg', False, 'Calibration CCC'),
+    (_REG_CFG, 'reg', 'script', False, False, 'Calibration CCC'),
     # Final-model block calls _one_class_metrics, same defect.
-    (_OC_CFG, 'oc', False, 'Calibration Balanced Accuracy'),
-    (_CLS_CFG, 'cls', False, 'Final model trained'),
+    (_OC_CFG, 'oc', 'script', False, False, 'Calibration Balanced Accuracy'),
+    (_CLS_CFG, 'cls', 'script', False, False, 'Final model trained'),
     # Imbalance-aware regression CV never computed `ccc`, which the shared
     # metrics block prints.
-    ({**_REG_CFG, 'model_name': 'Ridge', 'params': {'alpha': 1.0},
-      'imbalance_method': 'binning'}, 'reg', True, 'CCC:'),
+    (_REG_IMB_CFG, 'reg', 'script', True, False, 'CCC:'),
+    # Imbalance regression final model now prints calibration metrics too.
+    (_REG_IMB_CFG, 'reg', 'script', False, False, 'Calibration CCC'),
+    (_OC_IMB_CFG, 'oc', 'script', True, False, 'Calibration Balanced Accuracy'),
+    (_OC_IMB_CFG, 'oc', 'script', False, False, 'Calibration Balanced Accuracy'),
+    (_OC_IMB_CFG, 'oc', 'notebook', True, False, 'Calibration Balanced Accuracy'),
+    (_OC_IMB_CFG, 'oc', 'notebook', False, False, 'Calibration Balanced Accuracy'),
+    # CV-prediction plots read y_pred_cv / all_y_true_arr, defined only by CV.
+    (_REG_CFG, 'reg', 'script', False, True, 'Calibration CCC'),
+    (_REG_CFG, 'reg', 'notebook', False, True, 'Calibration CCC'),
 ], ids=['regression-no-cv', 'one-class-no-cv', 'classification-no-cv',
-        'regression-imbalance-cv'])
-def test_exported_script_runs_with_metric_helpers(config, y_kind, include_cv, expect, temp_dir):
-    """Exported scripts must define every metric helper they call, with or
+        'regression-imbalance-cv', 'regression-imbalance-no-cv',
+        'one-class-imbalance-script-cv', 'one-class-imbalance-script-no-cv',
+        'one-class-imbalance-notebook-cv', 'one-class-imbalance-notebook-no-cv',
+        'regression-viz-script-no-cv', 'regression-viz-notebook-no-cv'])
+def test_exported_script_runs_with_metric_helpers(config, y_kind, fmt, include_cv, viz, expect,
+                                                  temp_dir):
+    """Exported scripts and notebooks must define every name they use, with or
     without the CV section."""
     rng = np.random.default_rng(0)
     X = rng.normal(size=(40, 30))
@@ -1057,20 +1076,29 @@ def test_exported_script_runs_with_metric_helpers(config, y_kind, include_cv, ex
         'oc': np.array([1] * 34 + [-1] * 6),
     }[y_kind]
     options = ExportOptions(
-        include_visualization=False,
+        include_visualization=viz,
         include_prediction_template=False,
-        format='script',
+        format=fmt,
         include_data=True,
         data_X=X,
         data_y=y,
         wavelengths=np.linspace(1000, 2500, 30),
         include_cross_validation=include_cv,
     )
+    generator = CodeGenerator(config, options)
     script_path = Path(temp_dir) / 'export_metric_helpers.py'
-    CodeGenerator(config, options).save_script(str(script_path))
+    if fmt == 'notebook':
+        # Run the notebook's code cells in order, skipping the pip-install cell.
+        cells = [''.join(c['source']) for c in generator.generate_notebook()['cells']
+                 if c['cell_type'] == 'code']
+        cells = [src for src in cells if 'pip' not in src or 'subprocess' not in src]
+        script_path.write_text('\n\n'.join(cells), encoding='utf-8')
+    else:
+        generator.save_script(str(script_path))
 
+    env = {**os.environ, 'MPLBACKEND': 'Agg'}
     result = subprocess.run([sys.executable, str(script_path)], capture_output=True,
-                            text=True, timeout=120)
+                            text=True, timeout=120, cwd=temp_dir, env=env)
     assert result.returncode == 0, f"Script execution failed:\n{result.stderr}"
     assert expect in result.stdout
 

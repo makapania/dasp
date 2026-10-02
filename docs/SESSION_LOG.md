@@ -917,3 +917,14 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **`test_run_analysis_accepts_multiclass_engine_selection`: the test was wrong, not the code.** Its fake
   `threading.Thread` took only `(target, args, daemon)`; `_run_analysis` correctly passes `kwargs=`. The fake
   now mirrors Thread's signature and forwards args and kwargs.
+- **Round 2 (Codex probes + GLM review of d4f608a).** A stale `imbalance_method` on a one-class config sent export
+  down the *regression* imbalance CV/final-model path (`_lins_ccc` NameError; it would also have fitted the
+  one-class model with y and sample weights). Imbalance does not apply to one-class (backend fits inliers only, GUI
+  hides the card), so `CodeGenerator.__init__` now drops it for `one_class`. `generate_notebook` ignored
+  `include_cross_validation` and always emitted the CV cell; it now honours the flag as `generate_script` does.
+  With CV off, `include_visualization` emitted plots that read `y_pred_cv` / `all_y_true_arr`;
+  `get_visualization_code(include_cv_plots=False)` now keeps only the spectra plot. The imbalance-regression final
+  model now prints calibration RMSE/R2/CCC like the plain path, and imbalance classification no longer prints its CV
+  metrics twice. Noted, not fixed: the regression pred-vs-actual title prints a literal `{rmse:.4f}` (the viz
+  templates are never `.format`ed but use `{{ }}`), and the one-class "decision score" histogram plots +1/-1
+  labels, not scores.
