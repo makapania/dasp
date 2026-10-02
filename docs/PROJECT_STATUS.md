@@ -4,22 +4,42 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 3 of 11 branches merged
-Every Wave 1/2 item was cross-checked by **Codex gpt-6-astra and GLM 5.3** before fixing (the 09-28 reviews were
-Claude-only). Nothing refuted; corrections: R001/R020 latent behind R048; R085 is not the holdout bug; QW1 gain
-~1.5-4x not 60x; QW5 half exists; CTAI is "paired regression in satellite PCA space". User decisions: booster tree
-count = one value from the pooled CV curve (SESSION_LOG 2026-10-02); chemometrics validation conventions (CLAUDE.md).
-**Merged:** #83 fix/ct-honest-labels (QW2, R091, R085); #84 fix/ensemble-cv (R002, R021, R018, R105: honest
-ensemble CV, wrappers moved to `model_wrappers.py`, legacy-pickle-safe loading); #85 feat/dpi-fonts (QW7).
-**Open, each in Codex + GLM review rounds:** fix/booster-early-stopping (fit at max R, truncate to k),
-fix/ytransform-save, fix/wavelength-mapping (final confirm), fix/readers (final confirm), fix/gui-dataset-state
-(calibration identity digest), perf/thread-budget, fix/contaminant-maths (final round; auto EPO count is advisory in
-the GUI, revertible flag `_CONTAM_AUTO_COUNT_ADVISORY`), fix/classification-metrics (raw integer labels in every
-engine except XGBoost). **QW4 (holdout direction) held** until fix/gui-dataset-state merges (same code).
-Known pre-existing test failure on main: `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
-(its fake Thread rejects `kwargs=`). Pre-existing: regression code export without CV raises NameError (`_lins_ccc`).
-**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?);
-comma ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call).
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 4 of 11 branches merged — HAND-OFF
+Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
+count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
+**Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
+advisory, revertible `_CONTAM_AUTO_COUNT_ADVISORY`; DeepSeek LOWs left: GUI says ~7% vs docs 6.5%, skew hint checks
+only the first direction).
+**Reviewers:** Codex is OUT OF QUOTA until 2026-10-09 15:10, so GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
+user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
+demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
+`gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
+**Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
+- `fix/readers` 023fa18 — final round done + main merged; DeepSeek confirm pending → merge if clean. Deferred
+  follow-up recorded below (CSV/reference/ASD decimal-comma misreads).
+- `fix/wavelength-mapping` — final fixes in progress (matcher per-item numeric/text partition in
+  `model_wrappers._match_wavelengths_normalized`; Tab 8 multi-model probability column alignment) + merge main → merge.
+- `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
+  At merge with booster branch keep `|labels=` after `|boost_rounds=`; on "resume declined" KEEP the run record.
+- `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
+  LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
+  Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
+- `fix/ytransform-save` — round 6 in progress (freeze all worker inputs in `run_training`; guard Results double-click
+  during refit; plot click callback token; export header). Then one confirm + merge.
+- `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
+  function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
+  record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
+- `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
+  cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
+  DeepSeek r2 pending; then fix round + merge main.
+- `fix/preexisting-test-export` d4f608a — fixes multiclass GUI test fake Thread + export NameErrors without CV; GLM
+  MWF; one_class+imbalance export still NameErrors `_lins_ccc` (fix in progress) → review → merge, then delete the
+  "known pre-existing" lines below.
+Known pre-existing on main until that merges: `test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+fails; regression/one-class code export without CV raises NameError.
+**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
+ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
+in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
 
 ### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
@@ -28,10 +48,6 @@ Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Improvement roadmap:** `docs/reviews/2026-09-28-improvement-roadmap.md` (7 lenses: calibration transfer,
   contamination, modelling workflow, speed, GUI usability, visuals, structure). IDs QW*/F*/CT*/CS*/MW*/SP*/LF*/ST*.
 - **Selector test:** the MC-PLS selector is not adopted; its generic form is MW1 (see §4 item 3).
-- **2026-10-02, branch `fix/wavelength-mapping` (not pushed, awaiting review):** R009/R026/R112, R031/R078 and R016
-  fixed. One wavelength-to-column contract (`spectral_predict.wavelength_matching`, declared surface) for Tab 7,
-  model_io and both validation rebuilds; `all_vars` written round-trip-exact; old `%g` rows and old models still
-  load (old fine-grid Tab 7 models warn "retrain"). Details: SESSION_LOG 2026-10-02 and CHANGELOG.
 
 **Combined order (user has not approved it yet; confirm before starting).** Wave 1 fixes the numbers users report
 and deploy.

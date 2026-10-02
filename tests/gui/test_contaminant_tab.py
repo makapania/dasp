@@ -310,8 +310,11 @@ class TestApplyCorrection:
         harness.invoke_method('_contam_run_automated_detection')
         harness.wait_for_idle(0.3)
 
-        # Verify no backup exists yet
-        assert not hasattr(app, 'X_before_contam_correction'), "Backup should not exist yet"
+        # Verify no backup exists yet (the session app is shared, so clear any
+        # state a previous test left behind first)
+        app.X_before_contam_correction = None
+        app._contam_X_written = None
+        assert app.X_before_contam_correction is None, "Backup should not exist yet"
 
         # Apply correction to main dataset
         app.contam_correction_method.set('EPO Projection')
@@ -320,7 +323,6 @@ class TestApplyCorrection:
         harness.wait_for_idle(0.3)
 
         # Verify backup was created
-        assert hasattr(app, 'X_before_contam_correction'), "Backup not created"
         assert app.X_before_contam_correction is not None
 
         # Verify backup has same shape as original

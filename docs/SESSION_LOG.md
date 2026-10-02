@@ -836,6 +836,110 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   when validation is missing; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
   merely re-saved without retraining would lose its retrain warning.
 
+## 2026-10-02 - fix/contaminant-maths (QW3, QW6, R024, R025, R075, R113, R114): gotchas
+- **EPO must not centre the nuisance library.** `EstimatedEPO`, `MultiGroupEPO` and `interference.EPO` all
+  column-centred D before the SVD. When the rows share one contaminant shift (mean diff + noise copies,
+  bootstrapped mean diffs, equal-dose groups, one shape at several levels) centring subtracts the contaminant and the
+  SVD returns jitter. Now: SVD of the uncentred D, `P = I - VV^T`, `transform = X @ P` (a spectrum). `bootstrap` was
+  removed outright: uncentred, its 2nd+ directions are sampling jitter = analyte variation.
+- **Uncentred multi-group D needs a rank rule.** With k = n_groups, two groups sharing one contaminant give a 2nd
+  direction that is the difference of their mean ANALYTE levels; projecting it out kept 0.35% of the analyte.
+  `MultiGroupEPO` now keeps a direction only if S_k^2 > 9 x the expected sampling energy of the mean differences
+  (`sum var_g/n_g + var_ref/n_ref`). A factor of 4 (2 SE) flagged a same-population group ~1 in 20 when its spread
+  lies along one direction (the analyte), so 9 (3 SE).
+- **`interference.EPO` padded its basis with null-space vectors** when the library rank < n_components (it computed
+  `S_truncated` and never used it). Harmless-looking with the old centred library; with an uncentred rank-1 library it
+  projected out arbitrary directions. Now capped at the library rank with a warning; tests that asked for 2-3
+  components from the rank-1 fixture library now use a random library.
+- **numpy 2.5 `np.linalg.pinv` default cutoff kept the ~1e-14 singular value left by mean-centring** (trace of
+  `X X^+` was 79.05 for rank 79) and broke `T = X W` in DOSC at the 1e-4 level. Pass
+  `rcond=max(shape)*eps` explicitly.
+- **OSC/DOSC replaced** (Fearn 2000 / Westerhuis et al. 2001): removed scores satisfy t'y = 0 to ~1e-15; weights and
+  loadings are stored and replayed; output is `X - T P'` on the original scale. Old OSC removed the first PLS loading
+  (corr(t,y) 0.98 on the bench); old DOSC's replayed scores correlated 0.2 with y.
+- **Corrected EPO spectra are projections, not "decontaminated" spectra.** A clean spectrum also loses its own
+  projection on the contaminant direction (baseline overlap), so its level drops a few percent. Tests assert
+  `X @ P` and "not centred", not "clean spectra unchanged".
+- **GUI:** `self.X_train` / `self.wavelengths` are never assigned anywhere, so the Interference Application page's
+  "Load from Import Tab" always said "no data". It now reads `self.X` / `self.y` (aligned by sample label). The same
+  dead attributes are still read by the Diagnostics sub-tab (GUI ~57351, ~61000, ~61050); not fixed here.
+- Repo line endings are mixed: the GUI and the test files are stored CRLF, `src/` modules LF. Python rewrites with
+  default newline handling turned the whole GUI diff into 124k lines; write CRLF files back with `newline=''`.
+
+## 2026-10-02 - fix/contaminant-maths round 2 (Codex BLOCK / GLM merge-with-fixes on 0205c32)
+- **Pickles.** Old fitted EstimatedEPO/MultiGroupEPO (have `X_mean_`, no `fit_version_`) silently changed output;
+  old OSC/DOSC raised NotFittedError. Now every fit stamps `fit_version_ = 2`; objects without it replay the old
+  transform exactly (with a warning) so saved downstream models keep their predictions. Verified cross-process:
+  fitted with f6a2287 code, unpickled with the branch, max |old - new| <= 9e-16 for all six classes and an
+  OSC+PLS pipeline.
+- **interference.EPO needs two library kinds.** Uncentred SVD is right only for difference/pure-interferent
+  libraries. A library of whole spectra (one sample at several moisture levels) contains the analyte; uncentred,
+  its first direction IS the analyte (kept 0.33% analyte, 99.7% moisture). `library_type='samples'` (default,
+  = differences from the library mean, the old behaviour) vs `'differences'` (uncentred). GUI Application page
+  asks which; preprocess.py passes `library_type` through.
+- **MultiContaminantAnalyzer joint projection** took the numerical rank of the union of per-group directions, so
+  two groups sharing one contaminant removed their analyte sampling difference too (analyte kept 0.02%). It now
+  delegates to MultiGroupEPO (`joint_epo_`).
+- **MultiGroupEPO automatic count replaced** (the 9x summed-energy rule was not a per-direction test and diluted
+  a contaminant in one of k groups). Now: rows weighted by 1/sqrt(1/n_g + 1/n_ref); sequential test of the largest
+  remaining squared singular value against a bootstrap of the POOLED within-group residuals (randomly signed,
+  rescaled sqrt(n/(n-1))), with a small-sample factor F_{1-a}(1,df)/chi2_{1-a}(1), df = N - groups - 1; alpha 0.01,
+  999 draws, seed 0. Two failed variants, for the record: label permutation across all spectra lost power when
+  a real contaminant was present (it inflates the null; Codex blank-group case 0.01); a sign-flip of each
+  group's OWN residuals was anti-conservative at n=5 (false positives 5-7%). Needs >= 2 spectra per group for
+  auto, else `n_total_components`. Rates (200 runs, analyte swing ~1, constant dose, old 9x -> new):
+  all-groups dose 0.2: n=5 0.05->0.04, n=10 0.01->0.01, n=40 0.91->1.00; dose 0.5: n=5 0.48->0.28, n=10 1->1;
+  one of k groups: k=2 n=5 d=0.5 0.07->0.12, d=1 0.98->1.00; k=2 n=10 d=0.5 0.30->0.91; k=4 n=5 d=1 0.37->0.96;
+  k=4 n=10 d=0.5 0.00->0.11; false positives 0-2% old, 0-1.5% new; Codex blank-group case 0.21->0.94. A
+  contaminant smaller than the group means' sampling spread along their noisiest direction (the analyte, at
+  small n) is not detectable by any data-driven direction test; the Apply page has an override.
+- **GUI:** Restore/Apply now rebuild `validation_X` from `self.X` by the cached validation IDs (minimal, so
+  fix/gui-dataset-state's `_install_dataset` can absorb it); Restore also checks a content fingerprint (an
+  in-place edit kept object identity); EPO "directions to remove" (auto/1-5) and an unpaired-groups caution;
+  "auto found nothing" is an information dialog with the override hint. Pairing is NOT offered: the loaders
+  discard contaminated-group sample names and the combined import has no specimen-ID column.
+
+## 2026-10-02 - fix/contaminant-maths round 3 (Codex BLOCK / GLM merge-with-fixes on a5b17f2)
+- **The pooled residual bootstrap assumed one within-group covariance.** With identical means and no
+  contaminant it removed a direction in 25% of runs (reference n=50 SD1 vs group n=5 SD4) and 34%
+  (reference n=5 SD4 vs two groups n=50 SD1), 400 runs each. Replaced by a per-group bootstrap: each
+  group's mean error is drawn from its OWN residuals (rescaled sqrt(n/(n-1)), random signs), one shared
+  reference draw per replicate, and each group's error multiplied by sqrt(df/chi2_df), df = n_g - 1 (a
+  Behrens-Fisher-type predictive; the global F/chi2 factor and a min-Welch-df factor were dropped - the
+  latter made any 2-spectrum group veto everything). False positives at alpha 0.01, 400 runs: Codex
+  heteroscedastic cases 0.5% / 1.5% / 0.25% (10/10/10, ref SD4) / 0.25% (equal SD 50 vs 5); GLM grid k=2-4,
+  n=2-40: 0-1.25% (0% at n<=5: conservative). Pooled a5b17f2 on the same cells: 25% / 34% / 4.5% / 1.75%,
+  grid 0.5-2.75%.
+- **Cost: power at small n.** Detection (400 runs; among hits, median contaminant energy removed):
+  all groups, dose 0.5: n=5 0.03 (75%), n=10 0.97 (97%); dose 0.2: n=40 0.99 (95%), n<=10 <=0.02. One of
+  k groups: k=2 n=10 d=0.5 0.48 (94%); k=2 n=5 d=1 0.43 (97%); k=4 n=5 d=1 0.04; k=4 n=10 d=1 1.00 (99%).
+  The pooled version found far more at n=5 (k=4 n=5 d=1: 0.96) but at the false-positive cost above. With
+  groups of 2-3 spectra the test essentially never removes anything; a 2-spectrum blank group makes the
+  max statistic too heavy-tailed to find a clear contaminant elsewhere (Codex blank case 0.94 -> 0.01).
+  Accepted because the GUI count is now advisory and has a manual choice.
+- Benchmark "hits" now report removal quality too: low-power cells' hits remove 13-40% of the contaminant
+  (Codex saw 22% for n=5 dose 0.2), so a bare detection rate overstated usefulness.
+- Other fixes: `__setstate__` migrates constructor params of old MultiGroupEPO (alpha/n_resamples/
+  random_state) and interference.EPO (library_type = 'samples' iff old center=True, matching what the old
+  code did) so clone/refit work without stamping fit_version_; Apply/Restore clear an unrebuildable holdout
+  (`_reset_validation_set`); MultiContaminantAnalyzer warns and falls back to all group directions for
+  singleton groups and no longer hides "removes nothing"; analyze_multiple_contaminants keeps partial
+  results with a GUI-worded note; zero-capacity (one wavelength) no longer IndexErrors; failed fits leave no
+  half-fitted state; bootstrap chunks sized to ~64 MB.
+- 0205c32 (round 1) never left this branch, so pickles fitted by it (corrected method, no fit_version_)
+  would wrongly take the legacy path; no action: only f6a2287-and-earlier pickles exist in the wild.
+
+## 2026-10-02 - fix/contaminant-maths round 4 (final review)
+- Known limit, documented rather than fixed: the per-group bootstrap randomly sign-flips residuals, which
+  symmetrises them, so SKEWED groups with very different spreads are anti-conservative (Codex: lognormal
+  null, n 50/10, SD 1/4 -> 9.4% false removals at alpha 0.01, each erasing the analyte; exponential 3.8%;
+  `test_auto_rank_skewed_heteroscedastic_null_rate` reproduces 18/200 and bounds it at <= 30/200).
+  Dialog, docstrings, UserGuide and the Apply caution now say the p-values are approximate, can be wrong
+  both ways (one contaminated group of four at n=10, dose 0.5: ~6.5% detection), and that groups of 2-3
+  need a manual count. The advisory dialog adds a warning when a group's residual scores along the
+  suggested direction have |skewness| > 1 (n >= 8) - a hint, not a test.
+- tests/gui/conftest.py `_suppress_dialogs` now also patches tkinter.simpledialog.askinteger/askstring/
+  askfloat (return None); no existing test used the real dialogs.
 ## 2026-10-02 - Ensemble CV fix (branch fix/ensemble-cv; R002, R018, R021, R105)
 - **R018 masked R002.** With string specimen IDs every GUI ensemble died on `y_filtered[train_idx]` (pandas 3 label
   lookup), so the inflated R2CV was only visible on RangeIndex data. Fixing the indexing alone would have published
