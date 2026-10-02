@@ -4,7 +4,44 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. Next: work through the 2026-09-28 review results. Suggested order below; nothing is started.
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 3 of 11 branches merged — HAND-OFF
+Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
+count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
+**Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts.
+**Reviewers:** Codex is OUT OF QUOTA until 2026-10-09 15:10, so GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
+user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
+demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
+`gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
+**Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
+- `fix/readers` 023fa18 — final round done + main merged; DeepSeek confirm pending → merge if clean. Deferred
+  follow-up recorded below (CSV/reference/ASD decimal-comma misreads).
+- `fix/wavelength-mapping` — final fixes in progress (matcher per-item numeric/text partition in
+  `model_wrappers._match_wavelengths_normalized`; Tab 8 multi-model probability column alignment) + merge main → merge.
+- `fix/contaminant-maths` b7a8cef — final round done (auto EPO count advisory, documented skewed-null limit) + main
+  merged; DeepSeek confirm pending → merge if clean.
+- `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
+  At merge with booster branch keep `|labels=` after `|boost_rounds=`; on "resume declined" KEEP the run record.
+- `fix/booster-early-stopping` — round 3 in progress (Codex r3 BLOCK: export metrics before truncation; CatBoost auto
+  LR replaced by 0.1 in rebuild/export; sanitize None breaks clone; resume flag; ensemble rebuild via truncation).
+  Reconcile with fix/ytransform-save: Tab 7 y-transform k read off transformed-y curve vs final fit on raw y (~41998).
+- `fix/ytransform-save` — round 6 in progress (freeze all worker inputs in `run_training`; guard Results double-click
+  during refit; plot click callback token; export header). Then one confirm + merge.
+- `fix/gui-dataset-state` 77063e1 — round in progress (Codex BLOCK: transactional reconcile, shared calibration-prep
+  function for digest+worker, lossless int targets, object-y canonicalisation, framed digest + counts, strict
+  record schema, dotted IDs → "can't verify", MultiIndex NaN dedupe). QW4 (holdout direction) waits for this.
+- `perf/thread-budget` c53c6f2 — GLM r2 MWF (GA candidate pool lacks CatBoost-serial rule; `native_thread_limit`
+  cross-API restore via `restore_original_limits()` clobbers other APIs; stricter nested exit never re-loosens);
+  DeepSeek r2 pending; then fix round + merge main.
+- `fix/preexisting-test-export` d4f608a — fixes multiclass GUI test fake Thread + export NameErrors without CV; GLM
+  MWF; one_class+imbalance export still NameErrors `_lins_ccc` (fix in progress) → review → merge, then delete the
+  "known pre-existing" lines below.
+Known pre-existing on main until that merges: `test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+fails; regression/one-class code export without CV raises NameError.
+**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?); comma
+ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call); delete stray GLM temp files
+in %TEMP% (diff.txt, gui_f359708.py, opencodeepo_*).
+
+### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
   independent refuter; 2 critical, 30 high). IDs are R001-R133; themes in SESSION_LOG 2026-09-28.
@@ -29,7 +66,11 @@ Wave 2 stops the app misleading:
    Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Implemented on `feat/dpi-fonts`** (not merged
+   yet). It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
+   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
+   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.
@@ -53,8 +94,6 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
   `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
   pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
-> **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
-> The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
 
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).

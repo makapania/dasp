@@ -293,6 +293,37 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
+# Application manifest with system DPI awareness, so Windows does not
+# bitmap-stretch (blur) the Tk UI on scaled displays. Microsoft recommends the
+# manifest over the SetProcessDpiAwareness API; main() still calls the API so
+# source runs match, and it tolerates E_ACCESSDENIED when the manifest already
+# set awareness. A custom manifest REPLACES PyInstaller's built-in template
+# (PyInstaller/utils/win32/winmanifest.py:_DEFAULT_MANIFEST_XML, 6.x) rather than
+# merging with it, so the template's compatibility and longPathAware entries are
+# copied here verbatim; PyInstaller still injects the execution level and the
+# Common-Controls v6 dependency. "system" matches SetProcessDpiAwareness(1);
+# dpiAware=true is the pre-Windows-10-1607 spelling of the same setting.
+DPI_AWARE_MANIFEST = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{e2011457-1546-43c5-a5fe-008deee3d3f0}"></supportedOS>
+      <supportedOS Id="{35138b9a-5d96-4fbd-8e2d-a2440225f93a}"></supportedOS>
+      <supportedOS Id="{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}"></supportedOS>
+      <supportedOS Id="{1f676c76-80e1-4239-95bb-83d0f6d0da78}"></supportedOS>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"></supportedOS>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">system</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>
+"""
+
 exe = EXE(
     pyz,
     a.scripts,
@@ -311,6 +342,7 @@ exe = EXE(
     entitlements_file=None,
     icon='asp_logo.ico',
     version='version_info.txt',
+    manifest=DPI_AWARE_MANIFEST,
 )
 
 coll = COLLECT(

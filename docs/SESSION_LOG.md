@@ -851,3 +851,163 @@ Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loadi
   unverifiable record keeps the current selection and never decodes its holdout keys.
 - Legacy record + labels that look renamed ("S1" and "S1.2") now asks resume anyway / fresh / keep: that
   spelling also occurs naturally. `rename_duplicate_ids` uses missing-aware keys (tuple IDs with NaN parts).
+
+## 2026-10-02 - Ensemble CV fix (branch fix/ensemble-cv; R002, R018, R021, R105)
+- **R018 masked R002.** With string specimen IDs every GUI ensemble died on `y_filtered[train_idx]` (pandas 3 label
+  lookup), so the inflated R2CV was only visible on RangeIndex data. Fixing the indexing alone would have published
+  the leaky numbers. Example data (49 bone spectra, 5 base models incl. GA + CARS wrappers): before, string IDs ->
+  all 5 methods `[X] failed`; RangeIndex -> R2CV 0.936-0.970 with best honest base 0.869. After: 0.847-0.881 for
+  both index types.
+- **The "~0.03 R2 loss from StandardScaler divergence" (commit 9c4d02c) was honest CV, not a bug.** Refitting a
+  wrapper on 4/5 of the rows gives lower OOF R2 than predicting with the full-data fit; that drop is the point. The
+  wrappers already cloned correctly (clone().fit(all rows) reproduces the original predictions). `_is_wrapped_model`
+  and the GUI's `refit_base_models=not any_wrapped` are gone; `refit_base_models=False` still exists in the ensemble
+  classes for API compatibility but warns that it learns in-sample.
+- **WavelengthSubsetWrapper passed full-width numpy arrays straight through** ("assume columns are already matched"),
+  so any numpy caller (validation arrays, numpy-X ensemble fits) fed 2151 columns to a 40-column model. It now takes
+  `all_columns` and subsets arrays by position, or raises when the width matches neither.
+- **Outer CV design:** `ensemble.cross_validate_ensembles` clones and refits every base model on each outer training
+  fold (shared across ensemble types), then `create_ensemble` learns weights from inner OOF within that fold. The
+  deployed ensemble is still fitted on all calibration rows. Cost is about that of the old loop with unwrapped
+  members (plus one base fit per member per outer fold).
+- **Failed OOF members are now removed from the ensemble** (`models`, `model_names`, preprocessor lists; recorded in
+  `excluded_models_`), so saved metadata, weights and routing all agree. This mutates `models` in `fit` (sklearn
+  convention says don't), chosen because `model_io.save_ensemble`, the GUI metadata and viz all read `.models` /
+  `.model_names`; the caller's list is never mutated in place. All members failing raises ValueError.
+- **Stacking R2cal can be far below R2cv** on weak data (meta-model trained on OOF features, applied to in-sample
+  features): -0.75 vs -0.35 on noise. Not a bug in this fix; don't assert cal >= cv in tests.
+- `create_auto_ensembles` (no production caller) had the same Series indexing and two full-data fallbacks; folds that
+  cannot rebuild 2 models now give NaN metrics instead of calibration predictions, and `unique_model_count` counts only
+  successful rebuilds (R106 in passing). The first commit missed its two `n < 2` calibration fallbacks; round 1 of
+  review removed those too (NaN + warning).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes) added:** a caller's stacking `meta_model` is cloned per outer
+  fold and inside every `StackingEnsemble.fit` (a warm_start learner carried fold state); `cross_validate_ensembles`
+  rejects `preprocessors` / `preprocessor_configs` (members are refitted on raw rows, so a separate transform would
+  apply at predict time only; Codex measured R2 -30 vs 0.998) and non-numeric y; dropping a failed member resolves
+  every member's effective preprocessing first, because `_get_preprocessor` allows short lists and a survivor could
+  inherit the dropped member's transform.
+- **Saving any ensemble with a GA / Combined wrapper member raised PicklingError**: the wrappers cache a local
+  closure in `_transform`. They now drop it in `__getstate__` (it is rebuilt from `preprocess_config`).
+- **Saved ensemble uncertainty used in-sample residuals** labelled `cv_residuals` (`_save_selected_ensemble`
+  re-predicted the training rows). It now saves the outer-CV OOF predictions kept in each `ensemble_results` entry, or
+  no CV data at all. It also recorded `task_type='auto'` when the task radio was on auto, which dropped the residuals.
+- **Review round 2:** `BaseEstimator.__getstate__` returns the LIVE `__dict__` (py3.14 / sklearn 1.9), so editing it
+  cleared the cache of an object being pickled mid-prediction; copy it first. The six ensemble wrappers moved from
+  the GUI script to `spectral_predict/model_wrappers.py` (the GUI re-exports the names): pickles made by the GUI named
+  `__main__.<Class>` and could not load in a script or a frozen app with a different entry module. `model_io` loads
+  every pickle through `_joblib_load`, which temporarily points missing `__main__` / `spectral_predict_gui_optimized`
+  names at the backend classes (adds only, removes afterwards). Ensemble files with `task_type='auto'` load as
+  regression. `create_auto_ensembles` now warns that its CV is optimistic: specialists come from search-time
+  regional rankings over all rows; honest per-fold rankings not implemented (no production caller).
+- **Review round 3: the round-2 load shim mutated global state** (temporary `__main__` attributes and a stub
+  `spectral_predict_gui_optimized` in `sys.modules`): racy under concurrent loads, it shadowed a real GUI import made
+  during a load, and an interrupt could leak it. Replaced with a per-load unpickler: `model_io._joblib_load`
+  repeats `joblib.load`'s non-memmap path with a `NumpyUnpickler` subclass whose `find_class` maps the six
+  (`__main__` | GUI module, wrapper) pairs via `model_wrappers.resolve_legacy_class`. joblib 1.6 has no public
+  unpickler hook; the one private helper used (`numpy_pickle._validate_fileobject_and_memmap`, decompression) is
+  imported inside a try with a plain `joblib.load` fallback. `model_wrappers.LegacyWrapperUnpickler` does the same
+  for plain pickle (GUI raw `.pkl` prediction models).
+- **Black with `--target-version py314` rewrites `except (A, B):` to `except A, B:`**, which is a SyntaxError on the
+  3.12 rollback build. Run Black on this repo with `--target-version py312`.
+- `load_model` also maps `task_type='auto'` to regression, but only for a regressor (not an sklearn classifier and
+  no `classes_`); classifiers stay 'auto'.
+
+## 2026-10-02 - fix/ct-honest-labels (QW2, R085, R091, R128): gotchas
+- **Two CT build paths.** The Build button (GUI ~55034) calls `_build_transfer_model_new`; the older
+  `_build_ct_transfer_model` (~46990) has no callers. The roadmap's "TSR uses KS" line was true only of the dead
+  one; the live one took the first n rows. Fix the live path first; the dead one was only made honest.
+- **JYPLS-inv enhanced-y path indexed twice.** It subset the paired arrays by `transfer_indices` and then passed the
+  subset together with the same indices to `estimate_jypls_inv`, which indexes again (wrong rows or IndexError).
+  Dormant (radio disabled), fixed anyway.
+- **R091 maths.** sklearn `PLSRegression.transform` = `(X - mean) @ x_rotations_` for `scale=False`; `x_weights_`
+  only projects deflated X. The transfer is `mean_primary + (c + T_sat M - mean(T_primary)) P^T`, applied as
+  `X @ B + offset`. Without the primary-block mean the 2-block stacked mean leaves half the instrument offset.
+  Old saved jypls models have no `'offset'` and are now refused rather than silently applied.
+- **`black --line-ranges` is not hunk-local.** A range touching one entry of a multi-line statement reformats the
+  whole statement, so editing three tooltips re-quoted the entire ~770-entry `TOOLTIP_CONTENT` dict. Drop
+  black-only hunks afterwards (normalise quotes, `\'`, whitespace and trailing commas, compare) before committing.
+- **Worktree Bash guard.** In an isolated worktree the Bash tool refuses heredocs/compound commands it cannot
+  verify; write scripts with the Write tool and run them with PowerShell instead.
+- **`cross_val_score(groups=...)` breaks under sklearn metadata routing.** With
+  `config_context(enable_metadata_routing=True)` the `groups=` keyword raises; a broad `except ValueError`
+  around it silently skipped CV (JYPLS chose 1 component, cv_rmse=inf). Materialise
+  `list(GroupKFold(...).split(X, y, groups))` and pass `cv=splits`; that works with and without routing.
+- **The GUI holdout does not use `sample_selection.kennard_stone`.** `_validation_kennard_stone` (GUI ~20627)
+  is its own pdist/squareform implementation; R085 only affected CT standards and model_io representatives.
+- **CT dead code (round 2).** The transfer-model registry UI was never built (no `ct_registry_tree`, no bindings),
+  so its seven handlers and `transfer_model_registry` were deleted. The quality-plot SG window had a floor of 5,
+  so an ROI of 1-4 wavelengths raised and the shared try/except hid every plot; `ct_derivative_window` now
+  adapts (None below 3) and raw/scatter plots are drawn independently of the derivative tabs.
+
+## 2026-10-02 - User decision: booster tree count = one value from the pooled CV curve (xgb.cv / lgb.cv style)
+Replaces per-fold early stopping on the scored fold (R028/R003/R022). Each fold is fit once at max rounds; staged
+predictions give a pooled CV curve; one round count is chosen (like PLS LVs from RMSECV in Unscrambler), CV metrics are
+reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
+fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
+the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
+
+## 2026-10-02 - QW7 DPI/fonts gotchas (branch feat/dpi-fonts)
+- **Tk has no font fallback list.** `font=(('Segoe UI','Arial'),10)` becomes the Tcl string `{{Segoe UI} Arial} 10`,
+  which Tk reads as ONE family called "Segoe UI Arial"; Windows substitutes Arial. `('TkDefaultFont', 10, 'bold')`
+  has the same problem: inside a tuple the name is a family, not the named font, so it also renders Arial. Use
+  `tkfont.Font` named fonts (`self.fonts[...]`, Tk names `Dasp*`). Tk deletes a named font when the Python object that
+  created it is garbage-collected, which is why `_init_named_fonts` also keeps the owning objects on `root`.
+- **What scales by itself and what does not, once DPI aware.** Point sizes follow `tk scaling`, which goes from 1.333
+  to 1.667 at 125%. Embedded matplotlib canvases rescale from `tk scaling` (`_update_device_pixel_ratio`). Literal
+  pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one that breaks: the custom-range dialog hid its
+  Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap such sizes in `_px_geometry`. Fixed Treeview
+  column widths break too: the 80 px Results column cut `1.23456e-05` to `1.23456e-0` at 125%.
+- **Treeview row height depends on the Tk version (round-1 correction, round-2 wording).** My first note said
+  "Treeview row height follows the font". It does not follow it live on either version:
+  - **Tk 9.0.4** (shipped with 3.14) sets `rowheight` once, at style init, from the row font (linespace + 2): 17 px at
+    96 dpi, 22 px at 120 dpi. It does not re-sync if the font or scaling changes later.
+  - **Tk 8.6.15** (in `.venv312`, used by the `DASP_BUILD_PYTHON=312` rollback build) leaves `rowheight` empty and uses
+    a fixed 20 px. That is exactly the linespace at 125% and clips text above it.
+
+  `_apply_theme` now sets the `Treeview` rowheight to the TkDefaultFont linespace + `_px(2)`, which gives the same rows
+  on both versions (verified under .venv312 and .venv314). That is 1-2 px more than Tk 9's own value at 150% and 200%,
+  which is harmless. Invariant, also commented at that line: Treeview tag fonts must not be taller than TkDefaultFont.
+  The default build is still 3.14 (`BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")`).
+- **Column widths: measure, don't multiply (round 2).** Scaling a 70 px column with `_px(70)` gave 88 px at 125%, but
+  `1.23456e-05` needs 81 px of text plus Tk's cell padding (4 px per side at 96 dpi, scaled), i.e. 91 px. Text does not
+  scale exactly linearly (hinting), so the Results table now sizes float columns from the `.6g` text measured in the
+  row font (`_float_column_text_width`) plus padding, with the 96-dpi widths as minimums. `font.measure()` already
+  returns pixels at the current scale, so never multiply its result by `_UI_SCALE`.
+- **Widest-string search (round 3).**
+  - Two shortcuts each missed wider values: taking the longest strings by character count (`1.23456e+10` is wider
+    than `1.23456e-05` at the same length, because '+' is wider than '-'), and taking only the first 500 rows plus
+    the extremes.
+  - Measuring every distinct string costs about 100 us each inside Tk, and that is text layout, not Python-to-Tcl
+    overhead: moving the loop into Tcl made it slower, about 1.1 s per 10k strings.
+  - On Windows, `font.measure(s)` equals the sum of its per-character widths exactly, because GDI text extents
+    apply no kerning. Checked over 12k `.6g` strings, Segoe UI 9/10 and Arial 9, at 100/125/200%.
+  - `_float_column_text_width` therefore ranks every distinct string by summed character widths, measures the top
+    50 exactly, and returns the larger of the two. That is exact on Windows, safe elsewhere, and takes about 15 ms
+    per 10k values.
+- **`tk scaling` set on a fresh root does change font measurement in that interpreter** (62 / 81 px for
+  `1.23456e-05` at 100 / 125%). Use that to test real-scale text widths without a DPI-aware process. It does not
+  reproduce a true 200% DPI-aware process exactly (102 px here versus Codex's 132 px measured at real 192 dpi), so
+  the tests compare widths and text measured in the same interpreter.
+- **Dialog placement (round 2).** Tk's `winfo_screenwidth/height` on Windows describe the *primary* monitor only.
+  `_px_geometry(size, owner)` now asks Win32 for the work area of the owner's monitor (`MonitorFromWindow` +
+  `GetMonitorInfoW` `rcWork`, in the process's own DPI coordinate space, which is also Tk's) when the dialog opens. It
+  clamps the size, leaving room for the title bar, and centres the dialog on the owner inside that area. Without
+  Win32 it falls back to the Tk screen size.
+- **Test processes start DPI-unaware**, so the session app's `_UI_SCALE` is 1.0 and pixel assertions are unchanged.
+  Only `main()` calls `_enable_windows_dpi_awareness()`. However, the GUI module calls `matplotlib.use('TkAgg')`, so
+  the first pyplot figure in a test with no running Tk mainloop declares **per-monitor** DPI awareness
+  (matplotlib's `Win32_SetProcessDpiAwareness_max`). In the GUI suite this first happens in
+  `test_contaminant_tab.py::TestApplyCorrection::test_apply_correction_no_attribute_error`. After that, Tk font
+  measurements in the same process come back in physical pixels, even for pixel-sized fonts. Measure text in a fresh
+  subprocess, as `tests/test_gui_dpi_fonts.py::sci_text_px_96` does. The real app is unaffected: there the mainloop
+  is running, so matplotlib skips the call.
+- **Black 26 targets 3.14 and rewrites `except (A, B):` as PEP 758 `except A, B:`.** That is a SyntaxError on 3.12,
+  which the `DASP_BUILD_PYTHON=312` rollback build still uses. Keep the parentheses in the GUI file.
+- **A custom PyInstaller 6 `manifest=` REPLACES the built-in template rather than merging.** The spec therefore copies
+  the template's compatibility/longPathAware block verbatim; PyInstaller still injects the execution level and
+  Common-Controls v6.
+- **`sed -i` from Git Bash rewrites `spectral_predict_gui_optimized.py` from CRLF to LF.** The index stores CRLF, so
+  every line then shows as changed. Restore with a byte-level `\n` to `\r\n` pass, or use the Edit tool.
+- **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
+  bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
+  `full.width / winfo_screenwidth()`.
