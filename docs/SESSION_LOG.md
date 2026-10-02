@@ -782,3 +782,11 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
 - **Saved ensemble uncertainty used in-sample residuals** labelled `cv_residuals` (`_save_selected_ensemble`
   re-predicted the training rows). It now saves the outer-CV OOF predictions kept in each `ensemble_results` entry, or
   no CV data at all. It also recorded `task_type='auto'` when the task radio was on auto, which dropped the residuals.
+- **Review round 2:** `BaseEstimator.__getstate__` returns the LIVE `__dict__` (py3.14 / sklearn 1.9), so editing it
+  cleared the cache of an object being pickled mid-prediction; copy it first. The six ensemble wrappers moved from
+  the GUI script to `spectral_predict/model_wrappers.py` (the GUI re-exports the names): pickles made by the GUI named
+  `__main__.<Class>` and could not load in a script or a frozen app with a different entry module. `model_io` loads
+  every pickle through `_joblib_load`, which temporarily points missing `__main__` / `spectral_predict_gui_optimized`
+  names at the backend classes (adds only, removes afterwards). Ensemble files with `task_type='auto'` load as
+  regression. `create_auto_ensembles` now warns that its CV is optimistic: specialists come from search-time
+  regional rankings over all rows; honest per-fold rankings not implemented (no production caller).

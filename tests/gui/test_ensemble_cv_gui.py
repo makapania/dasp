@@ -143,6 +143,18 @@ def test_train_ensembles_accepts_label_indexed_targets(gui_app, monkeypatch, var
         assert r["r2"] == pytest.approx(by_method[r["method"]])
 
 
+def test_train_ensembles_refuses_classification_runs(gui_app, monkeypatch):
+    """Manual 'Train Ensemble' after a classification run must not fit class labels."""
+    X, y = _spectra()
+    labels = pd.Series(np.where(y > np.median(y), 1, 0), index=X.index)
+    logs: list[str] = []
+    monkeypatch.setattr(gui_app, "_log_progress", lambda msg: logs.append(str(msg)))
+    with _ensemble_settings(gui_app):
+        out = gui_app._train_ensembles(_rows(), X, labels, "classification", is_manual_retrain=True)
+    assert out == (None, None)
+    assert any("regression only" in line for line in logs)
+
+
 def test_train_ensembles_cv_is_honest_for_memorising_members_on_noise(gui_app, monkeypatch):
     X, y = _spectra(noise_target=True)
     X.index = [f"S{i}" for i in range(len(y))]

@@ -215,7 +215,10 @@ class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         """
         self.models = models
         self.model_names = model_names if model_names else [f"Model_{i}" for i in range(len(models))]
@@ -399,7 +402,10 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
@@ -598,7 +604,10 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
@@ -779,7 +788,8 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         models : list of fitted models
         model_names : list of str, optional
         meta_model : estimator, optional
-            Meta-learner (default: Ridge regression)
+            Meta-learner (default: Ridge regression). Must be sklearn-cloneable:
+            ``fit`` trains a fresh clone, so no state carries over between fits.
         region_aware : bool, default=True
             Include region features in meta-model
         n_regions : int, default=5
@@ -790,7 +800,10 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
@@ -1946,10 +1959,26 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
         'metrics': dict with 'r2', 'rmse' (regression) or 'accuracy', 'f1' (classification)
         'n_models': int - number of unique base models
         'specialist_info': dict mapping region/class -> list of model names
+
+    Notes
+    -----
+    The CV metrics are NOT fully held-out. Members are refitted per fold, but the
+    specialist for each region/class is chosen from ``results_df``'s regional / per-class
+    rankings, which the search computed over all rows, so each fold's held-out targets
+    influence which experts score it. Honest selection would recompute the rankings
+    from inner CV on every outer-training partition; that is not implemented because
+    this function has no production caller. A ``UserWarning`` says so on every call.
     """
     from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_score
     from sklearn.model_selection import KFold
 
+    warnings.warn(
+        "create_auto_ensembles: CV metrics are optimistic. Specialists are selected from "
+        "search-time regional/class rankings computed on all rows, so held-out targets "
+        "influence expert selection in every fold.",
+        UserWarning,
+        stacklevel=2,
+    )
     auto_ensembles = {}
     region_boundaries = [0, 25, 50, 75, 100]  # Quartile percentiles
     # Positional targets: a label-indexed Series indexed with KFold positions raises

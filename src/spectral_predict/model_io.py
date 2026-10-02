@@ -31,8 +31,11 @@ predictions = predict_with_model(model_dict, new_X_data)
 ```
 """
 
+import contextlib
 import joblib
 import json
+import sys
+import types
 import logging
 import warnings
 import zipfile
@@ -47,6 +50,53 @@ from . import __version__
 from .resource_paths import is_frozen
 
 logger = logging.getLogger(__name__)
+
+# Module names under which pre-move pickles reference the ensemble wrapper classes:
+# the GUI run as a script (``__main__``) or imported as a module.
+_LEGACY_WRAPPER_MODULES = ("__main__", "spectral_predict_gui_optimized")
+
+
+@contextlib.contextmanager
+def _legacy_wrapper_names():
+    """Let pickles that name a GUI-defined wrapper class load in any process.
+
+    Ensemble wrappers used to be defined in the GUI script, so files saved by the GUI
+    reference ``__main__.GAPreprocessWrapper`` (or ``spectral_predict_gui_optimized.``).
+    For the duration of a load, missing names are pointed at
+    ``spectral_predict.model_wrappers``; nothing that already exists is replaced, and
+    everything added is removed afterwards.
+    """
+    from . import model_wrappers
+
+    added_attrs = []
+    added_modules = []
+    for module_name in _LEGACY_WRAPPER_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            module = types.ModuleType(module_name)
+            sys.modules[module_name] = module
+            added_modules.append((module_name, module))
+        for name in model_wrappers.LEGACY_PICKLE_NAMES:
+            if not hasattr(module, name):
+                setattr(module, name, getattr(model_wrappers, name))
+                added_attrs.append((module, name))
+    try:
+        yield
+    finally:
+        for module, name in added_attrs:
+            try:
+                delattr(module, name)
+            except AttributeError:
+                pass
+        for module_name, module in added_modules:
+            if sys.modules.get(module_name) is module:
+                del sys.modules[module_name]
+
+
+def _joblib_load(path):
+    """``joblib.load`` that also resolves pre-move GUI wrapper class references."""
+    with _legacy_wrapper_names():
+        return joblib.load(path)
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -430,7 +480,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if not model_path.exists():
             raise ValueError("Invalid .dasp file: missing model.pkl")
 
-        model = joblib.load(model_path)
+        model = _joblib_load(model_path)
         # Bundle compatibility fix: ensure Pipeline is marked as fitted
         if model is not None and is_frozen():
             _ensure_pipeline_fitted(model)
@@ -439,7 +489,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         preprocessor = None
         preprocessor_path = tmppath / 'preprocessor.pkl'
         if preprocessor_path.exists():
-            preprocessor = joblib.load(preprocessor_path)
+            preprocessor = _joblib_load(preprocessor_path)
 
             # Bundle compatibility fix: ensure Pipeline is marked as fitted
             if preprocessor is not None and is_frozen():
@@ -449,18 +499,18 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         label_encoder = None
         label_encoder_path = tmppath / 'label_encoder.pkl'
         if label_encoder_path.exists():
-            label_encoder = joblib.load(label_encoder_path)
+            label_encoder = _joblib_load(label_encoder_path)
 
         # Load one-class auxiliary objects if present
         scaler = None
         scaler_path = tmppath / "scaler.pkl"
         if scaler_path.exists():
-            scaler = joblib.load(scaler_path)
+            scaler = _joblib_load(scaler_path)
 
         pca_reducer = None
         pca_reducer_path = tmppath / "pca_reducer.pkl"
         if pca_reducer_path.exists():
-            pca_reducer = joblib.load(pca_reducer_path)
+            pca_reducer = _joblib_load(pca_reducer_path)
 
         # Load CV data if present (for uncertainty estimation)
         cv_data = None
@@ -479,7 +529,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
             with np.load(ad_data_path) as npz_file:
                 ad_data = {key: npz_file[key] for key in npz_file.files}
         if pca_model_path.exists():
-            pca_model = joblib.load(pca_model_path)
+            pca_model = _joblib_load(pca_model_path)
 
         # Load bias correction if present
         bias_correction = None
@@ -1804,7 +1854,7 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
 
         # Load ensemble state
         ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
-        ensemble_state = joblib.load(ensemble_state_path)
+        ensemble_state = _joblib_load(ensemble_state_path)
 
         # Reconstruct ensemble object
         from spectral_predict.ensemble import (
@@ -1813,6 +1863,13 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             MixtureOfExpertsEnsemble,
             StackingEnsemble
         )
+
+        # GUI ensembles were always regression, but files saved before 2026-10 could
+        # record the task radio's 'auto', which predict_with_model rejects.
+        ensemble_metadata = config.get("metadata") or {}
+        for meta in [ensemble_metadata] + [md.get("metadata") or {} for md in base_model_dicts]:
+            if meta.get("task_type") == "auto":
+                meta["task_type"] = "regression"
 
         ensemble_type = config['ensemble_type']
 
