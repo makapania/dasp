@@ -4,15 +4,22 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes on 11 branches, none merged yet
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 3 of 11 branches merged
 Every Wave 1/2 item was cross-checked by **Codex gpt-6-astra and GLM 5.3** before fixing (the 09-28 reviews were
 Claude-only). Nothing refuted; corrections: R001/R020 latent behind R048; R085 is not the holdout bug; QW1 gain
 ~1.5-4x not 60x; QW5 half exists; CTAI is "paired regression in satellite PCA space". User decisions: booster tree
 count = one value from the pooled CV curve (SESSION_LOG 2026-10-02); chemometrics validation conventions (CLAUDE.md).
-Branches (local worktrees, Opus agents): fix/booster-early-stopping, fix/ensemble-cv, fix/ytransform-save,
-fix/wavelength-mapping, fix/readers, fix/gui-dataset-state, perf/thread-budget, fix/ct-honest-labels,
-fix/contaminant-maths, fix/classification-metrics, feat/dpi-fonts. **QW4 (holdout direction) held** until
-fix/gui-dataset-state merges (same code). Each branch gets Codex + GLM review before merging.
+**Merged:** #83 fix/ct-honest-labels (QW2, R091, R085); #84 fix/ensemble-cv (R002, R021, R018, R105: honest
+ensemble CV, wrappers moved to `model_wrappers.py`, legacy-pickle-safe loading); #85 feat/dpi-fonts (QW7).
+**Open, each in Codex + GLM review rounds:** fix/booster-early-stopping (fit at max R, truncate to k),
+fix/ytransform-save, fix/wavelength-mapping (final confirm), fix/readers (final confirm), fix/gui-dataset-state
+(calibration identity digest), perf/thread-budget, fix/contaminant-maths (final round; auto EPO count is advisory in
+the GUI, revertible flag `_CONTAM_AUTO_COUNT_ADVISORY`), fix/classification-metrics (raw integer labels in every
+engine except XGBoost). **QW4 (holdout direction) held** until fix/gui-dataset-state merges (same code).
+Known pre-existing test failure on main: `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection`
+(its fake Thread rejects `kwargs=`). Pre-existing: regression code export without CV raises NameError (`_lins_ccc`).
+**Open questions for the user:** Import rounds wavelengths to integers and refuses sub-unit spacing (FTIR?);
+comma ASCII files default to dot-decimal with a warning (my call); advisory EPO count (my call).
 
 ### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
