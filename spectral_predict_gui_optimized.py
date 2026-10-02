@@ -64,6 +64,7 @@ import logging
 import re
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 from datetime import datetime
@@ -1588,6 +1589,152 @@ SIDEBAR_CONFIG = {
 }
 
 
+# ===== HIGH-DPI SCALING =====
+# SPACING and SIDEBAR_CONFIG above are in pixels at 96 dpi. Once the process is
+# DPI aware (see _enable_windows_dpi_awareness), Windows stops bitmap-stretching the
+# window, so pixel sizes must be multiplied by the display scale to keep their
+# physical size. Point-sized fonts already follow Tk's own scaling and must NOT be
+# multiplied, and embedded matplotlib canvases rescale themselves from `tk scaling`
+# (FigureCanvasTk._update_device_pixel_ratio), so figure dpi is left alone too.
+_BASE_SPACING = dict(SPACING)
+_BASE_SIDEBAR_CONFIG = dict(SIDEBAR_CONFIG)
+_UI_SCALE = 1.0
+
+# HRESULT returned by SetProcessDpiAwareness when awareness was already set, e.g. by
+# the DPI-aware manifest embedded in the frozen executable.
+_E_ACCESSDENIED = 0x80070005
+
+
+def _enable_windows_dpi_awareness() -> bool:
+    """Declare the process system-DPI-aware on Windows. Call before ``tk.Tk()``.
+
+    Returns:
+        True if the process is DPI aware afterwards, False otherwise (including on
+        non-Windows platforms, where this is a no-op).
+    """
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+
+    try:
+        hresult = ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError) as exc:  # shcore.dll is absent before Windows 8.1
+        logger.debug("SetProcessDpiAwareness unavailable (%s); trying SetProcessDPIAware", exc)
+    else:
+        if hresult == 0:
+            return True
+        if (hresult & 0xFFFFFFFF) == _E_ACCESSDENIED:
+            logger.debug("DPI awareness was already set for this process (manifest)")
+            return True
+        logger.warning("SetProcessDpiAwareness(1) failed with HRESULT 0x%08X", hresult & 0xFFFFFFFF)
+    try:
+        return bool(ctypes.windll.user32.SetProcessDPIAware())
+    except (AttributeError, OSError) as exc:
+        logger.warning("Could not declare DPI awareness; UI may be blurry: %s", exc)
+        return False
+
+
+def _compute_ui_scale(root: tk.Misc) -> float:
+    """Return the pixel scale factor for the display ``root`` is on (1.0 = 96 dpi).
+
+    The factor never drops below 1.0, and is 1.0 on macOS where Tk works in points
+    and the OS handles Retina scaling. A DPI-unaware Windows process sees 96 dpi and
+    therefore gets 1.0.
+    """
+    if sys.platform == 'darwin':
+        return 1.0
+    try:
+        dpi = float(root.winfo_fpixels('1i'))
+    except tk.TclError:
+        return 1.0
+    return max(1.0, round(dpi / 96.0, 2))
+
+
+def _apply_ui_scale(root: tk.Misc) -> float:
+    """Set the module scale factor and rescale SPACING / SIDEBAR_CONFIG in place.
+
+    Idempotent: values are always recomputed from the 96-dpi base values, so
+    constructing a second app in the same process does not compound the scaling.
+    """
+    global _UI_SCALE
+    _UI_SCALE = _compute_ui_scale(root)
+    SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
+    SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
+    return _UI_SCALE
+
+
+def _px(value: float) -> int:
+    """Scale a pixel length given at 96 dpi to the current display."""
+    return int(round(value * _UI_SCALE))
+
+
+# ===== NAMED FONTS =====
+# Tk has no font fallback list: font=(('Segoe UI', 'Arial'), 10) is parsed as the
+# single family "Segoe UI Arial", which does not exist, so Windows substitutes Arial.
+# Pick one family that is actually installed and share it through named fonts.
+_UI_FAMILY_CANDIDATES = {
+    'win32': ('Segoe UI',),
+    'darwin': ('SF Pro Text', 'Helvetica Neue', 'Helvetica'),
+    'other': ('Inter', 'Ubuntu', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans'),
+}
+_MONO_FAMILY_CANDIDATES = {
+    'win32': ('Consolas', 'Cascadia Mono', 'Courier New'),
+    'darwin': ('Menlo', 'Monaco'),
+    'other': ('DejaVu Sans Mono', 'Ubuntu Mono', 'Noto Sans Mono', 'Liberation Mono'),
+}
+# key -> (family kind, size in points, weight)
+_NAMED_FONT_SPECS = {
+    'body': ('ui', 10, 'normal'),
+    'small': ('ui', 9, 'normal'),
+    'strong': ('ui', 11, 'bold'),
+    'heading': ('ui', 12, 'bold'),
+    'title': ('ui', 16, 'bold'),
+    'mono': ('mono', 9, 'normal'),
+}
+
+
+def _resolve_font_family(root: tk.Misc, candidates: tuple[str, ...], fallback: str) -> str:
+    """Return the first installed family in ``candidates``, else the family of ``fallback``.
+
+    A family counts as installed when Tk resolves it to itself rather than
+    substituting another face.
+    """
+    for family in candidates:
+        actual = tkfont.Font(root=root, family=family).actual('family')
+        if actual.lower() == family.lower():
+            return family
+    return tkfont.nametofont(fallback, root=root).actual('family')
+
+
+def _init_named_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
+    """Create (or reconfigure) the app's named fonts on ``root``.
+
+    Tk deletes a named font when the Python object that created it is
+    garbage-collected, so the owning objects are also kept on ``root`` and reused if
+    a second app is built on the same root.
+    """
+    platform_key = sys.platform if sys.platform in ('win32', 'darwin') else 'other'
+    families = {
+        'ui': _resolve_font_family(root, _UI_FAMILY_CANDIDATES[platform_key], 'TkDefaultFont'),
+        'mono': _resolve_font_family(root, _MONO_FAMILY_CANDIDATES[platform_key], 'TkFixedFont'),
+    }
+    fonts = dict(getattr(root, '_dasp_named_fonts', {}))
+    existing = set(tkfont.names(root))
+    for key, (kind, size, weight) in _NAMED_FONT_SPECS.items():
+        name = f"Dasp{key.capitalize()}"
+        options = {'family': families[kind], 'size': size, 'weight': weight}
+        font = fonts.get(key)
+        if font is None and name in existing:
+            font = tkfont.nametofont(name, root=root)
+        if font is None:
+            fonts[key] = tkfont.Font(root=root, name=name, **options)
+        else:
+            font.configure(**options)
+            fonts[key] = font
+    root._dasp_named_fonts = fonts
+    return fonts
+
+
 class SidebarNavigation:
     """
     Collapsible sidebar navigation component for the application.
@@ -1684,7 +1831,7 @@ class SidebarNavigation:
     def _create_collapse_toggle(self):
         """Create the collapse/expand toggle button at the bottom."""
         toggle_frame = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
-                               height=50)
+                               height=_px(50))
         toggle_frame.pack(side='bottom', fill='x')
         toggle_frame.pack_propagate(False)
 
@@ -2671,8 +2818,14 @@ class SpectralPredictApp:
         self.root = root
         self.root.title(f"ASP - Advanced Spectral Prediction  —  BETA {_DASP_VERSION}")
 
-        # Set minimum window size for usability
-        self.root.minsize(1200, 700)
+        # High-DPI: scale the 96-dpi pixel constants and build the named fonts before
+        # any widget is created (no-op scale of 1.0 in a DPI-unaware process).
+        _apply_ui_scale(self.root)
+        self.fonts = _init_named_fonts(self.root)
+
+        # Set minimum window size for usability (clamped so it never exceeds the screen)
+        self.root.minsize(min(_px(1200), self.root.winfo_screenwidth()),
+                          min(_px(700), self.root.winfo_screenheight()))
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -4655,26 +4808,17 @@ class SpectralPredictApp:
         # Configure root window
         self.root.configure(bg=self.colors['bg'])
 
-        # Get modern font stack (try Inter, SF Pro, fallback to system fonts)
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            heading_font = ('SF Pro Display', 'Helvetica Neue', 'Arial')
-            body_font = ('SF Pro Text', 'Helvetica Neue', 'Arial')
-        elif system == 'Windows':
-            heading_font = ('Segoe UI', 'Arial')
-            body_font = ('Segoe UI', 'Arial')
-        else:  # Linux
-            heading_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
-            body_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+        # Named fonts (one installed family, see _init_named_fonts). Paddings below
+        # are pixels at 96 dpi and go through _px(); font sizes are points and do not.
+        fonts = self.fonts
 
         style = ttk.Style()
 
         # Modern button styles with gradients (simulated with colors)
         # Unified sizing to match accent buttons for visual consistency
         style.configure('Modern.TButton',
-                       font=(body_font, 10),
-                       padding=(15, 10),  # Increased vertical padding for better alignment
+                       font=fonts['body'],
+                       padding=(_px(15), _px(10)),  # Increased vertical padding for better alignment
                        borderwidth=0,
                        relief='flat',
                        foreground=self.colors['text'])
@@ -4685,8 +4829,8 @@ class SpectralPredictApp:
                            ('!disabled', self.colors['text'])])
 
         style.configure('Accent.TButton',
-                       font=(body_font, 11, 'bold'),
-                       padding=(20, 12),
+                       font=fonts['strong'],
+                       padding=(_px(20), _px(12)),
                        background='#0078D4',  # Explicit blue background
                        foreground='#FFFFFF',  # Explicit white text
                        borderwidth=1,
@@ -4699,8 +4843,8 @@ class SpectralPredictApp:
 
         # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
         style.configure('TButton',
-                       font=(body_font, 10),
-                       padding=(15, 8),
+                       font=fonts['body'],
+                       padding=(_px(15), _px(8)),
                        borderwidth=1,  # Add border for visibility
                        relief='solid',
                        foreground='#000000',  # Explicit black text
@@ -4714,8 +4858,8 @@ class SpectralPredictApp:
 
         # Secondary button style (for less prominent actions)
         style.configure('Secondary.TButton',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=1,
                        relief='solid',
                        foreground=self.colors['text'],
@@ -4736,32 +4880,34 @@ class SpectralPredictApp:
         style.configure('TLabel',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+        # Title.TLabel (was 28 pt) has no live users; it shares the title font.
         style.configure('Title.TLabel',
-                       font=(heading_font, 28, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Heading.TLabel',
-                       font=(heading_font, 16, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Subheading.TLabel',
-                       font=(heading_font, 12, 'bold'),
+                       font=fonts['heading'],
                        foreground=self.colors['accent'],
                        background=self.colors['bg'])
         style.configure('Caption.TLabel',
-                       font=(body_font, 9),
+                       font=fonts['small'],
                        foreground=self.colors['text_light'],
                        background=self.colors['bg'])
+        # SidebarLabel.TLabel (was 11 pt) has no live users; it uses the body font.
         style.configure('SidebarLabel.TLabel',
-                       font=(body_font, 11),
+                       font=fonts['body'],
                        foreground=self.colors['text_inverse'],
                        background=self.colors['sidebar'],
-                       padding=(15, 10))
+                       padding=(_px(15), _px(10)))
         style.configure('CardLabel.TLabel',
                        background=self.colors['card_bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Notebook styling - Default style for subtabs (keep tabs visible)
         style.configure('TNotebook',
@@ -4769,8 +4915,8 @@ class SpectralPredictApp:
                        borderwidth=0,
                        tabmargins=[0, 0, 0, 0])
         style.configure('TNotebook.Tab',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=0)
         style.map('TNotebook.Tab',
                  background=[('selected', self.colors['bg']),
@@ -4805,7 +4951,7 @@ class SpectralPredictApp:
         style.configure('TLabelframe.Label',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 11, 'bold'))
+                       font=fonts['strong'])
 
         # Combobox styling - add stronger borders for better definition
         style.configure('TCombobox',
@@ -4825,79 +4971,67 @@ class SpectralPredictApp:
         style.configure('TCheckbutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Radiobutton styling
         style.configure('TRadiobutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            title_font = ('SF Pro Display', 32, 'bold')
-            subtitle_font = ('SF Pro Text', 12)
-            label_font = ('SF Pro Text', 11)
-            button_font = ('SF Pro Text', 10, 'bold')
-        elif system == 'Windows':
-            title_font = ('Segoe UI', 32, 'bold')
-            subtitle_font = ('Segoe UI', 12)
-            label_font = ('Segoe UI', 11)
-            button_font = ('Segoe UI', 10, 'bold')
-        else:  # Linux
-            title_font = ('Ubuntu', 32, 'bold')
-            subtitle_font = ('Ubuntu', 12)
-            label_font = ('Ubuntu', 11)
-            button_font = ('Ubuntu', 10, 'bold')
+        # Sizes here have no named-font equivalent, so they reuse the resolved family.
+        ui_family = self.fonts['body'].cget('family')
+        label_font = (ui_family, 11)
+        button_font = (ui_family, 10, 'bold')
 
-        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=70)
-        top_bar.pack(fill='x', padx=10, pady=(10, 5))
+        # Fixed-height bar (pack_propagate off), so its pixel height must be scaled.
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=_px(70))
+        top_bar.pack(fill='x', padx=_px(10), pady=(_px(10), _px(5)))
         top_bar.pack_propagate(False)
 
         # Left side: Logo and title (compact layout)
         title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
         title_frame.pack(side='left', fill='y')
 
-        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px)
-        self.logo_label = self._create_logo_label(title_frame, size=75)
-        self.logo_label.pack(side='left', padx=(0, 10), pady=0)
+        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px at 96 dpi)
+        self.logo_label = self._create_logo_label(title_frame, size=_px(75))
+        self.logo_label.pack(side='left', padx=(0, _px(10)), pady=0)
 
         # "Advanced Spectral Prediction" text to the right of logo (reduced font)
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
-        text_frame.pack(side='left', fill='y', pady=15)
+        text_frame.pack(side='left', fill='y', pady=_px(15))
 
         tk.Label(text_frame,
                 text="Advanced Spectral Prediction",
-                font=('Segoe UI', 16, 'bold'),
+                font=self.fonts['title'],
                 fg=self.colors['text'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 2))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(2)))
 
         # Subtle amber BETA marker + muted version (same row, baseline-aligned)
         tk.Label(text_frame,
                 text="BETA",
-                font=('Segoe UI', 9, 'bold'),
+                font=(ui_family, 9, 'bold'),
                 fg='#D97706',  # amber-600 — attractive but unobtrusive
-                bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', padx=(_px(10), _px(4)), anchor='s',
+                                           pady=(0, _px(5)))
 
         tk.Label(text_frame,
                 text=f"v{_DASP_VERSION}",
-                font=('Segoe UI', 9),
+                font=self.fonts['small'],
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(5)))
 
         # Right side: Theme switcher with beautiful buttons
         theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
-        theme_frame.pack(side='right', fill='y', padx=10)
+        theme_frame.pack(side='right', fill='y', padx=_px(10))
 
         tk.Label(theme_frame,
                 text="Theme:",
                 font=label_font,
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', padx=(0, 10))
+                bg=self.colors['bg']).pack(side='left', padx=(0, _px(10)))
 
         # Create theme buttons with hover effects (compact)
         self.theme_buttons = {}
@@ -4910,11 +5044,11 @@ class SpectralPredictApp:
                           activebackground=theme_data['accent_dark'],
                           relief='flat',
                           borderwidth=0,
-                          padx=10,
-                          pady=4,
+                          padx=_px(10),
+                          pady=_px(4),
                           cursor='hand2',
                           command=lambda tn=theme_name: self._switch_theme(tn))
-            btn.pack(side='left', padx=2)
+            btn.pack(side='left', padx=_px(2))
 
             # Add hover effect
             def on_enter(e, b=btn, td=theme_data):
@@ -4929,8 +5063,8 @@ class SpectralPredictApp:
             self.theme_buttons[theme_name] = btn
 
         # Add a stronger separator line for better visual definition
-        separator = tk.Frame(self.root, bg=self.colors['border'], height=3)
-        separator.pack(fill='x', padx=20)
+        separator = tk.Frame(self.root, bg=self.colors['border'], height=_px(3))
+        separator.pack(fill='x', padx=_px(20))
 
     def _switch_theme(self, theme_name):
         """Switch to a new theme with smooth transition effect."""
@@ -5042,15 +5176,7 @@ class SpectralPredictApp:
 
     def _show_theme_notification(self, theme_name):
         """Show a beautiful notification when theme changes."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            notif_font = ('SF Pro Text', 11)
-        elif system == 'Windows':
-            notif_font = ('Segoe UI', 11)
-        else:  # Linux
-            notif_font = ('Ubuntu', 11)
+        notif_font = (self.fonts['body'].cget('family'), 11)
 
         # Create a temporary notification label
         notif = tk.Label(self.root,
@@ -5058,8 +5184,8 @@ class SpectralPredictApp:
                         font=notif_font,
                         fg=self.colors['text_inverse'],
                         bg=self.colors['accent'],
-                        padx=20,
-                        pady=10)
+                        padx=_px(20),
+                        pady=_px(10))
         notif.place(relx=0.5, rely=0.95, anchor='center')
 
         # Fade out after 2 seconds
@@ -5082,20 +5208,10 @@ class SpectralPredictApp:
         when background and text are the same color. tk.Button provides reliable
         cross-platform color control for accent-colored buttons.
         """
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':
-            button_font = ('SF Pro Text', 11, 'bold')
-        elif system == 'Windows':
-            button_font = ('Segoe UI', 11, 'bold')
-        else:
-            button_font = ('Ubuntu', 11, 'bold')
-
         btn = tk.Button(parent,
                        text=text,
                        command=command,
-                       font=button_font,
+                       font=self.fonts['strong'],
                        fg=self.colors['text_inverse'],  # White text
                        bg=self.colors['accent'],  # Colored background
                        activeforeground=self.colors['text_inverse'],
@@ -5103,8 +5219,8 @@ class SpectralPredictApp:
                        disabledforeground=self.colors['text_inverse'],  # Keep white text when disabled
                        relief='flat',
                        borderwidth=0,
-                       padx=20,
-                       pady=12,
+                       padx=_px(20),
+                       pady=_px(12),
                        cursor='hand2',
                        **kwargs)
 
@@ -61713,6 +61829,14 @@ def main():
         _logging.getLogger("spectral_predict").debug(
             "T-50: cleanup failed (non-fatal)", exc_info=True
         )
+
+    # High-DPI: must run before tk.Tk(), or Windows bitmap-stretches the whole UI on
+    # scaled displays. Runs after the app logger so a failure lands in dasp.log. The
+    # frozen exe also declares this in its manifest (spectral_predict_py312.spec).
+    try:
+        _enable_windows_dpi_awareness()
+    except Exception:  # never block startup over a cosmetic setting
+        logger.warning("DPI-awareness setup failed (non-fatal)", exc_info=True)
 
     root = tk.Tk()
 
