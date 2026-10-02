@@ -373,27 +373,34 @@ def rename_duplicate_ids(index: pd.Index) -> tuple:
 
     new_ids = []
     seen = {}
-    taken = set(index)  # every original ID, plus each suffix handed out
+    missing = pd.isna(index)
+    # Every original ID, plus each suffix handed out. Missing IDs (NaN/None) never
+    # compare equal to each other, so repeated ones are grouped under "nan".
+    taken = {idx for idx, is_na in zip(index, missing) if not is_na}
     rename_mapping = {}  # Track original -> [new names] for warning display
     n_renamed = 0
 
-    for idx in index:
-        if idx in seen:
-            suffix = seen[idx]
+    for idx, is_na in zip(index, missing):
+        key = "nan" if is_na else idx
+        if key in seen or (is_na and key in taken):
+            suffix = seen.get(key, 0)
             while True:
                 suffix += 1
-                new_id = f"{idx}.{suffix}"
+                new_id = f"{key}.{suffix}"
                 if new_id not in taken:
                     break
-            seen[idx] = suffix
+            seen[key] = suffix
             taken.add(new_id)
             new_ids.append(new_id)
-            rename_mapping[idx].append(new_id)
+            rename_mapping.setdefault(key, [key]).append(new_id)
             n_renamed += 1
         else:
-            seen[idx] = 0
-            new_ids.append(idx)
-            rename_mapping[idx] = [idx]  # Start tracking this ID
+            seen[key] = 0
+            new_ids.append(key)
+            taken.add(key)
+            if is_na:
+                n_renamed += 1  # a missing ID became "nan"
+            rename_mapping[key] = [key]  # Start tracking this ID
 
     # Filter rename_mapping to only include IDs that had duplicates
     rename_mapping = {k: v for k, v in rename_mapping.items() if len(v) > 1}

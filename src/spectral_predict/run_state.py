@@ -180,13 +180,19 @@ class RunMetadata:
     # persisting the indices is cheaper and removes an entire class of
     # "user forgets to click Create Validation Set on resume" footguns.
     validation_indices: list[Any] | None = None
-    # The rest of the calibration-row choice: ``{"excluded": [labels],
-    # "active": [labels] or None}`` ("active" None = no Analysis Subset). None
-    # means the record predates this field or a label could not be stored, so
-    # the resume gate cannot check it. Reloading the same file clears the
-    # exclusions, so without this a resume could silently continue a study on
-    # a different calibration set.
+    # The rest of the calibration-row choice: ``{"excluded": [keys],
+    # "active": [keys] or None}`` ("active" None = no Analysis Subset). Keys are
+    # ``canonical_label`` strings, so any label type survives the JSON round
+    # trip. None means the record predates this field (legacy) or it could not
+    # be written. Reloading the same file clears the exclusions, so without this
+    # a resume could silently continue a study on a different calibration set.
     calibration_rows: dict[str, Any] | None = None
+    # How sample labels were normalised when the run started
+    # (``LABEL_NORMALIZATION``), written by the GUI, which also records
+    # ``calibration_rows``. None: a legacy or headless record, saved before
+    # repeated IDs got collision-free suffixes, so the same file can now give a
+    # saved label to other rows.
+    label_normalization: int | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -257,8 +263,37 @@ class RunMetadata:
         return cls(**filtered)
 
 
-def _is_label(value: Any) -> bool:
-    return isinstance(value, (int, str)) and not isinstance(value, bool)
+# Version of the sample-label normalisation recorded with a run. 1: repeated
+# IDs get collision-free suffixes ("A", "A.1", "A" -> "A", "A.1", "A.2"; the
+# old scheme gave "A.1" twice) and the GUI suffixes any repeats left at install.
+LABEL_NORMALIZATION = 1
+
+
+def canonical_label(value: Any) -> str:
+    """A type-tagged string for a sample label that round-trips through JSON.
+
+    Equal labels give equal keys, and labels of different types never collide
+    (``5``, ``5.0`` and ``"5"`` all differ), so a stored key can be compared
+    with the loaded data's labels after reload whatever their type.
+    """
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            value = value.item()  # numpy scalar -> Python scalar
+        except (TypeError, ValueError):
+            pass
+    if isinstance(value, bool):
+        return f"b:{value}"
+    if isinstance(value, int):
+        return f"i:{value}"
+    if isinstance(value, float):
+        return f"f:{value!r}"
+    if isinstance(value, str):
+        return f"s:{value}"
+    if isinstance(value, tuple):
+        return "t:" + json.dumps([canonical_label(v) for v in value])
+    if value is None:
+        return "n:"
+    return f"r:{type(value).__name__}:{value!r}"
 
 
 def _valid_calibration_rows(rows: Any) -> bool:
@@ -266,12 +301,12 @@ def _valid_calibration_rows(rows: Any) -> bool:
         return False
     excluded = rows.get("excluded")
     active = rows.get("active")
-    if not isinstance(excluded, list) or not all(_is_label(x) for x in excluded):
+    if not isinstance(excluded, list) or not all(isinstance(x, str) for x in excluded):
         return False
-    return active is None or (isinstance(active, list) and all(_is_label(x) for x in active))
+    return active is None or (isinstance(active, list) and all(isinstance(x, str) for x in active))
 
 
-def calibration_rows_record(excluded, active) -> dict[str, Any] | None:
+def calibration_rows_record(excluded, active) -> dict[str, Any]:
     """The calibration-row choice in a form the run record can store.
 
     Args:
@@ -279,25 +314,12 @@ def calibration_rows_record(excluded, active) -> dict[str, Any] | None:
         active: Labels of the Analysis Subset, or None for all samples.
 
     Returns:
-        ``{"excluded": [...], "active": [...] or None}``, or None when a label is
-        not an int or str (it could not be compared after a JSON round trip).
+        ``{"excluded": [keys], "active": [keys] or None}`` with sorted
+        ``canonical_label`` keys.
     """
-
-    def _labels(raw):
-        out = []
-        for value in raw:
-            if hasattr(value, "item") and not isinstance(value, (str, bytes)):
-                value = value.item()  # numpy scalar -> Python scalar
-            if not _is_label(value):
-                return None
-            out.append(value)
-        return sorted(out, key=lambda v: (isinstance(v, str), v))
-
-    excluded_list = _labels(excluded or ())
-    active_list = None if active is None else _labels(active)
-    if excluded_list is None or (active is not None and active_list is None):
-        return None
-    return {"excluded": excluded_list, "active": active_list}
+    excluded_keys = sorted({canonical_label(v) for v in (excluded or ())})
+    active_keys = None if active is None else sorted({canonical_label(v) for v in active})
+    return {"excluded": excluded_keys, "active": active_keys}
 
 
 @dataclasses.dataclass
@@ -440,6 +462,7 @@ def start_run(
     gui_settings: dict[str, Any] | None = None,
     validation_indices: list[Any] | None = None,
     calibration_rows: dict[str, Any] | None = None,
+    label_normalization: int | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -451,6 +474,10 @@ def start_run(
     T-41: when ``bayesian_persistence_mode='never'``, no SQLite URL is
     generated (``get_storage_url()`` returns ``None``). This saves I/O and
     avoids orphaned ``.sqlite3`` sidecars for all-in-memory sessions.
+
+    ``calibration_rows`` / ``label_normalization``: the GUI passes the run's
+    exclusions and Analysis Subset (``calibration_rows_record``) and
+    ``LABEL_NORMALIZATION``, so a resume can check its calibration rows.
     """
     _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
@@ -503,11 +530,8 @@ def start_run(
                 _coerce_validation_indices(validation_indices)
                 if validation_indices else None
             ),
-            calibration_rows=(
-                calibration_rows
-                if calibration_rows is not None and _valid_calibration_rows(calibration_rows)
-                else None
-            ),
+            calibration_rows=_recordable_calibration_rows(calibration_rows),
+            label_normalization=label_normalization,
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
@@ -515,6 +539,18 @@ def start_run(
         _active_metadata = meta
         _is_resuming = False
         return meta
+
+
+def _recordable_calibration_rows(rows: dict[str, Any] | None) -> dict[str, Any] | None:
+    if rows is None:
+        return None
+    if not _valid_calibration_rows(rows):
+        logger.warning(
+            "start_run: calibration_rows has an unexpected shape and was not recorded; "
+            "a resume of this run can't verify its excluded samples"
+        )
+        return None
+    return rows
 
 
 def mark_complete() -> None:

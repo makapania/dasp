@@ -799,3 +799,19 @@ Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loadi
 - **Duplicate IDs:** `io.rename_duplicate_ids` now never produces a duplicate (`["A","A.1","A"]` gave two
   "A.1"); `_install_dataset` also gives repeated labels a unique suffix. QC staleness uses a data
   fingerprint (index, columns, values), so a baseline replace or wavelength change also refuses a stale report.
+## 2026-10-02 - GUI dataset state, review round 2 follow-ups
+
+- **Resume gate: check every saved label is present BEFORE comparing.** Intersecting saved exclusions/subset
+  with the loaded labels made a renamed sample vanish from both sides and the gate returned "ok". Now any
+  missing saved label refuses (record kept).
+- **`calibration_rows` stores `run_state.canonical_label` keys** (type-tagged strings: `i:5`, `f:5.0`,
+  `s:5`, `t:[...]`), so float/tuple IDs are recorded and compare equal after the JSON round trip. A new
+  record without rows asks (resume anyway / fresh / cancel) instead of resuming silently.
+- **GUI records carry `label_normalization` (`run_state.LABEL_NORMALIZATION` = 1; `start_run` defaults to None, so headless and test records count as legacy).** Legacy records (None) were
+  saved before repeated IDs got collision-free suffixes (old reader: `["A","A.1","A"]` -> "A.1" twice), so
+  the same saved label can name other rows. `_labels_differ_from_legacy` is set at install when the reader's
+  `duplicate_rename_mapping` differs from the old scheme or the install had to suffix repeats; the gate
+  then refuses a legacy resume (keep/fresh). An exact migration would need the old row order, not stored.
+- QC staleness fingerprint includes the targets; the Analysis Subset dialog and `_metadata_stores` use only
+  the installed dataset's stores (the uninstalled DM merge never had `metadata_df` anyway); Comparison's
+  validation load refreshes the snapshot; repeated NaN IDs become "nan", "nan.1".

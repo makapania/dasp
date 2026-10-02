@@ -16610,11 +16610,10 @@ class SpectralPredictApp:
                 else:
                     X, y, metadata_df, metadata = read_combined_csv(combined_file, drop_na_y=False)
 
-                # Preview only: the loaded dataset's metadata changes when Load
-                # installs this file, never at browse time (a failed load would
-                # otherwise leave this file's metadata next to the old spectra).
-                self._combined_metadata_preview = metadata
-                self._combined_metadata_df_preview = metadata_df
+                # The loaded dataset's metadata (combined_metadata[_df]) changes
+                # only when Load installs this file, never at browse time: a failed
+                # load would otherwise leave this file's metadata next to the old
+                # spectra. The read here only fills the column dropdowns below.
 
                 # Check for duplicate specimen IDs that were auto-renamed
                 n_dups = metadata.get('duplicates_renamed', 0)
@@ -16808,7 +16807,7 @@ class SpectralPredictApp:
 
             # Store the path
             self.combined_file_path = filepath
-            self._combined_metadata_preview = metadata  # set for real at Load
+            # combined_metadata is set by Load when it installs the file.
 
             # Clear folder picker since we're using combined file
             self.spectral_data_path.set("")
@@ -17542,19 +17541,16 @@ class SpectralPredictApp:
             )
 
     def _metadata_stores(self) -> list[tuple[str, pd.DataFrame | None]]:
-        """Metadata tables that may describe the loaded samples, in priority order."""
-        stores = [
+        """Metadata tables that describe the loaded samples, in priority order.
+
+        Only the installed dataset's own stores: a Data Management merge that was
+        not installed must not fill values for these samples (its metadata is in
+        ``ref`` once it is installed).
+        """
+        return [
             ("combined_metadata_df", getattr(self, "combined_metadata_df", None)),
             ("self.ref", getattr(self, "ref", None)),
         ]
-        dsm = getattr(self, "data_source_manager", None)
-        merged = getattr(dsm, "merged_dataset", None) if dsm is not None else None
-        if merged is not None:
-            stores.append((
-                "data_source_manager.merged_dataset.metadata_df",
-                getattr(merged, "metadata_df", None),
-            ))
-        return stores
 
     def _metadata_column(self, col_name: str) -> pd.Series | None:
         """One metadata column over the loaded samples, merged across stores by sample.
@@ -18991,6 +18987,7 @@ class SpectralPredictApp:
         exact_axis: bool | None = None,
         reset_wavelength_range: bool = False,
         replot: bool = True,
+        reader_metadata: dict | None = None,
     ) -> bool:
         """Make a dataset the working data: the one path every loader goes through.
 
@@ -19046,6 +19043,11 @@ class SpectralPredictApp:
                 False if mode == "replace" else getattr(self, "_exact_wavelength_axis", False)
             )
 
+        # Labels a run saved before repeated IDs were renamed collision-free may
+        # name other rows of this data; the resume gate refuses those runs.
+        labels_differ = bool(X_original.index.has_duplicates) or self._legacy_suffixes_differ(
+            reader_metadata
+        )
         # R007 follow-up: every sample needs its own label, or one exclusion
         # (or one Quality Check row) would remove several spectra.
         X_original, y, ref, metadata_df = self._with_unique_sample_ids(
@@ -19074,6 +19076,12 @@ class SpectralPredictApp:
         self.ref = ref
         self.combined_metadata_df = metadata_df
         self._exact_wavelength_axis = exact_axis
+        if mode == "replace":
+            self._labels_differ_from_legacy = labels_differ
+        else:
+            self._labels_differ_from_legacy = labels_differ or getattr(
+                self, "_labels_differ_from_legacy", False
+            )
 
         if mode == "replace":
             self._clear_dataset_specific_state()
@@ -19092,6 +19100,20 @@ class SpectralPredictApp:
         if replot:
             self._refresh_views_after_install()
         return True
+
+    @staticmethod
+    def _legacy_suffixes_differ(reader_metadata: dict | None) -> bool:
+        """True if a reader renamed repeated IDs differently from the old scheme.
+
+        The old scheme gave the k-th repeat of ``A`` the label ``A.k`` even when
+        ``A.k`` already existed; the reader now skips taken suffixes.
+        """
+        mapping = (reader_metadata or {}).get("duplicate_rename_mapping") or {}
+        for original, new_ids in mapping.items():
+            expected = [original] + [f"{original}.{k}" for k in range(1, len(new_ids))]
+            if list(new_ids) != expected:
+                return True
+        return False
 
     def _with_unique_sample_ids(self, X_original, y, ref, metadata_df):
         """Give repeated sample labels a unique suffix everywhere they index rows.
@@ -19201,7 +19223,8 @@ class SpectralPredictApp:
     _DATASET_STATE_ATTRS = (
         "X", "X_original", "y", "ref", "combined_metadata_df", "combined_metadata",
         "detected_type", "combined_file_path", "combined_sheet_name",
-        "_exact_wavelength_axis", "type_confidence", "type_detection_method",
+        "_exact_wavelength_axis", "_labels_differ_from_legacy",
+        "type_confidence", "type_detection_method",
         "data_value_scale", "source_data_type", "data_has_been_converted",
         "x_unit_confidence", "x_unit_detection_method", "x_unit_has_been_converted",
         "use_custom_group_names",
@@ -19847,6 +19870,11 @@ class SpectralPredictApp:
                 getattr(self, 'combined_metadata_df', None),
                 mode="append" if appended else "replace",
                 replot=False,
+                reader_metadata=(
+                    self.combined_metadata
+                    if self.detected_type in ("combined", "combined_excel")
+                    else None
+                ),
             )
             if not installed:
                 self._restore_dataset_state(prev_dataset)
@@ -22933,12 +22961,28 @@ class SpectralPredictApp:
         return False
 
     def _loaded_data_fingerprint(self) -> tuple:
-        """Samples, wavelengths and values of self.X, for staleness checks."""
+        """Samples, wavelengths, values and targets, for staleness checks.
+
+        Quality Check uses the targets too (Y-outlier flags), so a report made for
+        one target column is stale after switching to another.
+        """
         values = pd.util.hash_pandas_object(self.X, index=True).to_numpy()
+        if self.y is None:
+            y_hash = None
+        else:
+            y_aligned = (
+                self.y if self.y.index.equals(self.X.index) else self.y.reindex(self.X.index)
+            )
+            y_hash = int(
+                pd.util.hash_pandas_object(y_aligned.astype(str), index=True)
+                .to_numpy()
+                .sum(dtype=np.uint64)
+            )
         return (
             tuple(self.X.index),
             tuple(self.X.columns),
             int(values.sum(dtype=np.uint64)),
+            y_hash,
         )
 
     def _mark_selected_for_exclusion(self):
@@ -25762,7 +25806,9 @@ class SpectralPredictApp:
                 task_type,
                 analysis_wl_min_value=analysis_wl_min,
                 analysis_wl_max_value=analysis_wl_max,
-                is_manual_retrain=True
+                is_manual_retrain=True,
+                # The holdout cached with this X_filtered, read once with it.
+                validation_data=cache.get("validation"),
             )
 
             # Restore original encoder
@@ -25815,7 +25861,7 @@ class SpectralPredictApp:
 
     def _train_ensembles(self, results_df, X_filtered, y_filtered, task_type,
                          analysis_wl_min_value=None, analysis_wl_max_value=None,
-                         is_manual_retrain=False):
+                         is_manual_retrain=False, validation_data=None):
         """
         Train ensemble models from selected models in results_df.
 
@@ -25998,8 +26044,8 @@ class SpectralPredictApp:
                     # The holdout frozen with the run that produced X_filtered,
                     # not the live one (R005 review).
                     run_X_val, run_y_val = (
-                        (self.training_data_cache or {}).get("validation", (None, None))
-                        if is_manual_retrain
+                        validation_data
+                        if validation_data is not None
                         else getattr(self, "_last_run_validation", (None, None))
                     )
                     if run_X_val is not None and run_y_val is not None and len(run_X_val) > 0:
@@ -27080,6 +27126,9 @@ class SpectralPredictApp:
         try:
             from spectral_predict.run_state import calibration_rows_record
         except ImportError:
+            self._log_progress(
+                "[RUN] Run-state unavailable: this run's excluded samples are not recorded."
+            )
             return None
         index = self.X.index if self.X is not None else None
         excluded = [
@@ -27088,74 +27137,129 @@ class SpectralPredictApp:
         active = None if self.active_indices is None else list(self.active_indices)
         return calibration_rows_record(excluded, active)
 
+    def _ask_keep_or_fresh(self, title: str, message: str) -> str | None:
+        """Yes/No dialog: "fresh" to delete the saved run, None to keep it (default)."""
+        try:
+            start_fresh = messagebox.askyesno(
+                title,
+                f"{message}\n\nNothing was run and nothing was deleted.\n\n"
+                "  • Yes — delete the interrupted run and start fresh.\n"
+                "  • No — keep the interrupted run and run nothing.",
+                icon="warning",
+                default="no",
+            )
+        except Exception:
+            start_fresh = False
+        if start_fresh:
+            return "fresh"
+        self._log_progress(f"[RUN] Resume kept — {title.lower()}.")
+        return None
+
     def _reconcile_resume_calibration_rows(self, meta):
-        """Make the excluded samples match the interrupted run's before resuming.
+        """Make the calibration rows match the interrupted run's before resuming.
 
         Exclusions are labels of the loaded data, so reloading the run's file
-        clears them, while the data fingerprint still matches. Resuming then would
-        add trials scored on a different calibration set to the saved study.
-        Called on the main thread once the data matches.
+        clears them, while the data fingerprint (spectra and targets, not labels)
+        still matches. Resuming then would add trials scored on a different
+        calibration set to the saved study. Called on the main thread once the
+        data matches.
+
+        Every saved label must name a loaded sample before anything is compared: a
+        renamed sample would otherwise drop out of both sides of the comparison.
 
         Returns ``"ok"`` (rows match, or the run's exclusions were restored),
         ``"fresh"`` (the user chose to delete the run and start fresh), or None
         (don't run; the record is kept).
         """
+        from spectral_predict.run_state import canonical_label
+
+        legacy = getattr(meta, "label_normalization", None) is None
+        if legacy and getattr(self, "_labels_differ_from_legacy", False):
+            # Repeated IDs used to get colliding suffixes ("A", "A.1", "A" gave
+            # "A.1" twice). The loaded data's labels follow the new scheme, so the
+            # same saved label can name other rows; an exact migration would need
+            # the old row order, which the record doesn't hold.
+            return self._ask_keep_or_fresh(
+                "Sample IDs were renamed differently from the interrupted run",
+                f"The interrupted run {meta.run_id} was saved before repeated sample "
+                "IDs were renamed the current way. This data has repeated IDs, so its "
+                "saved validation and excluded samples can't be matched to the same "
+                "spectra and the run can't be resumed safely.",
+            )
+
         rows = getattr(meta, "calibration_rows", None)
         if rows is None:
-            self._log_progress(
-                "[RUN] The interrupted run's record predates exclusion tracking; its "
-                "excluded samples can't be checked."
-            )
-            return "ok"
-        index = self.X.index
-
-        def _present(labels):
-            return {s for s in labels if s in index}
-
-        saved_active = rows.get("active")
-        saved_act = set(index) if saved_active is None else _present(saved_active)
-        current_act = set(index) if self.active_indices is None else _present(self.active_indices)
-        if saved_act != current_act:
+            if legacy:
+                self._log_progress(
+                    "[RUN] The interrupted run's record predates exclusion tracking; "
+                    "its excluded samples can't be checked."
+                )
+                return "ok"
             try:
-                start_fresh = messagebox.askyesno(
-                    "Analysis Subset differs from the interrupted run",
-                    f"The interrupted run {meta.run_id} used {len(saved_act)} sample(s) "
-                    f"of the Analysis Subset; the subset now has {len(current_act)}.\n\n"
+                answer = messagebox.askyesnocancel(
+                    "Can't verify the excluded samples",
+                    f"The record of the interrupted run {meta.run_id} doesn't say which "
+                    "samples it excluded, so dasp can't check that resuming uses the "
+                    "same calibration set.\n\n"
                     "Nothing was run and nothing was deleted.\n\n"
-                    "  • Yes — delete the interrupted run and start fresh with the "
-                    "current subset.\n"
-                    "  • No — keep the run. Set the Analysis Subset back and click Run "
-                    "Analysis to resume it.",
+                    "  • Yes — resume anyway with the current exclusions.\n"
+                    "  • No — delete the interrupted run and start fresh.\n"
+                    "  • Cancel — change nothing and run nothing.",
                     icon="warning",
-                    default="no",
+                    default="cancel",
                 )
             except Exception:
-                start_fresh = False
-            if start_fresh:
+                answer = None
+            if answer is None:
+                self._log_progress("[RUN] Resume kept — excluded samples unverifiable.")
+                return None
+            if answer is False:
                 return "fresh"
-            self._log_progress("[RUN] Resume kept — the Analysis Subset differs.")
-            return None
-
-        saved_excl_list = list(rows.get("excluded") or [])
-        saved_excl = _present(saved_excl_list)
-        current_excl = _present(self.excluded_spectra or ())
-        if saved_excl == current_excl:
-            return "ok"
-        if len(saved_excl) != len(saved_excl_list):
             self._log_progress(
-                "[RUN] Resume kept — the interrupted run's excluded samples are not all "
-                "in the loaded data."
+                "[RUN] Resuming without checking the excluded samples (user's choice)."
+            )
+            return "ok"
+
+        index = self.X.index
+        by_key = {canonical_label(label): label for label in index}
+        saved_excl = set(rows.get("excluded") or [])
+        saved_active = rows.get("active")
+        missing = [k for k in sorted(saved_excl | set(saved_active or ())) if k not in by_key]
+        if missing:
+            self._log_progress(
+                f"[RUN] Resume kept — {len(missing)} of the interrupted run's excluded "
+                "or Analysis Subset samples are not in the loaded data."
             )
             try:
                 messagebox.showerror(
-                    "Can't restore the excluded samples",
-                    "The interrupted run excluded samples that are not in the loaded "
-                    "data, so its calibration set can't be restored. Nothing was run "
-                    "and nothing was changed.",
+                    "Can't restore the calibration samples",
+                    f"{len(missing)} sample(s) the interrupted run excluded or used in "
+                    "its Analysis Subset are not in the loaded data (renamed or "
+                    "removed), so its calibration set can't be restored. Nothing was "
+                    "run and nothing was changed.",
                 )
             except Exception:
                 pass
             return None
+
+        all_keys = set(by_key)
+        saved_act = all_keys if saved_active is None else set(saved_active)
+        current_act = (
+            all_keys
+            if self.active_indices is None
+            else {canonical_label(s) for s in self.active_indices if s in index}
+        )
+        if saved_act != current_act:
+            return self._ask_keep_or_fresh(
+                "Analysis Subset differs from the interrupted run",
+                f"The interrupted run {meta.run_id} used {len(saved_act)} sample(s) of "
+                f"the Analysis Subset; the subset now has {len(current_act)}. Set the "
+                "Analysis Subset back and click Run Analysis to resume it.",
+            )
+
+        current_excl = {canonical_label(s) for s in (self.excluded_spectra or ()) if s in index}
+        if saved_excl == current_excl:
+            return "ok"
         try:
             answer = messagebox.askyesnocancel(
                 "Excluded samples differ from the interrupted run",
@@ -27178,7 +27282,7 @@ class SpectralPredictApp:
             return None
         if answer is False:
             return "fresh"
-        self.excluded_spectra = set(saved_excl)
+        self.excluded_spectra = {by_key[k] for k in saved_excl}
         self._log_progress(
             f"[RUN] Restored the interrupted run's {len(saved_excl)} excluded sample(s)."
         )
@@ -27486,6 +27590,7 @@ class SpectralPredictApp:
         self._pending_uses_bayesian_run_state = True
         try:
             from spectral_predict.run_state import (
+                LABEL_NORMALIZATION,
                 CorruptRunRecordError,
                 abandon_resume,
                 discard_incomplete_run,
@@ -27545,6 +27650,7 @@ class SpectralPredictApp:
                     gui_settings=capture_gui_settings(self),
                     validation_indices=val_indices,
                     calibration_rows=self._calibration_rows_for_record(),
+                    label_normalization=LABEL_NORMALIZATION,
                 )
                 self._pending_bayesian_run_id = meta.run_id
                 self._log_progress(f"[RUN] Run id: {meta.run_id}")
@@ -28145,6 +28251,7 @@ class SpectralPredictApp:
             from spectral_predict.run_state import (
                 start_run as _start_run_state,
                 fingerprint_dataset,
+                LABEL_NORMALIZATION,
             )
             from spectral_predict.run_gui_settings import capture_gui_settings
 
@@ -28210,6 +28317,7 @@ class SpectralPredictApp:
                             gui_settings=capture_gui_settings(self),
                             validation_indices=_val_indices,
                             calibration_rows=self._calibration_rows_for_record(),
+                            label_normalization=LABEL_NORMALIZATION,
                         )
                         analysis_run_id = meta.run_id
                         self._log_progress(f"[RUN] Run id: {meta.run_id}")
@@ -31672,7 +31780,8 @@ class SpectralPredictApp:
                         task_type,
                         analysis_wl_min_value=analysis_wl_min_value,
                         analysis_wl_max_value=analysis_wl_max_value,
-                        is_manual_retrain=False
+                        is_manual_retrain=False,
+                        validation_data=(_val_X_df, _val_y_s),
                     )
 
                     if ensemble_results is not None:
@@ -36189,11 +36298,12 @@ For detailed documentation, see the User Guide.
             messagebox.showwarning("No Data", "Please load data first.")
             return
 
+        # Every metadata store, as _get_column_series resolves them by sample: after
+        # an append, ref and combined metadata each describe some of the samples.
         columns = []
-        if hasattr(self, 'combined_metadata_df') and self.combined_metadata_df is not None:
-            columns = list(self.combined_metadata_df.columns)
-        elif self.ref is not None:
-            columns = list(self.ref.columns)
+        for _, store in self._metadata_stores():
+            if store is not None:
+                columns.extend(c for c in store.columns if c not in columns)
         if not columns:
             messagebox.showwarning(
                 "No Columns", "No metadata columns available for subset filtering."
@@ -53885,7 +53995,9 @@ External Validation Performance (n={n_val}):
 
         try:
             if source == 'validation':
-                # Use validation set from Tab 4
+                # Use validation set from Tab 4, rebuilt from the current data so
+                # samples excluded since the split are left out (R005 review).
+                self._refresh_validation_snapshot()
                 if self.validation_X is None or self.validation_y is None:
                     messagebox.showerror("Error",
                         "No validation set has been created yet.\n\n"

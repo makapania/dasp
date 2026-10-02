@@ -23,6 +23,7 @@ from matplotlib.figure import Figure
 
 import spectral_predict_gui_optimized as gui_module
 from spectral_predict.data_management import DataSource, DataSourceManager
+from spectral_predict.run_state import LABEL_NORMALIZATION
 
 from tests.gui.test_resume_data_mismatch_keeps_run import _FakeThread  # noqa: F401
 from tests.gui.test_resume_round9 import (  # noqa: F401 -- fixtures
@@ -1068,3 +1069,200 @@ def test_duplicate_suffix_collision_keeps_qc_and_plot_sample_identity(clean_stat
     line, _ = _line_for(app, app.X.index[2])
     app._on_spectrum_click(SimpleNamespace(artist=line, canvas=SimpleNamespace(draw=lambda: None)))
     assert app.X.index.isin(app.excluded_spectra).sum() == 1
+
+
+# ---------------------------------------------------------------------------
+# Review round 2
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def resumable(clean_state, worker_env, fake_thread):
+    """Save a run on the loaded data with given exclusions/subset, then claim it."""
+    app, rs = clean_state, worker_env
+
+    def _save(X, y, excluded=(), active=None, **kwargs):
+        assert app._install_dataset(X, y, None, None, replot=False)
+        app.excluded_spectra = set(excluded)
+        app.active_indices = None if active is None else set(active)
+        rows = app._calibration_rows_for_record()
+        kwargs.setdefault("calibration_rows", rows)
+        kwargs.setdefault("label_normalization", LABEL_NORMALIZATION)  # as the GUI records
+        return _start_and_resume(rs, app.X, app.y, **kwargs)
+
+    yield app, rs, _save
+    rs._reset_for_tests()
+
+
+def test_resume_refuses_missing_excluded_label(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y, excluded=["A3"])
+    renamed = X.rename(index={"A3": "A3-renamed"})
+    assert app._install_dataset(renamed, y.set_axis(renamed.index), None, None, replot=False)
+    with patch("tkinter.messagebox.showerror") as err:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert err.call_args[0][0] == "Can't restore the calibration samples"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+    assert app.excluded_spectra == set()
+
+
+def test_resume_refuses_missing_active_label(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y, active=[f"A{i}" for i in range(1, 11)])
+    renamed = X.rename(index={"A5": "A5-renamed"})
+    assert app._install_dataset(renamed, y.set_axis(renamed.index), None, None, replot=False)
+    app.active_indices = {s for s in renamed.index[:10]}
+    with patch("tkinter.messagebox.showerror") as err:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert err.called and rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_float_labels_are_recorded_and_restored_on_resume(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([float(i) for i in range(1, 21)], seed=1)
+    save(X, y, excluded=[3.0])
+    assert app._install_dataset(X, y, None, None, replot=False)  # reload clears exclusions
+    with patch("tkinter.messagebox.askyesnocancel", return_value=True) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert ask.call_args[0][0] == "Excluded samples differ from the interrupted run"
+    assert app.excluded_spectra == {3.0}
+
+
+def test_new_record_without_rows_asks_instead_of_resuming_silently(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y, calibration_rows=None)
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Can't verify the excluded samples"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_legacy_resume_duplicate_suffix_preserves_holdout_membership(
+    clean_state, worker_env, fake_thread, tmp_path
+):
+    """A run saved under the old suffix scheme is not resumed on relabelled rows.
+
+    The file repeats "A" next to an existing "A.1". The old reader named both
+    repeats "A.1", so a holdout of "A.1" held out two spectra; the reader now
+    gives "A.1" and "A.2", and "A.1" would hold out one.
+    """
+    app, rs = clean_state, worker_env
+    ids = ["A", "A.1", "A"] + [f"S{i}" for i in range(4, 31)]
+    path = tmp_path / "dup.csv"
+    _write_combined(path, ids, seed=1)
+    _load_combined(app, path)
+    assert list(app.X.index[:3]) == ["A", "A.1", "A.2"]
+    meta = _start_and_resume(
+        rs,
+        app.X,
+        app.y,
+        validation_indices=["A.1", "S4", "S5"],
+        label_normalization=None,  # a record written before the new scheme
+    )
+    app.validation_enabled.set(True)
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Sample IDs were renamed differently from the interrupted run"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+    assert app.validation_indices == set(), "the old holdout was not applied to new rows"
+
+
+def test_legacy_resume_without_repeated_ids_still_resumes(
+    clean_state, worker_env, fake_thread, tmp_path
+):
+    app, rs = clean_state, worker_env
+    path = tmp_path / "a.csv"
+    _write_combined(path, [f"A{i}" for i in range(1, 31)], seed=1)
+    _load_combined(app, path)
+    _start_and_resume(rs, app.X, app.y, label_normalization=None)
+    assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+
+
+def test_dm_append_subset_dialog_includes_ref_only_columns(clean_state, tmp_path, monkeypatch):
+    import tkinter as tk
+    from tkinter import ttk
+
+    app = clean_state
+    X_b, y_b = _spectra([f"B{i}" for i in range(1, 11)], seed=2)
+    ref_b = pd.DataFrame({"protein": y_b, "site": "north"}, index=X_b.index)
+    _use_dm_source(app, monkeypatch, X_b, y_b, ref=ref_b)
+    monkeypatch.setattr(app, "_prompt_for_group_names", lambda: ("B", "C"))
+    _write_combined(
+        tmp_path / "c.csv", [f"C{i}" for i in range(1, 11)], seed=3, extra={"batch": ["x"] * 10}
+    )
+    _load_combined(app, tmp_path / "c.csv", append=True)
+
+    seen = {}
+
+    def _combobox_values(widget):
+        for child in widget.winfo_children():
+            if isinstance(child, ttk.Combobox):
+                return list(child.cget("values"))
+            found = _combobox_values(child)
+            if found is not None:
+                return found
+        return None
+
+    def _close(dialog):
+        seen["columns"] = _combobox_values(dialog)
+        dialog.destroy()
+
+    monkeypatch.setattr(tk.Toplevel, "wait_window", _close)
+    app._show_active_group_dialog()
+    assert {"site", "batch", "protein"} <= set(seen["columns"])
+
+
+def test_comparison_validation_load_refreshes_excluded_rows(clean_state):
+    app = clean_state
+    _install_regression(app)
+    _split(app, ["S1", "S2", "S3"])
+    app.excluded_spectra = {"S2"}  # after the split; cached validation still has S2
+    saved = (getattr(app, "comparison_data", None), app.comparison_data_source.get())
+    try:
+        app.comparison_data_source.set("validation")
+        app._load_comparison_data()
+        assert list(app.comparison_data.index) == ["S1", "S3"]
+    finally:
+        app.comparison_data = saved[0]
+        app.comparison_data_source.set(saved[1])
+
+
+def test_quality_check_report_refused_after_target_change(qc_app):
+    app = qc_app
+    app._run_outlier_detection()
+    app.select_all_flagged.set(True)
+    app._auto_select_flagged()
+    app.combined_metadata_df = pd.DataFrame(
+        {"protein": app.y, "moisture": app.y[::-1].to_numpy()}, index=app.X.index
+    )
+    app.target_column.set("moisture")
+    app._on_target_column_changed()
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._mark_selected_for_exclusion()
+    assert warn.called and app.excluded_spectra == set()
+
+
+def test_manual_ensemble_retrain_receives_the_cached_holdout(clean_state, monkeypatch):
+    app = clean_state
+    X, y = _install_regression(app)
+    pair = (X.loc[["S1", "S2"]], y.loc[["S1", "S2"]])
+    app.training_data_cache = {
+        "X_filtered": X.drop(index=["S1", "S2"]),
+        "y_filtered": y.drop(index=["S1", "S2"]),
+        "task_type": "regression",
+        "label_encoder": None,
+        "validation": pair,
+    }
+    got = {}
+
+    def fake_train(*args, **kwargs):
+        got["validation_data"] = kwargs.get("validation_data")
+        raise RuntimeError("stop after the call")
+
+    monkeypatch.setattr(app, "_train_ensembles", fake_train)
+    monkeypatch.setattr(app.root, "after", lambda *a, **k: None)
+    app._train_ensemble_thread()
+    assert got["validation_data"] is pair
