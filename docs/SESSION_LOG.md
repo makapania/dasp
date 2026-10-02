@@ -742,3 +742,10 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - User decision: booster tree count = one value from the pooled CV curve (xgb.cv / lgb.cv style)
+Replaces per-fold early stopping on the scored fold (R028/R003/R022). Each fold is fit once at max rounds; staged
+predictions give a pooled CV curve; one round count is chosen (like PLS LVs from RMSECV in Unscrambler), CV metrics are
+reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
+fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
+the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
