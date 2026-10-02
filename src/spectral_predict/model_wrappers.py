@@ -12,6 +12,8 @@ Internal module: not part of the declared composition surface.
 
 from __future__ import annotations
 
+import pickle
+
 import numpy as np
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 
@@ -135,7 +137,7 @@ def _match_wavelengths_normalized(requested_cols, available_columns, precision=1
             normalized_key = f"{round(col_float, precision):.{precision}f}"
             if normalized_key not in col_lookup:
                 col_lookup[normalized_key] = col
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             continue
 
     # Match each requested wavelength
@@ -150,7 +152,7 @@ def _match_wavelengths_normalized(requested_cols, available_columns, precision=1
                 matched_by_index[idx] = col_lookup[normalized_key]
             else:
                 missing_by_index[idx] = req_col
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             # Non-numeric column - try direct string match
             if req_col in col_names:
                 matched_by_index[idx] = req_col
@@ -171,7 +173,7 @@ def _match_wavelengths_normalized(requested_cols, available_columns, precision=1
                     normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
                     if normalized_key not in col_lookup_alt:
                         col_lookup_alt[normalized_key] = col
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     continue
 
             # Try matching still-missing wavelengths
@@ -184,7 +186,7 @@ def _match_wavelengths_normalized(requested_cols, available_columns, precision=1
                         matched_by_index[idx] = col_lookup_alt[normalized_key]
                     else:
                         still_missing[idx] = wl
-                except ValueError, TypeError:
+                except (ValueError, TypeError):
                     still_missing[idx] = wl
 
             missing_by_index = still_missing
@@ -647,3 +649,30 @@ LEGACY_PICKLE_NAMES = (
     "GAPreprocessClassifierWrapper",
     "CombinedPreprocessClassifierWrapper",
 )
+LEGACY_PICKLE_MODULES = ("__main__", "spectral_predict_gui_optimized")
+
+
+def resolve_legacy_class(module: str, name: str) -> type | None:
+    """The backend class for a pre-move wrapper reference, or None for anything else.
+
+    Used from an unpickler's ``find_class``: it touches no global state (no
+    ``sys.modules`` or module attributes), so concurrent loads and imports of the real
+    GUI module are unaffected.
+    """
+    if module in LEGACY_PICKLE_MODULES and name in LEGACY_PICKLE_NAMES:
+        return globals()[name]
+    return None
+
+
+class LegacyWrapperUnpickler(pickle.Unpickler):
+    """``pickle.Unpickler`` that resolves pre-move GUI wrapper references.
+
+    For plain pickle files (``model_io`` uses a joblib unpickler with the same
+    ``find_class`` mapping).
+    """
+
+    def find_class(self, module, name):
+        cls = resolve_legacy_class(module, name)
+        if cls is not None:
+            return cls
+        return super().find_class(module, name)

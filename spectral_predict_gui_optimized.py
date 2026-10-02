@@ -45741,8 +45741,11 @@ External Validation Performance (n={n_val}):
             return model_dict
 
         if suffix == '.pkl':
+            from spectral_predict.model_wrappers import LegacyWrapperUnpickler
+
+            # A raw pickle may hold a GUI-era wrapper (__main__.GAPreprocessWrapper, ...).
             with open(path, 'rb') as f:
-                model_data = pickle.load(f)
+                model_data = LegacyWrapperUnpickler(f).load()
 
             normalized = self._normalize_legacy_model_dict(model_data, filepath=str(path))
             if normalized is not None:

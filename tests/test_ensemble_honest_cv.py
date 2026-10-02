@@ -457,6 +457,26 @@ def test_dropping_a_member_keeps_survivors_preprocessing_with_short_lists(bad_po
     np.testing.assert_allclose(ens.predict(X), reference.predict(X))
 
 
+def test_create_auto_ensembles_warns_that_specialist_selection_is_not_held_out():
+    """Deferred fix: specialists come from all-row rankings, so the CV is optimistic."""
+    X, y = _signal_data(n=40)
+    results_df = pd.DataFrame(
+        {
+            "Model": ["A", "B"],
+            "regional_rmse": [
+                {"Q1": 0.1, "Q2": 0.2, "Q3": 0.1, "Q4": 0.2},
+                {"Q1": 0.2, "Q2": 0.1, "Q3": 0.2, "Q4": 0.1},
+            ],
+        }
+    )
+
+    def reconstruct(row, X_train, y_train):
+        return Ridge(alpha=1.0).fit(X_train, y_train), row["Model"]
+
+    with pytest.warns(UserWarning, match="CV metrics are optimistic"):
+        create_auto_ensembles(results_df, X, y, "regression", reconstruct, list(range(12)))
+
+
 def test_create_auto_ensembles_single_sample_gives_nan_not_calibration():
     X, y = _signal_data(n=1)
     results_df = pd.DataFrame(

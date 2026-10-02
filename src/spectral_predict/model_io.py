@@ -31,11 +31,10 @@ predictions = predict_with_model(model_dict, new_X_data)
 ```
 """
 
-import contextlib
 import joblib
+import os
+from joblib.numpy_pickle import NumpyUnpickler
 import json
-import sys
-import types
 import logging
 import warnings
 import zipfile
@@ -47,56 +46,64 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union
 
 from . import __version__
+from .model_wrappers import resolve_legacy_class
 from .resource_paths import is_frozen
 
 logger = logging.getLogger(__name__)
 
-# Module names under which pre-move pickles reference the ensemble wrapper classes:
-# the GUI run as a script (``__main__``) or imported as a module.
-_LEGACY_WRAPPER_MODULES = ("__main__", "spectral_predict_gui_optimized")
+class _LegacyAwareNumpyUnpickler(NumpyUnpickler):
+    """joblib's unpickler, resolving pre-move GUI wrapper class references.
 
-
-@contextlib.contextmanager
-def _legacy_wrapper_names():
-    """Let pickles that name a GUI-defined wrapper class load in any process.
-
-    Ensemble wrappers used to be defined in the GUI script, so files saved by the GUI
-    reference ``__main__.GAPreprocessWrapper`` (or ``spectral_predict_gui_optimized.``).
-    For the duration of a load, missing names are pointed at
-    ``spectral_predict.model_wrappers``; nothing that already exists is replaced, and
-    everything added is removed afterwards.
+    Ensemble wrappers used to be defined in the GUI script, so files it saved name
+    ``__main__.GAPreprocessWrapper`` (or ``spectral_predict_gui_optimized.``). This
+    per-load ``find_class`` maps those six names to ``spectral_predict.model_wrappers``
+    without touching ``sys.modules`` or any module attribute, so it is safe under
+    concurrent loads and leaves nothing behind if a load is interrupted.
     """
-    from . import model_wrappers
 
-    added_attrs = []
-    added_modules = []
-    for module_name in _LEGACY_WRAPPER_MODULES:
-        module = sys.modules.get(module_name)
-        if module is None:
-            module = types.ModuleType(module_name)
-            sys.modules[module_name] = module
-            added_modules.append((module_name, module))
-        for name in model_wrappers.LEGACY_PICKLE_NAMES:
-            if not hasattr(module, name):
-                setattr(module, name, getattr(model_wrappers, name))
-                added_attrs.append((module, name))
-    try:
-        yield
-    finally:
-        for module, name in added_attrs:
-            try:
-                delattr(module, name)
-            except AttributeError:
-                pass
-        for module_name, module in added_modules:
-            if sys.modules.get(module_name) is module:
-                del sys.modules[module_name]
+    def find_class(self, module, name):
+        cls = resolve_legacy_class(module, name)
+        if cls is not None:
+            return cls
+        return super().find_class(module, name)
 
 
 def _joblib_load(path):
-    """``joblib.load`` that also resolves pre-move GUI wrapper class references."""
-    with _legacy_wrapper_names():
+    """``joblib.load`` with legacy wrapper-name resolution.
+
+    joblib has no public unpickler hook, so this repeats ``joblib.load``'s
+    non-memmapped path with :class:`_LegacyAwareNumpyUnpickler`. The decompression
+    helper is joblib-private; if it is unavailable (joblib upgrade) the load falls back
+    to plain ``joblib.load``, which still reads every file saved after the wrappers
+    moved to ``spectral_predict.model_wrappers``.
+    """
+    try:
+        from joblib.numpy_pickle import _validate_fileobject_and_memmap
+    except ImportError:  # pragma: no cover - joblib internals changed
+        logger.warning("joblib internals changed; loading without legacy wrapper mapping")
         return joblib.load(path)
+
+    path = os.fspath(path)
+    legacy_format = False
+    with open(path, "rb") as f:
+        with _validate_fileobject_and_memmap(f, path, None) as (fobj, _):
+            if isinstance(fobj, str):
+                legacy_format = True  # pre-0.10 joblib file: joblib's compat loader
+            else:
+                return _LegacyAwareNumpyUnpickler(path, fobj, True).load()
+    if legacy_format:
+        return joblib.load(path)
+
+
+def _is_regressor_model(model) -> bool:
+    """True when ``model`` is clearly not a classifier (no ``classes_``, not tagged)."""
+    from sklearn.base import is_classifier
+
+    try:
+        tagged_classifier = is_classifier(model)
+    except Exception:  # noqa: BLE001 - foreign objects without sklearn tags
+        tagged_classifier = False
+    return model is not None and not tagged_classifier and not hasattr(model, "classes_")
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -484,6 +491,11 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         # Bundle compatibility fix: ensure Pipeline is marked as fitted
         if model is not None and is_frozen():
             _ensure_pipeline_fitted(model)
+
+        # Older GUI saves could record the task radio's 'auto', which
+        # predict_with_model rejects. Only a regressor is safe to relabel.
+        if metadata.get("task_type") == "auto" and _is_regressor_model(model):
+            metadata["task_type"] = "regression"
 
         # Load preprocessor if present
         preprocessor = None

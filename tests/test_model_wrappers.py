@@ -11,9 +11,14 @@
 
 from __future__ import annotations
 
+import contextlib
+import importlib
+import io
 import pickle
 import sys
+import threading
 import types
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -88,8 +93,6 @@ def test_wrapper_pickle_round_trip_is_identical(kind, classification):
 
 
 def _joblib_round_trip(obj):
-    import io
-
     buf = io.BytesIO()
     joblib.dump(obj, buf)
     buf.seek(0)
@@ -119,48 +122,170 @@ def test_gui_module_reexports_the_backend_classes():
 
 # --- Pre-move pickles ----------------------------------------------------------------------
 
+GUI_MODULE = "spectral_predict_gui_optimized"
 
-@pytest.mark.parametrize("legacy_module", ["__main__", "spectral_predict_gui_optimized"])
-@pytest.mark.parametrize("name", ["GAPreprocessWrapper", "WavelengthSubsetWrapper"])
-def test_model_saved_with_gui_defined_wrapper_loads_without_gui(tmp_path, legacy_module, name):
-    X, y = _data()
-    base = getattr(mw, name)
-    # A class pickled exactly as the GUI-defined one was: <legacy_module>.<name>.
-    legacy_cls = type(name, (base,), {"__module__": legacy_module, "__qualname__": name})
-    module = sys.modules.get(legacy_module)
-    stub = None
-    if module is None or legacy_module != "__main__":
-        stub = types.ModuleType(legacy_module)
-    saved_module = sys.modules.get(legacy_module)
-    target = stub if stub is not None else module
-    if stub is not None:
-        sys.modules[legacy_module] = stub
+
+@contextlib.contextmanager
+def _gui_era_class(legacy_module: str, name: str):
+    """Make ``<legacy_module>.<name>`` exist only while the test pickles an object.
+
+    Yields a subclass that pickles exactly as the GUI-defined class did. Everything is
+    removed on exit, so the LOADING side runs with no GUI globals.
+    """
+    legacy_cls = type(
+        name, (getattr(mw, name),), {"__module__": legacy_module, "__qualname__": name}
+    )
+    saved = sys.modules.get(legacy_module)
+    target = saved if legacy_module == "__main__" else types.ModuleType(legacy_module)
+    sys.modules[legacy_module] = target
     setattr(target, name, legacy_cls)
     try:
-        model = _wrappers(False)[name.replace("Wrapper", "")]
-        model.__class__ = legacy_cls
-        model.fit(X, y)
+        yield legacy_cls
+    finally:
+        delattr(target, name)
+        if saved is None:
+            del sys.modules[legacy_module]
+        else:
+            sys.modules[legacy_module] = saved
+
+
+def _fitted_legacy(legacy_cls, name):
+    X, y = _data()
+    model = _wrappers(False)[name.replace("Wrapper", "")]
+    model.__class__ = legacy_cls
+    return model.fit(X, y)
+
+
+def _global_state():
+    """Everything a global-mutation shim could leave behind."""
+    main = sys.modules["__main__"]
+    return (
+        tuple(n for n in mw.LEGACY_PICKLE_NAMES if hasattr(main, n)),
+        sys.modules.get(GUI_MODULE),
+    )
+
+
+@pytest.mark.parametrize("legacy_module", ["__main__", GUI_MODULE])
+@pytest.mark.parametrize("name", ["GAPreprocessWrapper", "WavelengthSubsetWrapper"])
+def test_model_saved_with_gui_defined_wrapper_loads_without_gui(tmp_path, legacy_module, name):
+    X, _ = _data()
+    path = tmp_path / "legacy.dasp"
+    with _gui_era_class(legacy_module, name) as legacy_cls:
+        model = _fitted_legacy(legacy_cls, name)
         expected = model.predict(X)
-        path = tmp_path / "legacy.dasp"
         meta = {"model_name": "PLS", "task_type": "regression", "wavelengths": COLS, "n_vars": N_WL}
         save_model(model, None, meta, str(path))
-    finally:
-        # The loading process has no GUI globals.
-        delattr(target, name)
-        if stub is not None:
-            if saved_module is None:
-                del sys.modules[legacy_module]
-            else:
-                sys.modules[legacy_module] = saved_module
 
+    before = _global_state()
     loaded = load_model(str(path))["model"]
 
-    assert type(loaded).__module__ == "spectral_predict.model_wrappers"
+    assert type(loaded) is getattr(mw, name)
     np.testing.assert_allclose(loaded.predict(X), expected)
-    # The loader removes everything it added.
-    assert not hasattr(sys.modules["__main__"], name) or legacy_module != "__main__"
-    if saved_module is None and legacy_module != "__main__":
-        assert legacy_module not in sys.modules
+    assert _global_state() == before, "loading must not touch sys.modules or __main__"
+
+
+def test_plain_pickle_with_gui_defined_wrapper_loads_via_legacy_unpickler():
+    """The GUI's raw .pkl prediction-model path."""
+    X, _ = _data()
+    with _gui_era_class("__main__", "GAPreprocessWrapper") as legacy_cls:
+        model = _fitted_legacy(legacy_cls, "GAPreprocessWrapper")
+        blob = pickle.dumps(model)
+    loaded = mw.LegacyWrapperUnpickler(io.BytesIO(blob)).load()
+    assert type(loaded) is mw.GAPreprocessWrapper
+    np.testing.assert_allclose(loaded.predict(X), model.predict(X))
+
+
+# Pause points reached from INSIDE an unpickling (via __reduce__), to force overlap.
+_PAUSE: dict[str, threading.Barrier] = {}
+
+
+def _pause_inside_load():
+    _PAUSE["arrived"].wait(timeout=60)
+    _PAUSE["resume"].wait(timeout=60)
+    return "paused"
+
+
+def _interrupt_inside_load():
+    raise KeyboardInterrupt
+
+
+class _PauseHere:
+    def __reduce__(self):
+        return (_pause_inside_load, ())
+
+
+class _InterruptHere:
+    def __reduce__(self):
+        return (_interrupt_inside_load, ())
+
+
+def _legacy_payload(tmp_path, tag: str, extra) -> tuple[Path, np.ndarray]:
+    X, _ = _data()
+    path = tmp_path / f"{tag}.pkl"
+    with _gui_era_class("__main__", "GAPreprocessWrapper") as legacy_cls:
+        model = _fitted_legacy(legacy_cls, "GAPreprocessWrapper")
+        joblib.dump((extra, model), path)
+    return path, model.predict(X)
+
+
+def test_concurrent_legacy_loads_and_gui_import_do_not_interfere(tmp_path):
+    from spectral_predict.model_io import _joblib_load
+
+    paths = [_legacy_payload(tmp_path, f"p{i}", _PauseHere()) for i in range(2)]
+    _PAUSE["arrived"] = threading.Barrier(3)
+    _PAUSE["resume"] = threading.Barrier(3)
+    results: dict[int, object] = {}
+    errors: list[BaseException] = []
+
+    def load(i):
+        try:
+            results[i] = _joblib_load(paths[i][0])
+        except BaseException as exc:  # noqa: BLE001 - re-raised in the main thread
+            errors.append(exc)
+
+    threads = [threading.Thread(target=load, args=(i,)) for i in range(2)]
+    before = _global_state()
+    for t in threads:
+        t.start()
+    try:
+        _PAUSE["arrived"].wait(timeout=60)
+        # Both loads are now paused mid-unpickle.
+        assert _global_state() == before
+        gui = importlib.import_module(GUI_MODULE)  # the real module, not a stub
+        assert hasattr(gui, "SpectralPredictApp")
+        assert gui.GAPreprocessWrapper is mw.GAPreprocessWrapper
+    finally:
+        _PAUSE["resume"].wait(timeout=60)
+        for t in threads:
+            t.join(timeout=60)
+
+    assert not errors, errors
+    X, _ = _data()
+    for i, (_, expected) in enumerate(paths):
+        marker, model = results[i]
+        assert marker == "paused" and type(model) is mw.GAPreprocessWrapper
+        np.testing.assert_allclose(model.predict(X), expected)
+
+
+def test_interrupted_legacy_load_leaves_no_residue(tmp_path):
+    from spectral_predict.model_io import _joblib_load
+
+    path, _ = _legacy_payload(tmp_path, "interrupt", _InterruptHere())
+    before = _global_state()
+    with pytest.raises(KeyboardInterrupt):
+        _joblib_load(path)
+    assert _global_state() == before
+
+
+def test_standalone_auto_regressor_loads_as_regression_classifier_untouched(tmp_path):
+    X, y = _data()
+    meta = {"model_name": "Ridge", "task_type": "auto", "wavelengths": COLS, "n_vars": N_WL}
+    save_model(_wrappers(False)["GAPreprocess"].fit(X, y), None, meta, str(tmp_path / "r.dasp"))
+    Xc, yc = _data(classification=True)
+    save_model(_wrappers(True)["GAPreprocess"].fit(Xc, yc), None, meta, str(tmp_path / "c.dasp"))
+
+    assert load_model(str(tmp_path / "r.dasp"))["metadata"]["task_type"] == "regression"
+    assert load_model(str(tmp_path / "c.dasp"))["metadata"]["task_type"] == "auto"
 
 
 def test_ensemble_saved_with_auto_task_type_predicts_as_regression(tmp_path):

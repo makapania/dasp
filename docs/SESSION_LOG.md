@@ -790,3 +790,15 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   names at the backend classes (adds only, removes afterwards). Ensemble files with `task_type='auto'` load as
   regression. `create_auto_ensembles` now warns that its CV is optimistic: specialists come from search-time
   regional rankings over all rows; honest per-fold rankings not implemented (no production caller).
+- **Review round 3: the round-2 load shim mutated global state** (temporary `__main__` attributes and a stub
+  `spectral_predict_gui_optimized` in `sys.modules`): racy under concurrent loads, it shadowed a real GUI import made
+  during a load, and an interrupt could leak it. Replaced with a per-load unpickler: `model_io._joblib_load`
+  repeats `joblib.load`'s non-memmap path with a `NumpyUnpickler` subclass whose `find_class` maps the six
+  (`__main__` | GUI module, wrapper) pairs via `model_wrappers.resolve_legacy_class`. joblib 1.6 has no public
+  unpickler hook; the one private helper used (`numpy_pickle._validate_fileobject_and_memmap`, decompression) is
+  imported inside a try with a plain `joblib.load` fallback. `model_wrappers.LegacyWrapperUnpickler` does the same
+  for plain pickle (GUI raw `.pkl` prediction models).
+- **Black with `--target-version py314` rewrites `except (A, B):` to `except A, B:`**, which is a SyntaxError on the
+  3.12 rollback build. Run Black on this repo with `--target-version py312`.
+- `load_model` also maps `task_type='auto'` to regression, but only for a regressor (not an sklearn classifier and
+  no `classes_`); classifiers stay 'auto'.
