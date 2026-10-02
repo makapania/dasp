@@ -771,6 +771,18 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `_show_import_warnings` puts in a dialog (OPUS/ASCII/PerkinElmer main import only). PerkinElmer .sp has no unit
   field in specio; ranges up to 3300 (the Lambda UV/Vis/NIR limit) are ambiguous and now default to nm at 40%
   with a warning. `read_sp_dir` globbed `*.sp` + `*.SP`, which on Windows lists every file twice.
+- **Review round 2.** `data_type` is a physical ordinate type, not a "may log" flag: the GUI uses it for
+  10**-x conversion, plot labels, the absorbance-only Auto Bone FTIR gate and saved-model compatibility. Readers
+  now report a third type, 'other' (`io.OTHER_DATA_TYPE`), for Kubelka-Munk, photoacoustic, Raman, emission and
+  raw single-channel spectra; `source_data_type` names it. Log-reflectance and ATR stay 'absorbance'
+  (absorbance-equivalent). The GUI offers no conversion for 'other' (main tab, prediction, both CT modes), and
+  saves `source_data_type`/`data_type_converted_from` with models. The prediction and CT import paths used to
+  re-run `detect_spectral_data_type` on values and drop reader metadata (an OPUS logr spectrum became
+  "reflectance, 100%"); `_resolve_loaded_data_type` now prefers the reader's type, and every active import path
+  calls `_show_import_warnings`. CT conversions used the main tab's `source_data_type`/`data_value_scale`;
+  `_convert_with_source` swaps in the data's own. ASCII: every delimiter x decimal reading is scored on how many
+  lines give numeric x/y; ties must agree or the file is refused. The decimal-comma guard looks only at x/y and
+  the next field, plus leading-zero tokens (thousands groups). Fields are split with the csv module (quotes).
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.

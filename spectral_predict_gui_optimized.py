@@ -301,6 +301,54 @@ except ImportError:
     HAS_CALIBRATION_TRANSFER = False
 
 
+# ===== SPECTRAL DATA TYPES =====
+# Reflectance and absorbance convert into each other (A = log10(1/R)). The readers
+# also report OTHER_DATA_TYPE ('other') for measured ordinates that are neither
+# (Kubelka-Munk, photoacoustic, Raman/emission, raw single-channel intensity), and
+# keep the specific kind in source_data_type. No conversion is offered for those.
+_CONVERTIBLE_DATA_TYPES = ("reflectance", "absorbance")
+_SOURCE_DATA_TYPE_LABELS = {
+    "kubelka_munk": "Kubelka-Munk",
+    "photoacoustic": "Photoacoustic signal",
+    "raman": "Raman intensity",
+    "emission": "Emission intensity",
+    "sample": "Single-channel intensity",
+    "reference": "Single-channel intensity",
+}
+
+
+def _is_convertible_data_type(data_type) -> bool:
+    """True if reflectance <-> absorbance conversion applies to ``data_type``."""
+    return data_type in _CONVERTIBLE_DATA_TYPES
+
+
+def _data_type_label(data_type, source_data_type=None) -> str:
+    """Display name of a data type, e.g. for plot y labels and status text."""
+    if _is_convertible_data_type(data_type):
+        return str(data_type).capitalize()
+    return _SOURCE_DATA_TYPE_LABELS.get(source_data_type, "Intensity")
+
+
+def _resolve_loaded_data_type(metadata, X):
+    """Return ``(data_type, confidence, source_data_type)`` for freshly loaded data.
+
+    The reader's own result wins: it already fell back to the value heuristic where
+    the file carried no type, and it knows types the heuristic cannot see (an OPUS
+    log-reflectance block looks like reflectance by value but must not be logged
+    again). The heuristic runs only when the reader returned no data_type.
+    """
+    metadata = metadata or {}
+    data_type = metadata.get("data_type")
+    if data_type:
+        return data_type, float(metadata.get("type_confidence", 50.0)), metadata.get(
+            "source_data_type"
+        )
+    from spectral_predict.io import detect_spectral_data_type
+
+    data_type, confidence, _ = detect_spectral_data_type(X)
+    return data_type, confidence, None
+
+
 # ===== NATIVE TKINTER TOOLTIP CLASS =====
 # No external dependencies required - uses pure tkinter
 class CreateToolTip(object):
@@ -2764,6 +2812,7 @@ class SpectralPredictApp:
         self.loaded_models = []  # List of model dicts from load_model()
         self.prediction_data = None  # DataFrame with new spectral data
         self.prediction_data_type = None  # Data type of prediction data (absorbance/reflectance)
+        self.pred_source_data_type = None  # What the prediction file held (e.g. transmittance)
         self.predictions_df = None  # Results dataframe
         self.predictions_model_map = {}  # Map column names to model metadata
         self.consensus_info = {}  # Store consensus model details for display
@@ -10249,12 +10298,20 @@ class SpectralPredictApp:
             return
 
         # Validate absorbance
+        # 'absorbance' includes the absorbance-equivalent OPUS log-reflectance and
+        # ATR blocks; Kubelka-Munk, Raman etc. load as 'other' and are refused here.
         if hasattr(self, 'current_data_type') and self.current_data_type.get() != "absorbance":
+            current = self.current_data_type.get()
+            hint = (
+                "Convert in Data Management first."
+                if _is_convertible_data_type(current)
+                else "This data type cannot be converted to absorbance."
+            )
             messagebox.showwarning(
                 "Wrong Data Type",
                 "Auto Bone FTIR requires absorbance data.\n"
                 "Current data type is "
-                f"{self.current_data_type.get()}. Convert in Data Management first.",
+                f"{_data_type_label(current, getattr(self, 'source_data_type', None))}. {hint}",
             )
             return
 
@@ -19893,18 +19950,22 @@ class SpectralPredictApp:
         if self.X is None:
             return
 
-        # Update the conversion button text based on current selection
+        # Update the conversion button text based on current selection (the radios only
+        # offer reflectance/absorbance, so an override of an 'other' load enables it)
         current = self.current_data_type.get()
         if current == "reflectance":
-            self.convert_data_button.config(text="Convert to Absorbance")
+            self.convert_data_button.config(text="Convert to Absorbance", state='normal')
+        elif current == "absorbance":
+            self.convert_data_button.config(text="Convert to Reflectance", state='normal')
         else:
-            self.convert_data_button.config(text="Convert to Reflectance")
+            self.convert_data_button.config(text="No conversion", state='disabled')
 
         # Update status label to show user override
         original = self.original_data_type.get()
         if current != original:
+            original_label = _data_type_label(original, self.source_data_type)
             self.data_type_status_label.config(
-                text=f"[!]  User override: Treating as {current.capitalize()} (originally {original.capitalize()})",
+                text=f"[!]  User override: Treating as {current.capitalize()} (originally {original_label})",
                 foreground=self.colors['warning']
             )
         else:
@@ -20042,6 +20103,14 @@ class SpectralPredictApp:
 
         # Determine current and target types
         current_type = self.current_data_type.get()
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, self.source_data_type)} data has no "
+                "reflectance/absorbance conversion.\n\nIf the data really is reflectance "
+                "or absorbance, select that type first.",
+            )
+            return
         target_type = "absorbance" if current_type == "reflectance" else "reflectance"
 
         # Confirm with user if this seems unusual
@@ -20138,6 +20207,23 @@ class SpectralPredictApp:
         self.x_unit_confidence = metadata.get('x_unit_confidence', 50.0)
         self.x_unit_detection_method = metadata.get('x_unit_detection_method', 'default')
         self.x_unit_has_been_converted = False
+
+    def _convert_with_source(self, data, from_type, to_type, source_data_type):
+        """Convert data whose source type differs from the main tab's.
+
+        ``_convert_data_type`` reads the main tab's ``source_data_type`` (transmittance
+        formula) and ``data_value_scale``; prediction and calibration-transfer data
+        must use their own source type, so both are swapped in and restored.
+        """
+        saved_scale = self.data_value_scale
+        saved_source = self.source_data_type
+        try:
+            self.data_value_scale = 1.0  # the converter auto-detects percent scale
+            self.source_data_type = source_data_type
+            return self._convert_data_type(data, from_type, to_type)
+        finally:
+            self.data_value_scale = saved_scale
+            self.source_data_type = saved_source
 
     def _show_import_warnings(self, metadata, source_label):
         """Show a reader's ``metadata['import_warnings']`` in a dialog.
@@ -20331,7 +20417,8 @@ class SpectralPredictApp:
             color = self.colors['warning']
 
         # Update status label
-        status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence: {confidence:.0f}%)"
+        type_label = _data_type_label(data_type, self.source_data_type)
+        status_text = f"Detected: {type_label} ({conf_str} confidence: {confidence:.0f}%)"
         if confidence < 70:
             status_text += " [!]"
         extra_notes = []
@@ -20347,8 +20434,11 @@ class SpectralPredictApp:
         self.data_type_status_label.config(text=status_text, foreground=color)
 
         # Update button text
-        opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
-        self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
+        if _is_convertible_data_type(data_type):
+            opposite_type = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.convert_data_button.config(text=f"Convert to {opposite_type}", state='normal')
+        else:
+            self.convert_data_button.config(text="No conversion", state='disabled')
 
         # Enable radio buttons for manual override
         self.reflectance_radio.config(state='normal')
@@ -20390,7 +20480,10 @@ class SpectralPredictApp:
         if self.data_has_been_converted:
             status_text = f"Current: {data_type.capitalize()} (converted from {self.original_data_type.get()})"
         else:
-            status_text = f"Detected: {data_type.capitalize()} ({conf_str} confidence)"
+            status_text = (
+                f"Detected: {_data_type_label(data_type, self.source_data_type)} "
+                f"({conf_str} confidence)"
+            )
 
         color = self.colors.get('success', 'green') if confidence >= 70 else self.colors.get('warning', 'orange')
         self.dm_data_type_label.config(text=status_text, foreground=color)
@@ -21516,7 +21609,7 @@ class SpectralPredictApp:
         """
         if self.source_data_type == "transmittance" and self.current_data_type.get() == "reflectance" and not self.data_has_been_converted:
             return "Transmittance"
-        return self.current_data_type.get().capitalize()
+        return _data_type_label(self.current_data_type.get(), self.source_data_type)
 
     def _generate_plots(self):
         """Generate spectral plots in the plot notebook."""
@@ -42452,7 +42545,15 @@ External Validation Performance (n={n_val}):
                 'performance': {},
                 'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
-                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
+                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance/other)
+                # What the file held (e.g. 'transmittance', 'log_reflectance', 'kubelka_munk')
+                # and, if the user converted, the type before conversion.
+                'source_data_type': getattr(self, 'source_data_type', None),
+                'data_type_converted_from': (
+                    self.original_data_type.get()
+                    if getattr(self, 'data_has_been_converted', False)
+                    else None
+                ),
                 'x_unit': self.current_x_unit.get(),  # Store x-axis unit (nm/cm-1)
                 # Validation set metadata
                 'validation_set_enabled': self.validation_enabled.get(),
@@ -44200,6 +44301,9 @@ External Validation Performance (n={n_val}):
 
                 # For validation set, use the same data type as the training data
                 self.prediction_data_type = self.current_data_type.get()
+                self.pred_source_data_type = (
+                    None if self.data_has_been_converted else self.source_data_type
+                )
 
                 self.pred_data_status.config(
                     text=f"> Loaded validation set: {n_samples} spectra with {n_wavelengths} wavelengths ({self.prediction_data_type.upper()})"
@@ -44232,6 +44336,7 @@ External Validation Performance (n={n_val}):
             from spectral_predict.io import (read_asd_dir, read_spc_dir, read_csv_spectra,
                                              read_jcamp_dir, read_ascii_spectra)
 
+            pred_metadata = None  # reader metadata, when the reader returns any
             if source == 'directory':
                 # Try to detect file type
                 asd_files = list_asd_files(path)
@@ -44243,24 +44348,24 @@ External Validation Performance (n={n_val}):
                 if asd_files:
                     self.pred_status.config(text="Loading ASD files...")
                     self.root.update()
-                    self.prediction_data, _ = read_asd_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_asd_dir(str(path))
                 elif spc_files:
                     self.pred_status.config(text="Loading SPC files...")
                     self.root.update()
-                    self.prediction_data, _ = read_spc_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_spc_dir(str(path))
                 elif jcamp_files:
                     self.pred_status.config(text="Loading JCAMP-DX files...")
                     self.root.update()
-                    self.prediction_data, _ = read_jcamp_dir(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_jcamp_dir(str(path))
                 elif ascii_files:
                     self.pred_status.config(text="Loading ASCII files...")
                     self.root.update()
-                    self.prediction_data, _ = read_ascii_spectra(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_ascii_spectra(str(path))
                 elif list(path.glob("*.spa")) + list(path.glob("*.SPA")) + list(path.glob("*.spg")) + list(path.glob("*.SPG")):
                     self.pred_status.config(text="Loading Omnic files...")
                     self.root.update()
                     from spectral_predict.io import read_omnic_dir
-                    self.prediction_data, _ = read_omnic_dir(str(path))
+                    self.prediction_data, pred_metadata = read_omnic_dir(str(path))
                 else:
                     messagebox.showerror("No Files",
                         "No supported spectral files found in the selected directory.\n"
@@ -44274,21 +44379,25 @@ External Validation Performance (n={n_val}):
                 else:
                     self.pred_status.config(text="Loading CSV file...")
                     self.root.update()
-                    self.prediction_data, _ = read_csv_spectra(str(path))  # Unpack tuple, discard metadata
+                    self.prediction_data, pred_metadata = read_csv_spectra(str(path))
 
             # Update status
             n_samples = len(self.prediction_data)
             n_wavelengths = len(self.prediction_data.columns)
 
-            # Detect data type for prediction data
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            self.pred_source_data_type = None
             try:
-                from spectral_predict.io import detect_spectral_data_type
-                data_type, confidence, _ = detect_spectral_data_type(self.prediction_data)
+                data_type, confidence, source_type = _resolve_loaded_data_type(
+                    pred_metadata, self.prediction_data
+                )
                 self.prediction_data_type = data_type
+                self.pred_source_data_type = source_type
 
                 # Update status to include detected type
                 self.pred_data_status.config(
-                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths ({data_type.upper()} detected)"
+                    text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths "
+                         f"({_data_type_label(data_type, source_type).upper()} detected)"
                 )
             except Exception as e:
                 print(f"Could not detect prediction data type: {e}")
@@ -44296,6 +44405,7 @@ External Validation Performance (n={n_val}):
                 self.pred_data_status.config(
                     text=f"> Loaded {n_samples} spectra with {n_wavelengths} wavelengths"
                 )
+            self._show_import_warnings(pred_metadata, "Prediction data")
             # Infer reflectance scale for prediction data
             if self.prediction_data_type == 'reflectance':
                 try:
@@ -44329,7 +44439,9 @@ External Validation Performance (n={n_val}):
         for model_dict in self.loaded_models:
             metadata = model_dict.get('metadata', {})
             dt = metadata.get('data_type')
-            if dt and dt.lower() in ('absorbance', 'reflectance'):
+            # 'other' (e.g. Kubelka-Munk) counts so a mismatch is shown, but
+            # _update_pred_data_type_ui never offers a conversion to or from it.
+            if dt and dt.lower() in ('absorbance', 'reflectance', 'other'):
                 types.add(dt.lower())
 
         if len(types) == 1:
@@ -44350,8 +44462,9 @@ External Validation Performance (n={n_val}):
 
         # Update prediction data type label
         if pred_type:
+            pred_label = _data_type_label(pred_type, getattr(self, 'pred_source_data_type', None))
             self.pred_type_status_label.config(
-                text=f"Prediction data: {pred_type.upper()}",
+                text=f"Prediction data: {pred_label.upper()}",
                 foreground=self.colors.get('text', '#000000'))
         else:
             self.pred_type_status_label.config(
@@ -44362,7 +44475,21 @@ External Validation Performance (n={n_val}):
         self.pred_model_expects_label.config(text=model_text)
 
         # Determine button state and match indicator
-        if pred_type and model_type:
+        if pred_type and not _is_convertible_data_type(pred_type):
+            # e.g. Kubelka-Munk or single-channel data: nothing to convert to
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            if model_type and model_type != pred_type:
+                self.pred_type_match_label.config(
+                    text="\u26a0 Mismatch", foreground=self.colors.get('warning', '#e67e22'))
+            else:
+                self.pred_type_match_label.config(text="")
+        elif pred_type and model_type and not _is_convertible_data_type(model_type):
+            self.pred_convert_btn.config(state='disabled', text="Convert")
+            self.pred_type_match_label.config(
+                text="\u2713 Match" if pred_type == model_type else "\u26a0 Mismatch",
+                foreground=self.colors.get(
+                    'success' if pred_type == model_type else 'warning', '#e67e22'))
+        elif pred_type and model_type:
             if pred_type == model_type:
                 # Match
                 self.pred_convert_btn.config(state='disabled', text="Convert")
@@ -44401,10 +44528,16 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Unknown Type",
                 "Cannot convert: prediction data type is unknown.")
             return
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, getattr(self, 'pred_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
 
         # Determine target type
         model_type, _ = self._get_models_expected_data_type()
-        if model_type and model_type != current_type:
+        if model_type and model_type != current_type and _is_convertible_data_type(model_type):
             target_type = model_type
         else:
             # Toggle to opposite type
@@ -44415,7 +44548,9 @@ External Validation Performance (n={n_val}):
         saved_source = self.source_data_type
         try:
             self.data_value_scale = self.pred_data_value_scale
-            self.source_data_type = None  # Disable transmittance formula
+            # The prediction file's own source type (transmittance formula if the reader
+            # said so), never the main tab's.
+            self.source_data_type = getattr(self, 'pred_source_data_type', None)
             converted = self._convert_data_type(
                 self.prediction_data.values, current_type, target_type)
             # Capture any auto-detected scale change before restoring
@@ -48714,7 +48849,8 @@ External Validation Performance (n={n_val}):
             return df
         elif ascii_files:
             from spectral_predict.io import read_ascii_spectra
-            df, _ = read_ascii_spectra(str(directory))
+            df, metadata = read_ascii_spectra(str(directory))
+            self._show_import_warnings(metadata, "ASCII")
             return df
         elif sorted(set(
             list(dir_path.glob("*.spa")) + list(dir_path.glob("*.SPA"))
@@ -50529,6 +50665,7 @@ External Validation Performance (n={n_val}):
         try:
             is_directory = os.path.isdir(filepath)
             format_type = None
+            metadata = None  # reader metadata, when the reader returns any
 
             if is_directory:
                 # Directory - detect format by scanning files
@@ -50742,9 +50879,11 @@ External Validation Performance (n={n_val}):
             self.new_satellite_data_predict = (wavelengths, X)
             self.ct_pred_loaded_sample_ids = sample_ids  # Store extracted sample IDs
 
-            # Auto-detect data type
-            from spectral_predict.io import detect_spectral_data_type
-            data_type, confidence, _ = detect_spectral_data_type(X)
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            data_type, confidence, self.ct_pred_source_data_type = _resolve_loaded_data_type(
+                metadata, X
+            )
+            self._show_import_warnings(metadata, "Satellite spectra")
             self.ct_pred_data_type.set(data_type)
             self.ct_pred_original_data_type = data_type
             self.ct_pred_type_confidence = confidence
@@ -50759,7 +50898,8 @@ External Validation Performance (n={n_val}):
             info_text += f"Wavelengths: {len(wavelengths)} ({wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm)\n"
             if resampled:
                 info_text += "Status: Resampled to match transfer model\n"
-            info_text += f"Data Type: {data_type.capitalize()} ({confidence:.0f}% confidence)\n"
+            type_label = _data_type_label(data_type, self.ct_pred_source_data_type)
+            info_text += f"Data Type: {type_label} ({confidence:.0f}% confidence)\n"
             info_text += f"Path: {filepath}"
 
             self.ct_pred_satellite_info_text.config(state='normal')
@@ -50807,14 +50947,18 @@ External Validation Performance (n={n_val}):
         else:
             # Normal detection display
             color = self.colors['success'] if confidence >= 70 else self.colors['warning']
+            type_label = _data_type_label(data_type, getattr(self, 'ct_pred_source_data_type', None))
             self.ct_pred_data_type_status.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                text=f"{type_label} ({confidence:.0f}% confidence)",
                 foreground=color
             )
 
         # Update conversion button text
-        target = "Absorbance" if data_type == "reflectance" else "Reflectance"
-        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        if _is_convertible_data_type(data_type):
+            target = "Absorbance" if data_type == "reflectance" else "Reflectance"
+            self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        else:
+            self.ct_pred_convert_btn.config(text="No conversion", state='disabled')
 
     def _on_ct_pred_data_type_override(self):
         """Handle manual override of data type in Mode A (no conversion)."""
@@ -50826,7 +50970,9 @@ External Validation Performance (n={n_val}):
 
         # Update conversion button text
         target = "Absorbance" if current == "reflectance" else "Reflectance"
-        self.ct_pred_convert_btn.config(text=f"Convert to {target}")
+        self.ct_pred_convert_btn.config(
+            text=f"Convert to {target}",
+            state='normal' if _is_convertible_data_type(current) else 'disabled')
 
         # Update status to show override
         if current != original and not self.ct_pred_data_converted:
@@ -50850,13 +50996,19 @@ External Validation Performance (n={n_val}):
 
         wavelengths, X = self.new_satellite_data_predict
         current_type = self.ct_pred_data_type.get()
+        if not _is_convertible_data_type(current_type):
+            messagebox.showwarning(
+                "No Conversion",
+                f"{_data_type_label(current_type, getattr(self, 'ct_pred_source_data_type', None))} "
+                "data has no reflectance/absorbance conversion.")
+            return
         target_type = "absorbance" if current_type == "reflectance" else "reflectance"
 
-        # Convert using existing conversion functions
-        if target_type == "absorbance":
-            X_converted = self._convert_reflectance_to_absorbance(X)
-        else:
-            X_converted = self._convert_absorbance_to_reflectance(X)
+        # Convert with this data's own source type (transmittance formula), not the
+        # main tab's
+        X_converted = self._convert_with_source(
+            X, current_type, target_type,
+            None if self.ct_pred_data_converted else getattr(self, 'ct_pred_source_data_type', None))
 
         # Update stored data
         self.new_satellite_data_predict = (wavelengths, X_converted)
@@ -51184,6 +51336,7 @@ External Validation Performance (n={n_val}):
         self._update_ct_use_as_working_btn_state()
 
         try:
+            metadata = None  # reader metadata, when the reader returns any
             # Detect format (will be updated for directory formats)
             detected_format = self._detect_data_format(path)
             self.satellite_data_format = detected_format  # Store for export
@@ -51424,9 +51577,11 @@ External Validation Performance (n={n_val}):
             # Store data
             self.new_satellite_data_export = (wavelengths, X)
 
-            # Auto-detect data type
-            from spectral_predict.io import detect_spectral_data_type
-            data_type, confidence, _ = detect_spectral_data_type(X)
+            # Data type: the reader's metadata first, value heuristic only as fallback
+            data_type, confidence, self.ct_export_source_data_type = _resolve_loaded_data_type(
+                metadata, X
+            )
+            self._show_import_warnings(metadata, "Satellite spectra")
             self.ct_export_data_type.set(data_type)
             self.ct_export_original_data_type = data_type  # Store original for override warning
             self.ct_export_type_confidence = confidence  # Store confidence
@@ -51449,7 +51604,8 @@ External Validation Performance (n={n_val}):
                     if len(meta_cols) > 5:
                         info_text += f" ... +{len(meta_cols) - 5} more"
 
-            info_text += f"\nData Type: {data_type.capitalize()} ({confidence:.0f}% confidence)"
+            type_label = _data_type_label(data_type, self.ct_export_source_data_type)
+            info_text += f"\nData Type: {type_label} ({confidence:.0f}% confidence)"
 
             self.ct_export_data_info_text.config(state='normal')
             self.ct_export_data_info_text.delete('1.0', tk.END)
@@ -51459,7 +51615,7 @@ External Validation Performance (n={n_val}):
             # Update data type detection UI
             color = self.colors['success'] if confidence >= 70 else self.colors['warning']
             self.ct_export_detected_type_label.config(
-                text=f"{data_type.capitalize()} ({confidence:.0f}% confidence)",
+                text=f"{type_label} ({confidence:.0f}% confidence)",
                 foreground=color)
 
             # Enable radio buttons
@@ -51468,6 +51624,9 @@ External Validation Performance (n={n_val}):
 
             if data_type == 'reflectance':
                 self.ct_convert_to_abs_btn.config(state='normal')
+                self.ct_convert_to_refl_btn.config(state='disabled')
+            elif not _is_convertible_data_type(data_type):
+                self.ct_convert_to_abs_btn.config(state='disabled')
                 self.ct_convert_to_refl_btn.config(state='disabled')
             else:
                 self.ct_convert_to_abs_btn.config(state='disabled')
@@ -51782,7 +51941,8 @@ External Validation Performance (n={n_val}):
                 ax.plot(wavelengths, X[i, :], alpha=alpha, linewidth=1.0)
 
             ax.set_xlabel(self._get_spectral_xlabel())
-            ax.set_ylabel(self.ct_export_data_type.get().capitalize())
+            ax.set_ylabel(_data_type_label(
+                self.ct_export_data_type.get(), getattr(self, 'ct_export_source_data_type', None)))
             ax.set_title(f'Loaded Spectra ({n_samples} samples)')
             ax.grid(True, alpha=0.3)
             fig.tight_layout()
@@ -51985,8 +52145,13 @@ External Validation Performance (n={n_val}):
         """Convert loaded Mode B spectra from reflectance to absorbance."""
         if self.new_satellite_data_export is None:
             return
+        if self.ct_export_data_type.get() != "reflectance":
+            return
         wavelengths, X = self.new_satellite_data_export
-        X_converted = self._convert_reflectance_to_absorbance(X)
+        X_converted = self._convert_with_source(
+            X, "reflectance", "absorbance",
+            None if self.ct_export_data_converted
+            else getattr(self, 'ct_export_source_data_type', None))
         self.new_satellite_data_export = (wavelengths, X_converted)
         self.ct_export_data_type.set("absorbance")
         self.ct_export_data_converted = True
@@ -52008,8 +52173,10 @@ External Validation Performance (n={n_val}):
         """Convert loaded Mode B spectra from absorbance to reflectance."""
         if self.new_satellite_data_export is None:
             return
+        if self.ct_export_data_type.get() != "absorbance":
+            return
         wavelengths, X = self.new_satellite_data_export
-        X_converted = self._convert_absorbance_to_reflectance(X)
+        X_converted = self._convert_with_source(X, "absorbance", "reflectance", None)
         self.new_satellite_data_export = (wavelengths, X_converted)
         self.ct_export_data_type.set("reflectance")
         self.ct_export_data_converted = True
@@ -58605,6 +58772,7 @@ External Validation Performance (n={n_val}):
             if opus_files:
                 from spectral_predict.io import read_opus_dir
                 df, metadata = read_opus_dir(str(path))
+                self._show_import_warnings(metadata, "OPUS")
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for SP files (PerkinElmer)
@@ -58612,6 +58780,7 @@ External Validation Performance (n={n_val}):
             if sp_files:
                 from spectral_predict.io import read_sp_dir
                 df, metadata = read_sp_dir(str(path))
+                self._show_import_warnings(metadata, "PerkinElmer")
                 return df.values, df.columns.astype(float).values, df.index.tolist()
 
             # Check for Thermo Omnic files (.spa, .spg)

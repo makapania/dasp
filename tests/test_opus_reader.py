@@ -222,8 +222,9 @@ def test_wrapper_single_channel_is_not_labelled_absorbance_by_metadata(tmp_path,
         _, meta = sp_io.read_opus_file(path)
 
     assert meta["source_data_type"] == "sample"
-    assert meta["data_type"] in ("absorbance", "reflectance")  # heuristic, not metadata
-    assert not str(meta["detection_method"]).startswith("opus_metadata")
+    # Raw intensities: neither absorbance nor reflectance, so no conversion applies
+    assert meta["data_type"] == "other"
+    assert meta["detection_method"] == "opus_metadata(sample)"
 
 
 # ---------------------------------------------------------------------------
@@ -265,26 +266,32 @@ def test_read_opus_dir_warns_on_mixed_blocks(tmp_path, fake_brukeropus):
 
 
 @pytest.mark.parametrize(
-    "key, source",
+    "key, source, data_type",
     [
-        ("logr", "log_reflectance"),
-        ("km", "kubelka_munk"),
-        ("atr", "atr"),
-        ("pas", "photoacoustic"),
-        ("ra", "raman"),
-        ("e", "emission"),
+        # Absorbance-equivalent: -log10(R) and ATR-corrected absorbance
+        ("logr", "log_reflectance", "absorbance"),
+        ("atr", "atr", "absorbance"),
+        ("aria", "absorbance", "absorbance"),
+        # Linear, but neither absorbance nor reflectance: no conversion may apply
+        ("km", "kubelka_munk", "other"),
+        ("pas", "photoacoustic", "other"),
+        ("ra", "raman", "other"),
+        ("e", "emission", "other"),
+        ("sm", "sample", "other"),
     ],
 )
-def test_already_linear_blocks_map_to_absorbance(tmp_path, fake_brukeropus, key, source):
-    """Logging these again (the GUI's reflectance->absorbance step) would be wrong."""
-    path = _make(tmp_path, fake_brukeropus, "s1.0", FakeOpusFile(_blocks(key, "sm", "rf")))
+def test_block_types_map_to_physical_pipeline_types(
+    tmp_path, fake_brukeropus, key, source, data_type
+):
+    """Logging logr again, or 10**-x of KM/Raman data, would both be wrong."""
+    path = _make(tmp_path, fake_brukeropus, "s1.0", FakeOpusFile(_blocks(key, "rf")))
 
     df, meta = sp_io.read_opus_file(path)
 
     np.testing.assert_array_equal(df.iloc[0].to_numpy(), _expected(key))
     assert meta["opus_block"] == key
     assert meta["source_data_type"] == source
-    assert meta["data_type"] == "absorbance"
+    assert meta["data_type"] == data_type
     assert meta["detection_method"] == f"opus_metadata({source})"
 
 

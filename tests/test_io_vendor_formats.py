@@ -578,6 +578,19 @@ def test_perkinelmer_nir_nm_range_is_not_confidently_cm1(tmp_path, monkeypatch):
     assert metadata['x_unit'] == 'nm'
     assert metadata['x_unit_confidence'] < 50.0
     assert metadata['x_unit_detection_method'] == 'perkinelmer_ambiguous_range'
+    # The GUI only shows import_warnings; a single-file import must carry the note too
+    assert len(metadata['import_warnings']) == 1
+    assert metadata['import_warnings'][0].startswith("nir.sp: x range")
+
+
+def test_perkinelmer_single_file_clear_range_has_no_import_warning(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(4000.0, 400.0, 3601))
+    path = tmp_path / "ir.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['import_warnings'] == []
 
 
 def test_perkinelmer_unit_from_metadata_wins(tmp_path, monkeypatch):

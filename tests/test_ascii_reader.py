@@ -536,3 +536,159 @@ def test_read_spectra_auto_detects_ascii_folder(tmp_path):
 
     assert list(df.index) == ["a", "b"]
     assert meta["file_format"] == "ascii"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: number-format interpretation, quoting, header units
+# ---------------------------------------------------------------------------
+
+
+def _write(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(text)
+    return path
+
+
+def test_one_short_row_does_not_defeat_decimal_comma_refusal(tmp_path):
+    path = _write(tmp_path, "de.dat", "4000,5,0,123\n3999,5\n3998,5,0,125\n")
+    with pytest.raises(ValueError, match="decimal-comma"):
+        read_ascii_spectra(path)
+
+
+def test_dot_in_ignored_note_does_not_hide_decimal_comma(tmp_path):
+    path = _write(tmp_path, "note.dat", "1000,5,0,123,note.v1\n1001,5,0,124,note.v1\n")
+    with pytest.raises(ValueError, match="decimal-comma"):
+        read_ascii_spectra(path)
+
+
+def test_integer_rows_with_text_column_are_accepted(tmp_path):
+    path = _write(tmp_path, "flags.dat", "1000,5,OK\n1001,6,OK\n1002,7,BAD\n")
+
+    with pytest.warns(UserWarning, match="columns 3\\+ ignored"):
+        df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0, 1002.0]
+    assert df.iloc[0].tolist() == [5.0, 6.0, 7.0]
+
+
+@pytest.mark.parametrize("text", ["1,000,0.123\n1,001,0.124\n", "1,000.5,0.123\n1,001.5,0.124\n"])
+def test_thousands_separators_are_refused(tmp_path, text):
+    path = _write(tmp_path, "thousands.dat", text)
+    with pytest.raises(ValueError, match="leading zero"):
+        read_ascii_spectra(path)
+
+
+def test_integer_rows_do_not_block_decimal_comma_reading(tmp_path):
+    """'1001,5;0,123' must not be dropped because the other rows parse either way."""
+    path = _write(tmp_path, "mixed.dat", "1000;0\n1001,5;0,123\n1002;1\n")
+
+    with pytest.warns(UserWarning, match="decimal comma"):
+        df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.5, 1002.0]
+    assert df.iloc[0].tolist() == [0.0, 0.123, 1.0]
+    assert meta["decimal"] == ","
+    assert meta["n_skipped_lines"] == 0
+
+
+def test_tied_interpretations_with_different_values_are_refused(tmp_path):
+    text = "1000;0,5\n1001;0,6\n1002,0.7\n1003,0.8\n"
+    path = _write(tmp_path, "tie.dat", text)
+
+    with pytest.raises(ValueError, match="ambiguous number format"):
+        read_ascii_spectra(path)
+    # An explicit choice resolves it (the other rows are then skipped, with a warning)
+    with pytest.warns(UserWarning, match="skipped 2 line"):
+        df, _ = read_ascii_spectra(path, delimiter=";", decimal=",")
+    assert df.columns.tolist() == [1000.0, 1001.0]
+
+
+def test_identical_ties_are_not_ambiguous(tmp_path):
+    # Tab and whitespace, '.' and ',' decimals all read these rows identically
+    path = _write(tmp_path, "ints.dat", "1000\t5\n1001\t6\n")
+
+    df, meta = read_ascii_spectra(path)
+
+    assert df.iloc[0].tolist() == [5.0, 6.0]
+    assert meta["delimiter"] == "\t"
+    assert meta["decimal"] == "."
+
+
+def test_two_integer_comma_fields_warn(tmp_path):
+    path = _write(tmp_path, "pairs.dat", "4000,5\n3999,6\n3998,7\n")
+
+    with pytest.warns(UserWarning, match="two comma-separated integers"):
+        df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [3998.0, 3999.0, 4000.0]
+
+
+def test_quoted_fields_are_read(tmp_path):
+    text = '"Wavelength","Intensity"\n"1000","0.1"\n"1001","0.2"\n"1002","0.3"\n'
+    path = _write(tmp_path, "quoted.csv", text)
+
+    df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0, 1002.0]
+    assert df.iloc[0].tolist() == [0.1, 0.2, 0.3]
+    assert meta["column_names"] == ["Wavelength", "Intensity"]
+
+
+def test_quoted_decimal_comma_fields(tmp_path):
+    path = _write(tmp_path, "quoted_de.dat", '"1000,5";"0,1"\n"1001,5";"0,2"\n')
+
+    with pytest.warns(UserWarning, match="decimal comma"):
+        df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.5, 1001.5]
+    assert df.iloc[0].tolist() == [0.1, 0.2]
+
+
+def test_quoted_whitespace_fields(tmp_path):
+    path = _write(tmp_path, "quoted_ws.dat", '"1000" "0.1"\n"1001" "0.2"\n')
+
+    df, _ = read_ascii_spectra(path)
+
+    assert df.iloc[0].tolist() == [0.1, 0.2]
+
+
+def test_unsplittable_whitespace_heading_does_not_promote_other_column_unit(tmp_path):
+    text = "X Intensity Wavenumber (cm-1)\n1000 0.2 10000\n1001 0.3 9990\n"
+    path = _write(tmp_path, "ws.dat", text)
+
+    with pytest.warns(UserWarning, match="not for the x column"):
+        _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit"] == "nm"
+    assert meta["x_unit_detection_method"] == "default"
+    assert meta["x_unit_confidence"] == 50.0
+    assert any("not for the x column" in m for m in meta["import_warnings"])
+
+
+def test_two_column_whitespace_heading_with_one_unit(tmp_path):
+    text = "Wavenumber (cm-1) Absorbance\n1000 0.2\n1001 0.3\n"
+    path = _write(tmp_path, "ws2.dat", text)
+
+    _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit"] == "cm-1"
+
+
+def test_semicolon_inline_note_rows_are_skipped_not_misread(tmp_path):
+    path = _write(tmp_path, "semi_note.dat", "1000,0.1\n1001,0.2 ; check\n1002,0.3\n")
+
+    with pytest.warns(UserWarning, match="skipped 1 line"):
+        df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1002.0]
+
+
+def test_folder_failure_message_names_file_once(tmp_path):
+    _write_xy(tmp_path / "good.dpt", WAVENUMBERS, _values(200))
+    (tmp_path / "one.dpt").write_text("1,0.5\n")
+
+    with pytest.warns(UserWarning):
+        _, meta = read_ascii_spectra(tmp_path)
+
+    assert meta["failed_files"][0].startswith("one.dpt: need at least 2")
+    assert "one.dpt: one.dpt" not in meta["failed_files"][0]
