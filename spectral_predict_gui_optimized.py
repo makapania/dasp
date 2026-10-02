@@ -1609,8 +1609,9 @@ def _enable_windows_dpi_awareness() -> bool:
     """Declare the process system-DPI-aware on Windows. Call before ``tk.Tk()``.
 
     Returns:
-        True if the process is DPI aware afterwards, False otherwise (including on
-        non-Windows platforms, where this is a no-op).
+        Advisory only, nothing depends on it: True if the process is DPI aware
+        afterwards, False otherwise (including on non-Windows platforms, where this
+        is a no-op).
     """
     if sys.platform != 'win32':
         return False
@@ -1628,7 +1629,14 @@ def _enable_windows_dpi_awareness() -> bool:
             return True
         logger.warning("SetProcessDpiAwareness(1) failed with HRESULT 0x%08X", hresult & 0xFFFFFFFF)
     try:
-        return bool(ctypes.windll.user32.SetProcessDPIAware())
+        user32 = ctypes.windll.user32
+        if user32.SetProcessDPIAware():
+            return True
+        # On Windows 7/8 a manifest that already declared awareness makes this call
+        # fail too; ask whether the process is aware anyway.
+        aware = bool(user32.IsProcessDPIAware())
+        logger.debug("SetProcessDPIAware failed; IsProcessDPIAware() = %s", aware)
+        return aware
     except (AttributeError, OSError) as exc:
         logger.warning("Could not declare DPI awareness; UI may be blurry: %s", exc)
         return False
@@ -1656,11 +1664,22 @@ def _apply_ui_scale(root: tk.Misc) -> float:
     Idempotent: values are always recomputed from the 96-dpi base values, so
     constructing a second app in the same process does not compound the scaling.
     """
-    global _UI_SCALE
+    global _UI_SCALE, _SCREEN_SIZE
     _UI_SCALE = _compute_ui_scale(root)
     SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
     SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
+    try:
+        _SCREEN_SIZE = (int(root.winfo_screenwidth()), int(root.winfo_screenheight()))
+    except (AttributeError, tk.TclError):
+        _SCREEN_SIZE = None
     return _UI_SCALE
+
+
+# Screen size in pixels, recorded by _apply_ui_scale; None until then.
+_SCREEN_SIZE: tuple[int, int] | None = None
+# Largest fraction of the screen a fixed-size dialog may take (leaves room for the
+# taskbar and title bar, since the exact work area is not available from Tk).
+_DIALOG_MAX_SCREEN_FRACTION = 0.9
 
 
 def _px(value: float) -> int:
@@ -1673,9 +1692,14 @@ def _px_geometry(size: str) -> str:
 
     Fixed-size dialogs do not grow to fit their content, while their point-sized
     fonts do grow with the display scale, so an unscaled size clips the bottom rows.
+    The result is clamped to 90% of the screen, so a tall dialog at 150% on a 1080p
+    panel still fits; the user can resize it if the content needs more room.
     """
-    width, height = (int(v) for v in size.lower().split('x'))
-    return f"{_px(width)}x{_px(height)}"
+    width, height = (_px(int(v)) for v in size.lower().split('x'))
+    if _SCREEN_SIZE is not None:
+        width = min(width, int(_SCREEN_SIZE[0] * _DIALOG_MAX_SCREEN_FRACTION))
+        height = min(height, int(_SCREEN_SIZE[1] * _DIALOG_MAX_SCREEN_FRACTION))
+    return f"{width}x{height}"
 
 
 # ===== NAMED FONTS =====
@@ -4989,6 +5013,13 @@ class SpectralPredictApp:
                        foreground=self.colors['text'],
                        font=fonts['body'])
 
+        # Treeview row height. Tk 9 derives it from the font (linespace + 2), but Tk 8.6
+        # (the DASP_BUILD_PYTHON=312 rollback build) fixes it at 20 px whatever the font,
+        # so once the process is DPI aware the rows clip at 125% and above. Setting it
+        # explicitly from the row font gives the same rows on both Tk versions.
+        row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
+        style.configure('Treeview', rowheight=row_font.metrics('linespace') + _px(2))
+
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
         # Sizes here have no named-font equivalent, so they reuse the resolved family.
@@ -5254,11 +5285,16 @@ class SpectralPredictApp:
 
         Uses the beautiful rainbow cobra logo with spectral bar and UV/IR label.
         Automatically removes white background for transparency.
+
+        ``size`` is in screen pixels (already display-scaled). The text fallback's
+        font is in points, which Tk scales itself, so its size comes from the 96-dpi
+        base to avoid scaling twice.
         """
+        text_pt = max(1, int(round(size / _UI_SCALE)) // 3)
         if not HAS_PIL:
             # Fallback to text if PIL not available
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -5271,7 +5307,7 @@ class SpectralPredictApp:
                 if not logo_path.exists():
                     # Fallback to text
                     logo_label = tk.Label(parent, text="ASP",
-                                         font=('Arial', size//3, 'bold'),
+                                         font=('Arial', text_pt, 'bold'),
                                          fg=self.colors['accent'], bg=self.colors['bg'])
                     return logo_label
 
@@ -5295,7 +5331,7 @@ class SpectralPredictApp:
         except Exception as e:
             # Fallback to text if image loading fails
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -32698,7 +32734,8 @@ For detailed documentation, see the User Guide.
                     width = 70  # Quartile RMSE or Class F1 columns
                 else:
                     width = 80
-                self.results_tree.column(col, width=width, anchor='center', stretch=False)
+                # Widths are 96-dpi pixels; the cell font grows with the display scale.
+                self.results_tree.column(col, width=_px(width), anchor='center', stretch=False)
 
             # Store default widths for reset functionality
             self._results_default_col_widths = {
@@ -32739,8 +32776,8 @@ For detailed documentation, see the User Guide.
             # Widen sorted columns so arrow/superscript isn't clipped
             if is_sorted and col in sorted_col_names:
                 cur_width = self.results_tree.column(col, 'width')
-                if cur_width < 200:  # don't widen already-wide columns
-                    self.results_tree.column(col, width=cur_width + 22, stretch=False)
+                if cur_width < _px(200):  # don't widen already-wide columns
+                    self.results_tree.column(col, width=cur_width + _px(22), stretch=False)
 
         # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):

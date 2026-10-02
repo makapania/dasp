@@ -28,7 +28,13 @@ touches lines across the whole of `spectral_predict_gui_optimized.py`.*
   The family is resolved from what is installed: Segoe UI and Consolas on Windows.
 - **Styles and main window.** All ttk styles in `_apply_theme` use the named fonts. So do the
   top bar, `_create_accent_button` and the theme-change toast.
-- **Dialogs.** The 11 fixed `Toplevel.geometry("WxH")` calls go through `_px_geometry`.
+- **Dialogs.** The 11 fixed `Toplevel.geometry("WxH")` calls go through `_px_geometry`, which
+  also clamps them to 90% of the screen.
+- **Results table and row height (review round 1).**
+  - Results-table column widths and the widening applied to sorted columns go through
+    `_px()`.
+  - The `Treeview` rowheight is set explicitly from the row font (linespace + `_px(2)`).
+  - The text-logo fallback derives its point size from the unscaled base.
 
 ## Rules for the sweep
 
@@ -186,15 +192,22 @@ Contaminant). Wrap the values in `_px()` during the sweep.
   restores the old proportions everywhere. This pairs naturally with QW8 (flatten cards).
 - **29 `wraplength=N` values.** Text wraps after fewer words, but it is not clipped.
 - **Legend swatches** `tk.Canvas(width=14, height=14)` at :15148, :33423 and :33479.
-- **Dialog sizes and the screen edge.** `_px_geometry` does not clamp to the screen. At 150%
-  on a 1920×1080 panel, the 520×720 peak-calculator dialog becomes 780×1080, which is taller
-  than the work area. That was already true before this change (720 logical px on a 720 px
-  logical screen).
+- **Other Treeview column widths (about 58 `.column(..., width=N)` calls).** The Results table
+  is fixed (see above). Ensemble results (:34226, 60-200 px), CT comparison, library search,
+  outliers and the multi-class decision view still use 96-dpi pixel widths. Values such as
+  `1.23456e-05` need about 81 px at 125%, so any column of 80 px or less that holds
+  scientific notation will truncate. Wrap the widths in `_px()`.
+- **Dialog sizes and the screen edge.** Fixed in round 1: `_px_geometry` now clamps to 90% of
+  the screen size that `_apply_ui_scale` records. At 150% on a 1920×1080 panel the peak
+  calculator becomes 780×972 instead of 780×1080. Tk does not expose the work area, hence
+  the 90% margin for the taskbar. The dialog is resizable, so a user can still enlarge it.
 
 ### Checked and needing no change
 
-- **Treeview row height.** Tk 9 derives it from the font: 17 px at 96 dpi, 22 px at 120 dpi.
-  No `rowheight` is set anywhere.
+- **Treeview row height.** Now set explicitly in `_apply_theme` (round 1) to the TkDefaultFont
+  linespace + `_px(2)`. Tk 9 already did this by itself (17 px at 96 dpi, 22 px at 120 dpi),
+  but Tk 8.6, used by the `DASP_BUILD_PYTHON=312` rollback build, fixes rows at 20 px, which
+  clips text above 125%.
 - **Embedded matplotlib canvases.** `FigureCanvasTk._update_device_pixel_ratio` multiplies
   the figure dpi by `tk scaling / (96/72)`, which is 1.25 at 125%, so figures keep their
   physical size. Setting the figure dpi by hand would scale twice.

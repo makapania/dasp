@@ -757,12 +757,27 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   `tkfont.Font` named fonts (`self.fonts[...]`, Tk names `Dasp*`). Tk deletes a named font when the Python object that
   created it is garbage-collected, which is why `_init_named_fonts` also keeps the owning objects on `root`.
 - **What scales by itself and what does not, once DPI aware.** Point sizes follow `tk scaling`, which goes from 1.333
-  to 1.667 at 125%. Embedded matplotlib canvases rescale from `tk scaling` (`_update_device_pixel_ratio`), and Tk 9's
-  Treeview row height follows the font. Literal pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one
-  that breaks: the custom-range dialog hid its Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap
-  such sizes in `_px_geometry`.
-- **Test processes are DPI-unaware**, so `_UI_SCALE` is 1.0 there and pixel assertions are unchanged. Only `main()`
-  calls `_enable_windows_dpi_awareness()`.
+  to 1.667 at 125%. Embedded matplotlib canvases rescale from `tk scaling` (`_update_device_pixel_ratio`). Literal
+  pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one that breaks: the custom-range dialog hid its
+  Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap such sizes in `_px_geometry`. Fixed Treeview
+  column widths break too: the 80 px Results column cut `1.23456e-05` to `1.23456e-0` at 125%.
+- **Treeview row height depends on the Tk version (round-1 correction).** My first note said "Treeview row height
+  follows the font". That is true only on Tk 9: 3.14 ships Tk 9.0.4, which gives linespace + 2, so 17 px at 96 dpi
+  and 22 px at 120 dpi. Tk 8.6.15 (in `.venv312`, used by the `DASP_BUILD_PYTHON=312` rollback build) leaves
+  `rowheight` empty and uses a fixed 20 px. That is exactly the linespace at 125% and clips text above that.
+  `_apply_theme` now sets `Treeview` rowheight to the TkDefaultFont linespace + `_px(2)`, which gives the same rows on
+  both versions (verified under .venv312 and .venv314). The default build is still 3.14
+  (`BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")`).
+- **Test processes start DPI-unaware**, so the session app's `_UI_SCALE` is 1.0 and pixel assertions are unchanged.
+  Only `main()` calls `_enable_windows_dpi_awareness()`. However, the GUI module calls `matplotlib.use('TkAgg')`, so
+  the first pyplot figure in a test with no running Tk mainloop declares **per-monitor** DPI awareness
+  (matplotlib's `Win32_SetProcessDpiAwareness_max`). In the GUI suite this first happens in
+  `test_contaminant_tab.py::TestApplyCorrection::test_apply_correction_no_attribute_error`. After that, Tk font
+  measurements in the same process come back in physical pixels, even for pixel-sized fonts. Measure text in a fresh
+  subprocess, as `tests/test_gui_dpi_fonts.py::sci_text_px_96` does. The real app is unaffected: there the mainloop
+  is running, so matplotlib skips the call.
+- **Black 26 targets 3.14 and rewrites `except (A, B):` as PEP 758 `except A, B:`.** That is a SyntaxError on 3.12,
+  which the `DASP_BUILD_PYTHON=312` rollback build still uses. Keep the parentheses in the GUI file.
 - **A custom PyInstaller 6 `manifest=` REPLACES the built-in template rather than merging.** The spec therefore copies
   the template's compatibility/longPathAware block verbatim; PyInstaller still injects the execution level and
   Common-Controls v6.
