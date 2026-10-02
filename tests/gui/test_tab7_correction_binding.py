@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from spectral_predict.model_io import predict_with_model
 from tests.gui.test_tab7_y_transform_save import _refit, _row, _save_and_load, _spectra
 
 pytestmark = pytest.mark.gui
@@ -154,12 +155,153 @@ def deferred_refits(gui_app, monkeypatch):
         gui_app._restore_refit_buttons_after_abort()
 
 
+REFIT_DEPENDENT = (
+    "refine_save_button",
+    "refine_save_button_results",
+    "export_code_button",
+    "bc_compute_button",
+)
+
+
 def test_compute_and_save_disabled_while_refit_runs(gui_app, deferred_refits):
     _refit(gui_app, "PLS", "None", subset=True)
     gui_app._run_refined_model()
     assert deferred_refits, "refit thread was not launched"
-    for name in ("refine_save_button", "refine_save_button_results", "bc_compute_button"):
+    for name in REFIT_DEPENDENT:
         assert str(getattr(gui_app, name).cget("state")) == "disabled", name
+
+
+def test_export_refused_and_compute_ignored_while_refit_runs(
+    correction_on, deferred_refits, monkeypatch
+):
+    """GLM/Codex round 3: method-level busy guards, not only disabled buttons."""
+    import tkinter as tk
+
+    import spectral_predict.bias_correction as bc
+
+    app = correction_on
+    _refit(app, "PLS", "None", subset=True)
+    app._run_refined_model()
+    assert app._refit_active
+
+    opened = []
+    monkeypatch.setattr(tk, "Toplevel", lambda *a, **k: opened.append(1))
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._export_for_publication()
+    assert warn.called and not opened
+
+    def _must_not_run(*_a, **_k):
+        raise AssertionError("correction computed while a refit is running")
+
+    monkeypatch.setattr(bc, "compute_nonlinear_correction", _must_not_run)
+    monkeypatch.setattr(bc, "compute_bias_slope", _must_not_run)
+    app._compute_nonlinear_correction()
+    app._update_bias_correction_ui()
+
+
+def test_export_config_comes_from_one_snapshot(gui_app):
+    _refit(gui_app, "PLS", "None", subset=True)
+    snap = gui_app._refined_state_snapshot()
+    _refit(gui_app, "Ridge", "None", subset=False)  # another model is published
+
+    cfg = gui_app._build_export_model_config(snap)
+    assert cfg["model_name"] == "PLS"
+    assert cfg["wavelengths"] == snap["wavelengths"]
+    assert gui_app._build_export_model_config()["model_name"] == "Ridge"
+
+
+class _LaunchError(RuntimeError):
+    pass
+
+
+@pytest.mark.parametrize("where", ["constructor", "start"])
+def test_refit_launch_failure_releases_busy(gui_app, monkeypatch, where):
+    """test_refit_constructor_failure_releases_busy / test_refit_start_failure_releases_busy."""
+    import threading
+
+    _refit(gui_app, "PLS", "None", subset=True)
+
+    class _FailingThread:
+        def __init__(self, *a, **k):
+            if where == "constructor":
+                raise _LaunchError("can't start new thread")
+
+        def start(self):
+            raise _LaunchError("can't start new thread")
+
+    monkeypatch.setattr(threading, "Thread", _FailingThread)
+    monkeypatch.setattr(gui_app, "_validate_refinement_parameters", lambda: True)
+    with patch("tkinter.messagebox.showerror") as err:
+        gui_app._run_refined_model()
+    assert err.called
+    assert gui_app._refit_active is False
+    assert str(gui_app.refine_run_button.cget("state")) == "normal"
+    # The previous model is still complete, so it can still be saved/exported.
+    for name in REFIT_DEPENDENT:
+        assert str(getattr(gui_app, name).cget("state")) == "normal", name
+
+
+@pytest.mark.parametrize("exit_path", ["no_inlier", "too_few_folds"])
+def test_failed_one_class_refit_preserves_previous_save_state(
+    gui_app, tmp_path, monkeypatch, exit_path
+):
+    """Codex round 3: an early one-class exit must not touch the previous save state."""
+    import spectral_predict.contamination as contamination
+
+    X_a, y_a = _refit(gui_app, "PLS", "None", subset=True)  # model A
+    before = gui_app._refined_state_snapshot()
+
+    # One-class attempt on data with a DIFFERENT wavelength axis.
+    rng = np.random.default_rng(1)
+    wl_b = np.linspace(1200.0, 1600.0, 40)
+    X_b = pd.DataFrame(
+        0.5 + 0.01 * rng.normal(size=(30, 40)),
+        columns=[f"{w:.1f}" for w in wl_b],
+        index=[f"b{i}" for i in range(30)],
+    )
+    y_b = pd.Series(np.where(np.arange(30) % 2 == 0, "good", "bad"), index=X_b.index)
+    gui_app.X_original = X_b
+    gui_app.X = X_b
+    gui_app.y = y_b
+    gui_app._original_wavelength_order = [float(w) for w in X_b.columns]
+    gui_app.selected_model_config = {
+        "Model": "OneClassSVM",
+        "Task": "one_class",
+        "Params": str({"nu": 0.1}),
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+    }
+    gui_app.refine_task_type.set("one_class")
+    gui_app.refine_model_type.set("OneClassSVM")
+    gui_app.refine_preprocess.set("raw")
+    if exit_path == "no_inlier":
+        gui_app.inlier_class_label.set("absent-class")
+    else:
+        gui_app.inlier_class_label.set("good")
+        monkeypatch.setattr(contamination, "run_one_class_cv", lambda *a, **k: {"skipped": True})
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            gui_app._run_refined_model_thread()
+        gui_app.root.update()
+    finally:
+        gui_app.inlier_class_label.set("")
+        gui_app.refine_task_type.set("regression")
+
+    after = gui_app._refined_state_snapshot()
+    assert after["token"] is before["token"]
+    assert after["model"] is before["model"]
+    assert after["full_wavelengths"] == before["full_wavelengths"]
+    assert after["config"] == before["config"]
+    # Save stays available for the intact previous model ...
+    assert str(gui_app.refine_save_button.cget("state")) == "normal"
+
+    # ... and the saved file is model A: A's axis, A's predictions.
+    loaded = _save_and_load(gui_app, tmp_path)
+    assert loaded["metadata"]["full_wavelengths"] == [float(c) for c in X_a.columns]
+    pred = np.asarray(predict_with_model(loaded, X_a), dtype=float).ravel()
+    expected = np.asarray(before["model"].predict(before["X_train"]), dtype=float).ravel()
+    np.testing.assert_allclose(pred, expected, rtol=1e-9)
 
 
 def test_refit_tab_return_cannot_overlap_or_save_stale_correction(

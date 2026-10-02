@@ -37617,6 +37617,20 @@ Performance (Classification):
         self._bias_correction_token = None
         self._nonlinear_correction_token = None
 
+    def _publish_refined_state(self, state: dict) -> None:
+        """Make a finished refit the current model, all fields together (R010).
+
+        ``state`` maps ``refined_<name>`` suffixes to values. The refit worker builds
+        it locally and calls this only after the run has succeeded, so a failed run
+        never leaves the previous model mixed with this run's fields. The model token
+        is None while the fields change, and a fresh one is issued afterwards, which
+        invalidates any correction computed for the previous model.
+        """
+        self._refined_model_token = None
+        for name, value in state.items():
+            setattr(self, f'refined_{name}', value)
+        self._bind_corrections_to_new_model()
+
     def _correction_to_save(self) -> dict | None:
         """Return the correction to embed in the saved model, or None (R010).
 
@@ -37659,6 +37673,7 @@ Performance (Classification):
             'y_pred': getattr(self, 'refined_y_pred', None),
             'y_proba': getattr(self, 'refined_y_proba', None),
             'X_train': getattr(self, 'refined_X_train', None),
+            'y_train': getattr(self, 'refined_y_train', None),
             'oc_scaler': getattr(self, 'refined_oc_scaler', None),
             'oc_pca_reducer': getattr(self, 'refined_oc_pca_reducer', None),
             'oc_score_stats': getattr(self, 'refined_oc_score_stats', None),
@@ -37675,8 +37690,15 @@ Performance (Classification):
         widget.insert('1.0', "Click 'Compute' to see nonlinear correction metrics.")
         widget.config(state='disabled')
 
-    def _update_bias_correction_ui(self):
-        """Compute and display bias/slope correction after CV completes."""
+    def _update_bias_correction_ui(self, from_run_completion: bool = False):
+        """Compute and display bias/slope correction after CV completes.
+
+        Called by the run's own completion callback (``from_run_completion=True``),
+        which still counts as part of the run; any other call during a refit is
+        refused (R010).
+        """
+        if getattr(self, '_refit_active', False) and not from_run_completion:
+            return
         task_type = (self.refined_config.get('task_type', 'regression')
                      if hasattr(self, 'refined_config') and self.refined_config else 'regression')
 
@@ -37753,6 +37775,8 @@ Performance (Classification):
             return
         if not self.refined_config or self.refined_config.get('task_type') != 'regression':
             return  # R010: corrections are regression-only
+        if getattr(self, '_refit_active', False):
+            return  # R010: the model is being replaced; compute after the run finishes
 
         # R010: a refit can finish while this runs (Compute stays clickable). Capture
         # the model token BEFORE the CV predictions and keep the result only if the
@@ -39461,8 +39485,14 @@ F1 Score:  {f1:.4f}
             return None
 
         # The fitted value must be on the grid, so "Selected" marks the actual model.
+        # Log grids (alpha/C): replace the nearest point rather than adding a near-twin.
         if base not in values:
-            values = sorted(values + [base])
+            if use_log:
+                nearest = int(np.argmin(np.abs(np.log10(values) - np.log10(base))))
+                values[nearest] = base
+                values = sorted(values)
+            else:
+                values = sorted(values + [base])
         result = compute_sklearn_validation_curve(
             estimator, X, y, prefix + name, values, cv, task=task_type
         )
@@ -39866,11 +39896,20 @@ F1 Score:  {f1:.4f}
 
         # Run in thread (daemon=True for clean process exit)
         self._refit_generation = getattr(self, '_refit_generation', 0) + 1
+        generation = self._refit_generation
         self._refit_active = True
-        thread = threading.Thread(
-            target=self._refit_worker, args=(self._refit_generation,), daemon=True
-        )
-        thread.start()
+        try:
+            thread = threading.Thread(
+                target=self._refit_worker, args=(generation,), daemon=True
+            )
+            thread.start()
+        except Exception as e:  # e.g. RuntimeError: can't start new thread
+            # The worker never ran, so its finally will not release the run.
+            logger.error("Could not start the Model Development run: %s", e)
+            self._end_refit(generation)
+            self.refine_status.config(text="[X] Could not start the model run")
+            self._restore_refit_buttons_after_abort()
+            messagebox.showerror("Error", f"Could not start the model run:\n{e}")
 
     def _refit_worker(self, generation: int) -> None:
         """Thread body: run the refit, then mark it finished on the Tk thread.
@@ -39890,7 +39929,10 @@ F1 Score:  {f1:.4f}
 
     def _set_refit_dependent_buttons(self, state: str) -> None:
         """Enable/disable the Save and nonlinear-correction Compute buttons."""
-        for name in ('refine_save_button', 'refine_save_button_results', 'bc_compute_button'):
+        for name in (
+            'refine_save_button', 'refine_save_button_results', 'export_code_button',
+            'bc_compute_button',
+        ):
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.config(state=state)
@@ -41015,7 +41057,7 @@ F1 Score:  {f1:.4f}
                 # this the predict path takes Mode B (subset-first) and produces feature
                 # values mathematically different from training, causing the model to
                 # flag even its own training data as outliers.
-                self.refined_full_wavelengths = list(original_wavelengths)
+                full_wavelengths_oc = list(original_wavelengths)
 
                 # Build binary labels: inlier=+1, outlier=-1
                 inlier_label = self.inlier_class_label.get()
@@ -41068,36 +41110,6 @@ F1 Score:  {f1:.4f}
                     'AUCcv': mean_m.get('auc', np.nan),
                 }
 
-                self._bind_corrections_to_new_model()  # R010: drop stale corrections
-                self.refined_model = cv_result['cal_model']
-                self.refined_preprocessor = prep_pipeline_oc if isinstance(prep_steps, list) and len(prep_steps) > 0 else None
-                self.refined_wavelengths = list(selected_wl)
-                self.refined_performance = results
-                self.refined_label_encoder = None
-                self.refined_X_train = X_work
-                self.refined_y_train = y_oc
-                self.refined_oc_scaler = cv_result['cal_scaler']
-                self.refined_oc_pca_reducer = cv_result['cal_pca_reducer']
-                self.refined_oc_score_stats = cv_result.get('oc_score_stats')
-                self.refined_config = {
-                    'model_name': model_name,
-                    'task_type': 'one_class',
-                    'preprocessing': preprocess,
-                    'window': window,
-                    'n_vars': X_work.shape[1],
-                    'n_samples': X_work.shape[0],
-                    'cv_folds': n_folds,
-                    'cv_strategy': cv_strategy,
-                    'cv_n_repeats': cv_n_repeats,
-                    'inlier_class_label': inlier_label,
-                    # Training is full-spectrum-first (fit_transform on X_full, then
-                    # wavelength subset), so predict-time must match via Mode A.
-                    'use_full_spectrum_preprocessing': True,
-                    'ga_genes': None,
-                    'ga_config': None,
-                    'ga_model_type': None,
-                }
-
                 # Predictions for display
                 cal_model = cv_result['cal_model']
                 if cal_model is not None:
@@ -41108,18 +41120,58 @@ F1 Score:  {f1:.4f}
                                 X_display = cv_result['cal_pca_reducer'].transform(X_display)
                         else:
                             X_display = X_work
-                        self.refined_y_pred = cal_model.predict(X_display)
+                        y_pred_display = cal_model.predict(X_display)
                     except Exception as e:
                         logger.warning("Calibration model predict failed: %s", e)
-                        self.refined_y_pred = np.zeros(len(y_oc))
+                        y_pred_display = np.zeros(len(y_oc))
                 else:
                     X_display = X_work
-                    self.refined_y_pred = np.zeros(len(y_oc))
-                self.refined_y_true = y_oc
-                self.refined_cv_indices = np.arange(len(y_oc))
-                self.refined_specimen_ids = y_series.index.tolist()
-                self.refined_y_proba = None
-                self.refined_X_cv = X_work  # Needed for SHAP and diagnostics
+                    y_pred_display = np.zeros(len(y_oc))
+
+                # Publish everything a save needs at once, only on success (R010): the
+                # early exits above must leave the previous model's save state intact.
+                self._publish_refined_state({
+                    'model': cal_model,
+                    'preprocessor': (
+                        prep_pipeline_oc
+                        if isinstance(prep_steps, list) and len(prep_steps) > 0
+                        else None
+                    ),
+                    'wavelengths': list(selected_wl),
+                    # Required for predict-time Mode A (full-spectrum-first) in model_io.
+                    'full_wavelengths': full_wavelengths_oc,
+                    'performance': results,
+                    'label_encoder': None,
+                    'X_train': X_work,
+                    'y_train': y_oc,
+                    'oc_scaler': cv_result['cal_scaler'],
+                    'oc_pca_reducer': cv_result['cal_pca_reducer'],
+                    'oc_score_stats': cv_result.get('oc_score_stats'),
+                    'config': {
+                        'model_name': model_name,
+                        'task_type': 'one_class',
+                        'preprocessing': preprocess,
+                        'window': window,
+                        'n_vars': X_work.shape[1],
+                        'n_samples': X_work.shape[0],
+                        'cv_folds': n_folds,
+                        'cv_strategy': cv_strategy,
+                        'cv_n_repeats': cv_n_repeats,
+                        'inlier_class_label': inlier_label,
+                        # Training is full-spectrum-first (fit_transform on X_full, then
+                        # wavelength subset), so predict-time must match via Mode A.
+                        'use_full_spectrum_preprocessing': True,
+                        'ga_genes': None,
+                        'ga_config': None,
+                        'ga_model_type': None,
+                    },
+                    'y_pred': y_pred_display,
+                    'y_true': y_oc,
+                    'cv_indices': np.arange(len(y_oc)),
+                    'specimen_ids': y_series.index.tolist(),
+                    'y_proba': None,
+                    'X_cv': X_work,  # Needed for SHAP and diagnostics
+                })
 
                 # Build results text for display
                 perf = results
@@ -42415,18 +42467,10 @@ External Validation Performance (n={n_val}):
                 final_preprocessor = None
                 print("DEBUG: No preprocessor (raw data)")
 
-            # Store the fitted model and metadata for later saving.
-            # R010: no correction is valid while the model is being replaced; a fresh
-            # token is issued once this run's CV predictions are stored (below).
-            self._refined_model_token = None
-            self.refined_model = final_model
-            self.refined_preprocessor = final_preprocessor
-            self.refined_wavelengths = list(selected_wl)
-            self.refined_performance = results
-            self.refined_label_encoder = local_label_encoder  # Store for decoding predictions
-            self.refined_X_train = X_raw  # Store training data for applicability domain
-            self.refined_y_train = y_array  # Store target values for export
-            self.refined_config = {
+            # Store the fitted model and everything a save needs, all at once and only
+            # now that the run has succeeded (R010): a failed run must leave the
+            # previous model's save state untouched.
+            refined_config = {
                 'model_name': model_name,
                 'task_type': task_type,
                 'preprocessing': preprocess,
@@ -42447,37 +42491,36 @@ External Validation Performance (n={n_val}):
                     normalize_y_transform_method(y_transform) if y_transform_active else 'none'
                 ),
             }
-
             # Add coupled optimization params if present
             if self.selected_model_config is not None and 'optuna_params' in self.selected_model_config:
-                self.refined_config['optuna_params'] = self.selected_model_config['optuna_params']
+                refined_config['optuna_params'] = self.selected_model_config['optuna_params']
 
-            # Store predictions for plotting
-            self.refined_y_true = np.array(all_y_true)
-            self.refined_y_pred = np.array(all_y_pred)
-            # R010: corrections from here on are fitted to THIS model's CV predictions.
-            self._bind_corrections_to_new_model()
-            self.refined_cv_indices = np.array(all_cv_indices)  # Store CV indices for specimen ID mapping
-
-            # CRITICAL FIX: Store the actual specimen IDs that correspond to the CV data
-            # This is needed because refined_cv_indices are relative to the filtered data (without validation set)
-            # but self.y.index contains all samples (including validation set)
-            self.refined_specimen_ids = y_series.index[all_cv_indices].tolist()
-
-            # Store prediction probabilities if available
-            if all_y_proba:
-                self.refined_y_proba = np.concatenate(all_y_proba, axis=0)
-            else:
-                self.refined_y_proba = None
-
-            # Store X data for leverage diagnostics
-            self.refined_X_cv = X_raw
-
-            # Store full wavelengths for derivative + subset case
-            if use_full_spectrum_preprocessing:
-                self.refined_full_wavelengths = list(original_wavelengths)
-            else:
-                self.refined_full_wavelengths = None
+            self._publish_refined_state({
+                'model': final_model,
+                'preprocessor': final_preprocessor,
+                'wavelengths': list(selected_wl),
+                # All wavelengths, for derivative + subset (full-spectrum-first) predict
+                'full_wavelengths': (
+                    list(original_wavelengths) if use_full_spectrum_preprocessing else None
+                ),
+                'performance': results,
+                'label_encoder': local_label_encoder,  # for decoding predictions
+                'X_train': X_raw,  # applicability domain
+                'y_train': y_array,  # export
+                'config': refined_config,
+                'y_true': np.array(all_y_true),
+                'y_pred': np.array(all_y_pred),
+                # CV indices / specimen IDs: refined_cv_indices are relative to the filtered
+                # data (without validation set); self.y.index contains all samples.
+                'cv_indices': np.array(all_cv_indices),
+                'specimen_ids': y_series.index[all_cv_indices].tolist(),
+                'y_proba': np.concatenate(all_y_proba, axis=0) if all_y_proba else None,
+                'X_cv': X_raw,  # leverage diagnostics
+                # Not a one-class model: drop any previous one-class auxiliaries.
+                'oc_scaler': None,
+                'oc_pca_reducer': None,
+                'oc_score_stats': None,
+            })
 
             # Compute validation curve (complexity analysis)
             print(f"\nDEBUG: Computing validation curve for {model_name}...")
@@ -42600,7 +42643,7 @@ External Validation Performance (n={n_val}):
             # Plot the predictions
             self._plot_refined_predictions()
             # Update bias/slope correction UI
-            self._update_bias_correction_ui()
+            self._update_bias_correction_ui(from_run_completion=True)
             # Plot complexity curve (validation curve)
             self._plot_complexity_curve()
             # Plot wavelength importance analysis
@@ -42919,8 +42962,16 @@ External Validation Performance (n={n_val}):
             )
             print(f"Error saving model:\n{error_msg}")
 
-    def _build_export_model_config(self) -> dict:
-        """Build the code-export ``model_config`` for the current refined model."""
+    def _build_export_model_config(self, snap: dict | None = None) -> dict:
+        """Build the code-export ``model_config`` for the current refined model.
+
+        Reads the refined model's state from one snapshot (``_refined_state_snapshot``)
+        so the export describes a single run.
+        """
+        if snap is None:
+            snap = self._refined_state_snapshot()
+        cfg = snap['config'] or {}
+        perf_src = snap['performance'] or {}
         # Parse tuned parameters from results table (critical for reproducibility)
         params_from_search = {}
         if self.selected_model_config is not None:
@@ -42936,11 +42987,11 @@ External Validation Performance (n={n_val}):
                     params_from_search = {}
 
         # Build variable indices when full wavelength list is available
-        variable_indices = self.refined_config.get('ga_genes')
-        if variable_indices is None and self.refined_full_wavelengths:
+        variable_indices = cfg.get('ga_genes')
+        if variable_indices is None and snap['full_wavelengths']:
             # Map selected wavelengths back to full wavelength indices (preserve order)
             full_map = {}
-            for idx, wl in enumerate(self.refined_full_wavelengths):
+            for idx, wl in enumerate(snap['full_wavelengths']):
                 try:
                     key = f"{float(wl):.1f}"
                 except (TypeError, ValueError):
@@ -42949,7 +43000,7 @@ External Validation Performance (n={n_val}):
                     full_map[key] = idx
 
             indices = []
-            for wl in self.refined_wavelengths or []:
+            for wl in snap['wavelengths'] or []:
                 try:
                     key = f"{float(wl):.1f}"
                 except (TypeError, ValueError):
@@ -42961,29 +43012,29 @@ External Validation Performance (n={n_val}):
 
         # Build model config
         model_config = {
-            'model_name': self.refined_config['model_name'],
-            'preprocessing': self.refined_config['preprocessing'],
-            'target_name': self.refined_config.get('target_name', 'target'),
-            'task_type': self.refined_config['task_type'],
+            'model_name': cfg['model_name'],
+            'preprocessing': cfg['preprocessing'],
+            'target_name': cfg.get('target_name', 'target'),
+            'task_type': cfg['task_type'],
             'params': params_from_search,
             'metrics': (
-                {'RMSE': self.refined_performance.get('rmse_mean'),
-                 'R2': self.refined_performance.get('r2_mean')}
-                if self.refined_config['task_type'] == 'regression'
-                else {'BalancedAcc': self.refined_performance.get('BalancedAcc'),
-                      'Sensitivity': self.refined_performance.get('Sensitivity'),
-                      'Specificity': self.refined_performance.get('Specificity'),
-                      'AUC': self.refined_performance.get('AUC')}
-                if self.refined_config['task_type'] == 'one_class'
-                else {'Accuracy': self.refined_performance.get('accuracy_mean'),
-                      'F1': self.refined_performance.get('f1_mean')}
+                {'RMSE': perf_src.get('rmse_mean'),
+                 'R2': perf_src.get('r2_mean')}
+                if cfg['task_type'] == 'regression'
+                else {'BalancedAcc': perf_src.get('BalancedAcc'),
+                      'Sensitivity': perf_src.get('Sensitivity'),
+                      'Specificity': perf_src.get('Specificity'),
+                      'AUC': perf_src.get('AUC')}
+                if cfg['task_type'] == 'one_class'
+                else {'Accuracy': perf_src.get('accuracy_mean'),
+                      'F1': perf_src.get('f1_mean')}
             ),
-            'wavelengths': self.refined_wavelengths,
-            'cv_folds': self.refined_config.get('cv_folds', 5),
-            'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
-            'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
+            'wavelengths': snap['wavelengths'],
+            'cv_folds': cfg.get('cv_folds', 5),
+            'cv_strategy': cfg.get('cv_strategy', 'kfold'),
+            'cv_n_repeats': cfg.get('cv_n_repeats', 5),
             # Preprocessing window size (critical for SG derivatives)
-            'window_size': self.refined_config.get('window', 17),
+            'window_size': cfg.get('window', 17),
             # Derivative order / polyorder (for deriv_snv variants)
             'deriv_order': self.selected_model_config.get('Deriv') if self.selected_model_config else None,
             'polyorder': self.selected_model_config.get('Poly') if self.selected_model_config else None,
@@ -43008,7 +43059,7 @@ External Validation Performance (n={n_val}):
             # T-36 fix (post-merge review v2): parse via the shared
             # string-aware helper to avoid the bool("False") == True trap.
             'autoscale': _parse_autoscale_flag(
-                (self.refined_config or {}).get(
+                cfg.get(
                     'autoscale',
                     (self.selected_model_config or {}).get(
                         'autoscale',
@@ -43020,18 +43071,24 @@ External Validation Performance (n={n_val}):
             ),
             # Variable selection indices (GA or wavelength subset)
             'variable_indices': variable_indices,
-            'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
+            'variable_selection_method': 'GA' if cfg.get('ga_genes') else None,
             # GUI does NOT trim derivative edges; keep export aligned
             'trim_derivative_edges': False,
-            'inlier_class_label': self.refined_config.get('inlier_class_label', ''),
+            'inlier_class_label': cfg.get('inlier_class_label', ''),
             # Tab 7 target transform (canonical name, frozen at training time): the
             # exported CV and final fit must train on the same transformed target.
-            'y_transform': (self.refined_config or {}).get('y_transform', 'none'),
+            'y_transform': cfg.get('y_transform', 'none'),
         }
         return model_config
 
     def _export_for_publication(self):
         """Export analysis code for publication/reviewers - SIMPLE VERSION."""
+        if getattr(self, '_refit_active', False):
+            messagebox.showwarning(
+                "Model Run In Progress",
+                "A Model Development run is still in progress. Export once it has finished.",
+            )
+            return
         # Check if model has been trained
         if self.refined_model is None:
             messagebox.showerror(
@@ -43109,12 +43166,18 @@ External Validation Performance (n={n_val}):
                 from spectral_predict.export_bundle import create_export_bundle
                 from datetime import datetime
 
-                model_config = self._build_export_model_config()
+                # R010: one run's state only; the dialog can stay open while a new
+                # refit is started, so check again here.
+                if getattr(self, '_refit_active', False):
+                    status_var.set("A model run is in progress; export once it finishes.")
+                    return
+                snap = self._refined_state_snapshot()
+                model_config = self._build_export_model_config(snap)
 
                 # Get data
-                data_X = getattr(self, 'refined_X_train', None)
-                data_y = getattr(self, 'refined_y_train', None)
-                wavelengths = self.refined_wavelengths
+                data_X = snap['X_train']
+                data_y = snap['y_train']
+                wavelengths = snap['wavelengths']
                 has_data = data_X is not None and data_y is not None
 
                 # File dialog based on format

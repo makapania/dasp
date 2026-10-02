@@ -791,6 +791,17 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   - Exported `YTransformRegressor` must be `(RegressorMixin, BaseEstimator)` (mixin first) or `is_regressor` is
     False and VotingRegressor rejects it; it also mirrors TTR's (n,)/(n,1) output shape.
   - Complexity grids must contain the fitted value (8-point grids around a base usually miss it).
+- **Review round 3 (Codex BLOCK, GLM MERGE-WITH-FIXES):**
+  - The refit worker must not write ANY `refined_*` field before success: the one-class path wrote
+    `refined_full_wavelengths` before its no-inlier / too-few-folds exits, so a failed run left Save enabled with
+    model A plus run B's axis. Both paths now build their fitted state locally and call
+    `_publish_refined_state(dict)` once (token None during the setattr loop, fresh token after). `refined_ga_*`
+    are run inputs (set by Results-row loading / GA), frozen into `refined_config`, so they stay as they are.
+  - If `threading.Thread(...)`/`start()` raises after `_refit_active=True`, nothing ever clears it: the launch is
+    wrapped and releases its generation on failure.
+  - Export Code joins Save/Compute: disabled during a run, refused at method level, config + data from one snapshot.
+    `_update_bias_correction_ui(from_run_completion=True)` is the only call allowed during a run (the completion
+    callback runs before `_end_refit` clears the flag).
 - **Merge / follow-up items (not fixed here):**
   - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
     (pre-existing; still true with the Y-transform wrapper).

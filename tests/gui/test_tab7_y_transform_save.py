@@ -340,6 +340,9 @@ def test_ttr_complexity_curve_includes_selected_value(gui_app, model_name, estim
         )
     assert curve["param_name"] == param
     assert curve["param_values"][curve["selected_idx"]] == base
+    if estimator == "ridge":
+        # Log grid: the fitted alpha replaces its nearest point (no near-duplicate).
+        assert len(curve["param_values"]) == 8
 
 
 def test_classification_ignores_y_transform_widget(gui_app, tmp_path):

@@ -109,10 +109,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to all of its predictions. Each new fit now clears corrections, computing one after
   the run and then saving still works, and classification/one-class models never get
   one. Only one Model Development run can be active at a time (a second Run click is
-  refused even if the button was re-enabled by switching tabs), Save and the nonlinear
-  Compute button wait for the run to finish, a save writes one consistent snapshot of
-  the model and its correction, and a correction whose model changed while it was being
-  computed is discarded. Prediction
+  refused even if the button was re-enabled by switching tabs), Save, Export Code and
+  the nonlinear Compute button wait for the run to finish, a save or export uses one
+  consistent snapshot of the model and its correction, a failed run leaves the
+  previous model exactly as it was (still savable), and a correction whose model
+  changed while it was being computed is discarded. Prediction
   also ignores a correction stored with a non-regression model. **Already
   saved regression files with a stale correction cannot be detected automatically**:
   if a model was saved with "apply correction" ticked after more than one run in the
