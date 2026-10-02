@@ -1737,34 +1737,80 @@ def _px_geometry(size: str, owner: tk.Misc | None = None) -> str:
     # Tk sizes the client area; the frame adds the title bar and borders.
     width = max(1, min(width, right - left - _px(16)))
     height = max(1, min(height, bottom - top - _px(40)))
+    # Centre on the owner, unless it is iconified, withdrawn or not yet mapped: its
+    # coordinates are then meaningless (Windows parks minimised windows at -32000),
+    # so centre on the work area instead. MonitorFromWindow already uses a minimised
+    # window's restored position to pick the monitor.
+    cx, cy = (left + right) // 2, (top + bottom) // 2
     try:
-        cx = owner.winfo_rootx() + owner.winfo_width() // 2
-        cy = owner.winfo_rooty() + owner.winfo_height() // 2
-    except tk.TclError:
-        cx, cy = (left + right) // 2, (top + bottom) // 2
+        if owner.winfo_ismapped() and owner.winfo_toplevel().state() in ('normal', 'zoomed'):
+            cx = owner.winfo_rootx() + owner.winfo_width() // 2
+            cy = owner.winfo_rooty() + owner.winfo_height() // 2
+    except (AttributeError, tk.TclError):
+        pass
     x = min(max(cx - width // 2, left), right - width - _px(16))
     y = min(max(cy - height // 2, top), bottom - height - _px(40))
     return f"{width}x{height}+{max(x, left)}+{max(y, top)}"
+
+
+def _results_column_width(col: str, values: pd.Series, row_font: tkfont.Font) -> int:
+    """Pixel width for a Results-table column at the current display scale.
+
+    The per-column widths below are 96-dpi minimums, scaled with ``_px``. Float cells
+    are shown as ``.6g`` text, which can be as wide as ``-1.23456e+10``, so float
+    columns are widened to their widest formatted value measured in ``row_font``,
+    plus Tk's horizontal cell padding (4 px per side at 96 dpi) and a small margin.
+    """
+    if col == 'Select':
+        base = 60
+    elif col in ('Model', 'Preprocess', 'Subset'):
+        base = 120
+    elif col == 'top_vars':
+        base = 200
+    elif col in ('BestRegion', 'BestClass'):
+        base = 100
+    elif col.startswith('RMSE_') or col.startswith('F1_Class'):
+        base = 70  # Quartile RMSE or Class F1 columns
+    else:
+        base = 80
+    width = _px(base)
+    if pd.api.types.is_float_dtype(values):
+        text_width = _float_column_text_width(values, row_font)
+        if text_width:
+            width = max(width, text_width + 2 * _px(4) + _px(2))
+    return width
 
 
 def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
     """Pixel width of the widest ``.6g``-formatted value in a float column, in ``font``.
 
     ``font.measure`` already returns pixels at the current display scale, so the
-    result must not be multiplied by ``_UI_SCALE``. Only a bounded set of candidates
-    is formatted (the first 500 rows plus the extremes), so large tables stay fast.
+    result must not be multiplied by ``_UI_SCALE``.
+
+    Every value is formatted and every distinct string is considered. Character
+    count is not a proxy, because equal-length strings differ in width ('+' is wider
+    than '-'). Measuring each string costs about 100 us inside Tk (text layout, not
+    call overhead), and a results column can hold thousands of distinct values. So:
+
+    1. Each string's width is computed as the sum of its cached per-character widths.
+       On Windows, Tk's measure was checked to equal this sum exactly (12k strings,
+       three fonts, 100/125/200%), because GDI text extents apply no kerning.
+    2. The 50 strings with the largest sums are measured exactly, which catches any
+       positive kerning on other platforms.
+
+    The larger of the two is returned, so the column is never narrower than its text.
     """
     numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
     finite = numeric[np.isfinite(numeric)]
     if finite.size == 0:
         return 0
-    extremes = [finite.min(), finite.max()]
-    nonzero = finite[finite != 0]
-    if nonzero.size:
-        extremes.append(nonzero[np.argmin(np.abs(nonzero))])  # smallest magnitude, signed
-    candidates = {f"{v:.6g}" for v in np.concatenate([finite[:500], extremes])}
-    widest = sorted(candidates, key=len, reverse=True)[:5]
-    return max(font.measure(text) for text in widest)
+    strings = {f"{v:.6g}" for v in finite.tolist()}
+    char_width: dict[str, int] = {}
+    for ch in set().union(*strings):
+        char_width[ch] = font.measure(ch)
+    summed = {text: sum(char_width[ch] for ch in text) for text in strings}
+    widest_first = sorted(summed, key=summed.__getitem__, reverse=True)[:50]
+    return max(max(summed.values()), max(font.measure(text) for text in widest_first))
 
 
 # ===== NAMED FONTS =====
@@ -32788,34 +32834,10 @@ For detailed documentation, see the User Guide.
             # Set up columns
             self.results_tree['columns'] = columns
 
-            # Float cells are shown as .6g text, which can be as wide as "-1.23456e-05".
-            # Size those columns from the formatted text in the row font (pixels at the
-            # current scale) plus Tk's horizontal cell padding (4 px per side at 96 dpi)
-            # and a small margin; the 96-dpi widths below act as minimums.
+            # Configure column widths and anchors (see _results_column_width)
             row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
-            cell_padding = 2 * _px(4) + _px(2)
-
-            # Configure column widths and anchors
             for col in columns:
-                # Set column width based on content
-                if col == 'Select':
-                    width = 60
-                elif col in ['Model', 'Preprocess', 'Subset']:
-                    width = 120
-                elif col in ['top_vars']:
-                    width = 200
-                elif col in ['BestRegion', 'BestClass']:
-                    width = 100
-                elif col.startswith('RMSE_') or col.startswith('F1_Class'):
-                    width = 70  # Quartile RMSE or Class F1 columns
-                else:
-                    width = 80
-                # Widths are 96-dpi pixels; the cell font grows with the display scale.
-                width = _px(width)
-                if pd.api.types.is_float_dtype(results_df[col]):
-                    text_width = _float_column_text_width(results_df[col], row_font)
-                    if text_width:
-                        width = max(width, text_width + cell_padding)
+                width = _results_column_width(col, results_df[col], row_font)
                 self.results_tree.column(col, width=width, anchor='center', stretch=False)
 
             # Store default widths for reset functionality

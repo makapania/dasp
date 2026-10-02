@@ -777,6 +777,21 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   scale exactly linearly (hinting), so the Results table now sizes float columns from the `.6g` text measured in the
   row font (`_float_column_text_width`) plus padding, with the 96-dpi widths as minimums. `font.measure()` already
   returns pixels at the current scale, so never multiply its result by `_UI_SCALE`.
+- **Widest-string search (round 3).**
+  - Two shortcuts each missed wider values: taking the longest strings by character count (`1.23456e+10` is wider
+    than `1.23456e-05` at the same length, because '+' is wider than '-'), and taking only the first 500 rows plus
+    the extremes.
+  - Measuring every distinct string costs about 100 us each inside Tk, and that is text layout, not Python-to-Tcl
+    overhead: moving the loop into Tcl made it slower, about 1.1 s per 10k strings.
+  - On Windows, `font.measure(s)` equals the sum of its per-character widths exactly, because GDI text extents
+    apply no kerning. Checked over 12k `.6g` strings, Segoe UI 9/10 and Arial 9, at 100/125/200%.
+  - `_float_column_text_width` therefore ranks every distinct string by summed character widths, measures the top
+    50 exactly, and returns the larger of the two. That is exact on Windows, safe elsewhere, and takes about 15 ms
+    per 10k values.
+- **`tk scaling` set on a fresh root does change font measurement in that interpreter** (62 / 81 px for
+  `1.23456e-05` at 100 / 125%). Use that to test real-scale text widths without a DPI-aware process. It does not
+  reproduce a true 200% DPI-aware process exactly (102 px here versus Codex's 132 px measured at real 192 dpi), so
+  the tests compare widths and text measured in the same interpreter.
 - **Dialog placement (round 2).** Tk's `winfo_screenwidth/height` on Windows describe the *primary* monitor only.
   `_px_geometry(size, owner)` now asks Win32 for the work area of the owner's monitor (`MonitorFromWindow` +
   `GetMonitorInfoW` `rcWork`, in the process's own DPI coordinate space, which is also Tk's) when the dialog opens. It

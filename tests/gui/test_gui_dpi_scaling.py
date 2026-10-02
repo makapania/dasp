@@ -70,7 +70,7 @@ def _small_results() -> pd.DataFrame:
             "Preprocess": ["raw", "snv"],
             "RMSEcv": [1.23456e-05, 2.5e-05],
             "RMSE_Q1": [-1.23456e-05, 0.5],
-            "R2cv": [0.99, 0.98],
+            "R2cv": [0.99, 1.23456e10],  # '+' exponent: wider than '-' at equal length
             "n_vars": [10, 20],
         }
     )
@@ -85,7 +85,12 @@ def test_results_columns_are_scaled(scaled_150):
 
 
 def test_float_columns_fit_their_text_in_the_row_font(scaled_150):
-    """Real measurement: each float cell's text plus Tk's cell padding fits its column."""
+    """Wiring check in the session app: each float cell's text fits its column.
+
+    Only _UI_SCALE is simulated here; Tk's own scaling stays at the session's. Real
+    125/150/200% measurements are in tests/test_gui_dpi_fonts.py
+    (test_results_columns_fit_their_text_at_scale).
+    """
     app = scaled_150
     app._populate_results_table(_small_results())
     app.root.update_idletasks()
