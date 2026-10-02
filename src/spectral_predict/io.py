@@ -1888,12 +1888,20 @@ def write_jcamp(df, output_dir, title_prefix="spectrum", xunits="1/CM", yunits="
     return created_files
 
 
+# Folder imports read these extensions only. A single file may have any extension
+# (read_spectra maps .txt to 'ascii'), but .txt is too generic to sweep up from a
+# folder: README/notes files would be parsed as spectra.
 ASCII_EXTENSIONS = ('.dpt', '.dat', '.asc')
 
 # Candidate column delimiters, tried in this order. None means "any run of whitespace".
 _ASCII_DELIMITERS: tuple[Optional[str], ...] = ('\t', ',', ';', None)
 _ASCII_COMMENT_PREFIXES = ('#', '%')
 _ASCII_MAX_HEADER_LINES_KEPT = 20
+_ASCII_MIN_POINTS = 2
+_ASCII_UNIT_PATTERNS = (
+    ('cm-1', re.compile(r'cm\s*(-|\^-|⁻)\s*1|1\s*/\s*cm|wavenumber')),
+    ('nm', re.compile(r'\bnm\b|nanomet')),
+)
 
 
 def _split_ascii_line(line: str, delimiter: Optional[str]) -> list[str]:
@@ -1907,120 +1915,213 @@ def _split_ascii_line(line: str, delimiter: Optional[str]) -> list[str]:
     return tokens
 
 
-def _numeric_tokens(tokens: list[str]) -> Optional[list[float]]:
-    """Return the tokens as floats if there are at least two and all are numeric."""
+def _to_float(token: str, decimal: str) -> float:
+    """Parse one numeric field; ``decimal=','`` accepts a decimal comma."""
+    if decimal == ',':
+        token = token.replace(',', '.')
+    return float(token)
+
+
+def _xy_from_tokens(tokens: list[str], decimal: str) -> Optional[tuple[float, float]]:
+    """Return (x, y) from the first two fields, or None if either is not numeric.
+
+    Fields after the second are not parsed: exports often append text columns
+    (quality flags, sample notes) that must not reject the row.
+    """
     if len(tokens) < 2:
         return None
     try:
-        return [float(t) for t in tokens]
+        return _to_float(tokens[0], decimal), _to_float(tokens[1], decimal)
     except ValueError:
         return None
 
 
-def _x_unit_from_header(header_lines: list[str]) -> Optional[str]:
-    """Read an explicit x-axis unit from column headings, if one is stated.
+def _strip_ascii_comment(line: str) -> str:
+    """Drop an inline ``#`` comment ("1000,0.1 # good") and surrounding whitespace."""
+    return line.split('#', 1)[0].strip()
 
-    Only explicit unit tokens count. The word "Wavelength" alone does not, because
-    ``write_ascii_spectra`` labels the x column "Wavelength" whatever its unit.
+
+def _choose_ascii_delimiter(
+    lines: list[str], candidates: tuple[Optional[str], ...], decimal: str
+) -> tuple[Optional[str], int]:
+    """Pick the candidate delimiter under which the most lines give numeric (x, y).
+
+    Ties go to the earlier candidate. Returns ``(delimiter, n_parsed_lines)``.
     """
-    text = ' '.join(header_lines).lower()
-    if re.search(r'cm\s*(-|\^-|⁻)\s*1|1\s*/\s*cm|wavenumber', text):
-        return 'cm-1'
-    if re.search(r'\bnm\b|nanomet', text):
-        return 'nm'
-    return None
+    best: tuple[Optional[str], int] = (None, 0)
+    for cand in candidates:
+        n = sum(_xy_from_tokens(_split_ascii_line(ln, cand), decimal) is not None for ln in lines)
+        if n > best[1]:
+            best = (cand, n)
+    return best
+
+
+def _unit_in_text(text: str) -> Optional[str]:
+    """Return the x unit named in ``text`` if exactly one unit kind is named."""
+    text = text.lower()
+    found = {unit for unit, pattern in _ASCII_UNIT_PATTERNS if pattern.search(text)}
+    return found.pop() if len(found) == 1 else None
+
+
+def _x_unit_from_header(header_lines: list[str], column_names: Optional[list[str]]) -> Optional[str]:
+    """Read an explicit x-axis unit from the header, if one is stated.
+
+    When the column headings were identified, only the x column's heading counts:
+    a header such as ``Wavelength (nm),Intensity,Wavenumber (cm-1)`` describes
+    column 1 in nm, whatever the ignored columns say. Otherwise the other header
+    lines count only if they name exactly one unit. The word "Wavelength" alone
+    never counts, because ``write_ascii_spectra`` labels x "Wavelength" whatever
+    its unit.
+    """
+    if column_names:
+        unit = _unit_in_text(column_names[0])
+        if unit is not None:
+            return unit
+        header_lines = header_lines[:-1]  # the heading line itself is accounted for
+    return _unit_in_text(' '.join(header_lines))
 
 
 def _parse_ascii_file(
-    filepath: Union[str, Path], delimiter: Optional[str] = None
+    filepath: Union[str, Path], delimiter: Optional[str] = None, decimal: Optional[str] = None
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Parse one two-column (x, y) ASCII spectrum file.
 
-    Comment lines (``#`` or ``%``) and blank lines are ignored anywhere. Lines before
-    the first numeric data row are the header (column headings, instrument text);
-    a headerless file has none, so its first row is data. Column 0 is x and
-    column 1 is y; further columns are ignored with a warning.
+    Whole-line ``#``/``%`` comments, inline ``#`` comments and blank lines are
+    ignored. Lines before the first numeric data row are the header (column
+    headings, instrument text); a headerless file has none, so its first row is
+    data. Column 1 is x and column 2 is y; further columns are ignored, even if
+    they hold text.
 
     Args:
         filepath: Path to the file.
-        delimiter: Column delimiter. None auto-detects tab, comma, semicolon, then
-            whitespace from the first numeric row. ``' '`` means any whitespace.
+        delimiter: Column delimiter. None picks, from tab, comma, semicolon and
+            whitespace, the one under which most lines parse. ``' '`` means any
+            whitespace.
+        decimal: Decimal separator, '.' or ','. None means '.', falling back to a
+            decimal comma (with a warning) only when no line parses with '.'.
+            Passing '.' explicitly also accepts comma-delimited integer-only data,
+            which is otherwise refused as a likely decimal-comma file.
 
     Returns:
-        ``(df, info)``: ``df`` has float columns ``x`` and ``y``, sorted by ``x`` with
-        duplicate x values dropped (first kept). ``info`` holds ``delimiter``,
-        ``header_lines``, ``header_x_unit`` (an x unit stated in the header, else
-        None), ``column_names``, ``n_columns`` and ``n_skipped_lines``.
+        ``(df, info)``: ``df`` has float columns ``x`` and ``y``, sorted by ``x``,
+        with non-finite x and duplicate x values (first kept) dropped. ``info``
+        holds ``delimiter``, ``decimal``, ``header_lines``, ``header_x_unit``,
+        ``column_names``, ``n_columns``, ``n_skipped_lines`` and ``warnings``.
 
     Raises:
-        ValueError: If the file has no numeric two-column data.
+        ValueError: If the file has no numeric two-column data, fewer than 2 usable
+            points, no finite y, or looks like decimal-comma numbers separated by
+            commas (ambiguous).
     """
     filepath = Path(filepath)
+    if decimal not in (None, '.', ','):
+        raise ValueError(f"decimal must be '.' or ',', not {decimal!r}")
+    if decimal == ',' and delimiter == ',':
+        raise ValueError("decimal=',' cannot be combined with delimiter=','")
+
     # utf-8-sig drops a byte-order mark, which would otherwise make the first value
     # unparseable and turn the first data row into a "header".
     with open(filepath, 'r', encoding='utf-8-sig', errors='replace') as f:
-        lines = [line.strip() for line in f]
-    lines = [ln for ln in lines if ln and not ln.startswith(_ASCII_COMMENT_PREFIXES)]
+        raw = [line.strip() for line in f]
+    lines = [
+        _strip_ascii_comment(ln) for ln in raw if ln and not ln.startswith(_ASCII_COMMENT_PREFIXES)
+    ]
+    lines = [ln for ln in lines if ln]
     if not lines:
         raise ValueError(f"{filepath.name}: no data lines")
 
+    file_warnings: list[str] = []
     candidates = (delimiter,) if delimiter is not None else _ASCII_DELIMITERS
-    first_data = None
-    chosen: Optional[str] = None
-    for i, line in enumerate(lines):
-        for cand in candidates:
-            if _numeric_tokens(_split_ascii_line(line, cand)) is not None:
-                first_data, chosen = i, cand
-                break
-        if first_data is not None:
-            break
-    if first_data is None:
+    used_decimal = decimal or '.'
+    if decimal == ',':
+        candidates = tuple(c for c in candidates if c != ',')
+    chosen, n_parsed = _choose_ascii_delimiter(lines, candidates, used_decimal)
+    if n_parsed == 0 and decimal is None:
+        comma_candidates = tuple(c for c in candidates if c != ',')
+        chosen, n_parsed = _choose_ascii_delimiter(lines, comma_candidates, ',')
+        if n_parsed:
+            used_decimal = ','
+            file_warnings.append(
+                f"{filepath.name}: no row parses with a decimal point; read with a "
+                f"decimal comma"
+            )
+    if n_parsed == 0:
         shown = 'auto-detected' if delimiter is None else repr(delimiter)
         raise ValueError(
-            f"{filepath.name}: no rows of two or more numeric columns "
-            f"(delimiter {shown})"
+            f"{filepath.name}: no rows with numeric values in the first two columns "
+            f"(delimiter {shown}, decimal {decimal or 'auto'})"
         )
 
+    split_lines = [_split_ascii_line(ln, chosen) for ln in lines]
+    first_data = next(
+        i for i, toks in enumerate(split_lines) if _xy_from_tokens(toks, used_decimal) is not None
+    )
     header_lines = lines[:first_data]
-    rows: list[list[float]] = []
+    data_tokens: list[list[str]] = []
+    xs: list[float] = []
+    ys: list[float] = []
     skipped = 0
-    for line in lines[first_data:]:
-        values = _numeric_tokens(_split_ascii_line(line, chosen))
-        if values is None:
+    for toks in split_lines[first_data:]:
+        xy = _xy_from_tokens(toks, used_decimal)
+        if xy is None:
             skipped += 1
             continue
-        rows.append(values)
+        data_tokens.append(toks)
+        xs.append(xy[0])
+        ys.append(xy[1])
 
-    n_columns = len(rows[0])
-    x = np.array([r[0] for r in rows], dtype=float)
-    y = np.array([r[1] for r in rows], dtype=float)
+    # "4000,5,0,123" is 4000.5 / 0.123 written with decimal commas AND comma
+    # delimiters; split on ',' it would silently read as x=4000, y=5.
+    if (
+        chosen == ','
+        and decimal is None
+        and min(len(t) for t in data_tokens) >= 3
+        and not any('.' in tok for toks in data_tokens for tok in toks)
+    ):
+        raise ValueError(
+            f"{filepath.name}: comma-separated rows with 3+ fields and no decimal point "
+            f"look like decimal-comma numbers in a comma-delimited file, which cannot be "
+            f"split unambiguously. Re-export with ';' or tab as the delimiter, or pass "
+            f"decimal='.' if the values really are integers."
+        )
+
+    n_columns = len(data_tokens[0])
+    x = np.array(xs, dtype=float)
+    y = np.array(ys, dtype=float)
     finite_x = np.isfinite(x)
     skipped += int((~finite_x).sum())
     df = pd.DataFrame({'x': x[finite_x], 'y': y[finite_x]})
 
     if skipped:
-        warnings.warn(
-            f"{filepath.name}: skipped {skipped} non-numeric line(s) after the data began",
-            UserWarning,
-            stacklevel=3,
+        file_warnings.append(
+            f"{filepath.name}: skipped {skipped} line(s) after the data began with no "
+            f"numeric x/y (or non-finite x)"
         )
-    column_counts = sorted({len(r) for r in rows})
+    column_counts = sorted({len(t) for t in data_tokens})
     if column_counts != [2]:
-        warnings.warn(
-            f"{filepath.name}: rows have {column_counts} numeric columns; using column 1 "
-            f"as x and column 2 as y, other columns ignored",
-            UserWarning,
-            stacklevel=3,
+        n_text = sum(
+            1 for toks in data_tokens for tok in toks[2:] if _try_float(tok, used_decimal) is None
+        )
+        detail = f", {n_text} non-numeric" if n_text else ""
+        file_warnings.append(
+            f"{filepath.name}: rows have {column_counts} fields; using column 1 as x and "
+            f"column 2 as y, columns 3+ ignored{detail}"
         )
     n_dupes = int(df['x'].duplicated().sum())
     if n_dupes:
-        warnings.warn(
-            f"{filepath.name}: {n_dupes} duplicate x value(s); kept the first of each",
-            UserWarning,
-            stacklevel=3,
+        file_warnings.append(
+            f"{filepath.name}: {n_dupes} duplicate x value(s); kept the first of each"
         )
         df = df.drop_duplicates(subset='x', keep='first')
     df = df.sort_values('x', kind='stable').reset_index(drop=True)
+
+    if len(df) < _ASCII_MIN_POINTS:
+        raise ValueError(
+            f"{filepath.name}: need at least {_ASCII_MIN_POINTS} data points with finite, "
+            f"distinct x, got {len(df)}"
+        )
+    if not np.isfinite(df['y'].to_numpy()).any():
+        raise ValueError(f"{filepath.name}: no finite y values")
 
     column_names = None
     if header_lines:
@@ -2028,51 +2129,96 @@ def _parse_ascii_file(
         if len(names) == n_columns:
             column_names = names
 
+    for message in file_warnings:
+        warnings.warn(message, UserWarning, stacklevel=3)
+
     info = {
         'delimiter': ' ' if chosen is None else chosen,
+        'decimal': used_decimal,
         'header_lines': header_lines[:_ASCII_MAX_HEADER_LINES_KEPT],
-        'header_x_unit': _x_unit_from_header(header_lines),
+        'header_x_unit': _x_unit_from_header(header_lines, column_names),
         'column_names': column_names,
         'n_columns': n_columns,
         'n_skipped_lines': skipped,
+        'warnings': file_warnings,
     }
     return df, info
 
 
-def _ascii_x_unit_metadata(units: list[Optional[str]]) -> Dict[str, Any]:
-    """x-unit metadata keys for an ASCII import.
+def _try_float(token: str, decimal: str) -> Optional[float]:
+    try:
+        return _to_float(token, decimal)
+    except ValueError:
+        return None
+
+
+def _ascii_x_unit_metadata(
+    units: Dict[str, Optional[str]],
+) -> Tuple[Dict[str, Any], list[str]]:
+    """x-unit metadata keys for an ASCII import, plus any warnings.
 
     Args:
-        units: Per-file unit stated in the headings (None when not stated).
+        units: File name -> unit stated in its header (None when not stated).
 
     Returns:
-        The stated unit when the files that state one agree, else 'nm' by default.
+        ``(keys, warnings)``. A unit every file states gets confidence 90; a unit
+        only some files state gets 60 and a warning; no stated unit gives the 'nm'
+        default at 50.
+
+    Raises:
+        ValueError: If files state different units: their identical-looking numbers
+            would be different physical coordinates.
     """
-    stated = {u for u in units if u is not None}
-    if len(stated) == 1:
-        unit = stated.pop()
+    by_unit: Dict[str, list[str]] = {}
+    for name, unit in units.items():
+        if unit is not None:
+            by_unit.setdefault(unit, []).append(name)
+    if len(by_unit) > 1:
+        detail = '; '.join(f"{unit}: {sorted(names)[:5]}" for unit, names in sorted(by_unit.items()))
+        raise ValueError(
+            f"ASCII files state different x units in their headers ({detail}). "
+            f"Import the files for each unit separately."
+        )
+    if not by_unit:
+        return {'x_unit': 'nm', 'x_unit_confidence': 50.0, 'x_unit_detection_method': 'default'}, []
+    unit, stating = next(iter(by_unit.items()))
+    if len(stating) == len(units):
         return {
             'x_unit': unit,
             'x_unit_confidence': 90.0,
             'x_unit_detection_method': 'ascii_header',
-        }
-    return {'x_unit': 'nm', 'x_unit_confidence': 50.0, 'x_unit_detection_method': 'default'}
+        }, []
+    message = (
+        f"Only {len(stating)} of {len(units)} ASCII files state an x unit ({unit}); "
+        f"it was applied to all of them. Check the x unit before modelling."
+    )
+    return {
+        'x_unit': unit,
+        'x_unit_confidence': 60.0,
+        'x_unit_detection_method': 'ascii_header_partial',
+    }, [message]
 
 
 def read_ascii_spectra(
-    path: Union[str, Path], delimiter: Optional[str] = None, **kwargs: Any
+    path: Union[str, Path],
+    delimiter: Optional[str] = None,
+    decimal: Optional[str] = None,
+    **kwargs: Any,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """Read two-column ASCII spectra (.dpt, .dat, .asc, .txt) from a file or a folder.
+    """Read two-column ASCII spectra from a file or a folder.
 
     Handles Bruker OPUS .dpt data-point tables and generic x/y text exports:
-    tab, comma, semicolon or whitespace delimiters; ``#``/``%`` comment lines;
-    files with column headings and headerless files (whose first row is data).
+    tab, comma, semicolon or whitespace delimiters; ``#``/``%`` comment lines and
+    inline ``#`` comments; files with column headings and headerless files (whose
+    first row is data); extra columns after x and y, which are ignored.
 
     Args:
-        path: An ASCII file, or a directory whose .dpt/.dat/.asc files are each one
-            spectrum (row id = file stem).
+        path: An ASCII file (any extension, e.g. .dpt/.dat/.asc/.txt), or a
+            directory whose .dpt/.dat/.asc files are each one spectrum (row id =
+            file stem). Folders do not pick up .txt files.
         delimiter: Column delimiter; auto-detected when None. ``' '`` means any
             whitespace.
+        decimal: Decimal separator, '.' or ','; see ``_parse_ascii_file``.
         **kwargs: Not supported; accepted only so ``read_spectra`` can forward its
             keyword arguments. Any value raises TypeError.
 
@@ -2080,10 +2226,12 @@ def read_ascii_spectra(
         ``(df, metadata)``: ``df`` is wide (rows = spectra, columns = ascending x).
         ``metadata`` has n_spectra, wavelength_range, file_format ('ascii'),
         data_type, type_confidence, detection_method, value_scale, x_unit (from an
-        explicit unit in the column headings, else 'nm'), and per-file parse details.
+        explicit unit in the x column heading, else 'nm'), parse details, and
+        ``import_warnings`` (messages the GUI shows).
 
     Raises:
-        ValueError: If the path does not exist or holds no parseable spectrum.
+        ValueError: If the path does not exist, holds no parseable spectrum, or a
+            folder's files state conflicting x units.
         TypeError: If unsupported keyword arguments are passed.
     """
     if kwargs:
@@ -2092,19 +2240,18 @@ def read_ascii_spectra(
         )
     path = Path(path)
     if path.is_dir():
-        return _read_ascii_dir(path, delimiter=delimiter)
+        return _read_ascii_dir(path, delimiter=delimiter, decimal=decimal)
     if not path.exists():
         raise ValueError(f"File not found: {path}")
 
-    df_xy, info = _parse_ascii_file(path, delimiter=delimiter)
-    if len(df_xy) < 2:
-        raise ValueError(f"{path.name}: need at least 2 data points, got {len(df_xy)}")
-
+    df_xy, info = _parse_ascii_file(path, delimiter=delimiter, decimal=decimal)
     result = pd.DataFrame([df_xy['y'].to_numpy()], columns=df_xy['x'].to_numpy(), index=[path.stem])
 
     data_type, type_confidence, detection_method = detect_spectral_data_type(result)
     value_scale = infer_reflectance_scale(result) if data_type == "reflectance" else 1.0
+    unit_keys, _ = _ascii_x_unit_metadata({path.name: info['header_x_unit']})
 
+    file_warnings = info.pop('warnings')
     metadata = {
         'n_spectra': 1,
         'n_points': result.shape[1],
@@ -2115,26 +2262,29 @@ def read_ascii_spectra(
         'type_confidence': type_confidence,
         'detection_method': detection_method,
         'value_scale': value_scale,
-        **_ascii_x_unit_metadata([info['header_x_unit']]),
+        **unit_keys,
         **info,
+        'import_warnings': file_warnings,
     }
     return result, metadata
 
 
 def _read_ascii_dir(
-    directory: Union[str, Path], delimiter: Optional[str] = None
+    directory: Union[str, Path], delimiter: Optional[str] = None, decimal: Optional[str] = None
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Read every .dpt/.dat/.asc file in ``directory`` as one spectrum per file.
 
     Args:
         directory: Folder of ASCII spectra.
         delimiter: Passed to ``_parse_ascii_file`` for every file.
+        decimal: Passed to ``_parse_ascii_file`` for every file.
 
     Returns:
         ``(df, metadata)`` as for ``read_ascii_spectra``; rows are file stems.
 
     Raises:
-        ValueError: If the folder has no ASCII files or none can be parsed.
+        ValueError: If the folder has no ASCII files, none can be parsed, or the
+            files state conflicting x units.
     """
     directory = Path(directory)
     ascii_files = sorted(
@@ -2146,46 +2296,51 @@ def _read_ascii_dir(
     print(f"Found {len(ascii_files)} ASCII files")
 
     spectra: Dict[str, pd.Series] = {}
-    units: list[Optional[str]] = []
+    units: Dict[str, Optional[str]] = {}
     duplicate_stems: list[str] = []
     failed: list[str] = []
+    import_warnings: list[str] = []
+    file_warnings: list[str] = []
     for ascii_file in ascii_files:
         stem = ascii_file.stem
         try:
-            df_xy, info = _parse_ascii_file(ascii_file, delimiter=delimiter)
+            df_xy, info = _parse_ascii_file(ascii_file, delimiter=delimiter, decimal=decimal)
         except (ValueError, OSError) as e:
             failed.append(f"{ascii_file.name}: {e}")
             continue
         if stem in spectra:
             duplicate_stems.append(stem)
         spectra[stem] = pd.Series(df_xy['y'].to_numpy(), index=df_xy['x'].to_numpy())
-        units.append(info['header_x_unit'])
+        units[ascii_file.name] = info['header_x_unit']
+        file_warnings.extend(info['warnings'])
 
     if not spectra:
         raise ValueError(f"No valid ASCII spectra could be read from {directory}: {failed[:5]}")
+    unit_keys, unit_warnings = _ascii_x_unit_metadata(units)
+
     if failed:
-        warnings.warn(
-            f"Could not read {len(failed)} of {len(ascii_files)} ASCII files: {failed[:5]}",
-            UserWarning,
-            stacklevel=3,
+        import_warnings.append(
+            f"Could not read {len(failed)} of {len(ascii_files)} ASCII files: {failed[:5]}"
         )
     if duplicate_stems:
-        warnings.warn(
+        import_warnings.append(
             f"Duplicate ASCII file stems {duplicate_stems[:10]}: the last file of each "
-            f"name was kept",
-            UserWarning,
-            stacklevel=3,
+            f"name was kept"
         )
-
     df = pd.DataFrame(spectra).T
     df = df[sorted(df.columns)]
     n_gap_columns = int(df.isna().any(axis=0).sum())
     if n_gap_columns:
-        warnings.warn(
+        import_warnings.append(
             f"ASCII files in {directory} do not share one x grid: {n_gap_columns} of "
-            f"{df.shape[1]} x values are missing from some spectra (filled with NaN)",
-            UserWarning,
-            stacklevel=3,
+            f"{df.shape[1]} x values are missing from some spectra (filled with NaN)"
+        )
+    import_warnings.extend(unit_warnings)
+    for message in import_warnings:
+        warnings.warn(message, UserWarning, stacklevel=3)
+    if file_warnings:
+        import_warnings.append(
+            f"{len(file_warnings)} per-file parse warning(s), e.g. {file_warnings[:3]}"
         )
 
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
@@ -2203,9 +2358,10 @@ def _read_ascii_dir(
         'type_confidence': type_confidence,
         'detection_method': detection_method,
         'value_scale': value_scale,
-        **_ascii_x_unit_metadata(units),
+        **unit_keys,
         'n_failed': len(failed),
         'failed_files': failed[:10],
+        'import_warnings': import_warnings,
     }
     return df, metadata
 
@@ -2797,6 +2953,10 @@ def _detect_directory_format(directory: Path) -> str:
         return 'spc'
     elif any(f.suffix.lower() in ['.jdx', '.dx'] for f in files):
         return 'jcamp'
+    elif any(f.suffix.lower() in ASCII_EXTENSIONS for f in files):
+        # Before CSV: a folder of .dpt spectra usually also holds a reference .csv.
+        # .txt is deliberately not an ASCII folder extension (README/notes files).
+        return 'ascii'
     elif any(f.suffix.lower() in ['.csv'] for f in files):
         return 'csv_dir'
     elif any(f.suffix.lower() in ['.spa', '.spg'] for f in files):
@@ -3475,14 +3635,25 @@ def _map_opus_data_type(
 ) -> Tuple[str, float, str]:
     """Map an OPUS block data type onto the 'absorbance'/'reflectance' pipeline types.
 
-    Transmittance is treated as reflectance-like (the GUI's transmittance formula is
-    keyed off ``source_data_type``). Other block types fall back to the heuristic.
+    The pipeline type decides whether the GUI offers a log conversion: 'reflectance'
+    data is converted with A = log10(1/R), 'absorbance' data is left linear. So
+    every block that is already logged or otherwise linear in concentration maps to
+    'absorbance': log-reflectance (OPUS stores -log R), Kubelka-Munk, ATR-corrected
+    and photoacoustic spectra, and Raman/emission intensities (logging those is never
+    a valid conversion). Transmittance and reflectance map to 'reflectance' (the GUI's
+    transmittance formula is keyed off ``source_data_type``). Single-channel blocks
+    and unknown types fall back to the heuristic.
     """
-    if source_data_type == 'absorbance':
+    if source_data_type in _OPUS_ABSORBANCE_LIKE:
         return 'absorbance', 95.0, f"{method_prefix}({source_data_type})"
     if source_data_type in ('transmittance', 'reflectance'):
         return 'reflectance', 95.0, f"{method_prefix}({source_data_type})"
     return detect_spectral_data_type(df)
+
+
+_OPUS_ABSORBANCE_LIKE = frozenset(
+    {'absorbance', 'log_reflectance', 'kubelka_munk', 'atr', 'photoacoustic', 'raman', 'emission'}
+)
 
 
 def read_perkinelmer_file(

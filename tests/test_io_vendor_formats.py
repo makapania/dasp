@@ -541,6 +541,71 @@ def test_perkinelmer_dir_reports_canonical_x_unit(tmp_path, fake_specio):
     assert metadata['x_unit'] == 'cm-1'
 
 
+def _install_specio(monkeypatch, x, meta=None):
+    import sys
+    import types
+
+    class _Spectrum:
+        wavelength = x
+        amplitudes = np.linspace(0.1, 0.9, len(x))
+
+    _Spectrum.meta = meta or {}
+    module = types.ModuleType("specio_py310")
+    module.specread = lambda path: _Spectrum()
+    monkeypatch.setitem(sys.modules, "specio_py310", module)
+
+
+def test_perkinelmer_full_ir_range_is_cm1(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(4000.0, 650.0, 336))
+    path = tmp_path / "ir.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'cm-1'
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_range'
+
+
+def test_perkinelmer_nir_nm_range_is_not_confidently_cm1(tmp_path, monkeypatch):
+    """A 1000-2500 nm Lambda NIR file used to be labelled cm-1 with confidence."""
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501))
+    path = tmp_path / "nir.sp"
+    path.write_bytes(b"placeholder")
+
+    with pytest.warns(UserWarning, match="does not identify the unit"):
+        _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'nm'
+    assert metadata['x_unit_confidence'] < 50.0
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_ambiguous_range'
+
+
+def test_perkinelmer_unit_from_metadata_wins(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501), meta={'x_units': 'cm-1'})
+    path = tmp_path / "meta.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'cm-1'
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_metadata'
+
+
+def test_perkinelmer_dir_surfaces_ambiguous_unit_warning(tmp_path, monkeypatch):
+    from spectral_predict.io import read_sp_dir
+
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501))
+    for i in range(2):
+        (tmp_path / f"nir{i}.sp").write_bytes(b"placeholder")
+
+    with pytest.warns(UserWarning):
+        _, metadata = read_sp_dir(tmp_path)
+
+    assert metadata['x_unit'] == 'nm'
+    assert metadata['x_unit_confidence'] < 50.0
+    assert any("2 of 2 .sp files" in m for m in metadata['import_warnings'])
+
+
 def test_agilent_wrapper_normalised_metadata(tmp_path, monkeypatch):
     import sys
     import types

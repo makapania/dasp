@@ -23,9 +23,15 @@ import pandas as pd
 # files routinely carry the absorbance (AB) block *together with* the single-channel
 # sample (ScSm) and background reference (ScRf) blocks, and the reference is the
 # same instrument background in every file of a batch.
+#
+# 'aria'/'arit' are brukeropus's keys for arithmetic-result blocks that OPUS marks as
+# absorbance-like / transmittance-like (difference spectra, saved manipulations); they
+# rank after the native AB/TR blocks and carry the same data_type.
 OPUS_BLOCK_PRIORITY: tuple[tuple[str, str], ...] = (
     ('a', 'absorbance'),
     ('t', 'transmittance'),
+    ('aria', 'absorbance'),
+    ('arit', 'transmittance'),
     ('r', 'reflectance'),
     ('logr', 'log_reflectance'),
     ('km', 'kubelka_munk'),
@@ -83,6 +89,14 @@ def _select_opus_block(
             continue
         if x_arr.size != y_arr.size:
             rejected.append(f"{key}: x has {x_arr.size} points, y has {y_arr.size}")
+            continue
+        # brukeropus builds x from the block's FXV/LXV/NPT parameters, so a corrupt
+        # parameter gives a NaN or collapsed axis rather than an error.
+        if not np.isfinite(x_arr).all():
+            rejected.append(f"{key}: non-finite x coordinates")
+            continue
+        if np.unique(x_arr).size < 2:
+            rejected.append(f"{key}: fewer than 2 distinct x coordinates")
             continue
         if not np.isfinite(y_arr).any():
             rejected.append(f"{key}: no finite values")
@@ -290,8 +304,9 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
 
     # Read each file
     spectra = {}
-    data_types = []
-    opus_blocks = []
+    # Per kept stem, so a file overwritten by a same-stem file is not counted.
+    data_types: dict[str, str] = {}
+    opus_blocks: dict[str, str] = {}
     duplicate_stems = []
     failed_files = []
 
@@ -310,8 +325,8 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
         try:
             spectrum, file_metadata = read_opus_file(opus_file)
             spectra[stem] = spectrum
-            data_types.append(file_metadata.get('data_type', 'unknown'))
-            opus_blocks.append(file_metadata.get('opus_block', 'unknown'))
+            data_types[stem] = file_metadata.get('data_type', 'unknown')
+            opus_blocks[stem] = file_metadata.get('opus_block', 'unknown')
         except Exception as e:
             print(f"Warning: Could not read {opus_file.name}: {e}")
             failed_files.append(opus_file.name)
@@ -349,19 +364,34 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
 
     # Detect dominant data type
     from collections import Counter
-    type_counts = Counter(data_types)
+    type_counts = Counter(data_types.values())
     dominant_type = type_counts.most_common(1)[0][0] if type_counts else 'unknown'
-    block_counts = Counter(opus_blocks)
+    block_counts = Counter(opus_blocks.values())
+
+    # Collected for the GUI, which shows metadata['import_warnings'] in a dialog
+    # (warnings.warn and print only reach the console).
+    import_warnings: list[str] = []
     if len(type_counts) > 1:
         # e.g. some files carry AB and others only single channels: the rows of X are
         # then in different units, which no downstream step can reconcile.
-        warnings.warn(
-            f"OPUS files in {directory} contain different data types "
-            f"{dict(type_counts)}; the combined matrix mixes them. Check the "
-            f"per-file blocks before modelling.",
-            UserWarning,
-            stacklevel=2,
+        import_warnings.append(
+            f"The OPUS files contain different data types {dict(type_counts)}, so the "
+            f"combined matrix mixes them. Check the per-file blocks before modelling."
         )
+    single_channel = sorted(s for s, k in opus_blocks.items() if k in _SINGLE_CHANNEL_KEYS)
+    if single_channel:
+        import_warnings.append(
+            f"{len(single_channel)} of {len(spectra)} OPUS files have no processed spectrum "
+            f"(absorbance, transmittance, reflectance, ...) and were read from a "
+            f"single-channel block (ScSm/ScRf): raw detector intensities, not absorbance. "
+            f"Files: {single_channel[:10]}"
+        )
+    if failed_files:
+        import_warnings.append(
+            f"{len(failed_files)} OPUS file(s) could not be read: {failed_files[:10]}"
+        )
+    for message in import_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
 
     # Compile metadata
     metadata = {
@@ -373,6 +403,7 @@ def read_opus_dir(directory: str | Path, pattern: str = "*.[0-9]*") -> Tuple[pd.
         'opus_blocks': dict(block_counts),
         'n_failed': len(failed_files),
         'failed_files': failed_files[:10] if failed_files else [],
+        'import_warnings': import_warnings,
         'x_unit': 'cm-1',
         'x_unit_confidence': 99.0,
         'x_unit_detection_method': 'opus_native',

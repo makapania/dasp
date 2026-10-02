@@ -19161,6 +19161,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "ASCII")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -19199,6 +19200,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "OPUS")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -19237,6 +19239,7 @@ class SpectralPredictApp:
                 # Store data type detection results
                 self._apply_data_type_metadata(metadata)
                 self._apply_x_unit_metadata(metadata)
+                self._show_import_warnings(metadata, "PerkinElmer")
 
                 if self.reference_file.get():
                     # Load reference data and align
@@ -20136,6 +20139,24 @@ class SpectralPredictApp:
         self.x_unit_detection_method = metadata.get('x_unit_detection_method', 'default')
         self.x_unit_has_been_converted = False
 
+    def _show_import_warnings(self, metadata, source_label):
+        """Show a reader's ``metadata['import_warnings']`` in a dialog.
+
+        Folder readers (OPUS, ASCII, PerkinElmer) collect problems the user must see,
+        such as single-channel OPUS blocks or ambiguous x units; warnings.warn and
+        print output never reach the GUI.
+        """
+        messages = [str(m) for m in (metadata or {}).get('import_warnings') or []]
+        if not messages:
+            return
+        print(f"[!] {source_label} import warnings:")
+        for message in messages:
+            print(f"    - {message}")
+        messagebox.showwarning(
+            f"{source_label} import warnings",
+            "\n\n".join(messages),
+        )
+
     def _get_spectral_xlabel(self) -> str:
         """Return the x-axis label for spectral plots based on current x-unit."""
         unit = self.current_x_unit.get()
@@ -20316,6 +20337,8 @@ class SpectralPredictApp:
         extra_notes = []
         if self.source_data_type == "transmittance":
             extra_notes.append("OPUS transmittance")
+        elif self.source_data_type in ("sample", "reference"):
+            extra_notes.append("OPUS single-channel: raw intensities")
         if self.data_value_scale == 100.0:
             extra_notes.append("% reflectance")
         if extra_notes:

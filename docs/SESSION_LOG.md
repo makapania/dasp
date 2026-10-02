@@ -761,3 +761,16 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   header. The x unit is taken only from explicit unit tokens in the headings, because our own writer labels x
   "Wavelength" whatever its unit. `_parse_ascii_file` now returns `(df, info)` and raises. Unknown kwargs raise
   TypeError (they used to go to pd.read_csv; no caller passes any).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes).** The pipeline data_type decides whether the GUI offers a
+  log: 'reflectance' gets A = log10(1/R). So every OPUS block that is already logged or linear in concentration
+  (logr = -log R, KM, ATR, PAS, Raman, emission, aria) must map to 'absorbance'; mapping logr to 'reflectance'
+  logged it twice. "4000,5,0,123" (decimal comma + comma delimiter) splits into four integers and silently gave
+  x=4000, y=5; such files are now refused (decimal='.' overrides). pd.read_csv's header=0 path had tolerated text
+  columns, inline '#' comments and `decimal=','`; the hand parser must keep all three. The GUI never shows
+  warnings.warn or print output: reader problems the user must see go in `metadata['import_warnings']`, which
+  `_show_import_warnings` puts in a dialog (OPUS/ASCII/PerkinElmer main import only). PerkinElmer .sp has no unit
+  field in specio; ranges up to 3300 (the Lambda UV/Vis/NIR limit) are ambiguous and now default to nm at 40%
+  with a warning. `read_sp_dir` globbed `*.sp` + `*.SP`, which on Windows lists every file twice.
+- **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
+  control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
+  tools, not via heredoc.

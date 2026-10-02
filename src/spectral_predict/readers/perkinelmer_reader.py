@@ -6,10 +6,60 @@ in a binary format. This module uses the specio library to read these files.
 Note: Uses specio-py310 for Python 3.10+ compatibility.
 """
 
-import pandas as pd
-import numpy as np
+import re
+import warnings
 from pathlib import Path
-from typing import Tuple, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+
+# PerkinElmer UV/Vis/NIR (Lambda, UV WinLab) .sp files are in nm and stop at 3300 nm;
+# PerkinElmer FT-IR/FT-NIR (Spectrum) files are in cm-1 and a full range reaches
+# 4000 cm-1 or more. Below this maximum the two overlap (e.g. 400-2500 could be a
+# Vis-NIR range in nm or a truncated mid-IR range in cm-1).
+_SP_MAX_NM = 3300.0
+_UNIT_PATTERNS = (
+    ('cm-1', re.compile(r'cm\s*(-|\^-|⁻)\s*1|1\s*/\s*cm|wavenumber', re.IGNORECASE)),
+    ('nm', re.compile(r'\bnm\b|nanomet', re.IGNORECASE)),
+)
+
+
+def _unit_from_meta(meta: Any) -> Optional[str]:
+    """Return an x unit stated in the reader's metadata, if any.
+
+    specio-py310's .sp plugin records no x unit (only description, instrument
+    fields and the wavelength range), but a unit-bearing key is honoured if present.
+    """
+    if not isinstance(meta, dict):
+        return None
+    for key, value in meta.items():
+        if 'unit' not in str(key).lower() or not isinstance(value, str):
+            continue
+        found = {unit for unit, pattern in _UNIT_PATTERNS if pattern.search(value)}
+        if len(found) == 1:
+            return found.pop()
+    return None
+
+
+def _infer_sp_x_unit(
+    x_min: float, x_max: float, meta: Any = None
+) -> tuple[str, float, str, Optional[str]]:
+    """Return ``(x_unit, confidence, method, warning)`` for a PerkinElmer spectrum."""
+    stated = _unit_from_meta(meta)
+    if stated is not None:
+        return stated, 95.0, 'perkinelmer_metadata', None
+    if x_max > _SP_MAX_NM:
+        return 'cm-1', 80.0, 'perkinelmer_range', None
+    return (
+        'nm',
+        40.0,
+        'perkinelmer_ambiguous_range',
+        f"x range {x_min:.1f}-{x_max:.1f} does not identify the unit: it fits a "
+        f"UV/Vis/NIR spectrum in nm or a truncated IR spectrum in cm-1. Assumed nm; "
+        f"check the x unit and switch it if this is an IR spectrum.",
+    )
 
 
 def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
@@ -101,26 +151,11 @@ def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
             f"x={len(x_data)}, y={len(y_data)}"
         )
 
-    # Determine if x_data is wavelengths or wavenumbers based on typical ranges
-    # Wavenumbers: typically 400-4000 cm⁻¹
-    # Wavelengths: typically 2500-25000 nm (2.5-25 μm for IR)
-    x_min, x_max = x_data.min(), x_data.max()
-
-    # Use the canonical 'cm-1'/'nm' strings every other reader emits: the GUI's
-    # x-unit handling treats anything that is not 'cm-1' as nm.
-    if x_max <= 5000 and x_min >= 100:
-        # Likely wavenumbers (cm⁻¹)
-        x_unit = 'cm-1'
-    elif x_max >= 1000 and x_min >= 100:
-        # Likely wavelengths (nm)
-        x_unit = 'nm'
-    else:
-        # Ambiguous - assume wavenumbers (more common for IR)
-        x_unit = 'cm-1'
-        print(
-            f"Warning: Could not determine x-axis units for {filepath.name}. "
-            f"Assuming wavenumbers (cm⁻¹). Range: {x_min:.1f}-{x_max:.1f}"
-        )
+    x_unit, x_unit_confidence, x_unit_method, unit_warning = _infer_sp_x_unit(
+        float(x_data.min()), float(x_data.max()), getattr(spectra_obj, 'meta', None)
+    )
+    if unit_warning:
+        warnings.warn(f"{filepath.name}: {unit_warning}", UserWarning, stacklevel=2)
 
     # Ensure data is in ascending order
     if x_data[0] > x_data[-1]:
@@ -137,6 +172,9 @@ def read_sp_file(filepath: str | Path) -> Tuple[pd.Series, Dict]:
     metadata = {
         'filename': filepath.name,
         'x_unit': x_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
+        'x_unit_warning': unit_warning,
         'x_range': (float(x_data.min()), float(x_data.max())),
         'n_points': len(spectrum),
         'file_format': 'sp',
@@ -202,7 +240,8 @@ def read_sp_dir(directory: str | Path) -> Tuple[pd.DataFrame, Dict]:
         raise ValueError(f"Not a directory: {directory}")
 
     # Find .sp files
-    sp_files = list(directory.glob("*.sp")) + list(directory.glob("*.SP"))
+    # set(): on case-insensitive filesystems (Windows) both globs return every file.
+    sp_files = sorted(set(directory.glob("*.sp")) | set(directory.glob("*.SP")))
 
     if len(sp_files) == 0:
         raise ValueError(f"No .sp files found in {directory}")
@@ -215,6 +254,7 @@ def read_sp_dir(directory: str | Path) -> Tuple[pd.DataFrame, Dict]:
     duplicate_stems = []
     failed_files = []
 
+    unit_details: list[tuple[str, float, str, Optional[str]]] = []
     for sp_file in sorted(sp_files):
         stem = sp_file.stem
 
@@ -230,6 +270,14 @@ def read_sp_dir(directory: str | Path) -> Tuple[pd.DataFrame, Dict]:
             spectrum, file_metadata = read_sp_file(sp_file)
             spectra[stem] = spectrum
             x_units.append(file_metadata.get('x_unit', 'unknown'))
+            unit_details.append(
+                (
+                    sp_file.name,
+                    file_metadata.get('x_unit_confidence', 50.0),
+                    file_metadata.get('x_unit_detection_method', 'default'),
+                    file_metadata.get('x_unit_warning'),
+                )
+            )
         except Exception as e:
             print(f"Warning: Could not read {sp_file.name}: {e}")
             failed_files.append(sp_file.name)
@@ -252,11 +300,29 @@ def read_sp_dir(directory: str | Path) -> Tuple[pd.DataFrame, Dict]:
     unit_counts = Counter(x_units)
     dominant_unit = unit_counts.most_common(1)[0][0] if unit_counts else 'unknown'
 
+    # Collected for the GUI, which shows metadata['import_warnings'] in a dialog.
+    import_warnings: list[str] = []
     if len(unit_counts) > 1:
-        print(
-            f"Warning: Files have inconsistent x-axis units: {dict(unit_counts)}\n"
-            f"Proceeding with dominant unit: {dominant_unit}"
+        import_warnings.append(
+            f"The .sp files have inconsistent x-axis units {dict(unit_counts)}; "
+            f"proceeding with the dominant unit {dominant_unit}."
         )
+    ambiguous = [name for name, _, _, warning in unit_details if warning]
+    if ambiguous:
+        import_warnings.append(
+            f"{len(ambiguous)} of {len(unit_details)} .sp files have an x range that does "
+            f"not identify the unit (UV/Vis/NIR in nm, or truncated IR in cm-1); nm was "
+            f"assumed. Check the x unit. Files: {ambiguous[:10]}"
+        )
+    if failed_files:
+        import_warnings.append(
+            f"{len(failed_files)} .sp file(s) could not be read: {failed_files[:10]}"
+        )
+    for message in import_warnings:
+        warnings.warn(message, UserWarning, stacklevel=2)
+    dominant_details = [d for d, u in zip(unit_details, x_units) if u == dominant_unit]
+    x_unit_confidence = min((d[1] for d in dominant_details), default=50.0)
+    x_unit_method = min(dominant_details, key=lambda d: d[1])[2] if dominant_details else 'default'
 
     # Combine into DataFrame
     df = pd.DataFrame(spectra).T  # Transpose so rows = samples
@@ -281,11 +347,14 @@ def read_sp_dir(directory: str | Path) -> Tuple[pd.DataFrame, Dict]:
         'n_spectra': len(df),
         'x_range': (float(df.columns.min()), float(df.columns.max())),
         'x_unit': dominant_unit,
+        'x_unit_confidence': x_unit_confidence,
+        'x_unit_detection_method': x_unit_method,
         'file_format': 'sp',
         'vendor': 'PerkinElmer',
         'x_unit_counts': dict(unit_counts),
         'n_failed': len(failed_files),
         'failed_files': failed_files[:10] if failed_files else [],
+        'import_warnings': import_warnings,
     }
 
     print(f"Successfully read {len(df)} PerkinElmer .sp spectra")

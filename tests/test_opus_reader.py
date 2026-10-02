@@ -30,6 +30,14 @@ BLOCK_VALUES = {
     "a": 0.5,  # absorbance
     "t": 0.25,  # transmittance
     "r": 0.4,  # reflectance
+    "logr": 0.45,  # log reflectance, already -log10(R)
+    "km": 0.3,  # Kubelka-Munk
+    "atr": 0.35,  # ATR-corrected absorbance
+    "pas": 0.55,  # photoacoustic
+    "ra": 500.0,  # Raman intensity
+    "e": 600.0,  # emission
+    "aria": 0.6,  # arithmetic result, absorbance-like
+    "arit": 0.7,  # arithmetic result, transmittance-like
     "sm": 111.0,  # single-channel sample
     "rf": 999.0,  # single-channel background reference
 }
@@ -247,6 +255,115 @@ def test_read_opus_dir_warns_on_mixed_blocks(tmp_path, fake_brukeropus):
 
     assert meta["data_types"] == {"absorbance": 2, "sample": 1}
     assert meta["opus_blocks"] == {"a": 2, "sm": 1}
+    assert any("different data types" in m for m in meta["import_warnings"])
+    assert any("1 of 3 OPUS files" in m for m in meta["import_warnings"])
+
+
+# ---------------------------------------------------------------------------
+# Review round 1
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key, source",
+    [
+        ("logr", "log_reflectance"),
+        ("km", "kubelka_munk"),
+        ("atr", "atr"),
+        ("pas", "photoacoustic"),
+        ("ra", "raman"),
+        ("e", "emission"),
+    ],
+)
+def test_already_linear_blocks_map_to_absorbance(tmp_path, fake_brukeropus, key, source):
+    """Logging these again (the GUI's reflectance->absorbance step) would be wrong."""
+    path = _make(tmp_path, fake_brukeropus, "s1.0", FakeOpusFile(_blocks(key, "sm", "rf")))
+
+    df, meta = sp_io.read_opus_file(path)
+
+    np.testing.assert_array_equal(df.iloc[0].to_numpy(), _expected(key))
+    assert meta["opus_block"] == key
+    assert meta["source_data_type"] == source
+    assert meta["data_type"] == "absorbance"
+    assert meta["detection_method"] == f"opus_metadata({source})"
+
+
+@pytest.mark.parametrize(
+    "keys, chosen, data_type",
+    [
+        (("aria", "sm", "rf"), "aria", "absorbance"),
+        (("arit", "sm", "rf"), "arit", "transmittance"),
+        (("a", "aria"), "a", "absorbance"),  # native AB outranks the arithmetic result
+        (("t", "aria"), "t", "transmittance"),
+        (("aria", "r"), "aria", "absorbance"),
+    ],
+)
+def test_arithmetic_result_blocks(tmp_path, fake_brukeropus, keys, chosen, data_type):
+    path = _make(tmp_path, fake_brukeropus, "s.0", FakeOpusFile(_blocks(*keys)))
+
+    spectrum, meta = opus_reader.read_opus_file(path)
+
+    assert meta["opus_block"] == chosen
+    assert meta["data_type"] == data_type
+    np.testing.assert_array_equal(spectrum.to_numpy(), _expected(chosen))
+
+
+@pytest.mark.parametrize(
+    "bad_x",
+    [
+        np.full(N_POINTS, np.nan),  # FXV=NaN: linspace gives all NaN
+        np.where(np.arange(N_POINTS) == 0, np.nan, X_DESC),  # one NaN coordinate
+        np.full(N_POINTS, 4000.0),  # FXV == LXV: collapsed axis
+        np.where(np.arange(N_POINTS) == 5, np.inf, X_DESC),
+    ],
+)
+def test_bad_x_axis_falls_back_to_next_block(tmp_path, fake_brukeropus, capsys, bad_x):
+    blocks = _blocks("t", "sm", "rf")
+    blocks["a"] = FakeData("a", x=bad_x)
+    path = _make(tmp_path, fake_brukeropus, "s.0", FakeOpusFile(blocks))
+
+    spectrum, meta = opus_reader.read_opus_file(path)
+
+    assert meta["opus_block"] == "t"
+    np.testing.assert_array_equal(spectrum.to_numpy(), _expected("t"))
+    assert np.isfinite(spectrum.index.to_numpy()).all()
+    assert "a: " in capsys.readouterr().out
+
+
+def test_all_single_channel_folder_reports_import_warning(tmp_path, fake_brukeropus):
+    for i in range(3):
+        _make(tmp_path, fake_brukeropus, f"s{i}.0", FakeOpusFile(_blocks("sm", "rf")))
+
+    with pytest.warns(UserWarning, match="3 of 3 OPUS files have no processed spectrum"):
+        df, meta = sp_io.read_opus_dir(tmp_path)
+
+    assert df.shape == (3, N_POINTS)
+    assert meta["dominant_data_type"] == "sample"
+    assert meta["source_data_type"] == "sample"
+    # The GUI shows import_warnings in a dialog; this one must be there
+    assert len(meta["import_warnings"]) == 1
+    assert "single-channel" in meta["import_warnings"][0]
+
+
+def test_absorbance_folder_has_no_import_warnings(tmp_path, fake_brukeropus):
+    for i in range(2):
+        _make(tmp_path, fake_brukeropus, f"s{i}.0", FakeOpusFile(_blocks("a", "sm", "rf")))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, meta = sp_io.read_opus_dir(tmp_path)
+
+    assert meta["import_warnings"] == []
+
+
+def test_overwritten_duplicate_stem_not_counted(tmp_path, fake_brukeropus):
+    _make(tmp_path, fake_brukeropus, "s.0", FakeOpusFile(_blocks("sm", "rf")))
+    _make(tmp_path, fake_brukeropus, "s.1", FakeOpusFile(_blocks("a")))
+
+    _, meta = opus_reader.read_opus_dir(tmp_path)
+
+    assert meta["data_types"] == {"absorbance": 1}
+    assert meta["import_warnings"] == []
 
 
 # ---------------------------------------------------------------------------

@@ -132,7 +132,7 @@ def test_explicit_delimiter(tmp_path):
 
     assert df.shape == (1, 200)
     assert meta["delimiter"] == ";"
-    with pytest.raises(ValueError, match="no rows of two or more numeric columns"):
+    with pytest.raises(ValueError, match="no rows with numeric values"):
         read_ascii_spectra(path, delimiter="\t")
 
 
@@ -161,7 +161,7 @@ def test_non_numeric_line_inside_data_is_reported(tmp_path):
     path = tmp_path / "gap.dat"
     path.write_text("1,0.5\n2,0.6\nERROR\n3,0.7\n")
 
-    with pytest.warns(UserWarning, match="skipped 1 non-numeric"):
+    with pytest.warns(UserWarning, match="skipped 1 line"):
         df, meta = read_ascii_spectra(path)
 
     assert df.columns.tolist() == [1.0, 2.0, 3.0]
@@ -266,11 +266,26 @@ def test_folder_without_ascii_files_raises(tmp_path):
 def test_folder_unit_from_agreeing_headers(tmp_path):
     for i in range(2):
         _write_xy(tmp_path / f"s{i}.dpt", WAVENUMBERS, _values(50 + i), header=["Wavenumber,Abs"])
-    _write_xy(tmp_path / "s9.dpt", WAVENUMBERS, _values(59))  # states no unit
 
     _, meta = read_ascii_spectra(tmp_path)
 
     assert meta["x_unit"] == "cm-1"
+    assert meta["x_unit_confidence"] == 90.0
+    assert meta["import_warnings"] == []
+
+
+def test_folder_unit_stated_by_some_files_only_is_low_confidence(tmp_path):
+    _write_xy(tmp_path / "s0.dpt", WAVENUMBERS, _values(50), header=["Wavenumber,Abs"])
+    for i in range(1, 4):
+        _write_xy(tmp_path / f"s{i}.dpt", WAVENUMBERS, _values(50 + i))  # no unit stated
+
+    with pytest.warns(UserWarning, match="Only 1 of 4 ASCII files state an x unit"):
+        _, meta = read_ascii_spectra(tmp_path)
+
+    assert meta["x_unit"] == "cm-1"
+    assert meta["x_unit_confidence"] == 60.0
+    assert meta["x_unit_detection_method"] == "ascii_header_partial"
+    assert any("Only 1 of 4" in m for m in meta["import_warnings"])
 
 
 def test_read_spectra_ascii_dispatch_handles_file_and_folder(tmp_path):
@@ -303,3 +318,221 @@ def test_write_read_round_trip_with_header(tmp_path):
     assert meta["column_names"] == ["Wavelength", "Intensity"]
     # The writer labels x "Wavelength" whatever its unit, so that word sets no unit
     assert meta["x_unit_detection_method"] == "default"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (Codex / GLM) regressions and gaps
+# ---------------------------------------------------------------------------
+
+
+def test_decimal_comma_with_comma_delimiter_is_refused(tmp_path):
+    """'4000,5,0,123' must not silently read as x=4000, y=5."""
+    path = tmp_path / "de.dat"
+    path.write_text("4000,5,0,123\n3999,5,0,124\n3998,5,0,125\n")
+
+    with pytest.raises(ValueError, match="decimal-comma"):
+        read_ascii_spectra(path)
+
+
+def test_integer_comma_columns_accepted_with_explicit_decimal_point(tmp_path):
+    path = tmp_path / "ints.dat"
+    path.write_text("400,12,7\n401,13,7\n402,14,7\n")
+
+    with pytest.warns(UserWarning, match="columns 3\\+ ignored"):
+        df, meta = read_ascii_spectra(path, decimal=".")
+
+    assert df.iloc[0].tolist() == [12.0, 13.0, 14.0]
+    assert meta["decimal"] == "."
+
+
+def test_semicolon_decimal_comma_explicit(tmp_path):
+    """The delimiter=';', decimal=',' route that pd.read_csv used to provide."""
+    path = tmp_path / "de.dat"
+    path.write_text("Wellenzahl;Absorbanz\n1000,5;0,123\n1001,5;0,124\n")
+
+    df, meta = read_ascii_spectra(path, delimiter=";", decimal=",")
+
+    assert df.columns.tolist() == [1000.5, 1001.5]
+    assert df.iloc[0].tolist() == [0.123, 0.124]
+    assert meta["decimal"] == ","
+
+
+@pytest.mark.parametrize("sep", [";", "\t", " "])
+def test_decimal_comma_auto_fallback_warns(tmp_path, sep):
+    path = tmp_path / "de.dat"
+    path.write_text(f"1000,5{sep}0,123\n1001,5{sep}0,124\n1002{sep}0,125\n")
+
+    with pytest.warns(UserWarning, match="decimal comma"):
+        df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.5, 1001.5, 1002.0]
+    assert df.iloc[0].tolist() == [0.123, 0.124, 0.125]
+    assert meta["decimal"] == ","
+
+
+def test_decimal_comma_conflicts_with_comma_delimiter(tmp_path):
+    path = _write_xy(tmp_path / "s.dat", WAVENUMBERS, _values(80))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        read_ascii_spectra(path, delimiter=",", decimal=",")
+
+
+def test_unknown_kwargs_still_raise_alongside_decimal(tmp_path):
+    path = _write_xy(tmp_path / "s.dpt", WAVENUMBERS, _values(81))
+    with pytest.raises(TypeError, match="encoding"):
+        read_ascii_spectra(path, decimal=".", encoding="latin-1")
+
+
+def test_read_spectra_forwards_decimal(tmp_path):
+    path = tmp_path / "de.txt"
+    path.write_text("1000,5;0,123\n1001,5;0,124\n")
+
+    df, _ = read_spectra(path, format="ascii", delimiter=";", decimal=",")
+
+    assert df.columns.tolist() == [1000.5, 1001.5]
+
+
+def test_unit_comes_from_x_column_heading_only(tmp_path):
+    path = tmp_path / "multi.dat"
+    path.write_text("Wavelength (nm),Intensity,Wavenumber (cm-1)\n1000,0.2,10000\n1001,0.3,9990\n")
+
+    with pytest.warns(UserWarning, match="columns 3\\+ ignored"):
+        df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0]
+    assert meta["x_unit"] == "nm"
+
+
+def test_unit_from_other_header_lines_when_unambiguous(tmp_path):
+    path = tmp_path / "inst.dat"
+    path.write_text("XUNITS=1/CM\nx y\n1000 0.2\n1001 0.3\n")
+
+    _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit"] == "cm-1"
+
+
+def test_header_naming_both_units_outside_columns_sets_none(tmp_path):
+    path = tmp_path / "both.dat"
+    path.write_text("converted from nm to cm-1\n1000 0.2\n1001 0.3\n")
+
+    _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit_detection_method"] == "default"
+
+
+def test_folder_with_conflicting_explicit_units_is_refused(tmp_path):
+    x = np.array([1000.0, 1001.0, 1002.0])
+    _write_xy(tmp_path / "a.dat", x, _values(90, 3), header=["Wavenumber (cm-1),A"])
+    _write_xy(tmp_path / "b.dat", x, _values(91, 3), header=["Wavelength (nm),A"])
+
+    with pytest.raises(ValueError, match=r"different x units.*a\.dat.*b\.dat"):
+        read_ascii_spectra(tmp_path)
+
+
+def test_ignored_text_column_does_not_reject_rows(tmp_path):
+    path = tmp_path / "flags.dat"
+    path.write_text("Wavelength,Intensity,Quality\n1000,0.2,OK\n1001,0.3,BAD\n1002,0.4,OK\n")
+
+    with pytest.warns(UserWarning, match="3 non-numeric"):
+        df, meta = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0, 1002.0]
+    assert df.iloc[0].tolist() == [0.2, 0.3, 0.4]
+    assert meta["column_names"] == ["Wavelength", "Intensity", "Quality"]
+    assert meta["n_skipped_lines"] == 0
+
+
+def test_inline_comments_are_stripped(tmp_path):
+    path = tmp_path / "notes.dat"
+    path.write_text("# header comment\n1000,0.1 # good\n1001,0.2#ok\n1002,0.3\n")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0, 1002.0]
+    assert df.iloc[0].tolist() == [0.1, 0.2, 0.3]
+
+
+def test_single_point_file_fails_in_folder(tmp_path):
+    _write_xy(tmp_path / "good.dpt", WAVENUMBERS, _values(100))
+    (tmp_path / "one.dpt").write_text("1,0.5\n")
+
+    with pytest.warns(UserWarning, match="Could not read 1 of 2"):
+        df, meta = read_ascii_spectra(tmp_path)
+
+    assert list(df.index) == ["good"]
+    assert meta["n_failed"] == 1
+    assert "at least 2" in meta["failed_files"][0]
+
+
+def test_folder_of_only_one_point_files_raises(tmp_path):
+    (tmp_path / "one.dpt").write_text("1,0.5\n")
+    with pytest.raises(ValueError, match="No valid ASCII spectra"):
+        read_ascii_spectra(tmp_path)
+
+
+def test_all_nan_x_file_fails_in_folder(tmp_path):
+    _write_xy(tmp_path / "good.dpt", WAVENUMBERS, _values(101))
+    (tmp_path / "nan.dpt").write_text("nan,0.5\nnan,0.6\nnan,0.7\n")
+
+    with pytest.warns(UserWarning, match="Could not read 1 of 2"):
+        df, meta = read_ascii_spectra(tmp_path)
+
+    assert list(df.index) == ["good"]
+    assert meta["n_failed"] == 1
+
+
+def test_no_finite_y_is_rejected(tmp_path):
+    path = tmp_path / "nany.dat"
+    path.write_text("1,nan\n2,nan\n3,nan\n")
+    with pytest.raises(ValueError, match="no finite y"):
+        read_ascii_spectra(path)
+
+
+def test_delimiter_that_parses_most_lines_wins(tmp_path):
+    """A lone '2,0' metadata line must not pin the comma delimiter for tab data."""
+    y = _values(102)
+    path = _write_xy(tmp_path / "tabs.dat", WAVENUMBERS, y, delimiter="\t", header=["2,0"])
+
+    df, meta = read_ascii_spectra(path)
+
+    assert meta["delimiter"] == "\t"
+    assert df.shape == (1, 200)
+    assert meta["header_lines"] == ["2,0"]
+
+
+def test_folder_does_not_pick_up_txt_files(tmp_path):
+    from spectral_predict.io import _detect_directory_format
+
+    _write_xy(tmp_path / "s.dpt", WAVENUMBERS, _values(103))
+    (tmp_path / "README.txt").write_text("Notes about this folder\n")
+
+    df, _ = read_ascii_spectra(tmp_path)
+
+    assert list(df.index) == ["s"]
+    assert _detect_directory_format(tmp_path) == "ascii"
+
+
+def test_txt_only_folder_is_not_ascii(tmp_path):
+    from spectral_predict.io import _detect_directory_format
+
+    _write_xy(tmp_path / "s.txt", WAVENUMBERS, _values(104))
+
+    assert _detect_directory_format(tmp_path) == "unknown"
+    with pytest.raises(ValueError, match="No .dpt, .dat, or .asc files"):
+        read_ascii_spectra(tmp_path)
+    # A single .txt file is still readable
+    df, _ = read_ascii_spectra(tmp_path / "s.txt")
+    assert df.shape == (1, 200)
+
+
+def test_read_spectra_auto_detects_ascii_folder(tmp_path):
+    _write_xy(tmp_path / "a.dpt", WAVENUMBERS, _values(105))
+    _write_xy(tmp_path / "b.dpt", WAVENUMBERS, _values(106))
+    (tmp_path / "reference.csv").write_text("id,y\na,1\nb,2\n")
+
+    df, meta = read_spectra(tmp_path)
+
+    assert list(df.index) == ["a", "b"]
+    assert meta["file_format"] == "ascii"
