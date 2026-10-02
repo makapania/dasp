@@ -130,10 +130,7 @@ class TestJYPLSInvBasic:
         # Check all values are finite
         assert np.all(np.isfinite(X_transferred))
 
-        # JYPLS-inv produces a rank-deficient transformation (rank = n_components)
-        # that projects data into the Y-predictive subspace. Spectral RMSE is not
-        # the right metric -- instead verify that the transformation matrix has
-        # the expected rank matching n_components.
+        # B = R M P^T has rank n_components; the offset carries the mean spectrum.
         B = params['transformation_matrix']
         assert np.linalg.matrix_rank(B, tol=1e-8) == params['n_components']
 
@@ -182,13 +179,10 @@ class TestJYPLSInvQuality:
     """Test JYPLS-inv transfer quality."""
 
     def test_affine_transformation_recovery(self, simple_pls_data):
-        """Test that JYPLS-inv captures the Y-predictive structure.
+        """Primary and satellite PLS scores of the same standards are correlated.
 
-        JYPLS-inv uses a rank-deficient transformation (rank = n_components)
-        that maps satellite data into the Y-predictive subspace of the master.
-        It does NOT minimize full spectral reconstruction error. Instead, we
-        verify that the Y-predictive content is approximately preserved by
-        checking correlation between PLS scores.
+        Spectral transfer itself is tested in TestJYPLSInvTransfersSpectra; this
+        fixture is full-rank noise, so a k-component reconstruction cannot reproduce it.
         """
         X_master, X_slave, y = simple_pls_data
 
@@ -217,12 +211,7 @@ class TestJYPLSInvQuality:
         assert score_corr > 0.8, f"PLS scores should be correlated, got r={score_corr:.3f}"
 
     def test_complex_pls_structure(self, complex_pls_data):
-        """Test JYPLS-inv on complex PLS-structured data.
-
-        JYPLS-inv projects into a Y-predictive subspace rather than
-        minimizing spectral reconstruction error. Verify the transformation
-        runs correctly and produces a valid result.
-        """
+        """JYPLS-inv runs on three-latent-variable data with a wavelength-dependent gain."""
         X_master, X_slave, y = complex_pls_data
 
         transfer_idx = np.arange(0, 100, 8)  # 13 samples
@@ -250,49 +239,257 @@ class TestJYPLSInvQuality:
         assert 1 <= rank <= params['n_components']
 
     def test_transfer_sample_quality_impact(self, simple_pls_data):
-        """Test that transfer sample selection affects JYPLS-inv transformation.
+        """Different standards give different transforms, and both still transfer.
 
-        Different transfer sample sets should produce different transformation
-        matrices, demonstrating that sample selection matters for the method.
-        JYPLS-inv does not guarantee spectral RMSE improvement (it preserves
-        Y-predictive structure), so we verify the transformations differ.
+        Replaces the old relaxed check ("JYPLS-inv does not guarantee spectral RMSE
+        improvement"), which let R091 through: transfer must beat no transfer on the
+        standards it was fitted on and keep the primary mean level.
         """
         X_master, X_slave, y = simple_pls_data
 
-        # Good samples: diverse, representative
         from spectral_predict.sample_selection import kennard_stone
         good_idx = kennard_stone(X_master, n_samples=12)
-        y_good = y[good_idx]
+        bad_idx = np.arange(0, 12)
 
-        params_good = estimate_jypls_inv(
-            X_master, X_slave, y_good, good_idx,
-            n_components=5
+        params_good = estimate_jypls_inv(X_master, X_slave, y[good_idx], good_idx, n_components=5)
+        params_bad = estimate_jypls_inv(X_master, X_slave, y[bad_idx], bad_idx, n_components=5)
+
+        diff = np.sqrt(
+            np.mean(
+                (params_good["transformation_matrix"] - params_bad["transformation_matrix"]) ** 2
+            )
         )
-
-        X_good = apply_jypls_inv(X_slave, params_good)
-
-        # Bad samples: clustered, not representative
-        bad_idx = np.arange(0, 12)  # Just first 12 samples
-        y_bad = y[bad_idx]
-
-        params_bad = estimate_jypls_inv(
-            X_master, X_slave, y_bad, bad_idx,
-            n_components=5
-        )
-
-        X_bad = apply_jypls_inv(X_slave, params_bad)
-
-        # Both transformations should produce valid output
-        assert X_good.shape == X_slave.shape
-        assert X_bad.shape == X_slave.shape
-        assert np.all(np.isfinite(X_good))
-        assert np.all(np.isfinite(X_bad))
-
-        # Different sample selections should produce different transformations
-        B_good = params_good['transformation_matrix']
-        B_bad = params_bad['transformation_matrix']
-        diff = np.sqrt(np.mean((B_good - B_bad) ** 2))
         assert diff > 1e-6, "Different sample sets should produce different transformations"
+
+        for params, idx in ((params_good, good_idx), (params_bad, bad_idx)):
+            X_out = apply_jypls_inv(X_slave[idx], params)
+            assert np.all(np.isfinite(X_out))
+            # The 0.08 instrument offset is removed from the mean level.
+            assert abs(X_out.mean() - X_master[idx].mean()) < 0.01
+
+
+# ============================================================================
+# R091: JYPLS-inv must transfer spectra (identity / offset / affine instruments)
+# ============================================================================
+
+
+def _lowrank_instrument_data(n=40, n_new=60, p=200, noise=0.0, seed=0):
+    """Primary spectra = nonzero mean + 3 Gaussian bands with random scores (+ noise).
+
+    Returns (X_primary, y, X_primary_new, wl). y is a linear function of the band
+    scores, so a joint-Y PLS with >= 3 components can find the whole signal space.
+    """
+    rng = np.random.default_rng(seed)
+    wl = np.linspace(0.0, 1.0, p)
+    bands = np.array([np.exp(-((wl - c) ** 2) / 0.005) for c in (0.25, 0.5, 0.75)])
+    mean = 2.0 + 0.5 * wl
+
+    def draw(m):
+        t = rng.standard_normal((m, 3))
+        X = mean + t @ bands + noise * rng.standard_normal((m, p))
+        return X, t @ np.array([1.0, -0.5, 0.3])
+
+    X, y = draw(n)
+    X_new, _ = draw(n_new)
+    return X, y, X_new, wl
+
+
+def _rmse(a, b):
+    return float(np.sqrt(np.mean((a - b) ** 2)))
+
+
+@pytest.mark.filterwarnings("ignore:y residual is constant")
+class TestJYPLSInvTransfersSpectra:
+    """Behavioural tests on synthetic instruments with known relationships (R091)."""
+
+    def test_identical_instruments_identity_with_nonzero_mean(self):
+        """Identical instruments: the transfer returns the input, mean included.
+
+        The pre-fix code returned a rank-k projection without the mean (RMSE 2.0 on
+        a baseline-2 spectrum, Codex repro). Noise-free rank-3 data, 3 components.
+        """
+        X, y, X_new, _ = _lowrank_instrument_data()
+        params = estimate_jypls_inv(X, X.copy(), y, np.arange(len(X)), n_components=3)
+
+        X_out = apply_jypls_inv(X_new, params)
+        assert _rmse(X_out, X_new) < 1e-8
+        assert X_out.mean() == pytest.approx(X_new.mean(), abs=1e-8)
+
+    def test_identical_instruments_with_noise_stay_close(self):
+        """With noise, identity transfer error stays at the noise level, not the mean level."""
+        X, y, X_new, _ = _lowrank_instrument_data(noise=0.005, seed=1)
+        params = estimate_jypls_inv(X, X.copy(), y, np.arange(len(X)), n_components=3)
+
+        X_out = apply_jypls_inv(X_new, params)
+        assert _rmse(X_out, X_new) < 0.01  # noise SD is 0.005; mean level is ~2.25
+        assert abs(X_out.mean() - X_new.mean()) < 1e-3
+
+    @pytest.mark.parametrize("n_components", [3, 6, None])
+    def test_constant_offset_instrument(self, n_components):
+        """Satellite = primary + 0.3: transfer must beat no transfer on new samples."""
+        X, y, X_new, _ = _lowrank_instrument_data()
+        offset = 0.3
+        params = estimate_jypls_inv(X, X + offset, y, np.arange(len(X)), n_components=n_components)
+
+        X_out = apply_jypls_inv(X_new + offset, params)
+        rmse_none = _rmse(X_new + offset, X_new)
+        rmse_jy = _rmse(X_out, X_new)
+        assert rmse_jy < 0.5 * rmse_none
+        assert abs(X_out.mean() - X_new.mean()) < 0.05
+
+    @pytest.mark.parametrize("n_components", [3, 6, None])
+    def test_affine_instrument_multiple_components(self, n_components):
+        """Wavelength-dependent gain plus curved baseline, three latent bands."""
+        X, y, X_new, wl = _lowrank_instrument_data(noise=0.002, seed=2)
+        gain = np.linspace(0.9, 1.1, X.shape[1])
+        baseline = 0.2 * wl**2 + 0.1
+
+        def satellite(Xp):
+            return Xp * gain + baseline
+
+        params = estimate_jypls_inv(
+            X, satellite(X), y, np.arange(len(X)), n_components=n_components
+        )
+        X_out = apply_jypls_inv(satellite(X_new), params)
+
+        rmse_none = _rmse(satellite(X_new), X_new)
+        rmse_jy = _rmse(X_out, X_new)
+        assert rmse_jy < 0.5 * rmse_none, (rmse_jy, rmse_none)
+
+    def test_transfer_improves_primary_model_predictions(self):
+        """A primary PLS model predicts better on transferred than on raw satellite spectra."""
+        from sklearn.cross_decomposition import PLSRegression
+
+        rng = np.random.default_rng(3)
+        X, y, _, wl = _lowrank_instrument_data(n=60, noise=0.002, seed=3)
+        cal, std, test = np.arange(0, 30), np.arange(30, 45), np.arange(45, 60)
+        model = PLSRegression(n_components=3, scale=False).fit(X[cal], y[cal])
+
+        gain = np.linspace(0.95, 1.05, X.shape[1])
+        X_sat = X * gain + 0.05 + 0.002 * rng.standard_normal(X.shape)
+        params = estimate_jypls_inv(X[std], X_sat[std], y[std], np.arange(len(std)), n_components=3)
+
+        err_raw = _rmse(model.predict(X_sat[test]).ravel(), y[test])
+        err_jy = _rmse(model.predict(apply_jypls_inv(X_sat[test], params)).ravel(), y[test])
+        assert err_jy < err_raw
+
+    @pytest.mark.parametrize("bad", [np.nan, np.inf])
+    def test_missing_targets_rejected(self, bad):
+        """Missing reference values raise; they are never replaced by zeros."""
+        X, y, _, _ = _lowrank_instrument_data()
+        y = y.copy()
+        y[4] = bad
+        with pytest.raises(ValueError, match="reference value"):
+            estimate_jypls_inv(X, X + 0.1, y, np.arange(len(X)), n_components=3)
+
+    def test_pre_fix_params_are_refused(self):
+        """A model saved by the old maths (no 'offset') is refused, not silently applied."""
+        X, y, _, _ = _lowrank_instrument_data()
+        params = estimate_jypls_inv(X, X + 0.1, y, np.arange(len(X)), n_components=3)
+        legacy = {k: v for k, v in params.items() if k != "offset"}
+        with pytest.raises(ValueError, match="Rebuild"):
+            apply_jypls_inv(X, legacy)
+
+    def test_save_load_roundtrip_preserves_transfer(self, tmp_path):
+        """The offset survives save/load, so a reloaded model gives the same output."""
+        from spectral_predict.calibration_transfer import load_transfer_model, save_transfer_model
+
+        X, y, X_new, wl = _lowrank_instrument_data()
+        params = estimate_jypls_inv(X, X + 0.3, y, np.arange(len(X)), n_components=3)
+        tm = TransferModel(
+            primary_id="P",
+            satellite_id="S",
+            method="jypls-inv",
+            wavelengths_common=wl,
+            params=params,
+            meta={},
+        )
+        loaded = load_transfer_model(save_transfer_model(tm, tmp_path, name="jy"))
+
+        np.testing.assert_allclose(
+            apply_jypls_inv(X_new + 0.3, loaded.params), apply_jypls_inv(X_new + 0.3, params)
+        )
+
+    @pytest.mark.parametrize("k", [1, 3, 5])
+    def test_stored_affine_map_matches_independent_sklearn_reconstruction(self, k):
+        """X @ B + offset equals the score mapping rebuilt from sklearn's own transform.
+
+        Unequal-variance wavelengths and a non-trivial instrument make sure the
+        centring, x_rotations_ projection and loadings reconstruction are all exercised.
+        """
+        from sklearn.cross_decomposition import PLSRegression
+
+        rng = np.random.default_rng(11)
+        n, p = 25, 40
+        X = 1.5 + rng.standard_normal((n, p)) * np.linspace(0.2, 3.0, p)
+        y = X[:, 3] - 0.5 * X[:, 20] + 0.05 * rng.standard_normal(n)
+        Xs = X * np.linspace(0.9, 1.1, p) + 0.3 + 0.01 * rng.standard_normal((n, p))
+        params = estimate_jypls_inv(X, Xs, y, np.arange(n), n_components=k)
+
+        pls = PLSRegression(n_components=k, scale=False).fit(
+            np.vstack([X, Xs]), np.concatenate([y, y])
+        )
+        Tp, Ts = pls.transform(X), pls.transform(Xs)
+        design = np.hstack([np.ones((n, 1)), Ts])
+        coef = np.linalg.lstsq(design, Tp, rcond=None)[0]
+        X_new = Xs[:7] + 0.02
+        T_new = pls.transform(X_new)
+        mapped = coef[0] + T_new @ coef[1:] - Tp.mean(axis=0)
+        expected = X.mean(axis=0) + mapped @ pls.x_loadings_.T
+
+        np.testing.assert_allclose(apply_jypls_inv(X_new, params), expected, atol=1e-10)
+
+    def test_auto_components_cv_splits_never_separate_a_standard(self, monkeypatch):
+        """No CV fold trains on one spectrum of a standard and tests on its twin.
+
+        Rows i and i + n are the primary and satellite spectra of standard i and share
+        its y, so a standard's two rows must sit on the same side of every split.
+        """
+        import sklearn.model_selection as ms
+
+        seen = []
+        real = ms.cross_val_score
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs.get("cv"))
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(ms, "cross_val_score", spy)
+        n = 20
+        X, y, _, _ = _lowrank_instrument_data(n=n)
+        estimate_jypls_inv(X, X + 0.1, y, np.arange(n), n_components=None, max_components=4)
+
+        assert seen, "auto component selection should run CV"
+        splits = list(seen[0])
+        assert len(splits) == 5
+        for train, test in splits:
+            train_std = set((np.asarray(train) % n).tolist())
+            test_std = set((np.asarray(test) % n).tolist())
+            assert not train_std & test_std
+            assert len(train) + len(test) == 2 * n
+
+    def test_auto_components_work_with_metadata_routing(self):
+        """sklearn metadata routing must not silently disable the CV (Codex round 1)."""
+        import sklearn
+
+        X, y, _, _ = _lowrank_instrument_data(n=20, noise=0.002, seed=5)
+        kwargs = dict(n_components=None, max_components=6)
+        plain = estimate_jypls_inv(X, X + 0.1, y, np.arange(20), **kwargs)
+        with sklearn.config_context(enable_metadata_routing=True):
+            routed = estimate_jypls_inv(X, X + 0.1, y, np.arange(20), **kwargs)
+
+        assert np.isfinite(routed["cv_rmse"])
+        assert routed["n_components"] == plain["n_components"]
+        assert routed["cv_rmse"] == pytest.approx(plain["cv_rmse"])
+
+    def test_auto_components_reject_cv_with_no_finite_error(self, monkeypatch):
+        """If every component count gives a non-finite CV error, refuse to guess."""
+        import sklearn.model_selection as ms
+
+        monkeypatch.setattr(ms, "cross_val_score", lambda *a, **k: np.array([np.nan]))
+        X, y, _, _ = _lowrank_instrument_data(n=20)
+        with pytest.raises(ValueError, match="could not choose"):
+            estimate_jypls_inv(X, X + 0.1, y, np.arange(20), n_components=None, max_components=4)
 
 
 # ============================================================================

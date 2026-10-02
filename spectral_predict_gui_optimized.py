@@ -65,6 +65,7 @@ import logging
 import re
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 from datetime import datetime
@@ -297,9 +298,100 @@ try:
         choose_common_grid,
         equalize_dataset,
     )
+    # User-facing transfer-method names. The stored keys ('tsr', 'ctai', 'nspfce')
+    # are historical and persist in saved transfer models, so labels come from here.
+    from spectral_predict.calibration_transfer import DEFAULT_METHOD as CT_DEFAULT_METHOD
+    from spectral_predict.calibration_transfer import (
+        method_display_name as ct_method_display_name,
+    )
     HAS_CALIBRATION_TRANSFER = True
 except ImportError:
     HAS_CALIBRATION_TRANSFER = False
+    CT_DEFAULT_METHOD = 'tsr'
+
+    def ct_method_display_name(method: str, short: bool = False) -> str:
+        """Fallback when calibration transfer is unavailable: the raw key, upper-cased."""
+        return str(method).upper()
+
+
+def parse_transfer_standards_count(text: str) -> int | None:
+    """Parse the slope/bias 'standards' entry: 'All' or blank -> None, else an integer.
+
+    Raises:
+        ValueError: If the text is neither 'All' nor a whole number.
+    """
+    cleaned = str(text).strip()
+    if cleaned == "" or cleaned.lower() == "all":
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        raise ValueError(
+            f"Slope/bias standards must be 'All' or a whole number, got {text!r}"
+        ) from None
+
+
+def ct_region_arrays(
+    X_primary: "np.ndarray",
+    X_satellite: "np.ndarray",
+    wavelengths: "np.ndarray",
+    meta: "dict | None",
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Clip paired spectra to a transfer model's region of interest, if it has one.
+
+    A model built with a region of interest was fitted on those columns only
+    (``meta['region_of_interest']['indices']``); applying it to the full-width
+    arrays fails on shape. Without a region the inputs are returned unchanged.
+    """
+    roi = (meta or {}).get('region_of_interest') or {}
+    if not roi.get('enabled') or roi.get('indices') is None:
+        return X_primary, X_satellite, wavelengths
+    idx = np.asarray(roi['indices'], dtype=int)
+    return X_primary[:, idx], X_satellite[:, idx], np.asarray(wavelengths)[idx]
+
+
+def ct_derivative_window(n_wavelengths: int) -> int | None:
+    """Savitzky-Golay window (polyorder 2) for the transfer-quality derivative tabs.
+
+    Up to 11 points, odd and no wider than the plotted region; ``None`` when fewer
+    than 3 wavelengths are plotted, so no derivative can be drawn.
+    """
+    window = min(11, n_wavelengths - 1)
+    if window % 2 == 0:
+        window -= 1
+    window = max(window, 5)
+    if window > n_wavelengths:
+        window = n_wavelengths if n_wavelengths % 2 else n_wavelengths - 1
+    return window if window >= 3 else None
+
+
+CT_AGREEMENT_TITLE = (
+    "Spectral agreement on loaded standards (includes fitting data — not a validation)"
+)
+
+
+def ct_spectral_agreement_on_fit_rows(
+    X_primary: "np.ndarray", X_transferred: "np.ndarray", method: str, params: dict
+) -> "tuple[float, np.ndarray]":
+    """R² between primary and transferred spectra on the rows the transfer was fitted on.
+
+    Slope/bias ('tsr') stores the standards it used in ``params['transfer_indices']``;
+    every other GUI-built method is fitted on all loaded rows. The value is a
+    resubstitution figure on fitting data, not a validation (R128).
+
+    Returns:
+        (r2, rows) where rows are the row indices used.
+    """
+    from sklearn.metrics import r2_score
+
+    n_rows = X_primary.shape[0]
+    rows = np.arange(n_rows)
+    if method == "tsr" and params.get("transfer_indices") is not None:
+        candidate = np.asarray(params["transfer_indices"], dtype=int)
+        if candidate.size and candidate.min() >= 0 and candidate.max() < n_rows:
+            rows = candidate
+    r2 = float(r2_score(X_primary[rows].ravel(), X_transferred[rows].ravel()))
+    return r2, rows
 
 
 # ===== NATIVE TKINTER TOOLTIP CLASS =====
@@ -1012,54 +1104,50 @@ TOOLTIP_CONTENT = {
     # ===== CALIBRATION TRANSFER METHODS =====
     'calibration_transfer': {
         # Transfer Methods
-        'method_DS': (
-            "Direct Standardization (DS) is a simple pairwise calibration transfer method. "
-            "Builds a linear transformation matrix F that directly maps satellite spectra to primary spectra: "
-            "X_primary ≈ X_satellite × F. Fast and straightforward, works well when primary and satellite "
-            "instruments have similar wavelength grids. Best for simple spectral differences. "
-            "Requires paired samples measured on both instruments. Lambda parameter controls regularization."
+        "method_DS": (
+            "Direct Standardization (DS): one full matrix that maps every satellite wavelength "
+            "to every primary wavelength, X_primary ~ X_satellite x F, fitted by ridge regression "
+            "on the paired standards (the same samples measured on both instruments, row for row). "
+            "It has far more coefficients than there are standards, so it can reproduce the "
+            "standards almost exactly and still do worse on new samples; increase Lambda if so. "
+            "Check it on standards that were not used to fit it."
         ),
-        'method_PDS': (
-            "Piecewise Direct Standardization (PDS) is a local version of DS that models each primary "
-            "wavelength independently using a sliding window of neighboring satellite wavelengths. "
-            "More flexible than global DS, better at handling nonlinear wavelength dependencies. "
-            "Window size controls how many neighboring wavelengths are used (typical: 7-15). "
-            "Larger windows = smoother transfer but may miss local spectral features. "
-            "Good for instruments with slight wavelength misalignments."
+        "method_PDS": (
+            "Piecewise Direct Standardization (PDS): each primary wavelength is predicted from a "
+            "small window of neighbouring satellite wavelengths, fitted on the paired standards. "
+            "Handles small wavelength shifts and bandwidth differences, which a per-wavelength "
+            "correction cannot. Window size sets how many neighbours are used (odd number; "
+            "typical 7-15). Needs more paired standards than the window size."
         ),
-        'method_TSR': (
-            "Transfer by Sample Regression (TSR) selects a subset of representative transfer samples "
-            "that span the spectral space, then uses only these samples to build the transformation. "
-            "More efficient than using all transfer samples, reduces overfitting. Sample selection uses "
-            "Kennard-Stone algorithm to ensure good coverage of spectral diversity. "
-            "Number of samples controls subset size (typical: 10-30). Fewer = faster but may miss patterns, "
-            "more = comprehensive but slower. Robust choice for heterogeneous sample sets."
+        "method_TSR": (
+            "Slope/bias per wavelength (default). For each wavelength separately, the primary value "
+            "is regressed on the satellite value over the paired standards: primary = slope x "
+            "satellite + bias. Two coefficients per wavelength, so it can be fitted from few "
+            "standards. It cannot correct wavelength shifts (use PDS for those). "
+            "Standardization in the spirit of Shenk & Westerhaus (1991, Crop Sci 31:1694-1696). "
+            "Saved models call it 'tsr'; this is not trimmed scores regression."
         ),
-        'method_CTAI': (
-            "Calibration Transfer via Adaptive Integration (CTAI) combines spectral standardization "
-            "with adaptive selection of informative wavelengths. Uses an iterative algorithm to identify "
-            "and weight wavelengths that transfer well between instruments while down-weighting problematic "
-            "regions (e.g., noise, nonlinear response). More sophisticated than DS/PDS, adapts to "
-            "instrument-specific characteristics. Recommended when instruments have different noise profiles "
-            "or response characteristics. Generally provides robust transfer with minimal tuning."
+        "method_CTAI": (
+            "PC-DS: paired regression in the satellite PCA space. Both instruments' spectra of the "
+            "paired standards are projected onto the satellite's leading principal components, the "
+            "primary scores are regressed on the satellite scores, and the map is projected back. "
+            "Needs the same standards on both instruments and the same wavelength grid. "
+            "Saved models call it 'ctai', but it is not the published standard-free CTAI "
+            "(Zhao et al. 2019)."
         ),
-        'method_NSPFCE': (
-            "Null-Space Projection followed by Feature Correlation Enhancement (NS-PFCE) is an advanced "
-            "method that removes instrument-specific variance while preserving chemical information. "
-            "Uses wavelength selection algorithms (VCPA-IRIV, CARS, SPA) to identify informative features, "
-            "then projects out instrument-specific interference using null-space operations. "
-            "Excellent for complex scenarios with significant instrumental differences (e.g., different "
-            "detectors, optical configurations). Slower than other methods but very effective. "
-            "Wavelength selection is critical for performance - VCPA-IRIV recommended for most cases."
+        "method_NSPFCE": (
+            "Iterative ridge DS: a dasp heuristic, not the published PFCE/NS-PFCE. Starts from a "
+            "per-wavelength scaling and repeatedly re-solves a lightly regularised (ridge 1e-6) "
+            "full-matrix DS on the paired standards, with damped updates and a re-fitted offset. "
+            "Like DS, it can fit the standards closely and do worse than no correction on new "
+            "samples when there are few standards. Saved models call it 'nspfce'."
         ),
-        'method_JYPLS': (
-            "Joint-Y Partial Least Squares Inverse (JYPLS-inv) uses PLS regression to model the "
-            "primary-satellite relationship, treating primary spectra as 'Y' and satellite spectra as 'X'. "
-            "The PLS model learns latent variables capturing the systematic spectral differences. "
-            "Number of components controls model complexity (typical: 3-15, or 'Auto' for cross-validation). "
-            "More flexible than DS for nonlinear relationships, but requires more transfer samples (30+). "
-            "Sample selection uses Kennard-Stone for representativeness. "
-            "Good when spectral differences are complex but systematic."
+        "method_JYPLS": (
+            "JYPLS-inv (experimental, disabled): stacks both instruments' spectra of the paired "
+            "standards with their shared measured reference values, fits one PLS model, maps "
+            "satellite scores to primary scores, and reconstructs primary spectra from the PLS "
+            "loadings. Needs a measured reference value for every standard. Not checked against "
+            "a published JYPLS-inv algorithm."
         ),
 
         # Transfer Parameters
@@ -1079,13 +1167,11 @@ TOOLTIP_CONTENT = {
             "Large windows (17-25) = more global, smoother, approaches regular DS. "
             "Match to your spectral resolution: higher resolution allows smaller windows."
         ),
-        'param_tsr_samples': (
-            "Number of representative samples selected for Transfer by Sample Regression (TSR). "
-            "Subset selected using Kennard-Stone algorithm to span spectral diversity. "
-            "Fewer samples (8-12) = faster, simpler model, may miss spectral patterns (default: 12). "
-            "More samples (20-30) = more comprehensive, better coverage, slower. "
-            "Rule of thumb: 10-20% of total transfer samples, minimum 10. "
-            "Increase if transfer fails to capture sample diversity. Decrease if overfitting occurs."
+        "param_tsr_samples": (
+            "How many of the loaded paired standards the slope/bias fit uses. "
+            "'All' (default) uses every loaded pair. A smaller number picks that many by "
+            "Kennard-Stone on the primary spectra; the rest are not used in the fit. "
+            "At least 2 are needed; more standards give steadier slopes."
         ),
         'param_jypls_samples': (
             "Number of representative samples selected for JYPLS-inv calibration transfer. "
@@ -1105,31 +1191,24 @@ TOOLTIP_CONTENT = {
             "Too few = underfitting (incomplete transfer). Too many = overfitting (noise transfer). "
             "Start with 'Auto' or 5-8 for typical applications."
         ),
-        'param_nspfce_max_iter': (
-            "Maximum iterations for NS-PFCE optimization algorithm. Controls convergence of the iterative "
-            "null-space projection process. More iterations allow finding better projection but take longer. "
-            "50-100 = fast, usually sufficient for simple cases (default: 100). "
-            "200-500 = thorough optimization for complex instrumental differences. "
-            "Algorithm may converge early (before max iterations) if tolerance is met. "
-            "Increase if transfer quality is poor and you suspect incomplete convergence. "
-            "Monitor convergence messages - if hitting max iterations, consider increasing."
+        "param_nspfce_max_iter": (
+            "Maximum iterations for Iterative ridge DS. Each iteration re-solves the ridge DS and "
+            "takes a damped step; it stops early when the change in mean squared error on the "
+            "standards falls below the tolerance. Default 100."
         ),
-        'param_nspfce_wavelength_selection': (
-            "Enable wavelength selection for NS-PFCE optimization. "
-            "UNCHECKED (default): Uses all wavelengths. Recommended for most cases - NS-PFCE performs excellently "
-            "without wavelength selection, is faster, and outputs full-width spectra compatible with existing models. "
-            "CHECKED: Uses feature selection (CARS, SPA, or VCPA-IRIV) to focus on a subset of wavelengths. "
-            "Output spectra contain ONLY selected wavelengths (reduced width). "
-            "Use with caution - downstream models must be trained on the same reduced wavelength set."
+        "param_nspfce_wavelength_selection": (
+            "Iterative ridge DS: select wavelengths before fitting. "
+            "UNCHECKED (default): all wavelengths; output is full width. "
+            "CHECKED: a selector (CARS, SPA or VCPA-IRIV, run against the spectral mean) keeps a "
+            "subset, and the output contains ONLY those wavelengths, so models that expect the "
+            "full grid cannot use it."
         ),
-        'param_nspfce_selector': (
-            "Wavelength selection algorithm for NS-PFCE (only when wavelength selection is enabled). "
-            "cars (default) = Competitive Adaptive Reweighted Sampling. Fast and robust, uses competitive mechanism. "
-            "Good for most applications. "
-            "spa = Successive Projections Algorithm. Very fast, selects orthogonal variables. Good for "
-            "highly collinear spectral data. "
-            "vcpa-iriv = Variable Combination Population Analysis + Iteratively Retaining Informative Variables. "
-            "Most comprehensive but slowest. Identifies stable informative wavelengths through multiple iterations."
+        "param_nspfce_selector": (
+            "Wavelength selector for Iterative ridge DS (only when wavelength selection is on). "
+            "cars = Competitive Adaptive Reweighted Sampling. "
+            "spa = Successive Projections Algorithm. "
+            "vcpa-iriv = VCPA followed by IRIV; slowest. "
+            "All three run against the spectral mean as a stand-in target, not a measured property."
         ),
     },
 
@@ -1589,6 +1668,300 @@ SIDEBAR_CONFIG = {
 }
 
 
+# ===== HIGH-DPI SCALING =====
+# SPACING and SIDEBAR_CONFIG above are in pixels at 96 dpi. Once the process is
+# DPI aware (see _enable_windows_dpi_awareness), Windows stops bitmap-stretching the
+# window, so pixel sizes must be multiplied by the display scale to keep their
+# physical size. Point-sized fonts already follow Tk's own scaling and must NOT be
+# multiplied, and embedded matplotlib canvases rescale themselves from `tk scaling`
+# (FigureCanvasTk._update_device_pixel_ratio), so figure dpi is left alone too.
+_BASE_SPACING = dict(SPACING)
+_BASE_SIDEBAR_CONFIG = dict(SIDEBAR_CONFIG)
+_UI_SCALE = 1.0
+
+# HRESULT returned by SetProcessDpiAwareness when awareness was already set, e.g. by
+# the DPI-aware manifest embedded in the frozen executable.
+_E_ACCESSDENIED = 0x80070005
+
+
+def _enable_windows_dpi_awareness() -> bool:
+    """Declare the process system-DPI-aware on Windows. Call before ``tk.Tk()``.
+
+    Returns:
+        Advisory only, nothing depends on it: True if the process is DPI aware
+        afterwards, False otherwise (including on non-Windows platforms, where this
+        is a no-op).
+    """
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+
+    try:
+        hresult = ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError) as exc:  # shcore.dll is absent before Windows 8.1
+        logger.debug("SetProcessDpiAwareness unavailable (%s); trying SetProcessDPIAware", exc)
+    else:
+        if hresult == 0:
+            return True
+        if (hresult & 0xFFFFFFFF) == _E_ACCESSDENIED:
+            logger.debug("DPI awareness was already set for this process (manifest)")
+            return True
+        logger.warning("SetProcessDpiAwareness(1) failed with HRESULT 0x%08X", hresult & 0xFFFFFFFF)
+    try:
+        user32 = ctypes.windll.user32
+        if user32.SetProcessDPIAware():
+            return True
+        # On Windows 7/8 a manifest that already declared awareness makes this call
+        # fail too; ask whether the process is aware anyway.
+        aware = bool(user32.IsProcessDPIAware())
+        logger.debug("SetProcessDPIAware failed; IsProcessDPIAware() = %s", aware)
+        return aware
+    except (AttributeError, OSError) as exc:
+        logger.warning("Could not declare DPI awareness; UI may be blurry: %s", exc)
+        return False
+
+
+def _compute_ui_scale(root: tk.Misc) -> float:
+    """Return the pixel scale factor for the display ``root`` is on (1.0 = 96 dpi).
+
+    The factor never drops below 1.0, and is 1.0 on macOS where Tk works in points
+    and the OS handles Retina scaling. A DPI-unaware Windows process sees 96 dpi and
+    therefore gets 1.0.
+    """
+    if sys.platform == 'darwin':
+        return 1.0
+    try:
+        dpi = float(root.winfo_fpixels('1i'))
+    except tk.TclError:
+        return 1.0
+    return max(1.0, round(dpi / 96.0, 2))
+
+
+def _apply_ui_scale(root: tk.Misc) -> float:
+    """Set the module scale factor and rescale SPACING / SIDEBAR_CONFIG in place.
+
+    Idempotent: values are always recomputed from the 96-dpi base values, so
+    constructing a second app in the same process does not compound the scaling.
+    """
+    global _UI_SCALE
+    _UI_SCALE = _compute_ui_scale(root)
+    SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
+    SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
+    return _UI_SCALE
+
+
+def _px(value: float) -> int:
+    """Scale a pixel length given at 96 dpi to the current display."""
+    return int(round(value * _UI_SCALE))
+
+
+def _monitor_work_area(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` of the usable area around ``window``.
+
+    On Windows this is the work area (screen minus taskbar) of the monitor that holds
+    ``window``'s toplevel, in the process's own DPI coordinate space, which is also
+    the space Tk geometry strings use. Elsewhere, or if the Win32 calls fail, it is
+    the screen Tk reports (the primary monitor on Windows).
+    """
+    fallback = (0, 0, int(window.winfo_screenwidth()), int(window.winfo_screenheight()))
+    if sys.platform != 'win32':
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ('cbSize', wintypes.DWORD),
+                ('rcMonitor', wintypes.RECT),
+                ('rcWork', wintypes.RECT),
+                ('dwFlags', wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo)]
+        hwnd = int(window.winfo_toplevel().wm_frame(), 16)
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return fallback
+        work = info.rcWork
+        if work.right <= work.left or work.bottom <= work.top:
+            return fallback
+        return work.left, work.top, work.right, work.bottom
+    except (AttributeError, OSError, ValueError, tk.TclError) as exc:
+        logger.debug("Monitor work area unavailable (%s); using screen size", exc)
+        return fallback
+
+
+def _px_geometry(size: str, owner: tk.Misc | None = None) -> str:
+    """Scale a ``"WIDTHxHEIGHT"`` Toplevel size given at 96 dpi, e.g. ``"350x180"``.
+
+    Fixed-size dialogs do not grow to fit their content, while their point-sized
+    fonts do grow with the display scale, so an unscaled size clips the bottom rows.
+
+    With ``owner`` (the window the dialog belongs to), the size is clamped to the work
+    area of the owner's monitor, leaving room for the title bar and borders, and the
+    dialog is centred on the owner and kept inside that work area: the result is
+    ``"WxH+X+Y"``. Without ``owner`` only the scaled ``"WxH"`` is returned.
+    """
+    width, height = (_px(int(v)) for v in size.lower().split('x'))
+    if owner is None:
+        return f"{width}x{height}"
+    left, top, right, bottom = _monitor_work_area(owner)
+    # Tk sizes the client area; the frame adds the title bar and borders.
+    width = max(1, min(width, right - left - _px(16)))
+    height = max(1, min(height, bottom - top - _px(40)))
+    # Centre on the owner, unless it is iconified, withdrawn or not yet mapped: its
+    # coordinates are then meaningless (Windows parks minimised windows at -32000),
+    # so centre on the work area instead. MonitorFromWindow already uses a minimised
+    # window's restored position to pick the monitor.
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    try:
+        if owner.winfo_ismapped() and owner.winfo_toplevel().state() in ('normal', 'zoomed'):
+            cx = owner.winfo_rootx() + owner.winfo_width() // 2
+            cy = owner.winfo_rooty() + owner.winfo_height() // 2
+    except (AttributeError, tk.TclError):
+        pass
+    x = min(max(cx - width // 2, left), right - width - _px(16))
+    y = min(max(cy - height // 2, top), bottom - height - _px(40))
+    return f"{width}x{height}+{max(x, left)}+{max(y, top)}"
+
+
+def _results_column_width(col: str, values: pd.Series, row_font: tkfont.Font) -> int:
+    """Pixel width for a Results-table column at the current display scale.
+
+    The per-column widths below are 96-dpi minimums, scaled with ``_px``. Float cells
+    are shown as ``.6g`` text, which can be as wide as ``-1.23456e+10``, so float
+    columns are widened to their widest formatted value measured in ``row_font``,
+    plus Tk's horizontal cell padding (4 px per side at 96 dpi) and a small margin.
+    """
+    if col == 'Select':
+        base = 60
+    elif col in ('Model', 'Preprocess', 'Subset'):
+        base = 120
+    elif col == 'top_vars':
+        base = 200
+    elif col in ('BestRegion', 'BestClass'):
+        base = 100
+    elif col.startswith('RMSE_') or col.startswith('F1_Class'):
+        base = 70  # Quartile RMSE or Class F1 columns
+    else:
+        base = 80
+    width = _px(base)
+    if pd.api.types.is_float_dtype(values):
+        text_width = _float_column_text_width(values, row_font)
+        if text_width:
+            width = max(width, text_width + 2 * _px(4) + _px(2))
+    return width
+
+
+def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
+    """Pixel width of the widest ``.6g``-formatted value in a float column, in ``font``.
+
+    ``font.measure`` already returns pixels at the current display scale, so the
+    result must not be multiplied by ``_UI_SCALE``.
+
+    Every value is formatted and every distinct string is considered. Character
+    count is not a proxy, because equal-length strings differ in width ('+' is wider
+    than '-'). Measuring each string costs about 100 us inside Tk (text layout, not
+    call overhead), and a results column can hold thousands of distinct values. So:
+
+    1. Each string is ranked by the sum of its cached per-character widths.
+    2. The 50 strings with the largest sums are measured exactly, as whole runs.
+    3. The larger of the widest sum and the widest exact measure is returned.
+
+    This is a heuristic, not a guarantee. Tk on Windows measures a whole run with
+    GetTextExtentPoint32, which need not be additive. However, probes on 12k ``.6g``
+    strings (Segoe UI 9/10 and Arial 9, at 100/125/200%) found the sum equal to the
+    measure every time, and X11 Tk accumulates per-character advances. A string whose
+    true width exceeds its sum, and that ranks below the top 50 by sum, could still
+    be under-measured.
+    """
+    numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
+    finite = numeric[np.isfinite(numeric)]
+    if finite.size == 0:
+        return 0
+    strings = {f"{v:.6g}" for v in finite.tolist()}
+    char_width: dict[str, int] = {}
+    for ch in set().union(*strings):
+        char_width[ch] = font.measure(ch)
+    summed = {text: sum(char_width[ch] for ch in text) for text in strings}
+    widest_first = sorted(summed, key=summed.__getitem__, reverse=True)[:50]
+    return max(max(summed.values()), max(font.measure(text) for text in widest_first))
+
+
+# ===== NAMED FONTS =====
+# Tk has no font fallback list: font=(('Segoe UI', 'Arial'), 10) is parsed as the
+# single family "Segoe UI Arial", which does not exist, so Windows substitutes Arial.
+# Pick one family that is actually installed and share it through named fonts.
+_UI_FAMILY_CANDIDATES = {
+    'win32': ('Segoe UI',),
+    'darwin': ('SF Pro Text', 'Helvetica Neue', 'Helvetica'),
+    'other': ('Inter', 'Ubuntu', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans'),
+}
+_MONO_FAMILY_CANDIDATES = {
+    'win32': ('Consolas', 'Cascadia Mono', 'Courier New'),
+    'darwin': ('Menlo', 'Monaco'),
+    'other': ('DejaVu Sans Mono', 'Ubuntu Mono', 'Noto Sans Mono', 'Liberation Mono'),
+}
+# key -> (family kind, size in points, weight)
+_NAMED_FONT_SPECS = {
+    'body': ('ui', 10, 'normal'),
+    'small': ('ui', 9, 'normal'),
+    'strong': ('ui', 11, 'bold'),
+    'heading': ('ui', 12, 'bold'),
+    'title': ('ui', 16, 'bold'),
+    'mono': ('mono', 9, 'normal'),
+}
+
+
+def _resolve_font_family(root: tk.Misc, candidates: tuple[str, ...], fallback: str) -> str:
+    """Return the first installed family in ``candidates``, else the family of ``fallback``.
+
+    A family counts as installed when Tk resolves it to itself rather than
+    substituting another face.
+    """
+    for family in candidates:
+        actual = tkfont.Font(root=root, family=family).actual('family')
+        if actual.lower() == family.lower():
+            return family
+    return tkfont.nametofont(fallback, root=root).actual('family')
+
+
+def _init_named_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
+    """Create (or reconfigure) the app's named fonts on ``root``.
+
+    Tk deletes a named font when the Python object that created it is
+    garbage-collected, so the owning objects are also kept on ``root`` and reused if
+    a second app is built on the same root.
+    """
+    platform_key = sys.platform if sys.platform in ('win32', 'darwin') else 'other'
+    families = {
+        'ui': _resolve_font_family(root, _UI_FAMILY_CANDIDATES[platform_key], 'TkDefaultFont'),
+        'mono': _resolve_font_family(root, _MONO_FAMILY_CANDIDATES[platform_key], 'TkFixedFont'),
+    }
+    fonts = dict(getattr(root, '_dasp_named_fonts', {}))
+    existing = set(tkfont.names(root))
+    for key, (kind, size, weight) in _NAMED_FONT_SPECS.items():
+        name = f"Dasp{key.capitalize()}"
+        options = {'family': families[kind], 'size': size, 'weight': weight}
+        font = fonts.get(key)
+        if font is None and name in existing:
+            font = tkfont.nametofont(name, root=root)
+        if font is None:
+            fonts[key] = tkfont.Font(root=root, name=name, **options)
+        else:
+            font.configure(**options)
+            fonts[key] = font
+    root._dasp_named_fonts = fonts
+    return fonts
+
+
 class SidebarNavigation:
     """
     Collapsible sidebar navigation component for the application.
@@ -1685,7 +2058,7 @@ class SidebarNavigation:
     def _create_collapse_toggle(self):
         """Create the collapse/expand toggle button at the bottom."""
         toggle_frame = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
-                               height=50)
+                               height=_px(50))
         toggle_frame.pack(side='bottom', fill='x')
         toggle_frame.pack_propagate(False)
 
@@ -1979,592 +2352,19 @@ def _get_imbalance_suffix(imbalance_method: str | None) -> str:
 # These classes wrap models with preprocessing/wavelength selection
 # and are sklearn-clonable (required for ensemble OOF predictions)
 
-def _build_transform_from_config(config: dict):
-    """
-    Build a preprocessing transform function from configuration.
-
-    This is factored out so wrapper classes can recreate transforms after cloning.
-    Imports are done inside to avoid circular dependencies.
-    """
-    from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
-    from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
-
-    def transform(X):
-        import numpy as np
-        X_out = np.asarray(X, dtype=np.float64)
-
-        # Apply smoothing first (if enabled)
-        if config.get('smooth'):
-            smoother = SavgolSmooth(window_length=config['smooth'], polyorder=2)
-            X_out = smoother.fit_transform(X_out)
-
-        # Apply baseline correction
-        baseline = config.get('baseline')
-        bl_params = config.get('baseline_params', {})
-        if baseline == 'polynomial':
-            bl = BaselinePolynomial(degree=bl_params.get('degree', 2))
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'als':
-            bl = BaselineALS(
-                lambda_=bl_params.get('lam', 1e5),
-                p=bl_params.get('p', 0.01),
-                niter=10,
-            )
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'airpls':
-            bl = BaselineAirPLS(
-                lam=bl_params.get('lam', 1e5),
-                max_iter=15,
-            )
-            X_out = bl.fit_transform(X_out)
-
-        # Apply main preprocessing
-        pt = config.get('type', 'raw')
-        w = config.get('window', 15)
-
-        if pt == 'raw':
-            pass
-        elif pt == 'snv':
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv1':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'deriv2':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv3':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'deriv4':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'snv_deriv1':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv2':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-
-        return X_out
-
-    return transform
-
-
-def _match_wavelengths_normalized(requested_cols, available_columns, precision=1):
-    """
-    Match wavelengths using exact precision matching after normalization.
-
-    This function solves the CARS wavelength matching bug where tolerance-based
-    matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-    Instead of tolerance-based matching, this:
-    1. Rounds both requested and available wavelengths to the same precision
-    2. Matches on the normalized string representation
-    3. Tries multiple precision levels if initial match fails
-
-    Args:
-        requested_cols: List of wavelength column names (can be strings or floats)
-        available_columns: Column names from the new DataFrame
-        precision: Decimal places to round to (default 1)
-
-    Returns:
-        List of matched column names from available_columns
-
-    Raises:
-        KeyError: If any wavelength cannot be matched
-    """
-    # Build lookup dict: normalized wavelength string -> original column name
-    col_lookup = {}
-    col_names = list(available_columns)
-
-    for col in col_names:
-        try:
-            col_float = float(col)
-            normalized_key = f"{round(col_float, precision):.{precision}f}"
-            if normalized_key not in col_lookup:
-                col_lookup[normalized_key] = col
-        except (ValueError, TypeError):
-            continue
-
-    # Match each requested wavelength
-    matched_by_index = {}  # index -> matched column
-    missing_by_index = {}  # index -> wavelength
-
-    for idx, req_col in enumerate(requested_cols):
-        try:
-            req_float = float(req_col)
-            normalized_key = f"{round(req_float, precision):.{precision}f}"
-            if normalized_key in col_lookup:
-                matched_by_index[idx] = col_lookup[normalized_key]
-            else:
-                missing_by_index[idx] = req_col
-        except (ValueError, TypeError):
-            # Non-numeric column - try direct string match
-            if req_col in col_names:
-                matched_by_index[idx] = req_col
-            else:
-                missing_by_index[idx] = req_col
-
-    # Try different precision levels for missing wavelengths
-    if missing_by_index:
-        for alt_precision in [0, 2, 3]:
-            if alt_precision == precision:
-                continue
-
-            # Rebuild lookup at alternative precision
-            col_lookup_alt = {}
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key not in col_lookup_alt:
-                        col_lookup_alt[normalized_key] = col
-                except (ValueError, TypeError):
-                    continue
-
-            # Try matching still-missing wavelengths
-            still_missing = {}
-            for idx, wl in missing_by_index.items():
-                try:
-                    wl_float = float(wl)
-                    normalized_key = f"{round(wl_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key in col_lookup_alt:
-                        matched_by_index[idx] = col_lookup_alt[normalized_key]
-                    else:
-                        still_missing[idx] = wl
-                except (ValueError, TypeError):
-                    still_missing[idx] = wl
-
-            missing_by_index = still_missing
-            if not missing_by_index:
-                break
-
-    # Report any still-missing wavelengths
-    if missing_by_index:
-        missing_wls = list(missing_by_index.values())
-        raise KeyError(
-            f"Could not match all wavelength columns. "
-            f"Missing {len(missing_wls)} wavelengths: {missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-        )
-
-    # Return matched columns in original order
-    return [matched_by_index[i] for i in range(len(requested_cols))]
-
-
-class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-# ==================== CLASSIFIER WRAPPERS ====================
-# These are classification-specific versions of the wrappers above.
-# They inherit ClassifierMixin, expose predict_proba(), and have a classes_ property.
-
-
-class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_subset = self._subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_subset)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_preproc)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_processed = self._preprocess_and_subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_processed)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-def _is_wrapped_model(model):
-    """
-    Check if a model is a CARS/NSGA-II wrapped model.
-
-    These wrappers contain pipelines with StandardScaler whose parameters
-    should be preserved during ensemble CV. When models are wrapped, ensemble
-    methods should use refit_base_models=False to prevent StandardScaler
-    divergence that causes ~0.03 R² loss.
-
-    Parameters
-    ----------
-    model : object
-        A fitted model to check
-
-    Returns
-    -------
-    bool
-        True if the model is a wrapped model that should not be refitted
-    """
-    WRAPPED_TYPES = (
-        'WavelengthSubsetWrapper', 'WavelengthSubsetClassifierWrapper',
-        'GAPreprocessWrapper', 'GAPreprocessClassifierWrapper',
-        'CombinedPreprocessWrapper', 'CombinedPreprocessClassifierWrapper'
-    )
-    return type(model).__name__ in WRAPPED_TYPES
+# The ensemble base-model wrappers are persisted in saved .dasp files, so they live in
+# an importable backend module (pickles must not depend on this script being __main__).
+from spectral_predict.model_wrappers import (  # noqa: E402,F401 - re-exported names
+    CombinedPreprocessClassifierWrapper,
+    CombinedPreprocessWrapper,
+    GAPreprocessClassifierWrapper,
+    GAPreprocessWrapper,
+    WavelengthSubsetClassifierWrapper,
+    WavelengthSubsetWrapper,
+    _build_transform_from_config,
+    _match_wavelengths_normalized,
+    _subset_wavelength_columns,
+)
 
 
 def _infer_task_type_from_y(y) -> "str | None":
@@ -2741,8 +2541,14 @@ class SpectralPredictApp:
         self.root = root
         self.root.title(f"ASP - Advanced Spectral Prediction  —  BETA {_DASP_VERSION}")
 
-        # Set minimum window size for usability
-        self.root.minsize(1200, 700)
+        # High-DPI: scale the 96-dpi pixel constants and build the named fonts before
+        # any widget is created (no-op scale of 1.0 in a DPI-unaware process).
+        _apply_ui_scale(self.root)
+        self.fonts = _init_named_fonts(self.root)
+
+        # Set minimum window size for usability (clamped so it never exceeds the screen)
+        self.root.minsize(min(_px(1200), self.root.winfo_screenwidth()),
+                          min(_px(700), self.root.winfo_screenheight()))
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -2939,10 +2745,6 @@ class SpectralPredictApp:
         self.ct_equalized_wavelengths = None  # Wavelengths after equalization
         self.ct_equalized_X = None  # Equalized spectra
         self.ct_equalized_sample_ids = None  # Sample IDs with instrument prefixes
-
-        # Transfer Model Registry - persistent storage of built transfer models
-        self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
-        # model_key format: "PrimaryID_SatelliteID_Method"
 
         # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
         # Tab 11A: Interferent Library Management
@@ -4734,26 +4536,17 @@ class SpectralPredictApp:
         # Configure root window
         self.root.configure(bg=self.colors['bg'])
 
-        # Get modern font stack (try Inter, SF Pro, fallback to system fonts)
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            heading_font = ('SF Pro Display', 'Helvetica Neue', 'Arial')
-            body_font = ('SF Pro Text', 'Helvetica Neue', 'Arial')
-        elif system == 'Windows':
-            heading_font = ('Segoe UI', 'Arial')
-            body_font = ('Segoe UI', 'Arial')
-        else:  # Linux
-            heading_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
-            body_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+        # Named fonts (one installed family, see _init_named_fonts). Paddings below
+        # are pixels at 96 dpi and go through _px(); font sizes are points and do not.
+        fonts = self.fonts
 
         style = ttk.Style()
 
         # Modern button styles with gradients (simulated with colors)
         # Unified sizing to match accent buttons for visual consistency
         style.configure('Modern.TButton',
-                       font=(body_font, 10),
-                       padding=(15, 10),  # Increased vertical padding for better alignment
+                       font=fonts['body'],
+                       padding=(_px(15), _px(10)),  # Increased vertical padding for better alignment
                        borderwidth=0,
                        relief='flat',
                        foreground=self.colors['text'])
@@ -4764,8 +4557,8 @@ class SpectralPredictApp:
                            ('!disabled', self.colors['text'])])
 
         style.configure('Accent.TButton',
-                       font=(body_font, 11, 'bold'),
-                       padding=(20, 12),
+                       font=fonts['strong'],
+                       padding=(_px(20), _px(12)),
                        background='#0078D4',  # Explicit blue background
                        foreground='#FFFFFF',  # Explicit white text
                        borderwidth=1,
@@ -4778,8 +4571,8 @@ class SpectralPredictApp:
 
         # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
         style.configure('TButton',
-                       font=(body_font, 10),
-                       padding=(15, 8),
+                       font=fonts['body'],
+                       padding=(_px(15), _px(8)),
                        borderwidth=1,  # Add border for visibility
                        relief='solid',
                        foreground='#000000',  # Explicit black text
@@ -4793,8 +4586,8 @@ class SpectralPredictApp:
 
         # Secondary button style (for less prominent actions)
         style.configure('Secondary.TButton',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=1,
                        relief='solid',
                        foreground=self.colors['text'],
@@ -4815,32 +4608,34 @@ class SpectralPredictApp:
         style.configure('TLabel',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+        # Title.TLabel (was 28 pt) has no live users; it shares the title font.
         style.configure('Title.TLabel',
-                       font=(heading_font, 28, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Heading.TLabel',
-                       font=(heading_font, 16, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Subheading.TLabel',
-                       font=(heading_font, 12, 'bold'),
+                       font=fonts['heading'],
                        foreground=self.colors['accent'],
                        background=self.colors['bg'])
         style.configure('Caption.TLabel',
-                       font=(body_font, 9),
+                       font=fonts['small'],
                        foreground=self.colors['text_light'],
                        background=self.colors['bg'])
+        # SidebarLabel.TLabel (was 11 pt) has no live users; it uses the body font.
         style.configure('SidebarLabel.TLabel',
-                       font=(body_font, 11),
+                       font=fonts['body'],
                        foreground=self.colors['text_inverse'],
                        background=self.colors['sidebar'],
-                       padding=(15, 10))
+                       padding=(_px(15), _px(10)))
         style.configure('CardLabel.TLabel',
                        background=self.colors['card_bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Notebook styling - Default style for subtabs (keep tabs visible)
         style.configure('TNotebook',
@@ -4848,8 +4643,8 @@ class SpectralPredictApp:
                        borderwidth=0,
                        tabmargins=[0, 0, 0, 0])
         style.configure('TNotebook.Tab',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=0)
         style.map('TNotebook.Tab',
                  background=[('selected', self.colors['bg']),
@@ -4884,7 +4679,7 @@ class SpectralPredictApp:
         style.configure('TLabelframe.Label',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 11, 'bold'))
+                       font=fonts['strong'])
 
         # Combobox styling - add stronger borders for better definition
         style.configure('TCombobox',
@@ -4904,79 +4699,78 @@ class SpectralPredictApp:
         style.configure('TCheckbutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Radiobutton styling
         style.configure('TRadiobutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+
+        # Treeview row height. Tk 9 sets it once, at style init, from the row font
+        # (linespace + 2) and does not re-sync it later; Tk 8.6 (the DASP_BUILD_PYTHON=312
+        # rollback build) fixes it at 20 px whatever the font, so once the process is DPI
+        # aware the rows clip at 125% and above. Setting it explicitly from the row font
+        # gives the same rows on both Tk versions (_px(2) is 1-2 px more than Tk 9's own
+        # value at 150%/200%, which is harmless).
+        # INVARIANT: Treeview tag fonts (tag_configure(font=...)) must not be taller than
+        # TkDefaultFont, or their rows clip; size this from the tallest font if that changes.
+        row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
+        style.configure('Treeview', rowheight=row_font.metrics('linespace') + _px(2))
 
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            title_font = ('SF Pro Display', 32, 'bold')
-            subtitle_font = ('SF Pro Text', 12)
-            label_font = ('SF Pro Text', 11)
-            button_font = ('SF Pro Text', 10, 'bold')
-        elif system == 'Windows':
-            title_font = ('Segoe UI', 32, 'bold')
-            subtitle_font = ('Segoe UI', 12)
-            label_font = ('Segoe UI', 11)
-            button_font = ('Segoe UI', 10, 'bold')
-        else:  # Linux
-            title_font = ('Ubuntu', 32, 'bold')
-            subtitle_font = ('Ubuntu', 12)
-            label_font = ('Ubuntu', 11)
-            button_font = ('Ubuntu', 10, 'bold')
+        # Sizes here have no named-font equivalent, so they reuse the resolved family.
+        ui_family = self.fonts['body'].cget('family')
+        label_font = (ui_family, 11)
+        button_font = (ui_family, 10, 'bold')
 
-        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=70)
-        top_bar.pack(fill='x', padx=10, pady=(10, 5))
+        # Fixed-height bar (pack_propagate off), so its pixel height must be scaled.
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=_px(70))
+        top_bar.pack(fill='x', padx=_px(10), pady=(_px(10), _px(5)))
         top_bar.pack_propagate(False)
 
         # Left side: Logo and title (compact layout)
         title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
         title_frame.pack(side='left', fill='y')
 
-        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px)
-        self.logo_label = self._create_logo_label(title_frame, size=75)
-        self.logo_label.pack(side='left', padx=(0, 10), pady=0)
+        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px at 96 dpi)
+        self.logo_label = self._create_logo_label(title_frame, size=_px(75))
+        self.logo_label.pack(side='left', padx=(0, _px(10)), pady=0)
 
         # "Advanced Spectral Prediction" text to the right of logo (reduced font)
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
-        text_frame.pack(side='left', fill='y', pady=15)
+        text_frame.pack(side='left', fill='y', pady=_px(15))
 
         tk.Label(text_frame,
                 text="Advanced Spectral Prediction",
-                font=('Segoe UI', 16, 'bold'),
+                font=self.fonts['title'],
                 fg=self.colors['text'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 2))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(2)))
 
         # Subtle amber BETA marker + muted version (same row, baseline-aligned)
         tk.Label(text_frame,
                 text="BETA",
-                font=('Segoe UI', 9, 'bold'),
+                font=(ui_family, 9, 'bold'),
                 fg='#D97706',  # amber-600 — attractive but unobtrusive
-                bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', padx=(_px(10), _px(4)), anchor='s',
+                                           pady=(0, _px(5)))
 
         tk.Label(text_frame,
                 text=f"v{_DASP_VERSION}",
-                font=('Segoe UI', 9),
+                font=self.fonts['small'],
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(5)))
 
         # Right side: Theme switcher with beautiful buttons
         theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
-        theme_frame.pack(side='right', fill='y', padx=10)
+        theme_frame.pack(side='right', fill='y', padx=_px(10))
 
         tk.Label(theme_frame,
                 text="Theme:",
                 font=label_font,
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', padx=(0, 10))
+                bg=self.colors['bg']).pack(side='left', padx=(0, _px(10)))
 
         # Create theme buttons with hover effects (compact)
         self.theme_buttons = {}
@@ -4989,11 +4783,11 @@ class SpectralPredictApp:
                           activebackground=theme_data['accent_dark'],
                           relief='flat',
                           borderwidth=0,
-                          padx=10,
-                          pady=4,
+                          padx=_px(10),
+                          pady=_px(4),
                           cursor='hand2',
                           command=lambda tn=theme_name: self._switch_theme(tn))
-            btn.pack(side='left', padx=2)
+            btn.pack(side='left', padx=_px(2))
 
             # Add hover effect
             def on_enter(e, b=btn, td=theme_data):
@@ -5008,8 +4802,8 @@ class SpectralPredictApp:
             self.theme_buttons[theme_name] = btn
 
         # Add a stronger separator line for better visual definition
-        separator = tk.Frame(self.root, bg=self.colors['border'], height=3)
-        separator.pack(fill='x', padx=20)
+        separator = tk.Frame(self.root, bg=self.colors['border'], height=_px(3))
+        separator.pack(fill='x', padx=_px(20))
 
     def _switch_theme(self, theme_name):
         """Switch to a new theme with smooth transition effect."""
@@ -5121,15 +4915,7 @@ class SpectralPredictApp:
 
     def _show_theme_notification(self, theme_name):
         """Show a beautiful notification when theme changes."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            notif_font = ('SF Pro Text', 11)
-        elif system == 'Windows':
-            notif_font = ('Segoe UI', 11)
-        else:  # Linux
-            notif_font = ('Ubuntu', 11)
+        notif_font = (self.fonts['body'].cget('family'), 11)
 
         # Create a temporary notification label
         notif = tk.Label(self.root,
@@ -5137,8 +4923,8 @@ class SpectralPredictApp:
                         font=notif_font,
                         fg=self.colors['text_inverse'],
                         bg=self.colors['accent'],
-                        padx=20,
-                        pady=10)
+                        padx=_px(20),
+                        pady=_px(10))
         notif.place(relx=0.5, rely=0.95, anchor='center')
 
         # Fade out after 2 seconds
@@ -5161,20 +4947,10 @@ class SpectralPredictApp:
         when background and text are the same color. tk.Button provides reliable
         cross-platform color control for accent-colored buttons.
         """
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':
-            button_font = ('SF Pro Text', 11, 'bold')
-        elif system == 'Windows':
-            button_font = ('Segoe UI', 11, 'bold')
-        else:
-            button_font = ('Ubuntu', 11, 'bold')
-
         btn = tk.Button(parent,
                        text=text,
                        command=command,
-                       font=button_font,
+                       font=self.fonts['strong'],
                        fg=self.colors['text_inverse'],  # White text
                        bg=self.colors['accent'],  # Colored background
                        activeforeground=self.colors['text_inverse'],
@@ -5182,8 +4958,8 @@ class SpectralPredictApp:
                        disabledforeground=self.colors['text_inverse'],  # Keep white text when disabled
                        relief='flat',
                        borderwidth=0,
-                       padx=20,
-                       pady=12,
+                       padx=_px(20),
+                       pady=_px(12),
                        cursor='hand2',
                        **kwargs)
 
@@ -5207,11 +4983,16 @@ class SpectralPredictApp:
 
         Uses the beautiful rainbow cobra logo with spectral bar and UV/IR label.
         Automatically removes white background for transparency.
+
+        ``size`` is in screen pixels (already display-scaled). The text fallback's
+        font is in points, which Tk scales itself, so its size comes from the 96-dpi
+        base to avoid scaling twice.
         """
+        text_pt = max(1, int(round(size / _UI_SCALE)) // 3)
         if not HAS_PIL:
             # Fallback to text if PIL not available
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -5224,7 +5005,7 @@ class SpectralPredictApp:
                 if not logo_path.exists():
                     # Fallback to text
                     logo_label = tk.Label(parent, text="ASP",
-                                         font=('Arial', size//3, 'bold'),
+                                         font=('Arial', text_pt, 'bold'),
                                          fg=self.colors['accent'], bg=self.colors['bg'])
                     return logo_label
 
@@ -5248,7 +5029,7 @@ class SpectralPredictApp:
         except Exception as e:
             # Fallback to text if image loading fails
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -9411,7 +9192,7 @@ class SpectralPredictApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Peak Calculator")
-        dialog.geometry("520x720")
+        dialog.geometry(_px_geometry("520x720", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -19655,7 +19436,7 @@ class SpectralPredictApp:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
-            dialog.geometry("600x500")
+            dialog.geometry(_px_geometry("600x500", self.root))
 
             # Add text widget with scrollbar
             frame = ttk.Frame(dialog, padding=10)
@@ -25194,15 +24975,19 @@ class SpectralPredictApp:
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None and shared_prep is None:
-                    # Legacy preprocessing names with wavelength selection
-                    # Subset X_train to selected wavelengths and wrap model
-                    X_train_subset = X_train[wavelength_subset]
-                    pipeline.fit(X_train_subset, y_train)
+                    # Legacy preprocessing names with wavelength selection: the wrapper
+                    # subsets (by name, or by position for a full-width array) in both
+                    # fit and predict, so a clone refits exactly like this fit.
                     # Use classifier wrapper for classification tasks to expose predict_proba and classes_
-                    if task_type == 'classification':
-                        pipeline = WavelengthSubsetClassifierWrapper(pipeline, wavelength_subset)
-                    else:
-                        pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
+                    wrapper_cls = (
+                        WavelengthSubsetClassifierWrapper
+                        if task_type == "classification"
+                        else WavelengthSubsetWrapper
+                    )
+                    pipeline = wrapper_cls(
+                        pipeline, wavelength_subset, all_columns=list(X_train.columns)
+                    )
+                    pipeline.fit(X_train, y_train)
                 else:
                     # Fit on training data (standard path - full spectrum)
                     pipeline.fit(X_train, y_train)
@@ -25447,8 +25232,17 @@ class SpectralPredictApp:
                 self._log_progress(f"RUNNING ENSEMBLE METHODS")
             self._log_progress(f"{'='*70}")
 
-            from spectral_predict.ensemble import create_ensemble
-            from sklearn.model_selection import cross_val_predict
+            if task_type != 'regression':
+                # Every caller should already stop here; this keeps a classification run
+                # (string or numeric class labels) from being fitted as regression.
+                self._log_progress(
+                    f"[!] Ensemble methods support regression only (task: {task_type}); "
+                    f"skipping ensembles."
+                )
+                return None, None
+
+            from spectral_predict.ensemble import create_ensemble, cross_validate_ensembles
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
             # Select models for ensemble based on context
             if is_manual_retrain:
@@ -25494,11 +25288,9 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
-            # Detect wrapped models (CARS/NSGA-II) - these should not be refitted during
-            # ensemble CV to avoid StandardScaler divergence that causes ~0.03 R² loss
-            any_wrapped = any(_is_wrapped_model(m) for m in models)
-            if any_wrapped:
-                self._log_progress(f"[*] Detected wrapped models (CARS/NSGA-II) - using original fitted models")
+            # Positional targets for every ensemble fit and CV split. y_filtered keeps the
+            # specimen-ID index; y_filtered[train_idx] is a label lookup under pandas 3.
+            y_arr = np.asarray(y_filtered, dtype=float).ravel()
 
             # NOTE: We do NOT extract preprocessor_configs here because the reconstructed
             # models are already wrapped with preprocessing (GAPreprocessWrapper,
@@ -25527,78 +25319,80 @@ class SpectralPredictApp:
             n_regions = self.ensemble_n_regions.get()
             self._log_progress(f"Number of regions: {n_regions}")
 
+            def _outer_cv(cv_models, cv_names):
+                """Honest ensemble CV: base models refitted inside every outer fold."""
+                n_outer = min(5, len(y_arr))
+                self._log_progress(
+                    f"Cross-validating ensembles ({n_outer}-fold): base models are refitted "
+                    f"on each outer training fold; weights are learned from inner "
+                    f"out-of-fold predictions."
+                )
+                cv_result = cross_validate_ensembles(
+                    cv_models,
+                    cv_names,
+                    X_filtered,
+                    y_arr,
+                    [etype for etype, _ in ensemble_methods],
+                    n_regions=n_regions,
+                    n_splits=n_outer,
+                    inner_cv=5,
+                    random_state=42,
+                )
+                for note in cv_result.notes:
+                    self._log_progress(f"   [CV] {note}")
+                return cv_result
+
+            def _log_excluded(ens):
+                for excluded_name, reason in getattr(ens, "excluded_models_", []) or []:
+                    self._log_progress(
+                        f"   [!] {excluded_name} excluded from this ensemble: its "
+                        f"out-of-fold refit failed ({reason})"
+                    )
+
             # Train and evaluate each ensemble method
             ensemble_results = []
             trained_ensembles = {}
+            cv_result = _outer_cv(models, model_names)
 
             for ensemble_type, ensemble_name in ensemble_methods:
                 try:
                     self._log_progress(f"\n--- Training {ensemble_name} ---")
 
-                    # Create ensemble
+                    if ensemble_type in cv_result.errors:
+                        # No honest CV estimate -> do not offer the ensemble at all.
+                        self._log_progress(
+                            f"[X] {ensemble_name} failed in cross-validation: "
+                            f"{cv_result.errors[ensemble_type]}"
+                        )
+                        continue
+
+                    # Deployed ensemble: full-data base models; weights / meta-model from
+                    # inner out-of-fold refits over all calibration rows.
                     # NOTE: No preprocessor_configs - models already have preprocessing built-in
-                    # For wrapped models (CARS/NSGA-II), disable refitting to preserve scaler stats
                     ensemble = create_ensemble(
                         models=models,
                         model_names=model_names,
                         X=X_filtered,
-                        y=y_filtered,
+                        y=y_arr,
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
-                        cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
-                        refit_base_models=not any_wrapped,  # False for wrapped models
+                        cv=min(5, len(y_arr)),  # Use 5-fold or less if small dataset
+                        refit_base_models=True,
                     )
+                    _log_excluded(ensemble)
 
-                    # Use cross-validation to get realistic metrics (comparable to RMSECV)
-                    # Without CV, ensemble metrics on training data would be inflated
-                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                    from sklearn.model_selection import KFold
-                    import numpy as np
-
-                    n_cv_folds = min(5, len(y_filtered))
-                    if n_cv_folds >= 2:
-                        kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                        cv_predictions = np.full(len(y_filtered), np.nan)
-
-                        for train_idx, val_idx in kf.split(X_filtered):
-                            # Re-fit ensemble on CV training fold
-                            # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
-                            if hasattr(X_filtered, 'iloc'):
-                                X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                            else:
-                                X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                            y_cv_train = y_filtered[train_idx]
-
-                            cv_ensemble = create_ensemble(
-                                models=models,
-                                model_names=model_names,
-                                X=X_cv_train,
-                                y=y_cv_train,
-                                ensemble_type=ensemble_type,
-                                n_regions=n_regions,
-                                cv=min(5, len(y_cv_train)),
-                                refit_base_models=not any_wrapped,  # False for wrapped models
-                            )
-                            cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
-
-                        # Calculate CV metrics (realistic, comparable to individual models)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, cv_predictions))
-                        r2 = r2_score(y_filtered, cv_predictions)
-                        mae = mean_absolute_error(y_filtered, cv_predictions)
-                    else:
-                        # Fallback for very small datasets
-                        ensemble_pred = ensemble.predict(X_filtered)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
-                        r2 = r2_score(y_filtered, ensemble_pred)
-                        mae = mean_absolute_error(y_filtered, ensemble_pred)
+                    cv_predictions = cv_result.predictions[ensemble_type]
+                    rmse = np.sqrt(mean_squared_error(y_arr, cv_predictions))
+                    r2 = r2_score(y_arr, cv_predictions)
+                    mae = mean_absolute_error(y_arr, cv_predictions)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
-                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+                    rpd = np.std(y_arr) / rmse if rmse > 0 else 0
 
                     # Compute calibration metrics (ensemble prediction on training data)
                     cal_predictions = ensemble.predict(X_filtered)
-                    cal_rmse = np.sqrt(mean_squared_error(y_filtered, cal_predictions))
-                    cal_r2 = r2_score(y_filtered, cal_predictions)
+                    cal_rmse = np.sqrt(mean_squared_error(y_arr, cal_predictions))
+                    cal_r2 = r2_score(y_arr, cal_predictions)
 
                     # Compute validation metrics if validation set is available
                     val_rmse = None
@@ -25654,7 +25448,9 @@ class SpectralPredictApp:
                         'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
                         'rpd': rpd,
-                        'ensemble': ensemble
+                        'ensemble': ensemble,
+                        # Honest out-of-fold predictions (saved for uncertainty intervals)
+                        'cv_predictions': cv_predictions,
                     })
 
                     # Store trained ensemble
@@ -25676,9 +25472,6 @@ class SpectralPredictApp:
                 self._log_progress(f"{'='*70}")
 
                 from spectral_predict.ensemble import select_top_models_quartile_flat
-                from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                from sklearn.model_selection import KFold
-                import numpy as np
 
                 quartile_top_n = self.ensemble_quartile_top_n.get()
                 quartile_selection = select_top_models_quartile_flat(
@@ -25720,62 +25513,45 @@ class SpectralPredictApp:
                         q_models = [m[0] for m in quartile_reconstructed]
                         q_model_names = [m[1] for m in quartile_reconstructed]
 
+                        q_cv_result = _outer_cv(q_models, q_model_names)
+
                         # Run same ensemble methods with "(Quartile)" suffix
                         for ensemble_type, ensemble_name in ensemble_methods:
                             quartile_ensemble_name = f"{ensemble_name} (Quartile)"
                             try:
                                 self._log_progress(f"\n--- Training {quartile_ensemble_name} ---")
 
+                                if ensemble_type in q_cv_result.errors:
+                                    self._log_progress(
+                                        f"[X] {quartile_ensemble_name} failed in "
+                                        f"cross-validation: {q_cv_result.errors[ensemble_type]}"
+                                    )
+                                    continue
+
                                 # Create ensemble with quartile-selected models
                                 q_ensemble = create_ensemble(
                                     models=q_models,
                                     model_names=q_model_names,
                                     X=X_filtered,
-                                    y=y_filtered,
+                                    y=y_arr,
                                     ensemble_type=ensemble_type,
                                     n_regions=n_regions,
-                                    cv=min(5, len(y_filtered)),
+                                    cv=min(5, len(y_arr)),
+                                    refit_base_models=True,
                                 )
+                                _log_excluded(q_ensemble)
 
-                                # Use cross-validation for realistic metrics
-                                n_cv_folds = min(5, len(y_filtered))
-                                if n_cv_folds >= 2:
-                                    kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                                    q_cv_predictions = np.full(len(y_filtered), np.nan)
+                                q_cv_predictions = q_cv_result.predictions[ensemble_type]
+                                q_rmse = np.sqrt(mean_squared_error(y_arr, q_cv_predictions))
+                                q_r2 = r2_score(y_arr, q_cv_predictions)
+                                q_mae = mean_absolute_error(y_arr, q_cv_predictions)
 
-                                    for train_idx, val_idx in kf.split(X_filtered):
-                                        if hasattr(X_filtered, 'iloc'):
-                                            X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                                        else:
-                                            X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                                        y_cv_train = y_filtered[train_idx]
-
-                                        q_cv_ensemble = create_ensemble(
-                                            models=q_models,
-                                            model_names=q_model_names,
-                                            X=X_cv_train,
-                                            y=y_cv_train,
-                                            ensemble_type=ensemble_type,
-                                            n_regions=n_regions,
-                                            cv=min(5, len(y_cv_train)),
-                                        )
-                                        q_cv_predictions[val_idx] = q_cv_ensemble.predict(X_cv_val)
-
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_cv_predictions))
-                                    q_r2 = r2_score(y_filtered, q_cv_predictions)
-                                    q_mae = mean_absolute_error(y_filtered, q_cv_predictions)
-                                else:
-                                    q_ensemble_pred = q_ensemble.predict(X_filtered)
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_ensemble_pred))
-                                    q_r2 = r2_score(y_filtered, q_ensemble_pred)
-                                    q_mae = mean_absolute_error(y_filtered, q_ensemble_pred)
-
-                                q_rpd = np.std(y_filtered) / q_rmse if q_rmse > 0 else 0
+                                q_rpd = np.std(y_arr) / q_rmse if q_rmse > 0 else 0
 
                                 # Compute calibration metrics
                                 q_cal_predictions = q_ensemble.predict(X_filtered)
-                                q_cal_rmse = np.sqrt(mean_squared_error(y_filtered, q_cal_predictions))
-                                q_cal_r2 = r2_score(y_filtered, q_cal_predictions)
+                                q_cal_rmse = np.sqrt(mean_squared_error(y_arr, q_cal_predictions))
+                                q_cal_r2 = r2_score(y_arr, q_cal_predictions)
 
                                 self._log_progress(f"> {quartile_ensemble_name} Results:")
                                 self._log_progress(f"   RMSE:   {q_cal_rmse:.4f} (cal)")
@@ -25795,7 +25571,8 @@ class SpectralPredictApp:
                                     'r2': q_r2,
                                     'mae': q_mae,
                                     'rpd': q_rpd,
-                                    'ensemble': q_ensemble
+                                    'ensemble': q_ensemble,
+                                    'cv_predictions': q_cv_predictions,
                                 })
 
                                 # Store trained ensemble
@@ -31905,7 +31682,7 @@ For detailed documentation, see the User Guide.
 
             win = tk.Toplevel(self.root)
             win.title("Multi-Class Decision Matrix")
-            win.geometry("980x720")
+            win.geometry(_px_geometry("980x720", self.root))
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
@@ -32637,21 +32414,10 @@ For detailed documentation, see the User Guide.
             # Set up columns
             self.results_tree['columns'] = columns
 
-            # Configure column widths and anchors
+            # Configure column widths and anchors (see _results_column_width)
+            row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
             for col in columns:
-                # Set column width based on content
-                if col == 'Select':
-                    width = 60
-                elif col in ['Model', 'Preprocess', 'Subset']:
-                    width = 120
-                elif col in ['top_vars']:
-                    width = 200
-                elif col in ['BestRegion', 'BestClass']:
-                    width = 100
-                elif col.startswith('RMSE_') or col.startswith('F1_Class'):
-                    width = 70  # Quartile RMSE or Class F1 columns
-                else:
-                    width = 80
+                width = _results_column_width(col, results_df[col], row_font)
                 self.results_tree.column(col, width=width, anchor='center', stretch=False)
 
             # Store default widths for reset functionality
@@ -32693,8 +32459,8 @@ For detailed documentation, see the User Guide.
             # Widen sorted columns so arrow/superscript isn't clipped
             if is_sorted and col in sorted_col_names:
                 cur_width = self.results_tree.column(col, 'width')
-                if cur_width < 200:  # don't widen already-wide columns
-                    self.results_tree.column(col, width=cur_width + 22, stretch=False)
+                if cur_width < _px(200):  # don't widen already-wide columns
+                    self.results_tree.column(col, width=cur_width + _px(22), stretch=False)
 
         # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):
@@ -34553,17 +34319,10 @@ For detailed documentation, see the User Guide.
                 messagebox.showerror("Error", "Cannot determine wavelengths from training data.")
                 return
 
-            # Determine task type from target column or results
-            task_type = 'regression'  # Default
-            if hasattr(self, 'task_type'):
-                task_type = self.task_type.get()
-            elif hasattr(self, 'y') and self.y is not None:
-                # Infer from data
-                import numpy as np
-                if not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = 'classification'
-                elif len(self.y.dropna().unique()) < 20:
-                    task_type = 'classification'
+            # GUI ensembles are regression-only (_train_ensembles is never run for
+            # classification). Reading the task radio here saved 'auto' when it was left
+            # on auto-detect, which also dropped the CV residuals below.
+            task_type = "regression"
 
             # Get preprocessing information from results DataFrame if available
             preprocessing = 'unknown'
@@ -34599,20 +34358,27 @@ For detailed documentation, see the User Guide.
                 X_train = self.ensemble_X.values
                 self._log_progress(f"Including applicability domain data ({X_train.shape[0]} samples)")
 
-            # Get CV data if available (from ensemble predictions)
+            # CV data for uncertainty: the honest out-of-fold predictions from ensemble
+            # training. Never re-predict the training rows with the deployed ensemble:
+            # those are calibration predictions, and intervals from them are too narrow.
             cv_residuals = None
             cv_predictions = None
             cv_actuals = None
-            if hasattr(self, 'ensemble_y') and self.ensemble_y is not None:
-                cv_actuals = self.ensemble_y.values if hasattr(self.ensemble_y, 'values') else np.array(self.ensemble_y)
-                # Get ensemble predictions
-                try:
-                    cv_predictions = ensemble.predict(self.ensemble_X.values if hasattr(self.ensemble_X, 'values') else self.ensemble_X)
-                    if task_type == 'regression':
+            oof_predictions = selected_result.get("cv_predictions")
+            if getattr(self, "ensemble_y", None) is not None and oof_predictions is not None:
+                actuals = np.asarray(self.ensemble_y, dtype=float).ravel()
+                oof_predictions = np.asarray(oof_predictions, dtype=float).ravel()
+                if len(oof_predictions) == len(actuals):
+                    cv_actuals = actuals
+                    cv_predictions = oof_predictions
+                    if task_type == "regression":
                         cv_residuals = cv_predictions - cv_actuals
-                    self._log_progress(f"Including uncertainty estimation data")
-                except Exception as e:
-                    self._log_progress(f"Warning: Could not generate CV predictions: {e}")
+                    self._log_progress("Including out-of-fold CV predictions for uncertainty")
+            if cv_predictions is None:
+                self._log_progress(
+                    "No out-of-fold CV predictions stored for this ensemble (re-train "
+                    "ensembles to include them); uncertainty data omitted"
+                )
 
             # Get preprocessor if available (usually None for ensembles as preprocessing is in pipelines)
             preprocessor = None
@@ -35671,8 +35437,9 @@ For detailed documentation, see the User Guide.
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Analysis Subset")
-        dialog.geometry("520x500")
-        dialog.resizable(False, False)
+        dialog.geometry(_px_geometry("520x500", self.root))
+        # Resizable: _px_geometry may shrink it to fit a small monitor's work area.
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -43349,7 +43116,7 @@ External Validation Performance (n={n_val}):
         # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Code")
-        dialog.geometry("550x520")
+        dialog.geometry(_px_geometry("550x520", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -44041,7 +43808,7 @@ External Validation Performance (n={n_val}):
         # Create preview window
         preview_window = tk.Toplevel(self.root)
         preview_window.title("Wavelength Selection Preview")
-        preview_window.geometry("800x500")
+        preview_window.geometry(_px_geometry("800x500", self.root))
 
         # Info text
         info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
@@ -44156,7 +43923,7 @@ External Validation Performance (n={n_val}):
         """Show dialog for custom wavelength range."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Wavelength Range")
-        dialog.geometry("350x180")
+        dialog.geometry(_px_geometry("350x200", self.root))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -46925,8 +46692,11 @@ External Validation Performance (n={n_val}):
             return model_dict
 
         if suffix == '.pkl':
+            from spectral_predict.model_wrappers import LegacyWrapperUnpickler
+
+            # A raw pickle may hold a GUI-era wrapper (__main__.GAPreprocessWrapper, ...).
             with open(path, 'rb') as f:
-                model_data = pickle.load(f)
+                model_data = LegacyWrapperUnpickler(f).load()
 
             normalized = self._normalize_legacy_model_dict(model_data, filepath=str(path))
             if normalized is not None:
@@ -47034,179 +46804,6 @@ External Validation Performance (n={n_val}):
     #     self.ct_satellite_instrument_combo['values'] = inst_ids
     #
     #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
-
-    def _refresh_ct_registry(self):
-        """Refresh the transfer model registry view and instruments list."""
-        # Update instruments listbox
-        self.ct_instrument_listbox.delete(0, tk.END)
-        for inst_id in sorted(self.instrument_spectral_data.keys()):
-            self.ct_instrument_listbox.insert(tk.END, inst_id)
-
-        # Update transfer models treeview
-        for item in self.ct_registry_tree.get_children():
-            self.ct_registry_tree.delete(item)
-
-        for model_key, model_data in self.transfer_model_registry.items():
-            primary_id = model_data['primary_id']
-            satellite_id = model_data['satellite_id']
-            method = model_data['method']
-            date_built = model_data['date_built']
-            n_samples = model_data['n_samples']
-
-            self.ct_registry_tree.insert('', 'end', iid=model_key,
-                                        values=(primary_id, satellite_id, method, date_built, n_samples))
-
-        # Update registry combos in sections C and D
-        registry_keys = list(self.transfer_model_registry.keys())
-        if hasattr(self, 'ct_eq_registry_combo'):
-            self.ct_eq_registry_combo['values'] = registry_keys
-        if hasattr(self, 'ct_pred_registry_combo'):
-            self.ct_pred_registry_combo['values'] = registry_keys
-
-    def _load_model_from_registry(self):
-        """Load selected transfer model from registry to current model."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model from the registry")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _delete_from_registry(self):
-        """Delete selected transfer model from registry."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model to delete")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        response = messagebox.askyesno("Confirm Delete",
-            f"Delete transfer model?\n\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}\n\n"
-            f"This cannot be undone.")
-
-        if response:
-            del self.transfer_model_registry[model_key]
-            self._refresh_ct_registry()
-            messagebox.showinfo("Success", "Transfer model deleted from registry")
-
-    def _import_model_to_registry(self):
-        """Import a transfer model from file into the registry."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        from spectral_predict.calibration_transfer import load_transfer_model
-
-        file_path = filedialog.askopenfilename(
-            title="Select Transfer Model JSON File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not file_path:
-            return
-
-        try:
-            # Load the model
-            transfer_model = load_transfer_model(file_path)
-
-            # Try to extract primary/satellite IDs and method from the model
-            # These might be stored as metadata in the model
-            primary_id = getattr(transfer_model, 'primary_id', 'Unknown_Primary')
-            satellite_id = getattr(transfer_model, 'satellite_id', 'Unknown_Satellite')
-            method = transfer_model.method
-
-            # Create registry key
-            import datetime
-            model_key = f"{primary_id}_{satellite_id}_{method}"
-
-            # Check if already exists
-            if model_key in self.transfer_model_registry:
-                response = messagebox.askyesno("Model Exists",
-                    f"A model with key '{model_key}' already exists in the registry.\n\n"
-                    f"Do you want to replace it?")
-                if not response:
-                    return
-
-            # Store in registry
-            self.transfer_model_registry[model_key] = {
-                'model': transfer_model,
-                'primary_id': primary_id,
-                'satellite_id': satellite_id,
-                'method': method,
-                'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'n_samples': 0,  # Unknown from loaded file
-                'n_features': 0  # Unknown from loaded file
-            }
-
-            self._refresh_ct_registry()
-
-            messagebox.showinfo("Success",
-                f"Transfer model imported to registry:\n"
-                f"Key: {model_key}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to import transfer model:\n{str(e)}")
-
-    def _load_ct_eq_from_registry(self):
-        """Load transfer model from registry for file equalization (Section C)."""
-        model_key = self.ct_eq_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for file equalization:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _load_ct_pred_from_registry(self):
-        """Load transfer model from registry for prediction (Section D)."""
-        model_key = self.ct_pred_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for prediction:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _on_pred_tm_source_changed(self):
-        """Handle transfer model source change in Section D."""
-        source = self.ct_pred_tm_source_var.get()
-
-        # Hide/show appropriate frames
-        if source == 'registry':
-            self.ct_pred_registry_frame.pack(fill='x', pady=(5, 0))
-            self.ct_pred_load_tm_frame.pack_forget()
-        elif source == 'file':
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack(fill='x', pady=(5, 0))
-        else:  # current
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack_forget()
 
     def _browse_ct_pred_primary_model(self):
         """Browse for primary calibration model in Section D."""
@@ -47560,412 +47157,6 @@ External Validation Performance (n={n_val}):
     #     except Exception as e:
     #         messagebox.showerror("Error", f"Failed to import from Instrument Lab:\n{str(e)}")
 
-    def _build_ct_transfer_model(self):
-        """Build calibration transfer model (DS or PDS)."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        # VALIDATION: Data Loaded Check
-        if not hasattr(self, 'ct_X_primary_common') or not hasattr(self, 'ct_X_satellite_common'):
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        if self.ct_X_primary_common is None or self.ct_X_satellite_common is None:
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        method = self.ct_method_var.get()
-        primary_id = self.ct_primary_instrument_id.get()
-        satellite_id = self.ct_satellite_instrument_id.get()
-
-        # VALIDATION: Different Instruments Check
-        if primary_id == satellite_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Primary and satellite instruments must be different for calibration transfer."
-            )
-            return
-
-        try:
-            # --- ROI: optionally clip to region for estimation ---
-            roi_config = self._get_roi_config()
-            roi_meta = {}
-            X_primary_est = self.ct_X_primary_common
-            X_satellite_est = self.ct_X_satellite_common
-            wl_est = self.ct_wavelengths_common
-            if roi_config['enabled']:
-                from spectral_predict.calibration_transfer import clip_wavelengths_to_region
-                X_primary_est, wl_roi, roi_indices = clip_wavelengths_to_region(
-                    X_primary_est, wl_est, roi_config['start'], roi_config['end'])
-                X_satellite_est, _, _ = clip_wavelengths_to_region(
-                    X_satellite_est, wl_est, roi_config['start'], roi_config['end'])
-                roi_meta = {
-                    'enabled': True,
-                    'start': roi_config['start'],
-                    'end': roi_config['end'],
-                    'indices': roi_indices.tolist(),
-                    'n_wavelengths_region': len(roi_indices),
-                    'n_wavelengths_full': len(wl_est),
-                }
-                messagebox.showinfo("ROI",
-                    f"Estimating transfer on region {roi_config['start']:.1f}–{roi_config['end']:.1f} nm\n"
-                    f"({len(roi_indices)} of {len(wl_est)} wavelengths)")
-
-            if method == 'ds':
-                # Build DS transfer model
-                # VALIDATION: DS Ridge Lambda parameter
-                try:
-                    lam = float(self.ct_ds_lambda_var.get())
-                    if lam <= 0 or lam > 100:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"DS Ridge Lambda must be between 0 and 100.\nYou entered: {lam}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
-                    return
-                A = estimate_ds(X_primary_est, X_satellite_est, lam=lam)
-
-                # Create TransferModel object
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_ds = {'lambda': lam, 'note': 'DS transfer built in GUI'}
-                if roi_meta:
-                    meta_ds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'A': A},
-                    meta=meta_ds
-                )
-
-                info_text = (f"Transfer Method: Direct Standardization (DS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Ridge Lambda: {lam}\n"
-                            f"Matrix Shape: {A.shape}")
-
-            elif method == 'pds':
-                # Build PDS transfer model
-                # VALIDATION: PDS Window parameter
-                try:
-                    window = int(self.ct_pds_window_var.get())
-                    if window < 5 or window > 101:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be between 5 and 101.\nYou entered: {window}"
-                        )
-                        return
-                    if window % 2 == 0:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be an odd number.\nYou entered: {window} (even)"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
-                    return
-                B = estimate_pds(X_primary_est, X_satellite_est, window=window)
-
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_pds = {'note': 'PDS transfer built in GUI'}
-                if roi_meta:
-                    meta_pds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='pds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'B': B, 'window': window},
-                    meta=meta_pds
-                )
-
-                info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Window Size: {window}\n"
-                            f"Coefficient Matrix Shape: {B.shape}")
-
-            elif method == 'tsr':
-                # Build TSR (Transfer Sample Regression) model
-                from spectral_predict.calibration_transfer import estimate_tsr, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples (default 12)
-                try:
-                    n_transfer = int(getattr(self, 'ct_tsr_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 2:
-                        messagebox.showerror("Invalid Parameter", "Need at least 2 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Select transfer samples using Kennard-Stone (on full data for sample selection)
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Estimate TSR model (on ROI-clipped data if applicable)
-                tsr_params = estimate_tsr(
-                    X_primary_est,
-                    X_satellite_est,
-                    transfer_indices
-                )
-
-                meta_tsr = {'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_tsr['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='tsr',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=tsr_params,
-                    meta=meta_tsr
-                )
-
-                info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
-                            f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
-
-            elif method == 'ctai':
-                # Build CTAI (Affine Invariance) model - NO transfer samples needed!
-                from spectral_predict.calibration_transfer import estimate_ctai, TransferModel
-
-                # Estimate CTAI model
-                ctai_params = estimate_ctai(
-                    X_primary_est,
-                    X_satellite_est
-                )
-
-                meta_ctai = {'note': 'CTAI transfer built in GUI (no standards needed)'}
-                if roi_meta:
-                    meta_ctai['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ctai',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=ctai_params,
-                    meta=meta_ctai
-                )
-
-                info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"NO TRANSFER SAMPLES NEEDED >\n"
-                            f"Components: {ctai_params['n_components']}\n"
-                            f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
-                            f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
-
-            elif method == 'jypls-inv':
-                # Build JYPLS-inv (Joint-Y PLS with Inversion) model
-                from spectral_predict.calibration_transfer import estimate_jypls_inv, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples
-                try:
-                    n_transfer = int(getattr(self, 'ct_jypls_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 5:
-                        messagebox.showerror("Invalid Parameter", "JYPLS-inv needs at least 5 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Get PLS components
-                n_comp_str = self.ct_jypls_n_components_var.get()
-                if n_comp_str == 'Auto':
-                    n_components = None  # Auto-select via CV
-                else:
-                    n_components = int(n_comp_str)
-
-                # Select transfer samples using Kennard-Stone
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
-                # In real applications, user would provide reference values
-                y_transfer = X_primary_est[transfer_indices].mean(axis=1)
-
-                # Estimate JYPLS-inv model (on ROI-clipped data if applicable)
-                jypls_params = estimate_jypls_inv(
-                    X_primary_est,
-                    X_satellite_est,
-                    y_transfer,
-                    transfer_indices,
-                    n_components=n_components
-                )
-
-                meta_jypls = {'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_jypls['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='jypls-inv',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=jypls_params,
-                    meta=meta_jypls
-                )
-
-                info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"PLS Components: {jypls_params['n_components']}\n"
-                            f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
-                            f"Explained Variance: {jypls_params['explained_variance_ratio']:.4f}")
-
-            elif method == 'nspfce':
-                # Build NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) model
-                from spectral_predict.calibration_transfer import estimate_nspfce, TransferModel
-
-                # Get NS-PFCE parameters
-                use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
-                wavelength_selector = self.ct_nspfce_selector_var.get()
-
-                try:
-                    max_iterations = int(self.ct_nspfce_max_iterations_var.get())
-                    if max_iterations < 10 or max_iterations > 500:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"NS-PFCE Max Iterations must be between 10 and 500.\nYou entered: {max_iterations}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "NS-PFCE Max Iterations must be an integer.")
-                    return
-
-                # Estimate NS-PFCE model (on ROI-clipped data if applicable)
-                # NS-PFCE needs wavelengths array matching the spectral columns
-                wl_for_nspfce = wl_roi if roi_meta else wl_est
-                nspfce_params = estimate_nspfce(
-                    X_primary_est,
-                    X_satellite_est,
-                    wl_for_nspfce,
-                    use_wavelength_selection=use_wavelength_selection,
-                    wavelength_selector=wavelength_selector,
-                    max_iterations=max_iterations
-                )
-
-                meta_nspfce = {
-                    'note': 'NS-PFCE transfer built in GUI',
-                    'use_wavelength_selection': use_wavelength_selection,
-                    'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
-                }
-                if roi_meta:
-                    meta_nspfce['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='nspfce',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=nspfce_params,
-                    meta=meta_nspfce
-                )
-
-                # Build info text
-                info_lines = [
-                    f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
-                    f"Primary: {primary_id} -> Satellite: {satellite_id}",
-                    f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
-                    f"Converged: {'Yes >' if nspfce_params['converged'] else 'No (max iter reached)'}",
-                ]
-
-                if use_wavelength_selection:
-                    n_selected = len(nspfce_params.get('selected_wavelength_indices', []))
-                    n_total = len(self.ct_wavelengths_common)
-                    info_lines.append(f"Wavelength Selection: {wavelength_selector.upper()}")
-                    info_lines.append(f"Selected Wavelengths: {n_selected} / {n_total} ({100*n_selected/n_total:.1f}%)")
-                else:
-                    info_lines.append(f"Wavelength Selection: Not used")
-
-                if nspfce_params['convergence_history']:
-                    final_error = nspfce_params['convergence_history'][-1]
-                    info_lines.append(f"Final RMSE: {final_error:.6f}")
-
-                info_text = "\n".join(info_lines)
-
-            # Display transfer model info
-            self.ct_transfer_info_text.config(state='normal')
-            self.ct_transfer_info_text.delete('1.0', tk.END)
-            self.ct_transfer_info_text.insert('1.0', info_text)
-            self.ct_transfer_info_text.config(state='disabled')
-
-            # Generate transfer quality plots
-            self._plot_transfer_quality(method)
-
-            # Update active transfer model status
-            self._update_active_transfer_model_status()
-
-            # Save to transfer model registry
-            primary_id = self.ct_primary_instrument_id.get()
-            satellite_id = self.ct_satellite_instrument_id.get()
-            if primary_id and satellite_id:
-                import datetime
-                model_key = f"{primary_id}_{satellite_id}_{method}"
-                # Store model with metadata
-                self.transfer_model_registry[model_key] = {
-                    'model': self.ct_transfer_model,
-                    'primary_id': primary_id,
-                    'satellite_id': satellite_id,
-                    'method': method,
-                    'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'n_samples': self.ct_X_primary_common.shape[0] if self.ct_X_primary_common is not None else 0,
-                    'n_features': self.ct_wavelengths_common.shape[0] if self.ct_wavelengths_common is not None else 0
-                }
-
-            messagebox.showinfo("Success",
-                f"{method.upper()} transfer model built successfully\n\n"
-                f"Model saved to registry: {model_key}" if primary_id and satellite_id else
-                f"{method.upper()} transfer model built successfully")
-        except KeyError as e:
-            # Specific handling for missing dictionary keys
-            messagebox.showerror(
-                "Configuration Error",
-                f"Failed to build transfer model - missing expected parameter:\n{str(e)}\n\n"
-                f"This may indicate a version mismatch or incomplete calibration transfer implementation."
-            )
-        except ValueError as e:
-            # Specific handling for validation errors
-            messagebox.showerror(
-                "Data Validation Error",
-                f"Failed to build transfer model due to invalid data:\n{str(e)}\n\n"
-                f"Please check your data for NaN/inf values or ensure data shapes are correct."
-            )
-        except np.linalg.LinAlgError as e:
-            # Specific handling for numerical errors
-            messagebox.showerror(
-                "Numerical Error",
-                f"Failed to build transfer model due to numerical instability:\n{str(e)}\n\n"
-                f"This often occurs with poorly conditioned data. Try:\n"
-                f"- Preprocessing your data (scaling, normalization)\n"
-                f"- Using more samples\n"
-                f"- Checking for duplicate or near-duplicate spectra"
-            )
-        except Exception as e:
-            # Generic fallback for unexpected errors
-            import traceback
-            error_details = traceback.format_exc()
-            print(f"Transfer model build error:\n{error_details}")  # Log to console
-            messagebox.showerror(
-                "Error",
-                f"Failed to build transfer model:\n{str(e)}\n\n"
-                f"Check the console for detailed traceback."
-            )
-
     def _save_ct_transfer_model(self):
         """Save current transfer model to disk."""
         if not HAS_CALIBRATION_TRANSFER:
@@ -48266,7 +47457,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_transfer_model = load_transfer_model(path_prefix)
             messagebox.showinfo("Success",
                 f"Transfer model loaded:\n"
-                f"Method: {self.ct_pred_transfer_model.method.upper()}\n"
+                f"Method: {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
                 f"Primary: {self.ct_pred_transfer_model.primary_id}\n"
                 f"Satellite: {self.ct_pred_transfer_model.satellite_id}")
         except Exception as e:
@@ -48372,7 +47563,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
 
             # Display results
-            pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
+            pred_text = f"Transferred {len(y_pred)} spectra using {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
             pred_text += f"Predictions (first 10):\n"
             y_pred_arr = np.array(y_pred)
             is_numeric = pd.api.types.is_numeric_dtype(y_pred_arr.dtype)
@@ -48500,11 +47691,13 @@ External Validation Performance (n={n_val}):
             tm = TransferModel.load(filepath)
             self.ct_eq_loaded_transfer_model = tm
 
-            info_text = (f"Loaded Transfer Model:\n"
-                        f"  Primary: {tm.primary_id}\n"
-                        f"  Satellite: {tm.satellite_id}\n"
-                        f"  Method: {tm.method.upper()}\n"
-                        f"  Wavelengths: {len(tm.wavelengths_common)}")
+            info_text = (
+                f"Loaded Transfer Model:\n"
+                f"  Primary: {tm.primary_id}\n"
+                f"  Satellite: {tm.satellite_id}\n"
+                f"  Method: {ct_method_display_name(tm.method)}\n"
+                f"  Wavelengths: {len(tm.wavelengths_common)}"
+            )
 
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.delete('1.0', tk.END)
@@ -48616,7 +47809,10 @@ External Validation Performance (n={n_val}):
 
             # Apply transfer transformation
             self.ct_eq_status_text.config(state='normal')
-            self.ct_eq_status_text.insert(tk.END, f"Applying {transfer_model.method.upper()} transformation...\n")
+            self.ct_eq_status_text.insert(
+                tk.END,
+                f"Applying {ct_method_display_name(transfer_model.method)} transformation...\n",
+            )
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
@@ -48774,7 +47970,7 @@ External Validation Performance (n={n_val}):
 
         Shows:
         1. Transfer Quality Plot (3 subplots): Primary, Satellite before, Satellite after
-        2. Transfer Scatter Plot: Primary vs Transferred with R²
+        2. Spectral agreement scatter on the fitting standards with R² (not a validation)
         """
         if not HAS_MATPLOTLIB:
             return
@@ -48784,26 +47980,35 @@ External Validation Performance (n={n_val}):
             for widget in self.ct_transfer_plot_frame.winfo_children():
                 widget.destroy()
 
+            # A model built on a region of interest was fitted on the clipped columns,
+            # so plot (and apply it to) the same columns.
+            X_pri, X_sat, wl_plot = ct_region_arrays(
+                self.ct_X_primary_common,
+                self.ct_X_satellite_common,
+                self.ct_wavelengths_common,
+                getattr(self.ct_transfer_model, 'meta', None),
+            )
+
             # Apply transfer to get transferred spectra
             if method == 'ds':
                 A = self.ct_transfer_model.params['A']
-                X_transferred = apply_ds(self.ct_X_satellite_common, A)
+                X_transferred = apply_ds(X_sat, A)
             elif method == 'pds':
                 B = self.ct_transfer_model.params['B']
                 window = self.ct_transfer_model.params['window']
-                X_transferred = apply_pds(self.ct_X_satellite_common, B, window)
+                X_transferred = apply_pds(X_sat, B, window)
             elif method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_tsr(X_sat, self.ct_transfer_model.params)
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_ctai(X_sat, self.ct_transfer_model.params)
             elif method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_jypls_inv(X_sat, self.ct_transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_nspfce(X_sat, self.ct_transfer_model.params)
             else:
                 # Unsupported method for plotting
                 return
@@ -48815,20 +48020,18 @@ External Validation Performance (n={n_val}):
             derivative_notebook = ttk.Notebook(self.ct_transfer_plot_frame)
             derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
+            # Savitzky-Golay window for the derivative tabs; None when the plotted
+            # region is too narrow for any derivative (e.g. an ROI of 1-2 wavelengths).
+            deriv_window = ct_derivative_window(len(wl_plot))
+
             # Helper function to compute derivatives
             def compute_derivative(X, wavelengths, deriv_order):
                 """Compute derivative using Savitzky-Golay filter."""
                 from scipy.signal import savgol_filter
                 if deriv_order == 0:
                     return X
-                # Use window length of 11 and polynomial order 2 (common for NIR)
-                window_length = min(11, len(wavelengths) - 1)
-                if window_length % 2 == 0:
-                    window_length -= 1  # Must be odd
-                if window_length < 5:
-                    window_length = 5
                 X_deriv = np.apply_along_axis(
-                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    lambda y: savgol_filter(y, deriv_window, polyorder=2, deriv=deriv_order),
                     axis=1, arr=X
                 )
                 return X_deriv
@@ -48843,8 +48046,8 @@ External Validation Performance (n={n_val}):
                 ax1 = fig.add_subplot(131)
                 primary_mean = np.mean(primary_data, axis=0)
                 primary_std = np.std(primary_data, axis=0)
-                ax1.plot(self.ct_wavelengths_common, primary_mean, 'b-', linewidth=2, label='Mean')
-                ax1.fill_between(self.ct_wavelengths_common,
+                ax1.plot(wl_plot, primary_mean, 'b-', linewidth=2, label='Mean')
+                ax1.fill_between(wl_plot,
                                primary_mean - primary_std,
                                primary_mean + primary_std,
                                alpha=0.3, color='b', label='±1 Std')
@@ -48858,8 +48061,8 @@ External Validation Performance (n={n_val}):
                 ax2 = fig.add_subplot(132)
                 satellite_mean = np.mean(satellite_data, axis=0)
                 satellite_std = np.std(satellite_data, axis=0)
-                ax2.plot(self.ct_wavelengths_common, satellite_mean, 'r-', linewidth=2, label='Mean')
-                ax2.fill_between(self.ct_wavelengths_common,
+                ax2.plot(wl_plot, satellite_mean, 'r-', linewidth=2, label='Mean')
+                ax2.fill_between(wl_plot,
                                satellite_mean - satellite_std,
                                satellite_mean + satellite_std,
                                alpha=0.3, color='r', label='±1 Std')
@@ -48873,8 +48076,8 @@ External Validation Performance (n={n_val}):
                 ax3 = fig.add_subplot(133)
                 trans_mean = np.mean(transferred_data, axis=0)
                 trans_std = np.std(transferred_data, axis=0)
-                ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
-                ax3.fill_between(self.ct_wavelengths_common,
+                ax3.plot(wl_plot, trans_mean, 'g-', linewidth=2, label='Mean')
+                ax3.fill_between(wl_plot,
                                trans_mean - trans_std,
                                trans_mean + trans_std,
                                alpha=0.3, color='g', label='±1 Std')
@@ -48887,21 +48090,12 @@ External Validation Performance (n={n_val}):
                 fig.tight_layout()
                 return fig
 
-            # Compute all derivatives
-            primary_d1 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 1)
-            satellite_d1 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 1)
-            transferred_d1 = compute_derivative(X_transferred, self.ct_wavelengths_common, 1)
-
-            primary_d2 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 2)
-            satellite_d2 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 2)
-            transferred_d2 = compute_derivative(X_transferred, self.ct_wavelengths_common, 2)
-
-            # Tab 1: Raw spectra
+            # Tab 1: Raw spectra (drawn first so a derivative failure cannot hide it)
             tab_raw = ttk.Frame(derivative_notebook)
             derivative_notebook.add(tab_raw, text='Raw Spectra')
 
             fig_raw = create_comparison_figure(
-                self.ct_X_primary_common, self.ct_X_satellite_common, X_transferred,
+                X_pri, X_sat, X_transferred,
                 self._get_spectral_ylabel(), 'Spectra'
             )
 
@@ -48910,45 +48104,50 @@ External Validation Performance (n={n_val}):
             canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             self._add_plot_export_button(tab_raw, fig_raw, "transfer_quality_raw")
 
-            # Tab 2: 1st derivative
-            tab_d1 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d1, text='1st Derivative')
-
-            fig_d1 = create_comparison_figure(
-                primary_d1, satellite_d1, transferred_d1,
-                '1st Derivative', '(1st Derivative)'
-            )
-
-            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
-            canvas_d1.draw()
-            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d1, fig_d1, "transfer_quality_1st_deriv")
-
-            # Tab 3: 2nd derivative
-            tab_d2 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d2, text='2nd Derivative')
-
-            fig_d2 = create_comparison_figure(
-                primary_d2, satellite_d2, transferred_d2,
-                '2nd Derivative', '(2nd Derivative)'
-            )
-
-            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
-            canvas_d2.draw()
-            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
+            # Tabs 2-3: derivatives, only when the region is wide enough
+            if deriv_window is None:
+                tab_note = ttk.Frame(derivative_notebook)
+                derivative_notebook.add(tab_note, text='Derivatives')
+                ttk.Label(
+                    tab_note,
+                    text=(f"Derivative plots need at least 3 wavelengths; "
+                          f"this region has {len(wl_plot)}."),
+                ).pack(anchor='w', padx=10, pady=10)
+            else:
+                try:
+                    for order, tab_text, ylabel, suffix, export_name in (
+                        (1, '1st Derivative', '1st Derivative', '(1st Derivative)',
+                         "transfer_quality_1st_deriv"),
+                        (2, '2nd Derivative', '2nd Derivative', '(2nd Derivative)',
+                         "transfer_quality_2nd_deriv"),
+                    ):
+                        tab_d = ttk.Frame(derivative_notebook)
+                        derivative_notebook.add(tab_d, text=tab_text)
+                        fig_d = create_comparison_figure(
+                            compute_derivative(X_pri, wl_plot, order),
+                            compute_derivative(X_sat, wl_plot, order),
+                            compute_derivative(X_transferred, wl_plot, order),
+                            ylabel, suffix,
+                        )
+                        canvas_d = FigureCanvasTkAgg(fig_d, tab_d)
+                        canvas_d.draw()
+                        canvas_d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                        self._add_plot_export_button(tab_d, fig_d, export_name)
+                except Exception:
+                    logging.getLogger(__name__).exception("Transfer derivative plots failed")
 
             # === Plot 2: Transfer Scatter Plot ===
             fig2 = Figure(figsize=(7, 6))
             ax = fig2.add_subplot(111)
 
-            # Flatten arrays for scatter plot
-            primary_flat = self.ct_X_primary_common.ravel()
-            transferred_flat = X_transferred.ravel()
-
-            # Calculate R²
-            from sklearn.metrics import r2_score
-            r2 = r2_score(primary_flat, transferred_flat)
+            # Agreement on the standards the transfer was fitted on (resubstitution,
+            # not a validation). For slope/bias only the selected standards were
+            # fitted, so the other loaded rows are left out rather than mixed in.
+            r2, fit_rows = ct_spectral_agreement_on_fit_rows(
+                X_pri, X_transferred, method, self.ct_transfer_model.params
+            )
+            primary_flat = X_pri[fit_rows].ravel()
+            transferred_flat = X_transferred[fit_rows].ravel()
 
             # Scatter plot with alpha for density
             ax.scatter(primary_flat, transferred_flat, alpha=0.3, s=10, edgecolors='none')
@@ -48960,8 +48159,11 @@ External Validation Performance (n={n_val}):
 
             ax.set_xlabel('Primary Spectra Values', fontsize=11)
             ax.set_ylabel('Transferred Satellite Values', fontsize=11)
-            ax.set_title(f'Transfer Quality Scatter Plot (R² = {r2:.4f})',
-                        fontsize=12, fontweight='bold')
+            ax.set_title(
+                f"{CT_AGREEMENT_TITLE}\nR² = {r2:.4f} on the {len(fit_rows)} fitting standards",
+                fontsize=11,
+                fontweight="bold",
+            )
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3)
 
@@ -48976,6 +48178,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(self.ct_transfer_plot_frame, fig2, "transfer_scatter")
 
         except Exception as e:
+            logging.getLogger(__name__).exception("Transfer quality plot failed")
             print(f"Error creating transfer quality plots: {str(e)}")
 
     def _plot_equalization_quality(self, instruments_data, equalized_data, common_grid):
@@ -49424,7 +48627,7 @@ External Validation Performance (n={n_val}):
 
     def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths, model_data_type=None):
         """Display transfer model information in text widget."""
-        info_text = f"Method: {method}\n"
+        info_text = f"Method: {ct_method_display_name(method)} (saved key '{method}')\n"
         info_text += f"Primary ID: {primary_id}\n"
         info_text += f"Satellite ID: {satellite_id}\n"
         info_text += f"Date Created: {date_created}\n"
@@ -49480,7 +48683,7 @@ External Validation Performance (n={n_val}):
             # Extract model info
             method = getattr(transfer_model, 'method', 'Unknown')
             if isinstance(method, str):
-                method_str = method.upper()
+                method_str = ct_method_display_name(method)
             else:
                 method_str = str(method).upper()
 
@@ -49950,13 +49153,17 @@ External Validation Performance (n={n_val}):
                 params = {'B': B, 'window': window}
 
             elif method == 'tsr':
-                n_samples = int(self.ct_tsr_n_samples_var.get())
-                if n_samples > X_primary_common.shape[0]:
-                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-                # TSR requires transfer_indices: assume all loaded samples are paired
-                transfer_indices = np.arange(n_samples)
-                params = estimate_tsr(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                     transfer_indices)
+                # Per-wavelength slope/bias. Loaded rows are paired standards; use all
+                # of them, or a Kennard-Stone subset of the requested size (QW2: this
+                # used to take the first n rows although the tooltip promised KS).
+                from spectral_predict.calibration_transfer import select_transfer_standards
+
+                n_standards = parse_transfer_standards_count(self.ct_tsr_n_samples_var.get())
+                transfer_indices = select_transfer_standards(X_primary_common, n_standards)
+                params = estimate_tsr(X_primary_common, X_satellite_common, transfer_indices)
+                params["standard_selection"] = (
+                    "all" if len(transfer_indices) == X_primary_common.shape[0] else "kennard-stone"
+                )
 
             elif method == 'ctai':
                 params = estimate_ctai(X_primary_common, X_satellite_common)
@@ -50008,10 +49215,6 @@ External Validation Performance (n={n_val}):
                     # Extract Y values for selected transfer samples (REAL VALUES!)
                     y_transfer = y_paired[transfer_indices]
 
-                    # Use selected samples for building
-                    X_primary_transfer = X_primary_paired[transfer_indices]
-                    X_satellite_transfer = X_satellite_paired[transfer_indices]
-
                     # Show info about Y values used
                     y_min, y_max = y_transfer.min(), y_transfer.max()
                     y_mean, y_std = y_transfer.mean(), y_transfer.std()
@@ -50022,27 +49225,23 @@ External Validation Performance (n={n_val}):
                         f"Y mean: {y_mean:.3f} ± {y_std:.3f}\n\n"
                         f"Selected using Kennard-Stone algorithm.")
 
-                    params = estimate_jypls_inv(X_primary_transfer, X_satellite_transfer,
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # transfer_indices index the paired arrays, so pass those (passing
+                    # the already-subset rows indexed them twice).
+                    params = estimate_jypls_inv(
+                        X_primary_paired,
+                        X_satellite_paired,
+                        y_transfer,
+                        transfer_indices,
+                        n_components=n_components,
+                    )
 
                 else:
-                    # Simple loading: Fall back to placeholder (not recommended)
-                    if n_samples > X_primary_common.shape[0]:
-                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-
-                    messagebox.showwarning("JYPLS-inv Limitation",
-                        "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
-                        "Building with placeholder zeros because enhanced loading was not used.\n\n"
-                        "For accurate results, use the 'Load Primary/Satellite Data with Y values' section above.\n"
-                        "Otherwise, consider using CTAI or NS-PFCE instead, which don't require reference values.")
-
-                    y_transfer = np.zeros(n_samples)  # Placeholder
-                    transfer_indices = np.arange(n_samples)
-
-                    params = estimate_jypls_inv(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # No measured reference values: refuse rather than substitute zeros (R091).
+                    raise ValueError(
+                        "JYPLS-inv needs a measured reference value (y) for every transfer "
+                        "standard. Load primary and satellite data with y values, or use "
+                        "another method."
+                    )
 
             else:
                 raise ValueError(f"Unknown method: {method}")
@@ -50088,8 +49287,15 @@ External Validation Performance (n={n_val}):
 
             # Update info display
             info_text = f"Transfer Model Built Successfully!\n"
-            info_text += f"Method: {method.upper()}\n"
-            info_text += f"Training Samples: {X_primary_common.shape[0]}\n"
+            info_text += f"Method: {ct_method_display_name(method)}\n"
+            info_text += f"Paired standards loaded: {X_primary_common.shape[0]}\n"
+            if method == "tsr":
+                how = (
+                    "all loaded pairs"
+                    if params.get("standard_selection") == "all"
+                    else "Kennard-Stone subset"
+                )
+                info_text += f"Standards used in fit: {len(params['transfer_indices'])} ({how})\n"
             info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
             if roi_meta:
                 info_text += (
@@ -54295,7 +53501,7 @@ External Validation Performance (n={n_val}):
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry("550x450")
+        dialog.geometry(_px_geometry("550x450", self.root))
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -54404,7 +53610,7 @@ External Validation Performance (n={n_val}):
                     transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
-                description = f"{transfer_model.method.upper()}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
+                description = f"{ct_method_display_name(transfer_model.method)}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
 
                 # Add to list maintaining order
                 self.transfer_models.append({
@@ -55248,10 +54454,14 @@ External Validation Performance (n={n_val}):
         ct_guide_title.pack(anchor='w', pady=(0, 8))
 
         ct_decision_content = (
-            "Same wavelength range + 10+ standards:  PDS (Piecewise Direct Standardization)\n"
-            "Same wavelength range + <10 standards:  DS (Direct Standardization)\n"
-            "Different wavelength ranges:            CTAI (Cross-Transfer Adaptive Interpolation)\n"
-            "No transfer standards available:        Feature-based matching methods"
+            "Every method here needs paired standards: the same samples measured on both\n"
+            "instruments, row for row, on one common wavelength grid.\n"
+            "Default:                      Slope/bias per wavelength (2 coefficients per wavelength)\n"
+            "Wavelength shift / bandwidth: PDS (local window of neighbouring wavelengths)\n"
+            "DS, PC-DS, Iterative ridge DS: full-matrix maps; with few standards they can fit\n"
+            "                              the standards closely and do worse on new samples.\n"
+            "The agreement plot below is computed on the fitting standards, not a validation:\n"
+            "check any transfer on standards that were not used to fit it."
         )
         ct_decision_label = tk.Label(
             ct_guide_frame,
@@ -55458,7 +54668,8 @@ External Validation Performance (n={n_val}):
         method_buttons_frame = ttk.Frame(method_section)
         method_buttons_frame.pack(fill='x', pady=(0, 10))
 
-        self.ct_method_var = tk.StringVar(value='nspfce')
+        # Default: per-wavelength slope/bias (key 'tsr'); fewest coefficients (QW2).
+        self.ct_method_var = tk.StringVar(value=CT_DEFAULT_METHOD)
 
         # DS method
         ds_radio = ttk.Radiobutton(method_buttons_frame, text="DS",
@@ -55472,27 +54683,44 @@ External Validation Performance (n={n_val}):
         pds_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(pds_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_PDS'], delay=500)
 
-        # TSR method
-        tsr_radio = ttk.Radiobutton(method_buttons_frame, text="TSR",
-                                    variable=self.ct_method_var, value='tsr')
+        # Slope/bias per wavelength (stored key 'tsr'; not trimmed scores regression)
+        tsr_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("tsr", short=True),
+            variable=self.ct_method_var,
+            value="tsr",
+        )
         tsr_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(tsr_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_TSR'], delay=500)
 
-        # CTAI method
-        ctai_radio = ttk.Radiobutton(method_buttons_frame, text="CTAI",
-                                     variable=self.ct_method_var, value='ctai')
+        # PC-DS (stored key 'ctai'; not the published CTAI)
+        ctai_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("ctai", short=True),
+            variable=self.ct_method_var,
+            value="ctai",
+        )
         ctai_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(ctai_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_CTAI'], delay=500)
 
-        # NS-PFCE method
-        nspfce_radio = ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
-                                       variable=self.ct_method_var, value='nspfce')
+        # Iterative ridge DS (stored key 'nspfce'; a dasp heuristic, not PFCE)
+        nspfce_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("nspfce", short=True),
+            variable=self.ct_method_var,
+            value="nspfce",
+        )
         nspfce_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(nspfce_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_NSPFCE'], delay=500)
 
         # JYPLS-inv method
-        jypls_radio = ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
-                                      variable=self.ct_method_var, value='jypls-inv', state='disabled')
+        jypls_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("jypls-inv", short=True),
+            variable=self.ct_method_var,
+            value="jypls-inv",
+            state="disabled",
+        )
         jypls_radio.pack(side='left')
         CreateToolTip(jypls_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_JYPLS'], delay=500)
 
@@ -55529,12 +54757,15 @@ External Validation Performance (n={n_val}):
         row2 = ttk.Frame(params_frame)
         row2.pack(fill='x', pady=(0, 5))
 
-        # TSR Samples
-        tsr_samples_label = ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20)
+        # Slope/bias standards (stored as ct_tsr_n_samples_var)
+        tsr_samples_label = ttk.Label(
+            row2, text="Slope/bias standards:", style="CardLabel.TLabel", width=20
+        )
         tsr_samples_label.pack(side='left')
         CreateToolTip(tsr_samples_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
 
-        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        # 'All' = every loaded pair; a number = that many chosen by Kennard-Stone.
+        self.ct_tsr_n_samples_var = tk.StringVar(value="All")
         tsr_samples_entry = ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12)
         tsr_samples_entry.pack(side='left', padx=(0, 20))
         CreateToolTip(tsr_samples_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
@@ -55565,8 +54796,10 @@ External Validation Performance (n={n_val}):
         jypls_comp_combo.pack(side='left', padx=(0, 20))
         CreateToolTip(jypls_comp_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
 
-        # NS-PFCE Max Iter
-        nspfce_maxiter_label = ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20)
+        # Iterative ridge DS max iterations (stored as nspfce_*)
+        nspfce_maxiter_label = ttk.Label(
+            row3, text="Ridge DS Max Iter:", style="CardLabel.TLabel", width=20
+        )
         nspfce_maxiter_label.pack(side='left')
         CreateToolTip(nspfce_maxiter_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_max_iter'], delay=500)
 
@@ -55579,16 +54812,18 @@ External Validation Performance (n={n_val}):
         row4 = ttk.Frame(params_frame)
         row4.pack(fill='x')
 
-        # NS-PFCE Wavelength Selection
-        # Default to False - NS-PFCE works great without WL selection (faster, full spectrum output)
-        # When WL selection is enabled, output is reduced to only selected wavelengths
+        # Iterative ridge DS wavelength selection (stored as nspfce_*): off by default.
+        # When enabled, output is reduced to only the selected wavelengths.
         self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=False)
-        nspfce_wavsel_check = ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
-                                              variable=self.ct_nspfce_use_wavelength_selection_var)
+        nspfce_wavsel_check = ttk.Checkbutton(
+            row4,
+            text="Iterative ridge DS: Use Wavelength Selection",
+            variable=self.ct_nspfce_use_wavelength_selection_var,
+        )
         nspfce_wavsel_check.pack(side='left', padx=(0, 20))
         CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        # NS-PFCE Selector (only used when wavelength selection is enabled)
+        # Iterative ridge DS selector (only used when wavelength selection is enabled)
         nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
         nspfce_selector_label.pack(side='left')
         CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
@@ -57487,7 +56722,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             preview_win = tk.Toplevel(self.root)
             preview_win.title(f"Preview: {sample_id}")
-            preview_win.geometry("800x400")
+            preview_win.geometry(_px_geometry("800x400", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=preview_win)
             canvas.draw()
@@ -57704,7 +56939,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             compare_win = tk.Toplevel(self.root)
             compare_win.title(f"Comparison: {sample_id} vs {result_id}")
-            compare_win.geometry("1000x500")
+            compare_win.geometry(_px_geometry("1000x500", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=compare_win)
             canvas.draw()
@@ -60846,7 +60081,7 @@ External Validation Performance (n={n_val}):
         # Show in popup window
         popup = tk.Toplevel(self.root)
         popup.title("Correction Comparison")
-        popup.geometry("900x500")
+        popup.geometry(_px_geometry("900x500", self.root))
 
         canvas = FigureCanvasTkAgg(fig, master=popup)
         canvas.draw()
@@ -62340,6 +61575,14 @@ def main():
         _logging.getLogger("spectral_predict").debug(
             "T-50: cleanup failed (non-fatal)", exc_info=True
         )
+
+    # High-DPI: must run before tk.Tk(), or Windows bitmap-stretches the whole UI on
+    # scaled displays. Runs after the app logger so a failure lands in dasp.log. The
+    # frozen exe also declares this in its manifest (spectral_predict_py312.spec).
+    try:
+        _enable_windows_dpi_awareness()
+    except Exception:  # never block startup over a cosmetic setting
+        logger.warning("DPI-awareness setup failed (non-fatal)", exc_info=True)
 
     root = tk.Tk()
 

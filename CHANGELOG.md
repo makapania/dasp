@@ -124,6 +124,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saved regression files with a stale correction cannot be detected automatically**:
   if a model was saved with "apply correction" ticked after more than one run in the
   session, recompute the correction and re-save.
+- **Calibration transfer names and defaults (QW2, R085, R091, R128).** Transfer methods are
+  labelled for what they do: 'ctai' is PC-DS (paired regression in satellite PCA space),
+  'nspfce' is Iterative ridge DS (a dasp heuristic, not PFCE), 'tsr' is per-wavelength
+  slope/bias. Stored keys are unchanged, so saved models still load. Slope/bias is the
+  default and fits on all loaded pairs or a Kennard-Stone subset (it used the first n
+  rows). The agreement plot is labelled as fit-to-standards, not a validation.
+  `sample_selection.kennard_stone` now starts from the true farthest pair.
+- **JYPLS-inv transfer maths rewritten; old JYPLS-inv models are refused.** A JYPLS-inv
+  transfer model saved by an earlier version (no `offset` parameter) now raises
+  "Rebuild the transfer model" when applied (prediction, export and transfer chains),
+  instead of returning spectra without their mean. Rebuild such models. In a multi-model
+  comparison chain the refusal shows as a Transfer Error box and that comparison then
+  falls back to untransferred data (existing behaviour, review R089, not changed here).
+  Missing reference values are rejected instead of being replaced by zeros.
+- **Calibration transfer follow-ups.** JYPLS-inv automatic component selection no longer
+  skips cross-validation when sklearn metadata routing is enabled (it used to pick 1
+  component with an infinite CV error). The transfer-quality plots work for models built
+  on a region of interest (they used to apply the region model to full-width spectra and
+  show nothing), and a region too narrow for derivatives still shows the raw and agreement
+  plots. "Load Existing Transfer Model" shows the method's display name. Saved JSON/NPZ
+  transfer models keep string and numpy-scalar parameters (e.g. the standards-selection
+  mode and PC-DS's auto-selected component count), which used to be dropped.
+
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

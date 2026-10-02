@@ -56,7 +56,7 @@ pytest tests/gui/test_comprehensive.py::TestVariableSelectionViaGUI -v -s
 ```bash
 pytest tests/gui/test_comprehensive.py::TestCalibrationTransfer -v -s
 ```
-- DS, PDS, TSR, CTAI, NS-PFCE, JYPLS-inv
+- DS, PDS, slope/bias per wavelength ('tsr'), PC-DS ('ctai'), Iterative ridge DS ('nspfce'), JYPLS-inv
 - Uses: `C:\Users\sponheim\Desktop\LS Tablet` (master) and `FS Tablet` (slave)
 
 #### Interference Removal
