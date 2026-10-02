@@ -802,6 +802,20 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   - Export Code joins Save/Compute: disabled during a run, refused at method level, config + data from one snapshot.
     `_update_bias_correction_ui(from_run_completion=True)` is the only call allowed during a run (the completion
     callback runs before `_end_refit` clears the flag).
+- **Review round 4 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit result is now ONE frozen `RefinedState` (module level in the GUI) held in `app._refined_state` and
+    replaced by a single assignment; `app.refined_<field>` and `app._refined_model_token` are properties onto it
+    (assigning one replaces the whole object via `dataclasses.replace`). Unset fields raise AttributeError so the
+    many `hasattr(self, 'refined_...')` checks still work. The worker queues publication on the Tk thread
+    (`_publish_refined_state_on_tk_thread`), so Tk callbacks never straddle a swap; off-Tk or update()-calling
+    consumers (learning-curve worker, SHAP) capture `self._refined_state` once.
+  - `RefinedState.training` = the Results row (shallow copy) + autoscale flag captured at worker START; Save
+    metadata and Export read params/Deriv/Poly/imbalance/early stopping/autoscale from it, never from the live
+    selection. GA genes/config/model type are frozen per run (locals), not re-read at publish.
+  - `_refined_state_snapshot()` returns None without a token/model; Save, Export entry and the open dialog's
+    `do_export` refuse then. Loading a Results row is refused while a refit runs.
+  - Tooling gotcha: passing `\\n` through the agent's Bash heredoc arrived as `\n` (escape collapsed), so string
+    anchors containing backslashes silently failed to match; anchor on backslash-free text.
 - **Merge / follow-up items (not fixed here):**
   - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
     (pre-existing; still true with the Y-transform wrapper).

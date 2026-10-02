@@ -113,7 +113,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the nonlinear Compute button wait for the run to finish, a save or export uses one
   consistent snapshot of the model and its correction, a failed run leaves the
   previous model exactly as it was (still savable), and a correction whose model
-  changed while it was being computed is discarded. Prediction
+  changed while it was being computed is discarded. Saved metadata and exported code
+  now take the model's hyperparameters, derivative/polynomial settings, imbalance,
+  early-stopping and autoscale settings from the run that trained it, not from
+  whichever Results row is selected when you click Save or Export. Prediction
   also ignores a correction stored with a non-regression model. **Already
   saved regression files with a stale correction cannot be detected automatically**:
   if a model was saved with "apply correction" ticked after more than one run in the

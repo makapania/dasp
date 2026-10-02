@@ -386,3 +386,167 @@ def test_error_after_valid_model_keeps_save_enabled(gui_app):
     gui_app._update_refined_results("failed mid-swap", is_error=True)
     for name in buttons:
         assert str(getattr(gui_app, name).cget("state")) == "disabled", name
+
+
+# --- Round 4: one immutable published state; Save/Export from it only ------------------
+
+
+def _state_fields(app) -> dict:
+    from spectral_predict_gui_optimized import _REFINED_STATE_FIELDS
+
+    st = app._refined_state
+    return {name: st.get(name) for name in _REFINED_STATE_FIELDS}
+
+
+def test_export_snapshot_preserves_training_params_and_preprocessing(
+    gui_app, tmp_path, monkeypatch
+):
+    """Export/Save describe the trained model A, not Results row B selected later."""
+    import spectral_predict.cv_utils as cvu
+
+    _refit(gui_app, "Ridge", "None", subset=True)  # A: alpha 0.01, sg1 (Poly 2), no autoscale
+    config_a = dict(gui_app.refined_config)
+
+    # Select row B with different settings, toggle autoscale, and let B's run fail.
+    row_b = _row("Ridge", early_stopping=True)
+    row_b.update(Params=str({"alpha": 9.0}), Deriv=2, Poly=3, imbalance_method="binning")
+    gui_app.selected_model_config = row_b
+    gui_app.use_autoscale.set(True)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("run B fails")
+
+    monkeypatch.setattr(cvu, "build_cv_splitter", _boom)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            gui_app._run_refined_model_thread()
+        gui_app.root.update()
+        assert gui_app.refined_config == config_a  # B did not publish
+
+        cfg = gui_app._build_export_model_config()
+        assert cfg["params"] == {"alpha": 0.01}
+        assert cfg["deriv_order"] == 1
+        assert cfg["polyorder"] == 2
+        assert cfg["imbalance_method"] is None
+        assert cfg["early_stopping_rounds"] is None
+        assert cfg["autoscale"] is False
+
+        loaded = _save_and_load(gui_app, tmp_path)
+        meta = loaded["metadata"]
+        assert meta["params"] == str({"alpha": 0.01})
+        assert meta["polyorder"] == 2
+        assert meta["imbalance_method"] is None
+        assert meta["autoscale"] is False
+    finally:
+        gui_app.use_autoscale.set(False)
+
+
+def test_plot_reader_during_publish(gui_app):
+    """A finished worker's publication cannot be seen half-way by any reader."""
+    import dataclasses
+
+    _refit(gui_app, "PLS", "None", subset=True)  # A
+    st_a = gui_app._refined_state
+    n = len(st_a.y_true)
+    state_b = _state_fields(gui_app)
+    state_b.update(y_true=np.arange(n - 5, dtype=float), y_pred=np.arange(n - 5, dtype=float))
+
+    # Worker side: publication is queued for the Tk thread, so a Tk-thread reader
+    # (plots) running before the next event still sees A completely.
+    gui_app._publish_refined_state_on_tk_thread(state_b)
+    assert gui_app._refined_state is st_a
+    assert len(gui_app.refined_y_true) == len(gui_app.refined_y_pred) == n
+    gui_app._plot_refined_predictions()
+
+    # A reader that captured the state keeps one complete run; the object is frozen.
+    gui_app.root.update()
+    assert gui_app._refined_state is not st_a
+    assert len(st_a.y_true) == len(st_a.y_pred) == n
+    assert len(gui_app.refined_y_true) == len(gui_app.refined_y_pred) == n - 5
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        st_a.y_true = None
+
+
+def test_learning_curve_captures_one_refined_state(gui_app, monkeypatch):
+    """The learning-curve worker uses one run's data AND model, even if B publishes."""
+    from sklearn.linear_model import Ridge
+
+    import spectral_predict.cv_utils as cvu
+    import spectral_predict.diagnostics as diagnostics
+
+    _refit(gui_app, "PLS", "None", subset=True)  # A
+    model_a, X_a = gui_app.refined_model, gui_app.refined_X_train
+    state_b = _state_fields(gui_app)
+    state_b.update(model=Ridge(alpha=1.0), X_train=np.asarray(X_a) * 2.0)
+    real_splitter = cvu.build_cv_splitter
+
+    def _splitter_while_b_publishes(*a, **k):
+        gui_app._publish_refined_state(state_b)  # B lands mid-operation
+        return real_splitter(*a, **k)
+
+    captured = {}
+
+    def _capture(estimator, X, y, cv, **_k):
+        captured.update(estimator=estimator, X=X)
+        return {}
+
+    monkeypatch.setattr(cvu, "build_cv_splitter", _splitter_while_b_publishes)
+    monkeypatch.setattr(diagnostics, "compute_learning_curve", _capture)
+    monkeypatch.setattr(gui_app, "_plot_learning_curve", lambda: None)
+    gui_app._run_learning_curve_thread()
+    gui_app.root.update()
+
+    assert type(captured["estimator"]) is type(model_a)
+    assert captured["X"] is X_a
+
+
+def test_open_export_dialog_rejects_failed_publish(gui_app, monkeypatch):
+    """An Export dialog left open must not export a state without a valid token."""
+    import tkinter as tk
+
+    import spectral_predict.code_generator as code_generator
+
+    captured, toplevels = {}, []
+    real_button, real_toplevel = tk.Button, tk.Toplevel
+
+    def _button(*a, **k):
+        if "EXPORT" in str(k.get("text", "")):
+            captured["do_export"] = k["command"]
+        return real_button(*a, **k)
+
+    def _toplevel(*a, **k):
+        win = real_toplevel(*a, **k)
+        toplevels.append(win)
+        return win
+
+    monkeypatch.setattr(tk, "Button", _button)
+    monkeypatch.setattr(tk, "Toplevel", _toplevel)
+    _refit(gui_app, "PLS", "None", subset=True)
+    try:
+        gui_app._export_for_publication()
+        assert "do_export" in captured
+        gui_app._refined_model_token = None  # the publication failed / is incomplete
+        with (
+            patch("tkinter.filedialog.asksaveasfilename") as dialog,
+            patch.object(code_generator, "CodeGenerator") as generator,
+        ):
+            captured["do_export"]()
+        assert not dialog.called and not generator.called
+        assert gui_app._refined_state_snapshot() is None
+    finally:
+        for win in toplevels:
+            win.destroy()
+
+
+def test_loading_results_row_refused_while_refit_runs(gui_app):
+    sentinel = object()
+    gui_app.loaded_model_config = sentinel
+    gui_app._refit_active = True
+    try:
+        with patch("tkinter.messagebox.showwarning") as warn:
+            gui_app._load_model_for_refinement({"Model": "Ridge", "Task": "regression"})
+        assert warn.called
+        assert gui_app.loaded_model_config is sentinel
+    finally:
+        gui_app._refit_active = False
+        gui_app.loaded_model_config = None
