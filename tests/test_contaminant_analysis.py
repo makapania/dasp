@@ -936,12 +936,13 @@ class TestMultiGroupEPOAutomaticCount:
     def test_zero_difference_group_does_not_hide_a_clear_contaminant(self):
         """Codex: adding a small no-difference group suppressed a clear
         contaminant under the summed 9x rule. Rows are now precision-weighted and
-        tested against a bootstrap of the residuals."""
+        tested against a per-group bootstrap. (With a 2-spectrum blank group the
+        test is too conservative to find it; groups of 2-3 need the manual count.)"""
         rng = np.random.default_rng(31)
         X_clean = _spectra(rng, 20)
         groups = {
             "glyptal": _spectra(rng, 20, [(CONTAM, 1.0, 1.0)]),
-            "blank": _spectra(rng, 2),
+            "blank": _spectra(rng, 5),
         }
         epo = MultiGroupEPO().fit(X_clean, groups)
         assert epo.n_components_ == 1
@@ -959,11 +960,46 @@ class TestMultiGroupEPOAutomaticCount:
         assert epo.n_components_ == 1
         assert _share_removed(epo, CONTAM) > 0.95
 
+    # Power regressions (GLM round 2, L6): these scenarios FAIL with the summed 9x
+    # rule of commit 0205c32 (4/20 and 1/20 detections on the same seeds) and pass
+    # here. A hit must also remove the contaminant, not just "find something".
+
+    @staticmethod
+    def _detections(make, seeds):
+        found, removed = 0, []
+        for seed in seeds:
+            clean, groups = make(np.random.default_rng(seed))
+            epo = MultiGroupEPO().fit(clean, groups)
+            if epo.n_components_ >= 1:
+                found += 1
+                removed.append(_share_removed(epo, CONTAM))
+        return found, removed
+
+    def test_contaminant_in_one_of_three_groups_power(self):
+        def make(rng):
+            groups = {f"g{i}": _spectra(rng, 20) for i in range(2)}
+            groups["treated"] = _spectra(rng, 20, [(CONTAM, 0.45, 0.45)])
+            return _spectra(rng, 20), groups
+
+        found, removed = self._detections(make, range(200, 220))
+        assert found >= 18
+        assert np.median(removed) > 0.9
+
+    def test_extra_blank_group_does_not_dilute_power(self):
+        def make(rng):
+            clean = _spectra(rng, 20)
+            return clean, {"glyptal": _spectra(rng, 20, [(CONTAM, 0.35, 0.35)]),
+                           "blank": _spectra(rng, 10)}
+
+        found, removed = self._detections(make, range(300, 320))
+        assert found >= 17
+        assert np.median(removed) > 0.9
+
     def test_unequal_group_sizes(self):
         rng = np.random.default_rng(33)
         X_clean = _spectra(rng, 25)
         groups = {
-            "small": _spectra(rng, 4, [(CONTAM, 0.6, 1.4)]),
+            "small": _spectra(rng, 8, [(CONTAM, 0.6, 1.4)]),
             "large": _spectra(rng, 40, [(CONTAM_2, 0.6, 1.4)]),
         }
         epo = MultiGroupEPO().fit(X_clean, groups)
@@ -971,18 +1007,63 @@ class TestMultiGroupEPOAutomaticCount:
         assert _share_removed(epo, CONTAM) > 0.95
         assert _share_removed(epo, CONTAM_2) > 0.95
 
-    def test_false_positive_rate_without_contaminant(self):
-        """Controlled synthetic case, alpha = 0.01: about 1% of runs on groups
-        from one population should remove anything. Allow up to 4/60."""
+    # False-positive tests: 200 runs at alpha = 0.01, pass at <= 5 removals. A method
+    # whose true rate is 1% passes with probability ~0.98; one at 5% passes with
+    # probability ~0.06 (binomial), so these tests can tell the two apart. Seeds are
+    # fixed, so the outcome is deterministic. Controlled synthetic data only.
+
+    @staticmethod
+    def _null_rate(make, runs=200):
         hits = 0
-        for seed in range(60):
-            rng = np.random.default_rng(1000 + seed)
-            X_clean = _spectra(rng, 8)
-            groups = {"a": _spectra(rng, 8), "b": _spectra(rng, 8)}
+        for seed in range(runs):
+            clean, groups = make(np.random.default_rng(1000 + seed))
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                hits += MultiGroupEPO().fit(X_clean, groups).n_components_ > 0
-        assert hits <= 4
+                hits += MultiGroupEPO().fit(clean, groups).n_components_ > 0
+        return hits
+
+    @staticmethod
+    def _gaussian_spectra(rng, n, sd):
+        """Analyte score N(1, sd) along one direction; identical means across groups."""
+        return BASELINE + np.outer(1 + rng.normal(0, sd, n), ANALYTE) + rng.normal(
+            0, 0.002, (n, N_WL))
+
+    def test_false_positive_rate_without_contaminant(self):
+        hits = self._null_rate(
+            lambda r: (_spectra(r, 8), {"a": _spectra(r, 8), "b": _spectra(r, 8)}))
+        assert hits <= 5
+
+    def test_auto_rank_heteroscedastic_small_group_null(self):
+        """Codex round 2: a small, four times more variable group (n=5, SD x4) vs a
+        large reference was flagged 25% of the time by the pooled bootstrap."""
+        g = self._gaussian_spectra
+        hits = self._null_rate(lambda r: (g(r, 50, 0.25), {"grp": g(r, 5, 1.0)}))
+        assert hits <= 5
+
+    def test_auto_rank_heteroscedastic_small_reference_null(self):
+        """Codex round 2: a small, more variable reference (n=5, SD x4) vs two large
+        groups was flagged 35% of the time by the pooled bootstrap."""
+        g = self._gaussian_spectra
+        hits = self._null_rate(
+            lambda r: (g(r, 5, 1.0), {"a": g(r, 50, 0.25), "b": g(r, 50, 0.25)}))
+        assert hits <= 5
+
+    def test_auto_rank_zero_capacity_has_defined_behavior(self):
+        """Codex F4: one wavelength left no removable direction and indexed p_values_[0]."""
+        X_clean = np.random.default_rng(1).normal(size=(6, 1))
+        groups = {"g": X_clean + 5.0}
+        with pytest.warns(UserWarning, match="No direction can be removed"):
+            epo = MultiGroupEPO().fit(X_clean, groups)
+        assert epo.n_components_ == 0
+        with pytest.raises(ValueError, match="n_components_per_group"):
+            MultiGroupEPO(n_components_per_group=0).fit(X_clean, groups)
+
+    def test_failed_fit_leaves_no_fitted_state(self):
+        epo = MultiGroupEPO()
+        with pytest.raises(ValueError, match="at least 2 spectra"):
+            epo.fit(np.ones((1, 4)), {"g": np.ones((3, 4))})
+        assert not hasattr(epo, "n_features_in_")
+        assert not hasattr(epo, "combined_interferent_library_")
 
     def test_singletons_do_not_imply_zero_uncertainty(self):
         """Codex/GLM: one spectrum per group gave a zero noise floor, so noise
@@ -1003,6 +1084,37 @@ class TestMultiGroupEPOAutomaticCount:
         b = MultiGroupEPO().fit(X_clean, groups)
         assert a.p_values_ == b.p_values_
         np.testing.assert_array_equal(a.P_orth_, b.P_orth_)
+
+
+class TestMultiContaminantAnalyzerSingletons:
+    """GLM round 2: singleton groups made fit half-succeed and transform raise."""
+
+    def test_singleton_group_warns_at_fit_and_still_corrects(self):
+        rng = np.random.default_rng(41)
+        X_clean = _spectra(rng, 10)
+        groups = {"one": _spectra(rng, 1, [(CONTAM, 1.0, 1.0)])}
+        with pytest.warns(UserWarning, match="single spectrum"):
+            analyzer = MultiContaminantAnalyzer().fit(X_clean, groups)
+        assert analyzer.joint_epo_.n_components_ == 1
+        assert analyzer.transform(X_clean).shape == X_clean.shape
+
+    def test_zero_direction_warning_is_not_hidden(self):
+        rng = np.random.default_rng(42)
+        X_clean = _spectra(rng, 10)
+        with pytest.warns(UserWarning, match="removes nothing"):
+            MultiContaminantAnalyzer().fit(X_clean, {"same": _spectra(rng, 10)})
+
+    def test_analyze_multiple_contaminants_keeps_partial_results(self):
+        rng = np.random.default_rng(43)
+        X_clean = _spectra(rng, 10)
+        groups = {"a": _spectra(rng, 10, [(CONTAM, 1, 1)]), "single": _spectra(rng, 1)}
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = analyze_multiple_contaminants(X_clean, groups, method="all")
+        assert "epo" not in results
+        assert results["notes"] and "EPO directions to remove" in results["notes"][0]
+        assert "difference" in results and "glsw" in results
+        assert results["combined_influence"].shape == (N_WL,)
 
 
 class TestMultiContaminantAnalyzerTransform:
@@ -1400,6 +1512,24 @@ class TestLegacyPickles:
         assert epo.fit_version_ >= 2
         np.testing.assert_allclose(epo.transform(self.X_new), self.X_new @ epo.P_orth_)
 
+    @pytest.mark.parametrize("center", [True, False])
+    def test_legacy_epo_get_params_clone_and_refit(self, center):
+        """Codex round 2: unpickled old MultiGroupEPO lacked alpha/n_resamples/
+        random_state, so get_params, clone and refit raised AttributeError."""
+        from sklearn.base import clone
+
+        mg = _legacy(MultiGroupEPO, self._old_state(
+            n_components_per_group=2, n_total_components=None, center=center, svd_tol=1e-8,
+            group_labels_=["a"], combined_interferent_library_=np.ones((1, 10))))
+        params = mg.get_params()
+        assert params["alpha"] == 0.01 and params["n_resamples"] == 999
+        assert not hasattr(mg, "fit_version_")  # still replays the old projection
+        with pytest.warns(UserWarning, match="older dasp"):
+            np.testing.assert_allclose(mg.transform(self.X_new), (self.X_new - self.mean) @ self.P)
+        clone(mg)
+        mg.fit(self.X[:10], {"a": self.X[10:] + 3.0})
+        assert mg.fit_version_ >= 2
+
     def test_legacy_multi_contaminant_analyzer_replays_sequential_projection(self):
         P2 = np.eye(10) - np.outer(np.eye(10)[0], np.eye(10)[0])
         e1 = _legacy(EstimatedEPO, self._old_state())
@@ -1408,4 +1538,15 @@ class TestLegacyPickles:
             "n_epo_components": 2, "estimation_method": "pca_diff", "aggregation": "max",
             "random_state": 42, "n_features_in_": 10, "contaminant_labels_": ["a", "b"],
             "epo_transformers_": {"a": e1, "b": e2}, "X_uncontaminated_": self.X})
-        np.testing.assert_allclose(mca.transform(self.X_new), self.X_new @ self.P @ P2)
+        with pytest.warns(UserWarning, match="older dasp"):
+            np.testing.assert_allclose(mca.transform(self.X_new), self.X_new @ self.P @ P2)
+
+
+class TestEstimatedEPOFitValidation:
+    def test_fit_checks_params(self):
+        """GLM round 2: fit() now validates like fit_groups()."""
+        X = np.random.default_rng(0).normal(size=(10, 5))
+        with pytest.raises(ValueError, match="removed"):
+            EstimatedEPO(estimation_method="bootstrap").fit(X, X_interferents=X[:2])
+        with pytest.raises(ValueError, match="n_components"):
+            EstimatedEPO(n_components=-1).fit(X, X_interferents=X[:2])

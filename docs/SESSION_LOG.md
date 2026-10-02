@@ -805,3 +805,33 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   in-place edit kept object identity); EPO "directions to remove" (auto/1-5) and an unpaired-groups caution;
   "auto found nothing" is an information dialog with the override hint. Pairing is NOT offered: the loaders
   discard contaminated-group sample names and the combined import has no specimen-ID column.
+
+## 2026-10-02 - fix/contaminant-maths round 3 (Codex BLOCK / GLM merge-with-fixes on a5b17f2)
+- **The pooled residual bootstrap assumed one within-group covariance.** With identical means and no
+  contaminant it removed a direction in 25% of runs (reference n=50 SD1 vs group n=5 SD4) and 34%
+  (reference n=5 SD4 vs two groups n=50 SD1), 400 runs each. Replaced by a per-group bootstrap: each
+  group's mean error is drawn from its OWN residuals (rescaled sqrt(n/(n-1)), random signs), one shared
+  reference draw per replicate, and each group's error multiplied by sqrt(df/chi2_df), df = n_g - 1 (a
+  Behrens-Fisher-type predictive; the global F/chi2 factor and a min-Welch-df factor were dropped - the
+  latter made any 2-spectrum group veto everything). False positives at alpha 0.01, 400 runs: Codex
+  heteroscedastic cases 0.5% / 1.5% / 0.25% (10/10/10, ref SD4) / 0.25% (equal SD 50 vs 5); GLM grid k=2-4,
+  n=2-40: 0-1.25% (0% at n<=5: conservative). Pooled a5b17f2 on the same cells: 25% / 34% / 4.5% / 1.75%,
+  grid 0.5-2.75%.
+- **Cost: power at small n.** Detection (400 runs; among hits, median contaminant energy removed):
+  all groups, dose 0.5: n=5 0.03 (75%), n=10 0.97 (97%); dose 0.2: n=40 0.99 (95%), n<=10 <=0.02. One of
+  k groups: k=2 n=10 d=0.5 0.48 (94%); k=2 n=5 d=1 0.43 (97%); k=4 n=5 d=1 0.04; k=4 n=10 d=1 1.00 (99%).
+  The pooled version found far more at n=5 (k=4 n=5 d=1: 0.96) but at the false-positive cost above. With
+  groups of 2-3 spectra the test essentially never removes anything; a 2-spectrum blank group makes the
+  max statistic too heavy-tailed to find a clear contaminant elsewhere (Codex blank case 0.94 -> 0.01).
+  Accepted because the GUI count is now advisory and has a manual choice.
+- Benchmark "hits" now report removal quality too: low-power cells' hits remove 13-40% of the contaminant
+  (Codex saw 22% for n=5 dose 0.2), so a bare detection rate overstated usefulness.
+- Other fixes: `__setstate__` migrates constructor params of old MultiGroupEPO (alpha/n_resamples/
+  random_state) and interference.EPO (library_type = 'samples' iff old center=True, matching what the old
+  code did) so clone/refit work without stamping fit_version_; Apply/Restore clear an unrebuildable holdout
+  (`_reset_validation_set`); MultiContaminantAnalyzer warns and falls back to all group directions for
+  singleton groups and no longer hides "removes nothing"; analyze_multiple_contaminants keeps partial
+  results with a GUI-worded note; zero-capacity (one wavelength) no longer IndexErrors; failed fits leave no
+  half-fitted state; bootstrap chunks sized to ~64 MB.
+- 0205c32 (round 1) never left this branch, so pickles fitted by it (corrected method, no fit_version_)
+  would wrongly take the legacy path; no action: only f6a2287-and-earlier pickles exist in the wild.

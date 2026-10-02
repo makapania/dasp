@@ -326,6 +326,12 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         If True, append a StandardScaler step (mean-center + unit variance per
         wavelength column) AFTER SNV/derivatives and BEFORE imbalance handling.
         UV scaling — equivalent to SIMCA's default scaling for PLS.
+    interference : dict, optional
+        Interference-removal settings. ``interference['advanced']['epo']`` accepts
+        ``library_type``: 'samples' (default; library rows are whole spectra and are
+        differenced from their mean) or 'differences' (pure interferent or difference
+        spectra, used uncentred). 'samples' is what released versions did with the
+        default ``center=True``; use 'differences' for a pure-interferent library.
 
     Returns
     -------

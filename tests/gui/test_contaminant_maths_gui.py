@@ -208,6 +208,62 @@ class TestRoundTwoGuards:
         contam_app.invoke_method("_contam_apply_correction")
         assert app.contam_epo_transformer.n_components_ == 1
 
+    def test_auto_count_is_advisory_cancel_changes_nothing(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        X_before = app.X.copy()
+        with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+            app._contam_apply_correction()
+        assert ask.called and "suggests removing 1" in ask.call_args[0][1]
+        pd.testing.assert_frame_equal(app.X, X_before)
+        assert "Cancelled" in app.contam_apply_status_label.cget("text")
+
+    def test_auto_count_choose_a_number(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Contaminant Groups")
+        with (
+            patch("tkinter.messagebox.askyesnocancel", return_value=False),
+            patch("tkinter.simpledialog.askinteger", return_value=1) as pick,
+        ):
+            app._contam_apply_correction()
+        assert pick.called
+        assert app.contam_epo_transformer.n_total_components == 1
+
+    def test_missing_holdout_id_clears_the_holdout(self, contam_app):
+        """Codex round 2: a holdout that cannot be rebuilt must not stay usable."""
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        ids = list(app.X.index[:4]) + ["NOT_IN_X"]
+        app.validation_indices = set(ids)
+        app.validation_X = pd.concat(
+            [app.X.loc[ids[:4]], app.X.loc[ids[:1]].rename(index={ids[0]: "NOT_IN_X"})]
+        )
+        app.validation_y = pd.Series(np.arange(5.0), index=ids)
+        app.validation_enabled.set(True)
+        with patch("tkinter.messagebox.showinfo") as info:
+            app._contam_apply_correction()
+        assert app.validation_X is None and app.validation_y is None
+        assert not app.validation_indices
+        assert app.validation_enabled.get() is False
+        assert "CLEARED" in info.call_args[0][1]
+
+    def test_detection_with_single_spectrum_group_reports_note(self, contam_app):
+        """GLM round 2: Tab 13C aborted entirely, with an API-worded message."""
+        app = contam_app.app
+        rng = np.random.default_rng(5)
+        app.contam_groups = {
+            "Glyptal": _spectra(rng, 20, contaminated=True),
+            "Single": _spectra(rng, 1, contaminated=True),
+        }
+        app.contam_method.set("Estimated EPO")
+        with (
+            patch("tkinter.messagebox.showinfo") as info,
+            patch("tkinter.messagebox.showerror") as err,
+        ):
+            app._contam_run_automated_detection()
+        assert not err.called, err.call_args
+        assert "EPO directions to remove" in info.call_args[0][1]
+
     def test_epo_success_message_carries_the_caution(self, contam_app):
         app = contam_app.app
         app.contam_apply_source.set("Contaminant Groups")

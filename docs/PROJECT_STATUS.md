@@ -31,7 +31,8 @@ Wave 2 stops the app misleading:
    default, MultiGroupEPO noise-floor rank rule, Fearn OSC / Westerhuis DOSC, OPLS-DA filter out of Apply Correction,
    Restore + working Export, all six Interference Application methods run, QW6 dead controls greyed out / use_msc
    removed. Round 2 (review fixes: pickle replay, EPO library_type, bootstrap rank test, holdout resync)
-   on the same branch. Gotchas in SESSION_LOG 2026-10-02 (two entries). Still open: corrections never reach CV/saved models (F3); the
+   on the same branch; round 3: per-group (heteroscedastic) bootstrap, GUI count advisory,
+   holdout invalidation. Gotchas in SESSION_LOG 2026-10-02 (three entries). Still open: corrections never reach CV/saved models (F3); the
    Diagnostics sub-tab reads never-assigned self.X_train/self.wavelengths.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.

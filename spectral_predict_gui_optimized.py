@@ -2668,8 +2668,16 @@ class _ContamNothingToRemove(ValueError):
     """Automatic EPO found no contaminant direction; shown as information, not error."""
 
 
+class _ContamCancelled(Exception):
+    """The user cancelled the EPO count confirmation; nothing is changed."""
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
+
+    # The automatic EPO direction count only suggests; the user confirms before
+    # anything is removed. Set False to apply the suggestion directly.
+    _CONTAM_AUTO_COUNT_ADVISORY = True
 
     def __init__(self, root):
         self.root = root
@@ -59348,11 +59356,13 @@ External Validation Performance (n={n_val}):
             self._contam_plot_spectra_with_exclusions(results)
 
             preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
+            notes = results.get('notes') or []
+            notes_text = ("\n\nNote: " + "\n".join(notes)) if notes else ""
             messagebox.showinfo("Success",
                 f"Automated detection complete!\n"
                 f"Method: {method}{preproc_line}\n"
                 f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
-                f"See influence plot below for details.")
+                f"See influence plot below for details.{notes_text}")
 
         except Exception as e:
             self.contam_detection_status_label.config(
@@ -60245,6 +60255,9 @@ External Validation Performance (n={n_val}):
                 f"Original shape: {X_to_correct.shape}\n"
                 f"Corrected shape: {X_corrected.shape}{restore_note}")
 
+        except _ContamCancelled:
+            self.contam_apply_status_label.config(
+                text="Cancelled: nothing was changed", foreground='gray')
         except _ContamNothingToRemove as e:
             self.contam_apply_status_label.config(
                 text="No contaminant direction found: nothing removed (see message)",
@@ -60299,6 +60312,15 @@ External Validation Performance (n={n_val}):
 
         choice = str(self.contam_epo_components.get()).strip().lower()
         n_total = None if choice in ('', 'auto') else int(choice)
+        n_groups = len(self.contam_groups)
+        sizes = [len(self.contam_clean_data)] + [len(g) for g in self.contam_groups.values()]
+        if n_total is None and min(sizes) < 2:
+            raise _ContamNothingToRemove(
+                "The automatic count needs at least 2 spectra in the clean group and in "
+                "every contaminant group (sampling variation cannot be judged from one "
+                "spectrum), so nothing was removed.\n\nSet 'EPO directions to remove' to a "
+                "number and apply again."
+            )
         epo = MultiGroupEPO(n_total_components=n_total)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -60312,6 +60334,32 @@ External Validation Performance (n={n_val}):
                 "groups make weak contaminants hard to detect), set 'EPO directions to "
                 "remove' to 1 and apply again."
             )
+
+        if n_total is None and self._CONTAM_AUTO_COUNT_ADVISORY:
+            # The automatic count is advisory: nothing is removed until the user
+            # confirms or picks a number (review round 2, item 2).
+            k = epo.n_components_
+            p_txt = ", ".join(f"{p:.3g}" for p in epo.p_values_[:k])
+            answer = messagebox.askyesnocancel(
+                "Confirm EPO Directions",
+                f"The automatic test suggests removing {k} contaminant direction(s) "
+                f"(p = {p_txt}; the test is approximate).\n\n"
+                f"Yes: remove {k}.\nNo: choose a number.\nCancel: remove nothing.")
+            if answer is None:
+                raise _ContamCancelled()
+            if answer is False:
+                from tkinter import simpledialog
+
+                chosen = simpledialog.askinteger(
+                    "EPO Directions",
+                    f"Number of contaminant directions to remove (1-{n_groups}):",
+                    minvalue=1, maxvalue=n_groups, parent=self.root)
+                if chosen is None:
+                    raise _ContamCancelled()
+                epo = MultiGroupEPO(n_total_components=int(chosen))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    epo.fit(self.contam_clean_data, self.contam_groups)
 
         # Store for potential reuse
         self.contam_epo_transformer = epo
@@ -60442,9 +60490,15 @@ External Validation Performance (n={n_val}):
             validation_idx = list(self.validation_indices)
         missing = [i for i in validation_idx if i not in self.X.index]
         if missing:
-            return (f"\n\nWARNING: {len(missing)} holdout sample(s) are not in the main "
-                    "dataset, so the holdout spectra could not be updated. Recreate the "
-                    "holdout before running an analysis.")
+            # A stale holdout must not stay usable: clear it (cache, indices and
+            # the Validation checkbox) so no analysis scores against it.
+            self._reset_validation_set()
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(
+                    text="Holdout cleared: it no longer matched the main dataset")
+            return (f"\n\nThe holdout set was CLEARED: {len(missing)} holdout sample(s) "
+                    "are not in the main dataset, so its spectra could not be updated. "
+                    "Recreate the holdout before running an analysis.")
         self.validation_X = self.X.loc[validation_idx]
         return f"\n\nThe {len(validation_idx)} holdout spectra were updated to match."
 

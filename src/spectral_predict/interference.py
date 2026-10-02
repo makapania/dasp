@@ -962,6 +962,18 @@ class EPO(BaseEstimator, TransformerMixin):
         self.svd_tol = svd_tol
         self.library_type = library_type
 
+    def __setstate__(self, state):
+        """Give EPO objects pickled before 2026-10 the ``library_type`` they lack.
+
+        The old code centred the library exactly when ``center`` was True, so that
+        maps to 'samples' (centred) or 'differences' (uncentred); a refit of an old
+        object therefore builds the same kind of library it was fitted with. The
+        fitted projection itself is not touched.
+        """
+        super().__setstate__(state)
+        if not hasattr(self, "library_type"):
+            self.library_type = 'samples' if getattr(self, "center", True) else 'differences'
+
     def fit(self, X, y=None, X_interferents=None):
         """
         Fit EPO transformer using interferent reference library.

@@ -1794,3 +1794,36 @@ class TestLegacyPickles:
         assert osc.fit_version_ >= 2
         t = (self.X - osc.X_mean_) @ osc.weights_[:, 0]
         assert abs(np.corrcoef(t, y)[0, 1]) < 1e-8
+
+
+@pytest.mark.parametrize("center", [True, False])
+def test_legacy_interference_epo_get_params_clone_and_refit(center):
+    """Codex round 2: old EPO pickles lacked library_type (clone/refit failed). The
+    migrated value matches what the old code did: centred library iff center."""
+    from sklearn.base import clone
+
+    rng = np.random.RandomState(0)
+    X = rng.randn(20, 8)
+    P = np.eye(8)
+    old = _legacy(EPO, {"n_components": 1, "center": center, "svd_tol": 1e-8,
+                        "n_features_in_": 8, "X_mean_": X.mean(0) if center else np.zeros(8),
+                        "interferent_mean_": np.zeros(8), "P_orth_": P,
+                        "interferent_components_": np.eye(8)[:, :1],
+                        "explained_variance_": np.ones(1), "n_components_": 1})
+    assert old.get_params()["library_type"] == ("samples" if center else "differences")
+    clone(old)
+    old.fit(X, X_interferents=rng.randn(4, 8))
+    assert old.n_components_ == 1
+
+
+def test_dosc_handles_duplicate_columns():
+    """DOSC loadings use pinv(T'T): degenerate (duplicated) wavelengths do not raise."""
+    rng = np.random.RandomState(0)
+    base = rng.randn(30, 5)
+    X = np.hstack([base, base])
+    y = base[:, 0] + 0.1 * rng.randn(30)
+    dosc = DOSC(n_components=2).fit(X, y)
+    T = (X - dosc.X_mean_) @ dosc.weights_
+    assert np.all(np.isfinite(dosc.transform(X)))
+    for k in range(T.shape[1]):
+        assert abs(np.corrcoef(T[:, k], y)[0, 1]) < 1e-8
