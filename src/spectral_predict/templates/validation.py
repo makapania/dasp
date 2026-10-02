@@ -82,6 +82,11 @@ def _lins_ccc(y_true, y_pred):
 # Set up cross-validation
 cv = {cv_constructor}
 
+# Boosters: fix ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). It is set on `model`, so the folds and the final
+# model use it. No-op for other models.
+N_BOOST_ROUNDS = _choose_boosting_rounds(model, X_final, y, cv, EARLY_STOPPING_ROUNDS, 'regression')
+
 # Store per-fold metrics and per-sample prediction lists.
 # Collecting per-sample (not flat concatenation) matters under Repeated K-Fold,
 # where each sample appears in multiple test folds — the backend averages those
@@ -99,9 +104,7 @@ for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_final)):
     y_train, y_test = y[train_idx], y[test_idx]
 
     fold_model = clone(model)
-    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
+    fold_model.fit(X_train, y_train)
     y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
@@ -143,6 +146,11 @@ from collections import Counter
 # Set up cross-validation
 cv = {cv_constructor}
 
+# Boosters: fix ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). It is set on `model`, so the folds and the final
+# model use it. No-op for other models.
+N_BOOST_ROUNDS = _choose_boosting_rounds(model, X_final, y, cv, EARLY_STOPPING_ROUNDS, 'classification')
+
 # Use binary for 2 classes, macro otherwise (matches results tab)
 unique_classes = np.unique(y)
 average_method = 'binary' if len(unique_classes) == 2 else 'macro'
@@ -158,9 +166,7 @@ for train_idx, test_idx in cv.split(X_final, y):
     y_train, y_test = y[train_idx], y[test_idx]
 
     fold_model = clone(model)
-    # _fit_fold mirrors in-app cv_utils._fit_with_early_stopping: boosters
-    # early-stop on the held-out fold; non-boosters fall through to .fit().
-    _fit_fold(fold_model, X_train, y_train, X_test, y_test, EARLY_STOPPING_ROUNDS)
+    fold_model.fit(X_train, y_train)
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers

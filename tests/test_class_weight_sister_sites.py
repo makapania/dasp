@@ -138,7 +138,7 @@ class TestCVUtilsSampleWeightPlumbing:
         self, imbalanced_binary_data
     ):
         """Boosting + early stopping path uses the manual CV loop that calls
-        _fit_with_early_stopping. sample_weight must be sliced per train_idx
+        the booster fold fit. sample_weight must be sliced per train_idx
         and forwarded as the explicit kwarg."""
         pytest.importorskip("xgboost")
         from xgboost import XGBClassifier
@@ -161,7 +161,7 @@ class TestCVUtilsSampleWeightPlumbing:
         )
 
         assert not np.array_equal(preds_no_weight, preds_with_weight), (
-            "sample_weight kwarg did not reach _fit_with_early_stopping. "
+            "sample_weight kwarg did not reach the booster fold fit. "
             "Plumbing in cross_val_predict_with_early_stopping is broken."
         )
 

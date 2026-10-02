@@ -1505,7 +1505,8 @@ TOOLTIP_CONTENT = {
         'full_vars': 'full_vars (Full Spectrum Variable Count)\n\nTotal number of wavelength variables available before any subset selection.\nCompare with n_vars to see how aggressive variable selection was.',
         'all_vars': 'all_vars (All Wavelengths Used)\n\nComma-separated list of every wavelength fed to the model after preprocessing and variable selection.\nUsed by Model Development to reconstruct the exact training spectra.',
         'top_vars': 'top_vars (Top-Importance Wavelengths)\n\nComma-separated list of the most important wavelengths (display only; does NOT change the fit).\nN/A for models that don\'t expose feature importances.',
-        'early_stopping_rounds': 'early_stopping_rounds (Boosted-Tree Early Stopping)\n\nXGBoost / LightGBM / CatBoost only. Number of consecutive rounds without validation improvement after which training stops.\nNone / blank for non-boosted models.',
+        'early_stopping_rounds': 'early_stopping_rounds (Boosting-Round Patience)\n\nXGBoost / LightGBM / CatBoost only. The number of boosting rounds is chosen once, from the pooled cross-validation curve (like the number of PLS latent variables): scanning from round 1, the scan stops after this many rounds without improvement in pooled RMSEcv (or accuracy) and keeps the best count. No fold is stopped on its own test samples.\nNone / blank for non-boosted models.',
+        'n_estimators_selected': 'n_estimators_selected (Selected Boosting Rounds)\n\nXGBoost / LightGBM / CatBoost only. The one round count chosen from the pooled CV curve. Every *cv metric on the row is reported at this count, and Params (n_estimators / iterations) carries it, so Model Development, saved models and exports refit the same model.\nBlank for non-boosted models or when round selection was off.',
         'trial_number': 'trial_number (Bayesian / TPE Trial Index)\n\nOptuna trial index inside the unified-Bayesian study.\nLow numbers = early in the search; the best trials usually appear later as TPE narrows in.',
         'Folds': 'Folds (Cross-Validation Fold Count)\n\nNumber of cross-validation folds used to compute the *cv metrics on this row.\nFor LOO this reports the effective sample count.',
         'Optimization': 'Optimization (Search Method)\n\nWhich search engine produced this row — e.g., "Unified Bayesian", "Grid", "NSGA-II".',
@@ -39691,7 +39692,11 @@ F1 Score:  {f1:.4f}
             from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
-            from spectral_predict.cv_utils import is_boosting_model, _fit_with_early_stopping
+            from spectral_predict.cv_utils import (
+                cross_val_boosting_rounds,
+                is_boosting_model,
+                set_booster_rounds,
+            )
 
             # Parse wavelength specification
             available_wl = self.X_original.columns.astype(float).values
@@ -41573,8 +41578,30 @@ F1 Score:  {f1:.4f}
                 early_stopping_rounds > 0 and
                 is_boosting_model(final_model)
             )
+            # Boosters: choose ONE round count from the pooled CV curve (no fold sees
+            # its own test y), then fit every fold and the final model with it. A row
+            # whose Params already carry the selected count reproduces it exactly.
+            n_rounds_selected = None
+            n_rounds_max = None
             if use_early_stopping:
-                print(f"DEBUG: Early stopping enabled ({early_stopping_rounds} rounds) for {model_name}")
+                _rounds_target_tf = None
+                if y_transform_active:
+                    from spectral_predict.y_transform import YTransformWrapper
+                    _rounds_target_tf = YTransformWrapper._get_transformer(y_transform)
+                _rounds = cross_val_boosting_rounds(
+                    pipe, X_raw, y_array, cv,
+                    patience=early_stopping_rounds,
+                    balanced_sample_weight=use_sample_weight_for_classification,
+                    target_transformer=_rounds_target_tf,
+                )
+                n_rounds_selected = _rounds.n_rounds
+                n_rounds_max = _rounds.max_rounds
+                set_booster_rounds(pipe, n_rounds_selected)
+                print(
+                    f"DEBUG: {model_name} boosting rounds: {n_rounds_selected} of "
+                    f"{n_rounds_max}, chosen from the pooled CV curve "
+                    f"(patience {early_stopping_rounds})"
+                )
 
             for fold_idx, (train_idx, test_idx) in enumerate(cv.split(X_raw, y_array)):
                 # Clone ENTIRE PIPELINE for this fold (not just model)
@@ -41605,17 +41632,14 @@ F1 Score:  {f1:.4f}
 
                             final_model_fold = pipe_fold.steps[-1][1]
 
-                            # Y-transform for early stopping: manually transform y
+                            # Y-transform for boosters: manually transform the training y
+                            # (same per-fold transformer as the round selection above)
                             _y_transformer = None
                             if y_transform_active:
                                 from spectral_predict.y_transform import YTransformWrapper
                                 _y_transformer = YTransformWrapper._get_transformer(y_transform)
                                 y_train_fold = _y_transformer.fit_transform(
                                     y_train_fold.reshape(-1, 1)).ravel()
-                                y_test_es = _y_transformer.transform(
-                                    y_test.reshape(-1, 1)).ravel()
-                            else:
-                                y_test_es = y_test
 
                             # Per-fold balanced sample weights for sample_weight-only models
                             # (XGBoost class_weight path — mirrors search.py:4068, 4088).
@@ -41627,12 +41651,13 @@ F1 Score:  {f1:.4f}
                                     'balanced', y_train_fold
                                 )
 
-                            _fit_with_early_stopping(
-                                final_model_fold,
-                                X_train_transformed, y_train_fold,
-                                X_test_transformed, y_test_es,
-                                early_stopping_rounds,
-                                sample_weight=_es_sample_weight,
+                            # The round count was fixed above from the pooled CV
+                            # curve; no eval_set, the test fold is never seen.
+                            _rounds_fit_kwargs = {}
+                            if _es_sample_weight is not None:
+                                _rounds_fit_kwargs['sample_weight'] = _es_sample_weight
+                            final_model_fold.fit(
+                                X_train_transformed, y_train_fold, **_rounds_fit_kwargs
                             )
                             y_pred = final_model_fold.predict(X_test_transformed)
 
@@ -41645,12 +41670,7 @@ F1 Score:  {f1:.4f}
                                 y_proba = final_model_fold.predict_proba(X_test_transformed)
                                 all_y_proba.append(y_proba)
                         else:
-                            _fit_with_early_stopping(
-                                pipe_fold,
-                                X_train, y_train,
-                                X_test, y_test,
-                                early_stopping_rounds
-                            )
+                            pipe_fold.fit(X_train, y_train)
                             y_pred = pipe_fold.predict(X_test)
                             if hasattr(pipe_fold, 'predict_proba'):
                                 y_proba = pipe_fold.predict_proba(X_test)
@@ -41721,6 +41741,12 @@ F1 Score:  {f1:.4f}
                     rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
                     f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
                     fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
+
+            _rounds_line = (
+                f"  Boosting rounds: {n_rounds_selected} of {n_rounds_max} (one count for all "
+                f"folds, chosen from the pooled CV curve; patience {early_stopping_rounds})\n"
+                if n_rounds_selected is not None else ""
+            )
 
             # Compute mean and std across folds
             results = {}
@@ -41886,7 +41912,7 @@ Configuration:
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
   CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
-  n_components: {n_components}
+{_rounds_line}  n_components: {n_components}
 
 DEBUG INFO:
   Loaded LVs from config: {self.selected_model_config.get('LVs', 'N/A') if self.selected_model_config else 'N/A'}
@@ -41937,7 +41963,7 @@ Configuration:
   Features: {len(selected_wl)}
   Samples: {X_raw.shape[0]}
   CV Strategy: {cv_strategy}{f' ({n_folds} folds)' if cv_strategy != 'loo' else ''}{f' x {cv_n_repeats} repeats' if cv_strategy == 'repeated_kfold' else ''}
-"""
+{_rounds_line}"""
 
             # Fit final pipeline on full dataset for model persistence
             # Clone the pipeline and fit on all data

@@ -742,3 +742,29 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - Booster early stopping replaced by ONE round count from the pooled CV curve (R028/R003/R022/R126)
+Branch `fix/booster-early-stopping`. `cv_utils._fit_with_early_stopping` (eval_set = the scored test fold) is deleted.
+New primitives in `cv_utils`: `cross_val_boosting_rounds` (fit each fold at max rounds, no eval_set; stage test
+predictions; pick one count from pooled RMSECV, or pooled accuracy with pooled log-loss as exact-tie breaker),
+`booster_staged_predict`, `select_n_rounds` (`early_stopping_rounds` = patience of the scan), `set_booster_rounds`.
+Gotchas worth knowing:
+- **Truncation identity holds** for XGBoost (`iteration_range`), LightGBM (`num_iteration`) and CatBoost (`ntree_end`),
+  bagging included: a refit with `n_estimators=k` predicts exactly what the max-round fold model predicts at round k
+  (diff 0.0 / 2e-16). So CV at the selected count = CV of the refit, and re-running the selection with max=k returns k
+  (idempotent). Tab 7 and exports therefore reproduce a row whose Params already carry k with no special casing.
+- **CatBoost `staged_predict` costs ~1-3 ms per round** (0.9 s for 300 rounds on 16 rows). `_catboost_staged_raw` uses
+  `calc_leaf_indexes` + `get_leaf_values` + cumsum (exact, ~1 ms total) and falls back to `staged_predict` if the last
+  round does not match `predict`/`predict_proba` (unusual losses / tree layouts).
+- **LightGBM may build fewer trees than `n_estimators`** (stops when no split helps); staged arrays are padded with the
+  last round, which is what a refit with more rounds would also do.
+- **Pure accuracy as the classification curve picks round 1** on plateaus (strict improvement keeps the earliest round),
+  giving nearly untrained boosters. Hence the pooled log-loss tie-break on exact accuracy ties.
+- **Stratified splits move when labels move**: a "change only the test-fold labels" test must replay fixed splits.
+- Bayesian study names gain `|boost_rounds=pooled_cv_curve_v1` only for booster studies with round selection on, so
+  old biased trials never resume beside corrected ones; every other study name (and the T51 pinned names) is unchanged.
+- Bayesian Params carry `model__n_estimators` (pipeline-prefixed), grid Params `n_estimators`/`iterations`.
+- Export copies the cv_utils primitives' source with `inspect.getsource`, so in-app and exported selection cannot drift;
+  the export runs a pre-pass `_choose_boosting_rounds` and then a plain CV loop at the selected count.
+- Example data (BoneCollagen, snv, 5-fold, 200 rounds, patience 40): LightGBM RMSEcv 3.900 -> 3.949 (k=93),
+  XGBoost 3.960 -> 4.062 (k=177). The bias is modest on real signal and large on noise (review repro: R2cv +0.02 vs -0.54).

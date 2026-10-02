@@ -1,4 +1,4 @@
-"""Tests for early stopping support in CV utilities."""
+"""Tests for the early-stopping CV wrappers (boosting-round selection on the pooled CV curve)."""
 
 import numpy as np
 import pytest
@@ -13,7 +13,6 @@ from spectral_predict.cv_utils import (
     cross_val_predict_with_early_stopping,
     cross_val_score_with_early_stopping,
     is_boosting_model,
-    _fit_with_early_stopping,
 )
 
 # Import model classes

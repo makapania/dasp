@@ -1482,7 +1482,9 @@ class SpectralOptimizationProblem(Problem):
                 pipeline_model = Pipeline(pipe_steps)
 
             # Cross-validation
-            # Use early stopping for boosting models (XGBoost, LightGBM, CatBoost)
+            # Boosters (XGBoost, LightGBM, CatBoost): one round count chosen from the
+            # pooled CV curve; no fold sees its own test y (cv_utils). The displayed
+            # metrics are rebuilt from the same fold predictions (_booster_cv_metrics).
             use_early_stopping = (
                 self.early_stopping_rounds is not None and
                 self.early_stopping_rounds > 0 and
@@ -2256,6 +2258,7 @@ def run_nsga2_search(
         'imbalance_method': imbalance_method,
         'imbalance_params': imbalance_params,
         'early_stopping_rounds': early_stopping_rounds,
+        'random_state': random_state,
     }
 
 
@@ -2691,6 +2694,215 @@ def _compute_solution_r2(
 
     except Exception:
         return None
+
+
+_BOOSTER_MODEL_TYPES = ("XGBoost", "LightGBM", "CatBoost")
+
+
+def _booster_cv_metrics(
+    X: np.ndarray,
+    y: np.ndarray,
+    solution: np.ndarray,
+    model_types: List[str],
+    task_type: str,
+    cv_folds: int = 5,
+    random_state: int = 42,
+    imbalance_method: Optional[str] = None,
+    imbalance_params: Optional[Dict[str, Any]] = None,
+    early_stopping_rounds: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """CV metrics of a booster solution, from the fold predictions the objective scored.
+
+    R022: the NSGA-II objective scores boosters through
+    ``cross_val_score_with_early_stopping``, which picks ONE round count from the
+    pooled CV curve (cv_utils.cross_val_boosting_rounds). The display metrics must
+    come from those same fold predictions, so this rebuilds the objective's
+    pipeline, splitter, label encoding and class weighting exactly and runs the
+    same round selection once. Every displayed CV metric is derived from it.
+
+    Returns None when the solution is not a booster or round selection is off
+    (the plain display helpers then apply).
+
+    Returns:
+        Dict with ``n_rounds``, ``rounds_key`` (the Params key holding the round
+        count) and the CV metrics for the task.
+    """
+    from sklearn.metrics import (
+        accuracy_score as _acc,
+        f1_score as _f1,
+        mean_squared_error as _mse,
+        precision_score as _ps,
+        recall_score as _rs,
+        roc_auc_score as _auc,
+    )
+    from .cv_utils import cross_val_boosting_rounds, pool_boosting_predictions
+
+    if not early_stopping_rounds or early_stopping_rounds <= 0:
+        return None
+    preproc_idx = int(solution[0])
+    window_idx = int(solution[1])
+    model_idx = int(solution[2])
+    model_param = int(solution[3])
+    model_type = model_types[min(model_idx, len(model_types) - 1)]
+    if model_type not in _BOOSTER_MODEL_TYPES:
+        return None
+
+    # Same edge masking, preprocessing and wavelength subset as the objective.
+    wavelength_mask = solution[13:].astype(bool)
+    edge_zone = _get_edge_zone_size(preproc_idx, window_idx)
+    if edge_zone > 0:
+        wavelength_mask = wavelength_mask.copy()
+        wavelength_mask[:edge_zone] = False
+        wavelength_mask[-edge_zone:] = False
+    hyperparams = _decode_hyperparameter_genes(*[int(g) for g in solution[4:13]])
+    transform = _get_preprocessing_transform(preproc_idx, window_idx)
+    X_proc = transform(X) if transform is not None else X.copy()
+    X_subset = X_proc[:, wavelength_mask]
+    if X_subset.shape[1] == 0:
+        return None
+
+    model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
+    if model is None or not is_boosting_model(model):
+        return None
+
+    y_arr = np.asarray(y)
+    sample_weight = None
+    if task_type == "classification":
+        # Same 0..n-1 encoding as SpectralOptimizationProblem.
+        if y_arr.dtype == object:
+            y_arr = y_arr.astype(str)
+        y_arr = LabelEncoder().fit_transform(y_arr)
+        if imbalance_method == "class_weight":
+            if model_type == "CatBoost":
+                model.set_params(auto_class_weights="Balanced")
+            elif hasattr(model, "class_weight"):
+                model.set_params(class_weight="balanced")
+            else:
+                from sklearn.utils.class_weight import compute_sample_weight
+
+                sample_weight = compute_sample_weight("balanced", y_arr)
+
+    from sklearn.pipeline import Pipeline
+
+    pipe_steps = []
+    if imbalance_method is not None and imbalance_method != "class_weight":
+        pipe_steps.append(
+            (
+                "imbalance",
+                build_imbalance_transformer(
+                    method=imbalance_method,
+                    task_type=task_type,
+                    random_state=random_state,
+                    **(imbalance_params or {}),
+                ),
+            )
+        )
+    pipe_steps.append(("model", model))
+    if _needs_resampling_pipeline(imbalance_method, task_type):
+        pipeline = ImbPipeline(pipe_steps)
+    else:
+        pipeline = Pipeline(pipe_steps)
+
+    if task_type == "regression":
+        cv = KFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    else:
+        cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = cross_val_boosting_rounds(
+            pipeline,
+            X_subset,
+            y_arr,
+            cv,
+            patience=early_stopping_rounds,
+            sample_weight=sample_weight,
+        )
+
+    rounds_key = "iterations" if model_type == "CatBoost" else "n_estimators"
+    out: Dict[str, Any] = {"n_rounds": res.n_rounds, "rounds_key": rounds_key}
+    if task_type == "regression":
+        # RMSEcv as the objective computes it: mean of per-fold RMSE.
+        fold_rmse = [
+            float(np.sqrt(_mse(y_arr[te], p)))
+            for te, p in zip(res.test_indices, res.fold_predictions)
+        ]
+        y_pred_cv = pool_boosting_predictions(res, len(y_arr))
+        rmse_pooled = float(np.sqrt(np.mean((y_arr - y_pred_cv) ** 2)))
+        y_std = float(np.std(y_arr))
+        y_range = float(np.ptp(y_arr))
+        out.update(
+            {
+                "RMSEcv": float(np.mean(fold_rmse)),
+                "R2cv": float(r2_score(y_arr, y_pred_cv)),
+                "MAEcv": float(mean_absolute_error(y_arr, y_pred_cv)),
+                "Bias": float(np.mean(y_pred_cv - y_arr)),
+                "RPD": y_std / rmse_pooled if rmse_pooled > 0 else 0.0,
+                "RER": y_range / rmse_pooled if rmse_pooled > 0 else 0.0,
+                "CCCcv": float(lins_ccc(y_arr, y_pred_cv)),
+            }
+        )
+        return out
+
+    is_binary = len(res.classes) == 2
+    average = "binary" if is_binary else "macro"
+    per_fold: Dict[str, list] = {
+        k: []
+        for k in (
+            "Accuracycv",
+            "F1cv",
+            "Precisioncv",
+            "Recallcv",
+            "ROC_AUCcv",
+            "Specificitycv",
+            "Kappacv",
+            "MCCcv",
+            "BalancedAcccv",
+            "BERcv",
+            "LogLosscv",
+        )
+    }
+    for te, y_pred, y_proba in zip(res.test_indices, res.fold_predictions, res.fold_probas):
+        y_test = y_arr[te]
+        per_fold["Accuracycv"].append(_acc(y_test, y_pred))
+        per_fold["F1cv"].append(_f1(y_test, y_pred, average=average, zero_division=0))
+        per_fold["Precisioncv"].append(_ps(y_test, y_pred, average=average, zero_division=0))
+        per_fold["Recallcv"].append(_rs(y_test, y_pred, average=average, zero_division=0))
+        try:
+            if is_binary:
+                per_fold["ROC_AUCcv"].append(_auc(y_test, y_proba[:, 1]))
+            else:
+                per_fold["ROC_AUCcv"].append(
+                    _auc(y_test, y_proba, multi_class="ovr", average="macro", labels=res.classes)
+                )
+            per_fold["LogLosscv"].append(log_loss(y_test, y_proba, labels=res.classes))
+        except ValueError:
+            pass
+        try:
+            per_fold["Specificitycv"].append(compute_specificity(y_test, y_pred, average="macro"))
+        except Exception:
+            pass
+        per_fold["Kappacv"].append(cohen_kappa_score(y_test, y_pred))
+        per_fold["MCCcv"].append(matthews_corrcoef(y_test, y_pred))
+        bal = balanced_accuracy_score(y_test, y_pred)
+        per_fold["BalancedAcccv"].append(bal)
+        per_fold["BERcv"].append(1.0 - bal)
+    for key, values in per_fold.items():
+        out[key] = float(np.mean(values)) if values else np.nan
+    return out
+
+
+def _with_selected_rounds(params_str: str, rounds_key: str, n_rounds: int) -> str:
+    """Write the CV-selected round count into a stored Params string."""
+    import ast
+
+    try:
+        params = ast.literal_eval(params_str) if params_str else {}
+    except (ValueError, SyntaxError):
+        return params_str
+    if not isinstance(params, dict):
+        return params_str
+    params[rounds_key] = int(n_rounds)
+    return str(params)
 
 
 def _compute_display_rmse(
@@ -3817,8 +4029,24 @@ def convert_nsga2_to_v1_format(
                 row['R2'] = np.nan
                 row['CCC'] = np.nan
 
-            # Compute CV metrics (cross-validation) with imbalance handling
+            # Boosters (R022): every displayed CV metric comes from the same fold
+            # predictions, at the same pooled-curve round count, as the objective.
+            boost = None
             if X is not None and y is not None:
+                boost = _booster_cv_metrics(
+                    X, y, solution, model_types, task_type, folds,
+                    result.get('random_state', 42),
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params,
+                    early_stopping_rounds=result.get('early_stopping_rounds'),
+                )
+            if boost is not None:
+                row['RMSEcv'] = boost['RMSEcv']
+                row['R2cv'] = boost['R2cv'] if compute_r2 else None
+                for _k in ('MAEcv', 'Bias', 'RPD', 'RER', 'CCCcv'):
+                    row[_k] = boost[_k]
+            # Compute CV metrics (cross-validation) with imbalance handling
+            elif X is not None and y is not None:
                 display_rmse = _compute_display_rmse(
                     X, y, solution, n_wavelengths, model_types, task_type, folds, 42,
                     imbalance_method=imbalance_method,
@@ -3890,7 +4118,21 @@ def convert_nsga2_to_v1_format(
 
             # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall with imbalance handling
             row['Accuracycv'] = 1.0 - objectives[0]  # From optimization objective
+            boost = None
             if X is not None and y is not None:
+                boost = _booster_cv_metrics(
+                    X, y, solution, model_types, task_type, folds,
+                    result.get('random_state', 42),
+                    imbalance_method=imbalance_method,
+                    imbalance_params=imbalance_params,
+                    early_stopping_rounds=result.get('early_stopping_rounds'),
+                )
+            if boost is not None:
+                # Same fold predictions as the objective (R022).
+                for _k in ('ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'Specificitycv',
+                           'Kappacv', 'MCCcv', 'BalancedAcccv', 'BERcv', 'LogLosscv'):
+                    row[_k] = boost[_k]
+            elif X is not None and y is not None:
                 cv_metrics = _compute_classification_cv_metrics(
                     X, y, solution, n_wavelengths, model_types, folds, 42,
                     imbalance_method=imbalance_method,
@@ -3927,6 +4169,15 @@ def convert_nsga2_to_v1_format(
             if y is not None:
                 for class_idx, class_label in enumerate(np.unique(y)):
                     row[f'F1_Class{class_idx}'] = row.get('F1', np.nan)
+
+        # Boosters: the stored Params carry the CV-selected round count, so Tab 7,
+        # saved models and exports refit the model that was scored.
+        if boost is not None:
+            row['Params'] = _with_selected_rounds(
+                row['Params'], boost['rounds_key'], boost['n_rounds']
+            )
+            row['Parameters'] = row['Params']
+            row['n_estimators_selected'] = boost['n_rounds']
 
         rows.append(row)
 
@@ -4109,7 +4360,7 @@ def convert_nsga2_to_v1_format(
     # Preprocessing columns early (Deriv, Window, Poly, LVs, n_vars), metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                  'Poly', 'LVs', 'n_vars', 'Variables', 'full_vars', 'SubsetTag', 'Imbalance',
-                 'early_stopping_rounds']
+                 'early_stopping_rounds', 'n_estimators_selected']
 
     # Performance metrics after Imbalance (calibration first, then CV, then NIR-specific)
     if task_type == 'regression':
@@ -4148,7 +4399,7 @@ def convert_nsga2_to_v1_format(
     # Convert integer columns to nullable Int64 to avoid float display (e.g., 1.0 -> 1)
     int_cols = ['Deriv', 'Window', 'Poly', 'LVs', 'n_vars', 'Rank', 'Folds',
                 'N_Calibration', 'N_Excluded', 'N_Validation', 'full_vars',
-                'early_stopping_rounds']
+                'early_stopping_rounds', 'n_estimators_selected']
     for col in int_cols:
         if col in df.columns:
             df[col] = df[col].astype('Int64')

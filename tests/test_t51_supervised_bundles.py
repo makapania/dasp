@@ -34,6 +34,7 @@ import t51_baseline_recipe as recipe  # noqa: E402
 from spectral_predict import search_spaces as ss  # noqa: E402
 from spectral_predict import unified_bayesian as ub  # noqa: E402
 from spectral_predict.code_generator import CodeGenerator, ExportOptions  # noqa: E402
+from spectral_predict.cv_utils import set_booster_rounds  # noqa: E402
 from spectral_predict.models import CATBOOST_RUNTIME_PARAMS, build_model  # noqa: E402
 from spectral_predict.search import _rebuild_model_from_row  # noqa: E402
 from spectral_predict.search_spaces import (  # noqa: E402
@@ -512,8 +513,13 @@ def test_t9_real_run_rows_match_search_time_model(bid: str, family: str, task: s
         params = apply_extra_axes(replay, base, (bundle,))
         if "n_components_actual" in trial.user_attrs:  # PLS clamps to the subset size
             params["n_components"] = trial.user_attrs["n_components_actual"]
-        # The constructed search-time model reproduces the stored row exactly.
-        constructed = ub._capture_serializable_params(search_time_pipeline(family, task, params))
+        # The constructed search-time model reproduces the stored row exactly. Boosters
+        # are refit with the round count chosen from the pooled CV curve (R028/R003).
+        pipeline = search_time_pipeline(family, task, params)
+        if "n_estimators_selected" in trial.user_attrs:
+            set_booster_rounds(pipeline, trial.user_attrs["n_estimators_selected"])
+            assert row["n_estimators_selected"] == trial.user_attrs["n_estimators_selected"]
+        constructed = ub._capture_serializable_params(pipeline)
         assert constructed == stored
         for axis in bundle.axes:
             if axis.key in params:

@@ -111,7 +111,18 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 from .constants import RANDOM_STATE
 
 # Import early stopping CV utilities
-from .cv_utils import is_boosting_model, _fit_with_early_stopping, build_cv_splitter
+from .cv_utils import (
+    _align_proba,
+    booster_max_rounds,
+    booster_staged_predict,
+    build_cv_splitter,
+    is_boosting_model,
+    pooled_round_curve,
+    pooled_round_logloss,
+    select_n_rounds,
+    set_booster_rounds,
+    staged_labels,
+)
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
 from .preprocessing_discovery import discover_preprocessing, IMPORTANCE_METHODS
@@ -4365,8 +4376,10 @@ def _run_single_fold(
         If True, compute and apply sample_weight for classification models
         that don't support class_weight but do support sample_weight (e.g., Ridge)
     early_stopping_rounds : int, optional
-        Number of rounds without improvement before stopping for boosting models.
-        If None or 0, early stopping is disabled.
+        Boosting models only: patience for choosing the round count on the pooled
+        CV curve. When > 0 the fold returns staged test predictions instead of
+        metrics (see _finalize_boosting_folds). If None or 0, the booster is
+        scored at its full configured round count.
 
     Returns
     -------
@@ -4468,211 +4481,229 @@ def _run_single_fold(
                 pipe_clone.fit(X_train, y_train)
         sample_weight_train = "applied"  # Flag that we've already fit
 
-    # Standard path: fit if not already done above
+    # Standard path: fit if not already done above. Boosters are fitted with
+    # their full configured round count and never see the test fold: the round
+    # count is chosen afterwards from the pooled CV curve (see
+    # _finalize_boosting_folds), so no eval_set is passed here.
     if sample_weight_train is None:
-        # Check if we should use early stopping for boosting models
-        use_early_stopping = early_stopping_rounds is not None and early_stopping_rounds > 0
+        pipe_clone.fit(X_train, y_train)
 
-        if use_early_stopping:
-            # Get final model from pipeline
-            if hasattr(pipe_clone, "steps"):
-                final_model_es = pipe_clone.steps[-1][1]
-            else:
-                final_model_es = pipe_clone
-
-            # Check if final model is a boosting model
-            if is_boosting_model(final_model_es):
-                manual_fit_used = True
-
-                # Transform training data through preprocessing steps
-                X_train_transformed = X_train.copy()
-                X_test_transformed = X_test.copy()
-
-                if hasattr(pipe_clone, "steps"):
-                    # T-32 fix-of-fixes (GLM/DeepSeek MEDIUM): use the same
-                    # y_train_for_model threading pattern as the classification-
-                    # sample-weight branch instead of in-place mutating y_train.
-                    # Pre-fix this branch had the same architectural landmine
-                    # (downstream code seeing silently-resampled y_train) — no
-                    # crash today since boosting models on this path don't
-                    # propagate sample_weight, but a future merge of the two
-                    # branches OR adding a sample_weight-supporting boosting
-                    # model would re-introduce T-32's class of bug.
-                    y_train_for_model = y_train
-                    for step_name, step in pipe_clone.steps[:-1]:
-                        if hasattr(step, "fit_resample"):
-                            # For imblearn resamplers, apply fit_resample (only to training data)
-                            X_train_transformed, y_train_for_model = step.fit_resample(
-                                X_train_transformed, y_train_for_model
-                            )
-                            fitted_steps.append((step_name, step, "resample"))
-                            # Note: Don't transform test data - resampling only applies to training
-                        elif hasattr(step, "transform"):
-                            step.fit(X_train_transformed, y_train_for_model)
-                            X_train_transformed = step.transform(X_train_transformed)
-                            X_test_transformed = step.transform(X_test_transformed)
-                            fitted_steps.append((step_name, step, "transform"))
-
-                    final_model = final_model_es
-                else:
-                    final_model = final_model_es
-                    y_train_for_model = y_train
-
-                # Fit with early stopping
-                _fit_with_early_stopping(
-                    final_model,
-                    X_train_transformed,
-                    y_train_for_model,
-                    X_test_transformed,
-                    y_test,
-                    early_stopping_rounds,
-                )
-            else:
-                # Not a boosting model - standard fit
-                pipe_clone.fit(X_train, y_train)
-        else:
-            # No early stopping
-            pipe_clone.fit(X_train, y_train)
-
-    # Helper function to transform and predict when manual fitting was used
-    def _manual_transform_predict(X_data):
-        """Transform X through manually fitted steps and predict with final model."""
+    def _transform_test(X_data):
+        """X_data through the fitted preprocessing steps (samplers skipped)."""
         X_transformed = X_data
-        for step_name, step, step_type in fitted_steps:
-            if step_type == "transform" and hasattr(step, "transform"):
-                X_transformed = step.transform(X_transformed)
-            # Skip resample steps for test data - they only apply to training
-        return final_model.predict(X_transformed), X_transformed
-
-    def _manual_transform_predict_proba(X_data):
-        """Transform X through manually fitted steps and predict_proba with final model."""
-        X_transformed = X_data
-        for step_name, step, step_type in fitted_steps:
-            if step_type == "transform" and hasattr(step, "transform"):
-                X_transformed = step.transform(X_transformed)
-        return final_model.predict_proba(X_transformed)
-
-    if task_type == "regression":
         if manual_fit_used:
-            y_pred, _ = _manual_transform_predict(X_test)
-        else:
-            y_pred = pipe_clone.predict(X_test)
-        y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+            for step_name, step, step_type in fitted_steps:
+                if step_type == "transform" and hasattr(step, "transform"):
+                    X_transformed = step.transform(X_transformed)
+            return X_transformed
+        if hasattr(pipe_clone, "steps"):
+            for step_name, step in pipe_clone.steps[:-1]:
+                if step is None or step == "passthrough" or hasattr(step, "fit_resample"):
+                    continue
+                X_transformed = step.transform(X_transformed)
+        return X_transformed
+
+    # Boosting-round selection (R028/R126): every branch above fitted the booster
+    # with its maximum round count, sample weights included. Return its test-fold
+    # predictions at every round count; the caller pools them across folds and
+    # scores every fold at ONE selected count.
+    final_estimator = pipe_clone.steps[-1][1] if hasattr(pipe_clone, "steps") else pipe_clone
+    if (
+        early_stopping_rounds is not None
+        and early_stopping_rounds > 0
+        and is_boosting_model(final_estimator)
+    ):
+        staged = booster_staged_predict(
+            final_estimator,
+            _transform_test(X_test),
+            n_rounds=booster_max_rounds(final_estimator),
+        )
+        out = {"y_test": y_test, "test_idx": np.asarray(test_idx), "staged": staged}
+        if task_type != "regression":
+            out["classes"] = np.asarray(final_estimator.classes_)
+        return out
+
+    if manual_fit_used:
+        y_pred = final_model.predict(_transform_test(X_test))
+    else:
+        y_pred = pipe_clone.predict(X_test)
+
+    def _proba():
+        if manual_fit_used:
+            model_classes = final_model.classes_ if hasattr(final_model, "classes_") else None
+            return final_model.predict_proba(_transform_test(X_test)), model_classes
+        model_classes = pipe_clone.classes_ if hasattr(pipe_clone, "classes_") else None
+        return pipe_clone.predict_proba(X_test), model_classes
+
+    return _fold_metrics(task_type, is_binary_classification, y_test, y_pred, _proba)
+
+
+def _fold_metrics(task_type, is_binary_classification, y_test, y_pred, proba_fn):
+    """Per-fold metrics from one fold's test predictions.
+
+    Parameters
+    ----------
+    task_type : str
+        'regression' or 'classification'
+    is_binary_classification : bool
+        Whether the full dataset is binary (fixes the F1/precision/recall averaging)
+    y_test, y_pred : ndarray
+        Test-fold targets and predictions
+    proba_fn : callable or None
+        Returns ``(y_proba, model_classes)``; called only when the test fold holds
+        at least two classes (classification only)
+
+    Returns
+    -------
+    metrics : dict
+        Fold metrics, including y_test and y_pred for pooling and regional analysis
+    """
+    y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
+    if task_type == "regression":
         # Per-fold RMSE/R² are kept for debugging and tests only — headline metrics
         # are computed from pooled y_test/y_pred in the caller (see _aggregate_metrics
         # at search.py:4212+) to match IUPAC/chemometrics convention.
         rmse = np.sqrt(mean_squared_error(y_test, y_pred))
         r2 = r2_score(y_test, y_pred)
         return {"RMSE": rmse, "R2": r2, "y_test": y_test, "y_pred": y_pred}
-    else:  # classification
-        if manual_fit_used:
-            y_pred, _ = _manual_transform_predict(X_test)
-        else:
-            y_pred = pipe_clone.predict(X_test)
-        y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
 
-        acc = accuracy_score(y_test, y_pred)
+    acc = accuracy_score(y_test, y_pred)
 
-        # Use is_binary_classification flag (determined from full dataset) for consistent averaging
-        # This avoids issues where a CV fold might have missing classes
-        # Use 'macro' for multiclass to treat all classes equally (consistent with ROC_AUC)
-        average_method = "binary" if is_binary_classification else "macro"
+    # Use is_binary_classification flag (determined from full dataset) for consistent averaging
+    # This avoids issues where a CV fold might have missing classes
+    # Use 'macro' for multiclass to treat all classes equally (consistent with ROC_AUC)
+    average_method = "binary" if is_binary_classification else "macro"
 
-        # F1, Precision, Recall
+    # F1, Precision, Recall
+    try:
+        f1 = f1_score(y_test, y_pred, average=average_method, zero_division=0)
+    except Exception:
+        f1 = np.nan
+    try:
+        precision = precision_score(y_test, y_pred, average=average_method, zero_division=0)
+    except Exception:
+        precision = np.nan
+    try:
+        recall = recall_score(y_test, y_pred, average=average_method, zero_division=0)
+    except Exception:
+        recall = np.nan
+
+    # ROC AUC (requires at least 2 classes in test fold)
+    n_classes_test = len(np.unique(y_test))
+    if n_classes_test < 2:
+        # Single class in this CV fold - ROC AUC undefined
+        auc = np.nan
+        logloss = np.nan
+    else:
         try:
-            f1 = f1_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            f1 = np.nan
-        try:
-            precision = precision_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            precision = np.nan
-        try:
-            recall = recall_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            recall = np.nan
+            y_proba, model_classes = proba_fn()
 
-        # ROC AUC (requires at least 2 classes in test fold)
-        n_classes_test = len(np.unique(y_test))
-        if n_classes_test < 2:
-            # Single class in this CV fold - ROC AUC undefined
+            if is_binary_classification:
+                auc = roc_auc_score(y_test, y_proba[:, 1])
+            else:
+                # Explicitly tell roc_auc_score the column order matches model's classes_
+                if model_classes is not None:
+                    auc = roc_auc_score(
+                        y_test,
+                        y_proba,
+                        multi_class="ovr",
+                        average="macro",
+                        labels=model_classes,
+                    )
+                else:
+                    auc = roc_auc_score(y_test, y_proba, multi_class="ovr", average="macro")
+
+            # Log Loss (requires predict_proba)
+            try:
+                logloss = log_loss(
+                    y_test, y_proba, labels=model_classes if model_classes is not None else None
+                )
+            except Exception:
+                logloss = np.nan
+        except Exception:
             auc = np.nan
             logloss = np.nan
-        else:
-            try:
-                if manual_fit_used:
-                    y_proba = _manual_transform_predict_proba(X_test)
-                    model_classes = (
-                        final_model.classes_ if hasattr(final_model, "classes_") else None
-                    )
-                else:
-                    y_proba = pipe_clone.predict_proba(X_test)
-                    model_classes = pipe_clone.classes_ if hasattr(pipe_clone, "classes_") else None
 
-                if is_binary_classification:
-                    auc = roc_auc_score(y_test, y_proba[:, 1])
-                else:
-                    # Explicitly tell roc_auc_score the column order matches model's classes_
-                    if model_classes is not None:
-                        auc = roc_auc_score(
-                            y_test,
-                            y_proba,
-                            multi_class="ovr",
-                            average="macro",
-                            labels=model_classes,
-                        )
-                    else:
-                        auc = roc_auc_score(y_test, y_proba, multi_class="ovr", average="macro")
+    # Compute additional classification metrics
+    try:
+        specificity = compute_specificity(y_test, y_pred, average="macro")
+    except Exception:
+        specificity = np.nan
 
-                # Log Loss (requires predict_proba)
-                try:
-                    logloss = log_loss(
-                        y_test, y_proba, labels=model_classes if model_classes is not None else None
-                    )
-                except Exception:
-                    logloss = np.nan
-            except Exception:
-                auc = np.nan
-                logloss = np.nan
+    try:
+        kappa = cohen_kappa_score(y_test, y_pred)
+    except Exception:
+        kappa = np.nan
 
-        # Compute additional classification metrics
-        try:
-            specificity = compute_specificity(y_test, y_pred, average="macro")
-        except Exception:
-            specificity = np.nan
+    try:
+        mcc = matthews_corrcoef(y_test, y_pred)
+    except Exception:
+        mcc = np.nan
 
-        try:
-            kappa = cohen_kappa_score(y_test, y_pred)
-        except Exception:
-            kappa = np.nan
+    try:
+        balanced_acc = balanced_accuracy_score(y_test, y_pred)
+        ber = 1.0 - balanced_acc
+    except Exception:
+        balanced_acc = np.nan
+        ber = np.nan
 
-        try:
-            mcc = matthews_corrcoef(y_test, y_pred)
-        except Exception:
-            mcc = np.nan
+    return {
+        "Accuracy": acc,
+        "ROC_AUC": auc,
+        "F1": f1,
+        "Precision": precision,
+        "Recall": recall,
+        "Specificity": specificity,
+        "Kappa": kappa,
+        "MCC": mcc,
+        "BalancedAcc": balanced_acc,
+        "BER": ber,
+        "LogLoss": logloss,
+        "y_test": y_test,
+        "y_pred": y_pred,
+    }
 
-        try:
-            balanced_acc = balanced_accuracy_score(y_test, y_pred)
-            ber = 1.0 - balanced_acc
-        except Exception:
-            balanced_acc = np.nan
-            ber = np.nan
 
-        return {
-            "Accuracy": acc,
-            "ROC_AUC": auc,
-            "F1": f1,
-            "Precision": precision,
-            "Recall": recall,
-            "Specificity": specificity,
-            "Kappa": kappa,
-            "MCC": mcc,
-            "BalancedAcc": balanced_acc,
-            "BER": ber,
-            "LogLoss": logloss,
-            "y_test": y_test,
-            "y_pred": y_pred,
-        }
+def _finalize_boosting_folds(fold_results, y, task_type, is_binary_classification, patience):
+    """Choose ONE boosting-round count from the pooled CV curve and score every fold at it.
+
+    ``fold_results`` are the staged outputs of :func:`_run_single_fold`. The round
+    count is selected like the number of PLS latent variables: from the curve of
+    pooled RMSECV (regression) or pooled accuracy with log-loss tie-break
+    (classification) over all folds, with ``patience`` = ``early_stopping_rounds``.
+
+    Returns
+    -------
+    (fold_metrics, n_rounds) : (list of dict, int)
+    """
+    test_idx = [r["test_idx"] for r in fold_results]
+    if task_type == "regression":
+        staged = [r["staged"] for r in fold_results]
+        curve = pooled_round_curve(staged, test_idx, y, "regression")
+        n_rounds = select_n_rounds(curve, patience, higher_is_better=False)
+        metrics = [
+            _fold_metrics(task_type, is_binary_classification, r["y_test"], s[n_rounds - 1], None)
+            for r, s in zip(fold_results, staged)
+        ]
+        return metrics, n_rounds
+
+    classes = np.unique(y)
+    probas = [_align_proba(r["staged"], r["classes"], classes) for r in fold_results]
+    labels = [staged_labels(p, classes) for p in probas]
+    curve = pooled_round_curve(labels, test_idx, y, "classification")
+    tiebreak = pooled_round_logloss(probas, test_idx, y, classes)
+    n_rounds = select_n_rounds(curve, patience, higher_is_better=True, tiebreak=tiebreak)
+    metrics = [
+        _fold_metrics(
+            task_type,
+            is_binary_classification,
+            r["y_test"],
+            lab[n_rounds - 1],
+            lambda p=p: (p[n_rounds - 1], classes),
+        )
+        for r, lab, p in zip(fold_results, labels, probas)
+    ]
+    return metrics, n_rounds
 
 
 def _run_single_config(
@@ -4963,6 +4994,14 @@ def _run_single_config(
             "Check upstream fold errors for root cause."
         )
 
+    # Boosters: ONE round count for all folds, chosen from the pooled CV curve
+    # (like the PLS LV count), then every fold is scored at that count.
+    n_rounds_selected = None
+    if "staged" in cv_metrics[0]:
+        cv_metrics, n_rounds_selected = _finalize_boosting_folds(
+            cv_metrics, y, task_type, is_binary_classification, early_stopping_rounds
+        )
+
     # Pool predictions per sample so repeated-CV (RepeatedKFold/RepeatedStratifiedKFold)
     # produces one prediction per sample before scoring. Under plain K-Fold / LOO
     # this is a no-op (each sample appears in exactly one test fold). Under
@@ -5152,7 +5191,12 @@ def _run_single_config(
     cal_logloss = None
 
     try:
-        # Refit the pipeline on full data to get final fitted parameters
+        # Refit the pipeline on full data to get final fitted parameters.
+        # Boosters are refit with the round count selected by CV, so the captured
+        # Params (n_estimators / iterations) describe the model that was scored.
+        if n_rounds_selected is not None:
+            pipe = clone(pipe)
+            set_booster_rounds(pipe, n_rounds_selected)
         pipe.fit(X, y)
 
         # Get the fitted model from pipeline for parameter capture
@@ -5368,9 +5412,13 @@ def _run_single_config(
         "SubsetTag": subset_tag,
         "Imbalance": imbalance_display,
         # Track early stopping to allow Model Development to reproduce boosted results
+        # early_stopping_rounds is the patience used to pick ONE boosting-round
+        # count from the pooled CV curve; n_estimators_selected is that count (also
+        # written into Params, so Tab 7, saved models and exports refit it).
         "early_stopping_rounds": (
             early_stopping_rounds if model_name in ("XGBoost", "LightGBM", "CatBoost") else None
         ),
+        "n_estimators_selected": n_rounds_selected,
         # Store actual imbalance settings for Model Development tab to use
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,

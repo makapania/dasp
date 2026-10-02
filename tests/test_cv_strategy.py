@@ -81,10 +81,15 @@ class TestBuildCvSplitter:
 
 
 class TestLooEarlyStoppingGuard:
-    """Tests for the LeaveOneOut early-stopping disable guard in cross_validate_with_early_stopping."""
+    """LOO under boosting-round selection.
 
-    def test_loo_disables_early_stopping_for_boosting_model(self):
-        """XGBoost under LOO should train without early stopping and emit a warning."""
+    The old guard disabled early stopping under LOO because the single scored
+    sample was the eval_set. Round selection now uses the pooled CV curve (no
+    eval_set), which is well defined under LOO, so the guard is gone.
+    """
+
+    def test_loo_runs_round_selection_for_boosting_model(self):
+        """XGBoost under LOO: one fold per sample, one round count, no warning."""
         try:
             from xgboost import XGBRegressor
         except ImportError:
@@ -104,13 +109,12 @@ class TestLooEarlyStoppingGuard:
                 scoring='neg_root_mean_squared_error',
                 early_stopping_rounds=10,
             )
-            # Check that the warning fired
             matching = [wi for wi in w if "Early stopping disabled" in str(wi.message)]
-            assert len(matching) >= 1, f"Expected LOO early-stopping warning, got: {[str(wi.message) for wi in w]}"
+            assert matching == []
 
-        # Check that CV actually ran and produced per-fold scores (n_splits == n_samples == 12)
-        assert 'test_score' in results
+        # n_splits == n_samples == 12, all scored at one selected round count
         assert len(results['test_score']) == 12
+        assert 1 <= results['n_rounds_selected'] <= 10
 
     def test_kfold_does_not_disable_early_stopping(self):
         """Regular KFold should leave early stopping enabled (no guard fires)."""
