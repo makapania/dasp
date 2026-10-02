@@ -4,19 +4,18 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 4 of 11 branches merged — HAND-OFF
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes, 5 of 11 branches merged — HAND-OFF
 Every Wave 1/2 item was cross-checked by Codex gpt-6-astra and GLM 5.3 before fixing. User decisions: booster tree
 count = one value from the pooled CV curve; chemometrics validation conventions (CLAUDE.md).
 **Merged:** #83 fix/ct-honest-labels; #84 fix/ensemble-cv (wrappers now in `model_wrappers.py`); #85 feat/dpi-fonts; #86 fix/contaminant-maths (QW3, QW6; auto EPO count
 advisory, revertible `_CONTAM_AUTO_COUNT_ADVISORY`; DeepSeek LOWs left: GUI says ~7% vs docs 6.5%, skew hint checks
-only the first direction).
+only the first direction); #87 fix/readers (R017 OPUS background, R062 one ASCII parser, data type/scale
+carried through every tab; comma files dot-decimal + warning).
 **Reviewers:** Codex is OUT OF QUOTA until 2026-10-09 15:10, so GLM 5.3 + DeepSeek (deepseek-flash; Pro only if the
 user says "pro") stand in. opencode prompts must forbid shell redirection, writes, and reads outside the repo, and
 demand a verdict even if a tool call is rejected. Merge rule: well-reviewed PR → merge origin/main into branch, test,
 `gh pr create`, `gh pr merge N --merge --match-head-commit <full sha>`.
 **Open branches** (pushed to origin as backup; worktrees under `.claude/worktrees/agent-*`), state at hand-off:
-- `fix/readers` 023fa18 — final round done + main merged; DeepSeek confirm pending → merge if clean. Deferred
-  follow-up recorded below (CSV/reference/ASD decimal-comma misreads).
 - `fix/wavelength-mapping` — final fixes in progress (matcher per-item numeric/text partition in
   `model_wrappers._match_wavelengths_normalized`; Tab 8 multi-model probability column alignment) + merge main → merge.
 - `fix/classification-metrics` e5e012e — round 4 done (`scoring.classification_fit_labels`); GLM + DeepSeek pending.
@@ -609,6 +608,10 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 | `src/spectral_predict/preprocessing_discovery.py` | Smart preprocessing, has one-class path at line ~680 |
 
 ## Follow-Ups (unclaimed)
+
+- **Decimal-comma misreads in the CSV, reference and ASD-text readers (deferred from fix/readers review round 5, 2026-10-02).** These predate fix/readers and are not made worse by it (the ASCII reader's delimiter/decimal policy is not applied to these readers). Neither case gives a Python warning or an `import_warnings` entry.
+  1. **CSV spectra and reference readers shift columns** (`read_csv_spectra` ~io.py:81, `read_combined_csv` ~io.py:421, `read_reference_csv` ~io.py:1474). When decimal-comma values are written unquoted in a comma-delimited file, data rows have more fields than the header, and pandas silently turns the extra leading field into an implicit index. Codex repro: header `id,1000,1001,...,1099`, one data row `s1` followed by 100 unquoted `0,123` values → 100 wavelengths, alternating values `0` and `123`, sample ID `123`. Reference repro: `id,y\n1,12,34\n2,13,45` → IDs `12,13`, targets `34,45`. Fix: compare each row's field count with the header before pandas can infer an index; apply the ASCII delimiter/decimal policy (decimal-point default, warn or refuse when a decimal-comma split competes); pass diagnostics to the GUI's `import_warnings` dialog.
+  2. **ASD text parsing reports detector counts instead of a decimal-comma reflectance** (~io.py:849, ~858). For 100 rows shaped like `1000 12345 12000 0,123`, `read_asd_dir` drops the unparseable last field and returns `12000` rather than `0.123`. Fix: keep column positions; recognise decimal-comma fields, or reject/report a non-numeric expected ordinate instead of falling back to an earlier numeric column.
 
 - **T-51 — Opt-in Bayesian search-space axes (ticket written 2026-08-30; design complete, no code).** Full ticket: `docs/plans/2026-08-30-T51-bayesian-opt-in-search-axes.md`. **Premise is added value, not a defect** — supervised Bayesian performs well and the ticket does not assume otherwise. It adds opt-in knobs for hyperparameters that currently take exactly *one* value (LightGBM `reg_alpha=0.1`/`subsample=0.8`/`min_child_samples=5`, XGBoost `colsample_bytree=0.8` with `gamma`/`min_child_weight` absent, RandomForest `max_features='sqrt'`, SVM `gamma='scale'`, PLS-DA logistic head `C=1.0`), curated per model family, all off by default. **Design:** `suggest_model_params` / `suggest_one_class_params` stay byte-for-byte; a new `search_spaces.py` supplies `apply_extra_axes()` that runs after them and is a literal no-op when no bundle is enabled. GUI checkboxes and the Python API drive the same bundle ids (`enabled_extra_axes=(...)`). One-class included from the start, closing the PR #58 deferral. **Two hard constraints discovered in review (see SESSION_LOG 2026-08-30):** (a) Optuna forbids re-suggesting a parameter name, so only *pinned-constant* axes can be opened additively — ranges already searched (Ridge/Lasso/ElasticNet `alpha`, MLP `alpha`, OneClassSVM `gamma`, PCA-SIMCA `n_components`) cannot be widened this way, which is fine since widening them is explicitly out of scope; (b) clamping after `trial.suggest_*` does not change what TPE learns. **Two genuine bugs ride alongside, sequenced separately:** the `'SVC'`/`'SVM'` string mismatch leaving classification SVM unscaled (prerequisite for any SVM `gamma` knob), and the PLS clamp asymmetry where Bayesian bounds `n_components` by `n_features` while the grid path uses `compute_min_train_fold_size` (approved to ship last, own gate). Reviewed by Codex gpt-5.5 and a DeepSeek+GLM peer panel.
 

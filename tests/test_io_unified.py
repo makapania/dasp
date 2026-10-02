@@ -312,9 +312,10 @@ def test_read_ascii_with_delimiter(tmp_path):
     # Read with delimiter specified
     result, _ = read_spectra(ascii_path, format='ascii', delimiter=';')
 
-    # Note: pd.read_csv without header=None consumes the first data row as header,
-    # so 2001 data rows become 2000 columns
-    assert result.shape == (1, 2000)
+    # Every data row is kept, including the first (R062)
+    assert result.shape == (1, 2001)
+    assert result.columns[0] == pytest.approx(400.0)
+    assert result.iloc[0, 0] == pytest.approx(intensities[0])
 
 
 # ============================================================================

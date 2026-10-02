@@ -538,6 +538,14 @@ $$A = \log_{10}\left(\frac{1}{R}\right)$$
 
 where $A$ is absorbance and $R$ is reflectance.
 
+#### The "Other" Data Type
+
+When a file states that its values are neither reflectance nor absorbance, the data loads as **Other** and the status shows what it is: Kubelka-Munk, photoacoustic signal, Raman or emission intensity, or raw single-channel intensity (e.g. the matching Bruker OPUS blocks). These values are linear but have no reflectance/absorbance conversion, so the **Convert** buttons are disabled, plots are labelled with the measured quantity, and absorbance-only analyses (e.g. Auto Bone FTIR) refuse the data. If the data really is reflectance or absorbance, select that type with the radio buttons first.
+
+The file's own type is kept as the *source type* (e.g. log-reflectance, transmittance, Raman) and saved with models and ensembles. At prediction time a warning is shown when the prediction data's type, or for the same type its source type (e.g. a Raman model with Kubelka-Munk data), differs from the model's. Models saved before source types were recorded are compared on the data type alone.
+
+The data type reported by the file reader is used on every import path (Import, Prediction, Multi-Model Comparison, Calibration Transfer, Contamination); the value-based detection above only runs when the file carries no type.
+
 ### 3.8 Wavelength Range Configuration
 
 #### Automatic Range Detection
@@ -9777,15 +9785,21 @@ pip install jcamp
 
 **Description:** Proprietary binary format used by Bruker FT-IR instruments. One of the most common formats in infrared spectroscopy.
 
-**Data Types Available:**
-| Code | Data Type |
-|------|-----------|
-| `a` | Absorbance spectrum |
-| `t` | Transmittance spectrum |
-| `sm` | Sample spectrum (single beam) |
-| `rf` | Reference spectrum |
+**Data Types Available:** an OPUS file usually holds several blocks; exactly one is read.
 
-**Priority Order:** Spectral Predict reads absorbance > transmittance > sample > reference
+| Block | Data Type | Loaded as |
+|-------|-----------|-----------|
+| `a` (AB) | Absorbance spectrum | Absorbance |
+| `t` (TR) | Transmittance spectrum | Reflectance-like (transmittance formula on conversion) |
+| `aria` / `arit` | Arithmetic result, absorbance-/transmittance-like | Absorbance / Reflectance-like |
+| `r` | Reflectance | Reflectance |
+| `logr` | Log reflectance (-log R) | Absorbance (absorbance-equivalent; never logged again) |
+| `atr` | ATR-corrected absorbance | Absorbance |
+| `km`, `pas`, `ra`, `e` | Kubelka-Munk, photoacoustic, Raman, emission | Other (no conversion) |
+| `sm` (ScSm) | Single-channel sample spectrum | Other (no conversion), with a warning |
+| `rf` (ScRf) | Single-channel background reference | Other (no conversion), last resort, with a warning |
+
+**Priority Order:** absorbance > transmittance > arithmetic results > reflectance and other processed spectra > single-channel sample > single-channel reference. A block with an invalid axis or values is skipped for the next one. A folder that mixes data types, or holds single-channel files, is reported in a warning dialog on import.
 
 **Typical Wavenumber Range:** 400-4000 cm-1 (mid-IR) or 4000-12000 cm-1 (NIR)
 
@@ -9819,6 +9833,8 @@ $$\lambda (nm) = \frac{10^7}{\tilde{\nu} (cm^{-1})}$$
 - Single spectrum per file
 
 **Typical Range:** 400-4000 cm-1 (mid-IR)
+
+**X unit:** .sp files do not record the x unit, so it is inferred from the range: a maximum above 3300 is read as cm-1 (FT-IR/FT-NIR); lower ranges fit both a UV/Vis/NIR spectrum in nm and a truncated IR spectrum in cm-1, so nm is assumed at low confidence with a warning. Check the unit and switch it if needed.
 
 **Metadata Available:**
 - Sample information
@@ -9874,9 +9890,14 @@ pip install agilent-ir-formats
 - Semicolon (`;`)
 
 **Format Detection:**
-- Automatically detects delimiter
-- Skips comment lines (starting with `#` or `%`)
-- Identifies X,Y pair columns
+- Column 1 is x and column 2 is y; further columns (including text such as quality flags) are ignored, with a warning
+- Every delimiter and decimal separator (point or comma) is tried; the reading under which most rows give numeric x and y wins, and decimal-comma files are reported with a warning
+- Comma-delimited files are read with decimal points (decimal commas inside a comma-delimited file are not valid CSV). If rows also fit a decimal-comma or thousands-separator reading (e.g. `4000,5,0,123`), the file loads with a warning in the import dialog; re-export such a file with `;` as the delimiter. A comma file is refused only when that other reading explains an inconsistency: rows with different field counts, repeated x values, or fields with leading zeros such as `1,000,0.123`. Files whose rows read differently under two delimiters are also refused. From Python, pass `delimiter=` and `decimal=` to choose explicitly
+- Lines before the first data row are the header. A headerless file keeps its first row as data
+- Quoted fields (`"1000","0.1"`) are accepted
+- Skips comment lines (starting with `#` or `%`) and inline `#` comments (`1000,0.1 # note`). Inline `;` comments are **not** supported, because `;` is also a delimiter: a row such as `1000,0.1 ; note` is skipped with a warning
+- The x unit is taken only from an explicit statement: an `XUNITS=` line or the x column's own heading (e.g. `Wavenumber (cm-1)`). Otherwise nm is assumed at low confidence; check it and switch units if needed
+- A folder import reads the `.dpt`, `.dat` and `.asc` files in the folder (not `.txt`, to avoid README/notes files). Files that state different x units are refused; files with fewer than 2 points are listed as failures
 
 **Example (.dpt - Bruker data point table):**
 ```
