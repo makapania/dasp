@@ -1870,13 +1870,16 @@ def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
     than '-'). Measuring each string costs about 100 us inside Tk (text layout, not
     call overhead), and a results column can hold thousands of distinct values. So:
 
-    1. Each string's width is computed as the sum of its cached per-character widths.
-       On Windows, Tk's measure was checked to equal this sum exactly (12k strings,
-       three fonts, 100/125/200%), because GDI text extents apply no kerning.
-    2. The 50 strings with the largest sums are measured exactly, which catches any
-       positive kerning on other platforms.
+    1. Each string is ranked by the sum of its cached per-character widths.
+    2. The 50 strings with the largest sums are measured exactly, as whole runs.
+    3. The larger of the widest sum and the widest exact measure is returned.
 
-    The larger of the two is returned, so the column is never narrower than its text.
+    This is a heuristic, not a guarantee. Tk on Windows measures a whole run with
+    GetTextExtentPoint32, which need not be additive. However, probes on 12k ``.6g``
+    strings (Segoe UI 9/10 and Arial 9, at 100/125/200%) found the sum equal to the
+    measure every time, and X11 Tk accumulates per-character advances. A string whose
+    true width exceeds its sum, and that ranks below the top 50 by sum, could still
+    be under-measured.
     """
     numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
     finite = numeric[np.isfinite(numeric)]

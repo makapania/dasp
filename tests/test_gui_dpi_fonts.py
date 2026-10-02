@@ -146,9 +146,13 @@ def test_monitor_work_area_uses_win32_not_the_fallback(tk_root, monkeypatch):
     tk_root.geometry("200x100+100+100")  # on the primary monitor
     tk_root.deiconify()
     tk_root.update()
+    # Sentinel screen size: the fallback would return (0, 0, 12345, 6789).
+    monkeypatch.setattr(tk_root, "winfo_screenwidth", lambda: 12345)
+    monkeypatch.setattr(tk_root, "winfo_screenheight", lambda: 6789)
     area = gui._monitor_work_area(tk_root)
     tk_root.withdraw()
     assert not fallbacks, fallbacks
+    assert area != (0, 0, 12345, 6789)
     # Independent API: the primary monitor's work area (SPI_GETWORKAREA = 0x30).
     rect = wintypes.RECT()
     assert ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(rect), 0)
@@ -205,6 +209,18 @@ def test_float_column_width_is_the_true_widest_value(tk_root, name):
     assert gui._float_column_text_width(pd.Series(values), font) == expected
 
 
+def test_float_column_width_beyond_the_top_50_cutoff(tk_root):
+    """More than 50 distinct strings: only the top 50 by summed width are measured."""
+    font = tkfont.nametofont("TkDefaultFont", root=tk_root)
+    rng = np.random.default_rng(0)
+    values = np.concatenate(
+        [rng.uniform(0.1, 0.9, 300), rng.normal(0, 1e-5, 300), rng.lognormal(0, 8, 300)]
+    ).tolist()
+    assert len({f"{v:.6g}" for v in values}) > 50
+    expected = _brute_force_width(values, font)
+    assert gui._float_column_text_width(pd.Series(values), font) == expected
+
+
 def test_plus_exponent_is_wider_than_minus_exponent(tk_root):
     font = tkfont.nametofont("TkDefaultFont", root=tk_root)
     assert font.measure("1.23456e+10") > font.measure("1.23456e-05")
@@ -230,16 +246,25 @@ def scaled_tk_root(request, restore_scale):
     except tk.TclError as exc:
         pytest.skip(f"Tk unavailable: {exc}")
     root.withdraw()
-    root.tk.call("tk", "scaling", scale * 96 / 72)
-    gui._apply_ui_scale(_FakeRoot(96.0 * scale))
-    yield root
-    root.destroy()
+    # `tk scaling` outlives the root that set it (later roots in this process inherit
+    # it), so put the original value back before destroying the root.
+    original_scaling = root.tk.call("tk", "scaling")
+    try:
+        root.tk.call("tk", "scaling", scale * 96 / 72)
+        gui._apply_ui_scale(_FakeRoot(96.0 * scale))
+        yield root
+    finally:
+        root.tk.call("tk", "scaling", original_scaling)
+        root.destroy()
 
 
 @pytest.mark.parametrize("name", sorted(_COUNTEREXAMPLES))
 def test_results_columns_fit_their_text_at_scale(scaled_tk_root, name):
     """Every float cell, measured at 125/150/200%, fits its Results column with padding."""
-    row_font = tkfont.Font(root=scaled_tk_root, font="TkDefaultFont")
+    # A fixed positive point size: TkDefaultFont is pixel-based on Windows, so its
+    # point size drifts when `tk scaling` changes, which would hide a regression.
+    family = tkfont.nametofont("TkDefaultFont", root=scaled_tk_root).actual("family")
+    row_font = tkfont.Font(root=scaled_tk_root, family=family, size=9)
     values = _COUNTEREXAMPLES[name]
     tk_cell_padding = 2 * gui._px(4)
     for col in ("RMSEcv", "RMSE_Q1", "F1_Class0", "R2cv"):
