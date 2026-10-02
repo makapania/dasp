@@ -1177,16 +1177,24 @@ class SpectralOptimizationProblem(Problem):
         # Use user-specified models or defaults
         self.model_types = models if models is not None else MODEL_TYPES
 
-        # Encode labels for classification
-        # ALWAYS encode classification labels to ensure consistent 0..n-1 range
-        # even for numeric labels (e.g., [1,2,3] -> [0,1,2])
+        # Classification labels, as in search.run_search: text labels are
+        # label-encoded, numeric labels are fitted as given (PLS-DA regresses on
+        # the label values, so re-coding {1, 2, 100} would fit a model Model
+        # Development cannot reproduce). XGBoost only accepts 0..K-1, so it is
+        # fitted on self.y_xgb codes and decoded back before scoring.
         self.label_encoder = None
+        self.y_xgb = self.y
         if task_type == 'classification':
-            self.label_encoder = LabelEncoder()
             y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            self.y = self.label_encoder.fit_transform(y_arr)
+            if not pd.api.types.is_numeric_dtype(y_arr.dtype):
+                self.label_encoder = LabelEncoder()
+                if y_arr.dtype == object:
+                    y_arr = y_arr.astype(str)
+                self.y = self.label_encoder.fit_transform(y_arr)
+                self.y_xgb = self.y
+            else:
+                self.y = y_arr
+                self.y_xgb = np.searchsorted(np.unique(y_arr), y_arr)
 
         # Fitness cache
         self.cache_enabled = cache_enabled
@@ -1515,6 +1523,9 @@ class SpectralOptimizationProblem(Problem):
                 rmse = float(np.mean(rmse_per_fold))
                 return rmse
             else:
+                # XGBoost only accepts 0..K-1 codes; accuracy and the stratified
+                # splits are identical under that monotone re-coding.
+                y_cls = self.y_xgb if model_type == 'XGBoost' else self.y
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
                 # Per-fold balanced sample_weight for sample_weight-only classifiers
                 # (XGBoost-like). The early-stopping helper slices it per train_idx;
@@ -1522,12 +1533,12 @@ class SpectralOptimizationProblem(Problem):
                 _balanced_sw = None
                 if use_sample_weight_for_classification:
                     from sklearn.utils.class_weight import compute_sample_weight
-                    _balanced_sw = compute_sample_weight('balanced', self.y)
+                    _balanced_sw = compute_sample_weight('balanced', y_cls)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
                     if use_early_stopping:
                         scores = cross_val_score_with_early_stopping(
-                            pipeline_model, X_subset, self.y, cv=cv,
+                            pipeline_model, X_subset, y_cls, cv=cv,
                             scoring='accuracy',
                             early_stopping_rounds=self.early_stopping_rounds,
                             sample_weight=_balanced_sw,
@@ -1550,13 +1561,13 @@ class SpectralOptimizationProblem(Problem):
                                 _inner.set_fit_request(sample_weight=True)
                             with sklearn.config_context(enable_metadata_routing=True):
                                 scores = cross_val_score(
-                                    _routed_model, X_subset, self.y, cv=cv,
+                                    _routed_model, X_subset, y_cls, cv=cv,
                                     scoring='accuracy',
                                     params={'sample_weight': _balanced_sw},
                                 )
                         else:
                             scores = cross_val_score(
-                                pipeline_model, X_subset, self.y, cv=cv,
+                                pipeline_model, X_subset, y_cls, cv=cv,
                                 scoring='accuracy',
                             )
                 # Return 1 - pooled accuracy (to minimize). Weighting each fold's
@@ -1565,7 +1576,7 @@ class SpectralOptimizationProblem(Problem):
                 # definition used by the grid search and the displayed CV
                 # metrics; a plain fold mean favours configs that do well on
                 # the smaller folds.
-                fold_sizes = [len(test_idx) for _, test_idx in cv.split(X_subset, self.y)]
+                fold_sizes = [len(test_idx) for _, test_idx in cv.split(X_subset, y_cls)]
                 return 1.0 - float(np.average(scores, weights=fold_sizes))
 
         except Exception as e:
@@ -3057,12 +3068,15 @@ def _compute_classification_cv_metrics(
     logger = logging.getLogger(__name__)
 
     try:
-        # Encode labels for classification (PLS-DA requires numeric y)
-        le = LabelEncoder()
+        # Text labels are label-encoded; numeric labels are fitted as given,
+        # as in the grid search (PLS-DA regresses on the label values).
         y_arr = np.asarray(y)
-        if y_arr.dtype == object:
-            y_arr = y_arr.astype(str)
-        y = le.fit_transform(y_arr)
+        if pd.api.types.is_numeric_dtype(y_arr.dtype):
+            y = y_arr
+        else:
+            if y_arr.dtype == object:
+                y_arr = y_arr.astype(str)
+            y = LabelEncoder().fit_transform(y_arr)
 
         # Decode solution
         preproc_idx = int(solution[0])
@@ -3108,6 +3122,14 @@ def _compute_classification_cv_metrics(
 
         # Get model type
         model_type = model_types[min(model_idx, len(model_types) - 1)]
+
+        # XGBoost only accepts 0..K-1: fit it on codes, decode before scoring.
+        user_classes = None
+        if model_type == 'XGBoost' and not np.array_equal(
+            np.unique(y), np.arange(len(np.unique(y)))
+        ):
+            user_classes = np.unique(y)
+            y = np.searchsorted(user_classes, y)
 
         # Detect binary vs multiclass
         n_classes = len(np.unique(y))
@@ -3242,10 +3264,17 @@ def _compute_classification_cv_metrics(
         if not pooled_true:
             raise ValueError("no CV fold produced predictions")
         # Same definitions as the grid search (scoring.classification_metrics):
-        # binary positive = second sorted class, multiclass macro.
+        # binary positive = second sorted class, multiclass macro; scored in the
+        # user's labels (XGBoost codes decoded; proba columns already sorted).
+        _true = np.concatenate(pooled_true)
+        _pred = np.concatenate(pooled_pred)
+        if user_classes is not None:
+            _true = user_classes[_true.astype(int)]
+            _pred = user_classes[_pred.astype(int)]
+            all_classes = user_classes
         pooled = classification_metrics(
-            np.concatenate(pooled_true),
-            np.concatenate(pooled_pred),
+            _true,
+            _pred,
             classes=all_classes,
             y_proba=np.vstack(pooled_proba) if proba_ok and pooled_proba else None,
         )
@@ -3479,13 +3508,17 @@ def _compute_calibration_metrics(
     )
 
     try:
-        # Encode labels for classification (PLS-DA requires numeric y)
+        # Text labels are label-encoded; numeric labels are fitted as given, as
+        # in the grid search. XGBoost (0..K-1 only) is re-coded further below.
+        user_classes = None
         if task_type == 'classification':
-            le = LabelEncoder()
             y_arr = np.asarray(y)
-            if y_arr.dtype == object:
-                y_arr = y_arr.astype(str)
-            y = le.fit_transform(y_arr)
+            if pd.api.types.is_numeric_dtype(y_arr.dtype):
+                y = y_arr
+            else:
+                if y_arr.dtype == object:
+                    y_arr = y_arr.astype(str)
+                y = LabelEncoder().fit_transform(y_arr)
 
         # Decode solution directly (same pattern as _compute_display_rmse)
         preproc_idx = int(solution[0])
@@ -3539,6 +3572,14 @@ def _compute_calibration_metrics(
 
         # Get model type and build model (same as _compute_display_rmse)
         model_type = model_types[min(model_idx, len(model_types) - 1)]
+        if (
+            task_type == 'classification'
+            and model_type == 'XGBoost'
+            and not np.array_equal(np.unique(y), np.arange(len(np.unique(y))))
+        ):
+            # XGBoost only accepts 0..K-1: fit on codes, decode before scoring
+            user_classes = np.unique(y)
+            y = np.searchsorted(user_classes, y)
 
         # For PLS, limit n_components to valid range
         # Practical cap: 15 is rarely exceeded in chemometrics
@@ -3637,8 +3678,15 @@ def _compute_calibration_metrics(
                     )
                 except Exception as e:
                     logger.debug(f"calibration predict_proba unavailable: {e}")
+            _y_score, _pred_score = y, y_pred
+            if user_classes is not None:  # XGBoost codes -> user labels
+                _y_score = user_classes[np.asarray(y, dtype=int)]
+                _pred_score = user_classes[np.asarray(y_pred, dtype=int).ravel()]
+                _cal_classes = user_classes
             metrics.update(
-                classification_metrics(y, y_pred, classes=_cal_classes, y_proba=_cal_proba)
+                classification_metrics(
+                    _y_score, _pred_score, classes=_cal_classes, y_proba=_cal_proba
+                )
             )
 
         return metrics

@@ -253,6 +253,20 @@ def _supports_early_stopping(model_name: str) -> bool:
     return model_name in _EARLY_STOPPING_MODELS
 
 
+# Study-name segment for classification studies whose numeric labels are not
+# already 0..K-1. Before 2026-10 every classification target was re-coded to
+# 0..K-1 before fitting; from "raw1" numeric labels are fitted as given (XGBoost
+# excepted), which changes PLS-DA trial scores. The segment keeps old trials
+# from being resumed alongside new ones; all other study names are unchanged.
+LABEL_FIT_POLICY = "raw1"
+
+
+def _labels_are_codes(y) -> bool:
+    """True when the labels are exactly 0..K-1 (re-coding would be a no-op)."""
+    classes = np.unique(np.asarray(y))
+    return bool(np.array_equal(classes, np.arange(len(classes))))
+
+
 def _capture_serializable_params(model) -> Optional[Dict[str, Any]]:
     """Return model params that can round-trip through str() and ast.literal_eval()."""
     try:
@@ -1152,6 +1166,7 @@ def create_unified_objective(
     y_original: np.ndarray | None = None,
     seen_fingerprints: Optional[Dict[tuple, tuple]] = None,
     resolved_extra_axes: Tuple[BundleSpec, ...] = (),
+    label_classes: np.ndarray | None = None,
 ) -> Callable[[Trial], float]:
     """Create objective function for Optuna optimization.
 
@@ -1207,6 +1222,11 @@ def create_unified_objective(
         selection method. Coerced to False for ``task_type='one_class'``
         with a warning (UVE on y_oc is a discrimination method, not a
         one-class method per CLAUDE.md:66 / Pomerantsev et al. 2025 LOVE).
+    label_classes : np.ndarray, optional
+        Classification only. When set, ``y`` holds 0..K-1 codes into these
+        sorted user labels (XGBoost cannot fit anything else); predictions and
+        references are decoded back to the user's labels before any metric so
+        every engine scores in the same label space.
 
     Returns
     -------
@@ -1950,12 +1970,20 @@ def create_unified_objective(
                     logger.debug(f"Bayesian CV predict_proba unavailable: {e}")
                     y_proba = None
 
+                # XGBoost was fitted on 0..K-1 codes: score in the user's labels
+                # (probability columns are already in sorted-label order).
+                if label_classes is not None:
+                    y_score = label_classes[np.asarray(y, dtype=int)]
+                    y_pred_cv = label_classes[np.asarray(y_pred_cv, dtype=int)]
+                else:
+                    y_score = y
+
                 # All CV classification metrics from the pooled predictions with
                 # the same definitions as the grid search (scoring.
                 # classification_metrics: binary positive = second sorted class,
                 # multiclass macro; cross_val_predict columns are np.unique(y)).
                 _cv_m = classification_metrics(
-                    y, y_pred_cv, classes=np.unique(y), y_proba=y_proba
+                    y_score, y_pred_cv, classes=np.unique(y_score), y_proba=y_proba
                 )
                 roc_auc = _cv_m["ROC_AUC"]
                 logloss_cv = _cv_m["LogLoss"]
@@ -1973,7 +2001,9 @@ def create_unified_objective(
                 per_class_metrics = {}
                 class_labels = None
                 try:
-                    report = classification_report(y, y_pred_cv, output_dict=True, zero_division=0)
+                    report = classification_report(
+                        y_score, y_pred_cv, output_dict=True, zero_division=0
+                    )
                     class_labels = sorted([k for k in report.keys()
                                            if k not in ['accuracy', 'macro avg', 'weighted avg']])
                     for class_label in class_labels:
@@ -2069,9 +2099,17 @@ def create_unified_objective(
                         )
                     except Exception as e:
                         logger.debug(f"Bayesian calibration predict_proba unavailable: {e}")
-                _cal_m = classification_metrics(
-                    y, y_pred_cal, classes=_cal_classes, y_proba=y_proba_cal
-                )
+                if label_classes is not None:  # XGBoost codes -> user labels
+                    _cal_m = classification_metrics(
+                        label_classes[np.asarray(y, dtype=int)],
+                        label_classes[np.asarray(y_pred_cal, dtype=int)],
+                        classes=label_classes,
+                        y_proba=y_proba_cal,
+                    )
+                else:
+                    _cal_m = classification_metrics(
+                        y, y_pred_cal, classes=_cal_classes, y_proba=y_proba_cal
+                    )
                 trial.set_user_attr('Accuracy', _cal_m['Accuracy'])    # Calibration
                 trial.set_user_attr('ROC_AUC', _cal_m['ROC_AUC'])
                 trial.set_user_attr('LogLoss', _cal_m['LogLoss'])
@@ -2653,13 +2691,27 @@ def run_unified_bayesian(
 
     n_samples, n_features = X.shape
 
-    # Label-encode y for classification (string labels -> integers)
-    # This matches how search.py handles classification at lines 737-740
+    # Classification labels. As in search.run_search, text labels are
+    # label-encoded and numeric labels are fitted as given: PLS-DA regresses on
+    # the label values, so re-coding {1, 2, 100} to {0, 1, 2} would fit a model
+    # that Model Development and saved models (raw labels) cannot reproduce.
+    # XGBoost is the exception: it only accepts 0..K-1, so it is fitted on codes
+    # and its predictions are decoded back to the user's labels before scoring
+    # (label_classes below). An XGBoost label-encoding wrapper usable by every
+    # engine, grid and Model Development included, is a follow-up.
     label_encoder = None
+    label_classes = None
+    _label_fit_segment = False
     if task_type == 'classification':
         from sklearn.preprocessing import LabelEncoder
-        label_encoder = LabelEncoder()
-        y = label_encoder.fit_transform(y)
+        _label_fit_segment = pd.api.types.is_numeric_dtype(y.dtype) and not _labels_are_codes(y)
+        if not pd.api.types.is_numeric_dtype(y.dtype):
+            label_encoder = LabelEncoder()
+            y = label_encoder.fit_transform(y)
+        elif model_name == 'XGBoost' and not _labels_are_codes(y):
+            label_encoder = LabelEncoder()
+            y = label_encoder.fit_transform(y)
+            label_classes = label_encoder.classes_
 
     # Guard against None params
     if imbalance_params is None:
@@ -2761,6 +2813,7 @@ def run_unified_bayesian(
         y_original=y,
         seen_fingerprints=seen_fingerprints,
         resolved_extra_axes=_resolved_extra_axes,
+        label_classes=label_classes,
     )
 
     # Create TPE sampler with good defaults
@@ -2854,6 +2907,11 @@ def run_unified_bayesian(
     _space_id = canonical_space_identity(_resolved_extra_axes, search_space is not None)
     if _space_id is not None:
         config_components += f"|space={_space_id}"
+    # Numeric labels that are not 0..K-1 are now fitted as given (PLS-DA scores
+    # change), so those studies get their own name; every other study name is
+    # unchanged. Keep this segment AFTER any |boost_rounds= segment.
+    if _label_fit_segment:
+        config_components += f"|labels={LABEL_FIT_POLICY}"
     config_hash = _hashlib.sha256(config_components.encode("utf-8")).hexdigest()[:8]
 
     # The config hash alone is NOT sufficient identity for a resumable study.

@@ -12,12 +12,12 @@ F1, Precision, Recall (= sensitivity) use that positive class and Specificity
 is the true-negative rate of the first sorted class, so a monotone relabelling
 of the classes gives identical metrics. Multiclass metrics are macro averages.
 
-The convention lives only in the metrics. The grid search, its validation
-rebuild and Model Development fit the user's own labels (text labels
-label-encoded); the Bayesian and NSGA-II searches still label-encode every
-target before fitting, which changes a PLS-DA model whose numeric labels are
-unevenly spaced (e.g. {1, 2, 100}) -- their metrics follow the convention but
-describe that encoded fit. Covered: the single-label classifier metrics of the
+The convention lives only in the metrics. Every engine fits the user's own
+labels (text labels label-encoded), so a PLS-DA model with unevenly spaced
+numeric labels (e.g. {1, 2, 100}) is the same model in every engine. The one
+exception is XGBoost, which only accepts 0..K-1: the Bayesian and NSGA-II
+searches fit it on codes and decode its predictions before scoring (the grid
+and Model Development still cannot fit XGBoost on such labels). Covered: the single-label classifier metrics of the
 grid search (folds, pooled CV, calibration,
 ``compute_validation_metrics_for_top_models``), the Bayesian and NSGA-II
 searches (pooled CV and calibration; NSGA-II's accuracy objective is the pooled

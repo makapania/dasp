@@ -788,10 +788,16 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   column, rows summed to K and Bayesian LogLosscv read ~2e-16 for a failing model. Fold probabilities are now aligned
   via the fold model's `classes_` (cv_utils `_proba_in_class_order`, also in the early-stopping loop), and
   `classification_metrics` makes AUC/LogLoss NaN when proba rows do not sum to 1 (atol 1e-4).
-- **Open: Bayesian and NSGA-II still LabelEncode numeric labels before fitting.** Encoding only text labels there (as
-  grid / Model Dev do) breaks XGBoost, which rejects labels that are not 0..K-1 (`Invalid classes inferred ... got
-  [1 2]`); grid and Model Development already fail on XGBoost with such labels. Needs a decision (per-model encoding,
-  or an XGBoost label-encoding wrapper in models.py) before changing; study identity must be versioned when it is.
+- **Round 3 (user decision, option b): Bayesian and NSGA-II fit numeric labels as given, except XGBoost.** XGBoost
+  rejects labels that are not 0..K-1 (`Invalid classes inferred ... got [1 2]`), so those engines fit it on codes and
+  decode its predictions before scoring. Bayesian studies whose numeric labels are not 0..K-1 get a `|labels=raw1`
+  study-name segment (after `|boost_rounds=` when both apply); other study names are unchanged. NSGA-II's returned
+  `label_encoder` is now None for numeric labels (the GUI used it to re-code validation labels while training labels
+  stayed raw).
+- **Follow-up (c):** an XGBoost label-encoding wrapper in models.py usable by every engine. Grid and Model
+  Development still cannot fit XGBoost on numeric labels that are not 0..K-1.
+- Test gotcha: validation-rebuild tests need round wavelengths; `all_vars` is written with `%g` (R031, being fixed on
+  fix/wavelength-mapping), so `np.linspace` wavelengths silently fail to map back.
 - Model Development repeated CV now reduces to one prediction per sample (vote / mean / mean proba) before headline
   metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
 - NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv
