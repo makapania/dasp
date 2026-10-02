@@ -929,3 +929,69 @@ predictions give a pooled CV curve; one round count is chosen (like PLS LVs from
 reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
 fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
 the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
+
+## 2026-10-02 - QW7 DPI/fonts gotchas (branch feat/dpi-fonts)
+- **Tk has no font fallback list.** `font=(('Segoe UI','Arial'),10)` becomes the Tcl string `{{Segoe UI} Arial} 10`,
+  which Tk reads as ONE family called "Segoe UI Arial"; Windows substitutes Arial. `('TkDefaultFont', 10, 'bold')`
+  has the same problem: inside a tuple the name is a family, not the named font, so it also renders Arial. Use
+  `tkfont.Font` named fonts (`self.fonts[...]`, Tk names `Dasp*`). Tk deletes a named font when the Python object that
+  created it is garbage-collected, which is why `_init_named_fonts` also keeps the owning objects on `root`.
+- **What scales by itself and what does not, once DPI aware.** Point sizes follow `tk scaling`, which goes from 1.333
+  to 1.667 at 125%. Embedded matplotlib canvases rescale from `tk scaling` (`_update_device_pixel_ratio`). Literal
+  pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one that breaks: the custom-range dialog hid its
+  Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap such sizes in `_px_geometry`. Fixed Treeview
+  column widths break too: the 80 px Results column cut `1.23456e-05` to `1.23456e-0` at 125%.
+- **Treeview row height depends on the Tk version (round-1 correction, round-2 wording).** My first note said
+  "Treeview row height follows the font". It does not follow it live on either version:
+  - **Tk 9.0.4** (shipped with 3.14) sets `rowheight` once, at style init, from the row font (linespace + 2): 17 px at
+    96 dpi, 22 px at 120 dpi. It does not re-sync if the font or scaling changes later.
+  - **Tk 8.6.15** (in `.venv312`, used by the `DASP_BUILD_PYTHON=312` rollback build) leaves `rowheight` empty and uses
+    a fixed 20 px. That is exactly the linespace at 125% and clips text above it.
+
+  `_apply_theme` now sets the `Treeview` rowheight to the TkDefaultFont linespace + `_px(2)`, which gives the same rows
+  on both versions (verified under .venv312 and .venv314). That is 1-2 px more than Tk 9's own value at 150% and 200%,
+  which is harmless. Invariant, also commented at that line: Treeview tag fonts must not be taller than TkDefaultFont.
+  The default build is still 3.14 (`BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")`).
+- **Column widths: measure, don't multiply (round 2).** Scaling a 70 px column with `_px(70)` gave 88 px at 125%, but
+  `1.23456e-05` needs 81 px of text plus Tk's cell padding (4 px per side at 96 dpi, scaled), i.e. 91 px. Text does not
+  scale exactly linearly (hinting), so the Results table now sizes float columns from the `.6g` text measured in the
+  row font (`_float_column_text_width`) plus padding, with the 96-dpi widths as minimums. `font.measure()` already
+  returns pixels at the current scale, so never multiply its result by `_UI_SCALE`.
+- **Widest-string search (round 3).**
+  - Two shortcuts each missed wider values: taking the longest strings by character count (`1.23456e+10` is wider
+    than `1.23456e-05` at the same length, because '+' is wider than '-'), and taking only the first 500 rows plus
+    the extremes.
+  - Measuring every distinct string costs about 100 us each inside Tk, and that is text layout, not Python-to-Tcl
+    overhead: moving the loop into Tcl made it slower, about 1.1 s per 10k strings.
+  - On Windows, `font.measure(s)` equals the sum of its per-character widths exactly, because GDI text extents
+    apply no kerning. Checked over 12k `.6g` strings, Segoe UI 9/10 and Arial 9, at 100/125/200%.
+  - `_float_column_text_width` therefore ranks every distinct string by summed character widths, measures the top
+    50 exactly, and returns the larger of the two. That is exact on Windows, safe elsewhere, and takes about 15 ms
+    per 10k values.
+- **`tk scaling` set on a fresh root does change font measurement in that interpreter** (62 / 81 px for
+  `1.23456e-05` at 100 / 125%). Use that to test real-scale text widths without a DPI-aware process. It does not
+  reproduce a true 200% DPI-aware process exactly (102 px here versus Codex's 132 px measured at real 192 dpi), so
+  the tests compare widths and text measured in the same interpreter.
+- **Dialog placement (round 2).** Tk's `winfo_screenwidth/height` on Windows describe the *primary* monitor only.
+  `_px_geometry(size, owner)` now asks Win32 for the work area of the owner's monitor (`MonitorFromWindow` +
+  `GetMonitorInfoW` `rcWork`, in the process's own DPI coordinate space, which is also Tk's) when the dialog opens. It
+  clamps the size, leaving room for the title bar, and centres the dialog on the owner inside that area. Without
+  Win32 it falls back to the Tk screen size.
+- **Test processes start DPI-unaware**, so the session app's `_UI_SCALE` is 1.0 and pixel assertions are unchanged.
+  Only `main()` calls `_enable_windows_dpi_awareness()`. However, the GUI module calls `matplotlib.use('TkAgg')`, so
+  the first pyplot figure in a test with no running Tk mainloop declares **per-monitor** DPI awareness
+  (matplotlib's `Win32_SetProcessDpiAwareness_max`). In the GUI suite this first happens in
+  `test_contaminant_tab.py::TestApplyCorrection::test_apply_correction_no_attribute_error`. After that, Tk font
+  measurements in the same process come back in physical pixels, even for pixel-sized fonts. Measure text in a fresh
+  subprocess, as `tests/test_gui_dpi_fonts.py::sci_text_px_96` does. The real app is unaffected: there the mainloop
+  is running, so matplotlib skips the call.
+- **Black 26 targets 3.14 and rewrites `except (A, B):` as PEP 758 `except A, B:`.** That is a SyntaxError on 3.12,
+  which the `DASP_BUILD_PYTHON=312` rollback build still uses. Keep the parentheses in the GUI file.
+- **A custom PyInstaller 6 `manifest=` REPLACES the built-in template rather than merging.** The spec therefore copies
+  the template's compatibility/longPathAware block verbatim; PyInstaller still injects the execution level and
+  Common-Controls v6.
+- **`sed -i` from Git Bash rewrites `spectral_predict_gui_optimized.py` from CRLF to LF.** The index stores CRLF, so
+  every line then shows as changed. Restore with a byte-level `\n` to `\r\n` pass, or use the Edit tool.
+- **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
+  bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
+  `full.width / winfo_screenwidth()`.

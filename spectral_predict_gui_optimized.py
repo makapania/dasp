@@ -64,6 +64,7 @@ import logging
 import re
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import threading
 from datetime import datetime
@@ -1673,6 +1674,300 @@ SIDEBAR_CONFIG = {
 }
 
 
+# ===== HIGH-DPI SCALING =====
+# SPACING and SIDEBAR_CONFIG above are in pixels at 96 dpi. Once the process is
+# DPI aware (see _enable_windows_dpi_awareness), Windows stops bitmap-stretching the
+# window, so pixel sizes must be multiplied by the display scale to keep their
+# physical size. Point-sized fonts already follow Tk's own scaling and must NOT be
+# multiplied, and embedded matplotlib canvases rescale themselves from `tk scaling`
+# (FigureCanvasTk._update_device_pixel_ratio), so figure dpi is left alone too.
+_BASE_SPACING = dict(SPACING)
+_BASE_SIDEBAR_CONFIG = dict(SIDEBAR_CONFIG)
+_UI_SCALE = 1.0
+
+# HRESULT returned by SetProcessDpiAwareness when awareness was already set, e.g. by
+# the DPI-aware manifest embedded in the frozen executable.
+_E_ACCESSDENIED = 0x80070005
+
+
+def _enable_windows_dpi_awareness() -> bool:
+    """Declare the process system-DPI-aware on Windows. Call before ``tk.Tk()``.
+
+    Returns:
+        Advisory only, nothing depends on it: True if the process is DPI aware
+        afterwards, False otherwise (including on non-Windows platforms, where this
+        is a no-op).
+    """
+    if sys.platform != 'win32':
+        return False
+    import ctypes
+
+    try:
+        hresult = ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    except (AttributeError, OSError) as exc:  # shcore.dll is absent before Windows 8.1
+        logger.debug("SetProcessDpiAwareness unavailable (%s); trying SetProcessDPIAware", exc)
+    else:
+        if hresult == 0:
+            return True
+        if (hresult & 0xFFFFFFFF) == _E_ACCESSDENIED:
+            logger.debug("DPI awareness was already set for this process (manifest)")
+            return True
+        logger.warning("SetProcessDpiAwareness(1) failed with HRESULT 0x%08X", hresult & 0xFFFFFFFF)
+    try:
+        user32 = ctypes.windll.user32
+        if user32.SetProcessDPIAware():
+            return True
+        # On Windows 7/8 a manifest that already declared awareness makes this call
+        # fail too; ask whether the process is aware anyway.
+        aware = bool(user32.IsProcessDPIAware())
+        logger.debug("SetProcessDPIAware failed; IsProcessDPIAware() = %s", aware)
+        return aware
+    except (AttributeError, OSError) as exc:
+        logger.warning("Could not declare DPI awareness; UI may be blurry: %s", exc)
+        return False
+
+
+def _compute_ui_scale(root: tk.Misc) -> float:
+    """Return the pixel scale factor for the display ``root`` is on (1.0 = 96 dpi).
+
+    The factor never drops below 1.0, and is 1.0 on macOS where Tk works in points
+    and the OS handles Retina scaling. A DPI-unaware Windows process sees 96 dpi and
+    therefore gets 1.0.
+    """
+    if sys.platform == 'darwin':
+        return 1.0
+    try:
+        dpi = float(root.winfo_fpixels('1i'))
+    except tk.TclError:
+        return 1.0
+    return max(1.0, round(dpi / 96.0, 2))
+
+
+def _apply_ui_scale(root: tk.Misc) -> float:
+    """Set the module scale factor and rescale SPACING / SIDEBAR_CONFIG in place.
+
+    Idempotent: values are always recomputed from the 96-dpi base values, so
+    constructing a second app in the same process does not compound the scaling.
+    """
+    global _UI_SCALE
+    _UI_SCALE = _compute_ui_scale(root)
+    SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
+    SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
+    return _UI_SCALE
+
+
+def _px(value: float) -> int:
+    """Scale a pixel length given at 96 dpi to the current display."""
+    return int(round(value * _UI_SCALE))
+
+
+def _monitor_work_area(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` of the usable area around ``window``.
+
+    On Windows this is the work area (screen minus taskbar) of the monitor that holds
+    ``window``'s toplevel, in the process's own DPI coordinate space, which is also
+    the space Tk geometry strings use. Elsewhere, or if the Win32 calls fail, it is
+    the screen Tk reports (the primary monitor on Windows).
+    """
+    fallback = (0, 0, int(window.winfo_screenwidth()), int(window.winfo_screenheight()))
+    if sys.platform != 'win32':
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ('cbSize', wintypes.DWORD),
+                ('rcMonitor', wintypes.RECT),
+                ('rcWork', wintypes.RECT),
+                ('dwFlags', wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo)]
+        hwnd = int(window.winfo_toplevel().wm_frame(), 16)
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return fallback
+        work = info.rcWork
+        if work.right <= work.left or work.bottom <= work.top:
+            return fallback
+        return work.left, work.top, work.right, work.bottom
+    except (AttributeError, OSError, ValueError, tk.TclError) as exc:
+        logger.debug("Monitor work area unavailable (%s); using screen size", exc)
+        return fallback
+
+
+def _px_geometry(size: str, owner: tk.Misc | None = None) -> str:
+    """Scale a ``"WIDTHxHEIGHT"`` Toplevel size given at 96 dpi, e.g. ``"350x180"``.
+
+    Fixed-size dialogs do not grow to fit their content, while their point-sized
+    fonts do grow with the display scale, so an unscaled size clips the bottom rows.
+
+    With ``owner`` (the window the dialog belongs to), the size is clamped to the work
+    area of the owner's monitor, leaving room for the title bar and borders, and the
+    dialog is centred on the owner and kept inside that work area: the result is
+    ``"WxH+X+Y"``. Without ``owner`` only the scaled ``"WxH"`` is returned.
+    """
+    width, height = (_px(int(v)) for v in size.lower().split('x'))
+    if owner is None:
+        return f"{width}x{height}"
+    left, top, right, bottom = _monitor_work_area(owner)
+    # Tk sizes the client area; the frame adds the title bar and borders.
+    width = max(1, min(width, right - left - _px(16)))
+    height = max(1, min(height, bottom - top - _px(40)))
+    # Centre on the owner, unless it is iconified, withdrawn or not yet mapped: its
+    # coordinates are then meaningless (Windows parks minimised windows at -32000),
+    # so centre on the work area instead. MonitorFromWindow already uses a minimised
+    # window's restored position to pick the monitor.
+    cx, cy = (left + right) // 2, (top + bottom) // 2
+    try:
+        if owner.winfo_ismapped() and owner.winfo_toplevel().state() in ('normal', 'zoomed'):
+            cx = owner.winfo_rootx() + owner.winfo_width() // 2
+            cy = owner.winfo_rooty() + owner.winfo_height() // 2
+    except (AttributeError, tk.TclError):
+        pass
+    x = min(max(cx - width // 2, left), right - width - _px(16))
+    y = min(max(cy - height // 2, top), bottom - height - _px(40))
+    return f"{width}x{height}+{max(x, left)}+{max(y, top)}"
+
+
+def _results_column_width(col: str, values: pd.Series, row_font: tkfont.Font) -> int:
+    """Pixel width for a Results-table column at the current display scale.
+
+    The per-column widths below are 96-dpi minimums, scaled with ``_px``. Float cells
+    are shown as ``.6g`` text, which can be as wide as ``-1.23456e+10``, so float
+    columns are widened to their widest formatted value measured in ``row_font``,
+    plus Tk's horizontal cell padding (4 px per side at 96 dpi) and a small margin.
+    """
+    if col == 'Select':
+        base = 60
+    elif col in ('Model', 'Preprocess', 'Subset'):
+        base = 120
+    elif col == 'top_vars':
+        base = 200
+    elif col in ('BestRegion', 'BestClass'):
+        base = 100
+    elif col.startswith('RMSE_') or col.startswith('F1_Class'):
+        base = 70  # Quartile RMSE or Class F1 columns
+    else:
+        base = 80
+    width = _px(base)
+    if pd.api.types.is_float_dtype(values):
+        text_width = _float_column_text_width(values, row_font)
+        if text_width:
+            width = max(width, text_width + 2 * _px(4) + _px(2))
+    return width
+
+
+def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
+    """Pixel width of the widest ``.6g``-formatted value in a float column, in ``font``.
+
+    ``font.measure`` already returns pixels at the current display scale, so the
+    result must not be multiplied by ``_UI_SCALE``.
+
+    Every value is formatted and every distinct string is considered. Character
+    count is not a proxy, because equal-length strings differ in width ('+' is wider
+    than '-'). Measuring each string costs about 100 us inside Tk (text layout, not
+    call overhead), and a results column can hold thousands of distinct values. So:
+
+    1. Each string is ranked by the sum of its cached per-character widths.
+    2. The 50 strings with the largest sums are measured exactly, as whole runs.
+    3. The larger of the widest sum and the widest exact measure is returned.
+
+    This is a heuristic, not a guarantee. Tk on Windows measures a whole run with
+    GetTextExtentPoint32, which need not be additive. However, probes on 12k ``.6g``
+    strings (Segoe UI 9/10 and Arial 9, at 100/125/200%) found the sum equal to the
+    measure every time, and X11 Tk accumulates per-character advances. A string whose
+    true width exceeds its sum, and that ranks below the top 50 by sum, could still
+    be under-measured.
+    """
+    numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
+    finite = numeric[np.isfinite(numeric)]
+    if finite.size == 0:
+        return 0
+    strings = {f"{v:.6g}" for v in finite.tolist()}
+    char_width: dict[str, int] = {}
+    for ch in set().union(*strings):
+        char_width[ch] = font.measure(ch)
+    summed = {text: sum(char_width[ch] for ch in text) for text in strings}
+    widest_first = sorted(summed, key=summed.__getitem__, reverse=True)[:50]
+    return max(max(summed.values()), max(font.measure(text) for text in widest_first))
+
+
+# ===== NAMED FONTS =====
+# Tk has no font fallback list: font=(('Segoe UI', 'Arial'), 10) is parsed as the
+# single family "Segoe UI Arial", which does not exist, so Windows substitutes Arial.
+# Pick one family that is actually installed and share it through named fonts.
+_UI_FAMILY_CANDIDATES = {
+    'win32': ('Segoe UI',),
+    'darwin': ('SF Pro Text', 'Helvetica Neue', 'Helvetica'),
+    'other': ('Inter', 'Ubuntu', 'Noto Sans', 'DejaVu Sans', 'Liberation Sans'),
+}
+_MONO_FAMILY_CANDIDATES = {
+    'win32': ('Consolas', 'Cascadia Mono', 'Courier New'),
+    'darwin': ('Menlo', 'Monaco'),
+    'other': ('DejaVu Sans Mono', 'Ubuntu Mono', 'Noto Sans Mono', 'Liberation Mono'),
+}
+# key -> (family kind, size in points, weight)
+_NAMED_FONT_SPECS = {
+    'body': ('ui', 10, 'normal'),
+    'small': ('ui', 9, 'normal'),
+    'strong': ('ui', 11, 'bold'),
+    'heading': ('ui', 12, 'bold'),
+    'title': ('ui', 16, 'bold'),
+    'mono': ('mono', 9, 'normal'),
+}
+
+
+def _resolve_font_family(root: tk.Misc, candidates: tuple[str, ...], fallback: str) -> str:
+    """Return the first installed family in ``candidates``, else the family of ``fallback``.
+
+    A family counts as installed when Tk resolves it to itself rather than
+    substituting another face.
+    """
+    for family in candidates:
+        actual = tkfont.Font(root=root, family=family).actual('family')
+        if actual.lower() == family.lower():
+            return family
+    return tkfont.nametofont(fallback, root=root).actual('family')
+
+
+def _init_named_fonts(root: tk.Misc) -> dict[str, tkfont.Font]:
+    """Create (or reconfigure) the app's named fonts on ``root``.
+
+    Tk deletes a named font when the Python object that created it is
+    garbage-collected, so the owning objects are also kept on ``root`` and reused if
+    a second app is built on the same root.
+    """
+    platform_key = sys.platform if sys.platform in ('win32', 'darwin') else 'other'
+    families = {
+        'ui': _resolve_font_family(root, _UI_FAMILY_CANDIDATES[platform_key], 'TkDefaultFont'),
+        'mono': _resolve_font_family(root, _MONO_FAMILY_CANDIDATES[platform_key], 'TkFixedFont'),
+    }
+    fonts = dict(getattr(root, '_dasp_named_fonts', {}))
+    existing = set(tkfont.names(root))
+    for key, (kind, size, weight) in _NAMED_FONT_SPECS.items():
+        name = f"Dasp{key.capitalize()}"
+        options = {'family': families[kind], 'size': size, 'weight': weight}
+        font = fonts.get(key)
+        if font is None and name in existing:
+            font = tkfont.nametofont(name, root=root)
+        if font is None:
+            fonts[key] = tkfont.Font(root=root, name=name, **options)
+        else:
+            font.configure(**options)
+            fonts[key] = font
+    root._dasp_named_fonts = fonts
+    return fonts
+
+
 class SidebarNavigation:
     """
     Collapsible sidebar navigation component for the application.
@@ -1769,7 +2064,7 @@ class SidebarNavigation:
     def _create_collapse_toggle(self):
         """Create the collapse/expand toggle button at the bottom."""
         toggle_frame = tk.Frame(self.frame, bg=self.colors.get('sidebar', '#2D3748'),
-                               height=50)
+                               height=_px(50))
         toggle_frame.pack(side='bottom', fill='x')
         toggle_frame.pack_propagate(False)
 
@@ -2225,8 +2520,14 @@ class SpectralPredictApp:
         self.root = root
         self.root.title(f"ASP - Advanced Spectral Prediction  —  BETA {_DASP_VERSION}")
 
-        # Set minimum window size for usability
-        self.root.minsize(1200, 700)
+        # High-DPI: scale the 96-dpi pixel constants and build the named fonts before
+        # any widget is created (no-op scale of 1.0 in a DPI-unaware process).
+        _apply_ui_scale(self.root)
+        self.fonts = _init_named_fonts(self.root)
+
+        # Set minimum window size for usability (clamped so it never exceeds the screen)
+        self.root.minsize(min(_px(1200), self.root.winfo_screenwidth()),
+                          min(_px(700), self.root.winfo_screenheight()))
 
         # Set window size - use zoomed/maximized for better visibility
         try:
@@ -4205,26 +4506,17 @@ class SpectralPredictApp:
         # Configure root window
         self.root.configure(bg=self.colors['bg'])
 
-        # Get modern font stack (try Inter, SF Pro, fallback to system fonts)
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            heading_font = ('SF Pro Display', 'Helvetica Neue', 'Arial')
-            body_font = ('SF Pro Text', 'Helvetica Neue', 'Arial')
-        elif system == 'Windows':
-            heading_font = ('Segoe UI', 'Arial')
-            body_font = ('Segoe UI', 'Arial')
-        else:  # Linux
-            heading_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
-            body_font = ('Inter', 'Ubuntu', 'DejaVu Sans', 'Arial')
+        # Named fonts (one installed family, see _init_named_fonts). Paddings below
+        # are pixels at 96 dpi and go through _px(); font sizes are points and do not.
+        fonts = self.fonts
 
         style = ttk.Style()
 
         # Modern button styles with gradients (simulated with colors)
         # Unified sizing to match accent buttons for visual consistency
         style.configure('Modern.TButton',
-                       font=(body_font, 10),
-                       padding=(15, 10),  # Increased vertical padding for better alignment
+                       font=fonts['body'],
+                       padding=(_px(15), _px(10)),  # Increased vertical padding for better alignment
                        borderwidth=0,
                        relief='flat',
                        foreground=self.colors['text'])
@@ -4235,8 +4527,8 @@ class SpectralPredictApp:
                            ('!disabled', self.colors['text'])])
 
         style.configure('Accent.TButton',
-                       font=(body_font, 11, 'bold'),
-                       padding=(20, 12),
+                       font=fonts['strong'],
+                       padding=(_px(20), _px(12)),
                        background='#0078D4',  # Explicit blue background
                        foreground='#FFFFFF',  # Explicit white text
                        borderwidth=1,
@@ -4249,8 +4541,8 @@ class SpectralPredictApp:
 
         # Default style for all ttk.Button widgets (IMPORTANT: prevents invisible text)
         style.configure('TButton',
-                       font=(body_font, 10),
-                       padding=(15, 8),
+                       font=fonts['body'],
+                       padding=(_px(15), _px(8)),
                        borderwidth=1,  # Add border for visibility
                        relief='solid',
                        foreground='#000000',  # Explicit black text
@@ -4264,8 +4556,8 @@ class SpectralPredictApp:
 
         # Secondary button style (for less prominent actions)
         style.configure('Secondary.TButton',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=1,
                        relief='solid',
                        foreground=self.colors['text'],
@@ -4286,32 +4578,34 @@ class SpectralPredictApp:
         style.configure('TLabel',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+        # Title.TLabel (was 28 pt) has no live users; it shares the title font.
         style.configure('Title.TLabel',
-                       font=(heading_font, 28, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Heading.TLabel',
-                       font=(heading_font, 16, 'bold'),
+                       font=fonts['title'],
                        foreground=self.colors['text'],
                        background=self.colors['bg'])
         style.configure('Subheading.TLabel',
-                       font=(heading_font, 12, 'bold'),
+                       font=fonts['heading'],
                        foreground=self.colors['accent'],
                        background=self.colors['bg'])
         style.configure('Caption.TLabel',
-                       font=(body_font, 9),
+                       font=fonts['small'],
                        foreground=self.colors['text_light'],
                        background=self.colors['bg'])
+        # SidebarLabel.TLabel (was 11 pt) has no live users; it uses the body font.
         style.configure('SidebarLabel.TLabel',
-                       font=(body_font, 11),
+                       font=fonts['body'],
                        foreground=self.colors['text_inverse'],
                        background=self.colors['sidebar'],
-                       padding=(15, 10))
+                       padding=(_px(15), _px(10)))
         style.configure('CardLabel.TLabel',
                        background=self.colors['card_bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Notebook styling - Default style for subtabs (keep tabs visible)
         style.configure('TNotebook',
@@ -4319,8 +4613,8 @@ class SpectralPredictApp:
                        borderwidth=0,
                        tabmargins=[0, 0, 0, 0])
         style.configure('TNotebook.Tab',
-                       font=(body_font, 10),
-                       padding=(12, 6),
+                       font=fonts['body'],
+                       padding=(_px(12), _px(6)),
                        borderwidth=0)
         style.map('TNotebook.Tab',
                  background=[('selected', self.colors['bg']),
@@ -4355,7 +4649,7 @@ class SpectralPredictApp:
         style.configure('TLabelframe.Label',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 11, 'bold'))
+                       font=fonts['strong'])
 
         # Combobox styling - add stronger borders for better definition
         style.configure('TCombobox',
@@ -4375,79 +4669,78 @@ class SpectralPredictApp:
         style.configure('TCheckbutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
 
         # Radiobutton styling
         style.configure('TRadiobutton',
                        background=self.colors['bg'],
                        foreground=self.colors['text'],
-                       font=(body_font, 10))
+                       font=fonts['body'])
+
+        # Treeview row height. Tk 9 sets it once, at style init, from the row font
+        # (linespace + 2) and does not re-sync it later; Tk 8.6 (the DASP_BUILD_PYTHON=312
+        # rollback build) fixes it at 20 px whatever the font, so once the process is DPI
+        # aware the rows clip at 125% and above. Setting it explicitly from the row font
+        # gives the same rows on both Tk versions (_px(2) is 1-2 px more than Tk 9's own
+        # value at 150%/200%, which is harmless).
+        # INVARIANT: Treeview tag fonts (tag_configure(font=...)) must not be taller than
+        # TkDefaultFont, or their rows clip; size this from the tallest font if that changes.
+        row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
+        style.configure('Treeview', rowheight=row_font.metrics('linespace') + _px(2))
 
     def _create_top_bar(self):
         """Create a beautiful top bar with app title and theme switcher."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            title_font = ('SF Pro Display', 32, 'bold')
-            subtitle_font = ('SF Pro Text', 12)
-            label_font = ('SF Pro Text', 11)
-            button_font = ('SF Pro Text', 10, 'bold')
-        elif system == 'Windows':
-            title_font = ('Segoe UI', 32, 'bold')
-            subtitle_font = ('Segoe UI', 12)
-            label_font = ('Segoe UI', 11)
-            button_font = ('Segoe UI', 10, 'bold')
-        else:  # Linux
-            title_font = ('Ubuntu', 32, 'bold')
-            subtitle_font = ('Ubuntu', 12)
-            label_font = ('Ubuntu', 11)
-            button_font = ('Ubuntu', 10, 'bold')
+        # Sizes here have no named-font equivalent, so they reuse the resolved family.
+        ui_family = self.fonts['body'].cget('family')
+        label_font = (ui_family, 11)
+        button_font = (ui_family, 10, 'bold')
 
-        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=70)
-        top_bar.pack(fill='x', padx=10, pady=(10, 5))
+        # Fixed-height bar (pack_propagate off), so its pixel height must be scaled.
+        top_bar = tk.Frame(self.root, bg=self.colors['bg'], height=_px(70))
+        top_bar.pack(fill='x', padx=_px(10), pady=(_px(10), _px(5)))
         top_bar.pack_propagate(False)
 
         # Left side: Logo and title (compact layout)
         title_frame = tk.Frame(top_bar, bg=self.colors['bg'])
         title_frame.pack(side='left', fill='y')
 
-        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px)
-        self.logo_label = self._create_logo_label(title_frame, size=75)
-        self.logo_label.pack(side='left', padx=(0, 10), pady=0)
+        # ASP Logo - Rainbow cobra with spectral bar (reduced to 75px at 96 dpi)
+        self.logo_label = self._create_logo_label(title_frame, size=_px(75))
+        self.logo_label.pack(side='left', padx=(0, _px(10)), pady=0)
 
         # "Advanced Spectral Prediction" text to the right of logo (reduced font)
         text_frame = tk.Frame(title_frame, bg=self.colors['bg'])
-        text_frame.pack(side='left', fill='y', pady=15)
+        text_frame.pack(side='left', fill='y', pady=_px(15))
 
         tk.Label(text_frame,
                 text="Advanced Spectral Prediction",
-                font=('Segoe UI', 16, 'bold'),
+                font=self.fonts['title'],
                 fg=self.colors['text'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 2))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(2)))
 
         # Subtle amber BETA marker + muted version (same row, baseline-aligned)
         tk.Label(text_frame,
                 text="BETA",
-                font=('Segoe UI', 9, 'bold'),
+                font=(ui_family, 9, 'bold'),
                 fg='#D97706',  # amber-600 — attractive but unobtrusive
-                bg=self.colors['bg']).pack(side='left', padx=(10, 4), anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', padx=(_px(10), _px(4)), anchor='s',
+                                           pady=(0, _px(5)))
 
         tk.Label(text_frame,
                 text=f"v{_DASP_VERSION}",
-                font=('Segoe UI', 9),
+                font=self.fonts['small'],
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, 5))
+                bg=self.colors['bg']).pack(side='left', anchor='s', pady=(0, _px(5)))
 
         # Right side: Theme switcher with beautiful buttons
         theme_frame = tk.Frame(top_bar, bg=self.colors['bg'])
-        theme_frame.pack(side='right', fill='y', padx=10)
+        theme_frame.pack(side='right', fill='y', padx=_px(10))
 
         tk.Label(theme_frame,
                 text="Theme:",
                 font=label_font,
                 fg=self.colors['text_light'],
-                bg=self.colors['bg']).pack(side='left', padx=(0, 10))
+                bg=self.colors['bg']).pack(side='left', padx=(0, _px(10)))
 
         # Create theme buttons with hover effects (compact)
         self.theme_buttons = {}
@@ -4460,11 +4753,11 @@ class SpectralPredictApp:
                           activebackground=theme_data['accent_dark'],
                           relief='flat',
                           borderwidth=0,
-                          padx=10,
-                          pady=4,
+                          padx=_px(10),
+                          pady=_px(4),
                           cursor='hand2',
                           command=lambda tn=theme_name: self._switch_theme(tn))
-            btn.pack(side='left', padx=2)
+            btn.pack(side='left', padx=_px(2))
 
             # Add hover effect
             def on_enter(e, b=btn, td=theme_data):
@@ -4479,8 +4772,8 @@ class SpectralPredictApp:
             self.theme_buttons[theme_name] = btn
 
         # Add a stronger separator line for better visual definition
-        separator = tk.Frame(self.root, bg=self.colors['border'], height=3)
-        separator.pack(fill='x', padx=20)
+        separator = tk.Frame(self.root, bg=self.colors['border'], height=_px(3))
+        separator.pack(fill='x', padx=_px(20))
 
     def _switch_theme(self, theme_name):
         """Switch to a new theme with smooth transition effect."""
@@ -4592,15 +4885,7 @@ class SpectralPredictApp:
 
     def _show_theme_notification(self, theme_name):
         """Show a beautiful notification when theme changes."""
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':  # macOS
-            notif_font = ('SF Pro Text', 11)
-        elif system == 'Windows':
-            notif_font = ('Segoe UI', 11)
-        else:  # Linux
-            notif_font = ('Ubuntu', 11)
+        notif_font = (self.fonts['body'].cget('family'), 11)
 
         # Create a temporary notification label
         notif = tk.Label(self.root,
@@ -4608,8 +4893,8 @@ class SpectralPredictApp:
                         font=notif_font,
                         fg=self.colors['text_inverse'],
                         bg=self.colors['accent'],
-                        padx=20,
-                        pady=10)
+                        padx=_px(20),
+                        pady=_px(10))
         notif.place(relx=0.5, rely=0.95, anchor='center')
 
         # Fade out after 2 seconds
@@ -4632,20 +4917,10 @@ class SpectralPredictApp:
         when background and text are the same color. tk.Button provides reliable
         cross-platform color control for accent-colored buttons.
         """
-        # Get platform-appropriate font
-        import platform
-        system = platform.system()
-        if system == 'Darwin':
-            button_font = ('SF Pro Text', 11, 'bold')
-        elif system == 'Windows':
-            button_font = ('Segoe UI', 11, 'bold')
-        else:
-            button_font = ('Ubuntu', 11, 'bold')
-
         btn = tk.Button(parent,
                        text=text,
                        command=command,
-                       font=button_font,
+                       font=self.fonts['strong'],
                        fg=self.colors['text_inverse'],  # White text
                        bg=self.colors['accent'],  # Colored background
                        activeforeground=self.colors['text_inverse'],
@@ -4653,8 +4928,8 @@ class SpectralPredictApp:
                        disabledforeground=self.colors['text_inverse'],  # Keep white text when disabled
                        relief='flat',
                        borderwidth=0,
-                       padx=20,
-                       pady=12,
+                       padx=_px(20),
+                       pady=_px(12),
                        cursor='hand2',
                        **kwargs)
 
@@ -4678,11 +4953,16 @@ class SpectralPredictApp:
 
         Uses the beautiful rainbow cobra logo with spectral bar and UV/IR label.
         Automatically removes white background for transparency.
+
+        ``size`` is in screen pixels (already display-scaled). The text fallback's
+        font is in points, which Tk scales itself, so its size comes from the 96-dpi
+        base to avoid scaling twice.
         """
+        text_pt = max(1, int(round(size / _UI_SCALE)) // 3)
         if not HAS_PIL:
             # Fallback to text if PIL not available
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -4695,7 +4975,7 @@ class SpectralPredictApp:
                 if not logo_path.exists():
                     # Fallback to text
                     logo_label = tk.Label(parent, text="ASP",
-                                         font=('Arial', size//3, 'bold'),
+                                         font=('Arial', text_pt, 'bold'),
                                          fg=self.colors['accent'], bg=self.colors['bg'])
                     return logo_label
 
@@ -4719,7 +4999,7 @@ class SpectralPredictApp:
         except Exception as e:
             # Fallback to text if image loading fails
             logo_label = tk.Label(parent, text="ASP",
-                                 font=('Arial', size//3, 'bold'),
+                                 font=('Arial', text_pt, 'bold'),
                                  fg=self.colors['accent'], bg=self.colors['bg'])
             return logo_label
 
@@ -8882,7 +9162,7 @@ class SpectralPredictApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Peak Calculator")
-        dialog.geometry("520x720")
+        dialog.geometry(_px_geometry("520x720", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -19125,7 +19405,7 @@ class SpectralPredictApp:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
-            dialog.geometry("600x500")
+            dialog.geometry(_px_geometry("600x500", self.root))
 
             # Add text widget with scrollbar
             frame = ttk.Frame(dialog, padding=10)
@@ -31272,7 +31552,7 @@ For detailed documentation, see the User Guide.
 
             win = tk.Toplevel(self.root)
             win.title("Multi-Class Decision Matrix")
-            win.geometry("980x720")
+            win.geometry(_px_geometry("980x720", self.root))
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
@@ -32004,21 +32284,10 @@ For detailed documentation, see the User Guide.
             # Set up columns
             self.results_tree['columns'] = columns
 
-            # Configure column widths and anchors
+            # Configure column widths and anchors (see _results_column_width)
+            row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
             for col in columns:
-                # Set column width based on content
-                if col == 'Select':
-                    width = 60
-                elif col in ['Model', 'Preprocess', 'Subset']:
-                    width = 120
-                elif col in ['top_vars']:
-                    width = 200
-                elif col in ['BestRegion', 'BestClass']:
-                    width = 100
-                elif col.startswith('RMSE_') or col.startswith('F1_Class'):
-                    width = 70  # Quartile RMSE or Class F1 columns
-                else:
-                    width = 80
+                width = _results_column_width(col, results_df[col], row_font)
                 self.results_tree.column(col, width=width, anchor='center', stretch=False)
 
             # Store default widths for reset functionality
@@ -32060,8 +32329,8 @@ For detailed documentation, see the User Guide.
             # Widen sorted columns so arrow/superscript isn't clipped
             if is_sorted and col in sorted_col_names:
                 cur_width = self.results_tree.column(col, 'width')
-                if cur_width < 200:  # don't widen already-wide columns
-                    self.results_tree.column(col, width=cur_width + 22, stretch=False)
+                if cur_width < _px(200):  # don't widen already-wide columns
+                    self.results_tree.column(col, width=cur_width + _px(22), stretch=False)
 
         # Update sort hint label — prominent blue bar when sorting, subtle hint otherwise
         if hasattr(self, 'sort_hint_label'):
@@ -35029,8 +35298,9 @@ For detailed documentation, see the User Guide.
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Analysis Subset")
-        dialog.geometry("520x500")
-        dialog.resizable(False, False)
+        dialog.geometry(_px_geometry("520x500", self.root))
+        # Resizable: _px_geometry may shrink it to fit a small monitor's work area.
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -42105,7 +42375,7 @@ External Validation Performance (n={n_val}):
         # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Code")
-        dialog.geometry("550x520")
+        dialog.geometry(_px_geometry("550x520", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -42887,7 +43157,7 @@ External Validation Performance (n={n_val}):
         # Create preview window
         preview_window = tk.Toplevel(self.root)
         preview_window.title("Wavelength Selection Preview")
-        preview_window.geometry("800x500")
+        preview_window.geometry(_px_geometry("800x500", self.root))
 
         # Info text
         info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
@@ -43002,7 +43272,7 @@ External Validation Performance (n={n_val}):
         """Show dialog for custom wavelength range."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Wavelength Range")
-        dialog.geometry("350x180")
+        dialog.geometry(_px_geometry("350x200", self.root))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -52602,7 +52872,7 @@ External Validation Performance (n={n_val}):
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry("550x450")
+        dialog.geometry(_px_geometry("550x450", self.root))
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -55823,7 +56093,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             preview_win = tk.Toplevel(self.root)
             preview_win.title(f"Preview: {sample_id}")
-            preview_win.geometry("800x400")
+            preview_win.geometry(_px_geometry("800x400", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=preview_win)
             canvas.draw()
@@ -56040,7 +56310,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             compare_win = tk.Toplevel(self.root)
             compare_win.title(f"Comparison: {sample_id} vs {result_id}")
-            compare_win.geometry("1000x500")
+            compare_win.geometry(_px_geometry("1000x500", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=compare_win)
             canvas.draw()
@@ -59182,7 +59452,7 @@ External Validation Performance (n={n_val}):
         # Show in popup window
         popup = tk.Toplevel(self.root)
         popup.title("Correction Comparison")
-        popup.geometry("900x500")
+        popup.geometry(_px_geometry("900x500", self.root))
 
         canvas = FigureCanvasTkAgg(fig, master=popup)
         canvas.draw()
@@ -60656,6 +60926,14 @@ def main():
         _logging.getLogger("spectral_predict").debug(
             "T-50: cleanup failed (non-fatal)", exc_info=True
         )
+
+    # High-DPI: must run before tk.Tk(), or Windows bitmap-stretches the whole UI on
+    # scaled displays. Runs after the app logger so a failure lands in dasp.log. The
+    # frozen exe also declares this in its manifest (spectral_predict_py312.spec).
+    try:
+        _enable_windows_dpi_awareness()
+    except Exception:  # never block startup over a cosmetic setting
+        logger.warning("DPI-awareness setup failed (non-fatal)", exc_info=True)
 
     root = tk.Tk()
 
