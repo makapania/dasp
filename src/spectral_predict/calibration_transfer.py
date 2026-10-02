@@ -456,7 +456,12 @@ def save_transfer_model(
         elif isinstance(value, (int, float, str, np.integer, np.floating, np.bool_)):
             # Store scalars (numpy ones as Python values, which json can write) and
             # short strings (e.g. 'standard_selection') in metadata
-            metadata[f"param_{key}"] = value.item() if isinstance(value, np.generic) else value
+            # .item() keeps np.longdouble as longdouble, which json can't write
+            if isinstance(value, np.floating):
+                value = float(value)
+            elif isinstance(value, np.generic):
+                value = value.item()
+            metadata[f"param_{key}"] = value
 
     np.savez(f"{path_prefix}.npz", **arrays_to_save)
 

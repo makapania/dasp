@@ -128,12 +128,14 @@ class TestStringParamsPersist:
         assert isinstance(params["n_components"], np.integer)
         params["a_float"] = np.float32(0.25)
         params["a_flag"] = np.bool_(True)
+        params["a_longdouble"] = np.longdouble("0.5")  # .item() would keep longdouble
         tm = ct.TransferModel("p", "s", "ctai", np.arange(15.0), params)
 
         loaded = ct.load_transfer_model(ct.save_transfer_model(tm, tmp_path, name="pcds"))
 
         assert loaded.params["n_components"] == int(params["n_components"])
         assert loaded.params["a_float"] == pytest.approx(0.25)
+        assert loaded.params["a_longdouble"] == pytest.approx(0.5)
         assert loaded.params["a_flag"] is True
         np.testing.assert_allclose(ct.apply_ctai(Xp, loaded.params), ct.apply_ctai(Xp, params))
 
