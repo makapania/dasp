@@ -32,6 +32,8 @@ predictions = predict_with_model(model_dict, new_X_data)
 """
 
 import joblib
+import os
+from joblib.numpy_pickle import NumpyUnpickler
 import json
 import logging
 import warnings
@@ -44,9 +46,99 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Union
 
 from . import __version__
+from .model_wrappers import resolve_legacy_class
 from .resource_paths import is_frozen
 
 logger = logging.getLogger(__name__)
+
+class _LegacyAwareNumpyUnpickler(NumpyUnpickler):
+    """joblib's unpickler, resolving pre-move GUI wrapper class references.
+
+    Ensemble wrappers used to be defined in the GUI script, so files it saved name
+    ``__main__.GAPreprocessWrapper`` (or ``spectral_predict_gui_optimized.``). This
+    per-load ``find_class`` maps those six names to ``spectral_predict.model_wrappers``
+    without touching ``sys.modules`` or any module attribute, so it is safe under
+    concurrent loads and leaves nothing behind if a load is interrupted.
+    """
+
+    def find_class(self, module, name):
+        cls = resolve_legacy_class(module, name)
+        if cls is not None:
+            return cls
+        return super().find_class(module, name)
+
+
+def _joblib_load(path):
+    """``joblib.load`` with legacy wrapper-name resolution.
+
+    joblib has no public unpickler hook, so this repeats ``joblib.load``'s
+    non-memmapped path (including its ``_unpickle`` error translation and pre-0.10
+    warning) with :class:`_LegacyAwareNumpyUnpickler`. The helpers it needs are
+    joblib-private; if they are unavailable (joblib upgrade) the load falls back to
+    plain ``joblib.load``, with a warning, which still reads every file saved after the
+    wrappers moved to ``spectral_predict.model_wrappers``.
+    """
+    try:
+        from joblib.compressor import _ZFILE_PREFIX
+        from joblib.numpy_pickle import _validate_fileobject_and_memmap
+        from joblib.numpy_pickle_compat import load_compatibility
+    except ImportError:  # pragma: no cover - joblib internals changed
+        msg = (
+            "joblib internals changed: loading without the legacy GUI wrapper mapping; "
+            "models saved before the wrappers moved to spectral_predict.model_wrappers "
+            "may fail to load."
+        )
+        logger.warning(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        return joblib.load(path)
+
+    path = os.fspath(path)
+    with open(path, "rb") as f:
+        is_compat_file = f.read(len(_ZFILE_PREFIX)) == _ZFILE_PREFIX
+        if not is_compat_file:
+            f.seek(0)
+            with _validate_fileobject_and_memmap(f, path, None) as (fobj, _):
+                return _unpickle_legacy_aware(fobj, path)
+
+    # Pre-0.10 joblib file (predates DASP; holds no GUI wrappers): joblib's own loader.
+    warnings.warn(
+        f"The file '{path}' has been generated with a joblib version less than 0.10. "
+        "Please regenerate this pickle file.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return load_compatibility(path)
+
+
+def _unpickle_legacy_aware(fobj, path: str):
+    """``joblib.numpy_pickle._unpickle`` with :class:`_LegacyAwareNumpyUnpickler`."""
+    unpickler = _LegacyAwareNumpyUnpickler(path, fobj, True)
+    try:
+        obj = unpickler.load()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "You may be trying to read with python 3 a joblib pickle generated with "
+            "python 2. This feature is not supported by joblib."
+        ) from exc
+    if unpickler.compat_mode:
+        warnings.warn(
+            f"The file '{path}' has been generated with a joblib version less than 0.10. "
+            "Please regenerate this pickle file.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return obj
+
+
+def _is_regressor_model(model) -> bool:
+    """True when ``model`` is clearly not a classifier (no ``classes_``, not tagged)."""
+    from sklearn.base import is_classifier
+
+    try:
+        tagged_classifier = is_classifier(model)
+    except Exception:  # noqa: BLE001 - foreign objects without sklearn tags
+        tagged_classifier = False
+    return model is not None and not tagged_classifier and not hasattr(model, "classes_")
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -430,16 +522,21 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         if not model_path.exists():
             raise ValueError("Invalid .dasp file: missing model.pkl")
 
-        model = joblib.load(model_path)
+        model = _joblib_load(model_path)
         # Bundle compatibility fix: ensure Pipeline is marked as fitted
         if model is not None and is_frozen():
             _ensure_pipeline_fitted(model)
+
+        # Older GUI saves could record the task radio's 'auto', which
+        # predict_with_model rejects. Only a regressor is safe to relabel.
+        if metadata.get("task_type") == "auto" and _is_regressor_model(model):
+            metadata["task_type"] = "regression"
 
         # Load preprocessor if present
         preprocessor = None
         preprocessor_path = tmppath / 'preprocessor.pkl'
         if preprocessor_path.exists():
-            preprocessor = joblib.load(preprocessor_path)
+            preprocessor = _joblib_load(preprocessor_path)
 
             # Bundle compatibility fix: ensure Pipeline is marked as fitted
             if preprocessor is not None and is_frozen():
@@ -449,18 +546,18 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         label_encoder = None
         label_encoder_path = tmppath / 'label_encoder.pkl'
         if label_encoder_path.exists():
-            label_encoder = joblib.load(label_encoder_path)
+            label_encoder = _joblib_load(label_encoder_path)
 
         # Load one-class auxiliary objects if present
         scaler = None
         scaler_path = tmppath / "scaler.pkl"
         if scaler_path.exists():
-            scaler = joblib.load(scaler_path)
+            scaler = _joblib_load(scaler_path)
 
         pca_reducer = None
         pca_reducer_path = tmppath / "pca_reducer.pkl"
         if pca_reducer_path.exists():
-            pca_reducer = joblib.load(pca_reducer_path)
+            pca_reducer = _joblib_load(pca_reducer_path)
 
         # Load CV data if present (for uncertainty estimation)
         cv_data = None
@@ -479,7 +576,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
             with np.load(ad_data_path) as npz_file:
                 ad_data = {key: npz_file[key] for key in npz_file.files}
         if pca_model_path.exists():
-            pca_model = joblib.load(pca_model_path)
+            pca_model = _joblib_load(pca_model_path)
 
         # Load bias correction if present
         bias_correction = None
@@ -826,11 +923,59 @@ def predict_with_model(
     return predictions
 
 
+def check_data_type_compatibility(
+    model_metadata: Dict[str, Any],
+    prediction_data_type: Optional[str],
+    prediction_source_data_type: Optional[str] = None,
+) -> Optional[str]:
+    """Warn when prediction data is not the ordinate type a model was trained on.
+
+    Compares the pipeline data types ('absorbance', 'reflectance', 'other'). When
+    they agree, it also compares the source types (what the files held, e.g.
+    'raman' vs 'kubelka_munk', both 'other'), but only when both are known: models
+    saved before source types were recorded, data whose source is unknown, and
+    data that was converted after loading (``data_type_converted_from`` set) are
+    compared on the pipeline type alone.
+
+    Args:
+        model_metadata: The model's saved metadata.
+        prediction_data_type: Pipeline type of the prediction data, or None.
+        prediction_source_data_type: Source type of the prediction data, or None.
+
+    Returns:
+        A warning message, or None when compatible or not checkable.
+    """
+    model_type = model_metadata.get('data_type')
+    if not prediction_data_type or not model_type:
+        return None
+    if prediction_data_type.lower() != model_type.lower():
+        return (
+            f"Model trained on {model_type.upper()} data, "
+            f"but prediction data is {prediction_data_type.upper()}."
+        )
+    from spectral_predict.io import canonical_source_data_type
+
+    # Readers name the same ordinate differently (OPUS 'log_reflectance', Omnic
+    # 'Log(1/R)'), so compare canonical names
+    model_source = canonical_source_data_type(model_metadata.get('source_data_type'))
+    if model_metadata.get('data_type_converted_from'):
+        model_source = None
+    prediction_source = canonical_source_data_type(prediction_source_data_type)
+    if model_source and prediction_source and model_source != prediction_source:
+        return (
+            f"Model trained on {model_source.replace('_', ' ').upper()} data, but "
+            f"prediction data is {prediction_source.replace('_', ' ').upper()} "
+            f"(both {model_type.lower()})."
+        )
+    return None
+
+
 def predict_with_uncertainty(
     model_dict: Dict[str, Any],
     X_new: Union[pd.DataFrame, np.ndarray],
     validate_wavelengths: bool = True,
-    prediction_data_type: Optional[str] = None
+    prediction_data_type: Optional[str] = None,
+    prediction_source_data_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Make predictions with a loaded model and compute uncertainty estimates.
@@ -849,8 +994,11 @@ def predict_with_uncertainty(
     validate_wavelengths : bool, default=True
         Whether to validate wavelengths match model requirements
     prediction_data_type : str, optional
-        Type of prediction data ('absorbance' or 'reflectance'). If provided and differs
-        from model's training data type, a warning will be included in the result.
+        Type of prediction data ('absorbance', 'reflectance' or 'other'). If provided and
+        differs from model's training data type, a warning will be included in the result.
+    prediction_source_data_type : str, optional
+        What the prediction file held (e.g. 'raman', 'kubelka_munk'); see
+        ``check_data_type_compatibility``.
 
     Returns
     -------
@@ -896,15 +1044,9 @@ def predict_with_uncertainty(
     task_type = metadata.get('task_type', 'regression')
 
     # Check for data type mismatch
-    data_type_warning = None
-    model_data_type = metadata.get('data_type')
-
-    if prediction_data_type and model_data_type:
-        if prediction_data_type.lower() != model_data_type.lower():
-            data_type_warning = (
-                f"Model trained on {model_data_type.upper()} data, "
-                f"but prediction data is {prediction_data_type.upper()}."
-            )
+    data_type_warning = check_data_type_compatibility(
+        metadata, prediction_data_type, prediction_source_data_type
+    )
 
     # Multi-class class-modeling (SIMCA): predict_with_model already returns the
     # per-sample decision schema (p-values + accept matrix + accepted class sets
@@ -1574,6 +1716,9 @@ def _convert_to_serializable(obj):
     return _json_serializer(obj)
 
 
+_ORDINATE_METADATA_KEYS = ('data_type', 'source_data_type', 'data_type_converted_from')
+
+
 def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> None:
     """
     Save an ensemble model to a .dasp file.
@@ -1596,6 +1741,8 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
         - 'use_full_spectrum_preprocessing': Boolean for derivative+subset case
         - 'full_wavelengths': Full wavelength list if using derivative+subset
         - 'window': Savgol window size (if applicable)
+        - 'data_type', 'source_data_type', 'data_type_converted_from': ordinate type of
+          the training data (optional; copied into every base model's metadata)
         - 'X_train': Training data for applicability domain (optional)
         - 'cv_residuals', 'cv_predictions', 'cv_actuals': CV data for uncertainty (optional)
 
@@ -1673,6 +1820,11 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
                 'n_samples': metadata.get('n_training_samples', 0),
                 'ensemble_parent': True,  # Flag to indicate this is from an ensemble
             }
+            # The ordinate type the ensemble was trained on, so each base model file
+            # also identifies the data it expects
+            for key in _ORDINATE_METADATA_KEYS:
+                if key in metadata:
+                    base_metadata[key] = metadata[key]
 
             # Save individual model with all metadata and optional training data
             save_model(
@@ -1804,7 +1956,7 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
 
         # Load ensemble state
         ensemble_state_path = tmpdir_path / "ensemble_state.pkl"
-        ensemble_state = joblib.load(ensemble_state_path)
+        ensemble_state = _joblib_load(ensemble_state_path)
 
         # Reconstruct ensemble object
         from spectral_predict.ensemble import (
@@ -1867,6 +2019,15 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             )
         else:
             raise ValueError(f"Unknown ensemble type: {ensemble_type}")
+
+        # GUI ensembles were always regression, but files saved before 2026-10 could
+        # record the task radio's 'auto', which predict_with_model rejects. Members were
+        # already relabelled by load_model's regressor guard; apply the same guard here.
+        ensemble_metadata = config.get("metadata") or {}
+        if ensemble_metadata.get("task_type") == "auto" and all(
+            _is_regressor_model(m) for m in [ensemble, *base_models]
+        ):
+            ensemble_metadata["task_type"] = "regression"
 
         return {
             'ensemble': ensemble,

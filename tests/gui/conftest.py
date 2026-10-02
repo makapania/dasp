@@ -12,6 +12,7 @@ matplotlib.use('Agg')  # Non-interactive backend — no plot windows
 
 import pytest
 import tkinter as tk
+import tkinter.simpledialog  # noqa: F401  (patched in _suppress_dialogs)
 from pathlib import Path
 from unittest.mock import patch
 
@@ -368,7 +369,10 @@ def _suppress_dialogs():
          patch('tkinter.messagebox.askyesnocancel', return_value=True), \
          patch('tkinter.filedialog.askopenfilename', return_value=''), \
          patch('tkinter.filedialog.asksaveasfilename', return_value=''), \
-         patch('tkinter.filedialog.askdirectory', return_value=''):
+         patch('tkinter.filedialog.askdirectory', return_value=''), \
+         patch('tkinter.simpledialog.askinteger', return_value=None), \
+         patch('tkinter.simpledialog.askstring', return_value=None), \
+         patch('tkinter.simpledialog.askfloat', return_value=None):
         yield
 
 

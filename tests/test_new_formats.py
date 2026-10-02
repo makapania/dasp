@@ -15,6 +15,8 @@ import pandas as pd
 import tempfile
 import shutil
 
+import pytest
+
 from spectral_predict.io import (
     read_jcamp_file,
     read_jcamp_dir,
@@ -112,85 +114,43 @@ def test_jcamp_write_read():
 
 
 def test_ascii_formats():
-    """Test ASCII format parsing (.dpt, .dat, .asc)."""
-    print("\n" + "="*80)
-    print("TEST 2: ASCII Format Support")
-    print("="*80)
-
+    """Test ASCII format parsing (.dpt, .dat, .asc) with exact value round trips."""
     wavelengths, spectrum = create_synthetic_spectrum()
-
-    # Test different delimiter formats
-    formats = {
-        'tab': '\t',
-        'space': ' ',
-        'comma': ','
-    }
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
-        for fmt_name, delimiter in formats.items():
-            print(f"\n✓ Testing {fmt_name}-delimited format:")
-
-            # Create test file
+        for fmt_name, delimiter in {'tab': '\t', 'space': ' ', 'comma': ','}.items():
             test_file = tmpdir_path / f"test_{fmt_name}.dpt"
-
             with open(test_file, 'w') as f:
-                # Write header comment
                 f.write(f"# Test spectrum - {fmt_name} delimited\n")
                 f.write(f"# Wavelength{delimiter}Reflectance\n")
-
-                # Write data
                 for wl, val in zip(wavelengths, spectrum):
                     f.write(f"{wl:.2f}{delimiter}{val:.6f}\n")
 
-            print(f"  Created: {test_file.name}")
+            df_parsed, info = _parse_ascii_file(test_file)
 
-            # Read the file
-            df_parsed, x_col, y_col = _parse_ascii_file(test_file)
+            assert len(df_parsed) == len(wavelengths), fmt_name
+            np.testing.assert_allclose(df_parsed['x'].to_numpy(), wavelengths, atol=0.005)
+            np.testing.assert_allclose(df_parsed['y'].to_numpy(), spectrum, atol=5e-7)
+            assert info['delimiter'] == delimiter
 
-            if df_parsed is not None:
-                print(f"  ✓ Parsed {len(df_parsed)} data points")
-                print(f"  X column: {x_col}, Y column: {y_col}")
-
-                # Verify data
-                max_wl_diff = np.max(np.abs(df_parsed[x_col].values - wavelengths))
-                max_val_diff = np.max(np.abs(df_parsed[y_col].values - spectrum))
-
-                print(f"  Max wavelength diff: {max_wl_diff:.2e}")
-                print(f"  Max value diff: {max_val_diff:.2e}")
-
-                if max_wl_diff < 0.1 and max_val_diff < 1e-5:
-                    print(f"  ✓ {fmt_name.capitalize()}-delimited format verified!")
-                else:
-                    print(f"  ⚠ WARNING: Data mismatch detected")
-            else:
-                print(f"  ✗ FAILED to parse {fmt_name}-delimited file")
-                return False
-
-        # Test directory reading with mixed extensions
-        print(f"\n✓ Testing directory read with mixed extensions:")
-
-        # Create files with different extensions
-        extensions = ['.dpt', '.dat', '.asc']
-        for i, ext in enumerate(extensions):
-            test_file = tmpdir_path / f"spectrum_{i+1}{ext}"
-            with open(test_file, 'w') as f:
+        # Directory read with mixed extensions (the .dpt files above are included)
+        for i, ext in enumerate(['.dpt', '.dat', '.asc']):
+            with open(tmpdir_path / f"spectrum_{i+1}{ext}", 'w') as f:
                 f.write("# Test spectrum\n")
                 for wl, val in zip(wavelengths, spectrum):
                     f.write(f"{wl:.2f}\t{val:.6f}\n")
 
-        print(f"  Created 3 files with extensions: {extensions}")
-
-        # Read directory
         df_dir, metadata = _read_ascii_dir(tmpdir_path)
+        assert df_dir.shape == (6, len(wavelengths))
+        assert metadata['n_spectra'] == 6
+        assert metadata['wavelength_range'][0] == pytest.approx(wavelengths[0], abs=0.005)
+        assert metadata['wavelength_range'][1] == pytest.approx(wavelengths[-1], abs=0.005)
 
-        print(f"  ✓ Loaded {df_dir.shape[0]} spectra with {df_dir.shape[1]} wavelengths")
-        print(f"  Data type: {metadata['data_type']} (confidence: {metadata['type_confidence']:.1f}%)")
-        print(f"  Wavelength range: {metadata['wavelength_range'][0]:.1f} - {metadata['wavelength_range'][1]:.1f}")
-
-    print("\n✓ TEST 2 PASSED")
-    return True
+        # The public reader takes the same folder (R062: it used to raise)
+        df_public, _ = read_ascii_spectra(tmpdir_path)
+        pd.testing.assert_frame_equal(df_public, df_dir)
 
 
 def test_jcamp_metadata_preservation():
@@ -247,63 +207,36 @@ def test_jcamp_metadata_preservation():
 
 def test_edge_cases():
     """Test edge cases and error handling."""
-    print("\n" + "="*80)
-    print("TEST 4: Edge Cases and Error Handling")
-    print("="*80)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
 
-        # Test 1: Empty directory
-        print("\n✓ Test 4.1: Empty directory")
-        try:
-            df, metadata = read_jcamp_dir(tmpdir_path)
-            print("  ✗ Should have raised an error")
-            return False
-        except ValueError as e:
-            print(f"  ✓ Correctly raised ValueError: {e}")
+        # Empty directory
+        with pytest.raises(ValueError):
+            read_jcamp_dir(tmpdir_path)
 
-        # Test 2: File with comment lines
-        print("\n✓ Test 4.2: ASCII file with multiple comment styles")
+        # Multiple comment styles are ignored
         test_file = tmpdir_path / "test_comments.dat"
-
         wavelengths, spectrum = create_synthetic_spectrum(n_points=200)
-
         with open(test_file, 'w') as f:
             f.write("# Comment line 1\n")
             f.write("% Comment line 2\n")
             f.write("# Header: wavelength reflectance\n")
             for wl, val in zip(wavelengths, spectrum):
                 f.write(f"{wl:.2f} {val:.6f}\n")
+        df_parsed, _ = _parse_ascii_file(test_file)
+        assert len(df_parsed) == 200
 
-        df_parsed, x_col, y_col = _parse_ascii_file(test_file)
-
-        if df_parsed is not None and len(df_parsed) == 200:
-            print(f"  ✓ Correctly parsed {len(df_parsed)} data points (ignoring comments)")
-        else:
-            print(f"  ✗ Failed to parse correctly")
-            return False
-
-        # Test 3: Mixed numeric precision
-        print("\n✓ Test 4.3: Mixed numeric precision")
+        # Mixed numeric precision, headerless: all four rows are data
         test_file = tmpdir_path / "test_precision.asc"
-
         with open(test_file, 'w') as f:
             f.write("350.0 0.5\n")
             f.write("351 0.51\n")
             f.write("352.00 0.52\n")
             f.write("353.5 0.525\n")
-
-        df_parsed, x_col, y_col = _parse_ascii_file(test_file)
-
-        if df_parsed is not None and len(df_parsed) == 4:
-            print(f"  ✓ Correctly parsed mixed precision data")
-        else:
-            print(f"  ✗ Failed to parse mixed precision")
-            return False
-
-    print("\n✓ TEST 4 PASSED")
-    return True
+        df_parsed, info = _parse_ascii_file(test_file)
+        assert df_parsed['x'].tolist() == [350.0, 351.0, 352.0, 353.5]
+        assert df_parsed['y'].tolist() == [0.5, 0.51, 0.52, 0.525]
+        assert info['header_lines'] == []
 
 
 def run_all_tests():
@@ -323,8 +256,8 @@ def run_all_tests():
 
     for test_name, test_func in tests:
         try:
-            result = test_func()
-            results.append((test_name, result))
+            test_func()
+            results.append((test_name, True))
         except Exception as e:
             print(f"\n✗ TEST FAILED WITH EXCEPTION: {e}")
             import traceback

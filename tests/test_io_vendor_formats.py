@@ -39,9 +39,11 @@ def test_read_ascii_tab_delimited(tmp_path):
     # Read
     result, metadata = read_ascii_spectra(ascii_path)
 
-    # pd.read_csv without header=None consumes the first data row as header,
-    # so 2001 data rows become 2000 columns
-    assert result.shape == (1, 2000)
+    # Every data row is kept, including the first (R062: it used to become a header)
+    assert result.shape == (1, 2001)
+    assert result.columns[0] == pytest.approx(400.0)
+    assert result.columns[-1] == pytest.approx(2400.0)
+    np.testing.assert_allclose(result.iloc[0].to_numpy(), intensities, atol=1e-6)
     assert result.index[0] == "spectrum"
     assert metadata['file_format'] == 'ascii'
     assert metadata['n_spectra'] == 1
@@ -60,8 +62,10 @@ def test_read_ascii_comma_delimited(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2000)
+    assert result.shape == (1, 2001)
+    assert result.iloc[0, 0] == pytest.approx(intensities[0], abs=1e-6)
     assert metadata['file_format'] == 'ascii'
+    assert metadata['delimiter'] == ','
 
 
 def test_read_ascii_space_delimited(tmp_path):
@@ -77,7 +81,8 @@ def test_read_ascii_space_delimited(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2000)
+    assert result.shape == (1, 2001)
+    assert metadata['delimiter'] == ' '
 
 
 def test_read_ascii_with_comments(tmp_path):
@@ -96,7 +101,10 @@ def test_read_ascii_with_comments(tmp_path):
 
     result, metadata = read_ascii_spectra(ascii_path)
 
-    assert result.shape == (1, 2000)
+    assert result.shape == (1, 2001)
+    assert result.iloc[0, 0] == pytest.approx(intensities[0], abs=1e-6)
+    # Commented-out headings are comments, not a header
+    assert metadata['header_lines'] == []
 
 
 def test_write_read_ascii_roundtrip(tmp_path):
@@ -175,7 +183,9 @@ def test_ascii_without_header(tmp_path):
             f.write(f"{wl:.2f}\t{intensity:.6f}\n")
 
     result, _ = read_ascii_spectra(ascii_path)
-    assert result.shape == (1, 2000)
+    assert result.shape == (1, 2001)
+    assert result.columns[0] == pytest.approx(400.0)
+    assert result.iloc[0, 0] == pytest.approx(intensities[0], abs=1e-6)
 
 
 def test_ascii_custom_delimiter_write(tmp_path):
@@ -480,3 +490,156 @@ def test_ascii_wavelength_sorting(tmp_path):
     # Check wavelengths are sorted
     wls = result.columns.values
     assert np.all(wls[:-1] <= wls[1:])
+
+
+# ============================================================================
+# Wrapper metadata merge order (sibling audit of review finding R017)
+# ============================================================================
+# The io wrappers used to merge the reader's own metadata LAST, so reader keys
+# overwrote the normalised ones (file_format 'sp'/'seq', PerkinElmer's
+# non-canonical x_unit 'wavenumber_cm-1', which the GUI treats as nm).
+
+
+@pytest.fixture
+def fake_specio(monkeypatch):
+    import sys
+    import types
+
+    x_desc = np.linspace(4000.0, 400.0, 361)
+
+    class _Spectrum:
+        wavelength = x_desc
+        amplitudes = np.linspace(0.1, 0.9, 361)
+
+    module = types.ModuleType("specio_py310")
+    module.specread = lambda path: _Spectrum()
+    monkeypatch.setitem(sys.modules, "specio_py310", module)
+    return x_desc
+
+
+def test_perkinelmer_wrapper_normalised_metadata(tmp_path, fake_specio):
+    path = tmp_path / "pe1.sp"
+    path.write_bytes(b"placeholder")
+
+    df, metadata = read_perkinelmer_file(path)
+
+    assert df.shape == (1, 361)
+    assert df.columns[0] == 400.0
+    assert metadata['file_format'] == 'perkinelmer'
+    assert metadata['x_unit'] == 'cm-1'
+
+
+def test_perkinelmer_dir_reports_canonical_x_unit(tmp_path, fake_specio):
+    from spectral_predict.io import read_sp_dir
+
+    for i in range(2):
+        (tmp_path / f"pe{i}.sp").write_bytes(b"placeholder")
+
+    df, metadata = read_sp_dir(tmp_path)
+
+    assert df.shape == (2, 361)
+    assert metadata['x_unit'] == 'cm-1'
+
+
+def _install_specio(monkeypatch, x, meta=None):
+    import sys
+    import types
+
+    class _Spectrum:
+        wavelength = x
+        amplitudes = np.linspace(0.1, 0.9, len(x))
+
+    _Spectrum.meta = meta or {}
+    module = types.ModuleType("specio_py310")
+    module.specread = lambda path: _Spectrum()
+    monkeypatch.setitem(sys.modules, "specio_py310", module)
+
+
+def test_perkinelmer_full_ir_range_is_cm1(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(4000.0, 650.0, 336))
+    path = tmp_path / "ir.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'cm-1'
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_range'
+
+
+def test_perkinelmer_nir_nm_range_is_not_confidently_cm1(tmp_path, monkeypatch):
+    """A 1000-2500 nm Lambda NIR file used to be labelled cm-1 with confidence."""
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501))
+    path = tmp_path / "nir.sp"
+    path.write_bytes(b"placeholder")
+
+    with pytest.warns(UserWarning, match="does not identify the unit"):
+        _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'nm'
+    assert metadata['x_unit_confidence'] < 50.0
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_ambiguous_range'
+    # The GUI only shows import_warnings; a single-file import must carry the note too
+    assert len(metadata['import_warnings']) == 1
+    assert metadata['import_warnings'][0].startswith("nir.sp: x range")
+
+
+def test_perkinelmer_single_file_clear_range_has_no_import_warning(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(4000.0, 400.0, 3601))
+    path = tmp_path / "ir.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['import_warnings'] == []
+
+
+def test_perkinelmer_unit_from_metadata_wins(tmp_path, monkeypatch):
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501), meta={'x_units': 'cm-1'})
+    path = tmp_path / "meta.sp"
+    path.write_bytes(b"placeholder")
+
+    _, metadata = read_perkinelmer_file(path)
+
+    assert metadata['x_unit'] == 'cm-1'
+    assert metadata['x_unit_detection_method'] == 'perkinelmer_metadata'
+
+
+def test_perkinelmer_dir_surfaces_ambiguous_unit_warning(tmp_path, monkeypatch):
+    from spectral_predict.io import read_sp_dir
+
+    _install_specio(monkeypatch, np.linspace(1000.0, 2500.0, 1501))
+    for i in range(2):
+        (tmp_path / f"nir{i}.sp").write_bytes(b"placeholder")
+
+    with pytest.warns(UserWarning):
+        _, metadata = read_sp_dir(tmp_path)
+
+    assert metadata['x_unit'] == 'nm'
+    assert metadata['x_unit_confidence'] < 50.0
+    assert any("2 of 2 .sp files" in m for m in metadata['import_warnings'])
+
+
+def test_agilent_wrapper_normalised_metadata(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    class _AgilentIRFile:
+        def read(self, path):
+            self.wavenumbers = np.linspace(4000.0, 900.0, 200)
+            self.intensities = np.linspace(0.1, 0.9, 200)
+
+    package = types.ModuleType("agilent_ir_formats")
+    submodule = types.ModuleType("agilent_ir_formats.agilent_ir_file")
+    submodule.AgilentIRFile = _AgilentIRFile
+    package.agilent_ir_file = submodule
+    monkeypatch.setitem(sys.modules, "agilent_ir_formats", package)
+    monkeypatch.setitem(sys.modules, "agilent_ir_formats.agilent_ir_file", submodule)
+
+    path = tmp_path / "tile.seq"
+    path.write_bytes(b"placeholder")
+
+    df, metadata = read_agilent_file(path)
+
+    assert df.shape == (1, 200)
+    assert metadata['file_format'] == 'agilent'
+    assert metadata['source_file_format'] == 'seq'
