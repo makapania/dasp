@@ -161,6 +161,48 @@ class TestStoredWavelengthLists:
             resolve_wavelength_list("1001.0,1002.0,9999.0", axis)
         assert exc.value.missing == [9999.0]
 
+    # --- review round 1 (Codex) -------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "token,axis",
+        [("10000", [9999.97]), ("-10000", [-9999.97]), ("1000", [999.996, 1001.0])],
+        ids=["below_power_of_ten", "negative", "below_1000"],
+    )
+    def test_legacy_token_never_matches_a_column_g_prints_differently(self, token, axis):
+        """%g prints 9999.97 as '9999.97', so '10000' cannot stand for it."""
+        assert all(f"{w:g}" != token for w in axis)
+        with pytest.raises(WavelengthMatchError, match="not on the axis"):
+            resolve_wavelength_list(token, axis)
+
+    def test_legacy_token_matches_the_column_g_rounds_to_it(self):
+        axis = [9999.996, 10001.0]  # %g(9999.996) == '10000'
+        assert resolve_wavelength_list("10000", axis).tolist() == [0]
+
+    def test_new_rows_are_never_read_as_legacy(self):
+        axis = [10000.1, 10000.12, 10000.2, 10000.22]
+        text = format_wavelength_list([10000.1, 10000.2])
+        assert text == "10000.10,10000.20"
+        assert resolve_wavelength_list(text, axis).tolist() == [0, 2]
+        # The same values as old %g text really are ambiguous on this axis.
+        with pytest.raises(WavelengthMatchError, match="more than one"):
+            resolve_wavelength_list("10000.1", axis)
+
+    def test_new_scientific_notation_tokens_are_exact(self):
+        axis = [1e-05, 1.000001e-05, 2e-05]
+        text = format_wavelength_list([1e-05, 2e-05])
+        assert text == "1.0e-05,2.0e-05"
+        assert resolve_wavelength_list(text, axis).tolist() == [0, 2]
+        with pytest.raises(WavelengthMatchError):
+            resolve_wavelength_list("1e-05", axis)  # legacy %g text: two columns print it
+
+    @pytest.mark.parametrize(
+        "values", [[1500.0, 1500.5], [7407.407407407408, 10000.1, -3.25, 1e-05, 1e7]]
+    )
+    def test_every_new_token_round_trips_and_is_not_g_text(self, values):
+        tokens = format_wavelength_list(values).split(",")
+        assert [float(t) for t in tokens] == values
+        assert all(f"{float(t):g}" != t for t in tokens)
+
 
 # --------------------------------------------------------------------------------------
 # Save -> load -> predict identity (the Tab 7 training mapping and model_io agree)
@@ -258,6 +300,56 @@ class TestLegacySavedModels:
         np.testing.assert_allclose(
             np.ravel(got), np.ravel(model.predict(X_train)), rtol=0, atol=1e-12
         )
+
+    def test_legacy_0p012_grid_with_g_metadata_warns_and_predicts_named_channels(self, tmp_path):
+        """GLM H-1: on a 0.012 cm-1 grid ~45% of %g-rounded wavelengths have both
+        neighbours inside +/-0.01. The legacy path must warn on load and map them by
+        %g text, not raise 'more than one axis column' at predict."""
+        axis = 4000.0 + 0.012 * np.arange(120)
+        X = _spectra(30, axis)
+        sel = list(range(20, 100, 7))
+        model, prep, metadata, X_train = _fit_like_tab7(X, axis, axis[sel])
+        metadata["wavelengths"] = [float(f"{w:g}") for w in metadata["wavelengths"]]
+        with pytest.raises(WavelengthMatchError):  # the fixed 0.01 rule alone fails
+            match_wavelengths(metadata["wavelengths"], axis)
+        path = tmp_path / "old_0p012.dasp"
+        save_model(model, prep, metadata, path)
+        _strip_matching_stamp(path)
+
+        with pytest.warns(UserWarning, match="Retrain"):
+            loaded = load_model(path)
+        got = predict_with_model(loaded, pd.DataFrame(X, columns=axis))
+        np.testing.assert_allclose(
+            np.ravel(got), np.ravel(model.predict(X_train)), rtol=0, atol=1e-12
+        )
+
+    def test_legacy_grid_too_fine_for_g_text_warns_and_refuses_to_predict(self, tmp_path):
+        axis = 4000.0 + 0.004 * np.arange(120)  # several channels share each %g text
+        X = _spectra(30, axis)
+        model, prep, metadata, _ = _fit_like_tab7(X, axis, axis[[30, 31, 60]])
+        metadata["wavelengths"] = [float(f"{w:g}") for w in metadata["wavelengths"]]
+        path = tmp_path / "old_0p004.dasp"
+        save_model(model, prep, metadata, path)
+        _strip_matching_stamp(path)
+
+        with pytest.warns(UserWarning, match="do not each name a single channel"):
+            loaded = load_model(path)
+        with pytest.raises(WavelengthMatchError, match="Retrain"):
+            predict_with_model(loaded, pd.DataFrame(X, columns=axis))
+
+    def test_ensemble_member_on_fine_grid_is_not_flagged(self, tmp_path):
+        """Ensemble members store the whole exact axis; they never went through the
+        Tab 7 first-hit rule, so replaying it would be a false 'retrain' warning."""
+        axis = _axis(0.3, "asc")
+        X = _spectra(30, axis)
+        model, prep, metadata, _ = _fit_like_tab7(X, axis, axis)
+        metadata["ensemble_parent"] = True
+        path = tmp_path / "member.dasp"
+        save_model(model, prep, metadata, path)
+        _strip_matching_stamp(path)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert load_model(path)["wavelength_mapping_warning"] is None
 
 
 def test_predict_dataframe_missing_wavelength_still_says_missing(tmp_path):
@@ -360,6 +452,31 @@ def test_unmappable_all_vars_fails_the_row_visibly(wavenumber_split, all_vars):
     assert "does not match the spectral axis" in out.attrs["validation_failures"][0]
 
 
+@pytest.mark.parametrize("all_vars", [None, np.nan, "", "N/A"], ids=["None", "NaN", "empty", "NA"])
+def test_subset_row_without_all_vars_is_not_validated_on_the_full_spectrum(
+    wavenumber_split, all_vars
+):
+    """Codex/GLM round 1: a top-N row with no usable all_vars used to be refit on
+    every column and scored like the full-spectrum model."""
+    row = dict(_regression_row(all_vars), n_vars=1, SubsetTag="top1")
+    out = _validate([row], wavenumber_split)
+    assert np.isnan(out.loc[0, "RMSEP"])
+    assert "wavelength-subset row" in out.attrs["validation_failures"][0]
+
+
+def test_full_row_without_all_vars_validates_only_if_n_vars_covers_the_axis(wavenumber_split):
+    axis = wavenumber_split[0]
+    rows = [
+        dict(_regression_row("N/A", subset_tag="full"), n_vars=axis.size),
+        dict(_regression_row("N/A", subset_tag="full"), n_vars=axis.size - 10),
+        dict(_regression_row("N/A", subset_tag="full")),  # no n_vars at all
+    ]
+    out = _validate(rows, wavenumber_split)
+    assert np.isfinite(out.loc[0, "RMSEP"])
+    assert set(out.attrs["validation_failures"]) == {1, 2}
+    assert out.attrs["validation_attempted"] == [0, 1, 2]
+
+
 # --------------------------------------------------------------------------------------
 # Label encoder ownership (R016)
 # --------------------------------------------------------------------------------------
@@ -433,3 +550,35 @@ def test_legacy_artifact_with_stale_float_encoder_predicts_raw_labels(tmp_path):
     with pytest.warns(UserWarning, match="R016"):
         got = predict_with_model(loaded, X, validate_wavelengths=False)
     np.testing.assert_array_equal(got, model.predict(X))
+
+
+def test_superset_encoder_is_not_saved_with_a_binary_model(tmp_path):
+    """GLM L-3: codes 0/1 fit inside a 3-class encoder, but decoding through it
+    would use the wrong class list."""
+    X, y = _clf_data(["a", "b"])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(
+        X, LabelEncoder().fit_transform(y)
+    )
+    superset = LabelEncoder().fit(["a", "b", "c"])
+    with pytest.warns(UserWarning, match="does not match the model"):
+        loaded = _save_load(tmp_path, model, superset, X.shape[1])
+    assert loaded["label_encoder"] is None
+
+
+# --------------------------------------------------------------------------------------
+# GUI validation summary counts only this run's successes (review round 1, item 5)
+# --------------------------------------------------------------------------------------
+
+
+def test_validation_summary_ignores_stale_metrics_on_failed_rows():
+    from spectral_predict_gui_optimized import _validation_summary_lines
+
+    df = pd.DataFrame({"Model": ["PLS", "PLS", "PLS"], "R2pred": [0.9, 0.8, 0.7]})
+    df.attrs["validation_failures"] = {1: "all_vars does not match the spectral axis"}
+    df.attrs["validation_attempted"] = [0, 1]
+    lines = _validation_summary_lines(df, top_n=2, metric_col="R2pred")
+    assert "only 1 of the top 2" in lines[0]
+    assert "row 1" in lines[1]
+
+    df.attrs["validation_failures"] = {}
+    assert "[OK]" in _validation_summary_lines(df, top_n=2, metric_col="R2pred")[0]

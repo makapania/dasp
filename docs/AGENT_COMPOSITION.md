@@ -528,10 +528,14 @@ X_sel = X_pp[:, cols]                                          # training order 
 
 It raises `WavelengthMatchError` (a `ValueError`) when any value is missing or matches
 two columns, so a partial match can never become a smaller model. Rows written before
-the 2026-10 fix used `%g` (6 significant digits); they still resolve when the rounding
-cannot have merged two channels. Write your own lists with `format_wavelength_list`, and
-map plain float lists with `match_wavelengths(values, axis)` (exact match first, else the
-single axis value within 0.01).
+the 2026-10 fix used `%g` (6 significant digits); such a token still resolves when exactly
+one axis column prints as that same `%g` text. Write your own lists with
+`format_wavelength_list` (its tokens always end their mantissa in a `0` after the decimal
+point, e.g. `10000.10`, so they can never be mistaken for `%g` text; `float()` reads them
+back exactly), and map plain float lists with `match_wavelengths(values, axis)` (exact
+match first, else the single axis value within 0.01). Missing `all_vars` on a subset row
+is a failure too: the validation rebuild only falls back to every column for a row tagged
+full-spectrum whose `n_vars` equals the column count.
 `preprocessing_config_from_row` fills a missing derivative order / window with 1 / 15.
 Parse `Autoscale` / `smoothing` flag cells with `preprocess.parse_bool_cell`
 (`bool("False")` is `True`); every rebuild path in DASP uses it.

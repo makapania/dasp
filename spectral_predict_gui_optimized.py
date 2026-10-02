@@ -1967,15 +1967,25 @@ def _validation_summary_lines(results_df, top_n: int, metric_col: str) -> list[s
     list it in ``results_df.attrs["validation_failures"]`` (R031/R078). Saying
     "computed for top N" regardless hid those rows.
     """
-    n_requested = min(int(top_n), len(results_df))
-    n_ok = int(results_df[metric_col].notna().sum()) if metric_col in results_df else 0
+    failures = results_df.attrs.get("validation_failures", {}) or {}
+    attempted = results_df.attrs.get("validation_attempted")
+    if attempted is None:
+        attempted = list(results_df.index[: min(int(top_n), len(results_df))])
+    attempted = [i for i in attempted if i in results_df.index]
+    n_requested = len(attempted)
+    # Count only this run's successes over the rows it attempted: a recorded failure
+    # never counts, even if the frame still holds a number from an earlier run.
+    ok = [
+        i for i in attempted
+        if i not in failures and metric_col in results_df and pd.notna(results_df.at[i, metric_col])
+    ]
+    n_ok = len(ok)
     if n_ok >= n_requested:
         return [f"  [OK] Validation metrics computed for top {n_requested} models"]
     lines = [
         f"  [Warning] Validation metrics computed for only {n_ok} of the top "
         f"{n_requested} models; the others show no validation values."
     ]
-    failures = results_df.attrs.get("validation_failures", {}) or {}
     for row_idx, reason in list(failures.items())[:5]:
         name = results_df.loc[row_idx, "Model"] if "Model" in results_df.columns else ""
         lines.append(f"    - row {row_idx} {name}: {reason}")
@@ -44000,14 +44010,18 @@ External Validation Performance (n={n_val}):
                         model_dict['filename'] = Path(filepath).name
                         model_dict['is_ensemble'] = False
 
-                        # R009: a pre-fix model on a fine grid was trained on
-                        # neighbouring channels; tell the user to retrain it.
-                        if model_dict.get('wavelength_mapping_warning'):
-                            messagebox.showwarning(
-                                "Retrain Model",
-                                f"{Path(filepath).name}:\n\n"
-                                f"{model_dict['wavelength_mapping_warning']}",
-                            )
+                    # R009: a pre-fix model on a fine grid was trained on neighbouring
+                    # channels; tell the user to retrain it (ensembles: any member).
+                    _wl_warnings = [model_dict.get('wavelength_mapping_warning')] + [
+                        md.get('wavelength_mapping_warning')
+                        for md in model_dict.get('base_model_dicts') or []
+                    ]
+                    _wl_warnings = list(dict.fromkeys(w for w in _wl_warnings if w))
+                    if _wl_warnings:
+                        messagebox.showwarning(
+                            "Retrain Model",
+                            f"{Path(filepath).name}:\n\n" + "\n\n".join(_wl_warnings),
+                        )
 
                     # Check x-unit compatibility
                     model_x_unit = model_dict.get('metadata', {}).get('x_unit', 'nm')

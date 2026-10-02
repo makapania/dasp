@@ -410,7 +410,10 @@ def _validation_rmsep(row: dict, X: pd.DataFrame, y: np.ndarray, X_val: np.ndarr
     """RMSEP from the public validation rebuild for a single results row."""
     from spectral_predict.search import compute_validation_metrics_for_top_models
 
-    df = pd.DataFrame([{"CompositeScore": 0.0, "Task": "regression", **row}])
+    # A real full-spectrum row carries SubsetTag/n_vars; without all_vars the rebuild
+    # only uses every column when they say so (review round 1 of fix/wavelength-mapping).
+    base = {"CompositeScore": 0.0, "Task": "regression", "SubsetTag": "full", "n_vars": X.shape[1]}
+    df = pd.DataFrame([{**base, **row}])
     with contextlib.redirect_stdout(io.StringIO()):
         out = compute_validation_metrics_for_top_models(
             df, X.values, y, X_val, y_val, "regression", np.array(WL, dtype=float), top_n=1

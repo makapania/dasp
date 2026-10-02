@@ -20,9 +20,12 @@ Order is preserved (output index ``k`` belongs to requested value ``k``), and th
 axis may be ascending, descending or unsorted.
 
 Results rows store wavelength lists as text (``all_vars``, ``top_vars``). Write them
-with :func:`format_wavelength_list`, which round-trips exactly. Older rows were
-written with ``%g`` (6 significant digits), so :func:`resolve_wavelength_list`
-accepts those when the rounding cannot have merged two channels.
+with :func:`format_wavelength_list`: every token round-trips exactly and is spelled
+so that ``%g`` could never have produced it (its mantissa always ends in a ``0``
+after the decimal point, e.g. ``1500.0``, ``10000.10``, ``1.0e-05``). Older rows were
+written with ``%g`` (6 significant digits); :func:`resolve_wavelength_list` maps such
+a token to the single axis column whose own ``%g`` text is that token, and raises
+when two columns print the same.
 """
 
 from __future__ import annotations
@@ -82,13 +85,42 @@ def _as_axis(axis: Sequence[float] | np.ndarray) -> np.ndarray:
     return ax
 
 
+def _as_values(requested: Iterable[float]) -> np.ndarray:
+    try:
+        req = np.asarray(list(requested), dtype=float).ravel()
+    except (TypeError, ValueError) as exc:
+        raise WavelengthMatchError(f"requested wavelengths are not numeric: {exc}") from exc
+    if not np.all(np.isfinite(req)):
+        raise WavelengthMatchError("requested wavelengths contain NaN or infinite values")
+    return req
+
+
 def _preview(values: list[float], limit: int = 5) -> str:
     shown = ", ".join(repr(v) for v in values[:limit])
     return shown + (f", ... ({len(values)} in total)" if len(values) > limit else "")
 
 
-def _match(req: np.ndarray, ax: np.ndarray, tol: np.ndarray, *, prefer_exact: bool) -> np.ndarray:
-    """Vectorised core: ``tol`` is a per-request absolute half-window."""
+def _g_text(value: float) -> str:
+    return f"{value:g}"
+
+
+def _is_g_shaped(value: float) -> bool:
+    """True if ``value`` is exactly what parsing its own ``%g`` text gives back."""
+    return float(_g_text(value)) == value
+
+
+def _match(
+    req: np.ndarray,
+    ax: np.ndarray,
+    tol: np.ndarray,
+    g_tokens: list[str | None] | None = None,
+) -> np.ndarray:
+    """Core matcher.
+
+    For value ``k``: when ``g_tokens[k]`` is a string, the value is legacy ``%g``
+    text and its candidates are the axis columns whose own ``%g`` text equals it.
+    Otherwise an exact hit wins, else the single axis value within ``tol[k]``.
+    """
     order = np.argsort(ax, kind="stable")
     sorted_ax = ax[order]
 
@@ -100,13 +132,27 @@ def _match(req: np.ndarray, ax: np.ndarray, tol: np.ndarray, *, prefer_exact: bo
     win_hi = np.searchsorted(sorted_ax, req + tol, side="right")
     n_window = win_hi - win_lo
 
+    g_index: dict[str, list[int]] = {}
+    if g_tokens is not None and any(t is not None for t in g_tokens):
+        for col, value in enumerate(ax.tolist()):
+            g_index.setdefault(_g_text(value), []).append(col)
+
     result = np.full(req.shape, -1, dtype=np.intp)
     missing: list[float] = []
     ambiguous: list[float] = []
     for k, value in enumerate(req):
-        if n_exact[k] > 1:
+        token = g_tokens[k] if g_tokens is not None else None
+        if token is not None:
+            candidates = g_index.get(token, [])
+            if len(candidates) == 1:
+                result[k] = candidates[0]
+            elif candidates:
+                ambiguous.append(float(value))
+            else:
+                missing.append(float(value))
+        elif n_exact[k] > 1:
             ambiguous.append(float(value))  # duplicated axis value
-        elif prefer_exact and n_exact[k] == 1:
+        elif n_exact[k] == 1:
             result[k] = order[exact_lo[k]]
         elif n_window[k] == 1:
             result[k] = order[win_lo[k]]
@@ -148,6 +194,7 @@ def match_wavelengths(
     axis: Sequence[float] | np.ndarray,
     *,
     tolerance: float = DEFAULT_TOLERANCE,
+    legacy_g: bool = False,
 ) -> np.ndarray:
     """Map wavelength values to column indices of ``axis``, in the requested order.
 
@@ -156,6 +203,10 @@ def match_wavelengths(
         axis: The spectral axis (column wavelengths), any order.
         tolerance: Absolute half-window, in axis units, for a value that is not an
             exact axis value. ``0`` demands exact matches.
+        legacy_g: The values may have been parsed from 6-significant-digit ``%g``
+            text (wavelength metadata saved before the 2026-10 fix). A value equal
+            to its own ``%g`` text is then matched to the single axis column whose
+            ``%g`` text is the same; any other value uses the normal rule.
 
     Returns:
         Integer array, ``result[k]`` is the column of ``requested[k]``.
@@ -166,51 +217,62 @@ def match_wavelengths(
     """
     if tolerance < 0 or not math.isfinite(tolerance):
         raise ValueError(f"tolerance must be a finite value >= 0, got {tolerance!r}")
-    try:
-        req = np.asarray(list(requested), dtype=float).ravel()
-    except (TypeError, ValueError) as exc:
-        raise WavelengthMatchError(f"requested wavelengths are not numeric: {exc}") from exc
-    if not np.all(np.isfinite(req)):
-        raise WavelengthMatchError("requested wavelengths contain NaN or infinite values")
+    req = _as_values(requested)
     ax = _as_axis(axis)
     if req.size == 0:
         return np.zeros(0, dtype=np.intp)
     tol = np.maximum(float(tolerance), np.abs(req) * _FLOAT_SLACK)
-    return _match(req, ax, tol, prefer_exact=True)
+    g_tokens = None
+    if legacy_g:
+        g_tokens = [_g_text(v) if _is_g_shaped(v) else None for v in req.tolist()]
+    return _match(req, ax, tol, g_tokens)
+
+
+def _exact_token(value: float) -> str:
+    """Round-trip-exact text whose mantissa ends in a 0 after the decimal point.
+
+    ``%g`` strips trailing zeros and a bare decimal point, so it never writes such a
+    token. That is how :func:`resolve_wavelength_list` tells new rows from old ones.
+    """
+    text = repr(float(value))
+    if not math.isfinite(float(value)):
+        return text
+    mantissa, sep, exponent = text.partition("e")
+    if "." not in mantissa:
+        mantissa += ".0"
+    elif not mantissa.endswith("0"):
+        mantissa += "0"
+    return mantissa + sep + exponent
+
+
+def _is_exact_token(token: str) -> bool:
+    mantissa = token.lower().partition("e")[0]
+    return "." in mantissa and mantissa.endswith("0")
 
 
 def format_wavelength_list(wavelengths: Iterable[float]) -> str:
     """Serialise wavelengths as comma-separated text that parses back exactly.
 
-    Uses Python's shortest round-trip float repr (``1500.0``, ``7407.407407407408``),
-    never ``%g``, whose 6 significant digits merge or shift channels.
+    Each token is Python's shortest round-trip float repr, with a trailing ``0``
+    added after the decimal point when the repr lacks one (``1500.0``, ``10000.10``,
+    ``7407.4074074074080``, ``1.0e-05``). ``float()`` reads every token back to the
+    same value, and no token can be mistaken for the old ``%g`` output.
     """
-    return ",".join(repr(float(w)) for w in wavelengths)
-
-
-def _could_be_g_format(token: str, value: float) -> bool:
-    """True if ``%g`` formatting of ``value`` reproduces ``token`` exactly."""
-    return f"{value:g}" == token
-
-
-def _g_half_unit(values: np.ndarray) -> np.ndarray:
-    """Largest distance between a true value and its 6-significant-digit ``%g`` text."""
-    mag = np.abs(values)
-    safe = np.where(mag > 0, mag, 1.0)
-    exponent = np.floor(np.log10(safe))
-    half_unit = 0.5 * np.power(10.0, exponent - 5)
-    # Float slack so a value exactly on the rounding boundary is still inside.
-    return np.where(mag > 0, half_unit * (1 + 1e-9), 0.0)
+    return ",".join(_exact_token(w) for w in wavelengths)
 
 
 def resolve_wavelength_list(text: str, axis: Sequence[float] | np.ndarray) -> np.ndarray:
     """Map a stored wavelength list (``all_vars`` / ``top_vars`` text) to axis columns.
 
-    A list written by :func:`format_wavelength_list` is matched exactly. A list
-    written by the old ``%g`` writer (every token is what ``%g`` would print) is
-    matched within each value's 6-significant-digit rounding window, and is accepted
-    only when exactly one axis column falls in that window. When two columns do,
-    the old text cannot say which channel was meant, and this raises.
+    Each token is classified on its own:
+
+    - written by :func:`format_wavelength_list` (mantissa ends in ``0`` after a
+      decimal point): matched exactly;
+    - exactly what ``%g`` prints for its value (the pre-2026-10 writer): matched to
+      the single axis column whose own ``%g`` text equals the token; two such
+      columns make the token ambiguous, because the old text cannot say which
+      channel was meant;
+    - anything else (full-precision text from other writers): matched exactly.
 
     Args:
         text: Comma-separated wavelength values.
@@ -236,11 +298,8 @@ def resolve_wavelength_list(text: str, axis: Sequence[float] | np.ndarray) -> np
         raise WavelengthMatchError("wavelength list contains NaN or infinite values")
     ax = _as_axis(axis)
 
-    legacy_g = all(_could_be_g_format(t, v) for t, v in zip(tokens, values.tolist()))
-    if not legacy_g:
-        tol = np.abs(values) * _FLOAT_SLACK
-        return _match(values, ax, tol, prefer_exact=True)
-    # Every token looks like %g output. An exact hit is NOT trusted on its own here:
-    # under %g, 12345.7 may stand for 12345.67, so any second column inside the
-    # rounding window makes the value ambiguous.
-    return _match(values, ax, _g_half_unit(values), prefer_exact=False)
+    g_tokens: list[str | None] = [
+        None if _is_exact_token(t) or _g_text(v) != t else t
+        for t, v in zip(tokens, values.tolist())
+    ]
+    return _match(values, ax, np.abs(values) * _FLOAT_SLACK, g_tokens)

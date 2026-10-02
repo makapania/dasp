@@ -1084,6 +1084,8 @@ def compute_validation_metrics_for_top_one_class_models(
     # Rows that could not be validated, with the reason (returned on
     # df.attrs["validation_failures"] so callers can report them; R078).
     validation_failures: dict = {}
+    # A re-run must not leave an earlier run's numbers on a row that now fails.
+    df_results.loc[top_indices, list(_VAL_OC_COLUMNS)] = np.nan
 
     for i, idx in enumerate(top_indices):
         # Report progress every 10 models (matches classification helper at
@@ -1381,6 +1383,7 @@ def compute_validation_metrics_for_top_one_class_models(
         df_results = df_results[cols]
 
     df_results.attrs["validation_failures"] = validation_failures
+    df_results.attrs["validation_attempted"] = list(top_indices)
     return df_results
 
 

@@ -752,10 +752,20 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   dialog). So the fine-grid R009 bug is reachable in the GUI only when that filter is skipped (X_original kept, e.g.
   after its error dialog) and from Python; R031/R078 are reachable in the GUI after nm<->cm-1 conversion (1e7/x
   columns are not rounded). Do not "simplify" the contract on the assumption that GUI axes are integers.
-- **Legacy %g detection is per row, not per value:** a token is %g-possible iff `f"{float(t):g}" == t`. repr never
-  drops ".0", so any `1500.0`-style or >6-digit token proves the new writer -> exact matching. A row whose every token
-  could be %g is matched within each value's 6-sig-digit half-unit window, and an exact hit is NOT trusted there
-  (12345.7 may stand for 12345.67): two columns in the window raise.
+- **Legacy %g handling (revised after review round 1, Codex BLOCK):** a numeric window around the rounded value is
+  wrong below powers of ten (`"10000"` would match 9999.97, which %g prints as `"9999.97"`) and for negatives. Match a
+  legacy token to the axis columns whose OWN `f"{a:g}"` equals the token, and require exactly one. Telling new rows
+  from old ones per row also failed: repr writes `10000.1`, which %g also writes. The writer now appends a `0` to any
+  mantissa that lacks a trailing zero after the decimal point (`10000.10`, `1.0e-05`, `7407.4074074074080`); %g
+  strips trailing zeros, so it never writes such a token, and classification is per token. Rows written by
+  `1f3c671` (plain repr) never shipped.
+- **Old models with %g-rounded metadata wavelengths:** the pre-fix refit stored the parsed `all_vars` floats. On a
+  0.012 grid ~45% of them have both neighbours within ±0.01, so unstamped models are mapped with
+  `match_wavelengths(..., legacy_g=True)` (the same %g-text rule) at predict time and in the load-time replay; if even
+  that is ambiguous, load warns and predict raises "Retrain".
+- **Ensembles are excluded from the retrain replay:** the GUI ensemble save stores `wavelengths == full_wavelengths`
+  (the whole exact axis) for every member, so replaying the Tab 7 first-hit rule would flag every fine-grid ensemble
+  falsely. Members carry `ensemble_parent`/`is_base_model`.
 - **Old saved models:** `save_model` now stamps `metadata['wavelength_matching'] = 1`. On load, an unstamped Path A model
   (`use_full_spectrum_preprocessing` + `full_wavelengths`) replays the old first-hit-within-0.5 mapping against
   `full_wavelengths` (= the Tab 7 training axis) and warns if any feature differs (Tab 8 load shows a dialog).
@@ -768,9 +778,12 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `save_model` also drops an encoder whose model `classes_` are not codes 0..n-1 (warning), and `predict_with_model`
   skips decoding for such legacy artifacts. Display-only fallbacks (`refined_label_encoder or self.label_encoder` at
   ~21176/21198/37715/38596) still mis-label numeric classes in tooltips/plots: not fixed here.
-- **Validation failures are surfaced via `df.attrs["validation_failures"]`** (`{row index: reason}`) from both
-  `compute_validation_metrics_for_top_models` and the one-class twin; the GUI logs "computed for only X of top N"
-  plus reasons instead of an unconditional success line.
+- **Validation failures are surfaced via `df.attrs["validation_failures"]`** (`{row index: reason}`) and
+  `df.attrs["validation_attempted"]` from both `compute_validation_metrics_for_top_models` and the one-class twin;
+  the GUI logs "computed for only X of top N" plus reasons, counting only this run's non-failed attempted rows.
+  The one-class helper now clears val_* on attempted rows first (it used to keep an earlier run's numbers). A
+  supervised row with no usable `all_vars` is validated on the full spectrum only if it is tagged full AND its
+  `n_vars` equals the column count.
 - Not changed (ensemble paths, still own matchers): GUI `_match_wavelengths_normalized`/`match_wavelengths_exact`
   (1-decimal rounding, silent "train without subsetting" on failure) and `preprocessing_wrapper` (nearest within 0.5,
   silent drop). Candidates for the same contract.

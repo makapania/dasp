@@ -1284,6 +1284,28 @@ class TestGridSearchValidationMetricsParity:
         assert 'spectral axis' in result_df.attrs['validation_failures'][0]
         assert any('OC Validation' in rec.message for rec in caplog.records)
 
+    def test_failed_revalidation_clears_stale_val_metrics(
+        self, grid_search_oc_results_row, synthetic_train_val
+    ):
+        """Codex round 1: re-validating a row that now fails kept the previous run's
+        val_* numbers, and the GUI summary then reported success."""
+        from spectral_predict.contamination import (
+            _VAL_OC_COLUMNS,
+            compute_validation_metrics_for_top_one_class_models,
+        )
+
+        X_train, y_train, X_val, y_val, wavelengths = synthetic_train_val
+        row = dict(grid_search_oc_results_row, all_vars='9999.0,9998.0')
+        row.update({col: 0.99 for col in _VAL_OC_COLUMNS})  # left by an earlier run
+        result_df = compute_validation_metrics_for_top_one_class_models(
+            df_results=pd.DataFrame([row]), X_train=X_train, y_train=y_train,
+            X_val=X_val, y_val=y_val, inlier_label='Clean',
+            wavelengths=wavelengths, top_n=10,
+        )
+        assert result_df.loc[0, list(_VAL_OC_COLUMNS)].isna().all()
+        assert result_df.attrs['validation_attempted'] == [0]
+        assert 0 in result_df.attrs['validation_failures']
+
     @pytest.mark.parametrize(
         'mutate,label',
         [

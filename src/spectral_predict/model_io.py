@@ -71,6 +71,9 @@ def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
         n_codes = len(label_encoder.classes_)
     except (TypeError, AttributeError):
         return True
+    if model_classes.size != n_codes:
+        # A superset (or subset) encoder decodes through the wrong class list.
+        return False
     if model_classes.dtype.kind not in 'iuf':
         # Text classes: the model decodes itself and predict_with_model passes text
         # predictions through untouched, so the encoder can do no harm.
@@ -80,23 +83,34 @@ def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
     return bool(np.all((model_classes >= 0) & (model_classes < n_codes)))
 
 
+_RETRAIN = "Retrain the model in Model Development and save it again."
+
+
+def _is_legacy_tab7_model(metadata: Dict[str, Any]) -> bool:
+    """Unstamped Path A model of a task type the old Tab 7 refit produced."""
+    if metadata.get('wavelength_matching') is not None:
+        return False
+    if not metadata.get('use_full_spectrum_preprocessing'):
+        return False
+    # Only Tab 7 refits used the first-hit rule. Multi-class SIMCA models and
+    # ensembles (and their base models) stored their exact training columns.
+    if metadata.get('task_type') not in (None, 'regression', 'classification', 'one_class'):
+        return False
+    return not any(
+        metadata.get(key) for key in ('ensemble_type', 'ensemble_parent', 'is_base_model')
+    )
+
+
 def _legacy_wavelength_shift(metadata: Dict[str, Any]) -> Optional[str]:
     """Warn text if a pre-fix model was probably trained on neighbouring channels.
 
     Before WAVELENGTH_MATCHING_VERSION, the Tab 7 refit took each wavelength's column
     as the FIRST axis value within 0.5 of it, while prediction reads the named
     column. Both axes are in the metadata (``full_wavelengths`` is the training
-    axis), so the old training mapping can be replayed and compared.
+    axis), so the old training mapping can be replayed and compared. The stored
+    wavelengths may be ``%g``-rounded (the old refit kept the parsed ``all_vars``).
     """
-    if metadata.get('wavelength_matching') is not None:
-        return None
-    if not metadata.get('use_full_spectrum_preprocessing'):
-        return None
-    # Only Tab 7 refits used the first-hit rule; multi-class SIMCA and ensembles
-    # stored their exact training columns.
-    if metadata.get('task_type') not in (None, 'regression', 'classification', 'one_class'):
-        return None
-    if metadata.get('ensemble_type') is not None:
+    if not _is_legacy_tab7_model(metadata):
         return None
     full = metadata.get('full_wavelengths')
     requested = metadata.get('wavelengths')
@@ -105,9 +119,16 @@ def _legacy_wavelength_shift(metadata: Dict[str, Any]) -> Optional[str]:
     try:
         full_arr = np.asarray(full, dtype=float)
         req_arr = np.asarray(requested, dtype=float)
-        new_idx = match_wavelengths(req_arr, full_arr)
     except (TypeError, ValueError):
         return None  # predict will raise with the specific reason
+    try:
+        new_idx = match_wavelengths(req_arr, full_arr, legacy_g=True)
+    except WavelengthMatchError as exc:
+        return (
+            f"This model was saved before the wavelength-mapping fix (R009), and its "
+            f"stored wavelengths do not each name a single channel of its training "
+            f"axis ({exc}). It cannot be applied reliably. {_RETRAIN}"
+        )
     n_shifted = 0
     for wl, new in zip(req_arr, new_idx):
         hits = np.flatnonzero(np.abs(full_arr - wl) < 0.5)
@@ -120,8 +141,31 @@ def _legacy_wavelength_shift(metadata: Dict[str, Any]) -> Optional[str]:
         f"axis is finer than 0.5 units, and {n_shifted} of {len(req_arr)} features were "
         f"probably trained on the neighbouring channel while prediction reads the "
         f"named channel. Its predictions do not match its reported CV metrics. "
-        f"Retrain the model in Model Development and save it again."
+        f"{_RETRAIN}"
     )
+
+
+def _model_subset_indices(
+    required_wl: Any, full_wavelengths: Any, metadata: Dict[str, Any]
+) -> np.ndarray:
+    """Columns of the model's wavelengths within its full (training) axis.
+
+    Models saved before the fix may store ``%g``-rounded wavelengths, so they are
+    matched with the ``%g``-text rule instead of the fixed 0.01 window; if even that
+    cannot name one channel per wavelength, the error says to retrain.
+    """
+    legacy = metadata.get('wavelength_matching') is None
+    try:
+        return match_wavelengths(required_wl, full_wavelengths, legacy_g=legacy)
+    except WavelengthMatchError as exc:
+        if not legacy:
+            raise
+        raise WavelengthMatchError(
+            f"This model was saved before the wavelength-mapping fix and its wavelengths "
+            f"cannot be matched to single channels of its training axis: {exc} {_RETRAIN}",
+            missing=exc.missing,
+            ambiguous=exc.ambiguous,
+        ) from exc
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -773,7 +817,7 @@ def predict_with_model(
 
                 # Step 3: Find indices of subset wavelengths in full wavelengths
                 # (the shared exact-first contract the Tab 7 refit also uses).
-                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
 
                 # Step 4: Subset the preprocessed data
                 X_processed = X_full_preprocessed[:, wavelength_indices]
@@ -797,7 +841,7 @@ def predict_with_model(
                 X_full_preprocessed = (
                     preprocessor.transform(X_full) if preprocessor is not None else X_full
                 )
-                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = X_new.values
@@ -825,7 +869,7 @@ def predict_with_model(
                 X_full_preprocessed = X_new
 
             # Find indices of subset wavelengths
-            wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
+            wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
 
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
@@ -1131,7 +1175,7 @@ def predict_with_uncertainty(
                     X_full_preprocessed = preprocessor.transform(X_full)
                 else:
                     X_full_preprocessed = X_full
-                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
+                wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
@@ -1151,7 +1195,7 @@ def predict_with_uncertainty(
                 X_full_preprocessed = preprocessor.transform(X_new)
             else:
                 X_full_preprocessed = X_new
-            wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
+            wavelength_indices = _model_subset_indices(required_wl, full_wavelengths, metadata)
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
             if preprocessor is not None:

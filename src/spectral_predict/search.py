@@ -773,6 +773,29 @@ def _multiclass_holdout_metrics(
     }
 
 
+def _full_spectrum_fallback_refusal(row, n_cols: int) -> str | None:
+    """Why a row without a usable ``all_vars`` must not be validated on every column.
+
+    Returns None only when the row is tagged full-spectrum and its ``n_vars`` equals
+    the number of columns being validated, i.e. it demonstrably used the whole axis.
+    """
+    tag = row.get("SubsetTag", row.get("Subset"))
+    if isinstance(tag, float) and np.isnan(tag):
+        tag = None
+    if tag is not None and str(tag).strip().lower() not in ("full", "n/a", ""):
+        return f"all_vars is missing for a wavelength-subset row (SubsetTag={tag!r})"
+    try:
+        n_vars = int(row.get("n_vars"))
+    except (TypeError, ValueError):
+        return "all_vars is missing and n_vars does not confirm a full-spectrum model"
+    if n_vars != n_cols:
+        return (
+            f"all_vars is missing and n_vars ({n_vars}) differs from the {n_cols} "
+            f"columns being validated"
+        )
+    return None
+
+
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -1117,11 +1140,19 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
             # failure for this row, never a silent full-spectrum or fewer-column
             # refit. Old %g-rounded rows still resolve when unambiguous.
             all_vars_str = row.get("all_vars", "N/A")
-            if all_vars_str != "N/A" and all_vars_str and isinstance(all_vars_str, str):
+            if isinstance(all_vars_str, str) and all_vars_str.strip() not in ("", "N/A"):
                 try:
                     col_indices = resolve_wavelength_list(all_vars_str, wavelengths)
                 except WavelengthMatchError as e:
                     reason = f"all_vars does not match the spectral axis: {e}"
+                    validation_failures[idx] = reason
+                    print(f"  [Warning] Skipping validation for model {i+1}: {reason}")
+                    continue
+            else:
+                # No usable wavelength list. The full-spectrum fallback is safe only
+                # when the row itself says it used every column of this axis.
+                reason = _full_spectrum_fallback_refusal(row, X_train_preprocessed.shape[1])
+                if reason is not None:
                     validation_failures[idx] = reason
                     print(f"  [Warning] Skipping validation for model {i+1}: {reason}")
                     continue
@@ -1351,6 +1382,7 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
         df_results = df_results[cols]
 
     df_results.attrs["validation_failures"] = validation_failures
+    df_results.attrs["validation_attempted"] = list(top_indices)
     return df_results
 
 

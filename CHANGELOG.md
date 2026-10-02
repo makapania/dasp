@@ -101,10 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (nm→cm⁻¹ conversions such as 1e7/1350 = 7407.407…, OPUS wavenumbers, anything above
   9999.99) a subset row was silently validated on the full spectrum, a partial match on
   fewer columns, and one-class rows returned all-NaN `val_*`. Lists are now written
-  round-trip-exactly; already-saved rows (including Bayesian SQLite studies) still
-  resolve when the rounding cannot have merged two channels. A row that cannot be
-  mapped is left without validation values and is listed in the run log instead of
-  "Validation metrics computed for top N"; Optuna study names are unchanged.
+  round-trip-exactly (each token ends in a `0` after the decimal point, e.g. `10000.10`,
+  a spelling `%g` never produces); already-saved rows (including Bayesian SQLite
+  studies) still resolve when exactly one column prints as the stored `%g` text. A row
+  that cannot be mapped, or a wavelength-subset row with no `all_vars` at all, is left
+  without validation values (earlier one-class values on it are cleared) and is listed
+  in the run log instead of "Validation metrics computed for top N"; Optuna study
+  names are unchanged. Old Model Development models whose saved wavelengths were
+  `%g`-rounded are matched the same way at prediction; where that is ambiguous, loading
+  warns and prediction stops with "retrain".
 - **Saving a classifier trained on numeric labels (R016).** After a Bayesian or NSGA-II
   classification search, Tab 7 saved the search's label encoder with a model trained on
   raw numeric labels: integer classes crashed the save (`keys must be str`), float
