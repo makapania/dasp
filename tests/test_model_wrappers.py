@@ -310,3 +310,56 @@ def test_ensemble_saved_with_auto_task_type_predicts_as_regression(tmp_path):
     assert all(md["metadata"]["task_type"] == "regression" for md in loaded["base_model_dicts"])
     model_dict = {"model": loaded["ensemble"], "metadata": loaded["metadata"], "preprocessor": None}
     np.testing.assert_allclose(np.ravel(predict_with_model(model_dict, X)), ens.predict(X))
+
+
+def test_ensemble_with_classifier_member_keeps_auto_task_type(tmp_path):
+    from spectral_predict.ensemble import SimpleAverageEnsemble
+
+    X, y = _data(classification=True)
+    members = [LogisticRegression(max_iter=500).fit(X, y), Ridge(alpha=1.0).fit(X, y)]
+    ens = SimpleAverageEnsemble(members, ["LogReg", "Ridge"]).fit(X, y)
+    path = tmp_path / "auto_clf.dasp"
+    wl = [float(c) for c in COLS]
+    save_ensemble(
+        ens,
+        str(path),
+        {"ensemble_type": "simple_average", "task_type": "auto", "wavelengths": wl, "n_vars": N_WL},
+    )
+    assert load_ensemble(str(path))["metadata"]["task_type"] == "auto"
+
+
+# --- _joblib_load parity with joblib.load ----------------------------------------------------
+
+
+@pytest.mark.parametrize("compress", [0, 3], ids=["uncompressed", "compress3"])
+def test_joblib_load_matches_joblib_on_ordinary_payloads(tmp_path, compress):
+    from spectral_predict.model_io import _joblib_load
+
+    X, y = _data()
+    pipe = Pipeline([("scaler", StandardScaler()), ("pls", PLSRegression(n_components=3))]).fit(
+        X, y
+    )
+    big = np.random.default_rng(1).standard_normal((400, 400))  # ~1.3 MB
+    path = tmp_path / f"payload_{compress}.pkl"
+    joblib.dump({"pipe": pipe, "big": big, "meta": {"a": 1}}, path, compress=compress)
+
+    ours, theirs = _joblib_load(path), joblib.load(path)
+
+    np.testing.assert_array_equal(ours["big"], theirs["big"])
+    np.testing.assert_array_equal(ours["big"], big)
+    np.testing.assert_array_equal(ours["pipe"].predict(X), theirs["pipe"].predict(X))
+    assert ours["meta"] == theirs["meta"]
+
+
+def test_joblib_load_translates_unicode_errors_like_joblib(tmp_path, monkeypatch):
+    from spectral_predict import model_io
+
+    path = tmp_path / "x.pkl"
+    joblib.dump({"a": 1}, path)
+
+    def broken_load(self):
+        raise UnicodeDecodeError("ascii", b"\xff", 0, 1, "bad byte")
+
+    monkeypatch.setattr(model_io._LegacyAwareNumpyUnpickler, "load", broken_load)
+    with pytest.raises(ValueError, match="python 2"):
+        model_io._joblib_load(path)

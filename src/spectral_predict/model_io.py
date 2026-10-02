@@ -72,27 +72,62 @@ def _joblib_load(path):
     """``joblib.load`` with legacy wrapper-name resolution.
 
     joblib has no public unpickler hook, so this repeats ``joblib.load``'s
-    non-memmapped path with :class:`_LegacyAwareNumpyUnpickler`. The decompression
-    helper is joblib-private; if it is unavailable (joblib upgrade) the load falls back
-    to plain ``joblib.load``, which still reads every file saved after the wrappers
-    moved to ``spectral_predict.model_wrappers``.
+    non-memmapped path (including its ``_unpickle`` error translation and pre-0.10
+    warning) with :class:`_LegacyAwareNumpyUnpickler`. The helpers it needs are
+    joblib-private; if they are unavailable (joblib upgrade) the load falls back to
+    plain ``joblib.load``, with a warning, which still reads every file saved after the
+    wrappers moved to ``spectral_predict.model_wrappers``.
     """
     try:
+        from joblib.compressor import _ZFILE_PREFIX
         from joblib.numpy_pickle import _validate_fileobject_and_memmap
+        from joblib.numpy_pickle_compat import load_compatibility
     except ImportError:  # pragma: no cover - joblib internals changed
-        logger.warning("joblib internals changed; loading without legacy wrapper mapping")
+        msg = (
+            "joblib internals changed: loading without the legacy GUI wrapper mapping; "
+            "models saved before the wrappers moved to spectral_predict.model_wrappers "
+            "may fail to load."
+        )
+        logger.warning(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
         return joblib.load(path)
 
     path = os.fspath(path)
-    legacy_format = False
     with open(path, "rb") as f:
-        with _validate_fileobject_and_memmap(f, path, None) as (fobj, _):
-            if isinstance(fobj, str):
-                legacy_format = True  # pre-0.10 joblib file: joblib's compat loader
-            else:
-                return _LegacyAwareNumpyUnpickler(path, fobj, True).load()
-    if legacy_format:
-        return joblib.load(path)
+        is_compat_file = f.read(len(_ZFILE_PREFIX)) == _ZFILE_PREFIX
+        if not is_compat_file:
+            f.seek(0)
+            with _validate_fileobject_and_memmap(f, path, None) as (fobj, _):
+                return _unpickle_legacy_aware(fobj, path)
+
+    # Pre-0.10 joblib file (predates DASP; holds no GUI wrappers): joblib's own loader.
+    warnings.warn(
+        f"The file '{path}' has been generated with a joblib version less than 0.10. "
+        "Please regenerate this pickle file.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return load_compatibility(path)
+
+
+def _unpickle_legacy_aware(fobj, path: str):
+    """``joblib.numpy_pickle._unpickle`` with :class:`_LegacyAwareNumpyUnpickler`."""
+    unpickler = _LegacyAwareNumpyUnpickler(path, fobj, True)
+    try:
+        obj = unpickler.load()
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "You may be trying to read with python 3 a joblib pickle generated with "
+            "python 2. This feature is not supported by joblib."
+        ) from exc
+    if unpickler.compat_mode:
+        warnings.warn(
+            f"The file '{path}' has been generated with a joblib version less than 0.10. "
+            "Please regenerate this pickle file.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return obj
 
 
 def _is_regressor_model(model) -> bool:
@@ -1876,13 +1911,6 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             StackingEnsemble
         )
 
-        # GUI ensembles were always regression, but files saved before 2026-10 could
-        # record the task radio's 'auto', which predict_with_model rejects.
-        ensemble_metadata = config.get("metadata") or {}
-        for meta in [ensemble_metadata] + [md.get("metadata") or {} for md in base_model_dicts]:
-            if meta.get("task_type") == "auto":
-                meta["task_type"] = "regression"
-
         ensemble_type = config['ensemble_type']
 
         # Create appropriate ensemble object
@@ -1936,6 +1964,15 @@ def load_ensemble(filepath: str) -> Dict[str, Any]:
             )
         else:
             raise ValueError(f"Unknown ensemble type: {ensemble_type}")
+
+        # GUI ensembles were always regression, but files saved before 2026-10 could
+        # record the task radio's 'auto', which predict_with_model rejects. Members were
+        # already relabelled by load_model's regressor guard; apply the same guard here.
+        ensemble_metadata = config.get("metadata") or {}
+        if ensemble_metadata.get("task_type") == "auto" and all(
+            _is_regressor_model(m) for m in [ensemble, *base_models]
+        ):
+            ensemble_metadata["task_type"] = "regression"
 
         return {
             'ensemble': ensemble,
