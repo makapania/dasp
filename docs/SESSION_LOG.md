@@ -769,3 +769,10 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   so its seven handlers and `transfer_model_registry` were deleted. The quality-plot SG window had a floor of 5,
   so an ROI of 1-4 wavelengths raised and the shared try/except hid every plot; `ct_derivative_window` now
   adapts (None below 3) and raw/scatter plots are drawn independently of the derivative tabs.
+
+## 2026-10-02 - User decision: booster tree count = one value from the pooled CV curve (xgb.cv / lgb.cv style)
+Replaces per-fold early stopping on the scored fold (R028/R003/R022). Each fold is fit once at max rounds; staged
+predictions give a pooled CV curve; one round count is chosen (like PLS LVs from RMSECV in Unscrambler), CV metrics are
+reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
+fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
+the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
