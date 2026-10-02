@@ -4,7 +4,17 @@
 
 ## ▶ NEXT SESSION — START HERE (hand-off updated 2026-09-27)
 
-### 0. Next: work through the 2026-09-28 review results. Suggested order below; nothing is started.
+### 0. IN PROGRESS (2026-10-02): Wave 1 + Wave 2 fixes on 11 branches, none merged yet
+Every Wave 1/2 item was cross-checked by **Codex gpt-6-astra and GLM 5.3** before fixing (the 09-28 reviews were
+Claude-only). Nothing refuted; corrections: R001/R020 latent behind R048; R085 is not the holdout bug; QW1 gain
+~1.5-4x not 60x; QW5 half exists; CTAI is "paired regression in satellite PCA space". User decisions: booster tree
+count = one value from the pooled CV curve (SESSION_LOG 2026-10-02); chemometrics validation conventions (CLAUDE.md).
+Branches (local worktrees, Opus agents): fix/booster-early-stopping, fix/ensemble-cv, fix/ytransform-save,
+fix/wavelength-mapping, fix/readers, fix/gui-dataset-state, perf/thread-budget, fix/ct-honest-labels,
+fix/contaminant-maths, fix/classification-metrics, feat/dpi-fonts. **QW4 (holdout direction) held** until
+fix/gui-dataset-state merges (same code). Each branch gets Codex + GLM review before merging.
+
+### 0a. The 2026-09-28 review results and the combined order
 Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Correctness:** `docs/reviews/2026-09-28-adversarial-review.md`. 133 findings kept (129 confirmed by an
   independent refuter; 2 critical, 30 high). IDs are R001-R133; themes in SESSION_LOG 2026-09-28.
@@ -53,8 +63,6 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
   `suggest_one_class_params`. That is the one planned exception to the no-sampler-edits rule, and it changes the
   pinned sampler hashes in `tests/test_t51_extra_axes_mechanism.py`.
 
-> **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
-> The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
 
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
