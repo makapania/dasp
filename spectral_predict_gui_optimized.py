@@ -69,6 +69,7 @@ import threading
 from datetime import datetime
 import numpy as np
 import pandas as pd
+from dataclasses import dataclass
 
 # Child of "spectral_predict" so setup_app_logger's dasp.log handler receives GUI
 # warnings (__name__ is "__main__" when the GUI is run as a script).
@@ -2697,6 +2698,92 @@ def _validation_snapshot(X, y, validation_rows, excluded_rows=()):
     else:
         y_val = y.reindex(X_val.index)
     return X_val, y_val
+
+
+@dataclass
+class _PreparedCalibration:
+    """The rows a run trains and scores on, and what was removed on the way."""
+
+    X: "pd.DataFrame"
+    y: "pd.Series | None"
+    X_val: "pd.DataFrame | None"
+    y_val: "pd.Series | None"
+    n_inactive: int = 0
+    mixed_types: dict | None = None
+    collapsed_labels: list | None = None
+    rare_dropped: list | None = None
+    n_before_rare: int = 0
+
+
+def _prepare_calibration(
+    X,
+    y,
+    *,
+    active,
+    excluded,
+    holdout,
+    validation_on: bool,
+    task_type: str,
+    cv_strategy: str,
+    folds: int,
+) -> _PreparedCalibration:
+    """The calibration and holdout rows of one analysis launch.
+
+    The single definition shared by the analysis worker and the crash-resume
+    identity (``_calibration_identity_now``), so the digest covers exactly what
+    the worker trains on. In order: Analysis Subset, exclusions, holdout removal
+    (the holdout is read from ``X`` minus exclusions), mixed-type classification
+    labels normalised to strings, and classes rarer than the CV folds dropped.
+    """
+    if active is not None:
+        mask = X.index.isin(active)
+        X_cal, y_cal = X[mask], (None if y is None else y[mask])
+        n_inactive = len(X) - len(X_cal)
+    else:
+        X_cal, y_cal, n_inactive = X, y, 0
+    if excluded:
+        mask = ~X_cal.index.isin(excluded)
+        X_cal = X_cal[mask]
+        y_cal = None if y_cal is None else y_cal[mask]
+    if validation_on:
+        X_val, y_val = _validation_snapshot(X, y, holdout, excluded)
+    else:
+        X_val, y_val = None, None
+    if validation_on and holdout:
+        X_cal = X_cal[~X_cal.index.isin(holdout)]
+        y_cal = None if y_cal is None else y_cal[~y_cal.index.isin(holdout)]
+    prepared = _PreparedCalibration(X_cal, y_cal, X_val, y_val, n_inactive=n_inactive)
+
+    if (
+        task_type in ("classification", "one_class")
+        and y_cal is not None
+        and getattr(y_cal, "dtype", None) == object
+    ):
+        types_present = {type(v).__name__ for v in y_cal.dropna().values}
+        if len(types_present) > 1:
+            from collections import Counter
+
+            prepared.mixed_types = dict(Counter(type(v).__name__ for v in y_cal.dropna()))
+            before = set(y_cal.dropna().astype(str).unique())
+            y_cal = _normalize_mixed_type_labels(y_cal)
+            after = set(y_cal.dropna().unique())
+            prepared.collapsed_labels = sorted(before - after) if after != before else []
+            prepared.y = y_cal
+
+    if (
+        task_type == "classification"
+        and y_cal is not None
+        and cv_strategy in ("kfold", "repeated_kfold")
+    ):
+        classes, counts = np.unique(np.asarray(y_cal), return_counts=True)
+        rare = counts < folds
+        if rare.any() and len(classes) - int(rare.sum()) >= 2:
+            prepared.rare_dropped = [(str(classes[i]), int(counts[i])) for i in np.where(rare)[0]]
+            keep = ~y_cal.isin([classes[i] for i in np.where(rare)[0]])
+            prepared.n_before_rare = len(y_cal)
+            prepared.X = prepared.X[keep]
+            prepared.y = y_cal[keep]
+    return prepared
 
 
 class _MissingSample:
@@ -19112,10 +19199,12 @@ class SpectralPredictApp:
         """
         if self.X_original is None:
             return False
-        labels = {label for label in self.X_original.index if isinstance(label, str)}
-        for label in labels:
+        spelled = {str(label) for label in self.X_original.index}
+        for label in self.X_original.index:
+            if not isinstance(label, str):
+                continue
             base, sep, suffix = label.rpartition(".")
-            if sep and suffix.isdigit() and (base in labels or base == "nan"):
+            if sep and suffix.isdigit() and (base in spelled or base == "nan"):
                 return True
         return False
 
@@ -27165,44 +27254,91 @@ class SpectralPredictApp:
             )
             return None
 
+    def _launch_setting(self, name: str):
+        """A launch setting as the worker reads it: the click snapshot, else the control."""
+        snapshot = getattr(self, "_pending_analysis_settings", None) or {}
+        if name in snapshot:
+            return snapshot[name]
+        return getattr(self, name).get()
+
+    def _launch_prepared_calibration(self) -> _PreparedCalibration | None:
+        """The calibration and holdout rows a launch now would give the worker."""
+        if self.X is None:
+            return None
+        task_type = self.task_type.get()
+        if task_type == "auto":
+            task_type = _infer_task_type_from_y(self.y) or "regression"
+        excluded, active, holdout = self._launch_calibration_selection()
+        return _prepare_calibration(
+            self.X,
+            self.y,
+            active=active,
+            excluded=excluded,
+            holdout=holdout,
+            validation_on=self._launch_validation_enabled(),
+            task_type=task_type,
+            cv_strategy=self._launch_setting("cv_strategy"),
+            folds=int(self._launch_setting("folds")),
+        )
+
     def _calibration_identity_now(self):
         """Digest of the calibration and holdout rows a launch now would use (or None).
 
-        Mirrors the worker: Analysis Subset, then exclusions, then the holdout are
-        removed from ``self.X`` in its order; the holdout is read from the same
-        data minus exclusions (``_validation_snapshot``).
+        Built from ``_prepare_calibration``, the same function the worker uses
+        (subset, exclusions, holdout, target normalisation, rare classes), so it
+        covers exactly the rows the worker trains and scores on.
         """
         try:
             from spectral_predict.run_state import UnsupportedLabelError, calibration_identity
         except ImportError:
             return None
-        if self.X is None:
-            return None
-        X, y = self.X, self.y
-        excluded, active, holdout = self._launch_calibration_selection()
-        mask = np.ones(len(X), dtype=bool)
-        if active is not None:
-            mask &= X.index.isin(active)
-        if excluded:
-            mask &= ~X.index.isin(excluded)
-        if holdout:
-            mask &= ~X.index.isin(holdout)
-        X_cal = X[mask]
-        if y is None:
-            y_cal = None
-        elif y.index.equals(X.index):
-            y_cal = y[mask]
-        else:
-            y_cal = y.reindex(X_cal.index)
-        X_val, y_val = _validation_snapshot(X, y, holdout, excluded)
         try:
-            return calibration_identity(X_cal, y_cal, X_val, y_val)
+            prepared = self._launch_prepared_calibration()
+        except Exception as exc:  # never block registering the run; a resume asks
+            self._log_progress(
+                f"[RUN] This run's calibration rows could not be prepared for its record "
+                f"({exc}); a resume will ask before continuing."
+            )
+            return None
+        if prepared is None:
+            return None
+        try:
+            return calibration_identity(prepared.X, prepared.y, prepared.X_val, prepared.y_val)
         except UnsupportedLabelError as exc:
             self._log_progress(
                 f"[RUN] This run's calibration rows can't be fingerprinted ({exc}); a "
                 "resume will ask before continuing."
             )
             return None
+
+    def _capture_calibration_selection(self) -> dict:
+        """The sample selection a resume reconciliation may change (see restore)."""
+        return {
+            "excluded_spectra": set(self.excluded_spectra or ()),
+            "validation_indices": set(self.validation_indices or ()),
+            "validation_X": self.validation_X,
+            "validation_y": self.validation_y,
+            "_pending_validation_indices": getattr(self, "_pending_validation_indices", None),
+        }
+
+    def _restore_calibration_selection(self, saved: dict) -> None:
+        """Undo a reconciliation that did not end in a resume (nothing was run)."""
+        changed = (
+            saved["excluded_spectra"] != set(self.excluded_spectra or ())
+            or saved["validation_indices"] != set(self.validation_indices or ())
+        )
+        for name, value in saved.items():
+            setattr(self, name, value)
+        if changed:
+            self._log_progress(
+                "[RUN] The excluded and validation samples are back as they were "
+                "before Run Analysis was clicked."
+            )
+            for refresh in ("_update_exclusion_status", "_update_tab3_exclusion_status"):
+                try:
+                    getattr(self, refresh)()
+                except Exception:
+                    pass
 
     def _ask_keep_or_fresh(self, title: str, message: str) -> str | None:
         """Yes/No dialog: "fresh" to delete the saved run, None to keep it (default)."""
@@ -27244,7 +27380,7 @@ class SpectralPredictApp:
         if answer is False:
             return "fresh"
         self._log_progress("[RUN] Resuming without verifying the calibration samples.")
-        return "unchecked"
+        return "unverified"
 
     def _reconcile_resume_calibration_rows(self, meta):
         """Classify the run record and help the user reach the run's sample selection.
@@ -27252,17 +27388,21 @@ class SpectralPredictApp:
         Called on the main thread once the data fingerprint matches.
 
         - Legacy record (released code, no selection recorded): ``"unchecked"``
-          with a log line, unless the loaded labels show a duplicate-ID rename,
-          whose old scheme named rows differently; then keep or start fresh.
+          with a log line (the holdout restore still runs), unless the loaded
+          labels may come from a duplicate-ID rename, whose old scheme named rows
+          differently. That can't be told from dotted IDs that were always so, so
+          it asks: resume anyway / fresh / keep.
         - A record this code can't read (unknown version, missing or malformed
-          selection or digest, unsupported labels): ask; never resume silently.
+          selection or digest, unsupported labels): the same question; never
+          resume silently.
         - Otherwise every saved label must be loaded, the Analysis Subset must
           match, and differing exclusions are offered for restore. Returns
           ``"verify"``: the caller then compares ``calibration_identity``, which
           decides.
 
-        Returns ``"verify"``, ``"unchecked"``, ``"fresh"`` (delete and start
-        fresh) or None (keep the record and run nothing).
+        Returns ``"verify"``, ``"unchecked"``, ``"unverified"`` (the user chose to
+        resume with the current selection), ``"fresh"`` (delete and start fresh)
+        or None (keep the record and run nothing).
         """
         from spectral_predict.run_state import (
             LABEL_NORMALIZATION,
@@ -27277,12 +27417,11 @@ class SpectralPredictApp:
         normalization = getattr(meta, "label_normalization", None)
         if rows is None and identity is None and normalization is None:
             if self._labels_look_renamed():
-                return self._ask_keep_or_fresh(
-                    "Sample IDs were renamed differently from the interrupted run",
-                    f"The interrupted run {meta.run_id} was saved before repeated "
-                    "sample IDs were renamed the current way. This data has renamed "
-                    "repeated IDs, so the run's saved samples can't be matched to the "
-                    "same spectra and it can't be resumed safely.",
+                return self._ask_resume_unverified(
+                    meta,
+                    "The interrupted run was saved before repeated sample IDs were "
+                    "renamed the current way, and this data has IDs like \"A\" and "
+                    "\"A.1\" that such a rename produces (or that were always so).",
                 )
             self._log_progress(
                 "[RUN] The interrupted run's record predates sample-selection "
@@ -27370,7 +27509,8 @@ class SpectralPredictApp:
             return "fresh"
         self.excluded_spectra = {by_key[k] for k in saved_excl}
         self._log_progress(
-            f"[RUN] Restored the interrupted run's {len(saved_excl)} excluded sample(s)."
+            f"[RUN] Applying the interrupted run's {len(saved_excl)} excluded sample(s); "
+            "they stay only if the resume goes ahead."
         )
         try:
             self._update_exclusion_status()
@@ -27406,6 +27546,26 @@ class SpectralPredictApp:
             "don't describe this calibration set.",
         )
 
+    def _reconcile_resume_selection(self, meta):
+        """Run the resume's sample-selection checks in order; ``"ok"`` to resume.
+
+        Exclusions (and subset) first, then the holdout, then, for records that
+        carry one, the calibration identity as the final authority. A record the
+        user chose to resume unverified keeps the current selection: its saved
+        holdout is never decoded. Returns ``"ok"``, ``"fresh"`` or None.
+        """
+        rows = self._reconcile_resume_calibration_rows(meta)
+        if rows in ("fresh", None):
+            return rows
+        if rows == "unverified":
+            return "ok"
+        split = self._reconcile_resume_validation_split(meta)
+        if split in ("fresh", None):
+            return split
+        if rows == "verify":
+            return self._verify_resume_calibration_identity(meta)
+        return "ok"
+
     def _saved_holdout_labels(self, meta) -> list:
         """The interrupted run's holdout as labels of the loaded data.
 
@@ -27414,10 +27574,14 @@ class SpectralPredictApp:
         data, so the caller's presence check refuses it. Older records fall back
         to ``validation_indices``.
         """
-        from spectral_predict.run_state import UnsupportedLabelError, canonical_label
+        from spectral_predict.run_state import (
+            UnsupportedLabelError,
+            canonical_label,
+            valid_calibration_rows,
+        )
 
         rows = getattr(meta, "calibration_rows", None)
-        if isinstance(rows, dict) and isinstance(rows.get("holdout"), list):
+        if valid_calibration_rows(rows):
             by_key = {}
             if self.X is not None:
                 try:
@@ -28086,24 +28250,16 @@ class SpectralPredictApp:
                 if meta is not None:
                     # The fingerprint covers the spectra and targets, not which of
                     # them the run excluded; reloading the file clears exclusions.
-                    rows = self._reconcile_resume_calibration_rows(meta)
-                    if rows == "fresh":
+                    # Restores offered below are proposals: unless the resume goes
+                    # ahead, the selection goes back to what it was at the click.
+                    selection_before = self._capture_calibration_selection()
+                    outcome = self._reconcile_resume_selection(meta)
+                    if outcome != "ok":
+                        self._restore_calibration_selection(selection_before)
+                    if outcome == "fresh":
                         return _delete_resumed_run_and_start_fresh(meta)
-                    if rows is None:
+                    if outcome is None:
                         return False
-                    split = self._reconcile_resume_validation_split(meta)
-                    if split == "fresh":
-                        return _delete_resumed_run_and_start_fresh(meta)
-                    if split is None:
-                        return False
-                    if rows == "verify":
-                        # The final authority, after any restore the user approved:
-                        # the exact rows this launch would train and score on.
-                        same = self._verify_resume_calibration_identity(meta)
-                        if same == "fresh":
-                            return _delete_resumed_run_and_start_fresh(meta)
-                        if same is None:
-                            return False
                 self._pending_bayesian_run_id = meta.run_id if meta is not None else None
                 return True
             if stored_fp:
@@ -30138,7 +30294,9 @@ class SpectralPredictApp:
             self._log_progress(f"{'='*70}\n")
 
             # Run search
-            # Apply active group filter first
+            # Calibration rows: one definition (_prepare_calibration) shared with
+            # the crash-resume identity, so a resumed run is checked against
+            # exactly what this worker trains on.
             if analysis_rows is not None:
                 _active_rows, _excluded_rows, _validation_rows = analysis_rows
                 _validation_on = _setting("validation_enabled")
@@ -30147,53 +30305,46 @@ class SpectralPredictApp:
                 _excluded_rows = self.excluded_spectra
                 _validation_rows = self.validation_indices
                 _validation_on = self.validation_enabled.get()
+            _prepared = _prepare_calibration(
+                X_run,
+                y_run,
+                active=_active_rows,
+                excluded=_excluded_rows,
+                holdout=_validation_rows,
+                validation_on=bool(_validation_on),
+                task_type=task_type,
+                cv_strategy=_setting("cv_strategy"),
+                folds=_setting("folds"),
+            )
+            X_filtered, y_filtered = _prepared.X, _prepared.y
+
             if _active_rows is not None:
-                ag_mask = X_run.index.isin(_active_rows)
-                X_filtered = X_run[ag_mask]
-                y_filtered = y_run[ag_mask]
-                n_inactive = len(X_run) - len(X_filtered)
-                self.root.after(0, lambda n=n_inactive: self.progress_text.insert(tk.END,
-                    f"\n[i] Analysis Subset: {len(X_filtered)} samples ({n} filtered out)\n"))
+                _subset_msg = (
+                    f"\n[i] Analysis Subset: {len(X_run) - _prepared.n_inactive} samples "
+                    f"({_prepared.n_inactive} filtered out)\n"
+                )
+                self.root.after(0, lambda m=_subset_msg: self.progress_text.insert(tk.END, m))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
-            else:
-                X_filtered = X_run
-                y_filtered = y_run
 
-            # Filter out excluded spectra
             if _excluded_rows:
-                mask = ~X_filtered.index.isin(_excluded_rows)
-                X_filtered = X_filtered[mask]
-                y_filtered = y_filtered[mask]
-
                 # Update progress with exclusion info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
                     f"\n[i] Excluding {len(_excluded_rows)} user-selected spectra from analysis...\n"))
                 self.root.after(0, lambda: self.progress_text.see(tk.END))
 
-
             # R005: the validation spectra for THIS run come from the same data and
             # rows as calibration (frozen at the click: current wavelengths, current
             # spectra, minus exclusions), never from a snapshot frozen when the
             # split was made. Every validation-metric call below uses these.
-            if _validation_on:
-                _val_X_df, _val_y_s = _validation_snapshot(
-                    X_run, y_run, _validation_rows, _excluded_rows
-                )
-            else:
-                _val_X_df, _val_y_s = None, None
+            _val_X_df, _val_y_s = _prepared.X_val, _prepared.y_val
             _has_validation = _val_X_df is not None and _val_y_s is not None
             # Kept with this run's training data for the consumers that score
             # between runs (manual ensemble retraining reuses the cached X_filtered).
             self._last_run_validation = (_val_X_df, _val_y_s)
 
-            # Filter out validation set (if enabled)
             if _validation_on and _validation_rows:
-                # Remove validation samples from training data
-                X_filtered = X_filtered[~X_filtered.index.isin(_validation_rows)]
-                y_filtered = y_filtered[~y_filtered.index.isin(_validation_rows)]
-
                 n_val = len(_val_X_df) if _val_X_df is not None else 0
-                n_cal = len(X_filtered)
+                n_cal = _prepared.n_before_rare if _prepared.rare_dropped else len(X_filtered)
 
                 # Update progress with validation info
                 self.root.after(0, lambda: self.progress_text.insert(tk.END,
@@ -30210,67 +30361,37 @@ class SpectralPredictApp:
                 self._log_progress(f"   Calibration samples: {n_cal}")
                 self._log_progress(f"   Validation samples (held out): {n_val}\n")
 
-            # Auto-coerce mixed-type classification target to strings.
-            # Excel columns with mixed int+str cells produce object dtype with
-            # heterogeneous Python types, which breaks sklearn LabelEncoder's
-            # internal sort. For classification / one-class tasks a mixed column
-            # obviously isn't numeric, so casting to str is the intended read.
-            if (task_type in ('classification', 'one_class')
-                    and y_filtered is not None
-                    and hasattr(y_filtered, 'dtype')
-                    and y_filtered.dtype == object):
-                types_present = {type(v).__name__ for v in y_filtered.dropna().values}
-                if len(types_present) > 1:
-                    from collections import Counter
-                    _by_type = Counter(type(v).__name__ for v in y_filtered.dropna())
-                    self._log_progress(f"  [i] Target column has mixed Python types: {dict(_by_type)}")
+            # Mixed-type classification targets were cast to strings (Excel
+            # columns with mixed int+str cells break LabelEncoder's sort).
+            if _prepared.mixed_types:
+                self._log_progress(
+                    f"  [i] Target column has mixed Python types: {_prepared.mixed_types}"
+                )
+                if _prepared.collapsed_labels:
+                    self._log_progress(
+                        f"  [i] Normalized numeric-equivalent labels into canonical strings. "
+                        f"Collapsed labels: {_prepared.collapsed_labels}"
+                    )
 
-                    _before = set(y_filtered.dropna().astype(str).unique())
-                    y_filtered = _normalize_mixed_type_labels(y_filtered)
-                    _after = set(y_filtered.dropna().unique())
-                    if _after != _before:
-                        _collapsed = sorted(_before - _after)
-                        self._log_progress(
-                            f"  [i] Normalized numeric-equivalent labels into canonical strings. "
-                            f"Collapsed labels: {_collapsed}"
-                        )
-
-            # Auto-drop rows belonging to classes too rare for the configured CV.
-            # Stratified K-Fold requires min_class_samples >= n_folds, so any class
-            # with fewer samples than folds can't participate in a valid stratified
-            # split. We drop those rows entirely (more statistically defensible than
-            # reducing folds across all classes) and surface a popup listing exactly
-            # which classes were excluded so the user isn't blindsided by the model
-            # never seeing them at predict time.
-            if (task_type == 'classification'
-                    and y_filtered is not None
-                    and _setting("cv_strategy") in ('kfold', 'repeated_kfold')):
+            # Classes too rare for stratified K-fold were dropped: say which, so
+            # the user isn't blindsided by the model never seeing them.
+            if _prepared.rare_dropped:
                 _n_folds = _setting("folds")
-                _classes, _counts = np.unique(np.asarray(y_filtered), return_counts=True)
-                _rare_mask = _counts < _n_folds
-                if _rare_mask.any() and len(_classes) - int(_rare_mask.sum()) >= 2:
-                    _dropped = [(str(_classes[i]), int(_counts[i]))
-                                for i in np.where(_rare_mask)[0]]
-                    _keep_mask = ~y_filtered.isin([_classes[i] for i in np.where(_rare_mask)[0]])
-                    _n_before = len(y_filtered)
-                    X_filtered = X_filtered[_keep_mask]
-                    y_filtered = y_filtered[_keep_mask]
-                    _n_after = len(y_filtered)
-                    _lines = "\n".join(
-                        f"  • '{lbl}' — {cnt} sample(s)" for lbl, cnt in _dropped
-                    )
-                    _warn = (
-                        f"The following class(es) have fewer than {_n_folds} samples "
-                        f"and cannot participate in stratified {_n_folds}-fold CV:\n\n"
-                        f"{_lines}\n\n"
-                        f"Their rows have been DROPPED from this analysis "
-                        f"({_n_before - _n_after} sample(s) total). The resulting model "
-                        f"will NOT predict these classes.\n\n"
-                        f"To include them, add more samples or reduce the fold count."
-                    )
-                    self._log_progress(f"\n[!] Rare classes dropped:\n{_lines}\n")
-                    self.root.after(0, lambda m=_warn: messagebox.showwarning(
-                        "Rare Classes Dropped from Analysis", m))
+                _lines = "\n".join(
+                    f"  • '{lbl}' — {cnt} sample(s)" for lbl, cnt in _prepared.rare_dropped
+                )
+                _warn = (
+                    f"The following class(es) have fewer than {_n_folds} samples "
+                    f"and cannot participate in stratified {_n_folds}-fold CV:\n\n"
+                    f"{_lines}\n\n"
+                    f"Their rows have been DROPPED from this analysis "
+                    f"({_prepared.n_before_rare - len(y_filtered)} sample(s) total). The "
+                    f"resulting model will NOT predict these classes.\n\n"
+                    f"To include them, add more samples or reduce the fold count."
+                )
+                self._log_progress(f"\n[!] Rare classes dropped:\n{_lines}\n")
+                self.root.after(0, lambda m=_warn: messagebox.showwarning(
+                    "Rare Classes Dropped from Analysis", m))
 
             # Apply wavelength restriction for analysis (if enabled)
             # These will be passed to run_search() to filter variable selection only

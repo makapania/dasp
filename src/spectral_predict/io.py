@@ -373,41 +373,66 @@ def rename_duplicate_ids(index: pd.Index) -> tuple:
 
     new_ids = []
     seen = {}
-    # Per label, never pd.isna(index): that raises on a MultiIndex, and a tuple
-    # label is never missing.
-    missing = [not isinstance(idx, tuple) and bool(pd.isna(idx)) for idx in index]
-    # Every original ID, plus each suffix handed out. Missing IDs (NaN/None) never
-    # compare equal to each other, so repeated ones are grouped under "nan".
-    taken = {idx for idx, is_na in zip(index, missing) if not is_na}
+    # Missing-aware comparison keys: NaN never equals NaN, so repeated missing
+    # IDs (and tuple IDs with missing parts) would otherwise never match. Missing
+    # scalar IDs are grouped under "nan". Never pd.isna(index): that raises on a
+    # MultiIndex.
+    keys = [_id_key(idx) for idx in index]
+    labels = ["nan" if key == _MISSING_ID else idx for idx, key in zip(index, keys)]
+    # Every original ID's key, plus each suffix handed out.
+    taken = {key for key in keys if key != _MISSING_ID}
     rename_mapping = {}  # Track original -> [new names] for warning display
     n_renamed = 0
 
-    for idx, is_na in zip(index, missing):
-        key = "nan" if is_na else idx
-        if key in seen or (is_na and key in taken):
-            suffix = seen.get(key, 0)
+    for label, key in zip(labels, keys):
+        is_na = key == _MISSING_ID
+        group = "nan" if is_na else key
+        if group in seen or (is_na and "nan" in taken):
+            suffix = seen.get(group, 0)
             while True:
                 suffix += 1
-                new_id = f"{key}.{suffix}"
+                new_id = f"{label}.{suffix}"
                 if new_id not in taken:
                     break
-            seen[key] = suffix
+            seen[group] = suffix
             taken.add(new_id)
             new_ids.append(new_id)
-            rename_mapping.setdefault(key, [key]).append(new_id)
+            rename_mapping.setdefault(label, [label]).append(new_id)
             n_renamed += 1
         else:
-            seen[key] = 0
-            new_ids.append(key)
-            taken.add(key)
+            seen[group] = 0
+            new_ids.append(label)
+            taken.add("nan" if is_na else key)
             if is_na:
                 n_renamed += 1  # a missing ID became "nan"
-            rename_mapping[key] = [key]  # Start tracking this ID
+            rename_mapping[label] = [label]  # Start tracking this ID
 
     # Filter rename_mapping to only include IDs that had duplicates
     rename_mapping = {k: v for k, v in rename_mapping.items() if len(v) > 1}
 
-    return pd.Index(new_ids), n_renamed, rename_mapping
+    result = pd.Index(new_ids, tupleize_cols=False)
+    if len({_id_key(v) for v in result}) != len(result):
+        raise ValueError("Could not give every sample a unique ID")
+    return result, n_renamed, rename_mapping
+
+
+_MISSING_ID = ("__missing_sample_id__",)
+
+
+def _id_key(value):
+    """A comparison key for a sample ID that treats missing values as equal."""
+    if isinstance(value, tuple):
+        return ("__tuple__",) + tuple(
+            _MISSING_ID if _is_missing_scalar(part) else part for part in value
+        )
+    return _MISSING_ID if _is_missing_scalar(value) else value
+
+
+def _is_missing_scalar(value) -> bool:
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):
+        return False  # not a scalar
 
 
 _rename_duplicate_ids = rename_duplicate_ids  # the combined-file readers' name

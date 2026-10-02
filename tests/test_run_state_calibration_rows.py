@@ -17,6 +17,7 @@ import pytest
 
 from spectral_predict.io import rename_duplicate_ids
 from spectral_predict.run_state import (
+    CALIBRATION_IDENTITY_VERSION,
     CALIBRATION_RECORD_VERSION,
     LABEL_NORMALIZATION,
     RunMetadata,
@@ -119,3 +120,48 @@ def test_repeated_missing_ids_get_unique_names():
     assert new.is_unique and n == 3
     new, _, _ = rename_duplicate_ids(pd.Index(["nan", np.nan, "x", "x"]))
     assert new.is_unique
+
+
+def test_identity_hashes_large_integer_targets_losslessly():
+    X, _ = _frame(["a", "b", "c"])
+    big = 2**53
+    y1 = pd.Series([0, big, big + 1], index=X.index)
+    y2 = pd.Series([0, big + 1, big], index=X.index)
+    assert calibration_identity(X, y1, None, None) != calibration_identity(X, y2, None, None)
+
+
+def test_identity_is_container_independent_for_numeric_targets():
+    X, _ = _frame(["a", "b", "c"])
+    for values in ([1, 2, 3], [1.5, 2.0, float("nan")]):
+        numeric = pd.Series(values, index=X.index)
+        as_object = pd.Series(
+            [np.float64(v) if isinstance(v, float) else np.int64(v) for v in values],
+            index=X.index,
+            dtype=object,
+        )
+        assert calibration_identity(X, numeric, None, None) == calibration_identity(
+            X, as_object, None, None
+        )
+    strings = pd.Series(["1", "2", "3"], index=X.index)
+    ints = pd.Series([1, 2, 3], index=X.index)
+    assert calibration_identity(X, strings, None, None) != calibration_identity(X, ints, None, None)
+
+
+def test_identity_labels_are_length_prefixed():
+    X1, y = _frame(["a\x00s:b", "c"])
+    X2 = X1.set_axis(["a", "b\x00s:c"])
+    assert calibration_identity(X1, y, None, None) != calibration_identity(
+        X2, y.set_axis(X2.index), None, None
+    )
+
+
+def test_strict_schema_and_version():
+    assert not valid_calibration_rows({"version": 1, "excluded": [], "holdout": []})
+    assert not valid_calibration_rows(
+        {"version": 1, "excluded": [], "active": None, "holdout": [["S0"]]}
+    )
+    X, y = _frame(["a"])
+    identity = calibration_identity(X, y, None, None)
+    assert identity["version"] == CALIBRATION_IDENTITY_VERSION
+    assert not valid_calibration_identity(dict(identity, version=1))
+    assert not valid_calibration_identity({k: v for k, v in identity.items() if k != "n_holdout"})

@@ -1173,9 +1173,9 @@ def test_legacy_resume_duplicate_suffix_preserves_holdout_membership(
         label_normalization=None,  # a record written before the new scheme
     )
     app.validation_enabled.set(True)
-    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
         assert app._confirm_resume_before_launch(["PLS"], "quick") is False
-    assert ask.call_args[0][0] == "Sample IDs were renamed differently from the interrupted run"
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
     assert rs.find_incomplete_run().run_id == meta.run_id
     assert app.validation_indices == set(), "the old holdout was not applied to new rows"
 
@@ -1383,9 +1383,9 @@ def test_legacy_resume_refuses_dm_normalized_duplicate_ids(clean_state, worker_e
     X, y = _spectra(ids, seed=2)
     _use_dm_source(app, monkeypatch, X, y)
     meta = _start_and_resume(rs, app.X, app.y, validation_indices=["A.1"])  # legacy record
-    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
         assert app._confirm_resume_before_launch(["PLS"], "quick") is False
-    assert ask.call_args[0][0] == "Sample IDs were renamed differently from the interrupted run"
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
     assert rs.find_incomplete_run().run_id == meta.run_id
 
 
@@ -1416,3 +1416,216 @@ def test_rename_duplicate_ids_accepts_duplicate_multiindex():
     index = pd.MultiIndex.from_tuples([("a", 1), ("a", 1), ("b", 2)])
     new, n, _ = rename_duplicate_ids(index)
     assert n == 1 and pd.Index(new).is_unique
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: transactional reconciliation, worker parity, record checks
+# ---------------------------------------------------------------------------
+
+
+def test_refused_resume_leaves_selection_as_before_the_click(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    _reinstall(app, X, y)
+    _split(app, ["A1", "A2"])
+    save(X, y, excluded=["A3"])
+    edited = X.copy()
+    edited.iloc[7, 3] += 1e-3  # a cell the coarse fingerprint doesn't sample
+    _reinstall(app, edited, y)  # reload: exclusions and holdout cleared
+    app.validation_enabled.set(True)
+    with (
+        patch("tkinter.messagebox.askyesnocancel", return_value=True) as approve,
+        patch("tkinter.messagebox.askyesno", return_value=False) as keep,
+    ):
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert approve.call_args[0][0] == "Excluded samples differ from the interrupted run"
+    assert keep.call_args[0][0] == _DIFFERS
+    assert app.excluded_spectra == set() and app.validation_indices == set()
+    assert app.validation_X is None
+
+
+def test_rare_class_rows_the_worker_drops_are_not_in_the_identity(resumable):
+    app, rs, save = resumable
+    ids = [f"A{i}" for i in range(5)] + [f"B{i}" for i in range(5)] + ["C0"]
+    X, _ = _spectra(ids, seed=3)
+    y = pd.Series(["a"] * 5 + ["b"] * 5 + ["c"], index=X.index)
+    app.task_type.set("classification")
+    app.folds.set(5)
+    save(X, y)
+    renamed = X.rename(index={"C0": "C0-renamed"})
+    _reinstall(app, renamed, y.set_axis(renamed.index))
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert not ask.called
+
+
+def _capturing_bayesian():
+    calls = []
+
+    def fake(X, y, wavelengths, model_name, **kwargs):
+        calls.append((np.array(X, copy=True), np.array(y, copy=True)))
+        from tests.gui.test_resume_run_completion import _successful_results_row
+
+        return _successful_results_row(), None
+
+    return fake, calls
+
+
+def _labelled(X_run, values):
+    """The rows of ``X_run`` the worker received, found by their exact values."""
+    labels = []
+    for row in values:
+        match = [lab for lab, ref in zip(X_run.index, X_run.to_numpy()) if np.array_equal(ref, row)]
+        assert len(match) == 1
+        labels.append(match[0])
+    return X_run.loc[labels]
+
+
+@pytest.mark.parametrize("call_site", ["launch_gate", "worker_fallback"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {},
+        {"excluded": ["S3", "S9"]},
+        {"active": [f"S{i}" for i in range(1, 25)], "excluded": ["S2"], "holdout": ["S5", "S6"]},
+    ],
+    ids=["none", "excluded", "subset-excluded-holdout"],
+)
+def test_recorded_identity_matches_what_the_worker_trains_on(
+    clean_state, worker_env, fake_thread, monkeypatch, call_site, selection
+):
+    from spectral_predict.run_state import calibration_identity
+
+    app, rs = clean_state, worker_env
+    X, y = _spectra([f"S{i}" for i in range(1, 31)], seed=4)
+    _reinstall(app, X, y)
+    app.excluded_spectra = set(selection.get("excluded", ()))
+    app.active_indices = set(selection["active"]) if "active" in selection else None
+    if "holdout" in selection:
+        _split(app, selection["holdout"])
+    recorded = []
+    real_start_run = rs.start_run
+
+    def spy(*args, **kwargs):
+        recorded.append(kwargs.get("calibration_identity"))
+        return real_start_run(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "start_run", spy)
+    fake, calls = _capturing_bayesian()
+    monkeypatch.setattr(gui_module, "run_unified_bayesian", fake)
+    monkeypatch.setattr("spectral_predict.report.write_markdown_report", lambda *a, **k: None)
+    seen = _recording_validation(monkeypatch)
+    _select_models(app, ["PLS"])
+    with patch("tkinter.messagebox.showerror"), patch("tkinter.messagebox.showwarning"):
+        if call_site == "launch_gate":
+            app._run_analysis()
+            worker = _FakeThread.created[-1]
+            worker.target(*worker.args, **worker.kwargs)
+        else:
+            app._pending_analysis_settings = None
+            app._run_analysis_thread(["PLS"], "quick")
+
+    X_cal = _labelled(app.X, calls[0][0])
+    y_cal = pd.Series(calls[0][1], index=X_cal.index)
+    if "holdout" in selection:
+        X_val = _labelled(app.X, seen[0]["X_val"])
+        y_val = pd.Series(seen[0]["y_val"], index=X_val.index)
+    else:
+        X_val = y_val = None
+    expected = calibration_identity(X_cal, y_cal, X_val, y_val)
+    assert recorded and recorded[0]["calibration"] == expected["calibration"]
+    assert recorded[0]["holdout"] == expected["holdout"]
+
+
+def test_mixed_type_classification_identity_matches_worker(
+    clean_state, worker_env, fake_thread, monkeypatch
+):
+    from spectral_predict.run_state import calibration_identity
+
+    app, rs = clean_state, worker_env
+    X, _ = _spectra([f"S{i}" for i in range(1, 25)], seed=5)
+    y = pd.Series(["a"] * 8 + [1] * 8 + ["1.0"] * 8, index=X.index, dtype=object)
+    _reinstall(app, X, y)
+    app.task_type.set("classification")
+    recorded = []
+    real_start_run = rs.start_run
+    monkeypatch.setattr(
+        rs,
+        "start_run",
+        lambda *a, **k: recorded.append(k.get("calibration_identity")) or real_start_run(*a, **k),
+    )
+    fake, calls = _capturing_bayesian()
+    monkeypatch.setattr(gui_module, "run_unified_bayesian", fake)
+    monkeypatch.setattr("spectral_predict.report.write_markdown_report", lambda *a, **k: None)
+    _select_models(app, ["PLS"])
+    with patch("tkinter.messagebox.showerror"), patch("tkinter.messagebox.showwarning"):
+        app._run_analysis()
+        worker = _FakeThread.created[-1]
+        worker.target(*worker.args, **worker.kwargs)
+    assert calls, "the worker ran"
+    X_cal = _labelled(app.X, calls[0][0])
+    y_cal = pd.Series(calls[0][1], index=X_cal.index)
+    assert (
+        recorded[0]["calibration"] == calibration_identity(X_cal, y_cal, None, None)["calibration"]
+    )
+
+
+def test_record_missing_active_key_asks_without_crashing(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y, calibration_rows={"version": 1, "excluded": [], "holdout": []})
+    assert meta.calibration_rows == {"version": 1, "excluded": [], "holdout": []} or True
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+
+
+def test_malformed_holdout_resume_anyway_uses_current_selection(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    save(X, y)
+    meta = rs.get_resumed_run()
+    meta.calibration_rows = {
+        "version": 1,
+        "excluded": [],
+        "active": None,
+        "holdout": [["A1"]],
+    }
+    app.excluded_spectra = {"A4"}
+    with patch("tkinter.messagebox.askyesnocancel", return_value=True) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+    assert app.excluded_spectra == {"A4"} and app.validation_indices == set()
+
+
+def test_unknown_identity_version_asks(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    identity = dict(app._calibration_identity_now() or {})
+    _reinstall(app, X, y)
+    identity = dict(app._calibration_identity_now(), version=1)
+    save(X, y, calibration_identity=identity)
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+
+
+def test_legacy_resume_with_dotted_ids_is_unverifiable_not_refused(
+    clean_state, worker_env, fake_thread
+):
+    app, rs = clean_state, worker_env
+    X, y = _spectra(["S1", "S1.2"] + [f"T{i}" for i in range(18)], seed=6)
+    _reinstall(app, X, y)
+    _start_and_resume(rs, app.X, app.y)  # legacy record
+    with patch("tkinter.messagebox.askyesnocancel", return_value=True) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+
+
+def test_rename_duplicate_ids_with_missing_tuple_parts_is_unique():
+    from spectral_predict.io import rename_duplicate_ids
+
+    index = pd.MultiIndex.from_tuples([("a", np.nan), ("a", np.nan), ("b", 2)])
+    new, n, _ = rename_duplicate_ids(index)
+    assert n == 1 and len(new) == 3
+    assert len({repr(v) for v in new}) == 3

@@ -834,3 +834,20 @@ Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loadi
   (unknown `label_normalization`, malformed rows/identity, unsupported labels) asks: resume anyway / fresh /
   keep. `from_dict` no longer coerces malformed `calibration_rows` to None (that made it look legacy).
 - `rename_duplicate_ids` tests missingness per label (`pd.isna` on a MultiIndex raises).
+## 2026-10-02 - GUI dataset state, review round 4: transactional resume checks, worker-parity identity
+
+- **Resume reconciliation is transactional.** `_reconcile_resume_selection` runs rows -> holdout -> identity;
+  the gate snapshots the selection first (`_capture_calibration_selection`) and puts it back on any outcome
+  but "ok" (`_restore_calibration_selection`), so an approved exclusion/holdout restore followed by "keep"
+  at a mismatch leaves the GUI as it was at the click.
+- **`_prepare_calibration` is the one definition of the rows a run trains on** (subset -> exclusions ->
+  holdout -> mixed-type label normalisation -> rare-class drop). The worker and `_calibration_identity_now`
+  both call it, so the digest never includes rows the worker later drops. Tests capture the X/y the worker
+  actually passes to `run_unified_bayesian` and rebuild the identity independently, for both start_run sites.
+- **Identity v2** (`CALIBRATION_IDENTITY_VERSION`): every label/section length-prefixed (NUL-joined labels
+  collided), row counts hashed, integer targets as int64 (float64 merged ints above 2**53), object targets
+  that are all Python/numpy numbers hashed like the numeric column they equal. Unknown versions ask.
+- `valid_calibration_rows/identity` require every schema key and element type; "resume anyway" on an
+  unverifiable record keeps the current selection and never decodes its holdout keys.
+- Legacy record + labels that look renamed ("S1" and "S1.2") now asks resume anyway / fresh / keep: that
+  spelling also occurs naturally. `rename_duplicate_ids` uses missing-aware keys (tuple IDs with NaN parts).

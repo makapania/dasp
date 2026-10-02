@@ -267,8 +267,11 @@ class RunMetadata:
 # IDs get collision-free suffixes ("A", "A.1", "A" -> "A", "A.1", "A.2"; the
 # old scheme gave "A.1" twice) and the GUI suffixes any repeats left at install.
 LABEL_NORMALIZATION = 1
-# Version of the ``calibration_rows`` key encoding and of ``calibration_identity``.
+# Version of the ``calibration_rows`` key encoding.
 CALIBRATION_RECORD_VERSION = 1
+# Version of the ``calibration_identity`` digest. 2: every label and section is
+# length-prefixed, row counts are hashed, integer targets are hashed losslessly.
+CALIBRATION_IDENTITY_VERSION = 2
 
 
 class UnsupportedLabelError(ValueError):
@@ -305,14 +308,23 @@ def _valid_key_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(x, str) for x in value)
 
 
+_ROWS_KEYS = frozenset({"version", "excluded", "active", "holdout"})
+_IDENTITY_KEYS = frozenset({"version", "calibration", "holdout", "n_calibration", "n_holdout"})
+
+
 def valid_calibration_rows(rows: Any) -> bool:
-    """True if ``rows`` is a ``calibration_rows_record`` of the current version."""
+    """True if ``rows`` is a ``calibration_rows_record`` of the current version.
+
+    Every key must be present with the right type, so a record that passes can
+    be decoded without further checks.
+    """
     return (
         isinstance(rows, dict)
-        and rows.get("version") == CALIBRATION_RECORD_VERSION
-        and _valid_key_list(rows.get("excluded"))
-        and _valid_key_list(rows.get("holdout"))
-        and (rows.get("active") is None or _valid_key_list(rows.get("active")))
+        and set(rows) == _ROWS_KEYS
+        and rows["version"] == CALIBRATION_RECORD_VERSION
+        and _valid_key_list(rows["excluded"])
+        and _valid_key_list(rows["holdout"])
+        and (rows["active"] is None or _valid_key_list(rows["active"]))
     )
 
 
@@ -320,9 +332,14 @@ def valid_calibration_identity(identity: Any) -> bool:
     """True if ``identity`` is a ``calibration_identity`` of the current version."""
     return (
         isinstance(identity, dict)
-        and identity.get("version") == CALIBRATION_RECORD_VERSION
-        and isinstance(identity.get("calibration"), str)
-        and isinstance(identity.get("holdout"), str)
+        and set(identity) == _IDENTITY_KEYS
+        and identity["version"] == CALIBRATION_IDENTITY_VERSION
+        and isinstance(identity["calibration"], str)
+        and isinstance(identity["holdout"], str)
+        and all(
+            isinstance(identity[k], int) and not isinstance(identity[k], bool)
+            for k in ("n_calibration", "n_holdout")
+        )
     )
 
 
@@ -352,29 +369,74 @@ def calibration_rows_record(excluded, active, holdout=()) -> dict[str, Any]:
     }
 
 
-def _rows_digest(X, y) -> str:
-    """blake2b over the ordered labels, wavelengths, spectra and targets of ``X``."""
+def _put(h, tag: bytes, payload: bytes) -> None:
+    """Feed one tagged, length-prefixed section, so sections can't run together."""
+    h.update(tag)
+    h.update(len(payload).to_bytes(8, "little"))
+    h.update(payload)
+
+
+def _target_bytes(y) -> tuple[bytes, bytes]:
+    """``(tag, bytes)`` for a target column, lossless and container-independent.
+
+    Integers are hashed as int64 (float64 would merge values above 2**53), and an
+    object column whose values are all numbers is hashed like the numeric column
+    it equals, so the same targets in a different container give the same digest.
+    """
     import pandas as pd
 
+    def _numeric(values) -> tuple[bytes, bytes] | None:
+        if pd.api.types.is_bool_dtype(values):
+            return b"yb", np.ascontiguousarray(values.to_numpy(dtype=np.uint8)).tobytes()
+        if pd.api.types.is_integer_dtype(values) and not values.isna().any():
+            return b"yi", np.ascontiguousarray(values.to_numpy(dtype=np.int64)).tobytes()
+        if pd.api.types.is_numeric_dtype(values):
+            return b"yf", np.ascontiguousarray(values.to_numpy(dtype=np.float64)).tobytes()
+        return None
+
+    encoded = _numeric(y)
+    if encoded is not None:
+        return encoded
+    items = [v.item() if isinstance(v, np.generic) else v for v in y]
+    numbers = [v for v in items if not (isinstance(v, float) and np.isnan(v))]
+    if numbers and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in numbers):
+        # Python numbers only (missing values as NaN): hash as the numeric column
+        # they equal, provided the conversion loses nothing.
+        dtype = "float64" if any(isinstance(v, float) for v in items) else "int64"
+        try:
+            converted = pd.Series(items, dtype=dtype)
+        except (OverflowError, ValueError, TypeError):
+            converted = None  # e.g. an integer beyond int64: hashed by repr below
+        if converted is not None and all(
+            a == b or (a != a and b != b) for a, b in zip(items, converted.tolist())
+        ):
+            return _numeric(converted)
+    parts = []
+    for value in items:
+        text = repr(value).encode("utf-8")
+        parts.append(len(text).to_bytes(8, "little") + text)
+    return b"yo", b"".join(parts)
+
+
+def _rows_digest(X, y) -> str:
+    """blake2b over the ordered labels, wavelengths, spectra and targets of ``X``."""
     h = hashlib.blake2b(digest_size=16)
-    if X is None or len(X) == 0:
-        h.update(b"empty")
+    h.update(f"calibration-identity-v{CALIBRATION_IDENTITY_VERSION}".encode("ascii"))
+    n_rows = 0 if X is None else len(X)
+    n_cols = 0 if X is None else X.shape[1]
+    _put(h, b"shape", f"{n_rows}x{n_cols}".encode("ascii"))
+    if X is None or n_rows == 0:
         return h.hexdigest()
-    for part in (X.columns, X.index):
-        for label in part:
-            h.update(canonical_label(label).encode("utf-8"))
-            h.update(b"\x00")
-        h.update(b"\x01")
-    h.update(np.ascontiguousarray(X.to_numpy(dtype=np.float64)).tobytes())
-    h.update(b"\x02")
-    if y is not None:
+    for tag, labels in ((b"col", X.columns), (b"row", X.index)):
+        for label in labels:
+            _put(h, tag, canonical_label(label).encode("utf-8"))
+    _put(h, b"X", np.ascontiguousarray(X.to_numpy(dtype=np.float64)).tobytes())
+    if y is None:
+        _put(h, b"ynone", b"")
+    else:
         y_aligned = y if y.index.equals(X.index) else y.reindex(X.index)
-        if pd.api.types.is_numeric_dtype(y_aligned) and not pd.api.types.is_bool_dtype(y_aligned):
-            h.update(np.ascontiguousarray(y_aligned.to_numpy(dtype=np.float64)).tobytes())
-        else:
-            for value in y_aligned:
-                h.update(repr(value).encode("utf-8"))
-                h.update(b"\x00")
+        tag, payload = _target_bytes(y_aligned)
+        _put(h, tag, payload)
     return h.hexdigest()
 
 
@@ -382,14 +444,15 @@ def calibration_identity(X_cal, y_cal, X_holdout, y_holdout) -> dict[str, Any]:
     """Digest of exactly the calibration and holdout rows a run trains and scores on.
 
     Covers each row's label and position, the wavelength axis, every spectral
-    value and the target, so a resume on relabelled, reordered or edited data,
-    or on a different sample selection, gives a different identity.
+    value, the target and the row counts, so a resume on relabelled, reordered
+    or edited data, or on a different sample selection, gives a different
+    identity.
 
     Raises:
         UnsupportedLabelError: a label has no deterministic encoding.
     """
     return {
-        "version": CALIBRATION_RECORD_VERSION,
+        "version": CALIBRATION_IDENTITY_VERSION,
         "calibration": _rows_digest(X_cal, y_cal),
         "holdout": _rows_digest(X_holdout, y_holdout),
         "n_calibration": 0 if X_cal is None else int(len(X_cal)),
