@@ -1001,6 +1001,52 @@ class TestOneClassRefinementRoundtrip:
             f"before deleting this test."
         )
 
+    @pytest.mark.parametrize("spacing", [0.3, 0.482])
+    @pytest.mark.parametrize("order", ["asc", "desc"])
+    @pytest.mark.parametrize("selection", ["subset", "full"])
+    def test_fine_grid_roundtrip_trains_and_predicts_on_the_named_channels(
+        self, spectral_data_with_full_spectrum_preprocessing, spacing, order, selection
+    ):
+        """R112: on grids finer than 0.5 the refit used the first column within 0.5
+        (the neighbour) while prediction read the named column. The refit now maps
+        with ``match_wavelengths``, the same contract as ``predict_with_model``, so
+        save -> load -> predict reproduces the training decisions exactly."""
+        from spectral_predict.wavelength_matching import match_wavelengths
+
+        base = spectral_data_with_full_spectrum_preprocessing
+        n_features = len(base['original_wavelengths'])
+        axis = 1000.0 + spacing * np.arange(n_features)
+        if order == 'desc':
+            axis = axis[::-1].copy()
+        X_df = pd.DataFrame(base['X_df'].values, columns=[float(w) for w in axis])
+        X_full_preprocessed = base['prep_pipeline'].transform(base['X_df'].values)
+
+        wanted = list(range(50, 150)) if selection == 'subset' else list(range(n_features))
+        # What the GUI refit now does with its selected wavelengths:
+        idx = match_wavelengths(axis[wanted], axis)
+        assert idx.tolist() == wanted  # the named channel, not its neighbour
+        data = dict(
+            base,
+            X_df=X_df,
+            X_work=X_full_preprocessed[:, idx],
+            original_wavelengths=[float(w) for w in axis],
+            selected_wavelengths=[float(axis[i]) for i in idx],
+        )
+
+        model, metadata = self._train_and_build_metadata(
+            data,
+            use_full_spectrum_preprocessing=True,
+            full_wavelengths=data['original_wavelengths'],
+        )
+        training_predictions = model.predict(metadata['scaler'].transform(data['X_work']))
+        roundtrip_predictions = self._run_predict_roundtrip(
+            model=model,
+            preprocessor=data['prep_pipeline'],
+            metadata=metadata,
+            X_df=data['X_df'],
+        )
+        np.testing.assert_array_equal(roundtrip_predictions, training_predictions)
+
 
 class TestGridSearchValidationMetricsParity:
     """Regression coverage for the grid-search one-class validation pipeline.
@@ -1178,6 +1224,65 @@ class TestGridSearchValidationMetricsParity:
             "is required' (raise loudly) or 'normalize Preprocess as a "
             "fallback' — silent NaN is a regression."
         )
+
+    @pytest.mark.parametrize('writer', ['repr', 'legacy_g'])
+    @pytest.mark.parametrize('selection', ['full', 'subset'])
+    def test_high_precision_axis_validates_the_stored_wavelengths(
+        self, grid_search_oc_results_row, synthetic_train_val, writer, selection
+    ):
+        """R078: an nm -> cm-1 axis (1e7/x) has >6 significant digits. Rows written
+        with %g used to miss every lookup, so val_* came back NaN. New rows are
+        written round-trip-exact; old %g rows still resolve when unambiguous."""
+        from spectral_predict.contamination import (
+            compute_validation_metrics_for_top_one_class_models,
+        )
+        from spectral_predict.wavelength_matching import format_wavelength_list
+
+        X_train, y_train, X_val, y_val, _ = synthetic_train_val
+        wavelengths = 1e7 / np.arange(1000.0, 1000.0 + X_train.shape[1])
+        cols = list(range(len(wavelengths))) if selection == 'full' else [3, 4, 20, 41]
+        if writer == 'repr':
+            all_vars = format_wavelength_list(wavelengths[cols])
+        else:
+            all_vars = ','.join(f"{w:g}" for w in wavelengths[cols])
+
+        def run(row_all_vars, axis):
+            row = dict(grid_search_oc_results_row, all_vars=row_all_vars, n_vars=len(cols))
+            return compute_validation_metrics_for_top_one_class_models(
+                df_results=pd.DataFrame([row]), X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val, inlier_label='Clean', wavelengths=axis, top_n=10,
+            )
+
+        result_df = run(all_vars, wavelengths)
+        # Same rebuild on an integer axis, where the lookup was never at risk.
+        int_axis = np.arange(float(len(wavelengths)))
+        reference = run(','.join(f"{w:g}" for w in int_axis[cols]), int_axis)
+
+        for col in ('val_BalancedAcc', 'val_Sensitivity', 'val_Specificity'):
+            assert pd.notna(result_df.loc[0, col]), col
+            assert result_df.loc[0, col] == reference.loc[0, col], col
+        assert result_df.attrs['validation_failures'] == {}
+
+    def test_partial_wavelength_match_is_skipped_and_reported(
+        self, grid_search_oc_results_row, synthetic_train_val, caplog
+    ):
+        """A row whose all_vars only partly maps must not be validated on fewer columns."""
+        import logging
+        from spectral_predict.contamination import (
+            compute_validation_metrics_for_top_one_class_models,
+        )
+
+        X_train, y_train, X_val, y_val, wavelengths = synthetic_train_val
+        row = dict(grid_search_oc_results_row, all_vars='1100.0,1101.0,1500.0')
+        with caplog.at_level(logging.WARNING, logger='spectral_predict.contamination'):
+            result_df = compute_validation_metrics_for_top_one_class_models(
+                df_results=pd.DataFrame([row]), X_train=X_train, y_train=y_train,
+                X_val=X_val, y_val=y_val, inlier_label='Clean',
+                wavelengths=wavelengths, top_n=10,
+            )
+        assert pd.isna(result_df.loc[0, 'val_BalancedAcc'])
+        assert 'spectral axis' in result_df.attrs['validation_failures'][0]
+        assert any('OC Validation' in rec.message for rec in caplog.records)
 
     @pytest.mark.parametrize(
         'mutate,label',

@@ -80,6 +80,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Model Development trains, saves and predicts on the same wavelength columns
+  (R009/R026/R112).** The Tab 7 refit (regression, classification and one-class) mapped
+  each selected wavelength to the *first* column within ±0.5 units, while prediction
+  read the column within ±0.01. On axes finer than 0.5 units (0.25 nm NIR/Raman, 0.48 or
+  0.24 cm⁻¹ FTIR) the model was trained on the neighbouring channel, so its CV and
+  validation numbers described a model the `.dasp` file does not reproduce. Training,
+  prediction and validation now share one contract (`spectral_predict.wavelength_matching`,
+  on the declared composition surface): an exact axis value wins, otherwise the single
+  value within 0.01, and a missing or two-channel match is an error instead of a dropped
+  column. The refit stores the axis values it actually used. **Retrain affected models:**
+  a model saved from Model Development before this fix on an axis finer than 0.5 units
+  was trained on shifted channels. That holds for wavelength subsets and, one channel
+  over with the first column duplicated, for full-spectrum models too. Loading one now
+  prints a warning naming how many features were shifted; models on 0.5 nm (or coarser)
+  grids are unaffected and load silently.
+- **Validation scores the wavelengths a results row was trained on (R031/R078).**
+  `all_vars`/`top_vars` were written with `%g` (6 significant digits), and the validation
+  rebuild looked them up by exact float equality. On axes with more significant digits
+  (nm→cm⁻¹ conversions such as 1e7/1350 = 7407.407…, OPUS wavenumbers, anything above
+  9999.99) a subset row was silently validated on the full spectrum, a partial match on
+  fewer columns, and one-class rows returned all-NaN `val_*`. Lists are now written
+  round-trip-exactly; already-saved rows (including Bayesian SQLite studies) still
+  resolve when the rounding cannot have merged two channels. A row that cannot be
+  mapped is left without validation values and is listed in the run log instead of
+  "Validation metrics computed for top N"; Optuna study names are unchanged.
+- **Saving a classifier trained on numeric labels (R016).** After a Bayesian or NSGA-II
+  classification search, Tab 7 saved the search's label encoder with a model trained on
+  raw numeric labels: integer classes crashed the save (`keys must be str`), float
+  classes saved and then decoded every prediction to the wrong class. The save now
+  keeps only the encoder the refined model was trained with, `save_model` refuses an
+  encoder that cannot match the model's classes, `label_mapping` keys are strings, and
+  older `.dasp` files with such an encoder predict their raw labels with a warning.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

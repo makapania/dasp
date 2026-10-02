@@ -175,6 +175,13 @@ from spectral_predict.search_controller import SearchController
 
 from spectral_predict import __version__ as _DASP_VERSION
 
+# One wavelength-to-column contract for training, prediction and validation (R009/R031).
+from spectral_predict.wavelength_matching import (
+    WavelengthMatchError,
+    match_wavelengths,
+    resolve_wavelength_list,
+)
+
 # Analysis subset pure-logic helpers
 from spectral_predict.analysis_subset import (
     compute_matches,
@@ -1951,6 +1958,30 @@ def _parse_autoscale_flag(raw, default: bool = False) -> bool:
     from spectral_predict.preprocess import parse_bool_cell
 
     return parse_bool_cell(raw, default)
+
+
+def _validation_summary_lines(results_df, top_n: int, metric_col: str) -> list[str]:
+    """Progress-log lines: how many top rows got validation metrics, and why not.
+
+    The validation helpers leave NaN metrics on a row they could not rebuild and
+    list it in ``results_df.attrs["validation_failures"]`` (R031/R078). Saying
+    "computed for top N" regardless hid those rows.
+    """
+    n_requested = min(int(top_n), len(results_df))
+    n_ok = int(results_df[metric_col].notna().sum()) if metric_col in results_df else 0
+    if n_ok >= n_requested:
+        return [f"  [OK] Validation metrics computed for top {n_requested} models"]
+    lines = [
+        f"  [Warning] Validation metrics computed for only {n_ok} of the top "
+        f"{n_requested} models; the others show no validation values."
+    ]
+    failures = results_df.attrs.get("validation_failures", {}) or {}
+    for row_idx, reason in list(failures.items())[:5]:
+        name = results_df.loc[row_idx, "Model"] if "Model" in results_df.columns else ""
+        lines.append(f"    - row {row_idx} {name}: {reason}")
+    if len(failures) > 5:
+        lines.append(f"    ... and {len(failures) - 5} more (see console)")
+    return lines
 
 
 # ===== HELPER: IMBALANCE CATEGORY SUFFIX FOR FILENAMES =====
@@ -30079,10 +30110,10 @@ class SpectralPredictApp:
                             progress_callback=self._progress_callback,
                         )
 
-                        n_computed = min(top_n_val, len(results_df))
-                        self._log_progress(
-                            f"  [OK] Validation metrics computed for top {n_computed} one-class models"
-                        )
+                        for _line in _validation_summary_lines(
+                            results_df, top_n_val, 'val_BalancedAcc'
+                        ):
+                            self._log_progress(_line)
                         self.results_df = results_df
                         self.results = results_df
                         self.root.after(0, lambda: self._populate_results_table(results_df))
@@ -30649,8 +30680,12 @@ class SpectralPredictApp:
                                 imbalance_method=imbalance_method,
                             )
 
-                            n_computed = min(self.validation_top_n.get(), len(results_df))
-                            self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+                            for _line in _validation_summary_lines(
+                                results_df,
+                                self.validation_top_n.get(),
+                                'R2pred' if task_type == 'regression' else 'val_Accuracy',
+                            ):
+                                self._log_progress(_line)
 
                         except Exception as e:
                             self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
@@ -30804,8 +30839,12 @@ class SpectralPredictApp:
                             imbalance_method=imbalance_method,
                         )
 
-                        n_computed = min(self.validation_top_n.get(), len(results_df))
-                        self._log_progress(f"  ✓ Validation metrics computed for top {n_computed} models")
+                        for _line in _validation_summary_lines(
+                            results_df,
+                            self.validation_top_n.get(),
+                            'R2pred' if task_type == 'regression' else 'val_Accuracy',
+                        ):
+                            self._log_progress(_line)
 
                     except Exception as e:
                         self._log_progress(f"  [Warning] Failed to compute validation metrics: {e}")
@@ -36890,16 +36929,25 @@ Performance (Classification):
                 if 'all_vars' in config and config['all_vars'] != 'N/A' and config['all_vars']:
                     print(f"DEBUG: Model has all_vars, parsing complete wavelength list")
                     try:
-                        # Parse wavelengths from all_vars string (e.g., "1520.0, 1540.0, 1560.0, ...")
+                        # Resolve all_vars to the exact axis values (R009/R031): old
+                        # %g-rounded text maps to the channel it stood for, and text
+                        # that cannot be mapped one-to-one is an error, not a
+                        # silent fallback to top_vars or the full spectrum.
                         all_vars_str = str(config['all_vars']).strip()
-                        wavelength_strings = [w.strip() for w in all_vars_str.split(',')]
-                        model_wavelengths = [float(w) for w in wavelength_strings if w]
+                        try:
+                            _cols = resolve_wavelength_list(all_vars_str, all_wavelengths)
+                        except WavelengthMatchError:
+                            self._original_wavelength_order = None
+                            raise
+                        model_wavelengths = [float(all_wavelengths[c]) for c in _cols]
                         # Don't sort - preserve importance order from search results
                         # Sorting destroys feature order which affects PLS R² reproducibility
                         # Store original order for later use (as Python floats for consistent comparison)
                         self._original_wavelength_order = [float(wl) for wl in model_wavelengths]
                         print(f"DEBUG: Parsed {len(model_wavelengths)} wavelengths from all_vars")
                         print(f"DEBUG: Stored original wavelength order (type={type(self._original_wavelength_order[0]).__name__}): {self._original_wavelength_order[:5]}...")
+                    except WavelengthMatchError:
+                        raise  # shown in the wavelength box by the handler below
                     except Exception as e:
                         print(f"WARNING: Could not parse all_vars: {e}")
                         model_wavelengths = None
@@ -40773,14 +40821,13 @@ F1 Score:  {f1:.4f}
                 else:
                     X_full_preprocessed = X_full
 
-                # Subset to selected wavelengths
+                # Subset to selected wavelengths with the shared exact-first contract
+                # that predict_with_model also uses (R112). Keep the axis values
+                # actually used, so the saved model names its training columns.
                 original_wavelengths = X_base_df.columns.astype(float).values
-                wavelength_indices = []
-                for wl in selected_wl:
-                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                X_work = X_full_preprocessed[:, wavelength_indices] if wavelength_indices else X_full_preprocessed
+                wavelength_indices = match_wavelengths(selected_wl, original_wavelengths).tolist()
+                selected_wl = [float(original_wavelengths[i]) for i in wavelength_indices]
+                X_work = X_full_preprocessed[:, wavelength_indices]
 
                 # Required for predict-time Mode A in model_io.py: training applies
                 # preprocessing (SNV, SG deriv, baseline) on the FULL spectrum then
@@ -41344,19 +41391,14 @@ F1 Score:  {f1:.4f}
                 print(f"DEBUG: Original wavelengths: {len(original_wavelengths)}, Preprocessed shape: {X_full_preprocessed.shape[1]}")
 
                 # Find indices of selected wavelengths in the original array
-                # (which matches the preprocessed array since savgol preserves shape)
-                wavelength_indices = []
-                missing_wavelengths = []
-                for wl in selected_wl:
-                    idx = np.where(np.abs(original_wavelengths - wl) < 0.5)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                    else:
-                        missing_wavelengths.append(wl)
-
-                if missing_wavelengths:
-                    print(f"WARNING: {len(missing_wavelengths)} wavelengths not found:")
-                    print(f"  Missing: {missing_wavelengths[:10]}{'...' if len(missing_wavelengths) > 10 else ''}")
+                # (which matches the preprocessed array since savgol preserves shape).
+                # Shared exact-first contract with predict_with_model (R009/R026): the
+                # old first-hit-within-0.5 rule trained on the lower neighbour on
+                # grids finer than 0.5. Missing or ambiguous wavelengths raise.
+                wavelength_indices = match_wavelengths(selected_wl, original_wavelengths).tolist()
+                # Store the axis values actually used, so refined_wavelengths (and the
+                # saved model's metadata) name exactly the training columns.
+                selected_wl = [float(original_wavelengths[i]) for i in wavelength_indices]
 
                 # 4. Subset the PREPROCESSED data (not raw!)
                 X_work = X_full_preprocessed[:, wavelength_indices]
@@ -42568,9 +42610,10 @@ External Validation Performance (n={n_val}):
                 metadata['performance'] = perf
 
             # Save the model
-            # Use refined_label_encoder if available (from Model Development tab),
-            # otherwise fallback to global label_encoder (from Results tab)
-            label_encoder_to_save = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            # R016: only the encoder the refined model was trained with. Refinement
+            # encodes text labels itself and trains on raw numeric labels, so the
+            # search's encoder (self.label_encoder) never describes this model.
+            label_encoder_to_save = getattr(self, 'refined_label_encoder', None)
 
             # Prepare CV data for uncertainty estimation
             cv_residuals = None
@@ -43956,6 +43999,15 @@ External Validation Performance (n={n_val}):
                         model_dict['filepath'] = filepath
                         model_dict['filename'] = Path(filepath).name
                         model_dict['is_ensemble'] = False
+
+                        # R009: a pre-fix model on a fine grid was trained on
+                        # neighbouring channels; tell the user to retrain it.
+                        if model_dict.get('wavelength_mapping_warning'):
+                            messagebox.showwarning(
+                                "Retrain Model",
+                                f"{Path(filepath).name}:\n\n"
+                                f"{model_dict['wavelength_mapping_warning']}",
+                            )
 
                     # Check x-unit compatibility
                     model_x_unit = model_dict.get('metadata', {}).get('x_unit', 'nm')

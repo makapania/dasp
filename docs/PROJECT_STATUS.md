@@ -11,6 +11,10 @@ Two whole-codebase reviews ran on `main` `449dfb1` (PR D merged as `85790dd`):
 - **Improvement roadmap:** `docs/reviews/2026-09-28-improvement-roadmap.md` (7 lenses: calibration transfer,
   contamination, modelling workflow, speed, GUI usability, visuals, structure). IDs QW*/F*/CT*/CS*/MW*/SP*/LF*/ST*.
 - **Selector test:** the MC-PLS selector is not adopted; its generic form is MW1 (see §4 item 3).
+- **2026-10-02, branch `fix/wavelength-mapping` (not pushed, awaiting review):** R009/R026/R112, R031/R078 and R016
+  fixed. One wavelength-to-column contract (`spectral_predict.wavelength_matching`, declared surface) for Tab 7,
+  model_io and both validation rebuilds; `all_vars` written round-trip-exact; old `%g` rows and old models still
+  load (old fine-grid Tab 7 models warn "retrain"). Details: SESSION_LOG 2026-10-02 and CHANGELOG.
 
 **Combined order (user has not approved it yet; confirm before starting).** Wave 1 fixes the numbers users report
 and deploy.

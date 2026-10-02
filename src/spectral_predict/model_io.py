@@ -45,8 +45,83 @@ from typing import Dict, Any, Optional, Union
 
 from . import __version__
 from .resource_paths import is_frozen
+from .wavelength_matching import WavelengthMatchError, match_wavelengths
 
 logger = logging.getLogger(__name__)
+
+#: Stamped into every saved model's metadata. Models without it were saved while Tab 7
+#: mapped wavelengths to columns by first hit within +/-0.5 (R009), so on grids finer
+#: than 0.5 units they may have been trained on a neighbouring channel.
+WAVELENGTH_MATCHING_VERSION = 1
+
+
+def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
+    """Whether ``label_encoder`` can be the encoder ``model`` was trained with.
+
+    A model fitted on encoded labels predicts the integer codes ``0..n-1``. If the
+    model's own ``classes_`` hold anything else (``1, 2, 3`` or ``1.0, 2.0``), it was
+    trained on the raw labels and decoding its predictions would shift them (R016).
+    Returns True when the model exposes no numeric ``classes_`` (nothing to check).
+    """
+    classes = getattr(model, 'classes_', None)
+    if classes is None:
+        return True
+    try:
+        model_classes = np.asarray(classes)
+        n_codes = len(label_encoder.classes_)
+    except (TypeError, AttributeError):
+        return True
+    if model_classes.dtype.kind not in 'iuf':
+        # Text classes: the model decodes itself and predict_with_model passes text
+        # predictions through untouched, so the encoder can do no harm.
+        return True
+    if model_classes.dtype.kind == 'f' and not np.all(np.mod(model_classes, 1) == 0):
+        return False
+    return bool(np.all((model_classes >= 0) & (model_classes < n_codes)))
+
+
+def _legacy_wavelength_shift(metadata: Dict[str, Any]) -> Optional[str]:
+    """Warn text if a pre-fix model was probably trained on neighbouring channels.
+
+    Before WAVELENGTH_MATCHING_VERSION, the Tab 7 refit took each wavelength's column
+    as the FIRST axis value within 0.5 of it, while prediction reads the named
+    column. Both axes are in the metadata (``full_wavelengths`` is the training
+    axis), so the old training mapping can be replayed and compared.
+    """
+    if metadata.get('wavelength_matching') is not None:
+        return None
+    if not metadata.get('use_full_spectrum_preprocessing'):
+        return None
+    # Only Tab 7 refits used the first-hit rule; multi-class SIMCA and ensembles
+    # stored their exact training columns.
+    if metadata.get('task_type') not in (None, 'regression', 'classification', 'one_class'):
+        return None
+    if metadata.get('ensemble_type') is not None:
+        return None
+    full = metadata.get('full_wavelengths')
+    requested = metadata.get('wavelengths')
+    if not full or not requested:
+        return None
+    try:
+        full_arr = np.asarray(full, dtype=float)
+        req_arr = np.asarray(requested, dtype=float)
+        new_idx = match_wavelengths(req_arr, full_arr)
+    except (TypeError, ValueError):
+        return None  # predict will raise with the specific reason
+    n_shifted = 0
+    for wl, new in zip(req_arr, new_idx):
+        hits = np.flatnonzero(np.abs(full_arr - wl) < 0.5)
+        if hits.size and hits[0] != new:
+            n_shifted += 1
+    if not n_shifted:
+        return None
+    return (
+        f"This model was saved before the wavelength-mapping fix (R009). Its spectral "
+        f"axis is finer than 0.5 units, and {n_shifted} of {len(req_arr)} features were "
+        f"probably trained on the neighbouring channel while prediction reads the "
+        f"named channel. Its predictions do not match its reported CV metrics. "
+        f"Retrain the model in Model Development and save it again."
+    )
 
 
 def _ensure_pipeline_fitted(pipeline):
@@ -176,14 +251,33 @@ def save_model(
     metadata_complete['dasp_version'] = __version__
     metadata_complete['model_class'] = str(type(model).__name__)
 
+    metadata_complete['wavelength_matching'] = WAVELENGTH_MATCHING_VERSION
+
+    # The saved encoder must be the one the model was trained with (R016). An
+    # encoder left over from an earlier search would decode a raw-label model's
+    # predictions to the wrong classes, so it is refused rather than saved.
+    if label_encoder is not None and not _label_encoder_matches_model(model, label_encoder):
+        msg = (
+            "save_model: the label encoder does not match the model (the model was "
+            f"trained on raw labels {np.asarray(model.classes_).tolist()[:10]}); "
+            "saving without it."
+        )
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        logger.warning(msg)
+        label_encoder = None
+
     # Add label encoder information if present
     if label_encoder is not None:
         metadata_complete['has_label_encoder'] = True
         metadata_complete['label_classes'] = label_encoder.classes_.tolist()
-        metadata_complete['label_mapping'] = dict(zip(
-            label_encoder.classes_,
-            label_encoder.transform(label_encoder.classes_).tolist()
-        ))
+        # JSON object keys must be str; np.int64 keys crash json.dump (R016).
+        metadata_complete['label_mapping'] = {
+            str(label): int(code)
+            for label, code in zip(
+                label_encoder.classes_.tolist(),
+                label_encoder.transform(label_encoder.classes_).tolist(),
+            )
+        }
     else:
         metadata_complete['has_label_encoder'] = False
 
@@ -425,6 +519,11 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         with open(metadata_path, 'r', encoding='utf-8') as f:
             metadata = json.load(f)
 
+        legacy_shift = _legacy_wavelength_shift(metadata)
+        if legacy_shift:
+            warnings.warn(f"{filepath.name}: {legacy_shift}", UserWarning, stacklevel=2)
+            logger.warning("%s: %s", filepath.name, legacy_shift)
+
         # Load model
         model_path = tmppath / 'model.pkl'
         if not model_path.exists():
@@ -493,6 +592,7 @@ def load_model(filepath: Union[str, Path]) -> Dict[str, Any]:
         'preprocessor': preprocessor,
         'label_encoder': label_encoder,
         'metadata': metadata,
+        'wavelength_mapping_warning': legacy_shift,
         'cv_data': cv_data,
         'ad_data': ad_data,
         'pca_model': pca_model,
@@ -672,13 +772,8 @@ def predict_with_model(
                     X_full_preprocessed = X_full
 
                 # Step 3: Find indices of subset wavelengths in full wavelengths
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
-                    else:
-                        raise ValueError(f"Required wavelength {wl} not found in full_wavelengths")
+                # (the shared exact-first contract the Tab 7 refit also uses).
+                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
 
                 # Step 4: Subset the preprocessed data
                 X_processed = X_full_preprocessed[:, wavelength_indices]
@@ -702,11 +797,7 @@ def predict_with_model(
                 X_full_preprocessed = (
                     preprocessor.transform(X_full) if preprocessor is not None else X_full
                 )
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
+                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = X_new.values
@@ -734,11 +825,7 @@ def predict_with_model(
                 X_full_preprocessed = X_new
 
             # Find indices of subset wavelengths
-            wavelength_indices = []
-            for wl in required_wl:
-                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                if len(idx) > 0:
-                    wavelength_indices.append(idx[0])
+            wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
 
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
@@ -812,6 +899,17 @@ def predict_with_model(
         if pd.api.types.is_string_dtype(predictions.dtype):
             # Already decoded text labels, return as-is
             pass
+        elif not _label_encoder_matches_model(model, label_encoder):
+            # A .dasp saved before the R016 fix can carry a stale search encoder
+            # next to a model trained on raw numeric labels. Its predictions are
+            # already the real labels; decoding them would shift every class.
+            warnings.warn(
+                "predict_with_model: the saved label encoder does not match the "
+                "model's classes (saved before the R016 fix); returning the model's "
+                "own labels without decoding.",
+                UserWarning,
+                stacklevel=2,
+            )
         else:
             # Numeric predictions that need decoding
             predictions = label_encoder.inverse_transform(predictions.astype(int))
@@ -1033,11 +1131,7 @@ def predict_with_uncertainty(
                     X_full_preprocessed = preprocessor.transform(X_full)
                 else:
                     X_full_preprocessed = X_full
-                wavelength_indices = []
-                for wl in required_wl:
-                    idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                    if len(idx) > 0:
-                        wavelength_indices.append(idx[0])
+                wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
                 X_processed = X_full_preprocessed[:, wavelength_indices]
             else:
                 X_selected = _select_wavelengths_from_dataframe(X_new, required_wl)
@@ -1057,11 +1151,7 @@ def predict_with_uncertainty(
                 X_full_preprocessed = preprocessor.transform(X_new)
             else:
                 X_full_preprocessed = X_new
-            wavelength_indices = []
-            for wl in required_wl:
-                idx = np.where(np.abs(np.array(full_wavelengths) - wl) < 0.01)[0]
-                if len(idx) > 0:
-                    wavelength_indices.append(idx[0])
+            wavelength_indices = match_wavelengths(required_wl, full_wavelengths)
             X_processed = X_full_preprocessed[:, wavelength_indices]
         else:
             if preprocessor is not None:
@@ -1503,34 +1593,21 @@ def _select_wavelengths_from_dataframe(
     df_numeric = df[numeric_cols]
     available_wl = df_numeric.columns.astype(float).values
 
-    # Check for missing wavelengths
-    required_set = set(required_wavelengths)
-    available_set = set(available_wl)
-    missing_wl = required_set - available_set
+    # Shared exact-first contract: an exact column wins, else the single column
+    # within DEFAULT_TOLERANCE; missing or ambiguous wavelengths raise.
+    try:
+        indices = match_wavelengths(required_wavelengths, available_wl)
+    except WavelengthMatchError as exc:
+        if exc.missing:
+            raise WavelengthMatchError(
+                f"Missing {len(exc.missing)} required wavelengths. "
+                f"Examples: {exc.missing[:5]}",
+                missing=exc.missing,
+                ambiguous=exc.ambiguous,
+            ) from exc
+        raise
 
-    if missing_wl:
-        n_missing = len(missing_wl)
-        sample_missing = list(missing_wl)[:5]
-        raise ValueError(
-            f"Missing {n_missing} required wavelengths. "
-            f"Examples: {sample_missing}"
-        )
-
-    # Select wavelengths in correct order
-    # Use string matching to handle floating point comparison
-    selected_cols = []
-    for required_wl in required_wavelengths:
-        # Find matching column (allowing small floating point differences)
-        matching_cols = []
-        for col in df_numeric.columns:
-            col_float = float(col)  # Safe now - we filtered to numeric only
-            if abs(col_float - required_wl) < 0.01:
-                matching_cols.append(col)
-        if not matching_cols:
-            raise ValueError(f"Required wavelength {required_wl} not found")
-        selected_cols.append(matching_cols[0])
-
-    return df_numeric[selected_cols].values
+    return df_numeric.iloc[:, indices].values
 
 
 def _json_serializer(obj):

@@ -515,7 +515,23 @@ else:
 
 If `prep["autoscale"]` is true, the search skipped the per-model `StandardScaler` for
 scale-sensitive models (SVM/SVR/MLP/Ridge/Lasso/ElasticNet/NeuralBoosted), so don't add
-one. Wavelength subsets (`all_vars`) are taken **after** preprocessing.
+one. Wavelength subsets (`all_vars`) are taken **after** preprocessing. Map them to
+columns with `resolve_wavelength_list`, never with float equality or a ±tolerance
+"first hit":
+
+```python
+from spectral_predict.wavelength_matching import resolve_wavelength_list
+
+cols = resolve_wavelength_list(row["all_vars"], wavelengths)   # ndarray of column indices
+X_sel = X_pp[:, cols]                                          # training order preserved
+```
+
+It raises `WavelengthMatchError` (a `ValueError`) when any value is missing or matches
+two columns, so a partial match can never become a smaller model. Rows written before
+the 2026-10 fix used `%g` (6 significant digits); they still resolve when the rounding
+cannot have merged two channels. Write your own lists with `format_wavelength_list`, and
+map plain float lists with `match_wavelengths(values, axis)` (exact match first, else the
+single axis value within 0.01).
 `preprocessing_config_from_row` fills a missing derivative order / window with 1 / 15.
 Parse `Autoscale` / `smoothing` flag cells with `preprocess.parse_bool_cell`
 (`bool("False")` is `True`); every rebuild path in DASP uses it.
@@ -539,6 +555,7 @@ listed is an internal implementation detail that may change without notice.
 | `contamination` | `PCASIMCA` |
 | `models` | `PLSTransformer`; results-row rebuild helpers `parse_row_params`, `estimator_params_from_row`, `plsda_head_kwargs` (and its `PLSDA_HEAD_DEFAULT_RANDOM_STATE` default) |
 | `model_io` | `save_model`, `load_model`, `predict_with_model` |
+| `wavelength_matching` | `match_wavelengths`, `resolve_wavelength_list`, `format_wavelength_list`, `WavelengthMatchError` |
 | `search` | `run_search`, `run_one_class_search`, `run_multiclass_simca_search`, `multiclass_varsel_mask`, `build_multiclass_decision_view`, `compute_validation_metrics_for_top_models`, `MulticlassVarselUnsupported` |
 
 **This table is the contract.** Only `search` declares an `__all__` enforcing it (it

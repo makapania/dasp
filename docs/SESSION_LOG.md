@@ -742,3 +742,35 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - Wavelength mapping contract (R009/R026/R112, R031/R078) and label encoder (R016), branch fix/wavelength-mapping
+- **One contract:** `spectral_predict/wavelength_matching.py` (`match_wavelengths`, `resolve_wavelength_list`,
+  `format_wavelength_list`, `WavelengthMatchError`; on the declared surface). Exact axis value first, else the single
+  value within 0.01; missing, two-candidate or two-values-one-column all raise. Tab 7 (both mapping sites), model_io
+  (every former `< 0.01` first-hit loop and `_select_wavelengths_from_dataframe`) and both validation rebuilds use it.
+- **The GUI rounds axes to integers on load** (`_apply_wavelength_filter`, ~19670, refuses sub-integer data with a
+  dialog). So the fine-grid R009 bug is reachable in the GUI only when that filter is skipped (X_original kept, e.g.
+  after its error dialog) and from Python; R031/R078 are reachable in the GUI after nm<->cm-1 conversion (1e7/x
+  columns are not rounded). Do not "simplify" the contract on the assumption that GUI axes are integers.
+- **Legacy %g detection is per row, not per value:** a token is %g-possible iff `f"{float(t):g}" == t`. repr never
+  drops ".0", so any `1500.0`-style or >6-digit token proves the new writer -> exact matching. A row whose every token
+  could be %g is matched within each value's 6-sig-digit half-unit window, and an exact hit is NOT trusted there
+  (12345.7 may stand for 12345.67): two columns in the window raise.
+- **Old saved models:** `save_model` now stamps `metadata['wavelength_matching'] = 1`. On load, an unstamped Path A model
+  (`use_full_spectrum_preprocessing` + `full_wavelengths`) replays the old first-hit-within-0.5 mapping against
+  `full_wavelengths` (= the Tab 7 training axis) and warns if any feature differs (Tab 8 load shows a dialog).
+  Prediction already read the named column before the fix, so old models predict exactly as before; only the warning
+  is new. Not auto-remapped to the neighbour on purpose (brief: warn + retrain).
+- **GUI `wavelength_indices` must be a list:** the one-class validation block tests `if wavelength_indices:`; a numpy
+  array there raises "truth value of an array is ambiguous". The refit sites call `.tolist()`.
+- **R016:** refinement trains on raw numeric labels (it encodes only text labels), so `self.label_encoder` (fitted on
+  every Bayesian/NSGA classification search) never belongs to a refined model; the save fallback is gone.
+  `save_model` also drops an encoder whose model `classes_` are not codes 0..n-1 (warning), and `predict_with_model`
+  skips decoding for such legacy artifacts. Display-only fallbacks (`refined_label_encoder or self.label_encoder` at
+  ~21176/21198/37715/38596) still mis-label numeric classes in tooltips/plots: not fixed here.
+- **Validation failures are surfaced via `df.attrs["validation_failures"]`** (`{row index: reason}`) from both
+  `compute_validation_metrics_for_top_models` and the one-class twin; the GUI logs "computed for only X of top N"
+  plus reasons instead of an unconditional success line.
+- Not changed (ensemble paths, still own matchers): GUI `_match_wavelengths_normalized`/`match_wavelengths_exact`
+  (1-decimal rounding, silent "train without subsetting" on failure) and `preprocessing_wrapper` (nearest within 0.5,
+  silent drop). Candidates for the same contract.
