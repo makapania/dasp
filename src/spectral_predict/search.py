@@ -4930,21 +4930,23 @@ def _run_single_config(
             for train_idx, test_idx in splits
         ]
     else:
-        # Frozen bundles get the 'threading' backend (loky cannot spawn there).
-        cv_metrics = Parallel(n_jobs=plan.n_jobs, backend=plan.backend)(
-            delayed(_run_single_fold)(
-                fold_pipe,
-                X,
-                y,
-                train_idx,
-                test_idx,
-                task_type,
-                is_binary_classification,
-                use_sample_weight_for_classification,
-                early_stopping_rounds=early_stopping_rounds,
+        # Frozen bundles get the 'threading' backend (loky cannot spawn there); the
+        # plan's context then also caps the shared BLAS pool at the per-fit budget.
+        with plan.backend_context():
+            cv_metrics = Parallel(n_jobs=plan.n_jobs, backend=plan.backend)(
+                delayed(_run_single_fold)(
+                    fold_pipe,
+                    X,
+                    y,
+                    train_idx,
+                    test_idx,
+                    task_type,
+                    is_binary_classification,
+                    use_sample_weight_for_classification,
+                    early_stopping_rounds=early_stopping_rounds,
+                )
+                for train_idx, test_idx in splits
             )
-            for train_idx, test_idx in splits
-        )
 
     # Print summary if imbalance handling was used
     if imbalance_method is not None:

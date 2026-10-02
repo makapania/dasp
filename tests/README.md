@@ -98,7 +98,7 @@ Tests can be marked with custom categories:
 ```
 
 `slow` and `comprehensive` tests are deselected by default (pyproject `addopts`) and
-run nightly in CI (`long-tests` job, Windows). Any `-m` you pass replaces the
+run nightly in CI (`long-tests` on Windows; `long-tests-linux` for the non-GUI ones). Any `-m` you pass replaces the
 default selection, so `-m smoke` runs every smoke test, slow or not.
 
 Run tests by marker:
@@ -245,8 +245,9 @@ def test_outlier_detection():
 ## Continuous Integration
 
 `.github/workflows/ci.yml` runs the default selection on every push and PR, and a
-`long-tests` job (`pytest -m "comprehensive or slow"`, Windows) nightly and on manual
-dispatch (Actions -> CI -> Run workflow).
+`long-tests` job (`pytest -m "comprehensive or slow"`, Windows) plus a
+`long-tests-linux` job (same markers, `--ignore=tests/gui`, Ubuntu) nightly and on
+manual dispatch (Actions -> CI -> Run workflow).
 
 ```bash
 # Quick smoke tests only

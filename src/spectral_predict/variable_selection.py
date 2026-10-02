@@ -13,8 +13,6 @@ from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 
-from spectral_predict import parallel_policy
-
 
 # Selectors whose score arrays are sparse: a zero means "not selected", so a top-N
 # subset must never reach past the non-zero entries (the stable argsort would fill
@@ -649,18 +647,14 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
         try:
             pls = PLSRegression(n_components=interval_n_components, scale=False)
 
-            # Cross-validation R² score. PLS folds take milliseconds, so the thread
-            # policy runs them serially rather than opening a process pool per interval.
+            # Cross-validation R² score. Serial: PLS folds take milliseconds, and PLS is
+            # in parallel_policy.MODELS_PREFER_SERIAL_CV (a process pool per interval
+            # cost more than the fits).
             cv_scores = cross_val_score(
                 pls, X_interval, y,
                 cv=cv_folds,
                 scoring='r2',
-                n_jobs=parallel_policy.plan_cv(
-                    cv_folds if isinstance(cv_folds, int) else 2,
-                    n_samples,
-                    n_interval_features,
-                    model_name="PLS",
-                ).n_jobs,
+                n_jobs=1,
             )
 
             # Use mean R² as interval score

@@ -75,7 +75,29 @@ def test_tiny_job_runs_serially_single_threaded(cores, not_frozen):
 
 
 def test_single_split_runs_serially(cores, not_frozen):
-    assert not plan_cv(1, 1000, 1000).parallel
+    # One big fit: serial, and free to use every core (not forced to one thread).
+    assert plan_cv(1, 1000, 1000) == CVPlan(1, "sequential", None)
+
+
+def test_requested_n_jobs_zero_is_rejected(cores, not_frozen):
+    with pytest.raises(ValueError):
+        plan_cv(5, 100, 1000, requested_n_jobs=0)
+
+
+def test_negative_requested_n_jobs_counts_back_from_cpu_count(cores, not_frozen, monkeypatch):
+    import joblib
+
+    monkeypatch.setattr(joblib, "effective_n_jobs", lambda n: 3)
+    assert plan_cv(10, 100, 1000, requested_n_jobs=-2).n_jobs == 3
+
+
+def test_catboost_folds_are_serial_in_threaded_pools(cores, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert plan_cv(5, 49, 2151, model_name="CatBoost") == CVPlan(1, "sequential", None)
+
+
+def test_catboost_folds_use_the_process_pool_when_not_frozen(cores, not_frozen):
+    assert plan_cv(5, 49, 2151, model_name="CatBoost") == CVPlan(5, "loky", 4)
 
 
 @pytest.mark.parametrize("model", sorted(parallel_policy.MODELS_PREFER_SERIAL_CV))
@@ -117,6 +139,46 @@ def test_pool_model_threads(cores):
     cores(24)
     assert parallel_policy.pool_model_threads(6) == 4
     assert parallel_policy.pool_model_threads(48) == 1
+
+
+def test_caller_sized_pools_are_capped_at_physical_cores(cores, monkeypatch):
+    import joblib
+
+    cores(8)
+    monkeypatch.setattr(joblib, "effective_n_jobs", lambda n: 16)  # 8c/16t machine, n_jobs=-1
+    assert parallel_policy.pool_workers(-1) == 8
+    assert parallel_policy.pool_workers(-1) * parallel_policy.pool_model_threads(-1) <= 8
+
+
+def test_threading_plan_caps_shared_blas_pool_in_workers(cores, monkeypatch):
+    """Effective limits, measured from a raised baseline (the suite's env pins 1)."""
+    from joblib import Parallel, delayed
+    from threadpoolctl import threadpool_limits
+
+    if not _pool_threads("blas"):
+        pytest.skip("no BLAS runtime visible to threadpoolctl")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    plan = plan_cv(5, 49, 2151)  # 24 cores pinned -> 5 workers x 4 threads
+    assert plan.backend == "threading" and plan.model_threads == 4
+    with threadpool_limits(limits=8, user_api="blas"):
+        assert _pool_threads("blas") == {8}
+        with plan.backend_context():
+            seen = Parallel(n_jobs=plan.n_jobs, backend=plan.backend)(
+                delayed(_pool_threads)("blas") for _ in range(5)
+            )
+        assert all(s == {4} for s in seen)
+        assert _pool_threads("blas") == {8}
+
+
+def test_loky_plan_leaves_blas_to_joblib(cores, not_frozen):
+    from threadpoolctl import threadpool_limits
+
+    if not _pool_threads("blas"):
+        pytest.skip("no BLAS runtime visible to threadpoolctl")
+    plan = plan_cv(5, 49, 2151)
+    with threadpool_limits(limits=8, user_api="blas"):
+        with plan.backend_context():
+            assert _pool_threads("blas") == {8}  # loky workers get cores//workers via env
 
 
 # ------------------------------------------------------------- limit_estimator_threads
@@ -181,18 +243,69 @@ def _openmp_threads() -> set[int]:
     return {i["num_threads"] for i in threadpool_info() if i["user_api"] == "openmp"}
 
 
-def test_openmp_single_threaded_limits_and_restores():
+def _pool_threads(user_api: str) -> set[int]:
+    from threadpoolctl import threadpool_info
+
+    return {i["num_threads"] for i in threadpool_info() if i["user_api"] == user_api}
+
+
+@pytest.fixture
+def raised_openmp():
+    """OpenMP at 3 threads, so a cap to 1 and its restore are observable."""
     import sklearn.neighbors  # noqa: F401 -- loads sklearn's OpenMP runtime
+    from threadpoolctl import threadpool_limits
 
     if not _openmp_threads():
         pytest.skip("no OpenMP runtime loaded")
-    outside = _openmp_threads()
+    with threadpool_limits(limits=3, user_api="openmp"):
+        assert _openmp_threads() == {3}
+        yield
+
+
+def test_openmp_single_threaded_limits_and_restores(raised_openmp):
     with parallel_policy.openmp_single_threaded():
         assert _openmp_threads() == {1}
-    assert _openmp_threads() == outside
+    assert _openmp_threads() == {3}
 
 
-def test_one_class_cv_runs_under_openmp_cap(monkeypatch):
+def test_overlapping_caps_from_two_threads_restore_the_original(raised_openmp):
+    """Non-LIFO overlap: A enters, B enters, A exits, B exits -> back to 3, not stuck at 1."""
+    import threading
+
+    a_in, b_in, a_out = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def thread_a():
+        with parallel_policy.openmp_single_threaded():
+            a_in.set()
+            b_in.wait(5)
+        a_out.set()
+
+    def thread_b():
+        a_in.wait(5)
+        with parallel_policy.openmp_single_threaded():
+            b_in.set()
+            a_out.wait(5)
+            seen["after_a_left"] = _openmp_threads()
+
+    workers = [threading.Thread(target=thread_a), threading.Thread(target=thread_b)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(10)
+    assert seen["after_a_left"] == {1}  # B's cap survives A's exit
+    assert _openmp_threads() == {3}  # originals back once both left
+
+
+def test_nested_stricter_cap_applies_and_outer_restores(raised_openmp):
+    with parallel_policy.native_thread_limit(2, "openmp"):
+        assert _openmp_threads() == {2}
+        with parallel_policy.native_thread_limit(1, "openmp"):
+            assert _openmp_threads() == {1}
+    assert _openmp_threads() == {3}
+
+
+def test_one_class_cv_runs_under_openmp_cap(monkeypatch, raised_openmp):
     from spectral_predict import contamination
 
     seen = []
@@ -207,7 +320,8 @@ def test_one_class_cv_runs_under_openmp_cap(monkeypatch):
     X = rng.normal(size=(40, 30))
     y_oc = np.r_[np.ones(30), -np.ones(10)].astype(int)
     contamination.run_one_class_cv(X, y_oc, "LOF", {"n_neighbors": 5}, n_folds=3)
-    assert seen and all(s <= {1} for s in seen)
+    assert seen and all(s == {1} for s in seen)
+    assert _openmp_threads() == {3}
 
 
 def test_simca_cross_fit_null_is_capped():

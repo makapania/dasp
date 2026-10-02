@@ -40,7 +40,12 @@ def _curve_thread_plan(estimator, X, cv, n_points: int):
     else:
         n_splits = 5  # sklearn's default
     shape = np.shape(X)
-    plan = parallel_policy.plan_cv(int(n_splits) * max(1, int(n_points)), shape[0], shape[1])
+    plan = parallel_policy.plan_cv(
+        int(n_splits) * max(1, int(n_points)),
+        shape[0],
+        shape[1],
+        model_name="CatBoost" if parallel_policy.contains_catboost(estimator) else None,
+    )
     return plan, parallel_policy.limit_estimator_threads(estimator, plan.model_threads)
 
 

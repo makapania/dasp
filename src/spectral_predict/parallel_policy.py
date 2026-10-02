@@ -22,7 +22,9 @@ The rule this module owns:
   OpenMP start-up, not arithmetic.
 
 The frozen (PyInstaller) bundle cannot spawn loky workers, so parallel plans use the
-``threading`` backend there (see :func:`frozen_needs_threading_fallback`).
+``threading`` backend there (see :func:`frozen_needs_threading_fallback`). Thread
+workers share the process's BLAS pool, so :meth:`CVPlan.backend_context` caps it at
+the per-fit budget; CatBoost folds run serially there (see :func:`plan_cv`).
 
 Thread settings are runtime-only: callers apply :func:`limit_estimator_threads` to a
 *clone* used for the folds, so ``n_jobs`` never changes captured result-row params,
@@ -34,6 +36,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -73,7 +76,9 @@ def physical_cores() -> int:
 
     try:
         return max(1, int(cpu_count(only_physical_cores=True)))
-    except TypeError, ValueError, OSError:
+    # Parenthesised on purpose: the unparenthesised form is 3.14-only syntax and the
+    # documented 3.12 rollback build must still import this module.
+    except (TypeError, ValueError, OSError):  # fmt: skip
         return max(1, int(cpu_count()))
 
 
@@ -98,17 +103,29 @@ class CVPlan:
         """True when the folds go to a worker pool."""
         return self.n_jobs > 1
 
-    def backend_context(self) -> contextlib.AbstractContextManager:
-        """Context that routes joblib calls made inside sklearn to this plan's backend.
+    @contextlib.contextmanager
+    def backend_context(self) -> Iterator[None]:
+        """Context to run this plan's pool in. Wrap every parallel fold execution in it.
 
-        Needed where sklearn owns the pool (``cross_val_predict``, ``learning_curve``):
-        without it they use loky, which the frozen bundle cannot spawn.
+        * Routes joblib calls made inside sklearn (``cross_val_predict``,
+          ``learning_curve``) to this plan's backend; without it they use loky, which
+          the frozen bundle cannot spawn.
+        * For the ``threading`` backend, caps the process-wide BLAS pools at
+          ``model_threads``. Thread workers share one BLAS pool, and models without an
+          ``n_jobs`` (MLP, PLS inside a pipeline ...) would otherwise each fan out to
+          every core. Loky workers need no cap: joblib already sets the BLAS/OpenMP
+          environment of each worker to cores // workers.
         """
         if not self.parallel:
-            return contextlib.nullcontext()
+            yield
+            return
         from joblib import parallel_config
 
-        return parallel_config(backend=self.backend)
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(parallel_config(backend=self.backend))
+            if self.backend == "threading" and self.model_threads is not None:
+                stack.enter_context(native_thread_limit(self.model_threads, "blas"))
+            yield
 
 
 def plan_cv(
@@ -127,40 +144,80 @@ def plan_cv(
         n_features: Columns in the matrix being cross-validated.
         model_name: Model family; families in :data:`MODELS_PREFER_SERIAL_CV` run
             serially with their own threading.
-        requested_n_jobs: Caller's upper bound on the pool. ``1`` forces a serial
-            loop that leaves the model untouched; ``-1``/``None`` means no bound.
+        requested_n_jobs: Caller's upper bound on the pool, in joblib's convention.
+            ``1`` forces a serial loop that leaves the model untouched; ``-1``/``None``
+            means no bound; other negatives count back from the logical CPU count
+            (``-2`` = all but one). ``0`` is invalid, as in joblib.
 
     Returns:
         The plan to run the folds with.
+
+    Raises:
+        ValueError: If ``requested_n_jobs`` is 0.
     """
+    if requested_n_jobs == 0:
+        raise ValueError("requested_n_jobs == 0 has no meaning (joblib convention); use 1 or -1")
     if requested_n_jobs == 1 or (model_name is not None and model_name in MODELS_PREFER_SERIAL_CV):
         return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
 
     n_splits = max(1, int(n_splits))
-    if n_splits < 2 or n_splits * int(n_samples) * int(n_features) < TINY_JOB_CELLS:
+    tiny = n_splits * int(n_samples) * int(n_features) < TINY_JOB_CELLS
+    if tiny:
         return CVPlan(n_jobs=1, backend="sequential", model_threads=1)
-
-    workers = min(n_splits, physical_cores())
-    if requested_n_jobs is not None and requested_n_jobs > 1:
-        workers = min(workers, int(requested_n_jobs))
-    if workers <= 1:
+    if n_splits < 2:
+        # One big fit: nothing to pool, so it may use every core.
         return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
 
     backend = "threading" if frozen_needs_threading_fallback() else "loky"
+    if backend == "threading" and model_name == "CatBoost":
+        # CatBoost's post-fit feature importance and its predict calls ignore the
+        # constructor thread_count and use every core; in a shared-process thread pool
+        # those phases would multiply. Serial folds with CatBoost's own threading.
+        return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
+
+    workers = min(n_splits, physical_cores())
+    if requested_n_jobs is not None and requested_n_jobs != -1:
+        workers = min(workers, _resolve_n_jobs(requested_n_jobs))
+    if workers <= 1:
+        return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
+
     return CVPlan(
         n_jobs=workers, backend=backend, model_threads=max(1, physical_cores() // workers)
     )
 
 
-def pool_model_threads(n_jobs: int | None) -> int:
-    """Threads each model fit may use inside a joblib pool of ``n_jobs`` workers.
-
-    For pools this module does not size itself (e.g. one task per candidate
-    configuration): the cores are split between the workers, never multiplied.
-    """
+def _resolve_n_jobs(n_jobs: int | None) -> int:
+    """joblib's n_jobs convention resolved to a worker count (at least 1)."""
     from joblib import effective_n_jobs
 
-    return max(1, physical_cores() // max(1, effective_n_jobs(n_jobs)))
+    return max(1, int(effective_n_jobs(n_jobs)))
+
+
+def pool_workers(n_jobs: int | None) -> int:
+    """Pool size to use for a caller-sized joblib pool: ``n_jobs`` capped at physical cores.
+
+    ``n_jobs=-1`` means every *logical* CPU to joblib; on a hyper-threaded machine that
+    is twice the physical cores, and single-threaded fits would still oversubscribe.
+    """
+    return min(_resolve_n_jobs(n_jobs), physical_cores())
+
+
+def pool_model_threads(n_jobs: int | None) -> int:
+    """Threads each model fit may use inside a pool of :func:`pool_workers` (``n_jobs``).
+
+    For pools this module does not size itself (e.g. one task per candidate
+    configuration): the cores are split between the workers, never multiplied. Size
+    the pool itself with :func:`pool_workers`, not the raw ``n_jobs``.
+    """
+    return max(1, physical_cores() // pool_workers(n_jobs))
+
+
+def contains_catboost(estimator: Any) -> bool:
+    """True if ``estimator`` is, or is a pipeline ending in, a CatBoost model."""
+    steps = getattr(estimator, "steps", None)
+    if isinstance(steps, list) and steps:
+        estimator = steps[-1][1]
+    return (type(estimator).__module__ or "").startswith("catboost")
 
 
 def _set_threads(est: Any, n_threads: int) -> None:
@@ -230,27 +287,60 @@ def estimator_threads(estimator: Any) -> dict[str, Any]:
     return out
 
 
-_OPENMP_CONTROLLER: Any = None
+_CONTROLLER: Any = None
+_LIMIT_LOCK = threading.Lock()
+# user_api -> {"depth": open contexts, "limiter": the first one (holds the originals),
+#              "limit": the value currently applied}
+_ACTIVE_LIMITS: dict[str, dict[str, Any]] = {}
 
 
-def _openmp_controller() -> Any:
-    """Cached threadpoolctl controller (building one scans loaded libraries, ~8 ms)."""
-    global _OPENMP_CONTROLLER
+def _controller(user_api: str) -> Any:
+    """Cached threadpoolctl controller (building one scans loaded libraries, ~8 ms).
+
+    Rebuilt when it knows no library for ``user_api`` (e.g. it was created before that
+    runtime loaded). A runtime loaded later than one already known is not picked up;
+    sklearn loads its OpenMP and BLAS runtimes at import, before any limit is taken.
+    """
+    global _CONTROLLER
     from threadpoolctl import ThreadpoolController
 
-    if (
-        _OPENMP_CONTROLLER is None
-        or not _OPENMP_CONTROLLER.select(user_api="openmp").lib_controllers
-    ):
-        _OPENMP_CONTROLLER = ThreadpoolController()
-    return _OPENMP_CONTROLLER
+    if _CONTROLLER is None or not _CONTROLLER.select(user_api=user_api).lib_controllers:
+        _CONTROLLER = ThreadpoolController()
+    return _CONTROLLER
 
 
 @contextlib.contextmanager
-def openmp_single_threaded() -> Iterator[None]:
-    """Limit OpenMP runtimes (sklearn's neighbours/distances, boosters) to one thread."""
-    with _openmp_controller().limit(limits=1, user_api="openmp"):
+def native_thread_limit(n_threads: int, user_api: str) -> Iterator[None]:
+    """Cap the native ``user_api`` pools (``"openmp"`` or ``"blas"``) at ``n_threads``.
+
+    Both limits are process-wide (verified for MSVC's vcomp: a cap set in one thread is
+    seen by threads that already exist), so overlapping contexts from different
+    threads must not restore each other's values. Contexts are reference-counted
+    under a lock: the first one records the original limits, a later stricter one
+    tightens the cap, and the originals come back only when the last one exits.
+    """
+    with _LIMIT_LOCK:
+        state = _ACTIVE_LIMITS.get(user_api)
+        if state is None:
+            limiter = _controller(user_api).limit(limits=n_threads, user_api=user_api)
+            state = _ACTIVE_LIMITS[user_api] = {"depth": 0, "limiter": limiter, "limit": n_threads}
+        elif n_threads < state["limit"]:
+            _controller(user_api).limit(limits=n_threads, user_api=user_api)
+            state["limit"] = n_threads
+        state["depth"] += 1
+    try:
         yield
+    finally:
+        with _LIMIT_LOCK:
+            state["depth"] -= 1
+            if state["depth"] == 0:
+                state["limiter"].restore_original_limits()
+                del _ACTIVE_LIMITS[user_api]
+
+
+def openmp_single_threaded() -> contextlib.AbstractContextManager:
+    """Limit OpenMP runtimes (sklearn's neighbours/distances, boosters) to one thread."""
+    return native_thread_limit(1, "openmp")
 
 
 def openmp_single_threaded_call(func: _F) -> _F:

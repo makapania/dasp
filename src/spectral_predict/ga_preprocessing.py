@@ -453,7 +453,8 @@ def evaluate_fitness(
     model_threads : int, optional
         Thread cap for the fitness model's fits (``n_jobs`` / CatBoost
         ``thread_count``). Callers running candidates in a worker pool pass
-        ``parallel_policy.pool_model_threads(n_jobs)`` so the pool and the fits
+        ``parallel_policy.pool_model_threads(n_jobs)`` (with the pool sized by
+        ``parallel_policy.pool_workers(n_jobs)``) so the pool and the fits
         share the cores. None leaves the model as built.
 
     Returns
@@ -544,6 +545,18 @@ def evaluate_fitness(
             exc,
         )
         return -np.inf
+
+
+def _candidate_pool_plan(n_jobs, backend):
+    """Pool for one-task-per-candidate evaluation, sized by the thread policy.
+
+    Workers are capped at physical cores (``n_jobs=-1`` means every logical CPU to
+    joblib) and each fitness fit gets cores // workers threads; ``backend_context()``
+    also caps the shared BLAS pool when the backend is threading (frozen bundle).
+    """
+    from spectral_predict.parallel_policy import CVPlan, pool_model_threads, pool_workers
+
+    return CVPlan(n_jobs=pool_workers(n_jobs), backend=backend, model_threads=pool_model_threads(n_jobs))
 
 
 def _evaluate_with_actual_model(
@@ -1169,16 +1182,15 @@ def exhaustive_search(
             # Use 'loky' in dev mode (faster multiprocessing)
             from spectral_predict.search import _frozen_needs_threading_fallback
             backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
-            from spectral_predict.parallel_policy import pool_model_threads
-
-            model_threads = pool_model_threads(n_jobs)
-            results = Parallel(n_jobs=n_jobs, backend=backend)(
-                delayed(evaluate_fitness)(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config,
-                    model_threads=model_threads,
+            pool = _candidate_pool_plan(n_jobs, backend)
+            with pool.backend_context():
+                results = Parallel(n_jobs=pool.n_jobs, backend=backend)(
+                    delayed(evaluate_fitness)(
+                        genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config,
+                        model_threads=pool.model_threads,
+                    )
+                    for genes in all_genes
                 )
-                for genes in all_genes
-            )
         except ImportError:
             # Fall back to sequential
             if verbose >= 1:
@@ -1541,16 +1553,15 @@ def smart_exhaustive_search(
             # Use 'loky' in dev mode (faster multiprocessing)
             from spectral_predict.search import _frozen_needs_threading_fallback
             backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
-            from spectral_predict.parallel_policy import pool_model_threads
-
-            model_threads = pool_model_threads(n_jobs)
-            stage1_results = Parallel(n_jobs=n_jobs, backend=backend)(
-                delayed(evaluate_fitness)(
-                    genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config,
-                    model_threads=model_threads,
+            pool = _candidate_pool_plan(n_jobs, backend)
+            with pool.backend_context():
+                stage1_results = Parallel(n_jobs=pool.n_jobs, backend=backend)(
+                    delayed(evaluate_fitness)(
+                        genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config,
+                        model_threads=pool.model_threads,
+                    )
+                    for genes in stage1_genes
                 )
-                for genes in stage1_genes
-            )
         except ImportError:
             stage1_results = [
                 evaluate_fitness(genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config)

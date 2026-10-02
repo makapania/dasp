@@ -786,3 +786,15 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   Toplevel, tolerates `grab_set` on a withdrawn dialog, and re-withdraws after app startup and each reset. Verified by
   polling MainWindowTitle of the pytest process: main showed the window, the branch showed none over the full default
   GUI run (253 passed).
+- **Review round 1 fixes (Codex + GLM, both MERGE-WITH-FIXES):** (1) Black running on 3.14 rewrote
+  `except (A, B, C):` into the 3.14-only `except A, B, C:` - breaks the 3.12 rollback build. Run Black with
+  `--target-version py312` on touched files. (2) OpenMP/BLAS caps are process-wide (vcomp: a cap set in one thread is
+  seen by already-running threads), so overlapping `threadpoolctl` limit contexts from two threads left OpenMP stuck at
+  1; `native_thread_limit` is now lock + refcount, originals restored at depth 0. (3) Threading-backend pools (frozen)
+  share one BLAS pool: `CVPlan.backend_context()` caps BLAS at the per-fit budget (loky workers already get
+  cores//workers via joblib's worker env). (4) CatBoost's predict and post-fit feature importance ignore the
+  constructor `thread_count` (default -1 = all cores): CatBoost folds run serially in threading pools. (5)
+  `root.after_cancel(id)` on a callback scheduled by a child widget deletes the child's Tcl command; the child's
+  destroy then raises "can't delete Tcl command" (reproduced). Cancel the raw timer with
+  `root.tk.call('after','cancel',id)`. (6) Caller-sized pools (`n_jobs=-1` = logical CPUs) are capped at physical
+  cores (`pool_workers`). Nightly Linux leg added for the 52 non-GUI slow tests.

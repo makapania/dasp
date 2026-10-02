@@ -132,6 +132,33 @@ jobs:
       run: |
         pytest -v --tb=short -m "comprehensive or slow"
 
+  long-tests-linux:
+    # The non-GUI slow tests used to run on ubuntu-latest in every PR; keep that Linux
+    # coverage on the same nightly/dispatch schedule. GUI tests are Windows-only.
+    name: Nightly long tests (slow, non-GUI, Linux)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Set up Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.14'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -e .[dev]
+
+    - name: Run comprehensive and slow tests (non-GUI)
+      env:
+        MPLBACKEND: Agg
+      run: |
+        pytest -v --tb=short -m "comprehensive or slow" --ignore=tests/gui
+
   test-optional-deps:
     name: Test with optional dependencies
     if: github.event_name != 'schedule'
