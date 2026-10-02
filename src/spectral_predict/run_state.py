@@ -51,6 +51,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
+
 from spectral_predict.resource_paths import get_user_optuna_dir
 
 logger = logging.getLogger(__name__)
@@ -180,12 +182,10 @@ class RunMetadata:
     # persisting the indices is cheaper and removes an entire class of
     # "user forgets to click Create Validation Set on resume" footguns.
     validation_indices: list[Any] | None = None
-    # The rest of the calibration-row choice: ``{"excluded": [keys],
-    # "active": [keys] or None}`` ("active" None = no Analysis Subset). Keys are
-    # ``canonical_label`` strings, so any label type survives the JSON round
-    # trip. None means the record predates this field (legacy) or it could not
-    # be written. Reloading the same file clears the exclusions, so without this
-    # a resume could silently continue a study on a different calibration set.
+    # The calibration-row choice (``calibration_rows_record``): versioned
+    # ``canonical_label`` keys of the excluded samples, the Analysis Subset
+    # ("active" None = all samples) and the holdout. Reloading the same file
+    # clears exclusions; the resume gate uses these keys to offer restoring them.
     calibration_rows: dict[str, Any] | None = None
     # How sample labels were normalised when the run started
     # (``LABEL_NORMALIZATION``), written by the GUI, which also records
@@ -193,6 +193,10 @@ class RunMetadata:
     # repeated IDs got collision-free suffixes, so the same file can now give a
     # saved label to other rows.
     label_normalization: int | None = None
+    # ``calibration_identity`` digest of the exact calibration and holdout rows
+    # the run trained and scored on. The resume gate recomputes it and resumes
+    # only on a match. None with the two fields above also None: a legacy record.
+    calibration_identity: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -253,13 +257,9 @@ class RunMetadata:
                     type(vi).__name__,
                 )
                 filtered["validation_indices"] = None
-        rows = filtered.get("calibration_rows")
-        if rows is not None and not _valid_calibration_rows(rows):
-            logger.warning(
-                "sidecar calibration_rows has unexpected shape; coercing to None "
-                "(exclusions can't be checked for this resume)"
-            )
-            filtered["calibration_rows"] = None
+        # calibration_rows / calibration_identity / label_normalization are kept
+        # as stored: the resume gate treats an unrecognised value as "can't
+        # verify" and asks, rather than silently resuming as if it were absent.
         return cls(**filtered)
 
 
@@ -267,20 +267,27 @@ class RunMetadata:
 # IDs get collision-free suffixes ("A", "A.1", "A" -> "A", "A.1", "A.2"; the
 # old scheme gave "A.1" twice) and the GUI suffixes any repeats left at install.
 LABEL_NORMALIZATION = 1
+# Version of the ``calibration_rows`` key encoding and of ``calibration_identity``.
+CALIBRATION_RECORD_VERSION = 1
+
+
+class UnsupportedLabelError(ValueError):
+    """A sample label has no deterministic, type-preserving encoding."""
 
 
 def canonical_label(value: Any) -> str:
     """A type-tagged string for a sample label that round-trips through JSON.
 
-    Equal labels give equal keys, and labels of different types never collide
-    (``5``, ``5.0`` and ``"5"`` all differ), so a stored key can be compared
-    with the loaded data's labels after reload whatever their type.
+    Supported: int (numpy ints too), float (numpy floats too, NaN allowed), str,
+    bool, and tuples of these. Equal labels give equal keys and labels of
+    different types never collide (``5``, ``5.0`` and ``"5"`` all differ).
+
+    Raises:
+        UnsupportedLabelError: any other label type. Its encoding would not be
+            guaranteed to be distinct or stable across sessions.
     """
-    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
-        try:
-            value = value.item()  # numpy scalar -> Python scalar
-        except (TypeError, ValueError):
-            pass
+    if isinstance(value, np.generic):
+        value = value.item()  # numpy scalar -> Python scalar
     if isinstance(value, bool):
         return f"b:{value}"
     if isinstance(value, int):
@@ -291,35 +298,103 @@ def canonical_label(value: Any) -> str:
         return f"s:{value}"
     if isinstance(value, tuple):
         return "t:" + json.dumps([canonical_label(v) for v in value])
-    if value is None:
-        return "n:"
-    return f"r:{type(value).__name__}:{value!r}"
+    raise UnsupportedLabelError(f"unsupported sample label type {type(value).__name__}")
 
 
-def _valid_calibration_rows(rows: Any) -> bool:
-    if not isinstance(rows, dict):
-        return False
-    excluded = rows.get("excluded")
-    active = rows.get("active")
-    if not isinstance(excluded, list) or not all(isinstance(x, str) for x in excluded):
-        return False
-    return active is None or (isinstance(active, list) and all(isinstance(x, str) for x in active))
+def _valid_key_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(x, str) for x in value)
 
 
-def calibration_rows_record(excluded, active) -> dict[str, Any]:
+def valid_calibration_rows(rows: Any) -> bool:
+    """True if ``rows`` is a ``calibration_rows_record`` of the current version."""
+    return (
+        isinstance(rows, dict)
+        and rows.get("version") == CALIBRATION_RECORD_VERSION
+        and _valid_key_list(rows.get("excluded"))
+        and _valid_key_list(rows.get("holdout"))
+        and (rows.get("active") is None or _valid_key_list(rows.get("active")))
+    )
+
+
+def valid_calibration_identity(identity: Any) -> bool:
+    """True if ``identity`` is a ``calibration_identity`` of the current version."""
+    return (
+        isinstance(identity, dict)
+        and identity.get("version") == CALIBRATION_RECORD_VERSION
+        and isinstance(identity.get("calibration"), str)
+        and isinstance(identity.get("holdout"), str)
+    )
+
+
+def calibration_rows_record(excluded, active, holdout=()) -> dict[str, Any]:
     """The calibration-row choice in a form the run record can store.
+
+    Used to offer restoring a run's exclusions and holdout on resume; the
+    ``calibration_identity`` digest is what decides whether a resume matches.
 
     Args:
         excluded: Labels the user excluded from the analysis.
         active: Labels of the Analysis Subset, or None for all samples.
+        holdout: Labels of the validation holdout.
 
     Returns:
-        ``{"excluded": [keys], "active": [keys] or None}`` with sorted
+        ``{"version", "excluded", "active", "holdout"}`` with sorted
         ``canonical_label`` keys.
+
+    Raises:
+        UnsupportedLabelError: a label has no deterministic encoding.
     """
-    excluded_keys = sorted({canonical_label(v) for v in (excluded or ())})
-    active_keys = None if active is None else sorted({canonical_label(v) for v in active})
-    return {"excluded": excluded_keys, "active": active_keys}
+    return {
+        "version": CALIBRATION_RECORD_VERSION,
+        "excluded": sorted({canonical_label(v) for v in (excluded or ())}),
+        "active": None if active is None else sorted({canonical_label(v) for v in active}),
+        "holdout": sorted({canonical_label(v) for v in (holdout or ())}),
+    }
+
+
+def _rows_digest(X, y) -> str:
+    """blake2b over the ordered labels, wavelengths, spectra and targets of ``X``."""
+    import pandas as pd
+
+    h = hashlib.blake2b(digest_size=16)
+    if X is None or len(X) == 0:
+        h.update(b"empty")
+        return h.hexdigest()
+    for part in (X.columns, X.index):
+        for label in part:
+            h.update(canonical_label(label).encode("utf-8"))
+            h.update(b"\x00")
+        h.update(b"\x01")
+    h.update(np.ascontiguousarray(X.to_numpy(dtype=np.float64)).tobytes())
+    h.update(b"\x02")
+    if y is not None:
+        y_aligned = y if y.index.equals(X.index) else y.reindex(X.index)
+        if pd.api.types.is_numeric_dtype(y_aligned) and not pd.api.types.is_bool_dtype(y_aligned):
+            h.update(np.ascontiguousarray(y_aligned.to_numpy(dtype=np.float64)).tobytes())
+        else:
+            for value in y_aligned:
+                h.update(repr(value).encode("utf-8"))
+                h.update(b"\x00")
+    return h.hexdigest()
+
+
+def calibration_identity(X_cal, y_cal, X_holdout, y_holdout) -> dict[str, Any]:
+    """Digest of exactly the calibration and holdout rows a run trains and scores on.
+
+    Covers each row's label and position, the wavelength axis, every spectral
+    value and the target, so a resume on relabelled, reordered or edited data,
+    or on a different sample selection, gives a different identity.
+
+    Raises:
+        UnsupportedLabelError: a label has no deterministic encoding.
+    """
+    return {
+        "version": CALIBRATION_RECORD_VERSION,
+        "calibration": _rows_digest(X_cal, y_cal),
+        "holdout": _rows_digest(X_holdout, y_holdout),
+        "n_calibration": 0 if X_cal is None else int(len(X_cal)),
+        "n_holdout": 0 if X_holdout is None else int(len(X_holdout)),
+    }
 
 
 @dataclasses.dataclass
@@ -463,6 +538,7 @@ def start_run(
     validation_indices: list[Any] | None = None,
     calibration_rows: dict[str, Any] | None = None,
     label_normalization: int | None = None,
+    calibration_identity: dict[str, Any] | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -475,9 +551,11 @@ def start_run(
     generated (``get_storage_url()`` returns ``None``). This saves I/O and
     avoids orphaned ``.sqlite3`` sidecars for all-in-memory sessions.
 
-    ``calibration_rows`` / ``label_normalization``: the GUI passes the run's
-    exclusions and Analysis Subset (``calibration_rows_record``) and
-    ``LABEL_NORMALIZATION``, so a resume can check its calibration rows.
+    ``calibration_rows`` / ``label_normalization`` / ``calibration_identity``:
+    the GUI passes the run's exclusions, Analysis Subset and holdout
+    (``calibration_rows_record``), ``LABEL_NORMALIZATION`` and the digest of
+    the rows it trains on (``calibration_identity``), so a resume can verify
+    that it continues on the same calibration set.
     """
     _validate_persistence_mode(bayesian_persistence_mode)
     global _active_storage_url, _active_run_id, _active_metadata, _is_resuming
@@ -530,8 +608,13 @@ def start_run(
                 _coerce_validation_indices(validation_indices)
                 if validation_indices else None
             ),
-            calibration_rows=_recordable_calibration_rows(calibration_rows),
+            calibration_rows=_recordable(
+                calibration_rows, valid_calibration_rows, "calibration_rows"
+            ),
             label_normalization=label_normalization,
+            calibration_identity=_recordable(
+                calibration_identity, valid_calibration_identity, "calibration_identity"
+            ),
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())
         _active_storage_url = storage_url
@@ -541,16 +624,17 @@ def start_run(
         return meta
 
 
-def _recordable_calibration_rows(rows: dict[str, Any] | None) -> dict[str, Any] | None:
-    if rows is None:
+def _recordable(value: Any, is_valid, name: str) -> Any:
+    if value is None:
         return None
-    if not _valid_calibration_rows(rows):
+    if not is_valid(value):
         logger.warning(
-            "start_run: calibration_rows has an unexpected shape and was not recorded; "
-            "a resume of this run can't verify its excluded samples"
+            "start_run: %s has an unexpected shape and was not recorded; a resume "
+            "of this run can't verify its calibration rows",
+            name,
         )
         return None
-    return rows
+    return value
 
 
 def mark_complete() -> None:

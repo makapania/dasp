@@ -1,23 +1,31 @@
-"""The run record stores which samples a Bayesian run excluded (review of R004).
+"""The run record identifies the calibration rows a Bayesian run used (review of R004).
 
 Reloading a file clears its exclusions while the data fingerprint still matches, so
-the resume gate needs the run's own exclusions and Analysis Subset to compare.
-Labels are stored as type-tagged keys so any label type survives the JSON round trip.
+the record stores the run's sample selection (type-tagged label keys, used to offer
+restoring it) and a digest of the exact calibration and holdout rows (the final
+check on resume).
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from spectral_predict.io import rename_duplicate_ids
 from spectral_predict.run_state import (
+    CALIBRATION_RECORD_VERSION,
     LABEL_NORMALIZATION,
     RunMetadata,
+    UnsupportedLabelError,
+    calibration_identity,
     calibration_rows_record,
     canonical_label,
+    valid_calibration_identity,
+    valid_calibration_rows,
 )
 
 
@@ -36,44 +44,73 @@ def _meta(**kwargs) -> dict:
     return base
 
 
+def _frame(labels, seed=0):
+    rng = np.random.default_rng(seed)
+    X = pd.DataFrame(rng.normal(size=(len(labels), 5)), index=labels, columns=[1, 2, 3, 4, 5])
+    return X, pd.Series(rng.normal(size=len(labels)), index=X.index)
+
+
 def test_canonical_labels_keep_types_apart_and_survive_json():
-    labels = [5, np.int64(5), 5.0, "5", ("a", 1), np.float64(2.5), None]
+    labels = [5, np.int64(5), 5.0, "5", ("a", 1), np.float64(2.5), float("nan"), True]
     keys = [canonical_label(v) for v in labels]
     assert keys[0] == keys[1]  # numpy and Python ints are the same label
-    assert len({keys[0], keys[2], keys[3]}) == 3  # 5, 5.0 and "5" differ
+    assert len({keys[0], keys[2], keys[3], keys[7]}) == 4  # 5, 5.0, "5", True differ
     assert json.loads(json.dumps(keys)) == keys
     assert canonical_label(np.float64(2.5)) == canonical_label(2.5)
 
 
-def test_record_stores_every_label_type():
-    rows = calibration_rows_record([np.int64(5), 2.0, ("a", 1)], None)
-    assert rows["active"] is None
-    assert set(rows["excluded"]) == {
-        canonical_label(5),
-        canonical_label(2.0),
-        canonical_label(("a", 1)),
-    }
-    assert calibration_rows_record([], ["b", "a"]) == {
-        "excluded": [],
-        "active": [canonical_label("a"), canonical_label("b")],
-    }
+@pytest.mark.parametrize("label", [None, dt.date(2026, 1, 1), frozenset({1}), object()])
+def test_unsupported_labels_are_refused(label):
+    with pytest.raises(UnsupportedLabelError):
+        canonical_label(label)
+    with pytest.raises(UnsupportedLabelError):
+        calibration_rows_record([label], None)
 
 
-def test_metadata_round_trip_keeps_calibration_rows_and_normalization():
-    rows = calibration_rows_record(["S3"], None)
-    meta = RunMetadata.from_dict(
-        _meta(calibration_rows=rows, label_normalization=LABEL_NORMALIZATION)
-    )
+def test_record_stores_selection_and_holdout():
+    rows = calibration_rows_record([np.int64(5), 2.0], None, holdout=[("a", 1)])
+    assert valid_calibration_rows(rows)
+    assert rows["version"] == CALIBRATION_RECORD_VERSION and rows["active"] is None
+    assert set(rows["excluded"]) == {canonical_label(5), canonical_label(2.0)}
+    assert rows["holdout"] == [canonical_label(("a", 1))]
+
+
+def test_identity_changes_with_labels_order_values_and_targets():
+    X, y = _frame(["a", "b", "c"])
+    base = calibration_identity(X, y, None, None)
+    assert valid_calibration_identity(base)
+    assert calibration_identity(X.copy(), y.copy(), None, None) == base
+    swapped = X.rename(index={"a": "b", "b": "a"})
+    assert calibration_identity(swapped, y.set_axis(swapped.index), None, None) != base
+    order = ["c", "b", "a"]
+    assert calibration_identity(X.loc[order], y.loc[order], None, None) != base
+    edited = X.copy()
+    edited.iloc[0, 0] += 1e-9
+    assert calibration_identity(edited, y, None, None) != base
+    assert calibration_identity(X, y + 1, None, None) != base
+    assert calibration_identity(X, y, X.iloc[:1], y.iloc[:1]) != base
+
+
+def test_metadata_round_trip_keeps_the_new_fields():
+    X, y = _frame(["a", "b"])
+    fields = {
+        "calibration_rows": calibration_rows_record(["a"], None),
+        "label_normalization": LABEL_NORMALIZATION,
+        "calibration_identity": calibration_identity(X, y, None, None),
+    }
+    meta = RunMetadata.from_dict(_meta(**fields))
     again = RunMetadata.from_dict(json.loads(json.dumps(meta.to_dict())))
-    assert again.calibration_rows == rows
-    assert again.label_normalization == LABEL_NORMALIZATION
+    for name, value in fields.items():
+        assert getattr(again, name) == value
 
 
-def test_old_and_malformed_records_mean_unchecked():
+def test_legacy_and_unrecognised_records():
     old = RunMetadata.from_dict(_meta())
     assert old.calibration_rows is None and old.label_normalization is None
-    bad = RunMetadata.from_dict(_meta(calibration_rows={"excluded": "S3"}))
-    assert bad.calibration_rows is None
+    assert old.calibration_identity is None
+    # An intermediate-format record is kept as stored; the gate can't verify it.
+    odd = RunMetadata.from_dict(_meta(calibration_rows={"excluded": [2], "active": None}))
+    assert odd.calibration_rows is not None and not valid_calibration_rows(odd.calibration_rows)
 
 
 def test_repeated_missing_ids_get_unique_names():

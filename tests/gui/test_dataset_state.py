@@ -73,6 +73,7 @@ _STATE_ATTRS = (
     "active_group_filter",
     "active_indices",
     "_pending_validation_indices",
+    "_pending_analysis_settings",
     "data_sources",
     "source_group_names",
     "use_custom_group_names",
@@ -115,6 +116,7 @@ def clean_state(gui_app):
     gui_app.active_group_filter = None
     gui_app.active_indices = None
     gui_app._pending_validation_indices = None
+    gui_app._pending_analysis_settings = None
     gui_app.combined_metadata_df = None
     gui_app.ref = None
     gui_app._exact_wavelength_axis = False
@@ -662,6 +664,15 @@ def _use_dm_source(app, monkeypatch, X, y, ref=None, name="B"):
     app._use_for_analysis()
 
 
+def _gui_record(app) -> dict:
+    """What the GUI records about the calibration rows at a launch."""
+    return {
+        "calibration_rows": app._calibration_rows_for_record(),
+        "label_normalization": LABEL_NORMALIZATION,
+        "calibration_identity": app._calibration_identity_now(),
+    }
+
+
 def _start_and_resume(rs, X, y, **kwargs):
     """A saved Bayesian run, claimed for resume as the startup 'Resume' answer does."""
     from pathlib import Path
@@ -689,7 +700,7 @@ def resumed_from_file(clean_state, worker_env, fake_thread, tmp_path):
     _load_combined(app, path)
     excluded = app.X.index[2]
     app.excluded_spectra = {excluded}
-    meta = _start_and_resume(rs, app.X, app.y, calibration_rows=app._calibration_rows_for_record())
+    meta = _start_and_resume(rs, app.X, app.y, **_gui_record(app))
     _load_combined(app, path)  # reload the identical file: replace clears exclusions
     assert app.excluded_spectra == set()
     yield app, rs, meta, excluded
@@ -1085,9 +1096,8 @@ def resumable(clean_state, worker_env, fake_thread):
         assert app._install_dataset(X, y, None, None, replot=False)
         app.excluded_spectra = set(excluded)
         app.active_indices = None if active is None else set(active)
-        rows = app._calibration_rows_for_record()
-        kwargs.setdefault("calibration_rows", rows)
-        kwargs.setdefault("label_normalization", LABEL_NORMALIZATION)  # as the GUI records
+        for key, value in _gui_record(app).items():
+            kwargs.setdefault(key, value)
         return _start_and_resume(rs, app.X, app.y, **kwargs)
 
     yield app, rs, _save
@@ -1136,7 +1146,7 @@ def test_new_record_without_rows_asks_instead_of_resuming_silently(resumable):
     meta = save(X, y, calibration_rows=None)
     with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
         assert app._confirm_resume_before_launch(["PLS"], "quick") is False
-    assert ask.call_args[0][0] == "Can't verify the excluded samples"
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
     assert rs.find_incomplete_run().run_id == meta.run_id
 
 
@@ -1266,3 +1276,143 @@ def test_manual_ensemble_retrain_receives_the_cached_holdout(clean_state, monkey
     monkeypatch.setattr(app.root, "after", lambda *a, **k: None)
     app._train_ensemble_thread()
     assert got["validation_data"] is pair
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: one identity check decides
+# ---------------------------------------------------------------------------
+
+_DIFFERS = "The data or sample selection differs from the interrupted run"
+
+
+def _reinstall(app, X, y):
+    assert app._install_dataset(X, y, None, None, replot=False)
+
+
+def test_matching_data_resumes_after_identity_check(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    save(X, y, excluded=["A3"])
+    _reinstall(app, X, y)  # reload: exclusions cleared, restored on Yes
+    with (
+        patch("tkinter.messagebox.askyesnocancel", return_value=True),
+        patch("tkinter.messagebox.askyesno") as ask,
+    ):
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert not ask.called and app.excluded_spectra == {"A3"}
+
+
+def test_label_swap_with_identical_values_is_refused(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y)
+    swapped = X.rename(index={"A1": "A2", "A2": "A1"})
+    _reinstall(app, swapped, y.set_axis(swapped.index))
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == _DIFFERS
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_row_order_change_is_refused(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    meta = save(X, y)
+    order = list(X.index)
+    order[3], order[4] = order[4], order[3]  # away from the coarse fingerprint's cells
+    _reinstall(app, X.loc[order], y.loc[order])
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == _DIFFERS
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_edited_spectrum_is_refused_even_when_labels_match(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    save(X, y)
+    edited = X.copy()
+    edited.iloc[5, 7] += 1e-3
+    _reinstall(app, edited, y)
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == _DIFFERS
+
+
+def test_float_holdout_labels_survive_and_are_restored(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([float(i) for i in range(1, 21)], seed=1)
+    _reinstall(app, X, y)
+    _split(app, [1.0, 2.0, 3.0])
+    save_rows = _gui_record(app)
+    meta = _start_and_resume(rs, app.X, app.y, **save_rows)
+    _reinstall(app, X, y)  # reload clears the holdout
+    app.validation_enabled.set(True)
+    assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert app.validation_indices == {1.0, 2.0, 3.0}
+    assert meta.calibration_identity["n_holdout"] == 3
+
+
+def test_unsupported_label_type_asks(resumable):
+    import datetime as dt
+
+    app, rs, save = resumable
+    labels = [dt.date(2026, 1, d) for d in range(1, 21)]
+    X, y = _spectra(labels, seed=1)
+    meta = save(X, y)
+    assert meta.calibration_identity is None  # the dates can't be fingerprinted
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_unknown_record_version_asks(resumable):
+    app, rs, save = resumable
+    X, y = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    save(X, y, label_normalization=99)
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Can't verify the calibration samples"
+
+
+def test_legacy_resume_refuses_dm_normalized_duplicate_ids(clean_state, worker_env, monkeypatch):
+    """Data Management data whose labels were already renamed by its reader."""
+    app, rs = clean_state, worker_env
+    ids = ["A", "A.1", "A.2"] + [f"S{i}" for i in range(4, 21)]
+    X, y = _spectra(ids, seed=2)
+    _use_dm_source(app, monkeypatch, X, y)
+    meta = _start_and_resume(rs, app.X, app.y, validation_indices=["A.1"])  # legacy record
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert ask.call_args[0][0] == "Sample IDs were renamed differently from the interrupted run"
+    assert rs.find_incomplete_run().run_id == meta.run_id
+
+
+def test_viewer_revert_restores_legacy_label_check(clean_state, monkeypatch):
+    app = clean_state
+    X, y = _install_regression(app, n=8)
+    app.target_column.set("protein")
+    monkeypatch.setattr(app, "_populate_data_viewer", lambda *a, **k: None)
+    app._snapshot_data_viewer_state()
+    assert app._labels_look_renamed() is False
+
+    ids = list(X.index)
+    ids[1] = ids[0]  # an edit gives two rows the same ID; install renames one
+    headers = ["Sample ID", "protein"] + [str(c) for c in app.X.columns]
+    rows = [[ids[i], y.iloc[i]] + list(app.X.iloc[i]) for i in range(len(ids))]
+    monkeypatch.setattr(app, "data_viewer_sheet", _StubSheet(headers, rows))
+    with patch("tkinter.messagebox.showwarning"):
+        app._apply_data_viewer_edits()
+    assert app._labels_look_renamed() is True
+
+    app._revert_data_viewer()
+    assert app._labels_look_renamed() is False
+
+
+def test_rename_duplicate_ids_accepts_duplicate_multiindex():
+    from spectral_predict.io import rename_duplicate_ids
+
+    index = pd.MultiIndex.from_tuples([("a", 1), ("a", 1), ("b", 2)])
+    new, n, _ = rename_duplicate_ids(index)
+    assert n == 1 and pd.Index(new).is_unique

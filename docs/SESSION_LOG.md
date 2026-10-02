@@ -815,3 +815,22 @@ Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loadi
 - QC staleness fingerprint includes the targets; the Analysis Subset dialog and `_metadata_stores` use only
   the installed dataset's stores (the uninstalled DM merge never had `metadata_df` anyway); Comparison's
   validation load refreshes the snapshot; repeated NaN IDs become "nan", "nan.1".
+## 2026-10-02 - GUI dataset state, review round 3: one identity check for crash-resume
+
+- **`calibration_identity` is the final authority on resume.** At launch the GUI records a blake2b digest of
+  the exact calibration rows the worker trains on (after subset, exclusions and holdout removal, in order:
+  canonical labels, wavelength labels, float64 spectra, targets) and of the holdout rows
+  (`run_state.calibration_identity`, built by `_calibration_identity_now`, which mirrors the worker's
+  filtering). The gate recomputes it after any user-approved restore and resumes only on a match; otherwise
+  one dialog: start fresh / keep (default keep). This replaces chasing label edge cases (swaps, order,
+  normalization drift, provenance). The coarse `dataset_fingerprint` (shape + 3 cells) is still checked first.
+- `calibration_rows` (versioned keys of excluded / active / holdout) only drives the restore offers;
+  the holdout keys also fix float/tuple holdout labels that `validation_indices` drops.
+- `canonical_label` supports int/float/str/bool (numpy too) and tuples of these, nothing else
+  (`UnsupportedLabelError`): no repr fallback, which could collide or change across sessions.
+- Record classes: legacy (all three new fields None) resumes with a log, unless the loaded labels look renamed
+  (`_labels_look_renamed`: `"<id>.<k>"` next to `"<id>"`), computed from the loaded labels at the gate so it
+  can't go stale after Data Management, merges, viewer edits or Revert. Anything else not exactly current
+  (unknown `label_normalization`, malformed rows/identity, unsupported labels) asks: resume anyway / fresh /
+  keep. `from_dict` no longer coerces malformed `calibration_rows` to None (that made it look legacy).
+- `rename_duplicate_ids` tests missingness per label (`pd.isna` on a MultiIndex raises).

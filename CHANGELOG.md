@@ -89,7 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   computed on the run's own current spectra and wavelengths, without samples excluded
   after the split. Clicking a spectrum and Quality Check "Mark for exclusion" now
   exclude the right sample for numeric-looking and repeated IDs. A crash-resume now
-  also checks that the excluded samples match the interrupted run.
+  continues only on exactly the interrupted run's calibration samples (same IDs, order,
+  spectra, targets and selection); otherwise it offers to start fresh or keep the run.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

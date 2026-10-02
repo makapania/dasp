@@ -373,7 +373,9 @@ def rename_duplicate_ids(index: pd.Index) -> tuple:
 
     new_ids = []
     seen = {}
-    missing = pd.isna(index)
+    # Per label, never pd.isna(index): that raises on a MultiIndex, and a tuple
+    # label is never missing.
+    missing = [not isinstance(idx, tuple) and bool(pd.isna(idx)) for idx in index]
     # Every original ID, plus each suffix handed out. Missing IDs (NaN/None) never
     # compare equal to each other, so repeated ones are grouped under "nan".
     taken = {idx for idx, is_na in zip(index, missing) if not is_na}
