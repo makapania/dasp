@@ -18,6 +18,8 @@ and deploy.
    and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
 2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
    correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
+   **Done on branch `fix/ytransform-save` (not yet merged):** R048+R001+R020, R014/R019, R010/R064, with
+   save→load→predict parity tests (`tests/gui/test_tab7_y_transform_save.py`, `test_tab7_correction_binding.py`).
 3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
    should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
 4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);

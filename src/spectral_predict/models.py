@@ -2038,6 +2038,13 @@ def get_feature_importances(model, model_name, X, y):
     importances : ndarray
         Feature importance scores (higher = more important)
     """
+    # Unwrap a Y-transform TransformedTargetRegressor (Tab 7 saves the prediction
+    # model inside one); importances come from the fitted inner regressor.
+    from sklearn.compose import TransformedTargetRegressor
+
+    if isinstance(model, TransformedTargetRegressor) and hasattr(model, 'regressor_'):
+        model = model.regressor_
+
     # Unwrap sklearn Pipeline to get the actual estimator
     # Models with StandardScaler preprocessing are stored as Pipeline([scaler, model])
     if isinstance(model, Pipeline):

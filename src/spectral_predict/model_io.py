@@ -49,6 +49,14 @@ from .resource_paths import is_frozen
 logger = logging.getLogger(__name__)
 
 
+def _task_accepts_correction(task_type: Optional[str]) -> bool:
+    """Whether a bias/nonlinear correction may be stored with or applied to a model.
+
+    Absent or null ``task_type`` means a legacy regression model, as elsewhere here.
+    """
+    return task_type in (None, 'regression')
+
+
 def _ensure_pipeline_fitted(pipeline):
     """
     Ensure a Pipeline is marked as fitted for PyInstaller bundle compatibility.
@@ -328,8 +336,18 @@ def save_model(
         else:
             metadata_complete['has_applicability_domain'] = False
 
-        # Save bias correction if provided
+        # Save bias correction if provided. Corrections remap a continuous prediction,
+        # so they are meaningless (and corrupt labels) for any non-regression task (R010).
         bias_correction_path = tmppath / 'bias_correction.json'
+        if bias_correction is not None and not _task_accepts_correction(
+            metadata_complete.get('task_type')
+        ):
+            logger.warning(
+                "Not saving bias/nonlinear correction with a %r model: corrections "
+                "apply to regression models only.",
+                metadata_complete.get('task_type'),
+            )
+            bias_correction = None
         if bias_correction is not None:
             with open(bias_correction_path, 'w', encoding='utf-8') as f:
                 json.dump(bias_correction, f, indent=2)
@@ -818,10 +836,19 @@ def predict_with_model(
 
     # NOTE: Bias correction is applied after model.predict(), which returns
     # original-scale values even when TransformedTargetRegressor is used.
+    # R010: files written before the save-side guard can carry a stale regression
+    # correction inside a classification model; never apply it to class labels.
     bias_correction = model_dict.get('bias_correction')
     if bias_correction is not None:
-        from .bias_correction import apply_correction
-        predictions = apply_correction(predictions, bias_correction)
+        if _task_accepts_correction(task_type):
+            from .bias_correction import apply_correction
+            predictions = apply_correction(predictions, bias_correction)
+        else:
+            logger.warning(
+                "Ignoring bias/nonlinear correction stored with a %r model: "
+                "corrections apply to regression models only.",
+                task_type,
+            )
 
     return predictions
 

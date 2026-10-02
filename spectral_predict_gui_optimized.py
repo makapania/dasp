@@ -3035,6 +3035,10 @@ class SpectralPredictApp:
         # Bias/slope correction variables
         self.bias_correction_data = None  # Stores computed correction dict
         self.nonlinear_correction_data = None  # Stores nonlinear correction dict
+        # R010: identity of the refined model each correction was computed for
+        self._refined_model_token = None
+        self._bias_correction_token = None
+        self._nonlinear_correction_token = None
         self.apply_bias_correction = tk.BooleanVar(value=False)
         self.save_correction_with_model = tk.BooleanVar(value=True)
         self.use_nonlinear_correction = tk.BooleanVar(value=False)
@@ -37594,12 +37598,67 @@ Performance (Classification):
         # Add export button
         self._add_plot_export_button(self.refine_plot_frame, fig, "cv_predictions")
 
+    def _bind_corrections_to_new_model(self) -> None:
+        """Invalidate CV-derived corrections because a new model is being stored (R010).
+
+        Bias/slope and nonlinear corrections are fitted on one model's CV predictions.
+        Each new Model Development fit gets a fresh token; a correction is saved only
+        if it was computed under the current token (see ``_correction_to_save``), so
+        computing a correction AFTER a run and then saving still works, but a
+        correction left over from an earlier run never reaches a new model.
+        """
+        self._refined_model_token = object()
+        self.bias_correction_data = None
+        self.nonlinear_correction_data = None
+        self._bias_correction_token = None
+        self._nonlinear_correction_token = None
+
+    def _correction_to_save(self) -> dict | None:
+        """Return the correction to embed in the saved model, or None (R010).
+
+        Only regression models carry a correction, only when the user asked for it,
+        and only a correction computed for the current refined model.
+        """
+        if not self.refined_config or self.refined_config.get('task_type') != 'regression':
+            return None
+        if not (self.save_correction_with_model.get() and self.apply_bias_correction.get()):
+            return None
+        token = getattr(self, '_refined_model_token', None)
+        if token is None:
+            return None
+        if (
+            self.use_nonlinear_correction.get()
+            and self.nonlinear_correction_data
+            and getattr(self, '_nonlinear_correction_token', None) is token
+        ):
+            return self.nonlinear_correction_data
+        if self.bias_correction_data and getattr(self, '_bias_correction_token', None) is token:
+            return self.bias_correction_data
+        return None
+
+    def _reset_nonlinear_correction_text(self) -> None:
+        """Clear the nonlinear-correction metrics box (they described an older model)."""
+        widget = getattr(self, 'bc_nonlinear_text', None)
+        if widget is None:
+            return
+        widget.config(state='normal')
+        widget.delete('1.0', tk.END)
+        widget.insert('1.0', "Click 'Compute' to see nonlinear correction metrics.")
+        widget.config(state='disabled')
+
     def _update_bias_correction_ui(self):
         """Compute and display bias/slope correction after CV completes."""
         task_type = (self.refined_config.get('task_type', 'regression')
                      if hasattr(self, 'refined_config') and self.refined_config else 'regression')
 
+        # Any nonlinear correction shown belongs to an earlier model (R010/R064).
+        self._reset_nonlinear_correction_text()
+
         if task_type != 'regression':
+            # R010: never keep a regression correction around for a classification /
+            # one-class model -- it would be saved and applied to class labels.
+            self.bias_correction_data = None
+            self.nonlinear_correction_data = None
             self.bias_correction_frame.grid_remove()
             return
 
@@ -37616,6 +37675,7 @@ Performance (Classification):
             self.bias_correction_data = compute_bias_slope(
                 self.refined_y_true, self.refined_y_pred
             )
+            self._bias_correction_token = getattr(self, '_refined_model_token', None)
 
             bc = self.bias_correction_data
             orig = bc['metrics_original']
@@ -37655,6 +37715,8 @@ Performance (Classification):
         """Compute nonlinear correction and update display."""
         if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
             return
+        if not self.refined_config or self.refined_config.get('task_type') != 'regression':
+            return  # R010: corrections are regression-only
 
         try:
             from spectral_predict.bias_correction import compute_nonlinear_correction
@@ -37672,6 +37734,7 @@ Performance (Classification):
                 self.refined_y_true, self.refined_y_pred,
                 method=method, degree=degree
             )
+            self._nonlinear_correction_token = getattr(self, '_refined_model_token', None)
 
             nl = self.nonlinear_correction_data
             orig = nl['metrics_original']
@@ -40841,6 +40904,7 @@ F1 Score:  {f1:.4f}
                     'AUCcv': mean_m.get('auc', np.nan),
                 }
 
+                self._bind_corrections_to_new_model()  # R010: drop stale corrections
                 self.refined_model = cv_result['cal_model']
                 self.refined_preprocessor = prep_pipeline_oc if isinstance(prep_steps, list) and len(prep_steps) > 0 else None
                 self.refined_wavelengths = list(selected_wl)
@@ -41514,8 +41578,13 @@ F1 Score:  {f1:.4f}
             print(f"{'='*80}\n")
 
             # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
+            # Read the widget ONCE: this value is frozen into refined_config below, so the
+            # saved metadata describes the trained model, not the widget at save time.
             y_transform = getattr(self, 'refine_y_transform', tk.StringVar(value='None')).get()
-            y_transform_active = (y_transform != 'None' and task_type == 'regression')
+            y_transform_active = (
+                str(y_transform).strip().lower() not in ('none', '')
+                and task_type == 'regression'
+            )
             if y_transform_active:
                 from spectral_predict.y_transform import YTransformWrapper
 
@@ -41567,7 +41636,11 @@ F1 Score:  {f1:.4f}
             all_cv_indices = []  # Store CV sample indices for specimen ID mapping
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
-            final_model = pipe.steps[-1][1]
+            # A Y-transform (non-early-stopping) wraps the pipeline in a
+            # TransformedTargetRegressor, which has no .steps (R048).
+            from sklearn.compose import TransformedTargetRegressor as _TTR
+            _train_pipe = pipe.regressor if isinstance(pipe, _TTR) else pipe
+            final_model = _train_pipe.steps[-1][1]
             use_early_stopping = (
                 early_stopping_rounds is not None and
                 early_stopping_rounds > 0 and
@@ -41682,15 +41755,17 @@ F1 Score:  {f1:.4f}
 
                 # Store prediction probabilities if available (for classification)
                 if not use_early_stopping:
+                    # TransformedTargetRegressor (Y-transform) has no named_steps.
+                    _fold_steps = getattr(pipe_fold, 'named_steps', {})
                     if hasattr(pipe_fold, 'predict_proba'):
                         y_proba = pipe_fold.predict_proba(X_test)
                         all_y_proba.append(y_proba)
-                    elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
-                        y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
+                    elif 'model' in _fold_steps and hasattr(_fold_steps['model'], 'predict_proba'):
+                        y_proba = _fold_steps['model'].predict_proba(X_test)
                         all_y_proba.append(y_proba)
-                    elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
+                    elif 'lr' in _fold_steps and hasattr(_fold_steps['lr'], 'predict_proba'):
                         # For PLS-DA, LogisticRegression is named 'lr'
-                        y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
+                        y_proba = _fold_steps['lr'].predict_proba(X_test)
                         all_y_proba.append(y_proba)
 
                 if task_type == "regression":
@@ -41942,6 +42017,14 @@ Configuration:
             # Fit final pipeline on full dataset for model persistence
             # Clone the pipeline and fit on all data
             final_pipe = clone(pipe)
+            if y_transform_active and not isinstance(final_pipe, _TTR):
+                # Early-stopping boosters skip the TTR wrap so CV can transform each
+                # fold's targets by hand (above). The final model must be fitted the
+                # same way: transform fitted on the FULL calibration y, model fitted on
+                # transformed y, predictions inverse-transformed (R014/R019). Without
+                # this the saved model was a raw-y fit labelled with the transform.
+                from spectral_predict.y_transform import YTransformWrapper
+                final_pipe = YTransformWrapper.wrap(final_pipe, y_transform)
             # Mirror the per-fold sample_weight wiring: full-data balanced weights
             # for sample_weight-only classifiers (XGBoost). PLS-DA / CatBoost / RF /
             # SVC / LightGBM / NeuralBoosted carry their class_weight or
@@ -42089,53 +42172,45 @@ External Validation Performance (n={n_val}):
             # Combine final results text
             results_text = results_text_part1 + cal_text + val_text + results_text_part2
 
-            # Extract model and preprocessor from pipeline for saving
-            # When Y-transform wraps the whole pipeline as TransformedTargetRegressor,
-            # save it as-is — it handles transform/inverse internally
-            from sklearn.compose import TransformedTargetRegressor as _TTR
-            if isinstance(final_pipe, _TTR):
-                # TTR wraps the pipeline — extract inner pipeline for preprocessor,
-                # but save the full TTR as the model
-                inner_pipe = final_pipe.regressor_
-                if hasattr(inner_pipe, 'named_steps'):
-                    pipe_steps = list(inner_pipe.named_steps.keys())
-                    if len(pipe_steps) > 1:
-                        # Build preprocessor from inner pipeline steps (excluding model)
-                        inner_steps = list(inner_pipe.steps)
-                        final_preprocessor = Pipeline(inner_steps[:-1])
-                        # Don't refit — already fitted via TTR
-                        print(f"DEBUG: Extracted preprocessor from TTR inner pipeline: {[n for n, _ in inner_steps[:-1]]}")
-                    else:
-                        final_preprocessor = None
-                else:
-                    final_preprocessor = None
-                final_model = final_pipe
-                print(f"DEBUG: Saving TransformedTargetRegressor as model (Y-transform active)")
-            elif model_name == "PLS-DA" and task_type == "classification":
+            # Extract model and preprocessor from pipeline for saving.
+            # Y-transform (R001/R020): the TTR wraps only the post-subset training
+            # pipeline ([imbalance?, scaler?, model]). Spectral preprocessing
+            # (prep_pipeline) is fitted OUTSIDE it on the full spectrum. So a TTR is
+            # saved exactly like the un-transformed case below -- same preprocessor,
+            # same prediction model -- with that prediction model re-wrapped in the
+            # fitted TTR so predictions are inverse-transformed. Nothing is applied
+            # twice (the scaler stays only inside the model) and nothing is lost
+            # (prep_pipeline is still the saved preprocessor).
+            _ttr_fitted = final_pipe if isinstance(final_pipe, _TTR) else None
+            _fitted_pipe = _ttr_fitted.regressor_ if _ttr_fitted is not None else final_pipe
+            _fitted_steps = getattr(_fitted_pipe, 'named_steps', {})
+            if model_name == "PLS-DA" and task_type == "classification":
                 # Save entire PLS-DA pipeline (both PLS and LogisticRegression)
-                final_model = final_pipe
+                final_model = _fitted_pipe
             elif use_full_spectrum_preprocessing and model_name in ('SVC', 'SVM', 'SVR', 'MLP', 'NeuralBoosted', 'Ridge', 'Lasso', 'ElasticNet'):
                 # For full-spectrum preprocessing, scaler is applied AFTER subsetting.
                 # Save a prediction pipeline that includes the fitted scaler + model (exclude resampling).
-                if 'scaler' in final_pipe.named_steps and 'model' in final_pipe.named_steps:
+                if 'scaler' in _fitted_steps and 'model' in _fitted_steps:
                     final_model = Pipeline([
-                        ('scaler', final_pipe.named_steps['scaler']),
-                        ('model', final_pipe.named_steps['model'])
+                        ('scaler', _fitted_steps['scaler']),
+                        ('model', _fitted_steps['model'])
                     ])
                     print("DEBUG: Saving scaler+model pipeline for scale-sensitive model (full-spectrum preprocessing)")
                 else:
-                    final_model = final_pipe
-            elif 'model' in final_pipe.named_steps:
-                final_model = final_pipe.named_steps['model']
+                    final_model = _fitted_pipe
+            elif 'model' in _fitted_steps:
+                final_model = _fitted_steps['model']
             else:
                 # Fallback: save the entire pipeline
-                final_model = final_pipe
+                final_model = _fitted_pipe
+
+            if _ttr_fitted is not None:
+                from spectral_predict.y_transform import replace_fitted_regressor
+                final_model = replace_fitted_regressor(_ttr_fitted, final_model)
+                print("DEBUG: Saving TransformedTargetRegressor around the prediction model")
 
             # Build preprocessor from pipeline steps (excluding the model)
-            # Skip if already extracted from TTR above
-            if isinstance(final_pipe, _TTR):
-                pass  # final_preprocessor already set in TTR block above
-            elif use_full_spectrum_preprocessing:
+            if use_full_spectrum_preprocessing:
                 # For derivative + subset: preprocessor was already fitted on full spectrum
                 # We need to save that preprocessor, not create a new one
                 # prep_pipeline is None for raw preprocessing (no transformation needed)
@@ -42165,7 +42240,10 @@ External Validation Performance (n={n_val}):
                 final_preprocessor = None
                 print("DEBUG: No preprocessor (raw data)")
 
-            # Store the fitted model and metadata for later saving
+            # Store the fitted model and metadata for later saving.
+            # R010: no correction is valid while the model is being replaced; a fresh
+            # token is issued once this run's CV predictions are stored (below).
+            self._refined_model_token = None
             self.refined_model = final_model
             self.refined_preprocessor = final_preprocessor
             self.refined_wavelengths = list(selected_wl)
@@ -42186,7 +42264,10 @@ External Validation Performance (n={n_val}):
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
                 'ga_genes': self.refined_ga_genes,
                 'ga_config': self.refined_ga_config,
-                'ga_model_type': self.refined_ga_model_type
+                'ga_model_type': self.refined_ga_model_type,
+                # Frozen at training time (R014): the transform actually fitted, or
+                # 'None' (also for classification, where the widget is ignored).
+                'y_transform': y_transform if y_transform_active else 'None',
             }
 
             # Add coupled optimization params if present
@@ -42196,6 +42277,8 @@ External Validation Performance (n={n_val}):
             # Store predictions for plotting
             self.refined_y_true = np.array(all_y_true)
             self.refined_y_pred = np.array(all_y_pred)
+            # R010: corrections from here on are fitted to THIS model's CV predictions.
+            self._bind_corrections_to_new_model()
             self.refined_cv_indices = np.array(all_cv_indices)  # Store CV indices for specimen ID mapping
 
             # CRITICAL FIX: Store the actual specimen IDs that correspond to the CV data
@@ -42466,8 +42549,9 @@ External Validation Performance (n={n_val}):
                         ),
                     )
                 ),
-                # Y-transform
-                'y_transform': self.refine_y_transform.get() if hasattr(self, 'refine_y_transform') else 'None',
+                # Y-transform: the value frozen when the model was trained (R014), not
+                # the live widget. One-class refits never set it, so default to 'None'.
+                'y_transform': (self.refined_config or {}).get('y_transform', 'None'),
             }
 
             # Add coupled optimization params if present
@@ -42596,14 +42680,8 @@ External Validation Performance (n={n_val}):
             else:
                 print("DEBUG: No X_train available - model will not have applicability domain data")
 
-            # Determine bias correction to save
-            bias_correction_to_save = None
-            if (self.save_correction_with_model.get() and
-                    self.apply_bias_correction.get()):
-                if self.use_nonlinear_correction.get() and self.nonlinear_correction_data:
-                    bias_correction_to_save = self.nonlinear_correction_data
-                elif self.bias_correction_data:
-                    bias_correction_to_save = self.bias_correction_data
+            # Determine bias correction to save (only one computed for THIS model, R010)
+            bias_correction_to_save = self._correction_to_save()
 
             save_model(
                 model=self.refined_model,

@@ -80,6 +80,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Model Development Y-transform now refits, saves and predicts correctly** (review
+  R048, R001, R020, R014/R019). Selecting any Y-transform for a model without booster
+  early stopping crashed the refit, and 'Box-Cox' was rejected outright. The save path
+  behind the crash would have dropped the spectral preprocessing (derivatives, SNV,
+  baseline) from the .dasp file and saved the Ridge/SVR/MLP scaler twice. Now the saved
+  preprocessor is the fitted full-spectrum preprocessing, and the saved model is a
+  TransformedTargetRegressor around the same prediction model an untransformed save
+  would hold (including its per-subset scaler), so a loaded model reproduces the
+  in-app predictions. With booster early stopping, the final model used to be fitted on
+  raw y while CV, the reported metrics and the file's `y_transform` described the
+  transformed model. It is now fitted on the transformed full-calibration y and
+  inverse-transforms its predictions. `y_transform` in the file is the transform the
+  model was trained with, not the widget at save time. **Existing .dasp files saved
+  from an early-stopping booster with a Y-transform hold a raw-y model and must be
+  retrained**; no other Y-transform file could be produced before this fix.
+- **A bias or nonlinear correction is saved only with the model it was computed for**
+  (review R010/R064). A correction left from an earlier Model Development run (for
+  example a polynomial fitted to another model, or a regression correction after
+  switching to classification) used to be embedded in the next saved model and applied
+  to all of its predictions. Each new fit now clears corrections, computing one after
+  the run and then saving still works, and classification/one-class models never get
+  one. Prediction also ignores a correction stored with a non-regression model. **Already
+  saved regression files with a stale correction cannot be detected automatically**:
+  if a model was saved with "apply correction" ticked after more than one run in the
+  session, recompute the correction and re-save.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

@@ -742,3 +742,23 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - Tab 7 Y-transform save contract (R048/R001/R020/R014/R010), branch fix/ytransform-save
+- **R048 was masking R001/R020.** Every TTR refit crashed on `pipe.steps` before reaching the TTR save branch, so no
+  .dasp with a TTR could exist; a bare `hasattr` guard would have shipped silent corruption (lost prep_pipeline,
+  scaler saved twice). Fix both together.
+- **Save contract:** Tab 7 always runs Path A, so spectral preprocessing (`prep_pipeline`) is fitted OUTSIDE the TTR on
+  the full spectrum; the TTR wraps only the post-subset `[imbalance?, scaler?, model]`. Save a TTR exactly like the
+  untransformed case (preprocessor = prep_pipeline; model = scaler+model or bare model) and re-wrap that prediction
+  model with `y_transform.replace_fitted_regressor` (copies the fitted TTR, swaps `regressor_`). Never split the
+  TTR's inner steps out as the preprocessor.
+- **'Box-Cox'.** `.lower().replace('-', '-')` was a no-op, so the combobox value never matched 'boxcox'; also
+  `validate()` skipped the y>0 check for it. All entry points now go through `normalize_y_transform_method`.
+- **Early stopping + transform:** CV transforms fold y by hand; the final fit is now TTR-wrapped (no ES on the final
+  fit either way). If the booster ES agent changes the final fit (e.g. `set_params(model__n_estimators=...)`), the
+  TTR needs `regressor__` prefixes.
+- **Corrections:** each new `refined_model` gets a fresh `_refined_model_token`; corrections record the token they
+  were computed under and `_correction_to_save()` only returns a matching one, regression only. `model_io` drops a
+  correction for non-regression at save and ignores one at predict (legacy files).
+- **Pre-existing, not fixed:** `_plot_wavelength_importance` applies `refined_preprocessor` (full-spectrum prep) to
+  `refined_X_train` (already preprocessed + subset), so the residual-correlation overlay double-preprocesses.
