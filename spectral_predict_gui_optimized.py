@@ -2351,592 +2351,19 @@ def _get_imbalance_suffix(imbalance_method: str | None) -> str:
 # These classes wrap models with preprocessing/wavelength selection
 # and are sklearn-clonable (required for ensemble OOF predictions)
 
-def _build_transform_from_config(config: dict):
-    """
-    Build a preprocessing transform function from configuration.
-
-    This is factored out so wrapper classes can recreate transforms after cloning.
-    Imports are done inside to avoid circular dependencies.
-    """
-    from spectral_predict.preprocess import SavgolDerivative, SNV, SavgolSmooth
-    from spectral_predict.baseline import BaselinePolynomial, BaselineALS, BaselineAirPLS
-
-    def transform(X):
-        import numpy as np
-        X_out = np.asarray(X, dtype=np.float64)
-
-        # Apply smoothing first (if enabled)
-        if config.get('smooth'):
-            smoother = SavgolSmooth(window_length=config['smooth'], polyorder=2)
-            X_out = smoother.fit_transform(X_out)
-
-        # Apply baseline correction
-        baseline = config.get('baseline')
-        bl_params = config.get('baseline_params', {})
-        if baseline == 'polynomial':
-            bl = BaselinePolynomial(degree=bl_params.get('degree', 2))
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'als':
-            bl = BaselineALS(
-                lambda_=bl_params.get('lam', 1e5),
-                p=bl_params.get('p', 0.01),
-                niter=10,
-            )
-            X_out = bl.fit_transform(X_out)
-        elif baseline == 'airpls':
-            bl = BaselineAirPLS(
-                lam=bl_params.get('lam', 1e5),
-                max_iter=15,
-            )
-            X_out = bl.fit_transform(X_out)
-
-        # Apply main preprocessing
-        pt = config.get('type', 'raw')
-        w = config.get('window', 15)
-
-        if pt == 'raw':
-            pass
-        elif pt == 'snv':
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv1':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'deriv2':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'deriv3':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'deriv4':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'snv_deriv1':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv2':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-        elif pt == 'snv_deriv3':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-        elif pt == 'snv_deriv4':
-            X_out = SNV().fit_transform(X_out)
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-        elif pt == 'deriv1_snv':
-            X_out = SavgolDerivative(deriv=1, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv2_snv':
-            X_out = SavgolDerivative(deriv=2, window=w).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv3_snv':
-            X_out = SavgolDerivative(deriv=3, window=w, polyorder=4).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-        elif pt == 'deriv4_snv':
-            X_out = SavgolDerivative(deriv=4, window=w, polyorder=5).fit_transform(X_out)
-            X_out = SNV().fit_transform(X_out)
-
-        return X_out
-
-    return transform
-
-
-def _match_wavelengths_normalized(requested_cols, available_columns, precision=1):
-    """
-    Match wavelengths using exact precision matching after normalization.
-
-    This function solves the CARS wavelength matching bug where tolerance-based
-    matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-    Instead of tolerance-based matching, this:
-    1. Rounds both requested and available wavelengths to the same precision
-    2. Matches on the normalized string representation
-    3. Tries multiple precision levels if initial match fails
-
-    Args:
-        requested_cols: List of wavelength column names (can be strings or floats)
-        available_columns: Column names from the new DataFrame
-        precision: Decimal places to round to (default 1)
-
-    Returns:
-        List of matched column names from available_columns
-
-    Raises:
-        KeyError: If any wavelength cannot be matched
-    """
-    # Build lookup dict: normalized wavelength string -> original column name
-    col_lookup = {}
-    col_names = list(available_columns)
-
-    for col in col_names:
-        try:
-            col_float = float(col)
-            normalized_key = f"{round(col_float, precision):.{precision}f}"
-            if normalized_key not in col_lookup:
-                col_lookup[normalized_key] = col
-        except (ValueError, TypeError):
-            continue
-
-    # Match each requested wavelength
-    matched_by_index = {}  # index -> matched column
-    missing_by_index = {}  # index -> wavelength
-
-    for idx, req_col in enumerate(requested_cols):
-        try:
-            req_float = float(req_col)
-            normalized_key = f"{round(req_float, precision):.{precision}f}"
-            if normalized_key in col_lookup:
-                matched_by_index[idx] = col_lookup[normalized_key]
-            else:
-                missing_by_index[idx] = req_col
-        except (ValueError, TypeError):
-            # Non-numeric column - try direct string match
-            if req_col in col_names:
-                matched_by_index[idx] = req_col
-            else:
-                missing_by_index[idx] = req_col
-
-    # Try different precision levels for missing wavelengths
-    if missing_by_index:
-        for alt_precision in [0, 2, 3]:
-            if alt_precision == precision:
-                continue
-
-            # Rebuild lookup at alternative precision
-            col_lookup_alt = {}
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key not in col_lookup_alt:
-                        col_lookup_alt[normalized_key] = col
-                except (ValueError, TypeError):
-                    continue
-
-            # Try matching still-missing wavelengths
-            still_missing = {}
-            for idx, wl in missing_by_index.items():
-                try:
-                    wl_float = float(wl)
-                    normalized_key = f"{round(wl_float, alt_precision):.{alt_precision}f}"
-                    if normalized_key in col_lookup_alt:
-                        matched_by_index[idx] = col_lookup_alt[normalized_key]
-                    else:
-                        still_missing[idx] = wl
-                except (ValueError, TypeError):
-                    still_missing[idx] = wl
-
-            missing_by_index = still_missing
-            if not missing_by_index:
-                break
-
-    # Report any still-missing wavelengths
-    if missing_by_index:
-        missing_wls = list(missing_by_index.values())
-        raise KeyError(
-            f"Could not match all wavelength columns. "
-            f"Missing {len(missing_wls)} wavelengths: {missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-        )
-
-    # Return matched columns in original order
-    return [matched_by_index[i] for i in range(len(requested_cols))]
-
-
-class WavelengthSubsetWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
-    """
-    Sklearn-compatible wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-# ==================== CLASSIFIER WRAPPERS ====================
-# These are classification-specific versions of the wrappers above.
-# They inherit ClassifierMixin, expose predict_proba(), and have a classes_ property.
-
-
-class WavelengthSubsetClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper that applies wavelength subsetting during fit and predict.
-
-    This wrapper is clonable via sklearn.clone() because it inherits from BaseEstimator
-    and implements get_params/set_params properly.
-
-    FIXED: Uses exact precision matching instead of tolerance-based matching (±0.5nm)
-    to solve the CARS wavelength mismatch bug in ensembles.
-    """
-
-    def __init__(self, pipeline=None, wavelength_cols=None):
-        self.pipeline = pipeline
-        self.wavelength_cols = wavelength_cols
-
-    def _subset(self, X):
-        """
-        Subset X to selected wavelengths using exact precision matching.
-
-        This method solves the CARS wavelength matching bug where tolerance-based
-        matching (±0.5nm) could match wrong wavelengths or fail silently.
-        """
-        if self.wavelength_cols is None:
-            return X
-
-        if hasattr(X, 'loc'):
-            # DataFrame - use column selection
-            try:
-                return X[self.wavelength_cols]
-            except KeyError:
-                # Column name type mismatch - use normalized precision matching
-                # This fixes the CARS ensemble bug where float vs string columns caused issues
-                matching_cols = _match_wavelengths_normalized(
-                    self.wavelength_cols, X.columns, precision=1
-                )
-                return X[matching_cols]
-        else:
-            # numpy array - assume columns are already matched
-            return X
-
-    def fit(self, X, y):
-        X_subset = self._subset(X)
-        self.pipeline.fit(X_subset, y)
-        return self
-
-    def predict(self, X):
-        X_subset = self._subset(X)
-        return self.pipeline.predict(X_subset)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_subset = self._subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_subset)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'wavelength_cols': self.wavelength_cols}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        return self
-
-
-class GAPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for GA/NSGA preprocessing.
-
-    Stores preprocessing config (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self._transform = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    def fit(self, X, y):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        self.pipeline.fit(X_preproc, y)
-        return self
-
-    def predict(self, X):
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        return self.pipeline.predict(X_preproc)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_preproc)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {'pipeline': self.pipeline, 'preprocess_config': self.preprocess_config}
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset transform cache if config changes
-        if 'preprocess_config' in params:
-            self._transform = None
-        return self
-
-
-class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
-    """
-    Sklearn-compatible classifier wrapper for combined preprocessing + wavelength selection (NSGA-II).
-
-    Stores preprocessing config and column info (not the transform function) so it can be cloned.
-    The transform function is recreated from config when needed.
-    """
-
-    def __init__(self, pipeline=None, preprocess_config=None, wavelength_cols=None, all_columns=None):
-        self.pipeline = pipeline
-        self.preprocess_config = preprocess_config
-        self.wavelength_cols = wavelength_cols
-        self.all_columns = all_columns
-        self._transform = None
-        self._col_indices = None
-
-    @property
-    def transform(self):
-        """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
-            self._transform = _build_transform_from_config(self.preprocess_config)
-        return self._transform
-
-    @property
-    def col_indices(self):
-        """Lazily compute column indices."""
-        if self._col_indices is None and self.all_columns is not None and self.wavelength_cols is not None:
-            all_cols_list = list(self.all_columns)
-            self._col_indices = [all_cols_list.index(c) for c in self.wavelength_cols]
-        return self._col_indices
-
-    def _preprocess_and_subset(self, X):
-        X_arr = X.values if hasattr(X, 'values') else X
-        X_preproc = self.transform(X_arr)
-        # Subset to selected wavelengths (after preprocessing)
-        return X_preproc[:, self.col_indices]
-
-    def fit(self, X, y):
-        X_processed = self._preprocess_and_subset(X)
-        self.pipeline.fit(X_processed, y)
-        return self
-
-    def predict(self, X):
-        X_processed = self._preprocess_and_subset(X)
-        return self.pipeline.predict(X_processed)
-
-    def predict_proba(self, X):
-        """Return probability predictions for classification."""
-        X_processed = self._preprocess_and_subset(X)
-        if hasattr(self.pipeline, 'predict_proba'):
-            return self.pipeline.predict_proba(X_processed)
-        raise AttributeError(f"{type(self.pipeline).__name__} does not support predict_proba")
-
-    @property
-    def classes_(self):
-        """Return classes from the underlying classifier."""
-        if hasattr(self.pipeline, 'classes_'):
-            return self.pipeline.classes_
-        raise AttributeError(f"{type(self.pipeline).__name__} does not have classes_ attribute")
-
-    def get_params(self, deep=True):
-        return {
-            'pipeline': self.pipeline,
-            'preprocess_config': self.preprocess_config,
-            'wavelength_cols': self.wavelength_cols,
-            'all_columns': self.all_columns
-        }
-
-    def set_params(self, **params):
-        for key, value in params.items():
-            setattr(self, key, value)
-        # Reset caches if relevant params change
-        if 'preprocess_config' in params:
-            self._transform = None
-        if 'all_columns' in params or 'wavelength_cols' in params:
-            self._col_indices = None
-        return self
-
-
-def _is_wrapped_model(model):
-    """
-    Check if a model is a CARS/NSGA-II wrapped model.
-
-    These wrappers contain pipelines with StandardScaler whose parameters
-    should be preserved during ensemble CV. When models are wrapped, ensemble
-    methods should use refit_base_models=False to prevent StandardScaler
-    divergence that causes ~0.03 R² loss.
-
-    Parameters
-    ----------
-    model : object
-        A fitted model to check
-
-    Returns
-    -------
-    bool
-        True if the model is a wrapped model that should not be refitted
-    """
-    WRAPPED_TYPES = (
-        'WavelengthSubsetWrapper', 'WavelengthSubsetClassifierWrapper',
-        'GAPreprocessWrapper', 'GAPreprocessClassifierWrapper',
-        'CombinedPreprocessWrapper', 'CombinedPreprocessClassifierWrapper'
-    )
-    return type(model).__name__ in WRAPPED_TYPES
+# The ensemble base-model wrappers are persisted in saved .dasp files, so they live in
+# an importable backend module (pickles must not depend on this script being __main__).
+from spectral_predict.model_wrappers import (  # noqa: E402,F401 - re-exported names
+    CombinedPreprocessClassifierWrapper,
+    CombinedPreprocessWrapper,
+    GAPreprocessClassifierWrapper,
+    GAPreprocessWrapper,
+    WavelengthSubsetClassifierWrapper,
+    WavelengthSubsetWrapper,
+    _build_transform_from_config,
+    _match_wavelengths_normalized,
+    _subset_wavelength_columns,
+)
 
 
 def _infer_task_type_from_y(y) -> "str | None":
@@ -25468,15 +24895,19 @@ class SpectralPredictApp:
                     pipeline.fit(X_train, y_train)  # Wrapper handles preprocessing internally
 
                 elif wavelength_subset is not None and shared_prep is None:
-                    # Legacy preprocessing names with wavelength selection
-                    # Subset X_train to selected wavelengths and wrap model
-                    X_train_subset = X_train[wavelength_subset]
-                    pipeline.fit(X_train_subset, y_train)
+                    # Legacy preprocessing names with wavelength selection: the wrapper
+                    # subsets (by name, or by position for a full-width array) in both
+                    # fit and predict, so a clone refits exactly like this fit.
                     # Use classifier wrapper for classification tasks to expose predict_proba and classes_
-                    if task_type == 'classification':
-                        pipeline = WavelengthSubsetClassifierWrapper(pipeline, wavelength_subset)
-                    else:
-                        pipeline = WavelengthSubsetWrapper(pipeline, wavelength_subset)
+                    wrapper_cls = (
+                        WavelengthSubsetClassifierWrapper
+                        if task_type == "classification"
+                        else WavelengthSubsetWrapper
+                    )
+                    pipeline = wrapper_cls(
+                        pipeline, wavelength_subset, all_columns=list(X_train.columns)
+                    )
+                    pipeline.fit(X_train, y_train)
                 else:
                     # Fit on training data (standard path - full spectrum)
                     pipeline.fit(X_train, y_train)
@@ -25721,8 +25152,17 @@ class SpectralPredictApp:
                 self._log_progress(f"RUNNING ENSEMBLE METHODS")
             self._log_progress(f"{'='*70}")
 
-            from spectral_predict.ensemble import create_ensemble
-            from sklearn.model_selection import cross_val_predict
+            if task_type != 'regression':
+                # Every caller should already stop here; this keeps a classification run
+                # (string or numeric class labels) from being fitted as regression.
+                self._log_progress(
+                    f"[!] Ensemble methods support regression only (task: {task_type}); "
+                    f"skipping ensembles."
+                )
+                return None, None
+
+            from spectral_predict.ensemble import create_ensemble, cross_validate_ensembles
+            from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
             # Select models for ensemble based on context
             if is_manual_retrain:
@@ -25768,11 +25208,9 @@ class SpectralPredictApp:
             models = [m[0] for m in reconstructed]
             model_names = [m[1] for m in reconstructed]
 
-            # Detect wrapped models (CARS/NSGA-II) - these should not be refitted during
-            # ensemble CV to avoid StandardScaler divergence that causes ~0.03 R² loss
-            any_wrapped = any(_is_wrapped_model(m) for m in models)
-            if any_wrapped:
-                self._log_progress(f"[*] Detected wrapped models (CARS/NSGA-II) - using original fitted models")
+            # Positional targets for every ensemble fit and CV split. y_filtered keeps the
+            # specimen-ID index; y_filtered[train_idx] is a label lookup under pandas 3.
+            y_arr = np.asarray(y_filtered, dtype=float).ravel()
 
             # NOTE: We do NOT extract preprocessor_configs here because the reconstructed
             # models are already wrapped with preprocessing (GAPreprocessWrapper,
@@ -25801,78 +25239,80 @@ class SpectralPredictApp:
             n_regions = self.ensemble_n_regions.get()
             self._log_progress(f"Number of regions: {n_regions}")
 
+            def _outer_cv(cv_models, cv_names):
+                """Honest ensemble CV: base models refitted inside every outer fold."""
+                n_outer = min(5, len(y_arr))
+                self._log_progress(
+                    f"Cross-validating ensembles ({n_outer}-fold): base models are refitted "
+                    f"on each outer training fold; weights are learned from inner "
+                    f"out-of-fold predictions."
+                )
+                cv_result = cross_validate_ensembles(
+                    cv_models,
+                    cv_names,
+                    X_filtered,
+                    y_arr,
+                    [etype for etype, _ in ensemble_methods],
+                    n_regions=n_regions,
+                    n_splits=n_outer,
+                    inner_cv=5,
+                    random_state=42,
+                )
+                for note in cv_result.notes:
+                    self._log_progress(f"   [CV] {note}")
+                return cv_result
+
+            def _log_excluded(ens):
+                for excluded_name, reason in getattr(ens, "excluded_models_", []) or []:
+                    self._log_progress(
+                        f"   [!] {excluded_name} excluded from this ensemble: its "
+                        f"out-of-fold refit failed ({reason})"
+                    )
+
             # Train and evaluate each ensemble method
             ensemble_results = []
             trained_ensembles = {}
+            cv_result = _outer_cv(models, model_names)
 
             for ensemble_type, ensemble_name in ensemble_methods:
                 try:
                     self._log_progress(f"\n--- Training {ensemble_name} ---")
 
-                    # Create ensemble
+                    if ensemble_type in cv_result.errors:
+                        # No honest CV estimate -> do not offer the ensemble at all.
+                        self._log_progress(
+                            f"[X] {ensemble_name} failed in cross-validation: "
+                            f"{cv_result.errors[ensemble_type]}"
+                        )
+                        continue
+
+                    # Deployed ensemble: full-data base models; weights / meta-model from
+                    # inner out-of-fold refits over all calibration rows.
                     # NOTE: No preprocessor_configs - models already have preprocessing built-in
-                    # For wrapped models (CARS/NSGA-II), disable refitting to preserve scaler stats
                     ensemble = create_ensemble(
                         models=models,
                         model_names=model_names,
                         X=X_filtered,
-                        y=y_filtered,
+                        y=y_arr,
                         ensemble_type=ensemble_type,
                         n_regions=n_regions,
-                        cv=min(5, len(y_filtered)),  # Use 5-fold or less if small dataset
-                        refit_base_models=not any_wrapped,  # False for wrapped models
+                        cv=min(5, len(y_arr)),  # Use 5-fold or less if small dataset
+                        refit_base_models=True,
                     )
+                    _log_excluded(ensemble)
 
-                    # Use cross-validation to get realistic metrics (comparable to RMSECV)
-                    # Without CV, ensemble metrics on training data would be inflated
-                    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                    from sklearn.model_selection import KFold
-                    import numpy as np
-
-                    n_cv_folds = min(5, len(y_filtered))
-                    if n_cv_folds >= 2:
-                        kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                        cv_predictions = np.full(len(y_filtered), np.nan)
-
-                        for train_idx, val_idx in kf.split(X_filtered):
-                            # Re-fit ensemble on CV training fold
-                            # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
-                            if hasattr(X_filtered, 'iloc'):
-                                X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                            else:
-                                X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                            y_cv_train = y_filtered[train_idx]
-
-                            cv_ensemble = create_ensemble(
-                                models=models,
-                                model_names=model_names,
-                                X=X_cv_train,
-                                y=y_cv_train,
-                                ensemble_type=ensemble_type,
-                                n_regions=n_regions,
-                                cv=min(5, len(y_cv_train)),
-                                refit_base_models=not any_wrapped,  # False for wrapped models
-                            )
-                            cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
-
-                        # Calculate CV metrics (realistic, comparable to individual models)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, cv_predictions))
-                        r2 = r2_score(y_filtered, cv_predictions)
-                        mae = mean_absolute_error(y_filtered, cv_predictions)
-                    else:
-                        # Fallback for very small datasets
-                        ensemble_pred = ensemble.predict(X_filtered)
-                        rmse = np.sqrt(mean_squared_error(y_filtered, ensemble_pred))
-                        r2 = r2_score(y_filtered, ensemble_pred)
-                        mae = mean_absolute_error(y_filtered, ensemble_pred)
+                    cv_predictions = cv_result.predictions[ensemble_type]
+                    rmse = np.sqrt(mean_squared_error(y_arr, cv_predictions))
+                    r2 = r2_score(y_arr, cv_predictions)
+                    mae = mean_absolute_error(y_arr, cv_predictions)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
-                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+                    rpd = np.std(y_arr) / rmse if rmse > 0 else 0
 
                     # Compute calibration metrics (ensemble prediction on training data)
                     cal_predictions = ensemble.predict(X_filtered)
-                    cal_rmse = np.sqrt(mean_squared_error(y_filtered, cal_predictions))
-                    cal_r2 = r2_score(y_filtered, cal_predictions)
+                    cal_rmse = np.sqrt(mean_squared_error(y_arr, cal_predictions))
+                    cal_r2 = r2_score(y_arr, cal_predictions)
 
                     # Compute validation metrics if validation set is available
                     val_rmse = None
@@ -25928,7 +25368,9 @@ class SpectralPredictApp:
                         'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
                         'rpd': rpd,
-                        'ensemble': ensemble
+                        'ensemble': ensemble,
+                        # Honest out-of-fold predictions (saved for uncertainty intervals)
+                        'cv_predictions': cv_predictions,
                     })
 
                     # Store trained ensemble
@@ -25950,9 +25392,6 @@ class SpectralPredictApp:
                 self._log_progress(f"{'='*70}")
 
                 from spectral_predict.ensemble import select_top_models_quartile_flat
-                from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-                from sklearn.model_selection import KFold
-                import numpy as np
 
                 quartile_top_n = self.ensemble_quartile_top_n.get()
                 quartile_selection = select_top_models_quartile_flat(
@@ -25994,62 +25433,45 @@ class SpectralPredictApp:
                         q_models = [m[0] for m in quartile_reconstructed]
                         q_model_names = [m[1] for m in quartile_reconstructed]
 
+                        q_cv_result = _outer_cv(q_models, q_model_names)
+
                         # Run same ensemble methods with "(Quartile)" suffix
                         for ensemble_type, ensemble_name in ensemble_methods:
                             quartile_ensemble_name = f"{ensemble_name} (Quartile)"
                             try:
                                 self._log_progress(f"\n--- Training {quartile_ensemble_name} ---")
 
+                                if ensemble_type in q_cv_result.errors:
+                                    self._log_progress(
+                                        f"[X] {quartile_ensemble_name} failed in "
+                                        f"cross-validation: {q_cv_result.errors[ensemble_type]}"
+                                    )
+                                    continue
+
                                 # Create ensemble with quartile-selected models
                                 q_ensemble = create_ensemble(
                                     models=q_models,
                                     model_names=q_model_names,
                                     X=X_filtered,
-                                    y=y_filtered,
+                                    y=y_arr,
                                     ensemble_type=ensemble_type,
                                     n_regions=n_regions,
-                                    cv=min(5, len(y_filtered)),
+                                    cv=min(5, len(y_arr)),
+                                    refit_base_models=True,
                                 )
+                                _log_excluded(q_ensemble)
 
-                                # Use cross-validation for realistic metrics
-                                n_cv_folds = min(5, len(y_filtered))
-                                if n_cv_folds >= 2:
-                                    kf = KFold(n_splits=n_cv_folds, shuffle=True, random_state=42)
-                                    q_cv_predictions = np.full(len(y_filtered), np.nan)
+                                q_cv_predictions = q_cv_result.predictions[ensemble_type]
+                                q_rmse = np.sqrt(mean_squared_error(y_arr, q_cv_predictions))
+                                q_r2 = r2_score(y_arr, q_cv_predictions)
+                                q_mae = mean_absolute_error(y_arr, q_cv_predictions)
 
-                                    for train_idx, val_idx in kf.split(X_filtered):
-                                        if hasattr(X_filtered, 'iloc'):
-                                            X_cv_train, X_cv_val = X_filtered.iloc[train_idx], X_filtered.iloc[val_idx]
-                                        else:
-                                            X_cv_train, X_cv_val = X_filtered[train_idx], X_filtered[val_idx]
-                                        y_cv_train = y_filtered[train_idx]
-
-                                        q_cv_ensemble = create_ensemble(
-                                            models=q_models,
-                                            model_names=q_model_names,
-                                            X=X_cv_train,
-                                            y=y_cv_train,
-                                            ensemble_type=ensemble_type,
-                                            n_regions=n_regions,
-                                            cv=min(5, len(y_cv_train)),
-                                        )
-                                        q_cv_predictions[val_idx] = q_cv_ensemble.predict(X_cv_val)
-
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_cv_predictions))
-                                    q_r2 = r2_score(y_filtered, q_cv_predictions)
-                                    q_mae = mean_absolute_error(y_filtered, q_cv_predictions)
-                                else:
-                                    q_ensemble_pred = q_ensemble.predict(X_filtered)
-                                    q_rmse = np.sqrt(mean_squared_error(y_filtered, q_ensemble_pred))
-                                    q_r2 = r2_score(y_filtered, q_ensemble_pred)
-                                    q_mae = mean_absolute_error(y_filtered, q_ensemble_pred)
-
-                                q_rpd = np.std(y_filtered) / q_rmse if q_rmse > 0 else 0
+                                q_rpd = np.std(y_arr) / q_rmse if q_rmse > 0 else 0
 
                                 # Compute calibration metrics
                                 q_cal_predictions = q_ensemble.predict(X_filtered)
-                                q_cal_rmse = np.sqrt(mean_squared_error(y_filtered, q_cal_predictions))
-                                q_cal_r2 = r2_score(y_filtered, q_cal_predictions)
+                                q_cal_rmse = np.sqrt(mean_squared_error(y_arr, q_cal_predictions))
+                                q_cal_r2 = r2_score(y_arr, q_cal_predictions)
 
                                 self._log_progress(f"> {quartile_ensemble_name} Results:")
                                 self._log_progress(f"   RMSE:   {q_cal_rmse:.4f} (cal)")
@@ -26069,7 +25491,8 @@ class SpectralPredictApp:
                                     'r2': q_r2,
                                     'mae': q_mae,
                                     'rpd': q_rpd,
-                                    'ensemble': q_ensemble
+                                    'ensemble': q_ensemble,
+                                    'cv_predictions': q_cv_predictions,
                                 })
 
                                 # Store trained ensemble
@@ -34807,17 +34230,10 @@ For detailed documentation, see the User Guide.
                 messagebox.showerror("Error", "Cannot determine wavelengths from training data.")
                 return
 
-            # Determine task type from target column or results
-            task_type = 'regression'  # Default
-            if hasattr(self, 'task_type'):
-                task_type = self.task_type.get()
-            elif hasattr(self, 'y') and self.y is not None:
-                # Infer from data
-                import numpy as np
-                if not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = 'classification'
-                elif len(self.y.dropna().unique()) < 20:
-                    task_type = 'classification'
+            # GUI ensembles are regression-only (_train_ensembles is never run for
+            # classification). Reading the task radio here saved 'auto' when it was left
+            # on auto-detect, which also dropped the CV residuals below.
+            task_type = "regression"
 
             # Get preprocessing information from results DataFrame if available
             preprocessing = 'unknown'
@@ -34853,20 +34269,27 @@ For detailed documentation, see the User Guide.
                 X_train = self.ensemble_X.values
                 self._log_progress(f"Including applicability domain data ({X_train.shape[0]} samples)")
 
-            # Get CV data if available (from ensemble predictions)
+            # CV data for uncertainty: the honest out-of-fold predictions from ensemble
+            # training. Never re-predict the training rows with the deployed ensemble:
+            # those are calibration predictions, and intervals from them are too narrow.
             cv_residuals = None
             cv_predictions = None
             cv_actuals = None
-            if hasattr(self, 'ensemble_y') and self.ensemble_y is not None:
-                cv_actuals = self.ensemble_y.values if hasattr(self.ensemble_y, 'values') else np.array(self.ensemble_y)
-                # Get ensemble predictions
-                try:
-                    cv_predictions = ensemble.predict(self.ensemble_X.values if hasattr(self.ensemble_X, 'values') else self.ensemble_X)
-                    if task_type == 'regression':
+            oof_predictions = selected_result.get("cv_predictions")
+            if getattr(self, "ensemble_y", None) is not None and oof_predictions is not None:
+                actuals = np.asarray(self.ensemble_y, dtype=float).ravel()
+                oof_predictions = np.asarray(oof_predictions, dtype=float).ravel()
+                if len(oof_predictions) == len(actuals):
+                    cv_actuals = actuals
+                    cv_predictions = oof_predictions
+                    if task_type == "regression":
                         cv_residuals = cv_predictions - cv_actuals
-                    self._log_progress(f"Including uncertainty estimation data")
-                except Exception as e:
-                    self._log_progress(f"Warning: Could not generate CV predictions: {e}")
+                    self._log_progress("Including out-of-fold CV predictions for uncertainty")
+            if cv_predictions is None:
+                self._log_progress(
+                    "No out-of-fold CV predictions stored for this ensemble (re-train "
+                    "ensembles to include them); uncertainty data omitted"
+                )
 
             # Get preprocessor if available (usually None for ensembles as preprocessing is in pipelines)
             preprocessor = None
@@ -46662,8 +46085,11 @@ External Validation Performance (n={n_val}):
             return model_dict
 
         if suffix == '.pkl':
+            from spectral_predict.model_wrappers import LegacyWrapperUnpickler
+
+            # A raw pickle may hold a GUI-era wrapper (__main__.GAPreprocessWrapper, ...).
             with open(path, 'rb') as f:
-                model_data = pickle.load(f)
+                model_data = LegacyWrapperUnpickler(f).load()
 
             normalized = self._normalize_legacy_model_dict(model_data, filepath=str(path))
             if normalized is not None:
