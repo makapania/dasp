@@ -782,7 +782,14 @@ def truncate_booster(model, n_rounds: int) -> None:
         n_rounds: Round count to keep.
     """
     est = _final_estimator(model)
+    if isinstance(n_rounds, bool) or not isinstance(n_rounds, (int, np.integer)):
+        raise ValueError(f"Round count must be a positive integer, got {n_rounds!r}")
     k = int(n_rounds)
+    configured = booster_max_rounds(est)
+    if not 1 <= k <= configured:
+        # Validated before anything is mutated. A LightGBM model may hold FEWER trees
+        # than configured (no split improved the loss); that is allowed.
+        raise ValueError(f"Round count {k} is outside 1..{configured} (configured rounds)")
     if isinstance(est, XGBOOST_MODELS):
         booster = est.get_booster()
         if booster.num_boosted_rounds() > k:
@@ -830,16 +837,45 @@ def round_truncation_from_row(row) -> Optional[tuple]:
     default is in play, as with CatBoost's automatic learning rate).
     """
     getter = row.get if hasattr(row, "get") else (lambda k, d=None: d)
-    flag = getter("round_selection_truncated", None)
-    fit_rounds = getter("n_estimators_fit", None)
-    selected = getter("n_estimators_selected", None)
-    try:
-        if not flag or fit_rounds is None or selected is None:
-            return None
-        fit_rounds, selected = int(fit_rounds), int(selected)
-    except (TypeError, ValueError):
+    if not _parse_bool(getter("round_selection_truncated", None)):
+        return None
+    fit_rounds = _parse_count(getter("n_estimators_fit", None))
+    selected = _parse_count(getter("n_estimators_selected", None))
+    if fit_rounds is None or selected is None or selected > fit_rounds:
+        if fit_rounds is not None or selected is not None:
+            logger.warning(
+                "Ignoring inconsistent round-truncation metadata: fit=%r selected=%r",
+                getter("n_estimators_fit", None),
+                getter("n_estimators_selected", None),
+            )
         return None
     return fit_rounds, selected
+
+
+def _parse_bool(value) -> bool:
+    """Row flag as bool: True/1/"True"/"1"/"yes"; NaN, None, "" and anything else False."""
+    if value is None or isinstance(value, float) and np.isnan(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (int, np.integer)):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
+
+
+def _parse_count(value) -> Optional[int]:
+    """Positive integer round count from a row cell (int, integral float or digit string)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(number) or number < 1 or number != int(number):
+        return None
+    return int(number)
 
 
 def strip_eval_only_params(model) -> None:
@@ -869,7 +905,10 @@ def strip_eval_only_params(model) -> None:
     elif isinstance(est, LIGHTGBM_MODELS):
         updates = {k: None for k in _LGBM_EARLY_STOP_KEYS if params.get(k) is not None}
     elif CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
-        updates = {k: None for k in _CATBOOST_EVAL_KEYS if params.get(k) is not None}
+        # Remove the keys: CatBoost rejects od_type=None at fit, and its get_params
+        # drops None values, so a nulled key would break a later sklearn clone.
+        for key in _CATBOOST_EVAL_KEYS:
+            est._init_params.pop(key, None)
         if params.get("use_best_model"):
             updates["use_best_model"] = False
     if updates:

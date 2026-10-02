@@ -199,3 +199,29 @@ def test_resumed_run_completion_still_releases_the_record(gui_app, run_state_tmp
     assert rs.resume_run(meta.run_id) is not None
     gui_app._complete_run_state_after_search(meta.run_id)
     assert rs.find_incomplete_run() is None
+
+
+def test_check_failure_then_failed_attempt_then_successful_retry_releases_record(
+    gui_app, run_state_tmp, immediate_after
+):
+    """Round 3 #4: the "not continued" mark belongs to one launch attempt. A resume
+    check failure followed by a failed attempt must not stop a later successful retry
+    of the same run from completing and releasing the record."""
+    rs = run_state_tmp
+    meta = _crashed_run(rs, "auto", gui_mode=None, with_store=True)
+    assert rs.resume_run(meta.run_id) is not None
+    with patch("tkinter.messagebox.showwarning"):
+        gui_app._progress_callback({"message": "could not check", "resume_check_failed": True})
+    gui_app._complete_run_state_after_search(meta.run_id, n_model_errors=1)  # failed attempt
+    assert rs.find_incomplete_run() is not None  # paused, still resumable
+
+    assert rs.resume_run(meta.run_id) is not None  # retry: saved trials continued
+    gui_app._complete_run_state_after_search(meta.run_id)
+    assert rs.find_incomplete_run() is None
+
+
+def test_launch_resets_the_not_continued_mark(gui_app, run_state_tmp):
+    gui_app._resume_not_continued_run_id = "stale"
+    with patch.object(gui_app, "_uses_bayesian_run_state", return_value=False):
+        gui_app._confirm_resume_before_launch()
+    assert gui_app._resume_not_continued_run_id is None

@@ -43,6 +43,29 @@ from .contamination import (
 CATBOOST_RUNTIME_PARAMS: Mapping[str, Any] = MappingProxyType({"allow_writing_files": False})
 
 
+def catboost_from_row_params(params: Mapping[str, Any], task_type: str = "regression"):
+    """Build a CatBoost estimator from a results-row ``Params`` dict ONLY.
+
+    CatBoost's ``get_params`` reports just the arguments that were set, so a row's
+    Params omit every automatic default (learning rate, leaf-estimation iterations,
+    ...). Starting from ``get_model``'s defaults would inject values the scored model
+    never had (e.g. ``learning_rate=0.1``); building from the stored params keeps
+    those defaults automatic, so the rebuild is the scored configuration.
+
+    Args:
+        params: Bare CatBoost constructor params from the row.
+        task_type: ``'regression'`` or ``'classification'``.
+
+    Returns:
+        An unfitted CatBoostRegressor / CatBoostClassifier.
+    """
+    kwargs = with_catboost_runtime_params(params)
+    if not any(k in kwargs for k in ("verbose", "silent", "logging_level", "verbose_eval")):
+        kwargs["verbose"] = False
+    cls = CatBoostClassifier if task_type == "classification" else CatBoostRegressor
+    return cls(**kwargs)
+
+
 def with_catboost_runtime_params(params: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Return a copy of CatBoost constructor kwargs with the runtime-only kwargs filled in.
 

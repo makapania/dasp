@@ -445,8 +445,14 @@ def _rebuild_model_from_row(row: pd.Series, task_type: str, *, autoscale: bool =
 
         model_kwargs = estimator_params_from_row(model_kwargs)
 
-    # Apply parameters using set_params (same as Model Dev tab)
-    if model_kwargs:
+    # Apply parameters using set_params (same as Model Dev tab). CatBoost is built
+    # from the stored params alone: its Params omit automatic defaults, which
+    # get_model's explicit defaults (learning_rate=0.1, ...) would otherwise replace.
+    if model_kwargs and model_name == "CatBoost":
+        from .models import catboost_from_row_params
+
+        model = catboost_from_row_params(model_kwargs, task_type)
+    elif model_kwargs:
         try:
             model.set_params(**model_kwargs)
         except Exception as e:
@@ -5205,13 +5211,13 @@ def _run_single_config(
         # maximum round count and truncated to the selected count, so the final model
         # is exactly what the CV curve was read from (round-dependent defaults
         # included) and the captured Params report the selected count.
-        n_rounds_fit = None
         if n_rounds_selected is not None:
             pipe = clone(pipe)
-            n_rounds_fit = booster_max_rounds(pipe)
+            _max_rounds = booster_max_rounds(pipe)
         pipe.fit(X, y)
         if n_rounds_selected is not None:
             truncate_booster(pipe, n_rounds_selected)
+            n_rounds_fit = _max_rounds  # set only once the truncated model exists
 
         # Get the fitted model from pipeline for parameter capture
         # IMPORTANT: For PLS-DA and other multi-step pipelines without "model" step,
@@ -5438,7 +5444,9 @@ def _run_single_config(
         # The final model was fitted at n_estimators_fit rounds and truncated to
         # n_estimators_selected; rebuilds reproduce it (cv_utils.round_truncation_from_row).
         "n_estimators_fit": n_rounds_fit,
-        "round_selection_truncated": n_rounds_selected is not None,
+        # False whenever the final refit failed: Params then hold the configured
+        # params, and the flags must not claim a truncated model.
+        "round_selection_truncated": n_rounds_fit is not None,
         # Store actual imbalance settings for Model Development tab to use
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,

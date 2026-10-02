@@ -2903,8 +2903,25 @@ def _with_selected_rounds(params_str: str, overrides: Dict[str, Any]) -> str:
 
 
 def _record_round_selection(row: Dict[str, Any], boost: Dict[str, Any]) -> None:
-    """Params carry the selected count; the row records the fit-then-truncate procedure."""
-    row["Params"] = _with_selected_rounds(row["Params"], {boost["rounds_key"]: boost["n_rounds"]})
+    """Params carry the selected count; the row records the fit-then-truncate procedure.
+
+    A Params string that cannot be rewritten never aborts the whole conversion: the
+    row is kept, marked ``round_selection_truncated=False`` (its Params still hold the
+    configured count, so a rebuild fits that), and a warning is logged.
+    """
+    try:
+        params = _with_selected_rounds(row["Params"], {boost["rounds_key"]: boost["n_rounds"]})
+    except ValueError as exc:
+        logger.warning(
+            "NSGA-II row kept without its selected round count (%s); it rebuilds at the "
+            "configured count.", exc,
+        )
+        warnings.warn(f"NSGA-II row Params could not record the selected round count: {exc}")
+        row["n_estimators_selected"] = None
+        row["n_estimators_fit"] = None
+        row["round_selection_truncated"] = False
+        return
+    row["Params"] = params
     row["Parameters"] = row["Params"]
     row["n_estimators_selected"] = boost["n_rounds"]
     row["n_estimators_fit"] = boost["fit_rounds"]

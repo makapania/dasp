@@ -1111,3 +1111,431 @@ def test_nsga2_rows_record_truncation_and_parseable_params(task):
         assert int(row["n_estimators_fit"]) >= int(row["n_estimators_selected"])
         assert bool(row["round_selection_truncated"])
     assert best.iloc[0]["imbalance_method"] == imbalance
+
+
+# --- Review round 3 -------------------------------------------------------------------
+
+
+def _catboost_eval_configured():
+    from catboost import CatBoostRegressor
+
+    return CatBoostRegressor(
+        iterations=30,
+        learning_rate=0.1,
+        od_type="Iter",
+        od_wait=5,
+        od_pval=None,
+        early_stopping_rounds=5,
+        verbose=0,
+        thread_count=1,
+        allow_writing_files=False,
+    )
+
+
+@pytest.mark.parametrize("es", [0, 10], ids=["selection-disabled", "selection-on"])
+def test_sanitized_catboost_can_be_cloned_and_fitted(es):
+    """Round 3 #3: eval-only keys are removed (not nulled): clone + fit still work."""
+    from spectral_predict.cv_utils import sanitize_booster
+
+    X, y = _regression_data()
+    model = _catboost_eval_configured()
+    clean = sanitize_booster(model)
+    for key in ("od_type", "od_wait", "early_stopping_rounds"):
+        assert key not in clean.get_params()
+    clone(clean).fit(X, y)
+    preds = cross_val_predict_with_early_stopping(model, X, y, KFold(3), early_stopping_rounds=es)
+    assert preds.shape == y.shape
+
+
+def test_sanitized_catboost_rejected_selection_can_be_cloned_and_fitted():
+    from catboost import CatBoostRegressor
+
+    X, y = _regression_data()
+    model = CatBoostRegressor(
+        iterations=20,
+        learning_rate=0.1,
+        model_shrink_rate=0.1,
+        od_type="Iter",
+        od_wait=5,
+        verbose=0,
+        thread_count=1,
+        allow_writing_files=False,
+    )
+    with pytest.warns(UserWarning, match="selection skipped"):
+        preds = cross_val_predict_with_early_stopping(
+            model, X, y, KFold(3), early_stopping_rounds=5
+        )
+    assert preds.shape == y.shape
+
+
+def test_truncate_booster_validates_the_round_count():
+    """Round 3 #7: k must be a positive integer within the configured rounds, checked
+    before anything changes; a LightGBM model that built fewer trees is allowed."""
+    from catboost import CatBoostRegressor
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import truncate_booster
+
+    X, y = _regression_data()
+    for model in (
+        XGBRegressor(n_estimators=10, n_jobs=1),
+        LGBMRegressor(n_estimators=10, verbose=-1),
+        CatBoostRegressor(iterations=10, learning_rate=0.1, verbose=0, allow_writing_files=False),
+    ):
+        model.fit(X, y)
+        before = model.predict(X)
+        for bad in (0, -1, 11, 2.5, "3", True):
+            with pytest.raises(ValueError):
+                truncate_booster(model, bad)
+        np.testing.assert_array_equal(model.predict(X), before)  # untouched
+        truncate_booster(model, 10)  # boundary: all configured rounds
+        truncate_booster(model, np.int64(1))  # boundary: one round
+    # LightGBM may stop early: fewer trees than configured is fine.
+    sparse = LGBMRegressor(n_estimators=50, min_child_samples=100, verbose=-1).fit(X, y)
+    assert sparse.booster_.current_iteration() < 50
+    truncate_booster(sparse, 40)
+
+
+@pytest.mark.parametrize(
+    ("row", "expected"),
+    [
+        (
+            {"round_selection_truncated": True, "n_estimators_fit": 60, "n_estimators_selected": 9},
+            (60, 9),
+        ),
+        (
+            {
+                "round_selection_truncated": "True",
+                "n_estimators_fit": "60",
+                "n_estimators_selected": 9.0,
+            },
+            (60, 9),
+        ),
+        (
+            {
+                "round_selection_truncated": 1,
+                "n_estimators_fit": 60.0,
+                "n_estimators_selected": "9",
+            },
+            (60, 9),
+        ),
+        (
+            {
+                "round_selection_truncated": "False",
+                "n_estimators_fit": 60,
+                "n_estimators_selected": 9,
+            },
+            None,
+        ),
+        (
+            {
+                "round_selection_truncated": float("nan"),
+                "n_estimators_fit": 60,
+                "n_estimators_selected": 9,
+            },
+            None,
+        ),
+        (
+            {
+                "round_selection_truncated": True,
+                "n_estimators_fit": float("nan"),
+                "n_estimators_selected": 9,
+            },
+            None,
+        ),
+        (
+            {"round_selection_truncated": True, "n_estimators_fit": 60, "n_estimators_selected": 0},
+            None,
+        ),
+        (
+            {"round_selection_truncated": True, "n_estimators_fit": 8, "n_estimators_selected": 9},
+            None,
+        ),
+        (
+            {
+                "round_selection_truncated": True,
+                "n_estimators_fit": 60,
+                "n_estimators_selected": 9.5,
+            },
+            None,
+        ),
+        ({}, None),
+    ],
+)
+def test_round_truncation_metadata_is_parsed_explicitly(row, expected):
+    from spectral_predict.cv_utils import round_truncation_from_row
+
+    assert round_truncation_from_row(pd.Series(row) if row else row) == expected
+
+
+def test_truncation_private_attributes_exist():
+    """Version sentinel: truncate_booster relies on these library internals."""
+    from catboost import CatBoostRegressor
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+
+    X, y = _regression_data()
+    xgb_model = XGBRegressor(n_estimators=5, n_jobs=1).fit(X, y)
+    assert xgb_model.get_booster() is xgb_model._Booster
+    assert xgb_model.get_booster()[:2].num_boosted_rounds() == 2
+    lgb_model = LGBMRegressor(n_estimators=5, verbose=-1).fit(X, y)
+    assert lgb_model.booster_ is lgb_model._Booster
+    cb_model = CatBoostRegressor(
+        iterations=5, learning_rate=0.1, verbose=0, allow_writing_files=False
+    ).fit(X, y)
+    assert isinstance(cb_model._init_params, dict) and "iterations" in cb_model._init_params
+    assert callable(cb_model.shrink)
+
+
+def test_truncated_booster_survives_model_io_round_trip(tmp_path):
+    from catboost import CatBoostRegressor
+
+    from spectral_predict.cv_utils import truncate_booster
+    from spectral_predict.model_io import load_model, predict_with_model, save_model
+
+    X, y = _regression_data()
+    model = CatBoostRegressor(
+        iterations=40, random_seed=0, verbose=0, thread_count=1, allow_writing_files=False
+    ).fit(X, y)
+    truncate_booster(model, 7)
+    expected = model.predict(X)
+    path = tmp_path / "truncated.dasp"
+    save_model(
+        model,
+        None,
+        {
+            "model_name": "CatBoost",
+            "task_type": "regression",
+            "wavelengths": list(range(X.shape[1])),
+            "n_vars": X.shape[1],
+        },
+        path,
+    )
+    loaded = load_model(path)
+    assert loaded["model"].tree_count_ == 7
+    np.testing.assert_array_equal(predict_with_model(loaded, X), expected)
+
+
+def test_fitted_target_transform_wrapper_truncation():
+    from sklearn.compose import TransformedTargetRegressor
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import booster_predict_at, truncate_booster
+
+    X, y = _regression_data()
+    y = y - y.min() + 1.0
+    wrapped = TransformedTargetRegressor(
+        regressor=Pipeline(
+            [("scaler", StandardScaler()), ("model", XGBRegressor(n_estimators=30, n_jobs=1))]
+        ),
+        func=np.log,
+        inverse_func=np.exp,
+    ).fit(X, y)
+    inner = wrapped.regressor_
+    expected = np.exp(booster_predict_at(inner.steps[-1][1], inner[:-1].transform(X), 6))
+    truncate_booster(wrapped, 6)
+    np.testing.assert_allclose(wrapped.predict(X), expected, rtol=1e-12)
+
+
+def test_grid_row_rebuilds_to_the_reported_model_in_validation():
+    """Round 3 #2: a CatBoost grid row whose learning rate was automatic rebuilds (fit at
+    n_estimators_fit, truncate) to the reported model: validating on the calibration
+    data itself reproduces the row's calibration RMSE."""
+    from spectral_predict.search import compute_validation_metrics_for_top_models, run_search
+
+    X, y = _regression_data()
+    # Integer wavelengths: all_vars is written with %g (R031, fixed elsewhere), which
+    # would otherwise drop columns in the validation rebuild.
+    wl = np.arange(1000.0, 1000.0 + X.shape[1])
+    df, _ = run_search(
+        pd.DataFrame(X, columns=wl),
+        pd.Series(y),
+        "regression",
+        folds=3,
+        tier="quick",
+        models_to_test=["CatBoost"],
+        enabled_models=["CatBoost"],
+        preprocessing_methods={"raw": True},
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        catboost_iterations_list=[40],
+        catboost_depths=[3],
+        catboost_learning_rates=[None],
+        catboost_l2_leaf_reg_list=[3.0],
+        catboost_border_count_list=[32],
+        catboost_bagging_temperature_list=[1.0],
+        catboost_random_strength_list=[1.0],
+        early_stopping_rounds=10,
+    )
+    row = df.iloc[0]
+    assert bool(row["round_selection_truncated"])
+    assert "learning_rate" not in ast.literal_eval(row["Params"])  # automatic
+    out = compute_validation_metrics_for_top_models(
+        df.head(1), X, y, X, y, "regression", wl, top_n=1
+    )
+    assert out.iloc[0]["RMSEP"] == pytest.approx(row["RMSE"], rel=1e-9)
+
+
+def test_native_model_exports_to_the_same_rounds_and_predictions():
+    """Round 3 #2: a native CatBoost model (automatic learning rate) -> its row -> export
+    reproduces the selected count and the final model's predictions."""
+    from catboost import CatBoostRegressor
+
+    from spectral_predict.code_generator import CodeGenerator, ExportOptions
+    from spectral_predict.cv_utils import truncate_booster
+
+    X, y = _regression_data()
+    base = dict(
+        iterations=40, depth=3, random_state=0, verbose=0, thread_count=1, allow_writing_files=False
+    )
+    native = CatBoostRegressor(**base)
+    cv = KFold(n_splits=5, shuffle=True, random_state=42)
+    res = cross_val_boosting_rounds(native, X, y, cv, patience=10)
+    final = clone(native).fit(X, y)
+    truncate_booster(final, res.n_rounds)
+    row_params = dict(final.get_params())  # what the results row stores (count = k)
+    assert "learning_rate" not in row_params
+    config = {
+        "model_name": "CatBoost",
+        "preprocessing": "raw",
+        "task_type": "regression",
+        "target_name": "target",
+        "params": row_params,
+        "metrics": {},
+        "cv_folds": 5,
+        "cv_strategy": "kfold",
+        "cv_n_repeats": 5,
+        "imbalance_method": None,
+        "imbalance_params": {},
+        "autoscale": False,
+        "variable_indices": None,
+        "variable_selection_method": None,
+        "trim_derivative_edges": False,
+        "inlier_class_label": "",
+        "wavelengths": list(range(X.shape[1])),
+        "early_stopping_rounds": 10,
+        "n_estimators_selected": res.n_rounds,
+        "n_estimators_fit": 40,
+        "round_selection_truncated": True,
+    }
+    opts = ExportOptions(
+        format="script",
+        include_data=True,
+        data_X=X,
+        data_y=y,
+        wavelengths=None,
+        include_visualization=False,
+    )
+    ns: dict = {}
+    exec(CodeGenerator(config, opts).generate_script(), ns)
+    assert ns["N_BOOST_ROUNDS"] == res.n_rounds
+    np.testing.assert_array_equal(ns["model"].predict(X), final.predict(X))
+
+
+def test_export_reports_calibration_of_the_truncated_model():
+    """Round 3 #1: the exported calibration metrics describe the final (truncated) model."""
+    from lightgbm import LGBMRegressor  # noqa: F401  (export imports it)
+
+    from spectral_predict.code_generator import CodeGenerator, ExportOptions
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(40, 20))
+    y = rng.normal(size=40)  # noise: the pooled curve picks very few rounds
+    params = {
+        "n_estimators": 60,
+        "learning_rate": 0.3,
+        "num_leaves": 7,
+        "min_child_samples": 3,
+        "random_state": 0,
+        "n_jobs": 1,
+        "verbosity": -1,
+    }
+    config = {
+        "model_name": "LightGBM",
+        "preprocessing": "raw",
+        "task_type": "regression",
+        "target_name": "target",
+        "params": params,
+        "metrics": {},
+        "cv_folds": 5,
+        "cv_strategy": "kfold",
+        "cv_n_repeats": 5,
+        "imbalance_method": None,
+        "imbalance_params": {},
+        "autoscale": False,
+        "variable_indices": None,
+        "variable_selection_method": None,
+        "trim_derivative_edges": False,
+        "inlier_class_label": "",
+        "wavelengths": list(range(20)),
+        "early_stopping_rounds": 10,
+    }
+    for fmt in ("script", "notebook"):
+        opts = ExportOptions(
+            format=fmt,
+            include_data=True,
+            data_X=X,
+            data_y=y,
+            wavelengths=None,
+            include_visualization=False,
+            colab_ready=False,
+        )
+        gen = CodeGenerator(config, opts)
+        ns: dict = {}
+        if fmt == "script":
+            exec(gen.generate_script(), ns)
+        else:
+            for cell in gen.generate_notebook()["cells"]:
+                code = "".join(cell["source"])
+                if cell["cell_type"] == "code" and "subprocess.check_call" not in code:
+                    exec(code, ns)
+        assert ns["N_BOOST_ROUNDS"] < 60
+        X_used = next(ns[k] for k in ("X_final", "X_processed", "X") if k in ns)
+        own = ns["model"].predict(X_used)
+        assert ns["cal_rmse"] == pytest.approx(float(np.sqrt(np.mean((y - own) ** 2))), rel=1e-12)
+
+
+def test_nsga2_malformed_params_row_is_kept_without_truncation():
+    """Round 3 #6: one unparseable Params string must not abort the conversion."""
+    from spectral_predict.nsga2_search import _record_round_selection
+
+    row = {"Params": "{'n_estimators': 50, 'missing': nan}"}
+    with pytest.warns(UserWarning, match="could not record"):
+        _record_round_selection(
+            row, {"rounds_key": "n_estimators", "n_rounds": 7, "fit_rounds": 50}
+        )
+    assert row["round_selection_truncated"] is False
+    assert row["n_estimators_selected"] is None
+    assert row["Params"] == "{'n_estimators': 50, 'missing': nan}"
+
+
+def test_failed_final_refit_does_not_claim_a_truncated_model(monkeypatch):
+    """GLM LOW 8: if the final refit fails, the flags must not claim truncation."""
+    import spectral_predict.search as search_mod
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("refit failed")
+
+    monkeypatch.setattr(search_mod, "truncate_booster", boom)
+    from lightgbm import LGBMRegressor
+
+    X, y = _regression_data()
+    row = search_mod._run_single_config(
+        X,
+        y,
+        np.linspace(1000.0, 1100.0, X.shape[1]),
+        LGBMRegressor(n_estimators=30, verbose=-1),
+        "LightGBM",
+        {},
+        {"name": "raw", "deriv": 0, "window": 0, "polyorder": 0},
+        KFold(3, shuffle=True, random_state=0),
+        "regression",
+        False,
+        skip_preprocessing=True,
+        early_stopping_rounds=10,
+    )
+    assert row["round_selection_truncated"] is False
+    assert row["n_estimators_fit"] is None

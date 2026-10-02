@@ -2667,6 +2667,16 @@ def _launch_settings_snapshot(app):
         return None
 
 
+def _round_truncation_metadata(refined_config, selected_model_config) -> dict:
+    """Booster fit-then-truncate metadata for an export: the Tab 7 refit's own values
+    when it ran a round selection, else the loaded results row's."""
+    keys = ('n_estimators_selected', 'n_estimators_fit', 'round_selection_truncated')
+    if refined_config and refined_config.get('round_selection_truncated'):
+        return {k: refined_config.get(k) for k in keys}
+    source = selected_model_config or {}
+    return {k: source.get(k) for k in keys}
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -26846,6 +26856,8 @@ class SpectralPredictApp:
         self._pending_bayesian_models = None
         self._pending_bayesian_n_trials = None
         self._pending_analysis_settings = None
+        # "Saved trials not continued" is scoped to one launch attempt.
+        self._resume_not_continued_run_id = None
         if not self._uses_bayesian_run_state():
             return True
         # Round 12 (Codex): the Bayesian worker reads its settings only from this
@@ -27339,14 +27351,18 @@ class SpectralPredictApp:
         with ``analysis_run_id=None``) may omit it; it falls back to
         ``self.search_controller`` for them.
         """
+        # "Saved trials not continued" belongs to this launch attempt only: read it
+        # and clear it on every completion path (also reset at every launch).
+        not_continued = (
+            analysis_run_id is not None
+            and getattr(self, "_resume_not_continued_run_id", None) == analysis_run_id
+        )
+        self._resume_not_continued_run_id = None
         if analysis_run_id is None:
             return
         if controller is None:
             controller = getattr(self, "search_controller", None)
         stopped = controller is not None and controller.is_end_requested()
-        not_continued = (
-            getattr(self, "_resume_not_continued_run_id", None) == analysis_run_id
-        )
         if not_continued and not (n_model_errors or stopped):
             # The resume was accepted, but some saved trials could not be continued
             # (the backend declined them), so this run's success is a replacement,
@@ -27365,7 +27381,6 @@ class SpectralPredictApp:
                 self._log_progress(
                     f"[RUN] Could not release the resumed run's in-memory claim: {_cr_err}"
                 )
-            self._resume_not_continued_run_id = None
             return
         if n_model_errors or stopped:
             why = (
@@ -40529,7 +40544,14 @@ F1 Score:  {f1:.4f}
                                 continue
                             else:
                                 filtered_params[key] = val
-                        if filtered_params:
+                        if filtered_params and model_name == 'CatBoost':
+                            # CatBoost Params omit automatic defaults (learning rate,
+                            # leaf-estimation iterations); build from them alone so
+                            # get_model's explicit defaults do not replace those.
+                            from spectral_predict.models import catboost_from_row_params
+                            model = catboost_from_row_params(filtered_params, task_type)
+                            print(f"DEBUG: Built CatBoost from saved search parameters: {filtered_params}")
+                        elif filtered_params:
                             model.set_params(**filtered_params)
                             print(f"DEBUG: Applied saved search parameters: {filtered_params}")
                         else:
@@ -42240,7 +42262,13 @@ External Validation Performance (n={n_val}):
                 'use_full_spectrum_preprocessing': use_full_spectrum_preprocessing,
                 'ga_genes': self.refined_ga_genes,
                 'ga_config': self.refined_ga_config,
-                'ga_model_type': self.refined_ga_model_type
+                'ga_model_type': self.refined_ga_model_type,
+                # Boosters: this refit's own round selection (fitted at
+                # n_estimators_fit, truncated to n_estimators_selected). Saves and
+                # exports prefer these over the loaded row's values.
+                'n_estimators_selected': n_rounds_selected,
+                'n_estimators_fit': n_rounds_max if n_rounds_selected is not None else None,
+                'round_selection_truncated': n_rounds_selected is not None,
             }
 
             # Add coupled optimization params if present
@@ -42843,18 +42871,7 @@ External Validation Performance (n={n_val}):
                     ),
                     # Boosters: fitted at n_estimators_fit, truncated to the selected
                     # count; the export reproduces that procedure.
-                    'n_estimators_selected': (
-                        self.selected_model_config.get('n_estimators_selected')
-                        if self.selected_model_config else None
-                    ),
-                    'n_estimators_fit': (
-                        self.selected_model_config.get('n_estimators_fit')
-                        if self.selected_model_config else None
-                    ),
-                    'round_selection_truncated': (
-                        self.selected_model_config.get('round_selection_truncated')
-                        if self.selected_model_config else None
-                    ),
+                    **_round_truncation_metadata(self.refined_config, self.selected_model_config),
                     # T-36: autoscale flag — exported scripts must apply UV scaling after
                     # SNV/derivatives if it was active during training, else they will not
                     # reproduce the saved model.

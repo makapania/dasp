@@ -805,3 +805,15 @@ Gotchas worth knowing:
   - XGBoost supports dropout under gbtree (rate_drop / one_drop): prefix-unsafe like DART.
   - The export's regression final-model template prints CCC with `_lins_ccc`, which only the CV section defines, so
     a regression export without CV raises NameError (pre-existing, not fixed here).
+- **Review round 3 (Codex BLOCK; GLM merge-with-fixes) gotchas:**
+  - CatBoost `get_params` reports only the arguments that were set, so a row's Params omit automatic defaults.
+    Rebuilding from `get_model("CatBoost")` (or the export's DEFAULT_PARAMS) and then `set_params` silently injects
+    `learning_rate=0.1` etc. CatBoost rows are now built from their stored params alone
+    (`models.catboost_from_row_params`): validation rebuild, Tab 7, export.
+  - CatBoost drops None-valued keys when reconstructing, and `od_type=None` fails at fit: eval-only keys are now
+    REMOVED from `_init_params` rather than nulled, or a later sklearn clone raises KeyError.
+  - The export's final-model template computes calibration metrics right after `model.fit(...)`: truncation must be
+    spliced in immediately after that line, not appended after the section.
+  - `_resume_not_continued_run_id` must be scoped to one launch attempt (reset at launch and on every completion path).
+  - all_vars is written with %g (R031, other branch): tests that round-trip a row through the validation rebuild need
+    integer wavelengths, or columns are silently dropped.

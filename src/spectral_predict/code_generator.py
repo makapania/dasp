@@ -965,7 +965,13 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             )
         else:
             default_key = self._resolve_default_param_key()
-            params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
+            if model_class.startswith('CatBoost') and params:
+                # CatBoost Params omit automatic defaults (learning rate, leaf-
+                # estimation iterations): injecting DEFAULT_PARAMS would export a
+                # different model than the one scored. Use the stored params only.
+                params_full = {}
+            else:
+                params_full = DEFAULT_PARAMS.get(default_key, {}).copy()
             params_full.update(params)
 
             # Per-library balanced-loss kwarg name (None = no constructor knob;
@@ -1738,7 +1744,18 @@ strip_eval_only_params(model)
 
     def _render_final_model(self) -> str:
         """Render final model training code (boosters: fit, then truncate)."""
-        return self._render_final_model_body() + self._render_final_round_truncation()
+        body = self._render_final_model_body()
+        truncation = self._render_final_round_truncation()
+        if not truncation:
+            return body
+        # Truncate right after the final fit, BEFORE any calibration prediction or
+        # metric, so everything the script reports describes the truncated model.
+        import re
+
+        match = re.search(r"^model\.fit\(.*\)[ \t]*$", body, flags=re.MULTILINE)
+        if match is None:
+            raise ValueError("Final-model template has no top-level model.fit(...) line")
+        return body[: match.end()] + "\n" + truncation + body[match.end():]
 
     def _render_final_model_body(self) -> str:
         """Render the final model fit."""
