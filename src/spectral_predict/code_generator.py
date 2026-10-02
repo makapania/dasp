@@ -22,6 +22,7 @@ from .templates.validation import (
     get_cross_validation_template,
     get_metrics_template,
     get_final_model_template,
+    get_metric_helpers_template,
     get_prediction_template,
     FINAL_MODEL_TEMPLATE,
     PREDICTION_TEMPLATE,
@@ -222,6 +223,12 @@ class CodeGenerator:
         # 8. Model instantiation
         sections.append(self._render_model())
 
+        # Metric helpers (_lins_ccc / _one_class_metrics): used by both the CV
+        # and final-model blocks, so emitted even when CV is disabled.
+        metric_helpers = get_metric_helpers_template(self.task_type)
+        if metric_helpers:
+            sections.append(metric_helpers)
+
         # 9. Cross-validation
         if self.options.include_cross_validation:
             # Per-fold fit helper: mirrors cv_utils._fit_with_early_stopping so
@@ -364,6 +371,7 @@ class CodeGenerator:
         # See _render_fit_fold_helper for the in-app parity rationale.
         model_cv_code = (
             self._render_model() + '\n' +
+            get_metric_helpers_template(self.task_type) + '\n' +
             self._render_fit_fold_helper() + '\n' +
             self._render_cross_validation() + '\n' +
             self._render_metrics()
@@ -1980,6 +1988,7 @@ rmse = float(np.sqrt(mean_squared_error(all_y_true_arr, all_y_pred_arr)))
 r2 = float(r2_score(all_y_true_arr, all_y_pred_arr))
 mae = float(mean_absolute_error(all_y_true_arr, all_y_pred_arr))
 rpd = np.std(y) / rmse
+ccc = _lins_ccc(all_y_true_arr, all_y_pred_arr)
 
 # Keep y_pred_cv for compatibility with visualization
 y_pred_cv = all_y_pred_arr

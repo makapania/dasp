@@ -157,11 +157,12 @@ def test_run_analysis_accepts_multiclass_engine_selection(gui_app):
     started = {"v": False}
 
     class _FakeThread:
-        def __init__(self, target, args, daemon):
-            self._t, self._a = target, args
+        # Mirror threading.Thread's signature: _run_analysis passes kwargs=.
+        def __init__(self, target=None, args=(), kwargs=None, daemon=None, **_ignored):
+            self._t, self._a, self._k = target, tuple(args), dict(kwargs or {})
 
         def start(self):
-            self._t(*self._a)
+            self._t(*self._a, **self._k)
 
     def _stub_worker(*_a, **_k):
         started["v"] = True

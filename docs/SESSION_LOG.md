@@ -902,3 +902,18 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
+
+## 2026-10-02 - fix/preexisting-test-export: export metric helpers + multiclass fake Thread
+
+- **Export NameErrors came from helpers defined inside the CV block.** `_lins_ccc` (regression) and
+  `_one_class_metrics` (one-class) lived in the CV templates, yet the final-model block calls them too, so any
+  script exported with `include_cross_validation=False` died at calibration metrics. One-class had the same bug
+  as regression. Both now live in `templates/validation.py` (`LINS_CCC_HELPER`, `ONE_CLASS_METRICS_HELPER`,
+  `get_metric_helpers_template`); `CodeGenerator` emits them once after the model block, in the script and in
+  the notebook's model/CV cell. The imbalance-aware regression CV block (`_render_cross_validation_with_imbalance`)
+  never set `ccc`, which the shared metrics block prints: a third NameError, fixed with one line.
+  Classification exports have no shared helper and were fine. Separate, not fixed: imbalance regression with
+  PLS fails because `PLSRegression.fit` takes no `sample_weight`.
+- **`test_run_analysis_accepts_multiclass_engine_selection`: the test was wrong, not the code.** Its fake
+  `threading.Thread` took only `(target, args, daemon)`; `_run_analysis` correctly passes `kwargs=`. The fake
+  now mirrors Thread's signature and forwards args and kwargs.

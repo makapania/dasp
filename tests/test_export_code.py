@@ -1025,5 +1025,55 @@ def test_autoscale_omitted_when_false():
     )
 
 
+_REG_CFG = {'model_name': 'PLS', 'preprocessing': 'snv', 'task_type': 'regression',
+            'params': {'n_components': 3}, 'cv_folds': 3}
+_CLS_CFG = {'model_name': 'PLS-DA', 'preprocessing': 'snv', 'task_type': 'classification',
+            'params': {'n_components': 3}, 'cv_folds': 3}
+_OC_CFG = {'model_name': 'IsolationForest', 'preprocessing': 'snv', 'task_type': 'one_class',
+           'params': {}, 'cv_folds': 3, 'inlier_class_label': '1'}
+
+
+@pytest.mark.parametrize('config, y_kind, include_cv, expect', [
+    # Final-model block prints calibration CCC via _lins_ccc, which used to be
+    # defined only inside the CV block -> NameError with CV disabled.
+    (_REG_CFG, 'reg', False, 'Calibration CCC'),
+    # Final-model block calls _one_class_metrics, same defect.
+    (_OC_CFG, 'oc', False, 'Calibration Balanced Accuracy'),
+    (_CLS_CFG, 'cls', False, 'Final model trained'),
+    # Imbalance-aware regression CV never computed `ccc`, which the shared
+    # metrics block prints.
+    ({**_REG_CFG, 'model_name': 'Ridge', 'params': {'alpha': 1.0},
+      'imbalance_method': 'binning'}, 'reg', True, 'CCC:'),
+], ids=['regression-no-cv', 'one-class-no-cv', 'classification-no-cv',
+        'regression-imbalance-cv'])
+def test_exported_script_runs_with_metric_helpers(config, y_kind, include_cv, expect, temp_dir):
+    """Exported scripts must define every metric helper they call, with or
+    without the CV section."""
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(40, 30))
+    y = {
+        'reg': rng.normal(size=40),
+        'cls': np.array([0, 1] * 20),
+        'oc': np.array([1] * 34 + [-1] * 6),
+    }[y_kind]
+    options = ExportOptions(
+        include_visualization=False,
+        include_prediction_template=False,
+        format='script',
+        include_data=True,
+        data_X=X,
+        data_y=y,
+        wavelengths=np.linspace(1000, 2500, 30),
+        include_cross_validation=include_cv,
+    )
+    script_path = Path(temp_dir) / 'export_metric_helpers.py'
+    CodeGenerator(config, options).save_script(str(script_path))
+
+    result = subprocess.run([sys.executable, str(script_path)], capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0, f"Script execution failed:\n{result.stderr}"
+    assert expect in result.stdout
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v', '--tb=short'])
