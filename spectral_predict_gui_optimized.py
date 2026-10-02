@@ -34045,6 +34045,15 @@ For detailed documentation, see the User Guide.
 
     def _on_result_double_click(self, event):
         """Handle double-click on a result row."""
+        # R010: a Model Development run is in progress. Refuse BEFORE touching
+        # selected_model_config (both the refine and multiclass branches set it).
+        if getattr(self, '_refit_active', False):
+            messagebox.showwarning(
+                "Model Run In Progress",
+                "A Model Development run is still in progress. Load another result "
+                "once it has finished.",
+            )
+            return
         selection = self.results_tree.selection()
         if not selection:
             return
@@ -37467,7 +37476,10 @@ Performance (Classification):
 
     def _plot_regression_predictions(self):
         """Plot scatter of reference vs predicted for regression."""
-        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+        # One refit for this plot AND its click callbacks (R010): a later publication
+        # must not pair this plot's points with another run's specimens.
+        plot_state = self._refined_state
+        if plot_state.get('y_true') is None or plot_state.get('y_pred') is None:
             return
 
         # Clear existing plot
@@ -37507,16 +37519,16 @@ Performance (Classification):
         fig = Figure(figsize=(8, 6))
         ax = fig.add_subplot(111)
 
-        y_true = self.refined_y_true
-        y_pred = self.refined_y_pred
+        y_true = plot_state.get('y_true')
+        y_pred = plot_state.get('y_pred')
 
         # Get color variable selection
         color_by = self.regression_pred_color_var.get()
 
         # Resolve specimen IDs for label-based metadata/set lookup
-        specimen_ids = getattr(self, 'refined_specimen_ids', None)
-        if specimen_ids is None and hasattr(self, 'refined_cv_indices') and self.y is not None:
-            specimen_ids = self.y.index[self.refined_cv_indices].tolist()
+        specimen_ids = plot_state.get('specimen_ids')
+        if specimen_ids is None and plot_state.get('cv_indices') is not None and self.y is not None:
+            specimen_ids = self.y.index[plot_state.get('cv_indices')].tolist()
 
         # Resolve color values using shared helper
         color_values, is_categorical, color_label = self._resolve_cv_color_values(
@@ -37636,15 +37648,15 @@ Performance (Classification):
 
             if distances[nearest_idx] < threshold:
                 # Map CV index back to original specimen index
-                if self.refined_cv_indices is not None:
-                    original_idx = self.refined_cv_indices[nearest_idx]
+                if plot_state.get('cv_indices') is not None:
+                    original_idx = plot_state.get('cv_indices')[nearest_idx]
                     y_actual = y_true[nearest_idx]
                     y_predicted = y_pred[nearest_idx]
                     residual = y_actual - y_predicted
 
                     # Get specimen label for exclusion
-                    specimen_label = (self.refined_specimen_ids[nearest_idx]
-                                     if hasattr(self, 'refined_specimen_ids')
+                    specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
+                                     if plot_state.get('specimen_ids') is not None
                                      else self.y.index[original_idx])
 
                     if event.button == 1:  # Left click - annotation + exclude button
@@ -38591,7 +38603,10 @@ F1 Score:  {f1:.4f}
 
     def _plot_regression_residual_diagnostics(self):
         """Plot residual diagnostics for regression."""
-        if not hasattr(self, 'refined_y_true') or not hasattr(self, 'refined_y_pred'):
+        # One refit for this plot AND its click callbacks (R010): a later publication
+        # must not pair this plot's points with another run's specimens.
+        plot_state = self._refined_state
+        if plot_state.get('y_true') is None or plot_state.get('y_pred') is None:
             return
 
         from spectral_predict.diagnostics import compute_residuals, qq_plot_data
@@ -38619,8 +38634,8 @@ F1 Score:  {f1:.4f}
         plot_container = ttk.Frame(self.residual_diagnostics_frame)
         plot_container.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        y_true = self.refined_y_true
-        y_pred = self.refined_y_pred
+        y_true = plot_state.get('y_true')
+        y_pred = plot_state.get('y_pred')
 
         # Compute residuals
         residuals, std_residuals = compute_residuals(y_true, y_pred)
@@ -38629,9 +38644,9 @@ F1 Score:  {f1:.4f}
         color_by = self.residual_color_var.get()
 
         # Resolve specimen IDs for label-based metadata/set lookup
-        specimen_ids = getattr(self, 'refined_specimen_ids', None)
-        if specimen_ids is None and hasattr(self, 'refined_cv_indices') and self.y is not None:
-            specimen_ids = self.y.index[self.refined_cv_indices].tolist()
+        specimen_ids = plot_state.get('specimen_ids')
+        if specimen_ids is None and plot_state.get('cv_indices') is not None and self.y is not None:
+            specimen_ids = self.y.index[plot_state.get('cv_indices')].tolist()
 
         # Resolve color values using shared helper
         color_values, is_categorical, color_label = self._resolve_cv_color_values(
@@ -38703,15 +38718,15 @@ F1 Score:  {f1:.4f}
             y_range = ax1.get_ylim()[1] - ax1.get_ylim()[0]
             threshold = 0.1 * np.sqrt(x_range**2 + y_range**2)
 
-            if distances[nearest_idx] < threshold and self.refined_cv_indices is not None:
-                original_idx = self.refined_cv_indices[nearest_idx]
+            if distances[nearest_idx] < threshold and plot_state.get('cv_indices') is not None:
+                original_idx = plot_state.get('cv_indices')[nearest_idx]
                 y_actual = y_true[nearest_idx]
                 y_predicted = y_pred[nearest_idx]
                 residual_val = residuals[nearest_idx]
 
                 # Get specimen label for exclusion
-                specimen_label = (self.refined_specimen_ids[nearest_idx]
-                                 if hasattr(self, 'refined_specimen_ids')
+                specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
+                                 if plot_state.get('specimen_ids') is not None
                                  else self.y.index[original_idx])
 
                 if event.button == 1:  # Left click
@@ -38747,15 +38762,15 @@ F1 Score:  {f1:.4f}
 
             # Find nearest index
             bar_idx = int(round(event.xdata))
-            if 0 <= bar_idx < len(residuals) and self.refined_cv_indices is not None:
-                original_idx = self.refined_cv_indices[bar_idx]
+            if 0 <= bar_idx < len(residuals) and plot_state.get('cv_indices') is not None:
+                original_idx = plot_state.get('cv_indices')[bar_idx]
                 y_actual = y_true[bar_idx]
                 y_predicted = y_pred[bar_idx]
                 residual_val = residuals[bar_idx]
 
                 # Get specimen label for exclusion
-                specimen_label = (self.refined_specimen_ids[bar_idx]
-                                 if hasattr(self, 'refined_specimen_ids')
+                specimen_label = (plot_state.get('specimen_ids')[bar_idx]
+                                 if plot_state.get('specimen_ids') is not None
                                  else self.y.index[original_idx])
 
                 if event.button == 1:  # Left click
@@ -39027,16 +39042,19 @@ F1 Score:  {f1:.4f}
 
     def _plot_regression_leverage_diagnostics(self):
         """Plot leverage diagnostics for regression."""
-        if not hasattr(self, 'refined_config'):
+        # One refit for this plot AND its click callbacks (R010): a later publication
+        # must not pair this plot's points with another run's specimens.
+        plot_state = self._refined_state
+        if plot_state.get('config') is None:
             return
 
-        model_name = self.refined_config.get('model_name')
+        model_name = plot_state.get('config').get('model_name')
 
         # Leverage only meaningful for linear models (PLS, Ridge, Lasso, ElasticNet)
         if model_name not in ['PLS', 'Ridge', 'Lasso', 'ElasticNet']:
             return
 
-        if not hasattr(self, 'refined_X_cv') or self.refined_X_cv is None:
+        if plot_state.get('X_cv') is None or plot_state.get('X_cv') is None:
             return  # Need X data for leverage calculation
 
         from spectral_predict.diagnostics import compute_leverage
@@ -39046,7 +39064,7 @@ F1 Score:  {f1:.4f}
             widget.destroy()
 
         # Compute leverage on the CV data
-        X_data = self.refined_X_cv
+        X_data = plot_state.get('X_cv')
         leverage, threshold_2p = compute_leverage(X_data)
 
         # Calculate 3p/n threshold manually
@@ -39117,12 +39135,12 @@ F1 Score:  {f1:.4f}
             x_range = ax.get_xlim()[1] - ax.get_xlim()[0]
             threshold = 0.05 * x_range
 
-            if abs(indices[nearest_idx] - click_x) < threshold and self.refined_cv_indices is not None:
-                original_idx = self.refined_cv_indices[nearest_idx]
-                y_value = self.refined_y_true[nearest_idx] if hasattr(self, 'refined_y_true') else None
+            if abs(indices[nearest_idx] - click_x) < threshold and plot_state.get('cv_indices') is not None:
+                original_idx = plot_state.get('cv_indices')[nearest_idx]
+                y_value = plot_state.get('y_true')[nearest_idx] if plot_state.get('y_true') is not None else None
                 leverage_val = leverage[nearest_idx]
-                specimen_label = (self.refined_specimen_ids[nearest_idx]
-                                  if hasattr(self, 'refined_specimen_ids')
+                specimen_label = (plot_state.get('specimen_ids')[nearest_idx]
+                                  if plot_state.get('specimen_ids') is not None
                                   else self.y.index[original_idx])
 
                 # Determine leverage category
@@ -39996,26 +40014,29 @@ F1 Score:  {f1:.4f}
         generation = self._refit_generation
         self._refit_active = True
         try:
+            # Freeze every input on the Tk thread before the worker starts (R010/R050).
+            run_inputs = self._capture_refit_inputs()
             thread = threading.Thread(
-                target=self._refit_worker, args=(generation,), daemon=True
+                target=self._refit_worker, args=(generation, run_inputs), daemon=True
             )
             thread.start()
         except Exception as e:  # e.g. RuntimeError: can't start new thread
             # The worker never ran, so its finally will not release the run.
+            # (or the inputs could not be read)
             logger.error("Could not start the Model Development run: %s", e)
             self._end_refit(generation)
             self.refine_status.config(text="[X] Could not start the model run")
             self._restore_refit_buttons_after_abort()
             messagebox.showerror("Error", f"Could not start the model run:\n{e}")
 
-    def _refit_worker(self, generation: int) -> None:
+    def _refit_worker(self, generation: int, run_inputs: dict | None = None) -> None:
         """Thread body: run the refit, then mark it finished on the Tk thread.
 
         The finish callback is queued after any result callbacks the run queued, so
         the run counts as active until its results have been published.
         """
         try:
-            self._run_refined_model_thread()
+            self._run_refined_model_thread(run_inputs)
         finally:
             self.root.after(0, lambda: self._end_refit(generation))
 
@@ -40048,25 +40069,105 @@ F1 Score:  {f1:.4f}
         if self.refined_model is not None and self._refined_model_token is not None:
             self._set_refit_dependent_buttons('normal')
 
-    def _run_refined_model_thread(self):
-        """Execute the refined model in a background thread."""
+    def _capture_refit_inputs(self) -> dict:
+        """Freeze everything a Model Development run reads, on the Tk thread (R010/R050).
+
+        The worker reads only this dict, never the live Results selection, Tk
+        variables or data attributes, so a row double-clicked, a widget changed or a
+        dataset loaded mid-run cannot leak into the run or into what Save/Export
+        later describe. ``training`` is the part published with the model.
+        """
+
+        def _copy(value):
+            if isinstance(value, (list, set, dict)):
+                return type(value)(value)
+            return value
+
+        model_widget = self.refine_model_type.get()
+        hyperparams = {}
+        for name in {model_widget, 'PLS'}:  # 'PLS': the worker's PLS-DA remap target
+            try:
+                hyperparams[name] = self._collect_refine_hyperparams(name)
+            except Exception as e:  # the worker treated a failing collection as "none"
+                logger.warning("Could not read %s hyperparameter widgets: %s", name, e)
+                hyperparams[name] = {}
+        validation_enabled = bool(self.validation_enabled.get())
+        training = {
+            'row': (
+                dict(self.selected_model_config)
+                if self.selected_model_config is not None
+                else None
+            ),
+            'autoscale': bool(self.use_autoscale.get()),
+            'data_type': self.current_data_type.get(),
+            'x_unit': self.current_x_unit.get(),
+            'validation_enabled': validation_enabled,
+            'validation_indices': (
+                list(self.validation_indices) if self.validation_indices else []
+            ),
+            'validation_algorithm': (
+                self.validation_algorithm.get() if validation_enabled else None
+            ),
+            'inlier_class_label': self.inlier_class_label.get(),
+        }
+        loaded = getattr(self, 'loaded_model_config', None)
+        return {
+            'training': training,
+            'row': training['row'],
+            'loaded_model_config': dict(loaded) if loaded else None,
+            'X': self.X,
+            'X_original': self.X_original,
+            'y': self.y,
+            'active_indices': _copy(self.active_indices),
+            'excluded_spectra': _copy(self.excluded_spectra),
+            'validation_X': self.validation_X,
+            'validation_y': self.validation_y,
+            'validation_indices': training['validation_indices'],
+            'original_wavelength_order': _copy(self._original_wavelength_order),
+            'model_loaded_from_results': self.model_loaded_from_results,
+            'refine_hyperparams_modified': self.refine_hyperparams_modified,
+            'wl_spec_text': self.refine_wl_spec.get('1.0', 'end'),
+            'refine_y_transform': getattr(
+                self, 'refine_y_transform', tk.StringVar(value='None')
+            ).get(),
+            'refine_task_type': self.refine_task_type.get(),
+            'refine_model_type': model_widget,
+            'refine_preprocess': self.refine_preprocess.get(),
+            'refine_window': self.refine_window.get(),
+            'refine_window_custom': self.refine_window_custom.get(),
+            'refine_folds': self.refine_folds.get(),
+            'refine_cv_strategy': self.refine_cv_strategy.get(),
+            'refine_cv_n_repeats': self.refine_cv_n_repeats.get(),
+            'refine_max_iter': self.refine_max_iter.get(),
+            'max_n_components': self.max_n_components.get(),
+            'inlier_class_label': self.inlier_class_label.get(),
+            'baseline_params': self._get_baseline_params(),
+            'smoothing_params': self._get_smoothing_params(),
+            'refine_hyperparams': hyperparams,
+            'ga_genes': self.refined_ga_genes,
+            'ga_config': self.refined_ga_config,
+            'ga_model_type': self.refined_ga_model_type,
+        }
+
+    def _run_refined_model_thread(self, run_inputs: dict | None = None):
+        """Execute the refined model in a background thread.
+
+        ``run_inputs`` is the frozen view of every widget and selection the run uses
+        (``_capture_refit_inputs``), taken on the Tk thread before the worker starts;
+        the worker never reads the live selection or Tk variables (R010/R050). When
+        called directly (tests), it is captured here, on the calling thread.
+        """
         try:
-            # R010/R050: the Results-row settings and autoscale flag this run starts
-            # with, published with the model so Save/Export describe the trained
-            # model even if another row is selected later (or a later run fails).
-            run_training = {
-                'row': (
-                    dict(self.selected_model_config)
-                    if self.selected_model_config is not None
-                    else None
-                ),
-                'autoscale': bool(self.use_autoscale.get()),
-            }
+            if run_inputs is None:
+                run_inputs = self._capture_refit_inputs()
+            # Published with the model so Save/Export describe the trained model even if
+            # another row is selected or a widget changes later (or a later run fails).
+            run_training = run_inputs['training']
             # GA wavelength selection this run uses (updated below if GA runs now);
             # frozen into the published config rather than re-read at publish time.
-            run_ga_genes = self.refined_ga_genes
-            run_ga_config = self.refined_ga_config
-            run_ga_model_type = self.refined_ga_model_type
+            run_ga_genes = run_inputs['ga_genes']
+            run_ga_config = run_inputs['ga_config']
+            run_ga_model_type = run_inputs['ga_model_type']
             from spectral_predict.models import PLSDA_HEAD_DEFAULTS, get_model, split_plsda_params
             from spectral_predict.preprocess import SavgolDerivative, SNV
             from spectral_predict.cv_utils import build_cv_splitter
@@ -40076,24 +40177,24 @@ F1 Score:  {f1:.4f}
             from spectral_predict.cv_utils import is_boosting_model, _fit_with_early_stopping
 
             # Parse wavelength specification
-            available_wl = self.X_original.columns.astype(float).values
-            wl_spec_text = self.refine_wl_spec.get('1.0', 'end')
+            available_wl = run_inputs['X_original'].columns.astype(float).values
+            wl_spec_text = run_inputs['wl_spec_text']
 
             print(f"\nDEBUG: WAVELENGTH PARSING START")
             print(f"DEBUG: Wavelength spec text (first 200 chars): {wl_spec_text[:200]}")
             print(f"DEBUG: Available wavelengths: {len(available_wl)} total")
-            print(f"DEBUG: Stored _original_wavelength_order: {self._original_wavelength_order[:10] if self._original_wavelength_order else None}...")
+            print(f"DEBUG: Stored _original_wavelength_order: {run_inputs['original_wavelength_order'][:10] if run_inputs['original_wavelength_order'] else None}...")
 
             # CRITICAL FIX: Use stored wavelength order if available (from double-click load)
             # This bypasses the fragile format→parse round-trip that was causing R² mismatches
             # NOTE: We trust the _on_wavelength_spec_changed callback to clear
             # _original_wavelength_order when user manually edits (line 23701-23703)
             # Removed fragile string comparison that could fail due to formatting differences
-            if self._original_wavelength_order is not None and len(self._original_wavelength_order) > 0:
+            if run_inputs['original_wavelength_order'] is not None and len(run_inputs['original_wavelength_order']) > 0:
                 # Use stored wavelength order directly - this ensures exact match with Results tab
-                print(f"DEBUG: Using stored wavelength order directly (n={len(self._original_wavelength_order)})")
+                print(f"DEBUG: Using stored wavelength order directly (n={len(run_inputs['original_wavelength_order'])})")
                 print(f"DEBUG: This ensures exact wavelength order match with Results tab")
-                selected_wl = [float(wl) for wl in self._original_wavelength_order]
+                selected_wl = [float(wl) for wl in run_inputs['original_wavelength_order']]
             else:
                 # No stored order (user edited manually or full spectrum) - parse as usual
                 print(f"DEBUG: No stored wavelength order - parsing spec text")
@@ -40108,15 +40209,15 @@ F1 Score:  {f1:.4f}
 
             # DIAGNOSTIC: Compare reconstructed wavelengths with original all_vars
             print(f"\nDEBUG: Checking wavelength reconstruction...")
-            print(f"DEBUG: hasattr(self, 'loaded_model_config') = {hasattr(self, 'loaded_model_config')}")
-            if hasattr(self, 'loaded_model_config'):
-                print(f"DEBUG: self.loaded_model_config exists = {self.loaded_model_config is not None}")
-                if self.loaded_model_config:
-                    all_vars_str = self.loaded_model_config.get('all_vars', 'N/A')
+            print(f"DEBUG: hasattr(self, 'loaded_model_config') = {run_inputs['loaded_model_config'] is not None}")
+            if True:
+                print(f"DEBUG: run_inputs['loaded_model_config'] exists = {run_inputs['loaded_model_config'] is not None}")
+                if run_inputs['loaded_model_config']:
+                    all_vars_str = run_inputs['loaded_model_config'].get('all_vars', 'N/A')
                     print(f"DEBUG: all_vars_str = {all_vars_str[:100] if all_vars_str and all_vars_str != 'N/A' else all_vars_str}...")
 
-            if hasattr(self, 'loaded_model_config') and self.loaded_model_config:
-                all_vars_str = self.loaded_model_config.get('all_vars', 'N/A')
+            if run_inputs['loaded_model_config']:
+                all_vars_str = run_inputs['loaded_model_config'].get('all_vars', 'N/A')
                 if all_vars_str != 'N/A' and all_vars_str:
                     try:
                         # Parse original wavelengths from all_vars
@@ -40181,10 +40282,10 @@ F1 Score:  {f1:.4f}
 
             # Filter data source to selected wavelengths
             # Create mapping from float wavelengths to actual column names
-            if self.X is not None:
-                wavelength_columns = self.X.columns
+            if run_inputs['X'] is not None:
+                wavelength_columns = run_inputs['X'].columns
             else:
-                wavelength_columns = self.X_original.columns
+                wavelength_columns = run_inputs['X_original'].columns
 
             wl_to_col = {float(col): col for col in wavelength_columns}
 
@@ -40195,16 +40296,16 @@ F1 Score:  {f1:.4f}
                 raise ValueError(f"Could not find matching wavelengths. Selected: {len(selected_wl)}, Found: 0")
 
             # Determine CV strategy and how many folds we'll run
-            cv_strategy = self.refine_cv_strategy.get()
-            cv_n_repeats = self.refine_cv_n_repeats.get()
-            n_folds = self.refine_folds.get()
+            cv_strategy = run_inputs['refine_cv_strategy']
+            cv_n_repeats = run_inputs['refine_cv_n_repeats']
+            n_folds = run_inputs['refine_folds']
 
             # Validate CV folds match original training if available
-            if hasattr(self, 'loaded_model_config') and self.loaded_model_config:
+            if run_inputs['loaded_model_config']:
                 # Check if we have CV fold information from original training
-                original_folds = self.loaded_model_config.get('cv_folds', None)
-                if original_folds is None and 'training_config' in self.loaded_model_config:
-                    original_folds = self.loaded_model_config['training_config'].get('folds', None)
+                original_folds = run_inputs['loaded_model_config'].get('cv_folds', None)
+                if original_folds is None and 'training_config' in run_inputs['loaded_model_config']:
+                    original_folds = run_inputs['loaded_model_config']['training_config'].get('folds', None)
 
                 if original_folds is not None:
                     if n_folds != original_folds:
@@ -40215,15 +40316,15 @@ F1 Score:  {f1:.4f}
                         print(f"  -> Consider using {original_folds} folds to match original training\n")
 
             # Determine data source (respect current wavelength filter)
-            if self.X is not None:
-                X_source = self.X
+            if run_inputs['X'] is not None:
+                X_source = run_inputs['X']
             else:
-                X_source = self.X_original
+                X_source = run_inputs['X_original']
 
             # Apply active group filter first (match main search at line 23401)
             total_samples = len(X_source)
-            if self.active_indices is not None:
-                ag_mask = X_source.index.isin(self.active_indices)
+            if run_inputs['active_indices'] is not None:
+                ag_mask = X_source.index.isin(run_inputs['active_indices'])
                 n_active = ag_mask.sum()
                 min_samples = 2 if cv_strategy == 'loo' else n_folds
                 if n_active < min_samples:
@@ -40232,16 +40333,16 @@ F1 Score:  {f1:.4f}
                         f"{cv_strategy} CV requires at least {min_samples} samples."
                     )
                 X_source = X_source[ag_mask]
-                y_source = self.y[ag_mask]
+                y_source = run_inputs['y'][ag_mask]
                 print(f"DEBUG: Active group filter: {n_active} samples "
                       f"({total_samples - n_active} filtered out)")
             else:
-                y_source = self.y
+                y_source = run_inputs['y']
 
             # Align sample selection with the main analysis (respect excluded spectra)
             # Use DataFrame index labels (not positional indices) for exclusion
-            if self.excluded_spectra:
-                mask = ~X_source.index.isin(self.excluded_spectra)
+            if run_inputs['excluded_spectra']:
+                mask = ~X_source.index.isin(run_inputs['excluded_spectra'])
                 n_excluded = (~mask).sum()
                 n_remaining = mask.sum()
                 min_samples = 2 if cv_strategy == 'loo' else n_folds
@@ -40260,13 +40361,13 @@ F1 Score:  {f1:.4f}
 
             # Filter out validation set (if enabled) - CRITICAL FIX
             # This ensures Model Development uses the same data split as the main search
-            if self.validation_enabled.get() and self.validation_indices:
+            if run_inputs['training']['validation_enabled'] and run_inputs['validation_indices']:
                 # Remove validation samples from training data
                 initial_samples = len(X_base_df)
-                X_base_df = X_base_df[~X_base_df.index.isin(self.validation_indices)]
-                y_series = y_series[~y_series.index.isin(self.validation_indices)]
+                X_base_df = X_base_df[~X_base_df.index.isin(run_inputs['validation_indices'])]
+                y_series = y_series[~y_series.index.isin(run_inputs['validation_indices'])]
 
-                n_val = len(self.validation_indices)
+                n_val = len(run_inputs['validation_indices'])
                 n_removed = initial_samples - len(X_base_df)
                 n_cal = len(X_base_df)
 
@@ -40298,7 +40399,7 @@ F1 Score:  {f1:.4f}
             # Auto-coerce mixed-type classification / one-class target to strings.
             # Excel columns with mixed int+str cells give object dtype with heterogeneous
             # Python types, which breaks sklearn LabelEncoder's internal sort.
-            _refine_task = self.refine_task_type.get() if hasattr(self, 'refine_task_type') else ''
+            _refine_task = run_inputs['refine_task_type'] if hasattr(self, 'refine_task_type') else ''
             if (_refine_task in ('classification', 'one_class')
                     and y_series is not None
                     and hasattr(y_series, 'dtype')
@@ -40322,15 +40423,15 @@ F1 Score:  {f1:.4f}
             print(f"  Random State: 42 (fixed)")
             print(f"\nData Filtering:")
             print(f"  Total samples in dataset: {total_samples}")
-            print(f"  Active group filter: {len(X_source) if self.active_indices is not None else 'None (all samples)'}")
-            print(f"  Excluded samples: {len(self.excluded_spectra) if self.excluded_spectra else 0}")
-            print(f"  Validation enabled: {self.validation_enabled.get()}")
-            print(f"  Validation samples: {len(self.validation_indices) if self.validation_enabled.get() and self.validation_indices else 0}")
+            print(f"  Active group filter: {len(X_source) if run_inputs['active_indices'] is not None else 'None (all samples)'}")
+            print(f"  Excluded samples: {len(run_inputs['excluded_spectra']) if run_inputs['excluded_spectra'] else 0}")
+            print(f"  Validation enabled: {run_inputs['training']['validation_enabled']}")
+            print(f"  Validation samples: {len(run_inputs['validation_indices']) if run_inputs['training']['validation_enabled'] and run_inputs['validation_indices'] else 0}")
             print(f"  -> Calibration samples for CV: {len(X_base_df)}")
 
             # Check if we have saved training configuration from the original search
-            if hasattr(self, 'loaded_model_config') and self.loaded_model_config and 'training_config' in self.loaded_model_config:
-                training_config = self.loaded_model_config['training_config']
+            if run_inputs['loaded_model_config'] and 'training_config' in run_inputs['loaded_model_config']:
+                training_config = run_inputs['loaded_model_config']['training_config']
                 print(f"\nOriginal Training Configuration (from Results):")
                 print(f"  CV Strategy: {training_config.get('cv_strategy', 'kfold')}")
                 print(f"  CV Folds: {training_config.get('folds', 'NOT SAVED')}")
@@ -40359,17 +40460,17 @@ F1 Score:  {f1:.4f}
             wl_summary = f"{len(selected_wl)} wavelengths ({selected_wl[0]:.1f} to {selected_wl[-1]:.1f} nm)"
 
             # Get user-selected preprocessing method and map to build_preprocessing_pipeline format
-            preprocess = self.refine_preprocess.get()
+            preprocess = run_inputs['refine_preprocess']
 
             # Get window size (check custom first, then preset, then default)
-            if self.refine_window_custom.get().strip():
+            if run_inputs['refine_window_custom'].strip():
                 try:
-                    window = int(self.refine_window_custom.get().strip())
+                    window = int(run_inputs['refine_window_custom'].strip())
                 except ValueError:
-                    self._log_progress(f"Warning: Invalid custom window size '{self.refine_window_custom.get()}', using default value 17")
+                    self._log_progress(f"Warning: Invalid custom window size '{run_inputs['refine_window_custom']}', using default value 17")
                     window = 17
             else:
-                preset = self.refine_window.get()
+                preset = run_inputs['refine_window']
                 # Use preset if valid, otherwise default to 17
                 window = preset if preset in [7, 11, 17, 23, 31] else 17
 
@@ -40499,15 +40600,15 @@ F1 Score:  {f1:.4f}
             is_coupled_result = False
             baseline_method = None
 
-            if self.selected_model_config is not None:
+            if run_inputs['row'] is not None:
                 # Primary detection: explicit flag (most reliable)
-                is_coupled_result = self.selected_model_config.get('is_coupled', False)
+                is_coupled_result = run_inputs['row'].get('is_coupled', False)
 
                 # Fallback detection: check for coupled Preprocess format patterns
                 # Coupled uses formats like 'airpls+snv_deriv1', 'snv_deriv2', 'deriv1_snv'
                 # Grid/Bayesian use formats like 'snv', 'deriv', 'snv_deriv' (no numbers embedded)
                 if not is_coupled_result:
-                    config_preprocess = self.selected_model_config.get('Preprocess', 'raw')
+                    config_preprocess = run_inputs['row'].get('Preprocess', 'raw')
                     if config_preprocess:
                         import re
                         # Coupled format embeds numbers in deriv (deriv1, deriv2)
@@ -40526,7 +40627,7 @@ F1 Score:  {f1:.4f}
                 # CRITICAL: Pass Window from config for Unified Bayesian/NSGA-II results
                 # These store window in 'Window' column, not in 'Params'
                 # Must cast to int - pandas may load as float (e.g., 31.0 instead of 31)
-                window_from_config = self.selected_model_config.get('Window', None)
+                window_from_config = run_inputs['row'].get('Window', None)
                 print(f"DEBUG [WINDOW_FROM_CONFIG]: raw value = {window_from_config}, type = {type(window_from_config)}")
                 if window_from_config is not None and not pd.isna(window_from_config):
                     window_from_config = int(window_from_config)
@@ -40535,8 +40636,8 @@ F1 Score:  {f1:.4f}
                     print(f"DEBUG [WINDOW_FROM_CONFIG]: WILL USE DEFAULT 11 (window_from_config is None or NaN)")
 
                 coupled_config = _parse_coupled_preprocessing(
-                    self.selected_model_config.get('Preprocess', 'raw'),
-                    self.selected_model_config.get('Params', ''),
+                    run_inputs['row'].get('Preprocess', 'raw'),
+                    run_inputs['row'].get('Params', ''),
                     window_config=window_from_config
                 )
 
@@ -40549,7 +40650,7 @@ F1 Score:  {f1:.4f}
                 print(f"\n{'='*70}")
                 print(f"COUPLED OPTIMIZATION RESULT DETECTED")
                 print(f"{'='*70}")
-                print(f"  Preprocessing string: {self.selected_model_config.get('Preprocess')}")
+                print(f"  Preprocessing string: {run_inputs['row'].get('Preprocess')}")
                 print(f"  Parsed configuration:")
                 print(f"    Derivative order: {deriv}")
                 print(f"    Savitzky-Golay window: {window}")
@@ -40573,8 +40674,8 @@ F1 Score:  {f1:.4f}
 
                 print(f"  Mapped to preprocessing: '{preprocess_name}'")
 
-            elif self.selected_model_config is not None:
-                config_deriv = self.selected_model_config.get('Deriv', None)
+            elif run_inputs['row'] is not None:
+                config_deriv = run_inputs['row'].get('Deriv', None)
                 if config_deriv is not None and not pd.isna(config_deriv):
                     # Use the actual derivative order from config
                     deriv = int(config_deriv)
@@ -40597,7 +40698,7 @@ F1 Score:  {f1:.4f}
                 else:
                     deriv = default_deriv
                     polyorder = get_polyorder_from_deriv(deriv)
-                    if self.selected_model_config is not None:
+                    if run_inputs['row'] is not None:
                         print(f"INFO: Using default deriv={deriv}, polyorder={polyorder} for '{preprocess}'")
             else:
                 # Already set from config above
@@ -40608,8 +40709,8 @@ F1 Score:  {f1:.4f}
             # Use the actual deriv parameter instead of hardcoded list (more robust)
             is_derivative = (deriv is not None and deriv > 0)
             base_full_vars = len(X_base_df.columns)
-            if self.selected_model_config is not None:
-                cfg_full_vars = self.selected_model_config.get('full_vars')
+            if run_inputs['row'] is not None:
+                cfg_full_vars = run_inputs['row'].get('full_vars')
                 if cfg_full_vars is not None and not pd.isna(cfg_full_vars):
                     try:
                         base_full_vars = int(cfg_full_vars)
@@ -40644,7 +40745,7 @@ F1 Score:  {f1:.4f}
                     print(f"DEBUG: Processing {len(selected_wl)} wavelengths")
 
             # Get user-selected task type
-            task_type = self.refine_task_type.get()
+            task_type = run_inputs['refine_task_type']
 
             # Preflight: reconcile task_type against the saved result config and
             # the actual y-kind BEFORE model creation. The radio can drift from
@@ -40653,8 +40754,8 @@ F1 Score:  {f1:.4f}
             # regression row, silently producing wrong results even after the
             # CV guard corrects the splitter type.
             saved_task = None
-            if self.selected_model_config is not None:
-                saved_task = self.selected_model_config.get('Task')
+            if run_inputs['row'] is not None:
+                saved_task = run_inputs['row'].get('Task')
             if saved_task in ('regression', 'classification', 'one_class') and saved_task != task_type:
                 logger.warning(
                     "refine_task_type radio is %r but saved result Task is %r — "
@@ -40663,10 +40764,10 @@ F1 Score:  {f1:.4f}
                 )
                 task_type = saved_task
                 self.root.after(0, lambda v=saved_task: self.refine_task_type.set(v))
-            if task_type == 'classification' and self.y is not None:
+            if task_type == 'classification' and run_inputs['y'] is not None:
                 from sklearn.utils.multiclass import type_of_target
                 try:
-                    y_kind = type_of_target(self.y)
+                    y_kind = type_of_target(run_inputs['y'])
                 except (TypeError, ValueError):
                     y_kind = None
                 if y_kind == 'continuous':
@@ -40680,7 +40781,7 @@ F1 Score:  {f1:.4f}
                     self.root.after(0, lambda: self.refine_task_type.set('regression'))
 
             # Get user-selected model
-            model_name = self.refine_model_type.get()
+            model_name = run_inputs['refine_model_type']
 
             # Remap classification-only models if task_type was corrected to regression
             if task_type == 'regression' and model_name == 'PLS-DA':
@@ -40700,8 +40801,8 @@ F1 Score:  {f1:.4f}
             n_components = 10  # Default fallback
             n_components_from_params = None
 
-            if self.selected_model_config is not None:
-                raw_params = self.selected_model_config.get('Params')
+            if run_inputs['row'] is not None:
+                raw_params = run_inputs['row'].get('Params')
                 parsed_params = None
                 if isinstance(raw_params, dict):
                     parsed_params = raw_params
@@ -40725,8 +40826,8 @@ F1 Score:  {f1:.4f}
             if n_components_from_params is not None:
                 n_components = n_components_from_params
                 print(f"DEBUG: Using n_components={n_components} from Params (fitted value)")
-            elif self.selected_model_config is not None and 'LVs' in self.selected_model_config:
-                lvs_value = self.selected_model_config.get('LVs')
+            elif run_inputs['row'] is not None and 'LVs' in run_inputs['row']:
+                lvs_value = run_inputs['row'].get('LVs')
                 if lvs_value is not None and not pd.isna(lvs_value):
                     n_components = int(lvs_value)
                     print(f"DEBUG: Using n_components={n_components} from LVs (Params unavailable)")
@@ -40734,8 +40835,8 @@ F1 Score:  {f1:.4f}
                     # Both sources failed; falling back to default. Surface this so the
                     # user can correlate unexpected rebuild behavior with bad source data.
                     raw_params_dbg = (
-                        self.selected_model_config.get('Params')
-                        if self.selected_model_config else None
+                        run_inputs['row'].get('Params')
+                        if run_inputs['row'] else None
                     )
                     print(
                         f"WARNING: Neither Params nor LVs yielded a usable n_components for "
@@ -40746,7 +40847,7 @@ F1 Score:  {f1:.4f}
             # CRITICAL: Use n_components as max to prevent clipping
             # When reproducing a model, we must use the EXACT n_components from training
             # Otherwise get_model clips n_components to max_n_components and results won't match
-            effective_max_n_components = max(n_components, self.max_n_components.get())
+            effective_max_n_components = max(n_components, run_inputs['max_n_components'])
 
             # CRITICAL FIX: For PLS-DA, create PLSTransformer with correct n_components
             # The code below (lines ~23344, ~23389) will wrap this in a full pipeline with scaler + LR
@@ -40761,13 +40862,13 @@ F1 Score:  {f1:.4f}
                     task_type=task_type,
                     n_components=n_components,  # Use exact n_components from original model
                     max_n_components=effective_max_n_components,  # Prevent clipping
-                    max_iter=self.refine_max_iter.get()
+                    max_iter=run_inputs['refine_max_iter']
                 )
 
             # Reapply tuned hyperparameters from the search results when available
             params_from_search = {}
-            if self.selected_model_config is not None:
-                raw_params = self.selected_model_config.get('Params')
+            if run_inputs['row'] is not None:
+                raw_params = run_inputs['row'].get('Params')
                 if isinstance(raw_params, str) and raw_params.strip():
                     try:
                         parsed = ast.literal_eval(raw_params)
@@ -40971,8 +41072,8 @@ F1 Score:  {f1:.4f}
             skip_ui_override = False
             try:
                 # Check if we should skip UI override
-                skip_ui_override = (self.model_loaded_from_results and
-                                   not self.refine_hyperparams_modified)
+                skip_ui_override = (run_inputs['model_loaded_from_results'] and
+                                   not run_inputs['refine_hyperparams_modified'])
 
                 if skip_ui_override:
                     print(f"\n{'='*80}")
@@ -40983,10 +41084,10 @@ F1 Score:  {f1:.4f}
                     print(f"{'='*80}\n")
                 else:
                     # Apply UI parameters (either manual config or user made modifications)
-                    ui_params = self._collect_refine_hyperparams(model_name)
+                    ui_params = dict(run_inputs['refine_hyperparams'].get(model_name, {}))
 
                     if ui_params:
-                        if self.model_loaded_from_results and self.refine_hyperparams_modified:
+                        if run_inputs['model_loaded_from_results'] and run_inputs['refine_hyperparams_modified']:
                             print(f"\n{'='*80}")
                             print(f"APPLYING MODIFIED HYPERPARAMETERS FROM UI")
                             print(f"{'='*80}")
@@ -41031,7 +41132,7 @@ F1 Score:  {f1:.4f}
                 traceback.print_exc()
 
             # Final validation: Verify parameters match search params when loaded from Results
-            if params_from_search and self.model_loaded_from_results and not self.refine_hyperparams_modified:
+            if params_from_search and run_inputs['model_loaded_from_results'] and not run_inputs['refine_hyperparams_modified']:
                 try:
                     final_params = model.get_params()
                     # Define critical parameters per model type that affect R² reproducibility
@@ -41124,8 +41225,8 @@ F1 Score:  {f1:.4f}
 
                 # Parse hyperparameters from selected model config
                 params = {}
-                if self.selected_model_config is not None:
-                    params_str = self.selected_model_config.get('Params', '{}')
+                if run_inputs['row'] is not None:
+                    params_str = run_inputs['row'].get('Params', '{}')
                     try:
                         params = ast.literal_eval(params_str) if isinstance(params_str, str) else {}
                     except (ValueError, SyntaxError):
@@ -41133,10 +41234,10 @@ F1 Score:  {f1:.4f}
 
                 # Apply preprocessing to full spectrum first (matches standard path)
                 if not is_coupled_result:
-                    baseline_method, baseline_params_oc = self._get_baseline_params()
+                    baseline_method, baseline_params_oc = run_inputs['baseline_params']
                 else:
                     baseline_params_oc = {}
-                smoothing_enabled_oc, smoothing_window_oc, smoothing_poly_oc = self._get_smoothing_params()
+                smoothing_enabled_oc, smoothing_window_oc, smoothing_poly_oc = run_inputs['smoothing_params']
 
                 prep_steps = build_preprocessing_pipeline(
                     preprocess_name, deriv, window, polyorder,
@@ -41173,9 +41274,9 @@ F1 Score:  {f1:.4f}
                 full_wavelengths_oc = list(original_wavelengths)
 
                 # Build binary labels: inlier=+1, outlier=-1
-                inlier_label = self.inlier_class_label.get()
-                if not inlier_label and self.selected_model_config:
-                    inlier_label = self.selected_model_config.get('inlier_class_label', '') or self.selected_model_config.get('inlier_class', '')
+                inlier_label = run_inputs['inlier_class_label']
+                if not inlier_label and run_inputs['row']:
+                    inlier_label = run_inputs['row'].get('inlier_class_label', '') or run_inputs['row'].get('inlier_class', '')
 
                 # One-class guardrail: block if subset removes all inlier samples
                 y_series_check = pd.Series(y_array, index=X_base_df.index)
@@ -41314,15 +41415,15 @@ F1 Score:  {f1:.4f}
                 )
 
                 # Compute external validation metrics if enabled
-                if (self.validation_enabled.get() and
-                        self.validation_X is not None and
-                        self.validation_y is not None):
+                if (run_inputs['training']['validation_enabled'] and
+                        run_inputs['validation_X'] is not None and
+                        run_inputs['validation_y'] is not None):
                     try:
                         from spectral_predict.contamination import one_class_metrics
 
                         # Preprocess validation data using same pipeline
-                        X_val_raw = self.validation_X.values if hasattr(self.validation_X, 'values') else np.array(self.validation_X)
-                        y_val_raw = self.validation_y.values if hasattr(self.validation_y, 'values') else np.array(self.validation_y)
+                        X_val_raw = run_inputs['validation_X'].values if hasattr(run_inputs['validation_X'], 'values') else np.array(run_inputs['validation_X'])
+                        y_val_raw = run_inputs['validation_y'].values if hasattr(run_inputs['validation_y'], 'values') else np.array(run_inputs['validation_y'])
 
                         # Apply preprocessing
                         if isinstance(prep_steps, list) and len(prep_steps) > 0:
@@ -41401,19 +41502,19 @@ F1 Score:  {f1:.4f}
             # Get baseline and smoothing parameters
             # For coupled results, baseline_method is already set from parsing
             if not is_coupled_result:
-                baseline_method, baseline_params = self._get_baseline_params()
+                baseline_method, baseline_params = run_inputs['baseline_params']
             else:
                 # Use baseline from coupled config, get default params
                 baseline_params = {}
-            smoothing_enabled, smoothing_window_size, smoothing_poly = self._get_smoothing_params()
+            smoothing_enabled, smoothing_window_size, smoothing_poly = run_inputs['smoothing_params']
 
             # Get imbalance settings from loaded model config (if present)
             # This ensures Model Development uses the same imbalance handling as the original search
             loaded_imbalance_method = None
             loaded_imbalance_params = None
-            if self.selected_model_config is not None:
-                loaded_imbalance_method = self.selected_model_config.get('imbalance_method')
-                loaded_imbalance_params = self.selected_model_config.get('imbalance_params')
+            if run_inputs['row'] is not None:
+                loaded_imbalance_method = run_inputs['row'].get('imbalance_method')
+                loaded_imbalance_params = run_inputs['row'].get('imbalance_params')
                 if loaded_imbalance_method:
                     print(f"DEBUG: Using imbalance settings from loaded model config:")
                     print(f"  imbalance_method: {loaded_imbalance_method}")
@@ -41545,22 +41646,22 @@ F1 Score:  {f1:.4f}
                     return
 
                 # Check if we're loading from a saved GA model or running new GA optimization
-                if self.refined_ga_genes is not None and self.refined_ga_config is not None:
+                if run_ga_genes is not None and run_ga_config is not None:
                     # === SCENARIO 1: Loading from saved GA model ===
                     print(f"\nLOADING GA PREPROCESSING FROM SAVED MODEL")
                     print(f"  Using pre-optimized wavelength selection:")
-                    print(f"  - {len(self.refined_ga_genes)} wavelengths selected by GA")
-                    print(f"  - GA Config: {self.refined_ga_config}")
-                    print(f"  - GA Model Type: {self.refined_ga_model_type}")
+                    print(f"  - {len(run_ga_genes)} wavelengths selected by GA")
+                    print(f"  - GA Config: {run_ga_config}")
+                    print(f"  - GA Model Type: {run_ga_model_type}")
                     print(f"{'='*80}\n")
 
                     # Apply saved GA transform (subset to selected wavelengths)
                     X_full = X_base_df.values
-                    X_work = X_full[:, self.refined_ga_genes]
+                    X_work = X_full[:, run_ga_genes]
 
                     # Store wavelengths for prediction consistency
                     all_wavelengths = X_base_df.columns.astype(float).values
-                    selected_wl = all_wavelengths[self.refined_ga_genes]
+                    selected_wl = all_wavelengths[run_ga_genes]
 
                     print(f"Applied saved GA transform: {X_full.shape} -> {X_work.shape}")
 
@@ -41918,7 +42019,7 @@ F1 Score:  {f1:.4f}
             # saved metadata describes the trained model, not the widget at save time.
             from spectral_predict.y_transform import normalize_y_transform_method
 
-            y_transform = getattr(self, 'refine_y_transform', tk.StringVar(value='None')).get()
+            y_transform = run_inputs['refine_y_transform']
             y_transform_active = (
                 str(y_transform).strip().lower() not in ('none', '')
                 and task_type == 'regression'
@@ -41936,8 +42037,8 @@ F1 Score:  {f1:.4f}
                 # Check if early stopping will be used — if so, skip TTR wrapping here
                 # and handle y-transform manually in the CV loop to preserve early stopping
                 _es_rounds = None
-                if self.selected_model_config is not None:
-                    _es_val = self.selected_model_config.get('early_stopping_rounds')
+                if run_inputs['row'] is not None:
+                    _es_val = run_inputs['row'].get('early_stopping_rounds')
                     if _es_val is not None and not pd.isna(_es_val):
                         try:
                             _es_rounds = int(_es_val)
@@ -41958,8 +42059,8 @@ F1 Score:  {f1:.4f}
 
             # Use early stopping for boosted models when loaded from Results
             early_stopping_rounds = None
-            if self.selected_model_config is not None:
-                es_value = self.selected_model_config.get('early_stopping_rounds')
+            if run_inputs['row'] is not None:
+                es_value = run_inputs['row'].get('early_stopping_rounds')
                 if es_value is not None and not pd.isna(es_value):
                     try:
                         early_stopping_rounds = int(es_value)
@@ -42217,8 +42318,8 @@ F1 Score:  {f1:.4f}
                 # Add comparison to loaded model if available
                 loaded_r2 = "N/A"
                 r2_diff = "N/A"
-                if self.selected_model_config is not None and 'R2cv' in self.selected_model_config:
-                    loaded_r2_value = self.selected_model_config.get('R2cv')
+                if run_inputs['row'] is not None and 'R2cv' in run_inputs['row']:
+                    loaded_r2_value = run_inputs['row'].get('R2cv')
                     if not pd.isna(loaded_r2_value):
                         loaded_r2 = f"{loaded_r2_value:.4f}"
                         r2_diff_value = results['r2_mean'] - loaded_r2_value
@@ -42302,11 +42403,11 @@ Configuration:
   n_components: {n_components}
 
 DEBUG INFO:
-  Loaded LVs from config: {self.selected_model_config.get('LVs', 'N/A') if self.selected_model_config else 'N/A'}
-  Loaded n_vars from config: {self.selected_model_config.get('n_vars', 'N/A') if self.selected_model_config else 'N/A'}
-  Loaded Preprocessing: {self.selected_model_config.get('Preprocess', 'N/A') if self.selected_model_config else 'N/A'}
-  Loaded Deriv: {self.selected_model_config.get('Deriv', 'N/A') if self.selected_model_config else 'N/A'}
-  Loaded Window: {self.selected_model_config.get('Window', 'N/A') if self.selected_model_config else 'N/A'}
+  Loaded LVs from config: {run_inputs['row'].get('LVs', 'N/A') if run_inputs['row'] else 'N/A'}
+  Loaded n_vars from config: {run_inputs['row'].get('n_vars', 'N/A') if run_inputs['row'] else 'N/A'}
+  Loaded Preprocessing: {run_inputs['row'].get('Preprocess', 'N/A') if run_inputs['row'] else 'N/A'}
+  Loaded Deriv: {run_inputs['row'].get('Deriv', 'N/A') if run_inputs['row'] else 'N/A'}
+  Loaded Window: {run_inputs['row'].get('Window', 'N/A') if run_inputs['row'] else 'N/A'}
   Processing Path: {'Full-spectrum preprocessing (derivative+subset fix)' if use_full_spectrum_preprocessing else 'Standard (subset then preprocess)'}
 
 NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match search.py behavior and preserve derivative context.' if use_full_spectrum_preprocessing else ''}
@@ -42315,8 +42416,8 @@ NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match
                 # Build comparison text for classification
                 loaded_acc = "N/A"
                 acc_diff = "N/A"
-                if self.selected_model_config is not None and 'Accuracy' in self.selected_model_config:
-                    loaded_acc_value = self.selected_model_config.get('Accuracy')
+                if run_inputs['row'] is not None and 'Accuracy' in run_inputs['row']:
+                    loaded_acc_value = run_inputs['row'].get('Accuracy')
                     if loaded_acc_value is not None and not pd.isna(loaded_acc_value):
                         loaded_acc = f"{loaded_acc_value:.4f}"
                         acc_diff_value = results['accuracy_mean'] - loaded_acc_value
@@ -42414,33 +42515,33 @@ Calibration Performance (n={len(y_array)}):
 
             # --- External validation metrics ---
             val_text = ""
-            if (self.validation_enabled.get() and
-                    self.validation_X is not None and
-                    self.validation_y is not None and
-                    len(self.validation_X) > 0):
+            if (run_inputs['training']['validation_enabled'] and
+                    run_inputs['validation_X'] is not None and
+                    run_inputs['validation_y'] is not None and
+                    len(run_inputs['validation_X']) > 0):
                 try:
                     # Prepare validation X based on preprocessing path
-                    if preprocess == 'ga_optimized' and self.refined_ga_genes is not None:
+                    if preprocess == 'ga_optimized' and run_ga_genes is not None:
                         # GA path: subset validation data by GA gene indices
-                        val_X_prepared = self.validation_X.values[:, self.refined_ga_genes]
+                        val_X_prepared = run_inputs['validation_X'].values[:, run_ga_genes]
                     elif use_full_spectrum_preprocessing and prep_pipeline is not None:
                         # Full-spectrum path: preprocess then subset
-                        val_X_full = self.validation_X.values
+                        val_X_full = run_inputs['validation_X'].values
                         val_X_preprocessed = prep_pipeline.transform(val_X_full)
                         val_X_prepared = val_X_preprocessed[:, wavelength_indices]
                     elif use_full_spectrum_preprocessing and prep_pipeline is None:
                         # Full-spectrum path, raw preprocessing (no transform needed)
-                        val_X_full = self.validation_X.values
+                        val_X_full = run_inputs['validation_X'].values
                         if wavelength_indices is not None:
                             val_X_prepared = val_X_full[:, wavelength_indices]
                         else:
-                            val_X_prepared = self.validation_X[selected_cols].values
+                            val_X_prepared = run_inputs['validation_X'][selected_cols].values
                     else:
                         # Standard path: subset columns (pipeline handles preprocessing)
-                        val_X_prepared = self.validation_X[selected_cols].values
+                        val_X_prepared = run_inputs['validation_X'][selected_cols].values
 
                     # Prepare validation y
-                    val_y = self.validation_y.values
+                    val_y = run_inputs['validation_y'].values
 
                     # Filter NaN target values from validation set
                     val_nan_mask = pd.isna(val_y)
@@ -42612,8 +42713,8 @@ External Validation Performance (n={n_val}):
                 ),
             }
             # Add coupled optimization params if present
-            if self.selected_model_config is not None and 'optuna_params' in self.selected_model_config:
-                refined_config['optuna_params'] = self.selected_model_config['optuna_params']
+            if run_inputs['row'] is not None and 'optuna_params' in run_inputs['row']:
+                refined_config['optuna_params'] = run_inputs['row']['optuna_params']
 
             self._publish_refined_state_on_tk_thread({
                 'model': final_model,
@@ -42631,7 +42732,7 @@ External Validation Performance (n={n_val}):
                 'y_true': np.array(all_y_true),
                 'y_pred': np.array(all_y_pred),
                 # CV indices / specimen IDs: refined_cv_indices are relative to the filtered
-                # data (without validation set); self.y.index contains all samples.
+                # data (without validation set); run_inputs['y'].index contains all samples.
                 'cv_indices': np.array(all_cv_indices),
                 'specimen_ids': y_series.index[all_cv_indices].tolist(),
                 'y_proba': np.concatenate(all_y_proba, axis=0) if all_y_proba else None,
@@ -42804,6 +42905,8 @@ External Validation Performance (n={n_val}):
         perf_src = snap['performance'] or {}
         # Results-row settings the run was trained with (not the live selection).
         row = snap['training'].get('row')
+        # Data type, x unit and validation split the run was trained with (R050).
+        trained = snap['training']
 
         try:
             from spectral_predict.model_io import save_model
@@ -42817,7 +42920,7 @@ External Validation Performance (n={n_val}):
             imbalance_suffix = _get_imbalance_suffix(
                 row.get('imbalance_method') if row else None
             )
-            data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
+            data_type_suffix = "_abs" if trained.get('data_type') == "absorbance" else "_ref"
 
             # Build descriptive filename tokens
             preprocess_token = (cfg.get('preprocessing') or 'raw').lower().replace(' ', '')
@@ -42893,13 +42996,13 @@ External Validation Performance (n={n_val}):
                 'performance': {},
                 'use_full_spectrum_preprocessing': cfg.get('use_full_spectrum_preprocessing', False),
                 'full_wavelengths': snap['full_wavelengths'],  # All wavelengths for derivative+subset
-                'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
-                'x_unit': self.current_x_unit.get(),  # Store x-axis unit (nm/cm-1)
+                'data_type': trained.get('data_type'),  # absorbance/reflectance the run was trained on
+                'x_unit': trained.get('x_unit'),  # x-axis unit (nm/cm-1) the run was trained on
                 # Validation set metadata
-                'validation_set_enabled': self.validation_enabled.get(),
-                'validation_indices': list(self.validation_indices) if self.validation_indices else [],
-                'validation_size': len(self.validation_indices) if self.validation_indices else 0,
-                'validation_algorithm': self.validation_algorithm.get() if self.validation_enabled.get() else None,
+                'validation_set_enabled': trained.get('validation_enabled', False),
+                'validation_indices': list(trained.get('validation_indices') or []),
+                'validation_size': len(trained.get('validation_indices') or []),
+                'validation_algorithm': trained.get('validation_algorithm'),
                 # Model hyperparameters (from results table)
                 'params': row.get('Params', {}) if row else {},
                 # Preprocessing details
@@ -43001,7 +43104,7 @@ External Validation Performance (n={n_val}):
                     else ''
                 )
                 metadata['inlier_class_label'] = (
-                    resolved_inlier if resolved_inlier else self.inlier_class_label.get()
+                    resolved_inlier if resolved_inlier else trained.get('inlier_class_label', '')
                 )
                 # Attach fitted scaler/PCA reducer for one-class persistence
                 metadata['scaler'] = snap['oc_scaler']
@@ -43224,8 +43327,10 @@ External Validation Performance (n={n_val}):
                 "A Model Development run is still in progress. Export once it has finished.",
             )
             return
-        # Check if model has been trained
-        if self._refined_state_snapshot() is None:  # no complete published refit
+        # Check if model has been trained. The dialog describes and exports THIS
+        # snapshot of the refit (R010), taken once here.
+        entry_snap = self._refined_state_snapshot()
+        if entry_snap is None:  # no complete published refit
             messagebox.showerror(
                 "No Model Trained",
                 "Please run a refined model first before exporting.\n\n"
@@ -43233,7 +43338,7 @@ External Validation Performance (n={n_val}):
             )
             return
 
-        if self.refined_config is None or self.refined_performance is None:
+        if entry_snap['config'] is None or entry_snap['performance'] is None:
             messagebox.showerror(
                 "Model Configuration Missing",
                 "The model appears to have been trained, but configuration data is missing.\n\n"
@@ -43259,8 +43364,8 @@ External Validation Performance (n={n_val}):
         tk.Label(dialog, text="Export Analysis Code", font=('Arial', 16, 'bold'),
                  bg='#f0f0f0').pack(pady=(20, 10))
 
-        tk.Label(dialog, text=f"Model: {self.refined_config['model_name']} | "
-                 f"Preprocessing: {self.refined_config['preprocessing']}",
+        tk.Label(dialog, text=f"Model: {entry_snap['config']['model_name']} | "
+                 f"Preprocessing: {entry_snap['config']['preprocessing']}",
                  font=('Arial', 10), bg='#f0f0f0').pack(pady=(0, 20))
 
         # Format selection frame
@@ -43306,10 +43411,14 @@ External Validation Performance (n={n_val}):
                 if getattr(self, '_refit_active', False):
                     status_var.set("A model run is in progress; export once it finishes.")
                     return
-                snap = self._refined_state_snapshot()
-                if snap is None:
-                    status_var.set("No complete refined model to export; run the model again.")
+                # Export the refit this dialog was opened for, and only while it is
+                # still the current, complete one (a failed or newer publication refuses).
+                if getattr(self, '_refined_model_token', None) is not entry_snap['token']:
+                    status_var.set(
+                        "The model changed since this dialog opened; close it and export again."
+                    )
                     return
+                snap = entry_snap
                 model_config = self._build_export_model_config(snap)
 
                 # Get data

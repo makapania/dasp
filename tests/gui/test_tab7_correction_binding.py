@@ -312,7 +312,10 @@ def test_refit_tab_return_cannot_overlap_or_save_stale_correction(
     _refit(app, "PLS", "None", subset=True)  # model A
     stale = _compute_nonlinear(app)
 
-    app._run_refined_model()  # refit B starts (worker deferred)
+    # Refit B (a different model) starts; its inputs are frozen at launch.
+    app.selected_model_config = _row("Ridge", False)
+    app.refine_model_type.set("Ridge")
+    app._run_refined_model()  # worker deferred
     assert len(deferred_refits) == 1
     # Leaving and re-entering Model Development (or loading a Results row) re-enables
     # Run while B is still running. A second click must be refused.
@@ -327,9 +330,9 @@ def test_refit_tab_return_cannot_overlap_or_save_stale_correction(
         app._save_refined_model()
     assert not blocked.exists()
 
-    # B (a different model) completes on this thread.
-    app.selected_model_config = _row("Ridge", False)
-    app.refine_model_type.set("Ridge")
+    # The widgets move while B runs: the run must not see it.
+    app.refine_model_type.set("PLS")
+    # B completes on this thread.
     target, args = deferred_refits[0]
     with contextlib.redirect_stdout(io.StringIO()):
         target(*args)
@@ -550,3 +553,210 @@ def test_loading_results_row_refused_while_refit_runs(gui_app):
     finally:
         gui_app._refit_active = False
         gui_app.loaded_model_config = None
+
+
+# --- Round 5: the worker and Save/Export never read the live selection or widgets -----
+
+
+def test_double_click_during_refit_keeps_selection_and_run_uses_a(
+    correction_on, deferred_refits, tmp_path
+):
+    """Real Results double-click path while A runs: refused; A's row is what trains/saves."""
+    app = correction_on
+    _refit(app, "Ridge", "None", subset=True)  # loads data / widgets
+    row_a = _row("Ridge", early_stopping=False)
+    row_a.update(Params=str({"alpha": 0.01}), optuna_params={"alpha": 0.01}, is_coupled=False)
+    app.selected_model_config = row_a
+    app._run_refined_model()  # A launched, worker deferred
+    assert app._refit_active
+
+    row_b = dict(row_a, Params=str({"alpha": 9.0}), Rank=2)
+    row_b.pop("optuna_params")
+    app.results_display_df = pd.DataFrame([row_b], index=[0])
+    app.results_tree.insert("", "end", iid="0", values=())
+    app.results_tree.selection_set("0")
+    try:
+        with patch("tkinter.messagebox.showwarning") as warn:
+            app._on_result_double_click(None)
+        assert warn.called
+        assert app.selected_model_config is row_a  # untouched
+
+        # Even a selection change by any other path cannot reach the running worker.
+        app.selected_model_config = row_b
+        target, args = deferred_refits[0]
+        with contextlib.redirect_stdout(io.StringIO()):
+            target(*args)
+        app.root.update()
+    finally:
+        app.results_tree.delete("0")
+        app.results_display_df = None
+
+    inner = app.refined_model.named_steps["model"]
+    assert inner.alpha == pytest.approx(0.01)
+    assert app.refined_config["optuna_params"] == {"alpha": 0.01}
+    loaded = _save_and_load(app, tmp_path)
+    meta = loaded["metadata"]
+    assert meta["params"] == str({"alpha": 0.01})
+    assert meta["optuna_params"] == {"alpha": 0.01}
+    assert meta["is_coupled_result"] is True  # set because A carried optuna_params
+    assert app._build_export_model_config()["params"] == {"alpha": 0.01}
+
+
+def test_saved_metadata_describes_the_run_not_later_widgets(gui_app, tmp_path):
+    """Toggling validation / data type / x unit after the refit does not change the file."""
+    gui_app.current_data_type.set("reflectance")
+    gui_app.current_x_unit.set("nm")
+    _refit(gui_app, "PLS", "None", subset=True)  # validation disabled in _refit
+    try:
+        gui_app.current_data_type.set("absorbance")
+        gui_app.current_x_unit.set("cm-1")
+        gui_app.validation_enabled.set(True)
+        gui_app.validation_indices = ["s1", "s2"]
+        loaded = _save_and_load(gui_app, tmp_path)
+    finally:
+        gui_app.validation_enabled.set(False)
+        gui_app.validation_indices = []
+        gui_app.current_data_type.set("reflectance")
+        gui_app.current_x_unit.set("nm")
+    meta = loaded["metadata"]
+    assert meta["data_type"] == "reflectance"
+    assert meta["x_unit"] == "nm"
+    assert meta["validation_set_enabled"] is False
+    assert meta["validation_size"] == 0
+    assert meta["validation_algorithm"] is None
+
+
+def test_plot_click_after_newer_publish_offers_plotted_runs_specimen(gui_app, monkeypatch):
+    """Codex round 5: a click on A's plot must not offer B's specimen for exclusion."""
+    import types
+
+    import matplotlib.backend_bases as backend_bases
+    from matplotlib.axes import Axes
+
+    _refit(gui_app, "PLS", "None", subset=True)  # A
+    st_a = gui_app._refined_state
+    callbacks = []
+    real_connect = backend_bases.FigureCanvasBase.mpl_connect
+
+    def _record(canvas, name, func):
+        callbacks.append((name, func))
+        return real_connect(canvas, name, func)
+
+    monkeypatch.setattr(backend_bases.FigureCanvasBase, "mpl_connect", _record)
+    offered = []
+    monkeypatch.setattr(
+        gui_app, "_show_exclude_button", lambda _f, label, *a: offered.append(label)
+    )
+    monkeypatch.setattr(gui_app, "_create_or_update_annotation", lambda *a, **k: None)
+    gui_app._plot_regression_predictions()
+    click = [f for n, f in callbacks if n == "button_press_event"][-1]
+    ax = next(
+        c.cell_contents
+        for c in click.__closure__
+        if isinstance(getattr(c, "cell_contents", None), Axes)
+    )
+
+    # B is published (same number of CV predictions, different specimens/order).
+    state_b = _state_fields(gui_app)
+    state_b.update(
+        specimen_ids=[f"B{i}" for i in range(len(st_a.y_true))],
+        cv_indices=np.asarray(st_a.cv_indices)[::-1].copy(),
+    )
+    gui_app._publish_refined_state(state_b)
+
+    k = 3
+    click(types.SimpleNamespace(inaxes=ax, xdata=st_a.y_true[k], ydata=st_a.y_pred[k], button=1))
+    assert offered == [st_a.specimen_ids[k]]
+
+
+def test_shap_captures_one_refined_state(gui_app, monkeypatch):
+    import spectral_predict_gui_optimized as gui_mod
+
+    if not gui_mod.HAS_SHAP:
+        pytest.skip("shap not installed")
+    _refit(gui_app, "PLS", "None", subset=True)  # A
+    st_a = gui_app._refined_state
+    state_b = _state_fields(gui_app)
+    state_b.update(X_cv=np.zeros((5, 3)), model=None)
+
+    class _FakeLinear:
+        def __init__(self, model, X):
+            self.X = X
+
+        def shap_values(self, X):
+            return np.zeros_like(np.asarray(X, dtype=float))
+
+    monkeypatch.setattr(gui_mod.shap, "LinearExplainer", _FakeLinear)
+    # root.update() inside the computation runs a queued publication of B.
+    monkeypatch.setattr(gui_app.root, "update", lambda: gui_app._publish_refined_state(state_b))
+    monkeypatch.setattr(gui_app, "_plot_shap_summary", lambda: None)
+    gui_app._compute_shap_values()
+
+    assert gui_app._shap_state is st_a
+    assert gui_app.shap_values.shape == np.asarray(st_a.X_cv).shape
+
+
+def test_one_class_save_and_export_ignore_switched_row(gui_app, tmp_path):
+    """One-class path: Save/Export keep the trained row's settings after a row switch."""
+    rng = np.random.default_rng(2)
+    wl = np.linspace(1200.0, 1600.0, 40)
+    X = pd.DataFrame(
+        0.5 + 0.02 * rng.normal(size=(30, 40)),
+        columns=[f"{w:.1f}" for w in wl],
+        index=[f"o{i}" for i in range(30)],
+    )
+    y = pd.Series(np.where(np.arange(30) % 3 == 0, "bad", "good"), index=X.index)
+    row_a = {
+        "Model": "OneClassSVM",
+        "Task": "one_class",
+        "Params": str({"nu": 0.1}),
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+        "Poly": 2,
+    }
+    gui_app.X_original = X
+    gui_app.X = X
+    gui_app.y = y
+    gui_app.active_indices = None
+    gui_app.excluded_spectra = set()
+    gui_app.validation_enabled.set(False)
+    gui_app.validation_indices = []
+    gui_app.use_autoscale.set(False)
+    gui_app.selected_model_config = row_a
+    gui_app._original_wavelength_order = [float(w) for w in X.columns]
+    gui_app.refine_task_type.set("one_class")
+    gui_app.refine_model_type.set("OneClassSVM")
+    gui_app.refine_preprocess.set("raw")
+    gui_app.refine_folds.set(3)
+    gui_app.refine_cv_strategy.set("kfold")
+    gui_app.inlier_class_label.set("good")
+    gui_app.model_loaded_from_results = True
+    gui_app.refine_hyperparams_modified = False
+    gui_app.refined_model = None
+    try:
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            gui_app._run_refined_model_thread()
+        gui_app.root.update()
+        assert gui_app.refined_config["task_type"] == "one_class", buf.getvalue()[-3000:]
+
+        # Switch to another row, change the inlier label and autoscale afterwards.
+        gui_app.selected_model_config = dict(row_a, Params=str({"nu": 0.4}), Poly=3)
+        gui_app.inlier_class_label.set("bad")
+        gui_app.use_autoscale.set(True)
+
+        loaded = _save_and_load(gui_app, tmp_path)
+        cfg = gui_app._build_export_model_config()
+    finally:
+        gui_app.inlier_class_label.set("")
+        gui_app.use_autoscale.set(False)
+        gui_app.refine_task_type.set("regression")
+    meta = loaded["metadata"]
+    assert meta["params"] == str({"nu": 0.1})
+    assert meta["polyorder"] == 2
+    assert meta["autoscale"] is False
+    assert meta["inlier_class_label"] == "good"
+    assert cfg["params"] == {"nu": 0.1}
+    assert cfg["polyorder"] == 2
+    assert cfg["inlier_class_label"] == "good"

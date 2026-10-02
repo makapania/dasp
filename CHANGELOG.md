@@ -116,7 +116,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed while it was being computed is discarded. Saved metadata and exported code
   now take the model's hyperparameters, derivative/polynomial settings, imbalance,
   early-stopping and autoscale settings from the run that trained it, not from
-  whichever Results row is selected when you click Save or Export. Prediction
+  whichever Results row is selected when you click Save or Export. A run also reads
+  every setting once, when it starts: double-clicking another Results row (now refused
+  while a run is going) or changing widgets mid-run no longer leaks into the run, and
+  the saved data type, x unit and validation split are those of the run. Prediction
   also ignores a correction stored with a non-regression model. **Already
   saved regression files with a stale correction cannot be detected automatically**:
   if a model was saved with "apply correction" ticked after more than one run in the

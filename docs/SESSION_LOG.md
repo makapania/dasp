@@ -816,6 +816,21 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
     `do_export` refuse then. Loading a Results row is refused while a refit runs.
   - Tooling gotcha: passing `\\n` through the agent's Bash heredoc arrived as `\n` (escape collapsed), so string
     anchors containing backslashes silently failed to match; anchor on backslash-free text.
+- **Review round 5 (Codex + GLM MERGE-WITH-FIXES):**
+  - The refit worker read the live Results row (~24 sites: Params/Preprocess/Window/Deriv, hyperparams,
+    one-class, imbalance, early stopping, `optuna_params` at publish) and live Tk vars/data. Now
+    `_capture_refit_inputs()` freezes ALL of it on the Tk thread in `_run_refined_model` (or at the top of a
+    direct `_run_refined_model_thread()` call) and the worker reads only `run_inputs`; grep confirms no
+    `self.selected_model_config` / `self.<tkvar>.get()` / `self.X|y|validation_*` read remains in the worker.
+    `_collect_refine_hyperparams` is pre-collected for the widget model and 'PLS' (the only remap target).
+  - `_on_result_double_click` assigned `selected_model_config` before the guarded loader refused: guard at the
+    very top now (both branches).
+  - Save metadata data_type / x_unit / validation_* / inlier fallback come from `snap['training']`.
+  - Plot click callbacks (regression scatter, residual, leverage) captured y_true/y_pred but read the CURRENT
+    cv_indices/specimen_ids, so a click on A's plot after B published offered B's specimen. Each plot binds
+    `plot_state = self._refined_state` for itself and its callbacks.
+  - The Export dialog shows and exports the snapshot taken when it opened; `do_export` refuses if the current
+    token is no longer that snapshot's.
 - **Merge / follow-up items (not fixed here):**
   - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
     (pre-existing; still true with the Y-transform wrapper).
