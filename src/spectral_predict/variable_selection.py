@@ -13,6 +13,8 @@ from sklearn.cross_decomposition import PLSRegression
 from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
 from sklearn.metrics import mean_squared_error, r2_score
 
+from spectral_predict import parallel_policy
+
 
 # Selectors whose score arrays are sparse: a zero means "not selected", so a top-N
 # subset must never reach past the non-zero entries (the stable argsort would fill
@@ -38,12 +40,6 @@ def _cap_top_n(importances: np.ndarray, n_requested: int, method: str) -> int:
     if method not in SPARSE_SELECTOR_METHODS:
         return int(n_requested)
     return int(min(n_requested, np.count_nonzero(importances)))
-
-
-def _get_cv_n_jobs():
-    """Get n_jobs for CV, respecting frozen app constraints."""
-    from spectral_predict.search import _frozen_needs_threading_fallback
-    return 1 if _frozen_needs_threading_fallback() else -1
 
 
 def _spa_seed_n_jobs():
@@ -653,12 +649,18 @@ def ipls_selection(X, y, n_intervals=20, n_components=None, cv_folds=5, random_s
         try:
             pls = PLSRegression(n_components=interval_n_components, scale=False)
 
-            # Cross-validation R² score
+            # Cross-validation R² score. PLS folds take milliseconds, so the thread
+            # policy runs them serially rather than opening a process pool per interval.
             cv_scores = cross_val_score(
                 pls, X_interval, y,
                 cv=cv_folds,
                 scoring='r2',
-                n_jobs=_get_cv_n_jobs()
+                n_jobs=parallel_policy.plan_cv(
+                    cv_folds if isinstance(cv_folds, int) else 2,
+                    n_samples,
+                    n_interval_features,
+                    model_name="PLS",
+                ).n_jobs,
             )
 
             # Use mean R² as interval score

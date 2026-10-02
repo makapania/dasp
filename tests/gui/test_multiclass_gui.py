@@ -157,11 +157,14 @@ def test_run_analysis_accepts_multiclass_engine_selection(gui_app):
     started = {"v": False}
 
     class _FakeThread:
-        def __init__(self, target, args, daemon):
-            self._t, self._a = target, args
+        # The launch gate passes kwargs= too; without it this fake raised and the app
+        # reported "could not start" via a (patched-out) showerror. The test failed on
+        # its own and passed only in some suite orders (found by the QW10 state reset).
+        def __init__(self, target, args=(), daemon=None, kwargs=None):
+            self._t, self._a, self._k = target, args, kwargs or {}
 
         def start(self):
-            self._t(*self._a)
+            self._t(*self._a, **self._k)
 
     def _stub_worker(*_a, **_k):
         started["v"] = True

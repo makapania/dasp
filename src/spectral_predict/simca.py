@@ -38,6 +38,7 @@ from spectral_predict.contamination import (
     get_one_class_model_grids,
     run_one_class_cv,
 )
+from spectral_predict.parallel_policy import openmp_single_threaded_call
 
 
 # Non-SIMCA per-class engines (spec section 5.3 / task A4). Maps a
@@ -943,6 +944,7 @@ class MultiClassClassModel(BaseEstimator, ClassifierMixin):
             return min(5, max(1, n_class - 1))
         return best_nc
 
+    @openmp_single_threaded_call  # thread budget: small serial fold fits (parallel_policy)
     def _cross_fit_null(
         self,
         X_raw: np.ndarray,

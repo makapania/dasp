@@ -22,14 +22,26 @@ from sklearn.base import clone
 from sklearn.pipeline import Pipeline
 
 
-def _get_safe_n_jobs():
-    """Return n_jobs value that's safe for frozen (PyInstaller) apps.
+def _curve_thread_plan(estimator, X, cv, n_points: int):
+    """Thread plan for an sklearn curve that fits ``n_points`` x folds models.
 
-    Returns -1 (all cores) for source code, 1 (serial) for bundled apps.
-    This prevents PyInstaller's multiprocessing issues on Windows.
+    Returns ``(plan, fold_estimator)``: the pool to give sklearn (run it under
+    ``plan.backend_context()`` so frozen bundles use threads, not loky) and a clone of
+    ``estimator`` whose fits share the cores with that pool (parallel_policy).
     """
-    from spectral_predict.search import _frozen_needs_threading_fallback
-    return 1 if _frozen_needs_threading_fallback() else -1
+    from spectral_predict import parallel_policy
+
+    if isinstance(cv, int):
+        n_splits = cv
+    elif hasattr(cv, "get_n_splits"):
+        n_splits = cv.get_n_splits(X)
+    elif hasattr(cv, "__len__"):
+        n_splits = len(cv)
+    else:
+        n_splits = 5  # sklearn's default
+    shape = np.shape(X)
+    plan = parallel_policy.plan_cv(int(n_splits) * max(1, int(n_points)), shape[0], shape[1])
+    return plan, parallel_policy.limit_estimator_threads(estimator, plan.model_threads)
 
 
 def compute_residuals(y_true, y_pred):
@@ -461,14 +473,16 @@ def compute_sklearn_validation_curve(estimator, X, y, param_name, param_range, c
             scoring = 'accuracy'
 
     try:
-        train_scores_raw, cv_scores_raw = validation_curve(
-            estimator, X, y,
-            param_name=param_name,
-            param_range=param_range,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=_get_safe_n_jobs()
-        )
+        plan, fold_estimator = _curve_thread_plan(estimator, X, cv, len(param_range))
+        with plan.backend_context():
+            train_scores_raw, cv_scores_raw = validation_curve(
+                fold_estimator, X, y,
+                param_name=param_name,
+                param_range=param_range,
+                cv=cv,
+                scoring=scoring,
+                n_jobs=plan.n_jobs,
+            )
 
         # Convert scores (sklearn returns negated RMSE for regression)
         if task == 'regression':
@@ -793,15 +807,17 @@ def compute_learning_curve(estimator, X, y, cv, task='regression', train_sizes=N
         scoring = 'accuracy'
 
     try:
-        train_sizes_abs, train_scores_raw, cv_scores_raw = learning_curve(
-            estimator, X, y,
-            train_sizes=train_sizes,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=_get_safe_n_jobs(),
-            shuffle=True,
-            random_state=42
-        )
+        plan, fold_estimator = _curve_thread_plan(estimator, X, cv, len(train_sizes))
+        with plan.backend_context():
+            train_sizes_abs, train_scores_raw, cv_scores_raw = learning_curve(
+                fold_estimator, X, y,
+                train_sizes=train_sizes,
+                cv=cv,
+                scoring=scoring,
+                n_jobs=plan.n_jobs,
+                shuffle=True,
+                random_state=42
+            )
 
         # Convert scores
         if task == 'regression':

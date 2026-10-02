@@ -5,8 +5,16 @@ This directory contains the test suite for Spectral Predict, including comprehen
 ## Quick Start
 
 ```bash
-# Run all tests
+# Default run: everything EXCEPT tests marked `comprehensive` or `slow`
+# (pyproject.toml addopts = -m "not comprehensive and not slow")
 pytest tests/ -v
+
+# Only the long tests (what the nightly CI job runs; GUI ones need Windows + Tk)
+pytest tests/ -m "comprehensive or slow"
+pytest tests/gui -m comprehensive
+
+# Everything, ignoring the default deselection
+pytest tests/ -o addopts=""
 
 # Run only smoke tests (fast)
 pytest tests/ -m smoke -v
@@ -86,13 +94,22 @@ Tests can be marked with custom categories:
 @pytest.mark.regression # Regression tests
 @pytest.mark.io         # File I/O tests
 @pytest.mark.gui        # GUI component tests
+@pytest.mark.comprehensive  # Long GUI-driven model comparisons (tests/gui/test_comprehensive.py)
 ```
+
+`slow` and `comprehensive` tests are deselected by default (pyproject `addopts`) and
+run nightly in CI (`long-tests` job, Windows). Any `-m` you pass replaces the
+default selection, so `-m smoke` runs every smoke test, slow or not.
 
 Run tests by marker:
 ```bash
 pytest tests/ -m smoke      # Only smoke tests
-pytest tests/ -m "not slow" # Exclude slow tests
+pytest tests/ -m slow       # Only slow tests
 ```
+
+Thread caps: `tests/conftest.py` sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS` and
+`OPENBLAS_NUM_THREADS` to 1 (unless already set) before numpy loads. Export a
+different value before running pytest to override.
 
 ## Synthetic Data Generators
 
@@ -227,17 +244,16 @@ def test_outlier_detection():
 
 ## Continuous Integration
 
-For CI pipelines:
+`.github/workflows/ci.yml` runs the default selection on every push and PR, and a
+`long-tests` job (`pytest -m "comprehensive or slow"`, Windows) nightly and on manual
+dispatch (Actions -> CI -> Run workflow).
 
 ```bash
 # Quick smoke tests only
 pytest tests/ -m smoke --maxfail=3
 
-# Full test suite with coverage
-pytest tests/ --cov=src/spectral_predict --cov-report=xml
-
-# Exclude slow tests
-pytest tests/ -m "not slow" --maxfail=5
+# Full test suite with coverage (all markers)
+pytest tests/ -o addopts="" --cov=src/spectral_predict --cov-report=xml
 ```
 
 ## Adding New Fixtures

@@ -742,3 +742,34 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - QW1 thread budget + QW10 test split (branch perf/thread-budget)
+- **`n_jobs=1` inside the fold pool is NOT the right rule on a many-core box.** Warm loky pool, 5 folds, 24 cores:
+  XGBoost 49x2151 was 617 ms with `n_jobs=1` vs 450 ms with 4 threads/fit (24//5) and 526 ms with the old nested
+  `-1`; at 100x2151 `n_jobs=1` (2.1 s) was *slower* than the old nesting (1.4 s) because 5 single-threaded fits leave
+  19 cores idle. `parallel_policy.plan_cv` therefore splits the cores: pool = min(n_splits, physical cores), each fit
+  gets cores // pool (= 1 once folds >= cores, e.g. LOO). Never multiplied.
+- **Tiny jobs:** a warm pool already beats a serial loop at ~20k cells (5 folds x 20 x 200); break-even ~5-10k.
+  `TINY_JOB_CELLS = 10_000`, below which folds run serially with single-threaded fits. Serial fits that keep
+  `n_jobs=-1` lose to `n_jobs=1` at every size below ~50k cells (thread wake-up).
+- **Only the fold clone is capped** (`limit_estimator_threads` clones). The refit pipe/`model` keeps `n_jobs=-1`, so
+  result-row Params, Bayesian fingerprints and study hashes are unchanged (asserted in tests/test_parallel_policy.py).
+- **Bayesian:** `cross_val_predict_pooled` honours `n_jobs` only on its sklearn-delegate path; repeated CV,
+  fit_params (class_weight sample weights) and early stopping run a serial loop, so the plan collapses to serial with
+  untouched (all-core) models there. sklearn-owned pools need `joblib.parallel_config(backend=...)`
+  (`CVPlan.backend_context()`), otherwise frozen bundles would get loky. Frozen Bayesian/diagnostic curves now use a
+  threading pool instead of a serial loop (same backend grid search already used frozen).
+- **`threadpool_limits()` costs ~8 ms per call** (it rescans loaded DLLs); one-class CV calls it per config. The policy
+  caches a `ThreadpoolController` (0.006 ms per limit). OMP via env (`OMP_NUM_THREADS`) must be set before numpy loads
+  and never caps an explicit booster `n_jobs`.
+- **GUI session reset:** deepcopy of all launch attributes fails (`cannot pickle '_tkinter.tkapp'` - fonts, styles,
+  sidebar hold Tk handles), so the snapshot keeps only plain-data launch attributes; objects are judged GUI-bound by
+  their *direct* attributes only (recursing reaches the app itself via bound methods/args and marks everything GUI).
+  The reset also drops data attributes created since launch (e.g. `X_before_contam_correction`), cancels pending
+  `after` callbacks (a fresh app has none), removes test-added traces and Toplevels, and re-applies Tk values until
+  traces stop rewriting them.
+- **Order-dependent GUI tests found by the reset** (each failed when run alone on main f6a2287): 
+  `test_multiclass_gui::test_run_analysis_accepts_multiclass_engine_selection` (its fake Thread lacked `kwargs=`), and
+  `test_resume_round9::test_e2e_one_failing_model_keeps_run_resumable` + `test_resume_round11::
+  test_settings_changed_mid_run_do_not_reach_later_models` (`_select_models` unticked only PLS/Ridge; the launch tier
+  also ticks ElasticNet). Fixed in the tests. Default GUI selection now passes forward and reversed.

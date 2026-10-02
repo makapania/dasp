@@ -77,15 +77,207 @@ def session_app(gui_visible):
     # Initialize tier (required by app)
     if hasattr(app, '_on_tier_changed'):
         app._on_tier_changed()
+    root.update_idletasks()
+
+    # Fresh-launch state that gui_app restores before every test.
+    app._test_baseline = _AppStateSnapshot(app, root)
 
     yield app, root
 
-    # Cleanup at end of session
+    # Cleanup at end of session: pending callbacks first, so none fires on a dead root.
+    _cancel_pending_after(root)
     try:
         root.quit()
         root.destroy()
     except tk.TclError:
         pass
+    import matplotlib.pyplot as plt
+
+    plt.close('all')
+
+
+# ---------------------------------------------------------------------------
+# Shared-app state reset
+# ---------------------------------------------------------------------------
+
+
+def _cancel_pending_after(root) -> None:
+    """Cancel every pending ``after``/``after_idle`` callback on ``root``'s interpreter.
+
+    The freshly launched app has none, so anything pending belongs to an earlier test
+    (debounced filters, progress polls) and would otherwise fire inside the next one.
+    """
+    try:
+        pending = root.tk.splitlist(root.tk.call('after', 'info'))
+    except tk.TclError:
+        return
+    for after_id in pending:
+        try:
+            root.after_cancel(after_id)
+        except (tk.TclError, ValueError):
+            pass
+
+
+def _holds_gui_objects(value, _depth: int = 0) -> bool:
+    """True if ``value`` is, or contains, a widget, Tk variable or figure.
+
+    Such attributes are wiring (lazily built pages, canvases, widget registries), not
+    data; resetting them would orphan live widgets, so the reset leaves them alone.
+    """
+    if isinstance(value, (tk.Misc, tk.Variable)):
+        return True
+    module = type(value).__module__ or ''
+    if module.startswith(('matplotlib', 'tkinter', 'threading')):
+        return True
+    if _depth > 3:
+        return False
+    if isinstance(value, dict):
+        return any(_holds_gui_objects(v, _depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return any(_holds_gui_objects(v, _depth + 1) for v in value)
+    if not _is_plain_data(value) and hasattr(value, '__dict__'):
+        # Helper objects (progress monitors, controllers) that keep widget references
+        # directly. One level only: deeper chains reach the app itself.
+        return any(
+            isinstance(v, (tk.Misc, tk.Variable))
+            or (type(v).__module__ or '').startswith(('matplotlib', 'tkinter'))
+            for v in vars(value).values()
+        )
+    return False
+
+
+_PLAIN_LEAVES = (type(None), bool, int, float, complex, str, bytes)
+
+
+def _is_plain_data(value, _depth: int = 0) -> bool:
+    """True for scalars, strings, numpy/pandas data and containers of them only."""
+    import numpy as np
+    import pandas as pd
+
+    if isinstance(value, _PLAIN_LEAVES + (np.generic, np.ndarray, pd.DataFrame, pd.Series, pd.Index)):
+        return True
+    if _depth > 4:
+        return False
+    if isinstance(value, dict):
+        return all(
+            _is_plain_data(k, _depth + 1) and _is_plain_data(v, _depth + 1)
+            for k, v in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return all(_is_plain_data(v, _depth + 1) for v in value)
+    return False
+
+
+class _AppStateSnapshot:
+    """The session app's state right after launch, and how to put it back.
+
+    Covers (a) every Tk variable held by the app, directly or in a dict/list
+    attribute (~820), by raw Tcl value; (b) every data attribute (data, validation
+    arrays, exclusions, results, transfer/contamination state ...) whose launch value
+    holds no GUI objects, and removal of data attributes created since launch; (c) the
+    DataSourceManager's contents; (d) variable traces,
+    Toplevel windows and pending ``after`` callbacks added since launch.
+    """
+
+    _MAX_VAR_PASSES = 5
+
+    def __init__(self, app, root):
+        import copy
+
+        self.root = root
+        self.var_values: dict[str, str] = {}
+        self.var_traces: dict[str, set] = {}
+        self.vars: dict[str, tk.Variable] = {}
+        for value in vars(app).values():
+            for var in self._tk_vars_in(value):
+                name = str(var)
+                self.vars[name] = var
+                self.var_values[name] = str(root.getvar(name))
+                self.var_traces[name] = set(var.trace_info())
+        # Only attributes whose launch value is plain data. Helper objects built at
+        # launch (fonts, styles, sidebar, tooltips) hold Tk handles and are wiring.
+        self.data: dict[str, object] = {
+            name: copy.deepcopy(value)
+            for name, value in vars(app).items()
+            if _is_plain_data(value)
+        }
+        dsm = getattr(app, 'data_source_manager', None)
+        self.dsm_state = None
+        if dsm is not None and _is_plain_data(list(vars(dsm).values())):
+            self.dsm_state = copy.deepcopy(vars(dsm))
+        self.toplevels = {str(w) for w in root.winfo_children() if isinstance(w, tk.Toplevel)}
+        # Everything present at launch, plus the snapshot itself (set right after).
+        self.launch_attrs = set(vars(app)) | {'_test_baseline'}
+
+    @staticmethod
+    def _tk_vars_in(value):
+        if isinstance(value, tk.Variable):
+            yield value
+        elif isinstance(value, dict):
+            yield from (v for v in value.values() if isinstance(v, tk.Variable))
+        elif isinstance(value, (list, tuple)):
+            yield from (v for v in value if isinstance(v, tk.Variable))
+
+    def restore(self, app) -> list[str]:
+        """Put the app back to launch state. Returns Tk variables that would not settle."""
+        import copy
+
+        root = self.root
+        _cancel_pending_after(root)
+        for widget in root.winfo_children():
+            if isinstance(widget, tk.Toplevel) and str(widget) not in self.toplevels:
+                try:
+                    widget.destroy()
+                except tk.TclError:
+                    pass
+
+        for name, value in self.data.items():
+            current = getattr(app, name, None)
+            if _holds_gui_objects(current):
+                continue  # now wired to live widgets (e.g. a lazily built page)
+            setattr(app, name, copy.deepcopy(value))
+        # Attributes created since launch (backups such as X_before_contam_correction,
+        # caches) did not exist in a fresh app; drop the data ones, keep widget wiring.
+        for name in set(vars(app)) - self.launch_attrs:
+            if not _holds_gui_objects(vars(app)[name]):
+                delattr(app, name)
+        dsm = getattr(app, 'data_source_manager', None)
+        if dsm is not None and self.dsm_state is not None:
+            vars(dsm).clear()
+            vars(dsm).update(copy.deepcopy(self.dsm_state))
+
+        # Remove traces tests added, before restoring values, so they do not fire.
+        for name, var in self.vars.items():
+            try:
+                for mode, callback in set(var.trace_info()) - self.var_traces[name]:
+                    var.trace_remove(mode, callback)
+            except tk.TclError:
+                pass
+
+        # Writes fire the app's own traces, which rewrite other variables (task_type
+        # rewrites imbalance_method; model boxes rewrite model_tier). Re-apply until
+        # nothing differs from launch, so restore order does not matter.
+        unsettled: list[str] = []
+        for _ in range(self._MAX_VAR_PASSES):
+            unsettled = []
+            for name, value in self.var_values.items():
+                try:
+                    if str(root.getvar(name)) != value:
+                        unsettled.append(name)
+                        root.setvar(name, value)
+                except tk.TclError:
+                    pass
+            if not unsettled:
+                break
+        unsettled = [
+            name for name, value in self.var_values.items() if str(root.getvar(name)) != value
+        ]
+        # Traces fired above may have queued debounced work against the reset state.
+        _cancel_pending_after(root)
+        import matplotlib.pyplot as plt
+
+        plt.close('all')
+        return unsettled
 
 
 @pytest.fixture(autouse=True)
@@ -110,15 +302,18 @@ def gui_app(session_app):
     """
     Provide the session app with reset state for each test.
 
-    Resets data between tests but reuses the same app instance.
+    Reuses the same app instance but restores its launch state first: every Tk
+    variable, every data attribute (data, validation arrays, exclusions, results,
+    data sources ...), and no leftover traces, dialogs or pending callbacks. See
+    ``_AppStateSnapshot``.
     """
     app, root = session_app
 
-    # Reset app state before test
-    app.X = None
-    app.X_original = None
-    app.y = None
-    app.results_df = None
+    unsettled = app._test_baseline.restore(app)
+    if unsettled:
+        import warnings
+
+        warnings.warn(f"GUI reset: Tk variables did not settle to launch values: {unsettled[:10]}")
 
     yield app
 

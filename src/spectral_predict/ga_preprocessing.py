@@ -420,7 +420,8 @@ def evaluate_fitness(
     task_type: str = 'regression',
     random_state: int = 42,
     fitness_model: str = 'pls',
-    model_config: Optional[Dict[str, Any]] = None
+    model_config: Optional[Dict[str, Any]] = None,
+    model_threads: Optional[int] = None,
 ) -> float:
     """
     Evaluate fitness of a preprocessing configuration.
@@ -449,6 +450,11 @@ def evaluate_fitness(
     model_config : dict, optional
         If provided, uses actual model for fitness evaluation.
         Dict with keys: 'name' (str), 'params' (dict of hyperparameters)
+    model_threads : int, optional
+        Thread cap for the fitness model's fits (``n_jobs`` / CatBoost
+        ``thread_count``). Callers running candidates in a worker pool pass
+        ``parallel_policy.pool_model_threads(n_jobs)`` so the pool and the fits
+        share the cores. None leaves the model as built.
 
     Returns
     -------
@@ -501,7 +507,8 @@ def evaluate_fitness(
         if model_config is not None:
             actual_result = _evaluate_with_actual_model(
                 X_preproc, y, cv, task_type,
-                model_config['name'], model_config.get('params', {}), random_state
+                model_config['name'], model_config.get('params', {}), random_state,
+                model_threads=model_threads,
             )
             # If actual model succeeded, return its result
             if actual_result > -np.inf:
@@ -510,7 +517,9 @@ def evaluate_fitness(
 
         # Use proxy fitness model (or as fallback if actual model failed)
         if fitness_model == 'lightgbm':
-            return _evaluate_lightgbm(X_preproc, y, cv, task_type, random_state)
+            return _evaluate_lightgbm(
+                X_preproc, y, cv, task_type, random_state, model_threads=model_threads
+            )
         elif fitness_model == 'mlp':
             return _evaluate_mlp(X_preproc, y, cv, task_type, random_state)
         elif fitness_model == 'neuralboosted':
@@ -544,7 +553,8 @@ def _evaluate_with_actual_model(
     task_type: str,
     model_name: str,
     model_params: Dict[str, Any],
-    random_state: int
+    random_state: int,
+    model_threads: Optional[int] = None,
 ) -> float:
     """
     Evaluate fitness using actual model with user hyperparameters.
@@ -628,7 +638,10 @@ def _evaluate_with_actual_model(
                                           random_state=random_state))
             ])
 
-        # Cross-validated prediction
+        # Cross-validated prediction (thread cap: see evaluate_fitness)
+        from .parallel_policy import limit_estimator_threads
+
+        model = limit_estimator_threads(model, model_threads)
         y_pred = cross_val_predict(model, X, y_for_cv, cv=cv)
 
         # Calculate fitness
@@ -668,8 +681,9 @@ def _evaluate_pls(X, y, cv, n_comp, task_type):
         return -rmsecv
 
 
-def _evaluate_lightgbm(X, y, cv, task_type, random_state):
-    """Evaluate fitness using LightGBM."""
+def _evaluate_lightgbm(X, y, cv, task_type, random_state, model_threads=None):
+    """Evaluate fitness using LightGBM (``model_threads`` caps its fits; see evaluate_fitness)."""
+    thread_kwargs = {} if model_threads is None else {'n_jobs': int(model_threads)}
     if task_type == 'classification':
         y_class = np.asarray(y)
         if not pd.api.types.is_numeric_dtype(y_class.dtype):
@@ -683,14 +697,14 @@ def _evaluate_lightgbm(X, y, cv, task_type, random_state):
 
         model = LGBMClassifier(
             n_estimators=100, learning_rate=0.1, max_depth=5,
-            random_state=random_state, verbosity=-1, force_col_wise=True
+            random_state=random_state, verbosity=-1, force_col_wise=True, **thread_kwargs
         )
         y_pred = cross_val_predict(model, X, y_class, cv=cv)
         return accuracy_score(y_class, y_pred)
     else:
         model = LGBMRegressor(
             n_estimators=100, learning_rate=0.1, max_depth=5,
-            random_state=random_state, verbosity=-1, force_col_wise=True
+            random_state=random_state, verbosity=-1, force_col_wise=True, **thread_kwargs
         )
         y_pred = cross_val_predict(model, X, y, cv=cv)
         rmsecv = np.sqrt(mean_squared_error(y, y_pred))
@@ -1155,9 +1169,13 @@ def exhaustive_search(
             # Use 'loky' in dev mode (faster multiprocessing)
             from spectral_predict.search import _frozen_needs_threading_fallback
             backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
+            from spectral_predict.parallel_policy import pool_model_threads
+
+            model_threads = pool_model_threads(n_jobs)
             results = Parallel(n_jobs=n_jobs, backend=backend)(
                 delayed(evaluate_fitness)(
-                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config
+                    genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config,
+                    model_threads=model_threads,
                 )
                 for genes in all_genes
             )
@@ -1523,9 +1541,13 @@ def smart_exhaustive_search(
             # Use 'loky' in dev mode (faster multiprocessing)
             from spectral_predict.search import _frozen_needs_threading_fallback
             backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
+            from spectral_predict.parallel_policy import pool_model_threads
+
+            model_threads = pool_model_threads(n_jobs)
             stage1_results = Parallel(n_jobs=n_jobs, backend=backend)(
                 delayed(evaluate_fitness)(
-                    genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config
+                    genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config,
+                    model_threads=model_threads,
                 )
                 for genes in stage1_genes
             )

@@ -18,8 +18,14 @@ and deploy.
    and ensemble CV/weights fitted in-sample (R002 critical, R021, R018, R105). Reported scores will drop.
 2. **Saved model ≠ validated model:** Y-transform save paths (R001 critical, R020, R014/R019, R048), stale bias
    correction (R010), Tab 7 wavelength matching (R009, R112), `all_vars` %g (R031, R078), numeric label encoder (R016).
-3. **QW1 + QW10, thread budget and test split.** Measured 60x per booster config and 50x for LOF; the test suite
-   should drop from ~38 min to under 10. Can go first, since it speeds up testing every later PR.
+3. **QW1 + QW10, thread budget and test split — IMPLEMENTED on branch `perf/thread-budget` (awaiting review).**
+   `src/spectral_predict/parallel_policy.py` owns the rule (pool = min(folds, physical cores); each fit gets
+   cores // pool threads; tiny jobs serial; one-class CV + SIMCA null under an OpenMP cap; frozen = threading). Wired
+   into grid CV, Bayesian CV, iPLS, diagnostics curves and GA-preprocessing fitness; NSGA-II was already
+   single-threaded. Real gains under heavy machine load: LightGBM config ~1.7-1.8x, LOF grid ~2.6-2.9x, iPLS ~1.9x,
+   XGBoost ~1.0-1.2x, RF ~1.0x; metrics identical (the 60x/50x roadmap figures did not reproduce). pyproject
+   `addopts` deselects `comprehensive`+`slow` (97 tests); CI `long-tests` job runs them nightly + on dispatch
+   (Windows). GUI fixture now restores full launch state; three order-dependent GUI tests fixed (SESSION_LOG).
 4. **Data in:** OPUS reader returns the background, not absorbance (R017); duplicate `read_ascii_spectra` (R062);
    GUI exclusion and dataset-switch bugs (R004-R007, R037).
 Wave 2 stops the app misleading:
@@ -488,7 +494,7 @@ assert "wt-" in spectral_predict.__file__, spectral_predict.__file__
 
 **Decision:** the PyInstaller 3.12 bundle is now the only supported distribution path. Nobody is expected to clone and `pip install -e .`; the source-install scaffolding (`install.bat` / `install.sh` / `INSTALL.md`) stays in-repo as a developer convenience but is no longer marketed to end users. Beta version `0.5.0b1` ships exclusively as the bundled installer.
 
-**Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (see `src/spectral_predict/search.py:_frozen_needs_threading_fallback` — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
+**Implication for parallelism:** the 3.12 bundle still uses the threading-backend fallback (rule in `src/spectral_predict/parallel_policy.py:frozen_needs_threading_fallback`; `search._frozen_needs_threading_fallback` delegates to it — frozen-state-only, NOT version-gated; the original 3.12 plan to recover loky was wrong). Practical impact: numpy/sklearn/lightgbm/xgboost get thread-parallel speedup (those C extensions release the GIL), but pure-Python parallel loops (pymoo NSGA-II, GA-PLS evaluation) are single-core in the bundle. There is no longer a "use the source install for full multiprocessing" escape hatch for users — what the bundle does is what they get.
 
 **Still in-repo from the source-install era (kept, not deleted):**
 - `install.bat` / `install.sh`: detects Python 3.14, creates `.venv314`, installs `requirements-lock.txt` then `pip install -e . --no-deps`. Idempotent. Useful for developer setup.
