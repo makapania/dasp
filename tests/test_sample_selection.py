@@ -49,14 +49,27 @@ class TestKennardStone:
         assert_array_equal(indices1, indices2)
 
     def test_two_samples(self):
-        """Test selecting minimum (2) samples."""
-        X = np.random.randn(20, 5)
-        indices = kennard_stone(X, n_samples=2)
+        """The KS seed pair is the farthest pair (R085: the old index inversion was wrong)."""
 
-        assert len(indices) == 2
-        # The two samples should be maximally distant
-        dist = np.linalg.norm(X[indices[0]] - X[indices[1]])
-        assert dist > 0
+        rng = np.random.default_rng(0)
+        for _ in range(20):
+            X = rng.standard_normal((20, 5))
+            indices = kennard_stone(X, n_samples=2)
+
+            assert len(indices) == 2
+            dist = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=-1)
+            true_pair = set(np.unravel_index(np.argmax(dist), dist.shape))
+            assert set(indices.tolist()) == true_pair
+
+    def test_seed_pair_documented_failure_case(self):
+        """R085 repro: [[0],[1],[2],[10]] must seed with samples 0 and 3, not 2 and 1."""
+        X = np.array([[0.0], [1.0], [2.0], [10.0]])
+        assert set(kennard_stone(X, n_samples=2).tolist()) == {0, 3}
+
+    def test_identical_rows_do_not_crash(self):
+        """All-zero distances still give a valid, unique selection."""
+        indices = kennard_stone(np.ones((5, 3)), n_samples=3)
+        assert len(set(indices.tolist())) == 3
 
     def test_all_samples(self):
         """Test selecting all samples."""

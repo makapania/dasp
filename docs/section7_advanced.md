@@ -642,12 +642,19 @@ Calibration transfer enables applying models developed on one instrument (primar
 
 **Method Selection Guide:**
 
-| Scenario | Recommended Method |
-|----------|-------------------|
-| Same wavelength range + 10+ standards | PDS |
-| Same wavelength range + <10 standards | DS |
-| Different wavelength ranges | CTAI |
-| No transfer standards available | Feature-based |
+Every method in this tab needs **paired standards**: the same samples measured on both
+instruments, row for row, resampled to one common wavelength grid. None of them works
+without standards.
+
+| Situation | Method |
+|-----------|--------|
+| Default | Slope/bias per wavelength (2 coefficients per wavelength) |
+| Wavelength shift or bandwidth difference between instruments | PDS |
+| Full-matrix alternatives | DS, PC-DS, Iterative ridge DS |
+
+The full-matrix methods have many more coefficients than there are standards. With few
+standards they can reproduce the standards almost exactly and still do worse than no
+correction on new samples. Check any transfer on standards that were not used to fit it.
 
 ### 4.2 Direct Standardization (DS)
 
@@ -714,56 +721,62 @@ def estimate_pds(X_primary, X_satellite, window=11):
 - Wavelength-dependent response differences
 - Better performance with sufficient transfer samples
 
-### 4.4 Transfer Sample Regression (TSR / Shenk-Westerhaus)
+### 4.4 Slope/Bias per Wavelength (default; stored key `tsr`)
 
-TSR estimates per-wavelength slope and bias corrections using a small set of transfer samples.
+For each wavelength separately, the primary value is regressed on the satellite value over
+the paired standards. Wavelengths are fitted independently.
 
 **Mathematical Formulation:**
 
 For each wavelength $\lambda$:
 $$x_{primary,\lambda} = slope_\lambda \cdot x_{satellite,\lambda} + bias_\lambda$$
 
-**Algorithm:**
+**Standards used:** "Slope/bias standards" = **All** (default) fits on every loaded pair.
+A number $n$ smaller than the number of loaded pairs picks $n$ standards by Kennard-Stone
+on the primary spectra; the others are not used in the fit.
 
-1. Select transfer samples (12-13 recommended)
-2. For each wavelength, fit linear regression
-3. Store slope and bias arrays
-4. Apply transformation: `X_new = X_old * slope + bias`
+**Notes:**
+- Two coefficients per wavelength, so it can be fitted from few standards.
+- It cannot correct wavelength shifts or bandwidth differences, which mix neighbouring
+  channels; use PDS for those.
+- This is slope/bias standardization in the spirit of Shenk & Westerhaus (1991), *Crop
+  Science* 31(6):1694-1696, doi:10.2135/cropsci1991.0011183X003100060064x. The code has not
+  been checked against their exact procedure.
+- Saved models store the key `tsr` for historical reasons. It is **not** trimmed scores
+  regression (Folch-Fortuny et al. 2017), which is also abbreviated TSR.
+- The per-wavelength R² is computed on the fitting standards; it is not a validation.
 
-**Quality Metrics:**
-- Per-wavelength R^2
-- Mean R^2 across wavelengths
+### 4.5 PC-DS: Paired Regression in Satellite PCA Space (stored key `ctai`)
 
-**Advantages:**
-- Simple and fast
-- Works well with Kennard-Stone sample selection
-- Can achieve near-recalibration accuracy with optimal samples
+Both instruments' spectra of the paired standards are mean-centred and projected onto the
+satellite's leading principal components. The primary scores are regressed on the
+satellite scores and the map is projected back:
 
-### 4.5 CTAI (Calibration Transfer based on Affine Invariance)
-
-CTAI is a transfer-standard-free method that leverages affine invariance properties.
-
-**Key Innovation:** No transfer samples required!
-
-**Mathematical Formulation:**
-
-Estimate affine transformation:
-$$\mathbf{X}_{primary} \approx \mathbf{X}_{satellite} \cdot \mathbf{M} + \mathbf{T}$$
-
-Where:
-- $\mathbf{M}$: Transformation matrix
-- $\mathbf{T}$: Translation vector
-
-**Algorithm:**
-
-1. Mean-center both datasets
-2. Compute SVD of satellite data
-3. Find optimal transformation in reduced-rank space
-4. Project back to full wavelength space
+$$\mathbf{X}_{primary} \approx \mathbf{X}_{satellite} \cdot \mathbf{M} + \mathbf{T},\qquad
+\mathbf{M} = \mathbf{V} \mathbf{M}_{red} \mathbf{V}^T$$
 
 **Requirements:**
-- Paired samples (same samples on both instruments)
-- Sufficient spectral diversity in both datasets
+- Paired standards (same samples on both instruments, same row order).
+- The same wavelength grid for both instruments (equal column counts).
+
+Saved models store the key `ctai` for historical reasons. This is **not** the published
+CTAI (calibration transfer based on affine invariance; Zhao et al. 2019, *Molecules*
+24(9):1802), which needs no standards. Because the output is also projected onto the
+satellite PCA basis, it is not plain truncated-SVD DS either.
+
+### 4.5a Iterative Ridge DS (stored key `nspfce`)
+
+A dasp heuristic, not the published PFCE/NS-PFCE. It starts from a per-wavelength scaling
+and repeatedly re-solves a lightly regularised (ridge $10^{-6}$) full-matrix DS on the
+paired standards, with damped updates and a re-fitted offset. Like DS it can fit the
+standards closely and do worse than no correction on new samples when there are few
+standards.
+
+### 4.5b JYPLS-inv (experimental, disabled in the GUI)
+
+Fits one PLS model to both instruments' spectra of the paired standards with their shared
+measured reference values, maps satellite PLS scores to primary scores, and reconstructs
+primary spectra from the loadings. Every standard needs a measured reference value.
 
 ### 4.6 Validation of Transfer Quality
 
@@ -782,6 +795,10 @@ Where:
    - Improvement ratio: RMSEP_before / RMSEP_after
    - Spectral reconstruction RMSE
    - Per-wavelength correlation
+
+**The agreement plot in the tab is not a validation.** Its R² ("Spectral agreement on
+loaded standards") is computed on the standards the transfer was fitted on. For
+slope/bias it uses only the standards actually used in the fit.
 
 **Visualization:**
 - Overlay transferred vs primary spectra

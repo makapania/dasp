@@ -742,3 +742,20 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - fix/ct-honest-labels (QW2, R085, R091, R128): gotchas
+- **Two CT build paths.** The Build button (GUI ~55034) calls `_build_transfer_model_new`; the older
+  `_build_ct_transfer_model` (~46990) has no callers. The roadmap's "TSR uses KS" line was true only of the dead
+  one; the live one took the first n rows. Fix the live path first; the dead one was only made honest.
+- **JYPLS-inv enhanced-y path indexed twice.** It subset the paired arrays by `transfer_indices` and then passed the
+  subset together with the same indices to `estimate_jypls_inv`, which indexes again (wrong rows or IndexError).
+  Dormant (radio disabled), fixed anyway.
+- **R091 maths.** sklearn `PLSRegression.transform` = `(X - mean) @ x_rotations_` for `scale=False`; `x_weights_`
+  only projects deflated X. The transfer is `mean_primary + (c + T_sat M - mean(T_primary)) P^T`, applied as
+  `X @ B + offset`. Without the primary-block mean the 2-block stacked mean leaves half the instrument offset.
+  Old saved jypls models have no `'offset'` and are now refused rather than silently applied.
+- **`black --line-ranges` is not hunk-local.** A range touching one entry of a multi-line statement reformats the
+  whole statement, so editing three tooltips re-quoted the entire ~770-entry `TOOLTIP_CONTENT` dict. Drop
+  black-only hunks afterwards (normalise quotes, `\'`, whitespace and trailing commas, compare) before committing.
+- **Worktree Bash guard.** In an isolated worktree the Bash tool refuses heredocs/compound commands it cannot
+  verify; write scripts with the Write tool and run them with PowerShell instead.

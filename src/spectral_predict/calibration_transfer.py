@@ -4,11 +4,22 @@ spectral_predict.calibration_transfer
 
 Backend-only module for calibration transfer between instruments.
 
-Supported methods:
-- DS (Direct Standardization)
-- PDS (Piecewise Direct Standardization)
-- TSR (Transfer Sample Regression / Shenk-Westerhaus)
-- CTAI (Calibration Transfer based on Affine Invariance)
+Supported methods (internal key -> what the code does). The keys are stored in
+saved transfer models, so they stay as they are even where the historical name is
+misleading; user-facing text should come from ``method_display_name``.
+
+- ``'ds'``: Direct Standardization (ridge-regularised full matrix).
+- ``'pds'``: Piecewise Direct Standardization.
+- ``'tsr'``: per-wavelength slope/bias standardization. Not trimmed scores
+  regression (Folch-Fortuny et al. 2017), which is also abbreviated TSR.
+- ``'ctai'``: paired regression in the satellite PCA space ("PC-DS"). Not the
+  published standard-free CTAI (Zhao et al. 2019, Molecules 24(9):1802); it needs
+  the same standards measured on both instruments.
+- ``'nspfce'``: iterative ridge DS, a dasp heuristic. Not PFCE/NS-PFCE.
+- ``'jypls-inv'``: experimental PLS score mapping; disabled in the GUI.
+
+Every method here is fitted on paired rows: row i of the primary matrix and row i
+of the satellite matrix must be the same physical standard.
 """
 
 from __future__ import annotations
@@ -24,6 +35,77 @@ logger = logging.getLogger(__name__)
 
 
 MethodType = Literal["ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"]
+
+DEFAULT_METHOD: str = "tsr"
+"""Method key the GUI selects by default (per-wavelength slope/bias)."""
+
+METHOD_SHORT_LABELS: dict[str, str] = {
+    "ds": "DS",
+    "pds": "PDS",
+    "tsr": "Slope/bias per wavelength",
+    "ctai": "PC-DS",
+    "nspfce": "Iterative ridge DS",
+    "ns-pfce": "Iterative ridge DS",
+    "jypls-inv": "JYPLS-inv (experimental)",
+}
+"""Short user-facing labels (radio buttons, status lines), keyed by method key."""
+
+METHOD_DISPLAY_NAMES: dict[str, str] = {
+    "ds": "Direct Standardization (DS)",
+    "pds": "Piecewise Direct Standardization (PDS)",
+    "tsr": "Per-wavelength slope/bias standardization",
+    "ctai": "Paired regression in satellite PCA space (PC-DS)",
+    "nspfce": "Iterative ridge DS (dasp heuristic)",
+    "ns-pfce": "Iterative ridge DS (dasp heuristic)",
+    "jypls-inv": "JYPLS-inv score mapping (experimental)",
+}
+"""Full user-facing names, keyed by method key."""
+
+
+def method_display_name(method: str, short: bool = False) -> str:
+    """Return the user-facing name for a stored transfer-method key.
+
+    Args:
+        method: Internal key as stored in ``TransferModel.method`` (e.g. ``'ctai'``).
+        short: Return the short label instead of the full name.
+
+    Returns:
+        The display name, or ``method.upper()`` for an unknown key.
+    """
+    table = METHOD_SHORT_LABELS if short else METHOD_DISPLAY_NAMES
+    return table.get(str(method).lower(), str(method).upper())
+
+
+def select_transfer_standards(X_primary: np.ndarray, n_standards: int | None = None) -> np.ndarray:
+    """Choose which paired standards a transfer is fitted on.
+
+    Args:
+        X_primary: Primary-instrument spectra of the loaded paired standards,
+            shape (n_pairs, n_wavelengths).
+        n_standards: How many to use. ``None`` (or n_pairs) uses every loaded pair.
+            A smaller value picks that many by Kennard-Stone on the primary spectra.
+
+    Returns:
+        Row indices into ``X_primary`` (and the matching satellite rows).
+
+    Raises:
+        ValueError: If fewer than 2 standards are requested or available, or more
+            are requested than are loaded.
+    """
+    from .sample_selection import kennard_stone
+
+    n_pairs = X_primary.shape[0]
+    if n_pairs < 2:
+        raise ValueError(f"Need at least 2 paired standards, got {n_pairs}")
+    if n_standards is None or n_standards == n_pairs:
+        return np.arange(n_pairs)
+    if n_standards > n_pairs:
+        raise ValueError(
+            f"Asked for {n_standards} transfer standards but only {n_pairs} pairs are loaded"
+        )
+    if n_standards < 2:
+        raise ValueError(f"Need at least 2 transfer standards, got {n_standards}")
+    return kennard_stone(np.asarray(X_primary, dtype=float), n_samples=int(n_standards))
 
 
 @dataclass
@@ -435,7 +517,7 @@ def load_transfer_model(path_prefix: Path | str) -> TransferModel:
 
 
 # ==============================================================================
-# TSR (Transfer Sample Regression / Shenk-Westerhaus)
+# Per-wavelength slope/bias standardization (method key 'tsr')
 # ==============================================================================
 
 def estimate_tsr(
@@ -446,22 +528,24 @@ def estimate_tsr(
     regularization: float = 0.0,
 ) -> Dict:
     """
-    Estimate Transfer Sample Regression (TSR / Shenk-Westerhaus method).
+    Estimate a per-wavelength slope/bias standardization (method key ``'tsr'``).
 
-    TSR is a simple yet effective calibration transfer method that estimates
-    slope and bias corrections for each wavelength independently using a small
-    set of transfer samples measured on both instruments.
+    For each wavelength separately, regress the primary value on the satellite value
+    over the chosen paired standards: ``X_primary[:, k] = slope[k] * X_satellite[:, k]
+    + bias[k]``. Wavelengths are fitted independently; no information is shared
+    between neighbouring channels. With ``slope_bias_correction=False`` only the
+    bias is fitted (slope fixed at 1).
 
-    Algorithm:
-    1. Extract transfer samples from primary and satellite datasets
-    2. For each wavelength λ:
-       - Fit linear regression: X_primary[λ] = slope[λ] * X_satellite[λ] + bias[λ]
-       - Store slope and bias coefficients
-    3. Return parameters for applying correction to new samples
+    This is slope/bias standardization in the spirit of Shenk & Westerhaus (1991);
+    equivalence to their published procedure has not been checked. The key
+    ``'tsr'`` is historical and is kept because saved transfer models store it: this
+    is **not** trimmed scores regression (Folch-Fortuny et al. 2017), which is also
+    abbreviated TSR.
 
-    With optimal sample selection (e.g., Kennard-Stone), TSR can achieve
-    results statistically indistinguishable from full recalibration using
-    only 12-13 transfer samples.
+    Rows of ``X_primary`` and ``X_satellite`` must be the same physical standards
+    (paired). Two parameters are fitted per wavelength, so the fit is possible from
+    few standards, but the per-wavelength R² it reports is computed on the fitting
+    standards and is not a validation.
 
     Parameters
     ----------
@@ -471,8 +555,8 @@ def estimate_tsr(
         Satellite instrument spectra on common wavelength grid.
         Must have same number of samples as X_primary.
     transfer_indices : np.ndarray, shape (n_transfer,)
-        Indices of samples to use for building transfer mapping.
-        Typically 12-13 samples selected via Kennard-Stone or SPXY.
+        Indices of the paired standards to fit on (e.g. from
+        ``select_transfer_standards``).
     slope_bias_correction : bool, default=True
         If True, apply full slope + bias correction.
         If False, only apply bias correction (slope = 1).
@@ -522,23 +606,28 @@ def estimate_tsr(
 
     References
     ----------
-    .. [1] Shenk, J. S., & Westerhaus, M. O. (1991). Population definition,
-           sample selection, and calibration procedures for near infrared
-           reflectance spectroscopy. Crop Science, 31(2), 469-474.
+    .. [1] Shenk, J. S., & Westerhaus, M. O. (1991). New standardization and
+           calibration procedures for NIRS analytical systems. Crop Science,
+           31(6), 1694-1696. doi:10.2135/cropsci1991.0011183X003100060064x
+           (cited as the slope/bias standardization idea; this code is not
+           verified to reproduce their procedure).
+    .. [2] Folch-Fortuny, A., et al. (2017). Calibration transfer between NIR
+           spectrometers: new proposals and a comparative study. Journal of
+           Chemometrics, doi:10.1002/cem.2874 (the *other* "TSR": trimmed scores
+           regression, not implemented here).
 
     Notes
     -----
-    - TSR assumes linear relationship between primary and satellite at each wavelength
-    - Performance depends heavily on transfer sample selection quality
-    - Use Kennard-Stone, DUPLEX, or SPXY for optimal sample selection
-    - Typically requires 12-13 samples for best performance
-    - Computationally very fast (simple linear regression per wavelength)
-    - Can be parallelized easily for large datasets
+    - Assumes a linear relationship between instruments at each wavelength.
+    - Wavelength shifts and bandwidth differences mix neighbouring channels and
+      cannot be corrected by an independent per-channel fit; use PDS for those.
+    - ``select_transfer_standards`` chooses the standards (all loaded pairs, or a
+      Kennard-Stone subset).
 
     See Also
     --------
-    apply_tsr : Apply TSR transformation to new spectra
-    estimate_ctai : Alternative method requiring no transfer samples
+    apply_tsr : Apply the slope/bias correction to new spectra
+    select_transfer_standards : Choose the standards to fit on
     """
     n_samples, n_wavelengths = X_primary.shape
 
@@ -639,7 +728,7 @@ def estimate_tsr(
 
 def apply_tsr(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply TSR calibration transfer to new satellite instrument spectra.
+    Apply per-wavelength slope/bias standardization (key ``'tsr'``) to new spectra.
 
     Transforms satellite spectra to primary instrument domain using previously
     estimated slope and bias corrections.
@@ -690,7 +779,7 @@ def apply_tsr(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
 
 
 # ==============================================================================
-# CTAI (Calibration Transfer based on Affine Invariance)
+# Paired regression in satellite PCA space ("PC-DS", historical key 'ctai')
 # ==============================================================================
 
 def estimate_ctai(
@@ -700,113 +789,84 @@ def estimate_ctai(
     explained_variance_threshold: float = 0.99,
 ) -> Dict:
     """
-    Estimate CTAI (Calibration Transfer based on Affine Invariance).
+    Estimate a paired regression in the satellite PCA space ("PC-DS", key ``'ctai'``).
 
-    CTAI is a transfer standard-free method that leverages affine invariance
-    properties of spectral transformations. It achieves state-of-the-art
-    performance without requiring paired transfer samples, making it ideal
-    when transfer standards are unavailable or expensive to measure.
+    Despite the historical key, this is **not** the published CTAI (calibration
+    transfer based on affine invariance; Zhao et al. 2019, Molecules 24(9):1802),
+    which is standard-free and corrects predictions of a master PLS model. This
+    function needs the same standards measured on both instruments, row for row.
 
-    Algorithm (simplified):
-    1. Mean-center both primary and satellite datasets
-    2. Estimate affine transformation: X_primary ≈ X_satellite @ M + T
-    3. Use SVD/PCA to find optimal transformation in reduced-rank space
-    4. Validate transformation quality via reconstruction error
+    Algorithm:
+    1. Mean-centre the primary and satellite standards separately.
+    2. Take the satellite principal components V (n_components of them, chosen by
+       ``explained_variance_threshold`` when not given).
+    3. Project **both** centred matrices onto V and regress the primary scores on
+       the satellite scores (least squares), giving M_reduced.
+    4. Map back: ``M = V @ M_reduced @ V.T`` and ``T = mean_primary - mean_satellite @ M``.
 
-    The key insight is that spectral differences between instruments often
-    follow affine transformations, which can be estimated from the data
-    structure without requiring sample-wise correspondence.
+    Because the output is also projected onto the satellite PCA basis, any primary
+    variation outside the satellite's leading components is lost; this differs from
+    plain truncated-SVD DS, which leaves the output unrestricted.
 
     Parameters
     ----------
     X_primary : np.ndarray, shape (n_samples, n_wavelengths)
-        Primary instrument spectra on common wavelength grid.
+        Primary instrument spectra of the paired standards, on the common grid.
     X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
-        Satellite instrument spectra on common wavelength grid.
-        Need not be the same samples as X_primary.
+        Satellite instrument spectra of the **same** standards, in the same row
+        order and on the same grid (equal column counts are required).
     n_components : int, optional
-        Number of principal components to use for transformation.
+        Number of satellite principal components to keep.
         If None, automatically selected based on explained_variance_threshold.
     explained_variance_threshold : float, default=0.99
-        Fraction of variance to retain when auto-selecting n_components.
+        Fraction of satellite variance to retain when auto-selecting n_components.
 
     Returns
     -------
     params : dict
         Dictionary containing:
         - 'M' : np.ndarray, shape (n_wavelengths, n_wavelengths)
-            Affine transformation matrix
+            Transformation matrix
         - 'T' : np.ndarray, shape (n_wavelengths,)
-            Translation vector (bias correction)
+            Translation vector
         - 'n_components' : int
             Number of components used
         - 'explained_variance' : float
-            Fraction of variance explained by transformation
+            Fraction of satellite variance in the kept components
         - 'reconstruction_error' : float
-            RMSE of reconstruction on input data
+            RMSE on the fitting standards (resubstitution; not a validation)
         - 'primary_mean' : np.ndarray
-            Mean of primary spectra (for centering)
+            Mean of primary spectra
         - 'satellite_mean' : np.ndarray
-            Mean of satellite spectra (for centering)
+            Mean of satellite spectra
 
     Examples
     --------
     >>> import numpy as np
     >>> from spectral_predict.calibration_transfer import estimate_ctai, apply_ctai
-    >>>
-    >>> # Generate primary and satellite spectra (different samples!)
-    >>> n_primary, n_satellite, n_wavelengths = 100, 120, 200
-    >>>
-    >>> # Primary dataset
-    >>> X_primary = np.random.randn(n_primary, n_wavelengths)
-    >>>
-    >>> # Satellite dataset (different samples, with affine transformation)
-    >>> X_satellite_base = np.random.randn(n_satellite, n_wavelengths)
-    >>> true_slope = 0.95
-    >>> true_bias = 0.05
-    >>> X_satellite = true_slope * X_satellite_base + true_bias
-    >>>
-    >>> # Estimate CTAI - no transfer samples needed!
-    >>> params = estimate_ctai(X_primary, X_satellite)
-    >>>
-    >>> print(f"Explained variance: {params['explained_variance']:.4f}")
-    >>> print(f"Reconstruction RMSE: {params['reconstruction_error']:.6f}")
-    >>>
-    >>> # Apply to new satellite spectra
-    >>> X_satellite_new = np.random.randn(50, n_wavelengths)
-    >>> X_transferred = apply_ctai(X_satellite_new, params)
-
-    References
-    ----------
-    .. [1] Fan, W., et al. (2019). Calibration transfer based on affine
-           invariance for near-infrared spectra. Analytical Methods,
-           11(7), 864-872. DOI: 10.1039/C8AY02629G
+    >>> rng = np.random.default_rng(0)
+    >>> X_primary = rng.standard_normal((30, 200))          # 30 paired standards
+    >>> X_satellite = 0.95 * X_primary + 0.05               # same standards, row for row
+    >>> params = estimate_ctai(X_primary, X_satellite, n_components=10)
+    >>> X_transferred = apply_ctai(X_satellite, params)
 
     Notes
     -----
-    - **Major advantage**: No transfer samples required!
-    - Assumes spectral differences follow affine transformation
-    - Works best when primary and satellite have similar spectral characteristics
-    - Achieves lowest prediction errors in many benchmark studies
-    - Computational complexity: O(n * p^2) for SVD, quite fast
-    - More robust than PDS with limited transfer samples
-
-    Limitations:
-    - Assumes affine relationship (may not hold for severe instrumental differences)
-    - Requires sufficient spectral diversity in both datasets
-    - May struggle with very different spectral ranges
+    - Requires paired standards; raises if the row counts differ.
+    - With few standards the fit can reproduce the standards closely and still do
+      worse on new samples; check it on standards not used for fitting.
 
     See Also
     --------
-    apply_ctai : Apply CTAI transformation to new spectra
-    estimate_tsr : Alternative requiring transfer samples
+    apply_ctai : Apply the transformation to new spectra
+    estimate_ds : Direct Standardization
     """
     from scipy.linalg import svd
 
     n_samples_primary, n_wavelengths = X_primary.shape
     n_samples_satellite = X_satellite.shape[0]
 
-    logger.debug("CTAI input shapes: Primary %s, Satellite %s", X_primary.shape, X_satellite.shape)
+    logger.debug("PC-DS input shapes: Primary %s, Satellite %s", X_primary.shape, X_satellite.shape)
 
     if X_satellite.shape[1] != n_wavelengths:
         raise ValueError(
@@ -834,8 +894,11 @@ def estimate_ctai(
         raise ValueError(f"X_satellite contains {n_inf} infinite values")
 
     logger.debug(
-        "CTAI data validation passed; primary range [%.6f, %.6f], satellite range [%.6f, %.6f]",
-        np.min(X_primary), np.max(X_primary), np.min(X_satellite), np.max(X_satellite),
+        "PC-DS data validation passed; primary range [%.6f, %.6f], satellite range [%.6f, %.6f]",
+        np.min(X_primary),
+        np.max(X_primary),
+        np.min(X_satellite),
+        np.max(X_satellite),
     )
 
     # Step 1: Mean-center both datasets
@@ -846,35 +909,40 @@ def estimate_ctai(
     X_satellite_centered = X_satellite - satellite_mean
 
     logger.debug(
-        "CTAI mean centering complete; primary mean range [%.6f, %.6f], satellite mean range [%.6f, %.6f]",
-        np.min(primary_mean), np.max(primary_mean), np.min(satellite_mean), np.max(satellite_mean),
+        "PC-DS mean centering complete; primary mean range [%.6f, %.6f], satellite mean range [%.6f, %.6f]",
+        np.min(primary_mean),
+        np.max(primary_mean),
+        np.min(satellite_mean),
+        np.max(satellite_mean),
     )
 
     # Step 2: Estimate affine transformation using PCA-regularized regression
     # We want: X_primary ≈ X_satellite @ M + T (in data space, not covariance space!)
-    # CTAI's key insight: Use PCA to find low-rank approximation for stability
 
     # Check if we have paired samples
     have_paired_samples = (n_samples_primary == n_samples_satellite)
 
     if not have_paired_samples:
         raise ValueError(
-            f"CTAI requires paired samples (same samples on both instruments).\n"
+            f"PC-DS requires paired samples (same samples on both instruments).\n"
             f"Got {n_samples_primary} primary samples and {n_samples_satellite} satellite samples.\n"
-            f"For unpaired samples, use TSR, DS, or PDS instead."
+            f"Every transfer method here needs paired standards."
         )
 
-    print(f"  CTAI: Detected {n_samples_primary} paired samples on both instruments")
+    print(f"  PC-DS: Detected {n_samples_primary} paired samples on both instruments")
 
     try:
         U_satellite, S_satellite, Vt_satellite = svd(X_satellite_centered, full_matrices=False)
         logger.debug(
-            "CTAI SVD: U%s S%s Vt%s; singular values [%.6e, %.6e]",
-            U_satellite.shape, S_satellite.shape, Vt_satellite.shape,
-            np.min(S_satellite), np.max(S_satellite),
+            "PC-DS SVD: U%s S%s Vt%s; singular values [%.6e, %.6e]",
+            U_satellite.shape,
+            S_satellite.shape,
+            Vt_satellite.shape,
+            np.min(S_satellite),
+            np.max(S_satellite),
         )
         if S_satellite[-1] > 0:
-            logger.debug("CTAI SVD condition number: %.2e", S_satellite[0] / S_satellite[-1])
+            logger.debug("PC-DS SVD condition number: %.2e", S_satellite[0] / S_satellite[-1])
     except np.linalg.LinAlgError as e:
         raise ValueError(f"SVD failed: {e}. Check if data has sufficient variance.")
 
@@ -884,10 +952,12 @@ def estimate_ctai(
         explained_var_cumsum = np.cumsum(S_satellite**2) / np.sum(S_satellite**2)
         n_components = np.searchsorted(explained_var_cumsum, explained_variance_threshold) + 1
         n_components = min(n_components, min(n_samples_satellite, n_wavelengths))
-        print(f"  CTAI: Auto-selected {n_components} components (threshold={explained_variance_threshold})")
+        print(
+            f"  PC-DS: Auto-selected {n_components} components (threshold={explained_variance_threshold})"
+        )
     else:
         n_components = min(n_components, len(S_satellite))
-        print(f"  CTAI: Using {n_components} components (user-specified)")
+        print(f"  PC-DS: Using {n_components} components (user-specified)")
 
     # Step 2c: Project data onto principal components
     # This is the key: work in reduced-rank space for numerical stability
@@ -899,13 +969,16 @@ def estimate_ctai(
     X_primary_projected = X_primary_centered @ V_truncated  # (n_samples, n_components)
 
     M_reduced = np.linalg.lstsq(X_satellite_projected, X_primary_projected, rcond=None)[0]
-    logger.debug("CTAI M_reduced shape: %s (PCA space transformation)", M_reduced.shape)
+    logger.debug("PC-DS M_reduced shape: %s (PCA space transformation)", M_reduced.shape)
 
     M = V_truncated @ M_reduced @ V_truncated.T
 
     logger.debug(
-        "CTAI M shape %s; M range [%.6f, %.6f]; M diagonal mean %.6f",
-        M.shape, np.min(M), np.max(M), np.mean(np.diag(M)),
+        "PC-DS M shape %s; M range [%.6f, %.6f]; M diagonal mean %.6f",
+        M.shape,
+        np.min(M),
+        np.max(M),
+        np.mean(np.diag(M)),
     )
 
     # Check for NaN/inf in transformation matrix
@@ -919,8 +992,10 @@ def estimate_ctai(
     T = primary_mean - satellite_mean @ M
 
     logger.debug(
-        "CTAI translation T range [%.6f, %.6f]; T mean %.6f",
-        np.min(T), np.max(T), np.mean(T),
+        "PC-DS translation T range [%.6f, %.6f]; T mean %.6f",
+        np.min(T),
+        np.max(T),
+        np.mean(T),
     )
 
     X_satellite_transformed = X_satellite @ M + T
@@ -932,8 +1007,9 @@ def estimate_ctai(
         raise ValueError(f"Transformed data contains infinite values! Transformation failed.")
 
     logger.debug(
-        "CTAI transformed data range [%.6f, %.6f]",
-        np.min(X_satellite_transformed), np.max(X_satellite_transformed),
+        "PC-DS transformed data range [%.6f, %.6f]",
+        np.min(X_satellite_transformed),
+        np.max(X_satellite_transformed),
     )
 
     X_primary_sample = X_primary[:min(n_samples_primary, n_samples_satellite)]
@@ -944,7 +1020,7 @@ def estimate_ctai(
     explained_variance = np.sum(S_truncated**2) / np.sum(S_satellite**2) if len(S_satellite) > 0 else 1.0
 
     print(
-        f"  CTAI: components={n_components}, "
+        f"  PC-DS: components={n_components}, "
         f"explained_variance={explained_variance:.4f}, "
         f"reconstruction_RMSE={reconstruction_error:.6f}"
     )
@@ -966,17 +1042,17 @@ def estimate_ctai(
 
 def apply_ctai(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply CTAI calibration transfer to new satellite instrument spectra.
+    Apply a PC-DS transfer (key ``'ctai'``) to new satellite instrument spectra.
 
-    Transforms satellite spectra to primary instrument domain using affine
-    transformation estimated via CTAI.
+    Transforms satellite spectra to the primary instrument domain with the
+    affine map ``X @ M + T`` estimated by ``estimate_ctai``.
 
     Parameters
     ----------
     X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
         New satellite instrument spectra to transform.
     params : dict
-        CTAI parameters from estimate_ctai, containing 'M' and 'T'.
+        Parameters from estimate_ctai, containing 'M' and 'T'.
 
     Returns
     -------
@@ -985,7 +1061,7 @@ def apply_ctai(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
 
     Examples
     --------
-    >>> # After estimating CTAI model (see estimate_ctai examples)
+    >>> # After estimate_ctai (see its example)
     >>> X_satellite_new = np.random.randn(50, 200)
     >>> X_transferred = apply_ctai(X_satellite_new, params)
     >>>
@@ -1017,7 +1093,7 @@ def apply_ctai(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
 
 
 # ==============================================================================
-# NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)
+# Iterative ridge DS (historical key 'nspfce'; a dasp heuristic, not PFCE)
 # ==============================================================================
 
 def estimate_nspfce(
@@ -1031,45 +1107,49 @@ def estimate_nspfce(
     normalize: bool = False  # Changed default to False - normalization can cause issues
 ) -> Dict:
     """
-    Non-supervised Parameter-Free Calibration Enhancement (NS-PFCE).
+    Iterative ridge DS (historical key ``'nspfce'``): a dasp heuristic.
 
-    NS-PFCE is an advanced calibration transfer method that achieves best
-    performance when combined with intelligent wavelength selection (especially
-    VCPA-IRIV). It's parameter-free and fully automatic.
+    This is **not** PFCE or NS-PFCE (parameter-free calibration enhancement;
+    Zhang et al. 2021, Anal. Chim. Acta 1142:169-178), which constrains the slave
+    model's regression coefficients to correlate with the master model's. No
+    published reference exists for this
+    function; treat it as an in-house variant of Direct Standardization.
 
-    Algorithm:
-    1. Optional: Select informative wavelengths using VCPA-IRIV, CARS, or SPA
-    2. Initialize transformation with simple normalization
-    3. Iteratively refine transformation:
-       - Estimate spectral differences
-       - Update transformation matrix adaptively
-       - Apply normalization (optional)
-       - Check convergence
-    4. Return optimized transformation
+    Algorithm (as implemented):
+    1. Optionally select wavelengths (CARS, SPA or VCPA-IRIV run against the
+       spectral mean as a pseudo-target).
+    2. Initialise ``T = diag(std_primary / std_satellite)`` and a matching offset.
+    3. Repeat: solve the ridge problem (lambda = 1e-6)
+       ``T_new = argmin ||(X_primary - offset) - X_satellite @ T||``, damp the
+       update (``T = 0.5 * T_new + 0.5 * T``), and reset the offset to the mean
+       residual. Stop when the change in mean squared error falls below
+       ``convergence_threshold`` or after ``max_iterations``.
 
-    Key innovation: No parameters to tune - fully automatic optimization.
+    Rows of ``X_primary`` and ``X_satellite`` must be the same physical standards
+    (paired); the least-squares step uses them row for row. With few standards the
+    fitted full matrix can reproduce the standards almost exactly and still do
+    worse than no correction on new samples.
 
     Parameters
     ----------
     X_primary : np.ndarray, shape (n_samples_primary, n_wavelengths)
         Primary instrument spectra on common wavelength grid.
-    X_satellite : np.ndarray, shape (n_samples_satellite, n_wavelengths)
-        Satellite instrument spectra on common wavelength grid.
-        Need not be the same samples as X_primary.
+    X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
+        Satellite instrument spectra of the **same** standards, in the same row
+        order, on the common wavelength grid.
     wavelengths : np.ndarray, shape (n_wavelengths,)
         Wavelength grid (used for wavelength selection).
-    use_wavelength_selection : bool, default=True
-        Whether to apply wavelength selection before transformation.
-        Highly recommended for best performance.
-    wavelength_selector : str, default='vcpa-iriv'
+    use_wavelength_selection : bool, default=False
+        Whether to apply wavelength selection before transformation. When True the
+        output contains only the selected wavelengths.
+    wavelength_selector : str, default='cars'
         Method for wavelength selection: 'vcpa-iriv', 'cars', or 'spa'.
-        VCPA-IRIV typically gives best results but is slower.
     max_iterations : int, default=100
         Maximum iterations for iterative optimization.
     convergence_threshold : float, default=1e-6
         Convergence criterion (change in transformation matrix).
-    normalize : bool, default=True
-        Apply adaptive normalization during optimization.
+    normalize : bool, default=False
+        Rescale T to a fixed Frobenius norm every 10 iterations.
 
     Returns
     -------
@@ -1095,47 +1175,21 @@ def estimate_nspfce(
     >>> import numpy as np
     >>> from spectral_predict.calibration_transfer import estimate_nspfce, apply_nspfce
     >>>
-    >>> # Generate primary and satellite spectra (different samples)
-    >>> n_primary, n_satellite, n_wavelengths = 100, 120, 200
-    >>> wavelengths = np.linspace(1000, 2500, n_wavelengths)
-    >>>
-    >>> X_primary = np.random.randn(n_primary, n_wavelengths)
-    >>> X_satellite = 0.9 * np.random.randn(n_satellite, n_wavelengths) + 0.1
-    >>>
-    >>> # Estimate NS-PFCE model (with wavelength selection)
-    >>> params = estimate_nspfce(X_primary, X_satellite, wavelengths,
-    ...                          use_wavelength_selection=True,
-    ...                          wavelength_selector='vcpa-iriv')
-    >>>
-    >>> print(f"Selected {len(params['selected_wavelengths'])} wavelengths")
-    >>> print(f"Converged in {params['convergence_iterations']} iterations")
-    >>>
-    >>> # Apply to new satellite spectra
-    >>> X_satellite_new = np.random.randn(50, n_wavelengths)
-    >>> X_transferred = apply_nspfce(X_satellite_new, params)
+    >>> rng = np.random.default_rng(0)
+    >>> wavelengths = np.linspace(1000, 2500, 200)
+    >>> X_primary = rng.standard_normal((40, 200))           # 40 paired standards
+    >>> X_satellite = 0.9 * X_primary + 0.1                   # same standards, row for row
+    >>> params = estimate_nspfce(X_primary, X_satellite, wavelengths)
+    >>> X_transferred = apply_nspfce(X_satellite, params)
 
     References
     ----------
-    .. [1] Literature reference needed - NS-PFCE methodology
-
-    Notes
-    -----
-    - **Best performance with VCPA-IRIV wavelength selection**
-    - Parameter-free - no tuning required
-    - Works with unpaired datasets
-    - Computationally more expensive than TSR/CTAI
-    - Particularly effective for complex instrumental differences
-    - Adaptive normalization helps with different intensity scales
-
-    Limitations:
-    - Wavelength selection adds significant computation time
-    - May struggle if primary/satellite have very different spectral characteristics
-    - Requires sufficient spectral diversity in both datasets
+    None. This is a dasp heuristic (see above); it is not the published PFCE.
 
     See Also
     --------
-    apply_nspfce : Apply NS-PFCE transformation to new spectra
-    estimate_ctai : Alternative parameter-free method (faster)
+    apply_nspfce : Apply the transformation to new spectra
+    estimate_ds : Direct Standardization
     """
     n_samples_primary, n_wavelengths = X_primary.shape
     n_samples_satellite = X_satellite.shape[0]
@@ -1158,7 +1212,9 @@ def estimate_nspfce(
     full_wavelengths_map = None
 
     if use_wavelength_selection:
-        print(f"  NS-PFCE: Performing wavelength selection using {wavelength_selector}...")
+        print(
+            f"  Iterative ridge DS: Performing wavelength selection using {wavelength_selector}..."
+        )
 
         # Need pseudo-Y for wavelength selection
         # Use spectral mean or first principal component as proxy
@@ -1189,7 +1245,9 @@ def estimate_nspfce(
                 raise ValueError(f"Unknown wavelength_selector: {wavelength_selector}")
 
             selected_wavelengths = wl_result['selected_indices']
-            print(f"  NS-PFCE: Selected {len(selected_wavelengths)}/{n_wavelengths} wavelengths")
+            print(
+                f"  Iterative ridge DS: Selected {len(selected_wavelengths)}/{n_wavelengths} wavelengths"
+            )
 
             # Reduce matrices to selected wavelengths
             X_primary_sel = X_primary[:, selected_wavelengths]
@@ -1197,7 +1255,9 @@ def estimate_nspfce(
             n_selected = len(selected_wavelengths)
 
         except Exception as e:
-            print(f"  NS-PFCE: Wavelength selection failed ({str(e)}), using all wavelengths")
+            print(
+                f"  Iterative ridge DS: Wavelength selection failed ({str(e)}), using all wavelengths"
+            )
             X_primary_sel = X_primary
             X_satellite_sel = X_satellite
             n_selected = n_wavelengths
@@ -1290,8 +1350,8 @@ def estimate_nspfce(
     n_compare = min(n_samples_primary, n_samples_satellite)
     final_objective = np.sqrt(np.mean((X_primary_sel[:n_compare] - X_satellite_transformed[:n_compare]) ** 2))
 
-    print(f"  NS-PFCE: Converged in {convergence_iterations} iterations")
-    print(f"  NS-PFCE: Final RMSE: {final_objective:.6f}")
+    print(f"  Iterative ridge DS: Converged in {convergence_iterations} iterations")
+    print(f"  Iterative ridge DS: Final RMSE: {final_objective:.6f}")
 
     # Get actual wavelength values for selected wavelengths
     selected_wavelength_values = wavelengths[selected_wavelengths] if use_wavelength_selection else wavelengths
@@ -1334,17 +1394,17 @@ def apply_nspfce(
     return_full_spectrum: bool = False
 ) -> np.ndarray:
     """
-    Apply NS-PFCE calibration transfer to new satellite instrument spectra.
+    Apply an iterative ridge DS transfer (key ``'nspfce'``) to new satellite spectra.
 
     Transforms satellite spectra to primary instrument domain using previously
-    estimated NS-PFCE transformation.
+    estimated transformation.
 
     Parameters
     ----------
     X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
         New satellite instrument spectra to transform.
     params : dict
-        NS-PFCE parameters from estimate_nspfce.
+        Parameters from estimate_nspfce.
     return_full_spectrum : bool, default=False
         If wavelength selection was used:
         - False (default): Return only the selected wavelengths (reduced spectrum).
@@ -1367,7 +1427,7 @@ def apply_nspfce(
 
     Examples
     --------
-    >>> # After estimating NS-PFCE model (see estimate_nspfce examples)
+    >>> # After estimate_nspfce (see its example)
     >>> X_satellite_new = np.random.randn(50, 200)
     >>> X_transferred = apply_nspfce(X_satellite_new, params)
     >>>
@@ -1432,260 +1492,223 @@ def estimate_jypls_inv(
     transfer_indices: np.ndarray,
     n_components: int | None = None,
     cv_folds: int = 5,
-    max_components: int = 20
+    max_components: int = 20,
 ) -> Dict:
     """
-    Estimate JYPLS-inv (Joint-Y PLS with inversion) calibration transfer.
+    Estimate an experimental joint-Y PLS score mapping ("JYPLS-inv").
 
-    JYPLS-inv uses a joint PLS model where primary and satellite transfer samples
-    are combined in an augmented X matrix with shared Y values. The PLS model
-    learns a common latent structure, and the transformation is derived from
-    the PLS components to map satellite spectra to primary space.
+    The paired standards measured on both instruments are stacked into one X block
+    that shares the reference values y, and one PLS model is fitted to it. Each
+    spectrum is projected to PLS scores with the model's own centring and
+    ``x_rotations_`` (so undeflated X is projected correctly). An affine map with an
+    intercept is fitted from the satellite scores to the primary scores of the same
+    standards, and a satellite spectrum is transferred by mapping its scores and
+    reconstructing with the X loadings around the primary standards' mean:
+
+        X_transferred = mean_primary + (c + T_sat @ M - mean(T_primary)) @ P.T
+
+    which is applied as the affine map ``X_sat @ B + offset``.
+
+    The output lies in the primary mean plus the span of the PLS loadings, so
+    spectral variation outside the k components is not carried over. This is a
+    score-mapping implementation in the spirit of joint-Y PLS inversion; it has not
+    been checked against a published JYPLS-inv algorithm (which fits separate
+    loadings per instrument block). It is disabled in the GUI.
 
     Parameters
     ----------
     X_primary : np.ndarray, shape (n_samples, n_wavelengths)
         Primary instrument spectra.
     X_satellite : np.ndarray, shape (n_samples, n_wavelengths)
-        Satellite instrument spectra (same samples as X_primary).
+        Satellite instrument spectra of the same samples, row for row.
     y_transfer : np.ndarray, shape (n_transfer,)
-        Reference values for transfer samples.
-        Used for PLS modeling to find optimal transformation.
+        Measured reference values for the transfer standards. Every value must be
+        finite; missing targets are rejected, never substituted.
     transfer_indices : np.ndarray, shape (n_transfer,)
-        Indices of transfer samples in X_primary and X_satellite.
-        Typically 12-13 samples selected by Kennard-Stone or SPXY.
+        Rows of X_primary / X_satellite that are the transfer standards.
     n_components : int | None, optional
-        Number of PLS components. If None, determined by cross-validation.
-        Default: None (auto-select).
+        Number of PLS components. If None, chosen by cross-validated y error with
+        both spectra of a standard kept in the same fold.
     cv_folds : int, optional
-        Number of cross-validation folds for component selection.
-        Default: 5.
+        Number of cross-validation folds for component selection. Default 5.
     max_components : int, optional
-        Maximum number of components to try in CV.
-        Default: 20.
+        Maximum number of components to try in CV. Default 20.
 
     Returns
     -------
     params : dict
-        Dictionary containing:
-        - 'transformation_matrix' : np.ndarray, shape (n_wavelengths, n_wavelengths)
-            Matrix B such that X_primary ≈ X_satellite @ B
-        - 'n_components' : int
-            Number of PLS components used
-        - 'cv_rmse' : float
-            Cross-validation RMSE for component selection
-        - 'transfer_indices' : np.ndarray
-            Indices of transfer samples
-        - 'pls_x_weights' : np.ndarray
-            PLS X weights (for inspection)
-        - 'pls_x_loadings' : np.ndarray
-            PLS X loadings (for inspection)
-        - 'explained_variance_ratio' : float
-            Proportion of X variance explained by PLS components
+        - 'transformation_matrix' : (n_wavelengths, n_wavelengths) B
+        - 'offset' : (n_wavelengths,) so that X_transferred = X_sat @ B + offset
+        - 'n_components', 'cv_rmse' (RMSECV of y for the joint PLS when
+          auto-selected, else 0.0), 'transfer_indices', 'explained_variance_ratio'
+        - 'x_mean', 'pls_x_rotations', 'pls_x_weights', 'pls_x_loadings'
+        - 'pls_scores_primary', 'pls_scores_satellite'
+        - 'score_intercept', 'score_transformation' (c and M above)
+        - 'primary_mean' (mean primary spectrum of the standards)
 
-    Notes
-    -----
-    Algorithm:
-    1. Extract transfer samples from primary and satellite
-    2. Create augmented X = [X_primary_transfer; X_satellite_transfer]
-    3. Create augmented Y = [y_transfer; y_transfer] (shared Y)
-    4. Fit PLS(X_aug, Y_aug) with optimal number of components
-    5. Extract separate PLS scores for primary (T_m) and satellite (T_s)
-    6. Compute transformation: B = W @ (T_s^T T_s)^{-1} @ T_s^T @ T_m @ P^T
-       where W = PLS X-weights, P = PLS X-loadings
-    7. Simplified approach: B derived from PLS regression coefficients
-
-    The transformation maps satellite spectra into primary space while preserving
-    the PLS latent structure that predicts Y.
-
-    References
-    ----------
-    - Feudale, R. N., et al. (2002). "Transfer of multivariate calibration
-      models: a review." Chemometrics and Intelligent Laboratory Systems, 64(2), 181-192.
-    - Bouveresse, E., & Massart, D. L. (1996). "Improvement of the piecewise
-      direct standardisation procedure for the transfer of NIR spectra for
-      multivariate calibration." Chemometrics and intelligent laboratory systems, 32(2), 201-213.
-
-    Examples
-    --------
-    >>> import numpy as np
-    >>> from spectral_predict.sample_selection import kennard_stone
-    >>>
-    >>> # Simulate primary and satellite spectra
-    >>> np.random.seed(42)
-    >>> n_samples, n_wavelengths = 100, 200
-    >>> X_primary = np.random.randn(n_samples, n_wavelengths)
-    >>> X_satellite = 0.95 * X_primary + 0.05  # Satellite with bias/scale
-    >>> y = 2.0 * X_primary[:, 50] - 1.5 * X_primary[:, 100] + np.random.randn(n_samples) * 0.1
-    >>>
-    >>> # Select 12 transfer samples with Kennard-Stone
-    >>> transfer_idx = kennard_stone(X_primary, n_samples=12)
-    >>> y_transfer = y[transfer_idx]
-    >>>
-    >>> # Estimate JYPLS-inv model
-    >>> params = estimate_jypls_inv(X_primary, X_satellite, y_transfer, transfer_idx, n_components=5)
-    >>> print(f"PLS Components: {params['n_components']}")
-    >>> print(f"CV RMSE: {params['cv_rmse']:.6f}")
-    >>>
-    >>> # Apply transformation
-    >>> X_transferred = apply_jypls_inv(X_satellite, params)
-    >>> rmse_improvement = np.sqrt(np.mean((X_satellite - X_primary)**2)) / np.sqrt(np.mean((X_transferred - X_primary)**2))
-    >>> print(f"RMSE improvement: {rmse_improvement:.2f}x")
+    Raises
+    ------
+    ValueError
+        On shape mismatches, fewer than 2 standards, or non-finite y values.
     """
     try:
         from sklearn.cross_decomposition import PLSRegression
-        from sklearn.model_selection import cross_val_score
+        from sklearn.model_selection import GroupKFold, cross_val_score
     except ImportError:
-        raise ImportError("scikit-learn is required for JYPLS-inv. Install with: pip install scikit-learn")
+        raise ImportError(
+            "scikit-learn is required for JYPLS-inv. Install with: pip install scikit-learn"
+        )
 
-    # Validate inputs
     if X_primary.shape != X_satellite.shape:
-        raise ValueError(f"X_primary and X_satellite must have same shape. Got {X_primary.shape} and {X_satellite.shape}")
+        raise ValueError(
+            f"X_primary and X_satellite must have same shape. "
+            f"Got {X_primary.shape} and {X_satellite.shape}"
+        )
+
+    transfer_indices = np.asarray(transfer_indices)
+    y_transfer = np.asarray(y_transfer, dtype=float).ravel()
 
     if len(transfer_indices) != len(y_transfer):
-        raise ValueError(f"Number of transfer_indices ({len(transfer_indices)}) must match y_transfer length ({len(y_transfer)})")
+        raise ValueError(
+            f"Number of transfer_indices ({len(transfer_indices)}) must match "
+            f"y_transfer length ({len(y_transfer)})"
+        )
 
     if len(transfer_indices) < 2:
         raise ValueError("Need at least 2 transfer samples for JYPLS-inv")
 
-    n_samples, n_wavelengths = X_primary.shape
+    if not np.all(np.isfinite(y_transfer)):
+        n_bad = int(np.sum(~np.isfinite(y_transfer)))
+        raise ValueError(
+            f"JYPLS-inv needs a measured reference value for every transfer standard; "
+            f"{n_bad} of {len(y_transfer)} are missing or non-finite"
+        )
 
-    # Extract transfer samples
+    n_wavelengths = X_primary.shape[1]
+    n_transfer = len(transfer_indices)
+
     X_primary_transfer = X_primary[transfer_indices]
     X_satellite_transfer = X_satellite[transfer_indices]
 
-    # Create augmented matrices
-    # X_aug = [X_primary_transfer]  <- primary samples
-    #         [X_satellite_transfer]   <- satellite samples (to be mapped to primary)
+    # Stack both instruments' spectra of the same standards; they share y.
     X_aug = np.vstack([X_primary_transfer, X_satellite_transfer])
-
-    # Y_aug = [y_transfer]  <- same Y for primary
-    #         [y_transfer]  <- same Y for satellite (joint-Y approach)
     Y_aug = np.concatenate([y_transfer, y_transfer]).reshape(-1, 1)
+    # Both spectra of one standard carry the same y, so they must share a fold.
+    groups = np.tile(np.arange(n_transfer), 2)
 
-    # Determine optimal number of PLS components via cross-validation
+    cv_rmse = None
     if n_components is None:
         best_rmse = np.inf
         best_n = 1
-
-        # Try different numbers of components
-        max_comp = min(max_components, len(transfer_indices) - 1, n_wavelengths)
+        n_splits = min(cv_folds, n_transfer)
+        max_comp = min(max_components, n_transfer - 1, n_wavelengths)
 
         for n in range(1, max_comp + 1):
-            pls = PLSRegression(n_components=n, scale=False)
-
+            pls_cv = PLSRegression(n_components=n, scale=False)
             try:
-                # Cross-validation scores
                 scores = cross_val_score(
-                    pls, X_aug, Y_aug, cv=min(cv_folds, len(transfer_indices)),
-                    scoring='neg_root_mean_squared_error'
+                    pls_cv,
+                    X_aug,
+                    Y_aug,
+                    groups=groups,
+                    cv=GroupKFold(n_splits=n_splits),
+                    scoring="neg_root_mean_squared_error",
+                    error_score="raise",
                 )
-                avg_rmse = -np.mean(scores)  # Negative because sklearn uses neg_rmse
-
-                if avg_rmse < best_rmse:
-                    best_rmse = avg_rmse
-                    best_n = n
-            except Exception:
-                # If CV fails (e.g., too few samples), use previous best
+            except ValueError:
+                # Too few rows in a training fold for this many components.
                 break
+            avg_rmse = -np.mean(scores)
+            if avg_rmse < best_rmse:
+                best_rmse = avg_rmse
+                best_n = n
 
         n_components = best_n
         cv_rmse = best_rmse
-    else:
-        # User specified components
-        cv_rmse = None
 
-    # Validate n_components
-    max_comp = min(len(transfer_indices) - 1, n_wavelengths)
-    if n_components > max_comp:
-        n_components = max_comp
+    max_comp = min(n_transfer - 1, n_wavelengths)
+    n_components = max(min(int(n_components), max_comp), 1)
 
-    # Fit final PLS model
     pls = PLSRegression(n_components=n_components, scale=False)
     pls.fit(X_aug, Y_aug)
 
-    # Extract PLS scores for primary and satellite separately
-    T_all = pls.transform(X_aug)  # shape: (2*n_transfer, n_components)
-    n_transfer = len(transfer_indices)
-    T_primary = T_all[:n_transfer, :]  # Primary scores
-    T_satellite = T_all[n_transfer:, :]   # Satellite scores
+    # scale=False, so the model's preprocessing is centring on the stacked mean.
+    x_mean = X_aug.mean(axis=0)
+    R = pls.x_rotations_  # projects undeflated, centred X to scores
+    P = pls.x_loadings_
+    W = pls.x_weights_
 
-    # Compute transformation matrix
-    # Approach: Find B such that T_primary ≈ T_satellite in PLS space
-    # Then map back to original space using PLS loadings
-    #
-    # Simplified: Use PLS regression coefficients to build transformation
-    # The PLS model learns: Y_aug = X_aug @ coef
-    # We want to transform satellite → primary in X space
-    #
-    # Transformation derived from PLS structure:
-    # X_primary ≈ X_satellite @ B
-    # B is computed using PLS weights (W) and loadings (P)
-    #
-    # Method: Compute transformation in score space, then project back
-    # B = W @ inv(T_satellite^T @ T_satellite) @ (T_satellite^T @ T_primary) @ P^T
-    # where W = X-weights, P = X-loadings
+    T_primary = (X_primary_transfer - x_mean) @ R
+    T_satellite = (X_satellite_transfer - x_mean) @ R
 
-    W = pls.x_weights_  # shape: (n_wavelengths, n_components)
-    P = pls.x_loadings_  # shape: (n_wavelengths, n_components)
+    # Affine score map with intercept: T_primary ~ c + T_satellite @ M
+    design = np.hstack([np.ones((n_transfer, 1)), T_satellite])
+    coef = np.linalg.lstsq(design, T_primary, rcond=None)[0]
+    score_intercept = coef[0]
+    M_scores = coef[1:]
 
-    # Compute score transformation: T_primary = T_satellite @ M
-    # M = inv(T_satellite^T @ T_satellite) @ (T_satellite^T @ T_primary)
-    T_satellite_T = T_satellite.T  # (n_components, n_transfer)
-    T_satellite_cov = T_satellite_T @ T_satellite + 1e-6 * np.eye(n_components)  # Regularization
-    T_satellite_cov_inv = np.linalg.inv(T_satellite_cov)
-    M_scores = T_satellite_cov_inv @ (T_satellite_T @ T_primary)  # (n_components, n_components)
+    primary_mean = X_primary_transfer.mean(axis=0)
+    primary_score_mean = T_primary.mean(axis=0)
 
-    # Map back to original space
-    # B = W @ M_scores @ P^T
-    transformation_matrix = W @ M_scores @ P.T  # (n_wavelengths, n_wavelengths)
+    transformation_matrix = R @ M_scores @ P.T
+    offset = primary_mean + (score_intercept - primary_score_mean - x_mean @ R @ M_scores) @ P.T
 
-    # Calculate explained variance
+    X_reconstructed = (X_aug - x_mean) @ R @ P.T + x_mean
     X_var = np.var(X_aug, axis=0).sum()
-    X_reconstructed = pls.inverse_transform(T_all)
     X_residual_var = np.var(X_aug - X_reconstructed, axis=0).sum()
-    explained_variance_ratio = 1.0 - (X_residual_var / X_var)
+    explained_variance_ratio = 1.0 - (X_residual_var / X_var) if X_var > 0 else 1.0
 
-    params = {
-        'transformation_matrix': transformation_matrix,
-        'n_components': n_components,
-        'cv_rmse': cv_rmse if cv_rmse is not None else 0.0,
-        'transfer_indices': transfer_indices,
-        'pls_x_weights': W,
-        'pls_x_loadings': P,
-        'pls_scores_primary': T_primary,
-        'pls_scores_satellite': T_satellite,
-        'score_transformation': M_scores,
-        'explained_variance_ratio': explained_variance_ratio,
-        'n_transfer_samples': len(transfer_indices)
+    return {
+        "transformation_matrix": transformation_matrix,
+        "offset": offset,
+        "n_components": n_components,
+        "cv_rmse": cv_rmse if cv_rmse is not None else 0.0,
+        "transfer_indices": transfer_indices,
+        "x_mean": x_mean,
+        "pls_x_rotations": R,
+        "pls_x_weights": W,
+        "pls_x_loadings": P,
+        "pls_scores_primary": T_primary,
+        "pls_scores_satellite": T_satellite,
+        "score_intercept": score_intercept,
+        "score_transformation": M_scores,
+        "primary_mean": primary_mean,
+        "explained_variance_ratio": explained_variance_ratio,
+        "n_transfer_samples": n_transfer,
     }
-
-    return params
 
 
 def apply_jypls_inv(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
     """
-    Apply JYPLS-inv transformation to new satellite spectra.
+    Apply a JYPLS-inv score mapping to new satellite spectra.
 
     Parameters
     ----------
     X_satellite_new : np.ndarray, shape (n_samples, n_wavelengths)
-        New satellite spectra to transfer to primary domain.
+        New satellite spectra to transfer to the primary domain.
     params : dict
         Parameters from estimate_jypls_inv().
 
     Returns
     -------
     X_transferred : np.ndarray, shape (n_samples, n_wavelengths)
-        Transferred spectra in primary domain.
+        ``X_satellite_new @ B + offset``.
 
-    Examples
-    --------
-    >>> # After estimating JYPLS-inv model
-    >>> X_transferred = apply_jypls_inv(X_satellite_new, jypls_params)
-    >>> print(f"Transferred shape: {X_transferred.shape}")
+    Raises
+    ------
+    ValueError
+        If the wavelength count does not match, or if ``params`` come from the
+        pre-fix implementation (no ``'offset'``), whose output dropped the PLS
+        centring and mean spectrum and is not a primary-domain spectrum.
     """
-    B = params['transformation_matrix']
+    B = params["transformation_matrix"]
+
+    if "offset" not in params:
+        raise ValueError(
+            "This JYPLS-inv transfer model was built by an older dasp version whose "
+            "transfer maths dropped the PLS centring and mean spectrum, so its output "
+            "is not a primary-instrument spectrum. Rebuild the transfer model."
+        )
 
     if X_satellite_new.shape[1] != B.shape[0]:
         raise ValueError(
@@ -1693,10 +1716,7 @@ def apply_jypls_inv(X_satellite_new: np.ndarray, params: Dict) -> np.ndarray:
             f"but transformation matrix expects {B.shape[0]}"
         )
 
-    # Apply transformation: X_primary ≈ X_satellite @ B
-    X_transferred = X_satellite_new @ B
-
-    return X_transferred
+    return X_satellite_new @ B + np.asarray(params["offset"])
 
 
 def apply_transfer_dispatch(X_satellite: np.ndarray, transfer_model: TransferModel) -> np.ndarray:
@@ -1704,7 +1724,7 @@ def apply_transfer_dispatch(X_satellite: np.ndarray, transfer_model: TransferMod
     Unified dispatcher for applying any transfer model type.
 
     This function provides a single interface for applying calibration transfer
-    models regardless of the specific method used (DS, PDS, TSR, CTAI, etc.).
+    models regardless of the method key stored in the model.
 
     Parameters
     ----------
@@ -1761,19 +1781,15 @@ if __name__ == "__main__":
     print("Calibration Transfer Module")
     print("=" * 60)
     print("Available methods:")
-    print("  - DS (Direct Standardization)")
-    print("  - PDS (Piecewise Direct Standardization)")
-    print("  - TSR (Transfer Sample Regression / Shenk-Westerhaus)")
-    print("  - CTAI (Calibration Transfer based on Affine Invariance)")
-    print("  - NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement)")
-    print("  - JYPLS-inv (Joint-Y PLS with Inversion)")
+    for _key in ("ds", "pds", "tsr", "ctai", "nspfce", "jypls-inv"):
+        print(f"  - {_key}: {method_display_name(_key)}")
     print("=" * 60)
 
     # Quick test of new methods
     import numpy as np
     np.random.seed(42)
 
-    print("\nTesting TSR:")
+    print("\nTesting slope/bias per wavelength (key tsr):")
     X_primary = np.random.randn(50, 100)
     X_satellite = 0.95 * X_primary + 0.05
     transfer_idx = np.array([0, 10, 20, 30, 40])  # Simple selection
@@ -1785,7 +1801,7 @@ if __name__ == "__main__":
     X_transferred_tsr = apply_tsr(X_satellite, tsr_params)
     print(f"  Transfer RMSE: {np.sqrt(np.mean((X_transferred_tsr - X_primary)**2)):.6f}")
 
-    print("\nTesting CTAI:")
+    print("\nTesting PC-DS (key ctai):")
     ctai_params = estimate_ctai(X_primary, X_satellite)
     print(f"  Explained variance: {ctai_params['explained_variance']:.4f}")
     print(f"  N components: {ctai_params['n_components']}")
