@@ -55,24 +55,17 @@ def _normalize_mixed_type_labels(labels):
 
 
 from sklearn.pipeline import Pipeline
+# Classification metrics live in scoring.classification_metrics and regression
+# figures of merit in scoring.regression_figures_of_merit (one definition each).
 from sklearn.metrics import (
     mean_squared_error,
     r2_score,
-    accuracy_score,
-    roc_auc_score,
-    f1_score,
-    precision_score,
-    recall_score,
     classification_report,
-    mean_absolute_error,
-    balanced_accuracy_score,
-    cohen_kappa_score,
-    matthews_corrcoef,
-    log_loss,
 )
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone
+from sklearn.utils.multiclass import unique_labels
 from joblib import Parallel, delayed
 
 from imblearn.pipeline import Pipeline as ImbPipeline
@@ -81,10 +74,11 @@ from .preprocess import build_preprocessing_pipeline, preprocessing_config_from_
 from .models import get_model_grids, get_feature_importances, strip_runtime_params
 from .scoring import (
     add_result,
+    align_proba_to_classes,
+    classification_metrics,
     compute_cv_anova_pvalue,
-    compute_specificity,
     create_results_dataframe,
-    lins_ccc,
+    regression_figures_of_merit,
 )
 from .regions import create_region_subsets, format_region_report
 from .variable_selection import (
@@ -853,10 +847,28 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
         X_val = X_val[~val_nan_mask]
         y_val = y_val[~val_nan_mask]
 
+    # External-validation figures of merit (regression_figures_of_merit key ->
+    # results column). RMSEP / R2pred keep their names; the bias and slope
+    # t-tests here are the acceptance tests (independent holdout).
+    val_fom_columns = {
+        "SEP": "SEP",
+        "Bias": "Biaspred",
+        "RPD": "RPDpred",
+        "RPIQ": "RPIQpred",
+        "RER": "RERpred",
+        "CCC": "CCCpred",
+        "Slope": "Slopepred",
+        "Intercept": "Interceptpred",
+        "Bias_p": "Bias_p_pred",
+        "Slope_p": "Slope_p_pred",
+    }
+
     # Initialize columns
     if task_type == "regression":
         df_results["RMSEP"] = np.nan
         df_results["R2pred"] = np.nan
+        for _col in val_fom_columns.values():
+            df_results[_col] = np.nan
     elif task_type == "multiclass_simca":
         # This is a separate public entry point from run_multiclass_simca_search,
         # and its holdout rebuild reaches np.unique(y) — validate labels here too
@@ -1184,110 +1196,41 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
             # === STEP 5: Calculate metrics ===
             if task_type == "regression":
-                rmsep = np.sqrt(mean_squared_error(y_val, y_pred))
-                r2pred = r2_score(y_val, y_pred)
-                df_results.loc[idx, "RMSEP"] = rmsep
-                df_results.loc[idx, "R2pred"] = r2pred
+                fom = regression_figures_of_merit(y_val, y_pred, context="validation")
+                df_results.loc[idx, "RMSEP"] = fom["RMSE"]
+                df_results.loc[idx, "R2pred"] = fom["R2"]
+                for _key, _col in val_fom_columns.items():
+                    df_results.loc[idx, _col] = fom[_key]
             else:
-                # Accuracy
-                val_acc = accuracy_score(y_val, y_pred)
-                df_results.loc[idx, "val_Accuracy"] = val_acc
-
-                # Determine if binary or multiclass based on training data classes
-                # Use 'macro' for multiclass to treat all classes equally (consistent with CV metrics)
-                n_classes_train = len(np.unique(y_train))
-                average_method = "binary" if n_classes_train == 2 else "macro"
-
-                # F1 Score
-                try:
-                    val_f1 = f1_score(y_val, y_pred, average=average_method, zero_division=0)
-                    df_results.loc[idx, "val_F1"] = val_f1
-                except Exception as e:
-                    # Fallback to weighted if binary fails
+                # One definition for every classification metric (scoring.
+                # classification_metrics): binary positive class = the second
+                # sorted label of the union of training and validation classes,
+                # so {0,1}, {1,2}, {2,3}, {-1,1} and encoded text labels agree.
+                val_classes = unique_labels(y_train, y_val)
+                y_proba_val = None
+                if hasattr(model, "predict_proba"):
                     try:
-                        val_f1 = f1_score(y_val, y_pred, average="weighted", zero_division=0)
-                        df_results.loc[idx, "val_F1"] = val_f1
-                    except Exception as e2:
-                        print(f"  [Warning] Could not compute F1 for model {i+1}: {e2}")
-
-                # Precision
-                try:
-                    val_precision = precision_score(
-                        y_val, y_pred, average=average_method, zero_division=0
+                        y_proba_val = align_proba_to_classes(
+                            model.predict_proba(X_val_final),
+                            getattr(model, "classes_", np.unique(y_train)),
+                            val_classes,
+                        )
+                    except (AttributeError, NotImplementedError) as e:
+                        logger.debug("predict_proba unavailable for validation row %d: %s", i, e)
+                    except ValueError as e:
+                        print(f"  [Warning] Could not align probabilities for model {i+1}: {e}")
+                if len(np.unique(y_val)) < 2 and i == 0:
+                    print(
+                        "  [Info] ROC AUC skipped - validation set has only 1 class (need at least 2)"
                     )
-                    df_results.loc[idx, "val_Precision"] = val_precision
-                except Exception as e:
-                    try:
-                        val_precision = precision_score(
-                            y_val, y_pred, average="weighted", zero_division=0
-                        )
-                        df_results.loc[idx, "val_Precision"] = val_precision
-                    except Exception as e2:
-                        print(f"  [Warning] Could not compute Precision for model {i+1}: {e2}")
-
-                # Recall
-                try:
-                    val_recall = recall_score(
-                        y_val, y_pred, average=average_method, zero_division=0
-                    )
-                    df_results.loc[idx, "val_Recall"] = val_recall
-                except Exception as e:
-                    try:
-                        val_recall = recall_score(
-                            y_val, y_pred, average="weighted", zero_division=0
-                        )
-                        df_results.loc[idx, "val_Recall"] = val_recall
-                    except Exception as e2:
-                        print(f"  [Warning] Could not compute Recall for model {i+1}: {e2}")
-
-                # ROC AUC (requires predict_proba and at least 2 classes in validation)
-                try:
-                    val_classes = np.unique(y_val)
-                    n_classes_val = len(val_classes)
-
-                    if n_classes_val < 2:
-                        # ROC AUC undefined with only one class
-                        # Only log for first model to avoid spam
-                        if i == 0:
-                            print(
-                                f"  [Info] ROC AUC skipped - validation set has only 1 class (need at least 2)"
-                            )
-                    elif hasattr(model, "predict_proba"):
-                        y_proba = model.predict_proba(X_val_final)
-                        model_classes = (
-                            model.classes_ if hasattr(model, "classes_") else np.unique(y_train)
-                        )
-
-                        # Always subset to classes present in validation
-                        # This handles: binary, multiclass, and class-mismatch cases uniformly
-                        col_indices = []
-                        for c in val_classes:
-                            matches = np.where(model_classes == c)[0]
-                            if len(matches) > 0:
-                                col_indices.append(matches[0])
-
-                        if (
-                            len(col_indices) == n_classes_val
-                        ):  # All validation classes found in model
-                            y_proba_subset = y_proba[:, col_indices]
-                            # ALWAYS renormalize to sum to 1 (even for binary)
-                            # This is needed when validation has fewer classes than training
-                            y_proba_subset = y_proba_subset / y_proba_subset.sum(
-                                axis=1, keepdims=True
-                            )
-
-                            if n_classes_val == 2:
-                                # Binary: use probability of second class (positive)
-                                val_roc_auc = roc_auc_score(y_val, y_proba_subset[:, 1])
-                            else:
-                                # Multiclass: compute OvR
-                                val_roc_auc = roc_auc_score(
-                                    y_val, y_proba_subset, multi_class="ovr", average="macro"
-                                )
-
-                            df_results.loc[idx, "val_ROC_AUC"] = val_roc_auc
-                except Exception as e:
-                    print(f"  [Warning] Could not compute ROC AUC for model {i+1}: {e}")
+                val_metrics = classification_metrics(
+                    y_val, y_pred, classes=val_classes, y_proba=y_proba_val
+                )
+                df_results.loc[idx, "val_Accuracy"] = val_metrics["Accuracy"]
+                df_results.loc[idx, "val_F1"] = val_metrics["F1"]
+                df_results.loc[idx, "val_Precision"] = val_metrics["Precision"]
+                df_results.loc[idx, "val_Recall"] = val_metrics["Recall"]
+                df_results.loc[idx, "val_ROC_AUC"] = val_metrics["ROC_AUC"]
 
         except Exception as e:
             print(f"  [Warning] Failed to compute validation for model {i+1}: {e}")
@@ -1313,12 +1256,14 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
     # Calibration metrics first, then validation metrics
     cols = list(df_results.columns)
     if task_type == "regression" and "RMSEP" in cols and "R2cv" in cols:
-        # Move RMSEP and R2pred after R2cv
-        cols.remove("RMSEP")
-        cols.remove("R2pred")
+        # Move RMSEP, R2pred and the other external-validation figures of
+        # merit after R2cv
+        val_order = ["RMSEP", "R2pred"] + [c for c in val_fom_columns.values() if c in cols]
+        for col in val_order:
+            cols.remove(col)
         r2cv_idx = cols.index("R2cv")
-        cols.insert(r2cv_idx + 1, "RMSEP")
-        cols.insert(r2cv_idx + 2, "R2pred")
+        for offset, col in enumerate(val_order, start=1):
+            cols.insert(r2cv_idx + offset, col)
         df_results = df_results[cols]
     elif task_type == "classification":
         # Order: Accuracy, ROC_AUC, F1, Precision, Recall (calibration)
@@ -1608,16 +1553,25 @@ def run_search(
     n_features = X_np.shape[1]
     n_samples = X_np.shape[0]
 
-    # Handle categorical labels for classification
+    # Encode every classification target to 0..K-1 (R029). Models, CV and all
+    # metrics then see the same sorted codes whether the user's labels are
+    # text, {0,1}, {1,2}, {2,3} or {-1,1}; the binary positive class is code 1
+    # (= the larger / second sorted original label, scoring module docstring).
+    # The returned ``label_encoder`` keeps its old contract: it is the encoder
+    # for TEXT labels and None for numeric labels. Numeric labels are decoded
+    # back in every label-valued output below (per-class keys, F1_Class<label>
+    # columns), so callers that refit on their own numeric y (the GUI's Model
+    # Development tab) never receive an encoder their model was not trained on.
     label_encoder = None
+    class_encoder = None
     if task_type == "classification":
-        # Check if labels are non-numeric (text labels like "low", "medium", "high")
-        if not pd.api.types.is_numeric_dtype(y_np.dtype):
-            from sklearn.preprocessing import LabelEncoder
+        from sklearn.preprocessing import LabelEncoder
 
-            label_encoder = LabelEncoder()
-            y_original = y_np.copy()  # Keep original for logging
-            y_np = label_encoder.fit_transform(y_np)
+        class_encoder = LabelEncoder()
+        y_np = class_encoder.fit_transform(y_np)
+        if not pd.api.types.is_numeric_dtype(y.dtype):
+            # Text labels ("low", "medium", "high"): expose the encoder.
+            label_encoder = class_encoder
             # Log the label mapping
             label_mapping = dict(
                 zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_))
@@ -1630,6 +1584,13 @@ def run_search(
             for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
                 print(f"  '{label}' -> {code}")
             print(f"{'='*70}\n")
+        else:
+            _classes = class_encoder.classes_
+            if len(_classes) == 2:
+                print(
+                    f"Classification labels {_classes.tolist()}: positive class for "
+                    f"F1/Precision/Recall = {_classes[1]!r}, Specificity = TNR of {_classes[0]!r}"
+                )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
@@ -4270,6 +4231,39 @@ def run_search(
             print("  Subset models may rank higher due to lower variable counts.")
             print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
 
+    # Numeric classification labels were encoded to 0..K-1 for the search (R029);
+    # put the user's own labels back into the label-valued outputs. Text labels
+    # keep their codes here because the returned label_encoder decodes them.
+    if class_encoder is not None and label_encoder is None and len(df_results):
+        code_to_label = {
+            str(code): str(lbl) for code, lbl in enumerate(class_encoder.classes_.tolist())
+        }
+        if "per_class_metrics" in df_results.columns:
+            df_results["per_class_metrics"] = [
+                (
+                    {code_to_label.get(str(k), str(k)): v for k, v in pcm.items()}
+                    if isinstance(pcm, dict)
+                    else pcm
+                )
+                for pcm in df_results["per_class_metrics"]
+            ]
+        if "class_labels" in df_results.columns:
+            df_results["class_labels"] = [
+                (
+                    [code_to_label.get(str(k), str(k)) for k in cl]
+                    if isinstance(cl, (list, tuple))
+                    else cl
+                )
+                for cl in df_results["class_labels"]
+            ]
+        df_results = df_results.rename(
+            columns={
+                f"F1_Class{code}": f"F1_Class{lbl}"
+                for code, lbl in code_to_label.items()
+                if f"F1_Class{code}" in df_results.columns
+            }
+        )
+
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, gap_penalty)
 
     # =========================================================================
@@ -4296,18 +4290,31 @@ def run_search(
             y_val_for_val = y_val_for_val[~val_nan]
 
         # CRITICAL: Use encoded training labels (y_np) for consistency
-        # y_np was encoded earlier if label_encoder exists, so model training
-        # and validation must use the same encoding
+        # y_np was encoded earlier for every classification target, so model
+        # training and validation must use the same encoding
         y_train_for_val = y_np  # Use the (possibly encoded) training labels
 
-        # CRITICAL: Encode validation labels using the same encoder as training
-        if label_encoder is not None:
-            try:
-                y_val_for_val = label_encoder.transform(y_val_for_val)
-                print(f"[Validation] Encoded validation labels using training label encoder")
-            except ValueError as e:
-                print(f"[Warning] Could not encode validation labels: {e}")
-                print(f"          Validation labels may contain classes not seen during training")
+        # CRITICAL: Encode validation labels using the same encoder as training.
+        # A holdout class never seen in training gets a fresh code (K, K+1, ...)
+        # so it still counts against the model instead of breaking the encoding.
+        if class_encoder is not None:
+            y_val_arr = np.asarray(y_val_for_val)
+            known = np.isin(y_val_arr, class_encoder.classes_)
+            if known.all():
+                y_val_for_val = class_encoder.transform(y_val_arr)
+            else:
+                unseen = np.unique(y_val_arr[~known])
+                print(
+                    f"[Warning] Validation labels {unseen.tolist()} were not seen during "
+                    f"training; they are scored as misclassified classes"
+                )
+                codes = np.empty(len(y_val_arr), dtype=int)
+                codes[known] = class_encoder.transform(y_val_arr[known])
+                codes[~known] = len(class_encoder.classes_) + np.searchsorted(
+                    unseen, y_val_arr[~known]
+                )
+                y_val_for_val = codes
+            print("[Validation] Encoded validation labels using training label encoder")
 
         # Get wavelengths for subsetting
         wavelengths_for_validation = (
@@ -4571,108 +4578,35 @@ def _run_single_fold(
             y_pred = pipe_clone.predict(X_test)
         y_pred = np.ravel(y_pred)  # Ensure 1D for metrics
 
-        acc = accuracy_score(y_test, y_pred)
-
-        # Use is_binary_classification flag (determined from full dataset) for consistent averaging
-        # This avoids issues where a CV fold might have missing classes
-        # Use 'macro' for multiclass to treat all classes equally (consistent with ROC_AUC)
-        average_method = "binary" if is_binary_classification else "macro"
-
-        # F1, Precision, Recall
+        # Global class order: y is the full target vector, so a training fold
+        # that lacks a class still yields probabilities with one column per
+        # dataset class (zeros for the missing class). The caller pools these
+        # out-of-fold probabilities for AUC / log-loss (R030).
+        classes = np.unique(y)
+        y_proba = None
         try:
-            f1 = f1_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            f1 = np.nan
-        try:
-            precision = precision_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            precision = np.nan
-        try:
-            recall = recall_score(y_test, y_pred, average=average_method, zero_division=0)
-        except Exception:
-            recall = np.nan
+            if manual_fit_used:
+                raw_proba = _manual_transform_predict_proba(X_test)
+                model_classes = getattr(final_model, "classes_", None)
+            else:
+                raw_proba = pipe_clone.predict_proba(X_test)
+                model_classes = getattr(pipe_clone, "classes_", None)
+            y_proba = align_proba_to_classes(raw_proba, model_classes, classes)
+        except (AttributeError, NotImplementedError):
+            y_proba = None  # model has no predict_proba (e.g. RidgeClassifier)
+        except ValueError as e:
+            logger.warning("Fold probabilities could not be aligned to %s: %s", classes, e)
+            y_proba = None
 
-        # ROC AUC (requires at least 2 classes in test fold)
-        n_classes_test = len(np.unique(y_test))
-        if n_classes_test < 2:
-            # Single class in this CV fold - ROC AUC undefined
-            auc = np.nan
-            logloss = np.nan
-        else:
-            try:
-                if manual_fit_used:
-                    y_proba = _manual_transform_predict_proba(X_test)
-                    model_classes = (
-                        final_model.classes_ if hasattr(final_model, "classes_") else None
-                    )
-                else:
-                    y_proba = pipe_clone.predict_proba(X_test)
-                    model_classes = pipe_clone.classes_ if hasattr(pipe_clone, "classes_") else None
-
-                if is_binary_classification:
-                    auc = roc_auc_score(y_test, y_proba[:, 1])
-                else:
-                    # Explicitly tell roc_auc_score the column order matches model's classes_
-                    if model_classes is not None:
-                        auc = roc_auc_score(
-                            y_test,
-                            y_proba,
-                            multi_class="ovr",
-                            average="macro",
-                            labels=model_classes,
-                        )
-                    else:
-                        auc = roc_auc_score(y_test, y_proba, multi_class="ovr", average="macro")
-
-                # Log Loss (requires predict_proba)
-                try:
-                    logloss = log_loss(
-                        y_test, y_proba, labels=model_classes if model_classes is not None else None
-                    )
-                except Exception:
-                    logloss = np.nan
-            except Exception:
-                auc = np.nan
-                logloss = np.nan
-
-        # Compute additional classification metrics
-        try:
-            specificity = compute_specificity(y_test, y_pred, average="macro")
-        except Exception:
-            specificity = np.nan
-
-        try:
-            kappa = cohen_kappa_score(y_test, y_pred)
-        except Exception:
-            kappa = np.nan
-
-        try:
-            mcc = matthews_corrcoef(y_test, y_pred)
-        except Exception:
-            mcc = np.nan
-
-        try:
-            balanced_acc = balanced_accuracy_score(y_test, y_pred)
-            ber = 1.0 - balanced_acc
-        except Exception:
-            balanced_acc = np.nan
-            ber = np.nan
-
-        return {
-            "Accuracy": acc,
-            "ROC_AUC": auc,
-            "F1": f1,
-            "Precision": precision,
-            "Recall": recall,
-            "Specificity": specificity,
-            "Kappa": kappa,
-            "MCC": mcc,
-            "BalancedAcc": balanced_acc,
-            "BER": ber,
-            "LogLoss": logloss,
-            "y_test": y_test,
-            "y_pred": y_pred,
-        }
+        # Per-fold metrics are for debugging only; headline CV metrics are
+        # computed from the pooled out-of-fold predictions in _run_single_config.
+        # Same definitions everywhere (scoring.classification_metrics); binary
+        # positive class = second sorted label.
+        metrics = classification_metrics(y_test, y_pred, classes=classes, y_proba=y_proba)
+        metrics["y_test"] = y_test
+        metrics["y_pred"] = y_pred
+        metrics["y_proba"] = y_proba
+        return metrics
 
 
 def _run_single_config(
@@ -4982,31 +4916,24 @@ def _run_single_config(
             all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
             all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
 
-        # Compute RMSE from aggregated predictions (not per-fold averages).
-        # Matches chemometrics convention (Unscrambler, PLS_Toolbox, SIMCA, IUPAC).
-        # Under LOO this is required — per-fold RMSE on 1-sample folds degenerates to |y-ŷ|,
-        # and averaging those gives MAE, not RMSE.
-        mean_rmse = float(np.sqrt(mean_squared_error(all_y_test, all_y_pred)))
-
-        # Compute R² from aggregated predictions (not per-fold averages)
-        # Averaging per-fold R² is mathematically incorrect due to different SS_tot per fold
-        mean_r2 = r2_score(all_y_test, all_y_pred)
-
-        # Compute additional NIR spectroscopy metrics from aggregated CV predictions
-        # MAEcv: Mean Absolute Error - less sensitive to outliers than RMSE
-        mae_cv = mean_absolute_error(all_y_test, all_y_pred)
-        # Bias: Mean prediction error (positive = systematic overprediction)
-        bias_cv = float(np.mean(all_y_pred - all_y_test))
-        ccc_cv = lins_ccc(all_y_test, all_y_pred)
-        # RPD: Ratio of Performance to Deviation (std(y) / RMSEcv)
-        # Industry standard for NIR model fitness assessment
-        # RPD < 1.5: Poor, 1.5-2: Screening only, 2-3: Acceptable, > 3: Good
-        y_std = float(np.std(y))
-        rpd = y_std / mean_rmse if mean_rmse > 0 else 0.0
-        # RER: Range Error Ratio (range(y) / RMSEcv)
-        # Alternative to RPD, uses data range instead of standard deviation
-        y_range = float(np.ptp(y))  # max(y) - min(y)
-        rer = y_range / mean_rmse if mean_rmse > 0 else 0.0
+        # Figures of merit from the pooled out-of-fold predictions (one per
+        # sample; repeated CV was averaged per sample above), never per-fold
+        # averages: matches Unscrambler / PLS_Toolbox / SIMCA / IUPAC. Under LOO
+        # per-fold RMSE degenerates to |y-yhat| and its mean is the MAE.
+        # Definitions and citations: scoring.regression_figures_of_merit.
+        fom_cv = regression_figures_of_merit(all_y_test, all_y_pred, context="cv")
+        mean_rmse = fom_cv["RMSE"]
+        mean_r2 = fom_cv["R2"]
+        mae_cv = fom_cv["MAE"]
+        bias_cv = fom_cv["Bias"]  # mean(yhat - y); positive = over-prediction
+        ccc_cv = fom_cv["CCC"]
+        # RPD = SD(y)/RMSEcv and RER = range(y)/RMSEcv (ddof=0, RMSE-based, as
+        # before). A perfect CV prediction now gives inf, not 0.0. No universal
+        # RPD thresholds are implied (Bellon-Maurel et al. 2010, §5.1).
+        rpd = fom_cv["RPD"]
+        rer = fom_cv["RER"]
+        secv = fom_cv["SEP"]  # bias-corrected SE of CV, n-1 df
+        rpiq = fom_cv["RPIQ"]  # (Q3 - Q1) / RMSEcv
 
         # Compute quartiles based on TRUE Y values
         # Regional selection identifies which models excel in different value ranges
@@ -5034,79 +4961,50 @@ def _run_single_config(
             else:
                 regional_rmse[f"Q{i+1}"] = np.nan
     else:
-        # Headline label-based metrics: under repeated CV, derive from
-        # majority-vote-pooled predictions per sample (averaging fold metrics
-        # double-counts samples that appear in multiple test folds). AUC/LogLoss/BER
-        # require probabilities and stay as mean-of-folds.
+        # Headline CV metrics come from the POOLED out-of-fold predictions, one
+        # per sample, for every CV strategy (R030). Averaging per-fold metrics
+        # is wrong under LOO (1-sample folds: F1 0.5 / MCC 0 / Kappa NaN for a
+        # perfect classifier) and biased for small folds. Reduction policy for
+        # repeated CV (cv_utils.reduce_repeated_cv_predictions, and the same
+        # policy as cv_utils.cross_val_predict_pooled): labels by per-sample
+        # majority vote, probabilities by per-sample mean. AUC/LogLoss use the
+        # pooled probabilities (NaN if any fold model lacks predict_proba).
+        classes = np.unique(y)
+        have_proba = all(m.get("y_proba") is not None for m in cv_metrics)
         if repeated_cv:
             all_y_test, all_y_pred = reduce_repeated_cv_predictions(
                 cv_metrics, splits, n_samples=len(y), task_type="classification"
             )
-            from sklearn.metrics import (
-                accuracy_score as _acc,
-                f1_score as _f1,
-                precision_score as _ps,
-                recall_score as _rs,
-                balanced_accuracy_score as _bas,
-                cohen_kappa_score as _kappa,
-                matthews_corrcoef as _mcc,
-            )
-
-            avg = "binary" if is_binary_classification else "macro"
-            mean_acc = float(_acc(all_y_test, all_y_pred))
-            mean_f1 = float(_f1(all_y_test, all_y_pred, average=avg, zero_division=0))
-            mean_precision = float(_ps(all_y_test, all_y_pred, average=avg, zero_division=0))
-            mean_recall = float(_rs(all_y_test, all_y_pred, average=avg, zero_division=0))
-            mean_balanced_acc = float(_bas(all_y_test, all_y_pred))
-            mean_kappa = float(_kappa(all_y_test, all_y_pred))
-            mean_mcc = float(_mcc(all_y_test, all_y_pred))
-            # Specificity is only defined for binary; derive from confusion matrix.
-            # Pass labels= explicitly so the matrix is always 2x2 even when
-            # pooled predictions collapse to a single class (upstream y
-            # validation guarantees both labels exist in y_true, but model
-            # degeneracy can make y_pred single-class).
-            if is_binary_classification:
-                from sklearn.metrics import confusion_matrix as _cm
-
-                binary_labels = np.unique(y)
-                cm = _cm(all_y_test, all_y_pred, labels=binary_labels)
-                tn, fp, fn, tp = cm.ravel()
-                mean_specificity = float(tn / (tn + fp)) if (tn + fp) > 0 else float("nan")
-            else:
-                mean_specificity = float(
-                    np.mean(
-                        [m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])]
-                    )
-                )
-            # BER = 1 - BalancedAccuracy, label-based, pools alongside BalancedAcc
-            mean_ber = 1.0 - mean_balanced_acc
+            all_y_proba = None
+            if have_proba:
+                proba_sum = np.zeros((len(y), len(classes)), dtype=np.float64)
+                proba_count = np.zeros(len(y), dtype=int)
+                for m, (_train_idx, test_idx) in zip(cv_metrics, splits):
+                    proba_sum[test_idx] += m["y_proba"]
+                    proba_count[test_idx] += 1
+                seen = proba_count > 0  # same sample-index order as the labels
+                all_y_proba = proba_sum[seen] / proba_count[seen, None]
         else:
-            mean_acc = np.mean([m["Accuracy"] for m in cv_metrics])
-            mean_f1 = np.mean([m["F1"] for m in cv_metrics if not np.isnan(m["F1"])])
-            mean_precision = np.mean(
-                [m["Precision"] for m in cv_metrics if not np.isnan(m["Precision"])]
-            )
-            mean_recall = np.mean([m["Recall"] for m in cv_metrics if not np.isnan(m["Recall"])])
-            mean_specificity = np.mean(
-                [m["Specificity"] for m in cv_metrics if not np.isnan(m["Specificity"])]
-            )
-            mean_kappa = np.mean([m["Kappa"] for m in cv_metrics if not np.isnan(m["Kappa"])])
-            mean_mcc = np.mean([m["MCC"] for m in cv_metrics if not np.isnan(m["MCC"])])
-            mean_balanced_acc = np.mean(
-                [m["BalancedAcc"] for m in cv_metrics if not np.isnan(m["BalancedAcc"])]
-            )
-            mean_ber = np.mean([m["BER"] for m in cv_metrics if not np.isnan(m["BER"])])
-
-        # AUC and LogLoss require probabilities — keep as mean-of-folds
-        mean_auc = np.mean([m["ROC_AUC"] for m in cv_metrics if not np.isnan(m["ROC_AUC"])])
-        mean_logloss = np.mean([m["LogLoss"] for m in cv_metrics if not np.isnan(m["LogLoss"])])
-
-        regional_rmse = None  # Not applicable for classification
-
-        # Per-class report uses pooled predictions (one per sample under repeated CV)
-        if not repeated_cv:
             all_y_test = np.concatenate([m["y_test"] for m in cv_metrics])
             all_y_pred = np.concatenate([m["y_pred"] for m in cv_metrics])
+            all_y_proba = np.vstack([m["y_proba"] for m in cv_metrics]) if have_proba else None
+
+        pooled = classification_metrics(
+            all_y_test, all_y_pred, classes=classes, y_proba=all_y_proba
+        )
+        mean_acc = pooled["Accuracy"]
+        mean_f1 = pooled["F1"]
+        mean_precision = pooled["Precision"]
+        mean_recall = pooled["Recall"]
+        mean_specificity = pooled["Specificity"]
+        mean_kappa = pooled["Kappa"]
+        mean_mcc = pooled["MCC"]
+        mean_balanced_acc = pooled["BalancedAcc"]
+        mean_ber = pooled["BER"]
+        mean_auc = pooled["ROC_AUC"]
+        mean_logloss = pooled["LogLoss"]
+
+        regional_rmse = None  # Not applicable for classification
 
         # Compute per-class metrics for classification (analogous to regional RMSE for regression)
         per_class_metrics = {}
@@ -5174,78 +5072,44 @@ def _run_single_config(
         y_pred_cal = np.ravel(y_pred_cal)  # Ensure 1D for metrics
 
         if task_type == "regression":
-            cal_rmse = np.sqrt(mean_squared_error(y, y_pred_cal))
-            cal_r2 = r2_score(y, y_pred_cal)
-            cal_ccc = lins_ccc(y, y_pred_cal)
+            # Same FoM function as CV and external validation. Only RMSE, R2
+            # and CCC are reported for calibration: a calibration "SEC" needs
+            # the model's degrees of freedom, which are not defined for PLS
+            # and the non-linear models (Bellon-Maurel et al. 2010, §4.1).
+            fom_cal = regression_figures_of_merit(y, y_pred_cal, context="calibration")
+            cal_rmse = fom_cal["RMSE"]
+            cal_r2 = fom_cal["R2"]
+            cal_ccc = fom_cal["CCC"]
         else:
-            # Classification metrics
-            cal_acc = accuracy_score(y, y_pred_cal)
-
-            # Compute ROC AUC if probabilities available
-            try:
-                if hasattr(pipe, "predict_proba"):
-                    y_pred_proba_cal = pipe.predict_proba(X)
-                    n_classes = len(np.unique(y))
-                    if n_classes == 2:
-                        cal_auc = roc_auc_score(y, y_pred_proba_cal[:, 1])
-                    else:
-                        cal_auc = roc_auc_score(
-                            y, y_pred_proba_cal, multi_class="ovr", average="macro"
-                        )
-                else:
-                    cal_auc = np.nan
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration ROC AUC: {e}")
-                cal_auc = np.nan
-
-            # Compute F1, Precision, Recall
-            try:
-                cal_f1 = f1_score(y, y_pred_cal, average="weighted", zero_division=0)
-                cal_precision = precision_score(y, y_pred_cal, average="weighted", zero_division=0)
-                cal_recall = recall_score(y, y_pred_cal, average="weighted", zero_division=0)
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration F1/Precision/Recall: {e}")
-                cal_f1 = np.nan
-                cal_precision = np.nan
-                cal_recall = np.nan
-
-            # Compute new classification metrics
-            try:
-                cal_specificity = compute_specificity(y, y_pred_cal, average="macro")
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration Specificity: {e}")
-                cal_specificity = np.nan
-
-            try:
-                cal_kappa = cohen_kappa_score(y, y_pred_cal)
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration Kappa: {e}")
-                cal_kappa = np.nan
-
-            try:
-                cal_mcc = matthews_corrcoef(y, y_pred_cal)
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration MCC: {e}")
-                cal_mcc = np.nan
-
-            try:
-                cal_balanced_acc = balanced_accuracy_score(y, y_pred_cal)
-                cal_ber = 1.0 - cal_balanced_acc
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration BalancedAcc/BER: {e}")
-                cal_balanced_acc = np.nan
-                cal_ber = np.nan
-
-            # Compute Log Loss
-            try:
-                if hasattr(pipe, "predict_proba"):
-                    y_pred_proba_cal = pipe.predict_proba(X)
-                    cal_logloss = log_loss(y, y_pred_proba_cal)
-                else:
-                    cal_logloss = np.nan
-            except Exception as e:
-                logger.debug(f"Failed to compute calibration LogLoss: {e}")
-                cal_logloss = np.nan
+            # Same definitions as the CV and validation columns
+            # (scoring.classification_metrics). Pre-2026-10 calibration
+            # F1/Precision/Recall were support-WEIGHTED averages while the CV
+            # columns were binary/macro, so F1 and F1cv were not comparable.
+            cal_classes = np.unique(y)
+            y_proba_cal = None
+            if hasattr(pipe, "predict_proba"):
+                try:
+                    y_proba_cal = align_proba_to_classes(
+                        pipe.predict_proba(X), getattr(pipe, "classes_", None), cal_classes
+                    )
+                except (AttributeError, NotImplementedError) as e:
+                    logger.debug(f"Calibration predict_proba unavailable: {e}")
+                except ValueError as e:
+                    logger.warning(f"Calibration probabilities could not be aligned: {e}")
+            cal_metrics = classification_metrics(
+                y, y_pred_cal, classes=cal_classes, y_proba=y_proba_cal
+            )
+            cal_acc = cal_metrics["Accuracy"]
+            cal_auc = cal_metrics["ROC_AUC"]
+            cal_f1 = cal_metrics["F1"]
+            cal_precision = cal_metrics["Precision"]
+            cal_recall = cal_metrics["Recall"]
+            cal_specificity = cal_metrics["Specificity"]
+            cal_kappa = cal_metrics["Kappa"]
+            cal_mcc = cal_metrics["MCC"]
+            cal_balanced_acc = cal_metrics["BalancedAcc"]
+            cal_ber = cal_metrics["BER"]
+            cal_logloss = cal_metrics["LogLoss"]
 
         # Capture ALL parameters
         print(f"\n{'='*80}")
@@ -5465,6 +5329,8 @@ def _run_single_config(
         result["RPD"] = rpd
         result["Bias"] = bias_cv
         result["RER"] = rer
+        result["SECV"] = secv
+        result["RPIQ"] = rpiq
         # CV-ANOVA F-test (Eriksson, Trygg & Wold 2008)
         if model_name == "PLS" and lvs is not None:
             result["cv_anova_pvalue"] = compute_cv_anova_pvalue(
@@ -5492,7 +5358,7 @@ def _run_single_config(
         result["BalancedAcc"] = cal_balanced_acc if cal_balanced_acc is not None else np.nan
         result["BER"] = cal_ber if cal_ber is not None else np.nan
         result["LogLoss"] = cal_logloss if cal_logloss is not None else np.nan
-        # Cross-validation metrics (test fold averages)
+        # Cross-validation metrics (pooled out-of-fold predictions)
         result["Accuracycv"] = mean_acc
         result["ROC_AUCcv"] = mean_auc
         result["F1cv"] = mean_f1

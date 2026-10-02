@@ -749,3 +749,28 @@ predictions give a pooled CV curve; one round count is chosen (like PLS LVs from
 reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
 fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
 the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
+
+## 2026-10-02 - Classification label convention + pooled CV metrics + regression FoM (R029/R030/QW5, branch fix/classification-metrics)
+- **Label convention:** `run_search` now label-encodes EVERY classification target (numeric too) to 0..K-1. Binary
+  positive class = second sorted label; Specificity = TNR of the first. All metrics go through
+  `scoring.classification_metrics` with explicit classes/pos_label (folds, pooled CV, calibration, holdout).
+- **Gotcha: the returned `label_encoder` is still None for numeric labels.** Returning it would break the GUI: Model
+  Development refits on the raw numeric y and the save fallback (`refined_label_encoder or self.label_encoder`) would
+  attach an encoder the model was not trained on, so `predict_with_model` would inverse-transform {1,2} as codes.
+  Numeric labels are decoded back in per_class_metrics / class_labels / F1_Class<label> instead.
+- **Gotcha: `model_io.save_model` with a LabelEncoder fitted on NUMERIC labels fails** (`label_mapping` has np.int64
+  keys -> json TypeError). Being fixed on fix/wavelength-mapping; not touched here.
+- **R030:** headline CV classification metrics are always computed from pooled out-of-fold predictions. Folds now
+  return `y_proba` aligned to the global class order (zeros for a class missing from the training fold), so pooled
+  AUC/LogLoss work under LOO. Repeated CV: labels majority vote, probabilities per-sample mean (same policy as
+  `cv_utils.cross_val_predict_pooled`); AUC/LogLoss were previously mean-of-folds there.
+- Calibration F1/Precision/Recall were support-WEIGHTED while CV used binary/macro; now the same definition.
+- **QW5:** `scoring.regression_figures_of_merit`. Bellon-Maurel 2010 "SEP" (Eq. 1) = our RMSE/RMSEP; their SEPc (Eq. 4,
+  /m); our SEP/SECV is the n-1 bias-corrected form. RPIQ = IQR/RMSE (§5.3, Table 2 caption, no equation number).
+  RPD/RER unchanged (ddof=0, RMSE-based) except a perfect model now gives inf instead of 0.0. New columns: SECV, RPIQ
+  (CV); SEP, Biaspred, RPDpred, RPIQpred, RERpred, CCCpred, Slopepred, Interceptpred, Bias_p_pred, Slope_p_pred
+  (external validation). Bias/slope t-tests are acceptance tests only for the holdout; CV/calibration = diagnostic.
+- Black's py314/py315 target rewrites `except (A, B):` to the PEP 758 `except A, B:` form; do not accept that in src
+  (the py312 spec build cannot parse it).
+- Not done (follow-ups): unified_bayesian.py:1879 and nsga2_search.py:2984 still return RPD/RER 0.0 for RMSE 0 and
+  have no SECV/RPIQ; GUI `higher_is_better_cols` (~31596) lacks RPIQ.
