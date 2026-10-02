@@ -1006,3 +1006,80 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
 - **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
   bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
   `full.width / winfo_screenwidth()`.
+
+## 2026-10-02 - fix/readers: OPUS block priority (R017) and one ASCII reader (R062)
+- **brukeropus gotchas.** `OPUSFile.__getattr__` returns None (not AttributeError) for any absent name, so
+  `hasattr(opus_file, 'a')` is always True; trust `data_keys` (1-D blocks only; `series_keys` are 2-D). A non-OPUS file
+  does not raise in `read_opus`: it returns `is_opus=False`, and `__getattr__` then recurses on `self.params`
+  (RecursionError, which `hasattr` does not catch). The reader now checks `is_opus` first and takes the first usable
+  block in `OPUS_BLOCK_PRIORITY` (a, t, r, other processed types, then sm, then rf, with a UserWarning for sm/rf);
+  metadata `opus_block` records the key. No real OPUS fixture exists in the repo or example/; tests use fakes.
+- **Wrapper merge order.** io.py's vendor wrappers built `{normalised keys..., **file_metadata}`, so reader keys won.
+  OPUS data_type became the raw 'transmittance'/'reference'. PerkinElmer file_format became 'sp' and x_unit the
+  non-canonical 'wavenumber_cm-1', which the GUI's `_apply_x_unit_metadata` treats as nm (read_sp_dir passed it
+  through as well). Reader keys now go first, and the PerkinElmer reader emits 'cm-1'/'nm'.
+- **ASCII.** The later `read_ascii_spectra` (pd.read_csv, header=0, no folders) shadowed the folder-aware one, and
+  five tests asserted the lost first row (2001 -> 2000). There is now one implementation. The delimiter comes from the
+  first fully numeric row (the old folder parser chose it from the first line, so a heading with more spaces than
+  tabs over tab-separated data picked ' ' and then parsed nothing). Lines before that row are the header. Files are opened as utf-8-sig so a BOM does not turn row 1 into a
+  header. The x unit is taken only from explicit unit tokens in the headings, because our own writer labels x
+  "Wavelength" whatever its unit. `_parse_ascii_file` now returns `(df, info)` and raises. Unknown kwargs raise
+  TypeError (they used to go to pd.read_csv; no caller passes any).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes).** The pipeline data_type decides whether the GUI offers a
+  log: 'reflectance' gets A = log10(1/R). So every OPUS block that is already logged or linear in concentration
+  (logr = -log R, KM, ATR, PAS, Raman, emission, aria) must map to 'absorbance'; mapping logr to 'reflectance'
+  logged it twice. "4000,5,0,123" (decimal comma + comma delimiter) splits into four integers and silently gave
+  x=4000, y=5; such files are now refused (decimal='.' overrides). pd.read_csv's header=0 path had tolerated text
+  columns, inline '#' comments and `decimal=','`; the hand parser must keep all three. The GUI never shows
+  warnings.warn or print output: reader problems the user must see go in `metadata['import_warnings']`, which
+  `_show_import_warnings` puts in a dialog (OPUS/ASCII/PerkinElmer main import only). PerkinElmer .sp has no unit
+  field in specio; ranges up to 3300 (the Lambda UV/Vis/NIR limit) are ambiguous and now default to nm at 40%
+  with a warning. `read_sp_dir` globbed `*.sp` + `*.SP`, which on Windows lists every file twice.
+- **Review round 2.** `data_type` is a physical ordinate type, not a "may log" flag: the GUI uses it for
+  10**-x conversion, plot labels, the absorbance-only Auto Bone FTIR gate and saved-model compatibility. Readers
+  now report a third type, 'other' (`io.OTHER_DATA_TYPE`), for Kubelka-Munk, photoacoustic, Raman, emission and
+  raw single-channel spectra; `source_data_type` names it. Log-reflectance and ATR stay 'absorbance'
+  (absorbance-equivalent). The GUI offers no conversion for 'other' (main tab, prediction, both CT modes), and
+  saves `source_data_type`/`data_type_converted_from` with models. The prediction and CT import paths used to
+  re-run `detect_spectral_data_type` on values and drop reader metadata (an OPUS logr spectrum became
+  "reflectance, 100%"); `_resolve_loaded_data_type` now prefers the reader's type, and every active import path
+  calls `_show_import_warnings`. CT conversions used the main tab's `source_data_type`/`data_value_scale`;
+  `_convert_with_source` swaps in the data's own. ASCII: every delimiter x decimal reading is scored on how many
+  lines give numeric x/y; ties must agree or the file is refused. The decimal-comma guard looks only at x/y and
+  the next field, plus leading-zero tokens (thousands groups). Fields are split with the csv module (quotes).
+- **Review round 3.** More loaders re-detected the type from values: contamination, Multi-Model Comparison
+  (including a validation-set source, which must take the main tab's current type), the CT wizard's
+  primary/satellite loads and CT's "use as working data" handoff (must keep Mode B's type after conversion).
+  `_load_spectra_from_directory[_as_df]` return arrays only, so they leave the reader metadata in
+  `self._last_dir_load_metadata`. Compatibility: `model_io.check_data_type_compatibility` compares
+  `source_data_type` when the pipeline types agree (Raman vs KM are both 'other'); legacy models without a
+  source type, and converted data, are compared on the type alone; CT prediction now runs the check too.
+  `_convert_with_source` now takes and returns the per-dataset value scale (resetting it to 1.0 broke % round
+  trips). Tie comparison must be NaN-aware. The comma-ambiguity guard is per row (one competing row refuses the
+  file) and covers thousands groups. Ensemble saves carry the ordinate keys into every base model.
+- **Review round 4 (final).** Coordinator decision: comma-delimited files default to the decimal-point reading
+  (decimal commas inside comma-delimited data are not valid CSV). Rows that also fit a decimal-comma or
+  thousands split only warn (import_warnings, so the GUI shows it); the file is refused only when that split
+  explains an inconsistency (differing field counts, repeated x, leading zeros). Round 3's per-row refusal
+  rejected real files (integer nm or Raman shift + integer counts + a float column). A point-decimal third
+  field can never be half of a decimal-comma pair. Contaminant groups now keep their own type/source/scale;
+  a group whose stated type differs from the clean data (or is 'other') is refused, and conversion refuses
+  while any group mismatches. `_loaded_value_scale` honours a carried scale before looking at the type, so
+  converted % reflectance converts back to %. Source labels are canonicalised (`io.canonical_source_data_type`;
+  Omnic 'Log(1/R)' == OPUS 'log_reflectance'). PowerShell 5.1 mangles `"` inside native-command arguments:
+  write commit messages to a file and use `git commit -F`.
+- **Review round 5 (final).** Contaminant compatibility: the non-convertible policy runs before any equality
+  check ('other' matches only 'other' with the same canonical source, so Kubelka-Munk vs Raman is refused); stored
+  groups are re-validated when clean data loads (with an offer to remove offenders) and again before
+  difference analysis / automated detection; combined-file groups get their own records with a scale decided
+  from the whole file; empty groups are rejected and `_contam_convert_data_type` computes every array before
+  committing. ASCII folder summaries now keep every number-format (decimal-comma) warning in full and summarise
+  other kinds per category with all files named; exponent fragments ("4,123E+3,0,123") count as warning-only
+  evidence; a leading zero refuses only when a competing split exists ("0400,0.5" loads, "1,000,0.123" refuses).
+  Note: the GUI's transmittance and reflectance formulas are the same number (-log10 T == log10(1/T)), so
+  passing the carried source into contamination conversion is bookkeeping, not a value change. Deferred by the
+  coordinator (see PROJECT_STATUS Follow-Ups): CSV/reference implicit-index shift and ASD-text decimal-comma
+  misreads, both pre-existing.
+- **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
+  control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
+  tools, not via heredoc.
