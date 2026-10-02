@@ -832,3 +832,12 @@ predictions give a pooled CV curve; one round count is chosen (like PLS LVs from
 reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
 fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
 the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
+- **Review round 2 (GLM + DeepSeek):** threadpoolctl's `restore_original_limits()` restores EVERY library the
+  controller holds, not just the user_api it limited - a BLAS context's exit un-capped a live OpenMP context and a BLAS
+  cap leaked past all exits (reproduced by both reviewers). `native_thread_limit` now limits/restores through
+  `controller.select(user_api=...)` and keeps a multiset of open limits per API, re-applying the strictest open one on
+  every exit (so a stricter inner context no longer pins the outer at its value). GA candidate pools and the SPA seed
+  loop now go through the policy (`task_pool_plan`; SPA = physical cores, max 8, BLAS capped; SPA output verified
+  bit-identical on example data). Notes: `plan_cv(requested_n_jobs=0)` now raises; a single non-tiny split keeps the
+  estimator's own n_jobs, so LightGBM/XGBoost may differ in the last bits from a 1-thread fit; the GUI fixture's raw
+  `after cancel` leaves one Tcl command per cancelled callback registered until its widget dies.

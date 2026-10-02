@@ -547,16 +547,17 @@ def evaluate_fitness(
         return -np.inf
 
 
-def _candidate_pool_plan(n_jobs, backend):
+def _candidate_pool_plan(n_jobs, model_config):
     """Pool for one-task-per-candidate evaluation, sized by the thread policy.
 
-    Workers are capped at physical cores (``n_jobs=-1`` means every logical CPU to
-    joblib) and each fitness fit gets cores // workers threads; ``backend_context()``
-    also caps the shared BLAS pool when the backend is threading (frozen bundle).
+    ``parallel_policy.task_pool_plan``: workers capped at physical cores, each fitness
+    fit gets cores // workers threads, CatBoost serial under the threading backend
+    (frozen bundle), and ``backend_context()`` caps the shared BLAS pool there.
     """
-    from spectral_predict.parallel_policy import CVPlan, pool_model_threads, pool_workers
+    from spectral_predict.parallel_policy import task_pool_plan
 
-    return CVPlan(n_jobs=pool_workers(n_jobs), backend=backend, model_threads=pool_model_threads(n_jobs))
+    model_name = model_config.get('name') if model_config else None
+    return task_pool_plan(n_jobs, model_name=model_name)
 
 
 def _evaluate_with_actual_model(
@@ -1178,13 +1179,11 @@ def exhaustive_search(
             if verbose >= 1:
                 print(f"  Parallel evaluation with n_jobs={n_jobs}")
 
-            # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
-            # Use 'loky' in dev mode (faster multiprocessing)
-            from spectral_predict.search import _frozen_needs_threading_fallback
-            backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
-            pool = _candidate_pool_plan(n_jobs, backend)
+            # Backend from the thread policy: 'threading' in frozen apps (avoids
+            # PyInstaller process spawn issues), 'loky' in dev mode.
+            pool = _candidate_pool_plan(n_jobs, model_config)
             with pool.backend_context():
-                results = Parallel(n_jobs=pool.n_jobs, backend=backend)(
+                results = Parallel(n_jobs=pool.n_jobs, backend=pool.backend)(
                     delayed(evaluate_fitness)(
                         genes, X, y, cv_folds, n_components, task_type, random_state, fitness_model, model_config,
                         model_threads=pool.model_threads,
@@ -1549,13 +1548,11 @@ def smart_exhaustive_search(
             if verbose >= 1:
                 print(f"  Parallel evaluation with n_jobs={n_jobs}")
 
-            # Use 'threading' in frozen apps (avoids PyInstaller process spawn issues)
-            # Use 'loky' in dev mode (faster multiprocessing)
-            from spectral_predict.search import _frozen_needs_threading_fallback
-            backend = 'threading' if _frozen_needs_threading_fallback() else 'loky'
-            pool = _candidate_pool_plan(n_jobs, backend)
+            # Backend from the thread policy: 'threading' in frozen apps (avoids
+            # PyInstaller process spawn issues), 'loky' in dev mode.
+            pool = _candidate_pool_plan(n_jobs, model_config)
             with pool.backend_context():
-                stage1_results = Parallel(n_jobs=pool.n_jobs, backend=backend)(
+                stage1_results = Parallel(n_jobs=pool.n_jobs, backend=pool.backend)(
                     delayed(evaluate_fitness)(
                         genes, X, y, stage1_cv_folds, n_components, task_type, 42, fitness_model, model_config,
                         model_threads=pool.model_threads,

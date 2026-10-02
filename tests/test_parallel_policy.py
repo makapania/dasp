@@ -141,6 +141,54 @@ def test_pool_model_threads(cores):
     assert parallel_policy.pool_model_threads(48) == 1
 
 
+def test_task_pool_plan_serialises_catboost_in_threaded_pools(cores, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert parallel_policy.task_pool_plan(-1, model_name="CatBoost") == CVPlan(
+        1, "sequential", None
+    )
+    lgbm = parallel_policy.task_pool_plan(6, model_name="LightGBM")
+    assert lgbm == CVPlan(6, "threading", 4)
+
+
+def test_task_pool_plan_keeps_catboost_parallel_with_processes(cores, not_frozen):
+    assert parallel_policy.task_pool_plan(6, model_name="CatBoost") == CVPlan(6, "loky", 4)
+
+
+def test_ga_candidate_pool_routes_through_policy(cores, monkeypatch):
+    from spectral_predict.ga_preprocessing import _candidate_pool_plan
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert not _candidate_pool_plan(-1, {"name": "CatBoost", "params": {}}).parallel
+    assert _candidate_pool_plan(-1, {"name": "XGBoost", "params": {}}).backend == "threading"
+    assert _candidate_pool_plan(-1, None).parallel
+
+
+def test_contains_catboost_sees_wrapped_and_non_terminal_models():
+    catboost = pytest.importorskip("catboost")
+    from sklearn.model_selection import GridSearchCV
+
+    cb = catboost.CatBoostRegressor(verbose=False, allow_writing_files=False)
+    assert parallel_policy.contains_catboost(cb)
+    assert parallel_policy.contains_catboost(GridSearchCV(cb, {"depth": [3]}))
+    assert parallel_policy.contains_catboost(
+        Pipeline([("model", cb), ("scaler", StandardScaler())])
+    )
+    assert not parallel_policy.contains_catboost(
+        Pipeline([("scaler", StandardScaler()), ("model", RandomForestRegressor())])
+    )
+
+
+def test_spa_seed_pool_is_physical_cores_with_capped_blas(cores):
+    from spectral_predict.variable_selection import _spa_seed_plan
+
+    cores(24)
+    plan = _spa_seed_plan()
+    assert plan.backend == "threading" and plan.n_jobs == 8 and plan.model_threads == 3
+    cores(4)
+    plan = _spa_seed_plan()
+    assert plan.n_jobs == 4 and plan.n_jobs * plan.model_threads <= 4
+
+
 def test_caller_sized_pools_are_capped_at_physical_cores(cores, monkeypatch):
     import joblib
 
@@ -302,7 +350,69 @@ def test_nested_stricter_cap_applies_and_outer_restores(raised_openmp):
         assert _openmp_threads() == {2}
         with parallel_policy.native_thread_limit(1, "openmp"):
             assert _openmp_threads() == {1}
+        assert _openmp_threads() == {2}  # the outer budget is back once the inner left
     assert _openmp_threads() == {3}
+
+
+def test_exception_in_inner_cap_unwinds_to_outer_then_original(raised_openmp):
+    with parallel_policy.native_thread_limit(2, "openmp"):
+        with pytest.raises(RuntimeError):
+            with parallel_policy.native_thread_limit(1, "openmp"):
+                raise RuntimeError("fit failed")
+        assert _openmp_threads() == {2}
+    assert _openmp_threads() == {3}
+    assert parallel_policy._ACTIVE_LIMITS == {}
+
+
+@pytest.fixture
+def raised_blas(raised_openmp):
+    from threadpoolctl import threadpool_limits
+
+    if not _pool_threads("blas"):
+        pytest.skip("no BLAS runtime visible to threadpoolctl")
+    with threadpool_limits(limits=8, user_api="blas"):
+        yield
+
+
+def test_cross_api_overlap_from_two_threads_never_clobbers(raised_blas):
+    """A caps BLAS, B caps OpenMP, A exits first: B's OpenMP cap must survive, and
+    once both left BLAS is back to 8 (not leaked at 2) and OpenMP back to 3."""
+    import threading
+
+    a_in, b_in, a_out = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def thread_a():
+        with parallel_policy.native_thread_limit(2, "blas"):
+            a_in.set()
+            b_in.wait(5)
+            seen["openmp_while_both"] = _openmp_threads()
+        a_out.set()
+
+    def thread_b():
+        a_in.wait(5)
+        with parallel_policy.native_thread_limit(1, "openmp"):
+            b_in.set()
+            a_out.wait(5)
+            seen["openmp_after_a_left"] = _openmp_threads()
+            seen["blas_after_a_left"] = _pool_threads("blas")
+
+    workers = [threading.Thread(target=thread_a), threading.Thread(target=thread_b)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(10)
+    assert seen["openmp_while_both"] == {1}
+    assert seen["openmp_after_a_left"] == {1}
+    assert seen["blas_after_a_left"] == {8}
+    assert _pool_threads("blas") == {8}
+    assert _openmp_threads() == {3}
+
+
+def test_cap_below_one_is_rejected():
+    with pytest.raises(ValueError):
+        with parallel_policy.native_thread_limit(0, "blas"):
+            pass
 
 
 def test_one_class_cv_runs_under_openmp_cap(monkeypatch, raised_openmp):

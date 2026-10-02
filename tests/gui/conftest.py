@@ -177,8 +177,10 @@ def _cancel_pending_after(root) -> None:
     Cancels the raw Tcl timer only. ``root.after_cancel`` would also delete the
     callback's Tcl command, but that command belongs to the widget that scheduled it
     (e.g. the running-figure canvas uses ``canvas.after``); the owner later deletes
-    it again on destroy and raises ``TclError: can't delete Tcl command``. Leaving the
-    command registered costs nothing: its owner cleans it up when destroyed.
+    it again on destroy and raises ``TclError: can't delete Tcl command``. The command
+    stays registered until its owner is destroyed. For the session app's long-lived
+    widgets that means a small accumulation (one Tcl command per cancelled callback)
+    over the GUI run: harmless at a few hundred tests, but not free.
     """
     try:
         pending = root.tk.splitlist(root.tk.call('after', 'info'))

@@ -153,7 +153,14 @@ def plan_cv(
         The plan to run the folds with.
 
     Raises:
-        ValueError: If ``requested_n_jobs`` is 0.
+        ValueError: If ``requested_n_jobs`` is 0 (an earlier version silently treated
+            it as "no bound").
+
+    Note:
+        A single split above :data:`TINY_JOB_CELLS` gets ``model_threads=None``: the
+        one fit keeps the estimator's own ``n_jobs`` (often all cores). For
+        LightGBM/XGBoost the thread count can change histogram-reduction order, so
+        that fit may differ in the last bits from a single-threaded one.
     """
     if requested_n_jobs == 0:
         raise ValueError("requested_n_jobs == 0 has no meaning (joblib convention); use 1 or -1")
@@ -168,11 +175,8 @@ def plan_cv(
         # One big fit: nothing to pool, so it may use every core.
         return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
 
-    backend = "threading" if frozen_needs_threading_fallback() else "loky"
-    if backend == "threading" and model_name == "CatBoost":
-        # CatBoost's post-fit feature importance and its predict calls ignore the
-        # constructor thread_count and use every core; in a shared-process thread pool
-        # those phases would multiply. Serial folds with CatBoost's own threading.
+    backend = _pool_backend()
+    if _catboost_needs_serial(backend, model_name):
         return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
 
     workers = min(n_splits, physical_cores())
@@ -184,6 +188,37 @@ def plan_cv(
     return CVPlan(
         n_jobs=workers, backend=backend, model_threads=max(1, physical_cores() // workers)
     )
+
+
+def _pool_backend() -> str:
+    """joblib backend for a worker pool: threads in a frozen bundle, else processes."""
+    return "threading" if frozen_needs_threading_fallback() else "loky"
+
+
+def _catboost_needs_serial(backend: str, model_name: str | None) -> bool:
+    """CatBoost runs serially, with its own threading, in a threading pool.
+
+    Its post-fit feature importance and its predict calls ignore the constructor
+    ``thread_count`` and use every core; in a shared-process thread pool those phases
+    would multiply. (Each loky worker is its own process, so there it is tolerated.)
+    """
+    return backend == "threading" and model_name == "CatBoost"
+
+
+def task_pool_plan(n_jobs: int | None, *, model_name: str | None = None) -> CVPlan:
+    """Plan for a caller-sized pool of independent tasks (one per candidate config).
+
+    Workers are ``n_jobs`` capped at physical cores (:func:`pool_workers`); each task's
+    fits get cores // workers threads; the backend follows the frozen rule; CatBoost
+    under the threading backend runs serially, as in :func:`plan_cv`. Run the pool as
+    ``Parallel(n_jobs=plan.n_jobs, backend=plan.backend)`` inside
+    ``plan.backend_context()``.
+    """
+    backend = _pool_backend()
+    workers = pool_workers(n_jobs)
+    if workers <= 1 or _catboost_needs_serial(backend, model_name):
+        return CVPlan(n_jobs=1, backend="sequential", model_threads=None)
+    return CVPlan(n_jobs=workers, backend=backend, model_threads=pool_model_threads(n_jobs))
 
 
 def _resolve_n_jobs(n_jobs: int | None) -> int:
@@ -212,12 +247,31 @@ def pool_model_threads(n_jobs: int | None) -> int:
     return max(1, physical_cores() // pool_workers(n_jobs))
 
 
-def contains_catboost(estimator: Any) -> bool:
-    """True if ``estimator`` is, or is a pipeline ending in, a CatBoost model."""
+def contains_catboost(estimator: Any, _depth: int = 0) -> bool:
+    """True if a CatBoost model is anywhere in ``estimator``.
+
+    Looks through pipeline steps (any position) and estimator-valued params
+    (``GridSearchCV.estimator``, wrappers), the same way :func:`limit_estimator_threads`
+    walks them.
+    """
+    if (type(estimator).__module__ or "").startswith("catboost"):
+        return True
+    if _depth > 6:
+        return False
     steps = getattr(estimator, "steps", None)
-    if isinstance(steps, list) and steps:
-        estimator = steps[-1][1]
-    return (type(estimator).__module__ or "").startswith("catboost")
+    if isinstance(steps, list):
+        return any(
+            step is not None and step != "passthrough" and contains_catboost(step, _depth + 1)
+            for _name, step in steps
+        )
+    if not hasattr(estimator, "get_params") or isinstance(estimator, type):
+        return False
+    return any(
+        hasattr(value, "get_params")
+        and not isinstance(value, type)
+        and contains_catboost(value, _depth + 1)
+        for value in estimator.get_params(deep=False).values()
+    )
 
 
 def _set_threads(est: Any, n_threads: int) -> None:
@@ -289,8 +343,9 @@ def estimator_threads(estimator: Any) -> dict[str, Any]:
 
 _CONTROLLER: Any = None
 _LIMIT_LOCK = threading.Lock()
-# user_api -> {"depth": open contexts, "limiter": the first one (holds the originals),
-#              "limit": the value currently applied}
+# user_api -> {"limits": the n_threads of every open context (a multiset),
+#              "originals": the first context's limiter on this API's libraries only,
+#                           which holds their pre-cap thread counts}
 _ACTIVE_LIMITS: dict[str, dict[str, Any]] = {}
 
 
@@ -315,27 +370,42 @@ def native_thread_limit(n_threads: int, user_api: str) -> Iterator[None]:
 
     Both limits are process-wide (verified for MSVC's vcomp: a cap set in one thread is
     seen by threads that already exist), so overlapping contexts from different
-    threads must not restore each other's values. Contexts are reference-counted
-    under a lock: the first one records the original limits, a later stricter one
-    tightens the cap, and the originals come back only when the last one exits.
+    threads must not restore each other's values. Under a lock, each API keeps the
+    limits of all its open contexts: the cap in force is always the strictest open
+    one (re-applied whenever a context enters or exits, in any order), and the
+    original thread counts come back when the last context exits. Every set and
+    restore goes through a controller narrowed to ``user_api``, so a BLAS context
+    never touches OpenMP libraries and vice versa (threadpoolctl's
+    ``restore_original_limits`` restores every library its controller holds).
+
+    Raises:
+        ValueError: If ``n_threads`` is below 1.
     """
+    if n_threads < 1:
+        raise ValueError(f"n_threads must be >= 1, got {n_threads}")
     with _LIMIT_LOCK:
         state = _ACTIVE_LIMITS.get(user_api)
+        narrowed = _controller(user_api).select(user_api=user_api)
         if state is None:
-            limiter = _controller(user_api).limit(limits=n_threads, user_api=user_api)
-            state = _ACTIVE_LIMITS[user_api] = {"depth": 0, "limiter": limiter, "limit": n_threads}
-        elif n_threads < state["limit"]:
-            _controller(user_api).limit(limits=n_threads, user_api=user_api)
-            state["limit"] = n_threads
-        state["depth"] += 1
+            state = _ACTIVE_LIMITS[user_api] = {
+                "limits": [],
+                "originals": narrowed.limit(limits=n_threads),
+            }
+        state["limits"].append(n_threads)
+        narrowed.limit(limits=min(state["limits"]))
     try:
         yield
     finally:
         with _LIMIT_LOCK:
-            state["depth"] -= 1
-            if state["depth"] == 0:
-                state["limiter"].restore_original_limits()
-                del _ACTIVE_LIMITS[user_api]
+            state["limits"].remove(n_threads)
+            try:
+                if state["limits"]:
+                    narrowed.limit(limits=min(state["limits"]))
+                else:
+                    state["originals"].restore_original_limits()
+            finally:
+                if not state["limits"]:
+                    del _ACTIVE_LIMITS[user_api]
 
 
 def openmp_single_threaded() -> contextlib.AbstractContextManager:
