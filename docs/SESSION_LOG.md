@@ -783,6 +783,16 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `_convert_with_source` swaps in the data's own. ASCII: every delimiter x decimal reading is scored on how many
   lines give numeric x/y; ties must agree or the file is refused. The decimal-comma guard looks only at x/y and
   the next field, plus leading-zero tokens (thousands groups). Fields are split with the csv module (quotes).
+- **Review round 3.** More loaders re-detected the type from values: contamination, Multi-Model Comparison
+  (including a validation-set source, which must take the main tab's current type), the CT wizard's
+  primary/satellite loads and CT's "use as working data" handoff (must keep Mode B's type after conversion).
+  `_load_spectra_from_directory[_as_df]` return arrays only, so they leave the reader metadata in
+  `self._last_dir_load_metadata`. Compatibility: `model_io.check_data_type_compatibility` compares
+  `source_data_type` when the pipeline types agree (Raman vs KM are both 'other'); legacy models without a
+  source type, and converted data, are compared on the type alone; CT prediction now runs the check too.
+  `_convert_with_source` now takes and returns the per-dataset value scale (resetting it to 1.0 broke % round
+  trips). Tie comparison must be NaN-aware. The comma-ambiguity guard is per row (one competing row refuses the
+  file) and covers thousands groups. Ensemble saves carry the ordinate keys into every base model.
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.

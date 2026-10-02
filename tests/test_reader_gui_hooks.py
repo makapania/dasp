@@ -176,8 +176,17 @@ class _AnyWidget(_Widget):
     def delete(self, *args):
         self.text = ""
 
-    def insert(self, index, text):
-        self.text += text
+    def insert(self, index, text="", **kwargs):
+        self.text += str(text)
+
+    def grid(self, *args, **kwargs):
+        pass
+
+    def grid_remove(self, *args, **kwargs):
+        pass
+
+    def get_children(self):
+        return []
 
 
 @pytest.fixture
@@ -427,3 +436,330 @@ def test_resolve_loaded_data_type_prefers_reader():
     assert gui._resolve_loaded_data_type(meta, X) == ("absorbance", 95.0, "log_reflectance")
     data_type, _, source = gui._resolve_loaded_data_type(None, X)
     assert source is None and data_type in ("absorbance", "reflectance")
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: contamination, comparison, CT scale, compatibility, ensembles
+# ---------------------------------------------------------------------------
+
+
+def _contam_app(monkeypatch, path):
+    app = _bare_app()
+    app.colors = {"success": "green", "warning": "orange", "text": "black"}
+    app.source_data_type = None
+    app.data_value_scale = 1.0
+    app.contam_clean_path = _Var()
+    app.contam_original_data_type = _Var()
+    app.contam_current_data_type = _Var()
+    app.contam_groups = {}
+    app.contam_data_converted = False
+    app.contam_type_confidence = 0.0
+    for name in ("contam_clean_info_label", "contam_dtype_status_label", "contam_convert_btn"):
+        setattr(app, name, _AnyWidget())
+    app._contam_update_summary = lambda: None
+    app._contam_auto_populate_spectra_plot = lambda: None
+    app._contam_plot_group_spectra = lambda **k: None
+    monkeypatch.setattr(gui.messagebox, "askquestion", lambda *a, **k: "yes")
+    monkeypatch.setattr(gui.filedialog, "askdirectory", lambda *a, **k: str(path))
+    return app
+
+
+def test_contamination_keeps_reader_type_for_log_reflectance(tmp_path, monkeypatch, dialogs):
+    _install_opus(monkeypatch, {tmp_path / f"s{i}.0": {"logr": LOGR} for i in range(2)})
+    app = _contam_app(monkeypatch, tmp_path)
+
+    app._contam_load_clean_data()
+
+    assert not [c for c in dialogs if c[0] == "showerror"], dialogs
+    assert app.contam_current_data_type.get() == "absorbance"
+    assert app.contam_source_data_type == "log_reflectance"
+    # The offer is absorbance -> reflectance, never another log10(1/x)
+    assert app.contam_convert_btn.options["text"] == "Convert to Reflectance"
+    np.testing.assert_array_equal(app.contam_clean_data[0], LOGR[::-1])
+
+
+def test_contamination_other_type_refuses_conversion(tmp_path, monkeypatch, dialogs):
+    _install_opus(monkeypatch, {tmp_path / f"s{i}.0": {"km": np.full(60, 0.3)} for i in range(2)})
+    app = _contam_app(monkeypatch, tmp_path)
+
+    app._contam_load_clean_data()
+
+    assert app.contam_current_data_type.get() == "other"
+    assert app.contam_convert_btn.options["state"] == "disabled"
+    before = app.contam_clean_data.copy()
+    app._contam_convert_data_type()
+    np.testing.assert_array_equal(app.contam_clean_data, before)
+    assert any(c[1] == "No Conversion" for c in dialogs)
+
+
+def _comparison_app(source, path=""):
+    app = _bare_app()
+    app.colors = {"success": "green", "warning": "orange", "text_light": "gray", "accent": "blue"}
+    app.source_data_type = None
+    app.data_value_scale = 1.0
+    app.data_has_been_converted = False
+    app.comparison_data_source = _Var(source)
+    app.comparison_data_path = _Var(str(path))
+    app.comparison_data_type = _Var()
+    app.comparison_primary_model = None
+    app.comparison_auxiliary_models = []
+    for name in (
+        "comparison_conversion_status",
+        "comparison_data_type_frame",
+        "comparison_data_status",
+        "comparison_status",
+        "comparison_refl_radio",
+        "comparison_abs_radio",
+        "comparison_convert_btn",
+        "comparison_type_status",
+        "comparison_model_expects_label",
+        "comparison_type_match_label",
+    ):
+        setattr(app, name, _AnyWidget())
+    return app
+
+
+def test_comparison_validation_set_keeps_main_tab_type(dialogs):
+    """A validation matrix of -log10(R) values must stay absorbance in the comparison tab."""
+    app = _comparison_app("validation")
+    app.validation_X = pd.DataFrame([LOGR], columns=np.linspace(3410.0, 4000.0, 60))
+    app.validation_y = pd.Series([1.0])
+    app.current_data_type.set("absorbance")
+    app.type_confidence = 95.0
+    app.source_data_type = "log_reflectance"
+
+    app._load_comparison_data()
+
+    assert not [c for c in dialogs if c[0] == "showerror"], dialogs
+    assert app.comparison_data_type.get() == "absorbance"
+    assert app.comparison_source_data_type == "log_reflectance"
+    assert app.comparison_convert_btn.options["text"] == "Convert to Reflectance"
+
+
+def test_comparison_directory_uses_reader_metadata(tmp_path, monkeypatch, dialogs):
+    (tmp_path / "s0.dpt").write_text("1000,0.3\n1001,0.31\n")
+    df = pd.DataFrame([[0.3, 0.31]], index=["s0"], columns=[1000.0, 1001.0])
+    meta = {"data_type": "other", "type_confidence": 95.0, "source_data_type": "kubelka_munk"}
+    monkeypatch.setattr(sp_io, "read_ascii_spectra", lambda p, **k: (df, meta))
+    app = _comparison_app("directory", tmp_path)
+
+    app._load_comparison_data()
+
+    assert app.comparison_data_type.get() == "other"
+    assert app.comparison_convert_btn.options["state"] == "disabled"
+    before = app.comparison_data.copy()
+    app._comparison_convert_data_type()
+    pd.testing.assert_frame_equal(app.comparison_data, before)
+    assert any(c[1] == "No Conversion" for c in dialogs)
+
+
+def _export_app(X, data_type="reflectance", scale=100.0):
+    app = _bare_app()
+    app.colors = {"success": "green", "warning": "orange", "accent": "blue"}
+    app.source_data_type = "transmittance"  # main tab state must not leak in
+    app.data_value_scale = 1.0
+    app.new_satellite_data_export = (np.linspace(1000.0, 1100.0, X.shape[1]), X)
+    app.ct_export_data_type = _Var(data_type)
+    app.ct_export_value_scale = scale
+    app.ct_export_data_converted = False
+    app.ct_export_source_data_type = None
+    app._plot_export_spectra_preview = lambda *a: None
+    for name in (
+        "ct_export_detected_type_label",
+        "ct_convert_to_abs_btn",
+        "ct_convert_to_refl_btn",
+        "ct_conversion_status_label",
+    ):
+        setattr(app, name, _AnyWidget())
+    return app
+
+
+def test_ct_export_percent_reflectance_round_trip():
+    X = np.full((2, 5), 50.0)  # percent reflectance
+    app = _export_app(X)
+
+    app._ct_convert_to_absorbance()
+    _, A = app.new_satellite_data_export
+    np.testing.assert_allclose(A, np.log10(1 / 0.5))
+    app._ct_convert_to_reflectance()
+    _, R = app.new_satellite_data_export
+
+    np.testing.assert_allclose(R, 50.0)
+    assert app.data_value_scale == 1.0 and app.source_data_type == "transmittance"
+
+
+def test_ct_export_load_keeps_percent_scale(tmp_path, monkeypatch, dialogs):
+    for i in range(2):
+        rows = "\n".join(f"{1000 + j},{40 + j / 10}" for j in range(60))
+        (tmp_path / f"s{i}.dpt").write_text(rows + "\n")
+    app = _ct_app(tmp_path)
+    app.current_transfer_model = object()
+    app.ct_export_satellite_path_var = _Var(str(tmp_path))
+    app.ct_export_data_type = _Var()
+    app.export_metadata_context = None
+    app._detect_data_format = lambda p: "folder"
+    app._update_ct_use_as_working_btn_state = lambda: None
+    app._plot_export_spectra_preview = lambda *a: None
+    for name in (
+        "ct_export_data_info_text",
+        "ct_export_detected_type_label",
+        "ct_export_refl_radio",
+        "ct_export_abs_radio",
+        "ct_convert_to_abs_btn",
+        "ct_convert_to_refl_btn",
+        "ct_conversion_status_label",
+    ):
+        setattr(app, name, _AnyWidget())
+
+    app._load_new_satellite_data_export()
+    assert app.ct_export_data_type.get() == "reflectance"
+    assert app.ct_export_value_scale == 100.0
+    _, X0 = app.new_satellite_data_export
+    app._ct_convert_to_absorbance()
+    app._ct_convert_to_reflectance()
+    _, X1 = app.new_satellite_data_export
+
+    np.testing.assert_allclose(X1, X0)
+
+
+def test_ct_working_data_handoff_keeps_converted_type():
+    """After Mode B data was converted to absorbance, the handoff must not re-detect."""
+    app = _bare_app()
+    app.ct_export_data_type = _Var("absorbance")
+    app.ct_export_type_confidence = 90.0
+    app.ct_export_data_converted = True
+    app.ct_export_source_data_type = "transmittance"
+    # Simulate the transform step's bookkeeping, then the handoff's type resolution
+    carried = {
+        "data_type": app.ct_export_data_type.get(),
+        "type_confidence": app.ct_export_type_confidence,
+        "source_data_type": None,
+        "value_scale": 1.0,
+    }
+    X = np.full((3, 5), 0.45)  # would look like reflectance by value
+    assert gui._resolve_loaded_data_type(carried, X)[0] == "absorbance"
+    source = Path(gui.__file__).read_text(encoding="utf-8")
+    assert "carried = getattr(self, 'transformed_spectra_type', None)" in source
+
+
+def test_ct_prediction_checks_data_type(tmp_path, monkeypatch, dialogs):
+    from spectral_predict import model_io
+
+    monkeypatch.setattr(model_io, "predict_with_model", lambda md, X, **k: np.zeros(len(X)))
+    app = _bare_app()
+    app.current_transfer_model = object()
+    app.ct_transfer_model = None
+    app.current_prediction_model = object()
+    app.current_prediction_model_dict = {
+        "metadata": {"data_type": "other", "source_data_type": "raman", "wavelengths": None}
+    }
+    app.new_satellite_data_predict = (np.linspace(1000.0, 1100.0, 5), np.full((2, 5), 0.3))
+    app.ct_pred_data_type = _Var("other")
+    app.ct_pred_data_converted = False
+    app.ct_pred_source_data_type = "kubelka_munk"
+    app.ct_pred_loaded_sample_ids = None
+    app._apply_transfer_with_roi = lambda X, model: X
+    app._plot_ct_prediction_results = lambda *a: None
+    app.play_sound = lambda *a, **k: None
+    app.ct_predictions_tree = _AnyWidget()
+    app.ct_export_predictions_button = _AnyWidget()
+
+    app._run_prediction_workflow()
+
+    mismatch = [c for c in dialogs if c[1] == "Data Type Mismatch"]
+    assert mismatch and "RAMAN" in mismatch[0][2] and "KUBELKA MUNK" in mismatch[0][2]
+    assert not [c for c in dialogs if c[0] == "showerror"], dialogs
+
+
+def test_check_data_type_compatibility_rules():
+    from spectral_predict.model_io import check_data_type_compatibility as check
+
+    raman = {"data_type": "other", "source_data_type": "raman"}
+    assert "KUBELKA MUNK" in check(raman, "other", "kubelka_munk")
+    assert check(raman, "other", "raman") is None
+    assert check(raman, "other", None) is None  # unknown prediction source
+    assert check({"data_type": "other"}, "other", "kubelka_munk") is None  # legacy model
+    assert "ABSORBANCE" in check(raman, "absorbance", None)
+    converted = {
+        "data_type": "absorbance",
+        "source_data_type": "transmittance",
+        "data_type_converted_from": "reflectance",
+    }
+    assert check(converted, "absorbance", "absorbance") is None
+    assert check({}, "absorbance", "absorbance") is None
+
+
+def test_predict_with_uncertainty_warns_on_other_subtype(tmp_path):
+    from sklearn.linear_model import Ridge
+
+    from spectral_predict.model_io import load_model, predict_with_uncertainty, save_model
+
+    X = np.random.default_rng(1).normal(size=(12, 5))
+    wl = [1000.0, 1001.0, 1002.0, 1003.0, 1004.0]
+    meta = {
+        "model_name": "Ridge",
+        "task_type": "regression",
+        "wavelengths": wl,
+        "n_vars": 5,
+        "data_type": "other",
+        "source_data_type": "raman",
+    }
+    save_model(Ridge().fit(X, X[:, 0]), None, meta, tmp_path / "m.dasp")
+    model_dict = load_model(tmp_path / "m.dasp")
+    X_new = pd.DataFrame(X[:3], columns=wl)
+
+    result = predict_with_uncertainty(
+        model_dict, X_new, prediction_data_type="other", prediction_source_data_type="kubelka_munk"
+    )
+
+    assert "RAMAN" in result["data_type_warning"]
+
+
+def test_ensemble_save_carries_ordinate_metadata(tmp_path):
+    import json
+    import zipfile
+
+    from sklearn.linear_model import Ridge
+
+    from spectral_predict.model_io import load_model, save_ensemble
+
+    X = np.random.default_rng(2).normal(size=(12, 5))
+    ensemble = types.SimpleNamespace(
+        models=[Ridge().fit(X, X[:, 0]), Ridge(alpha=2).fit(X, X[:, 0])],
+        model_names=["r1", "r2"],
+    )
+    meta = {
+        "task_type": "regression",
+        "wavelengths": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "n_vars": 5,
+        "data_type": "other",
+        "source_data_type": "kubelka_munk",
+        "data_type_converted_from": None,
+    }
+    path = tmp_path / "e.dasp"
+    save_ensemble(ensemble, str(path), meta)
+
+    with zipfile.ZipFile(path) as zf:
+        config = json.loads(zf.read("ensemble_config.json"))
+        zf.extract("base_model_0.dasp", tmp_path)
+    assert config["metadata"]["source_data_type"] == "kubelka_munk"
+    base = load_model(tmp_path / "base_model_0.dasp")["metadata"]
+    assert base["data_type"] == "other"
+    assert base["source_data_type"] == "kubelka_munk"
+    assert "data_type_converted_from" in base
+    source = Path(gui.__file__).read_text(encoding="utf-8")
+    assert "# Ordinate type of the training data (save_ensemble copies these to" in source
+
+
+@pytest.mark.parametrize(
+    "data_type, source, suffix",
+    [
+        ("absorbance", "log_reflectance", "_abs"),
+        ("reflectance", "transmittance", "_ref"),
+        ("other", "kubelka_munk", "_km"),
+        ("other", "raman", "_raman"),
+        ("other", None, "_other"),
+    ],
+)
+def test_data_type_suffix(data_type, source, suffix):
+    assert gui._data_type_suffix(data_type, source) == suffix

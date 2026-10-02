@@ -1907,6 +1907,10 @@ _ASCII_UNIT_PATTERNS = (
 # An explicit axis-unit statement such as "XUNITS=1/CM" or "x unit: nm".
 _ASCII_XUNIT_LINE = re.compile(r'^\W*x\s*[-_ ]?\s*units?\s*[=:]', re.IGNORECASE)
 _INT_TOKEN = re.compile(r'^[+-]?\d+$')
+# "1,234,0.1" / "1,234.5,0.1": a 1-3 digit field followed by a 3-digit group reads as a
+# thousands-separated x as well as x, y.
+_THOUSANDS_HEAD = re.compile(r'^[+-]?\d{1,3}$')
+_THOUSANDS_GROUP = re.compile(r'^\d{3}(\.\d*)?$')
 # "05", "000", "000.5": a leading zero before another digit is a thousands group or a
 # fraction fragment, never how a spectrometer writes an x or y value.
 _LEADING_ZERO_TOKEN = re.compile(r'^[+-]?0\d')
@@ -2007,7 +2011,7 @@ def _choose_ascii_interpretation(
     best = [s for s in scored if s[0] == best_count]
     _, delimiter, decimal, parsed = best[0]
     for _, other_delim, other_decimal, other_parsed in best[1:]:
-        if other_parsed != parsed:
+        if not _same_parse(other_parsed, parsed):
             raise ValueError(
                 f"ambiguous number format: delimiter {_delimiter_name(delimiter)} with decimal "
                 f"{decimal!r} and delimiter {_delimiter_name(other_delim)} with decimal "
@@ -2017,29 +2021,50 @@ def _choose_ascii_interpretation(
     return delimiter, decimal, parsed
 
 
-def _decimal_comma_suspicion(data_tokens: list[list[str]]) -> Optional[str]:
-    """Why comma-delimited, decimal-point rows may really be decimal-comma numbers.
+def _same_parse(
+    a: list[Optional[tuple[float, float]]], b: list[Optional[tuple[float, float]]]
+) -> bool:
+    """True if two readings parse the same lines to the same values (NaN == NaN)."""
+    if len(a) != len(b):
+        return False
+    for pa, pb in zip(a, b):
+        if (pa is None) != (pb is None):
+            return False
+        if pa is not None and not all(
+            va == vb or (np.isnan(va) and np.isnan(vb)) for va, vb in zip(pa, pb)
+        ):
+            return False
+    return True
 
-    Only the x/y fields and the field right after them are examined, so text in
-    ignored columns (notes, flags) neither triggers nor hides the problem. Returns
-    a reason, or None when the reading is unambiguous.
+
+def _decimal_comma_suspicion(data_tokens: list[list[str]]) -> Optional[str]:
+    """Why comma-delimited, decimal-point rows may be read another way.
+
+    Checked row by row: any single row with a competing reading makes the file
+    ambiguous, whatever the other rows look like. Only the x/y fields and the field
+    right after them are examined, so text in ignored columns (notes, flags)
+    neither triggers nor hides the problem. A row competes when:
+    - an x/y field has a leading zero ("05", "000.5"): a fraction or thousands group;
+    - it starts with two integer fields followed by a number ("4000,5,0,123",
+      "1000,5,0.5"): x and y could be decimal-comma numbers;
+    - it starts with a 1-3 digit field and a 3-digit group followed by a number
+      ("1,234,0.123", "1,234.5,0.1"): x could be thousands-separated.
+
+    Returns a reason, or None when every row reads one way only.
     """
-    xy_has_point = any('.' in toks[0] or '.' in toks[1] for toks in data_tokens)
     for toks in data_tokens:
         if any(_LEADING_ZERO_TOKEN.match(t) for t in toks[:2]):
             return f"a field such as {toks[:3]} has a leading zero (thousands or fraction group)"
-    if xy_has_point:
-        return None
-    for toks in data_tokens:
-        if (
-            len(toks) >= 3
-            and _INT_TOKEN.match(toks[0])
-            and _INT_TOKEN.match(toks[1])
-            and _INT_TOKEN.match(toks[2])
-        ):
+        if len(toks) < 3 or _try_float(toks[2], '.') is None:
+            continue
+        if _INT_TOKEN.match(toks[0]) and _INT_TOKEN.match(toks[1]):
             return (
-                f"rows such as {toks[:4]} have integer fields only and could be "
-                f"decimal-comma numbers"
+                f"rows such as {toks[:4]} start with two integer fields and a number, so x "
+                f"and y could be decimal-comma numbers"
+            )
+        if _THOUSANDS_HEAD.match(toks[0]) and _THOUSANDS_GROUP.match(toks[1]):
+            return (
+                f"rows such as {toks[:3]} could have a thousands-separated x"
             )
     return None
 
@@ -2051,18 +2076,23 @@ def _unit_in_text(text: str) -> set[str]:
 
 
 def _x_unit_from_header(
-    header_lines: list[str], column_names: Optional[list[str]], n_columns: int
+    header_lines: list[str],
+    column_names: Optional[list[str]],
+    n_columns: int,
+    delimiter: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Read an explicit x-axis unit from the header.
 
     Returns ``(unit, warning)``. A unit counts when it is stated:
     - on an explicit axis-unit line ("XUNITS=1/CM"), or
     - in the x column's heading, when the headings line up with the data columns, or
-    - anywhere in the header of a two-column file whose headings could not be
-      split, if only one unit is named.
-    A unit named elsewhere cannot be tied to the x column, so it is reported in
-    ``warning`` and not used. The word "Wavelength" alone never counts, because
-    ``write_ascii_spectra`` labels x "Wavelength" whatever its unit.
+    - for two-column data whose heading splits into more fields than columns
+      ("Wavenumber (cm-1) Absorbance"), in the heading's first two fields, if only
+      one unit is named there.
+    A unit named elsewhere (another column's heading, a trailing heading field such
+    as "X Y Wavenumber_cm-1_ref", other header text) cannot be tied to the x column,
+    so it is reported in ``warning`` and not used. The word "Wavelength" alone never
+    counts, because ``write_ascii_spectra`` labels x "Wavelength" whatever its unit.
     """
     for line in header_lines:
         if _ASCII_XUNIT_LINE.match(line):
@@ -2073,11 +2103,12 @@ def _x_unit_from_header(
         units = _unit_in_text(column_names[0])
         if len(units) == 1:
             return units.pop(), None
-        others = _unit_in_text(' '.join(header_lines))
-    else:
-        others = _unit_in_text(' '.join(header_lines))
-        if n_columns == 2 and len(others) == 1:
-            return others.pop(), None
+    elif n_columns == 2 and header_lines:
+        lead = ' '.join(_split_ascii_line(header_lines[-1], delimiter)[:n_columns])
+        units = _unit_in_text(lead)
+        if len(units) == 1:
+            return units.pop(), None
+    others = _unit_in_text(' '.join(header_lines))
     if others:
         return None, (
             f"the header names {sorted(others)} but not for the x column, so the x "
@@ -2218,7 +2249,9 @@ def _parse_ascii_file(
         names = _split_ascii_line(header_lines[-1], chosen)
         if len(names) == n_columns:
             column_names = names
-    header_x_unit, unit_warning = _x_unit_from_header(header_lines, column_names, n_columns)
+    header_x_unit, unit_warning = _x_unit_from_header(
+        header_lines, column_names, n_columns, chosen
+    )
     if unit_warning:
         file_warnings.append(f"{filepath.name}: {unit_warning}")
 

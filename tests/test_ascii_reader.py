@@ -692,3 +692,60 @@ def test_folder_failure_message_names_file_once(tmp_path):
 
     assert meta["failed_files"][0].startswith("one.dpt: need at least 2")
     assert "one.dpt: one.dpt" not in meta["failed_files"][0]
+
+
+# ---------------------------------------------------------------------------
+# Review round 3
+# ---------------------------------------------------------------------------
+
+
+def test_nan_values_do_not_make_identical_readings_ambiguous(tmp_path):
+    path = _write(tmp_path, "nan.dat", "1000\t0.1\n1001\tnan\n1002\t0.3\n")
+
+    df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == [1000.0, 1001.0, 1002.0]
+    assert df.iloc[0, 0] == 0.1 and np.isnan(df.iloc[0, 1]) and df.iloc[0, 2] == 0.3
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1,234,0.123\n2,345,0.124\n",  # nonzero thousands groups
+        "1,234.5,0.1\n2,345.5,0.2\n",  # thousands group with a decimal point
+        "1000,5,0,123\n1001.5,0.124\n",  # one decimal-comma row among dot rows
+        "1000.5,0.1,7\n1001,5,0.2\n",  # a single competing row is enough
+    ],
+)
+def test_any_row_with_a_competing_reading_is_refused(tmp_path, text):
+    path = _write(tmp_path, "amb.dat", text)
+    with pytest.raises(ValueError, match="comma-separated values may be"):
+        read_ascii_spectra(path)
+
+
+def test_competing_rows_accepted_with_explicit_decimal(tmp_path):
+    path = _write(tmp_path, "amb.dat", "1,234,0.123\n2,345,0.124\n")
+
+    with pytest.warns(UserWarning, match="columns 3\\+ ignored"):
+        df, _ = read_ascii_spectra(path, decimal=".")
+
+    assert df.columns.tolist() == [1.0, 2.0]
+
+
+def test_unit_in_trailing_heading_field_of_two_column_data_is_not_used(tmp_path):
+    path = _write(tmp_path, "trail.dat", "X Y Wavenumber_cm-1_ref\n1000 0.2\n1001 0.3\n")
+
+    with pytest.warns(UserWarning, match="not for the x column"):
+        _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit"] == "nm"
+    assert meta["x_unit_detection_method"] == "default"
+
+
+def test_unit_in_leading_heading_fields_of_two_column_data_is_used(tmp_path):
+    path = _write(tmp_path, "lead.dat", "Wavelength (nm) Reflectance\n1000 0.2\n1001 0.3\n")
+
+    _, meta = read_ascii_spectra(path)
+
+    assert meta["x_unit"] == "nm"
+    assert meta["x_unit_detection_method"] == "ascii_header"
