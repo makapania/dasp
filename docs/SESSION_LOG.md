@@ -765,3 +765,7 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   `list(GroupKFold(...).split(X, y, groups))` and pass `cv=splits`; that works with and without routing.
 - **The GUI holdout does not use `sample_selection.kennard_stone`.** `_validation_kennard_stone` (GUI ~20627)
   is its own pdist/squareform implementation; R085 only affected CT standards and model_io representatives.
+- **CT dead code (round 2).** The transfer-model registry UI was never built (no `ct_registry_tree`, no bindings),
+  so its seven handlers and `transfer_model_registry` were deleted. The quality-plot SG window had a floor of 5,
+  so an ROI of 1-4 wavelengths raised and the shared try/except hid every plot; `ct_derivative_window` now
+  adapts (None below 3) and raw/scatter plots are drawn independently of the derivative tabs.

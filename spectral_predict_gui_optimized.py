@@ -348,6 +348,21 @@ def ct_region_arrays(
     return X_primary[:, idx], X_satellite[:, idx], np.asarray(wavelengths)[idx]
 
 
+def ct_derivative_window(n_wavelengths: int) -> int | None:
+    """Savitzky-Golay window (polyorder 2) for the transfer-quality derivative tabs.
+
+    Up to 11 points, odd and no wider than the plotted region; ``None`` when fewer
+    than 3 wavelengths are plotted, so no derivative can be drawn.
+    """
+    window = min(11, n_wavelengths - 1)
+    if window % 2 == 0:
+        window -= 1
+    window = max(window, 5)
+    if window > n_wavelengths:
+        window = n_wavelengths if n_wavelengths % 2 else n_wavelengths - 1
+    return window if window >= 3 else None
+
+
 CT_AGREEMENT_TITLE = (
     "Spectral agreement on loaded standards (includes fitting data — not a validation)"
 )
@@ -2930,10 +2945,6 @@ class SpectralPredictApp:
         self.ct_equalized_wavelengths = None  # Wavelengths after equalization
         self.ct_equalized_X = None  # Equalized spectra
         self.ct_equalized_sample_ids = None  # Sample IDs with instrument prefixes
-
-        # Transfer Model Registry - persistent storage of built transfer models
-        self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
-        # model_key format: "PrimaryID_SatelliteID_Method"
 
         # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
         # Tab 11A: Interferent Library Management
@@ -46491,179 +46502,6 @@ External Validation Performance (n={n_val}):
     #
     #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
 
-    def _refresh_ct_registry(self):
-        """Refresh the transfer model registry view and instruments list."""
-        # Update instruments listbox
-        self.ct_instrument_listbox.delete(0, tk.END)
-        for inst_id in sorted(self.instrument_spectral_data.keys()):
-            self.ct_instrument_listbox.insert(tk.END, inst_id)
-
-        # Update transfer models treeview
-        for item in self.ct_registry_tree.get_children():
-            self.ct_registry_tree.delete(item)
-
-        for model_key, model_data in self.transfer_model_registry.items():
-            primary_id = model_data['primary_id']
-            satellite_id = model_data['satellite_id']
-            method = model_data['method']
-            date_built = model_data['date_built']
-            n_samples = model_data['n_samples']
-
-            self.ct_registry_tree.insert('', 'end', iid=model_key,
-                                        values=(primary_id, satellite_id, method, date_built, n_samples))
-
-        # Update registry combos in sections C and D
-        registry_keys = list(self.transfer_model_registry.keys())
-        if hasattr(self, 'ct_eq_registry_combo'):
-            self.ct_eq_registry_combo['values'] = registry_keys
-        if hasattr(self, 'ct_pred_registry_combo'):
-            self.ct_pred_registry_combo['values'] = registry_keys
-
-    def _load_model_from_registry(self):
-        """Load selected transfer model from registry to current model."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model from the registry")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _delete_from_registry(self):
-        """Delete selected transfer model from registry."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model to delete")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        response = messagebox.askyesno("Confirm Delete",
-            f"Delete transfer model?\n\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}\n\n"
-            f"This cannot be undone.")
-
-        if response:
-            del self.transfer_model_registry[model_key]
-            self._refresh_ct_registry()
-            messagebox.showinfo("Success", "Transfer model deleted from registry")
-
-    def _import_model_to_registry(self):
-        """Import a transfer model from file into the registry."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        from spectral_predict.calibration_transfer import load_transfer_model
-
-        file_path = filedialog.askopenfilename(
-            title="Select Transfer Model JSON File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not file_path:
-            return
-
-        try:
-            # Load the model
-            transfer_model = load_transfer_model(file_path)
-
-            # Try to extract primary/satellite IDs and method from the model
-            # These might be stored as metadata in the model
-            primary_id = getattr(transfer_model, 'primary_id', 'Unknown_Primary')
-            satellite_id = getattr(transfer_model, 'satellite_id', 'Unknown_Satellite')
-            method = transfer_model.method
-
-            # Create registry key
-            import datetime
-            model_key = f"{primary_id}_{satellite_id}_{method}"
-
-            # Check if already exists
-            if model_key in self.transfer_model_registry:
-                response = messagebox.askyesno("Model Exists",
-                    f"A model with key '{model_key}' already exists in the registry.\n\n"
-                    f"Do you want to replace it?")
-                if not response:
-                    return
-
-            # Store in registry
-            self.transfer_model_registry[model_key] = {
-                'model': transfer_model,
-                'primary_id': primary_id,
-                'satellite_id': satellite_id,
-                'method': method,
-                'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'n_samples': 0,  # Unknown from loaded file
-                'n_features': 0  # Unknown from loaded file
-            }
-
-            self._refresh_ct_registry()
-
-            messagebox.showinfo("Success",
-                f"Transfer model imported to registry:\n"
-                f"Key: {model_key}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to import transfer model:\n{str(e)}")
-
-    def _load_ct_eq_from_registry(self):
-        """Load transfer model from registry for file equalization (Section C)."""
-        model_key = self.ct_eq_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for file equalization:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _load_ct_pred_from_registry(self):
-        """Load transfer model from registry for prediction (Section D)."""
-        model_key = self.ct_pred_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for prediction:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _on_pred_tm_source_changed(self):
-        """Handle transfer model source change in Section D."""
-        source = self.ct_pred_tm_source_var.get()
-
-        # Hide/show appropriate frames
-        if source == 'registry':
-            self.ct_pred_registry_frame.pack(fill='x', pady=(5, 0))
-            self.ct_pred_load_tm_frame.pack_forget()
-        elif source == 'file':
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack(fill='x', pady=(5, 0))
-        else:  # current
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack_forget()
-
     def _browse_ct_pred_primary_model(self):
         """Browse for primary calibration model in Section D."""
         file_path = filedialog.askopenfilename(
@@ -47879,20 +47717,18 @@ External Validation Performance (n={n_val}):
             derivative_notebook = ttk.Notebook(self.ct_transfer_plot_frame)
             derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
+            # Savitzky-Golay window for the derivative tabs; None when the plotted
+            # region is too narrow for any derivative (e.g. an ROI of 1-2 wavelengths).
+            deriv_window = ct_derivative_window(len(wl_plot))
+
             # Helper function to compute derivatives
             def compute_derivative(X, wavelengths, deriv_order):
                 """Compute derivative using Savitzky-Golay filter."""
                 from scipy.signal import savgol_filter
                 if deriv_order == 0:
                     return X
-                # Use window length of 11 and polynomial order 2 (common for NIR)
-                window_length = min(11, len(wavelengths) - 1)
-                if window_length % 2 == 0:
-                    window_length -= 1  # Must be odd
-                if window_length < 5:
-                    window_length = 5
                 X_deriv = np.apply_along_axis(
-                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    lambda y: savgol_filter(y, deriv_window, polyorder=2, deriv=deriv_order),
                     axis=1, arr=X
                 )
                 return X_deriv
@@ -47951,16 +47787,7 @@ External Validation Performance (n={n_val}):
                 fig.tight_layout()
                 return fig
 
-            # Compute all derivatives
-            primary_d1 = compute_derivative(X_pri, wl_plot, 1)
-            satellite_d1 = compute_derivative(X_sat, wl_plot, 1)
-            transferred_d1 = compute_derivative(X_transferred, wl_plot, 1)
-
-            primary_d2 = compute_derivative(X_pri, wl_plot, 2)
-            satellite_d2 = compute_derivative(X_sat, wl_plot, 2)
-            transferred_d2 = compute_derivative(X_transferred, wl_plot, 2)
-
-            # Tab 1: Raw spectra
+            # Tab 1: Raw spectra (drawn first so a derivative failure cannot hide it)
             tab_raw = ttk.Frame(derivative_notebook)
             derivative_notebook.add(tab_raw, text='Raw Spectra')
 
@@ -47974,33 +47801,37 @@ External Validation Performance (n={n_val}):
             canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             self._add_plot_export_button(tab_raw, fig_raw, "transfer_quality_raw")
 
-            # Tab 2: 1st derivative
-            tab_d1 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d1, text='1st Derivative')
-
-            fig_d1 = create_comparison_figure(
-                primary_d1, satellite_d1, transferred_d1,
-                '1st Derivative', '(1st Derivative)'
-            )
-
-            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
-            canvas_d1.draw()
-            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d1, fig_d1, "transfer_quality_1st_deriv")
-
-            # Tab 3: 2nd derivative
-            tab_d2 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d2, text='2nd Derivative')
-
-            fig_d2 = create_comparison_figure(
-                primary_d2, satellite_d2, transferred_d2,
-                '2nd Derivative', '(2nd Derivative)'
-            )
-
-            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
-            canvas_d2.draw()
-            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
+            # Tabs 2-3: derivatives, only when the region is wide enough
+            if deriv_window is None:
+                tab_note = ttk.Frame(derivative_notebook)
+                derivative_notebook.add(tab_note, text='Derivatives')
+                ttk.Label(
+                    tab_note,
+                    text=(f"Derivative plots need at least 3 wavelengths; "
+                          f"this region has {len(wl_plot)}."),
+                ).pack(anchor='w', padx=10, pady=10)
+            else:
+                try:
+                    for order, tab_text, ylabel, suffix, export_name in (
+                        (1, '1st Derivative', '1st Derivative', '(1st Derivative)',
+                         "transfer_quality_1st_deriv"),
+                        (2, '2nd Derivative', '2nd Derivative', '(2nd Derivative)',
+                         "transfer_quality_2nd_deriv"),
+                    ):
+                        tab_d = ttk.Frame(derivative_notebook)
+                        derivative_notebook.add(tab_d, text=tab_text)
+                        fig_d = create_comparison_figure(
+                            compute_derivative(X_pri, wl_plot, order),
+                            compute_derivative(X_sat, wl_plot, order),
+                            compute_derivative(X_transferred, wl_plot, order),
+                            ylabel, suffix,
+                        )
+                        canvas_d = FigureCanvasTkAgg(fig_d, tab_d)
+                        canvas_d.draw()
+                        canvas_d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                        self._add_plot_export_button(tab_d, fig_d, export_name)
+                except Exception:
+                    logging.getLogger(__name__).exception("Transfer derivative plots failed")
 
             # === Plot 2: Transfer Scatter Plot ===
             fig2 = Figure(figsize=(7, 6))
@@ -54662,7 +54493,7 @@ External Validation Performance (n={n_val}):
         jypls_comp_combo.pack(side='left', padx=(0, 20))
         CreateToolTip(jypls_comp_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
 
-        # NS-PFCE Max Iter
+        # Iterative ridge DS max iterations (stored as nspfce_*)
         nspfce_maxiter_label = ttk.Label(
             row3, text="Ridge DS Max Iter:", style="CardLabel.TLabel", width=20
         )
@@ -54689,7 +54520,7 @@ External Validation Performance (n={n_val}):
         nspfce_wavsel_check.pack(side='left', padx=(0, 20))
         CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        # NS-PFCE Selector (only used when wavelength selection is enabled)
+        # Iterative ridge DS selector (only used when wavelength selection is enabled)
         nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
         nspfce_selector_label.pack(side='left')
         CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)

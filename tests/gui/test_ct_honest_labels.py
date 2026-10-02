@@ -62,6 +62,7 @@ _CT_VARS = (
     "ct_load_model_path_var",
 )
 _CT_TEXTS = ("ct_transfer_info_text", "ct_loaded_model_info_text")
+_CT_LABELS = ("ct_mode_a_transfer_status_label", "ct_mode_b_transfer_status_label")
 
 
 def _text_get(widget) -> tuple[str, str]:
@@ -85,6 +86,10 @@ def ct_app(gui_app):
     tk_vars = {name: getattr(app, name).get() for name in _CT_VARS}
     texts = {name: _text_get(getattr(app, name)) for name in _CT_TEXTS}
     save_state = str(app.ct_save_tm_button.cget("state"))
+    labels = {
+        name: (str(getattr(app, name).cget("text")), str(getattr(app, name).cget("foreground")))
+        for name in _CT_LABELS
+    }
 
     wl, Xp, Xs = _paired_standards()
     app.current_primary_data = (wl, Xp)
@@ -107,6 +112,8 @@ def ct_app(gui_app):
     for name, value in texts.items():
         _text_set(getattr(app, name), value)
     app.ct_save_tm_button.config(state=save_state)
+    for name, (text, foreground) in labels.items():
+        getattr(app, name).config(text=text, foreground=foreground)
     for widget in app.ct_transfer_plot_frame.winfo_children():
         widget.destroy()
 
@@ -238,6 +245,50 @@ def test_quality_plot_with_region_of_interest(ct_app):
         app.ct_X_primary_common, app.ct_X_satellite_common, app.ct_wavelengths_common, tm.meta
     )
     assert X_pri.shape[1] == X_sat.shape[1] == len(wl_roi) == n_roi
+
+
+@pytest.mark.parametrize("n_roi", [1, 2, 4])
+def test_quality_plot_with_narrow_region_keeps_raw_and_scatter(ct_app, n_roi):
+    """A region too narrow for the SG derivative must not hide the other plots (round 2)."""
+    from spectral_predict_gui_optimized import ct_derivative_window
+
+    app, Xp, _ = ct_app
+    wl = app.current_primary_data[0]
+    app.ct_method_var.set("tsr")
+    app.ct_tsr_n_samples_var.set("All")
+    app.ct_roi_mode_var.set("roi")
+    app.ct_roi_start_var.set(f"{wl[10] - 1.0:.3f}")
+    app.ct_roi_end_var.set(f"{wl[10 + n_roi - 1] + 1.0:.3f}")
+    with patch("builtins.print") as fake_print:
+        app._build_transfer_model_new()
+
+    tm = app.ct_transfer_model
+    assert tm is not None
+    assert tm.meta["region_of_interest"]["n_wavelengths_region"] == n_roi
+    printed = " ".join(str(c) for c in fake_print.call_args_list)
+    assert "Error creating transfer quality plots" not in printed
+
+    children = app.ct_transfer_plot_frame.winfo_children()
+    notebooks = [w for w in children if w.winfo_class() == "TNotebook"]
+    assert len(notebooks) == 1
+    tab_texts = [notebooks[0].tab(t, "text") for t in notebooks[0].tabs()]
+    assert tab_texts[0] == "Raw Spectra"
+    if ct_derivative_window(n_roi) is None:
+        assert tab_texts == ["Raw Spectra", "Derivatives"]
+    else:
+        assert tab_texts == ["Raw Spectra", "1st Derivative", "2nd Derivative"]
+    # notebook + scatter canvas + its export button: the scatter was drawn
+    assert len(children) >= 3
+
+
+@pytest.mark.parametrize(
+    ("n", "expected"),
+    [(1, None), (2, None), (3, 3), (4, 3), (5, 5), (6, 5), (12, 11), (200, 11)],
+)
+def test_derivative_window(n, expected):
+    from spectral_predict_gui_optimized import ct_derivative_window
+
+    assert ct_derivative_window(n) == expected
 
 
 def test_region_arrays_without_roi_are_unchanged():

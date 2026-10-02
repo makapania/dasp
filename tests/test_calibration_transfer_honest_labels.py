@@ -120,6 +120,23 @@ class TestStringParamsPersist:
         assert loaded.params["standard_selection"] == "kennard-stone"
         np.testing.assert_array_equal(loaded.params["transfer_indices"], idx)
 
+    def test_numpy_scalars_survive_json_npz_save(self, tmp_path) -> None:
+        """np.integer / np.floating / np.bool_ params used to be dropped (GLM round 2)."""
+        rng = np.random.default_rng(6)
+        Xp = rng.standard_normal((20, 15))
+        params = ct.estimate_ctai(Xp, 0.9 * Xp + 0.1)  # auto n_components
+        assert isinstance(params["n_components"], np.integer)
+        params["a_float"] = np.float32(0.25)
+        params["a_flag"] = np.bool_(True)
+        tm = ct.TransferModel("p", "s", "ctai", np.arange(15.0), params)
+
+        loaded = ct.load_transfer_model(ct.save_transfer_model(tm, tmp_path, name="pcds"))
+
+        assert loaded.params["n_components"] == int(params["n_components"])
+        assert loaded.params["a_float"] == pytest.approx(0.25)
+        assert loaded.params["a_flag"] is True
+        np.testing.assert_allclose(ct.apply_ctai(Xp, loaded.params), ct.apply_ctai(Xp, params))
+
 
 class TestSlopeBiasFitsOnSelectedStandards:
     def test_fit_uses_only_the_selected_rows(self) -> None:

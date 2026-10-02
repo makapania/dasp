@@ -66,6 +66,17 @@ class TestKennardStone:
         X = np.array([[0.0], [1.0], [2.0], [10.0]])
         assert set(kennard_stone(X, n_samples=2).tolist()) == {0, 3}
 
+    def test_duplicates_and_ties(self):
+        """Duplicate rows and tied farthest pairs still give a farthest seed and unique picks."""
+        base = np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+        X = np.vstack([base, base[[5]]])  # (0,0)-(1,1) is tied with (1,0)-(0,1)
+        dist = np.linalg.norm(X[:, None, :] - X[None, :, :], axis=-1)
+        for n in range(2, len(X) + 1):
+            indices = kennard_stone(X, n_samples=n)
+            assert len(indices) == n
+            assert len(set(indices.tolist())) == n
+            assert dist[indices[0], indices[1]] == pytest.approx(dist.max())
+
     def test_identical_rows_do_not_crash(self):
         """All-zero distances still give a valid, unique selection."""
         indices = kennard_stone(np.ones((5, 3)), n_samples=3)

@@ -410,6 +410,35 @@ class TestJYPLSInvTransfersSpectra:
             apply_jypls_inv(X_new + 0.3, loaded.params), apply_jypls_inv(X_new + 0.3, params)
         )
 
+    @pytest.mark.parametrize("k", [1, 3, 5])
+    def test_stored_affine_map_matches_independent_sklearn_reconstruction(self, k):
+        """X @ B + offset equals the score mapping rebuilt from sklearn's own transform.
+
+        Unequal-variance wavelengths and a non-trivial instrument make sure the
+        centring, x_rotations_ projection and loadings reconstruction are all exercised.
+        """
+        from sklearn.cross_decomposition import PLSRegression
+
+        rng = np.random.default_rng(11)
+        n, p = 25, 40
+        X = 1.5 + rng.standard_normal((n, p)) * np.linspace(0.2, 3.0, p)
+        y = X[:, 3] - 0.5 * X[:, 20] + 0.05 * rng.standard_normal(n)
+        Xs = X * np.linspace(0.9, 1.1, p) + 0.3 + 0.01 * rng.standard_normal((n, p))
+        params = estimate_jypls_inv(X, Xs, y, np.arange(n), n_components=k)
+
+        pls = PLSRegression(n_components=k, scale=False).fit(
+            np.vstack([X, Xs]), np.concatenate([y, y])
+        )
+        Tp, Ts = pls.transform(X), pls.transform(Xs)
+        design = np.hstack([np.ones((n, 1)), Ts])
+        coef = np.linalg.lstsq(design, Tp, rcond=None)[0]
+        X_new = Xs[:7] + 0.02
+        T_new = pls.transform(X_new)
+        mapped = coef[0] + T_new @ coef[1:] - Tp.mean(axis=0)
+        expected = X.mean(axis=0) + mapped @ pls.x_loadings_.T
+
+        np.testing.assert_allclose(apply_jypls_inv(X_new, params), expected, atol=1e-10)
+
     def test_auto_components_cv_splits_never_separate_a_standard(self, monkeypatch):
         """No CV fold trains on one spectrum of a standard and tests on its twin.
 
