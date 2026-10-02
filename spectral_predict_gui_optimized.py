@@ -31595,6 +31595,8 @@ For detailed documentation, see the User Guide.
             'R2', 'R2cv', 'R²', 'Accuracy', 'Accuracycv',
             'ROC_AUC', 'F1', 'F1cv', 'ROC_AUCcv', 'RPD', 'RER',
             'CCC', 'CCCcv',
+            # Figures of merit (scoring.regression_figures_of_merit)
+            'RPIQ', 'RPIQpred', 'RPDpred', 'RERpred', 'CCCpred',
         }
 
         if shift_held and self.results_sort_keys:
@@ -37756,20 +37758,19 @@ Performance (Classification):
         self._add_plot_export_button(self.refine_plot_frame, fig, "confusion_matrix")
 
         # Calculate and display metrics
-        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        # Same definitions as the Results tab (scoring.classification_metrics):
+        # binary positive class = second sorted label, multiclass macro.
+        from spectral_predict.scoring import classification_metrics
 
-        accuracy = accuracy_score(self.refined_y_true, self.refined_y_pred)
-
-        # Handle binary vs multi-class
-        n_classes = len(class_labels)
-        if n_classes == 2:
-            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='binary', zero_division=0)
-        else:
-            precision = precision_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
-            recall = recall_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
-            f1 = f1_score(self.refined_y_true, self.refined_y_pred, average='weighted', zero_division=0)
+        _panel_m = classification_metrics(
+            self.refined_y_true,
+            self.refined_y_pred,
+            classes=np.unique(np.concatenate([self.refined_y_true, self.refined_y_pred])),
+        )
+        accuracy = _panel_m['Accuracy']
+        precision = _panel_m['Precision']
+        recall = _panel_m['Recall']
+        f1 = _panel_m['F1']
 
         # Display metrics in text box
         metrics_text = f"""
@@ -41716,11 +41717,18 @@ F1 Score:  {f1:.4f}
                     print(f"Fold MAE:  {mae:.4f}")
                     print(f"{'='*80}\n")
                 else:
-                    acc = accuracy_score(y_test, y_pred)
-                    prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
-                    rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
-                    f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-                    fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
+                    # Per-fold values feed the *_std spread only; the headline
+                    # *_mean values are pooled below. Same definitions as the
+                    # Results tab (scoring.classification_metrics).
+                    from spectral_predict.scoring import classification_metrics
+
+                    _fold_m = classification_metrics(
+                        y_test, y_pred, classes=np.unique(y_array)
+                    )
+                    fold_metrics.append({
+                        "accuracy": _fold_m['Accuracy'], "precision": _fold_m['Precision'],
+                        "recall": _fold_m['Recall'], "f1": _fold_m['F1'],
+                    })
 
             # Compute mean and std across folds
             results = {}
@@ -41763,18 +41771,28 @@ F1 Score:  {f1:.4f}
                 results['y_quartiles'] = quartiles.tolist()
 
                 # Compute RPD and Bias from aggregated CV predictions
-                rpd = float(np.std(all_y_true_arr)) / results['rmse_mean'] if results['rmse_mean'] > 0 else 0.0
+                # (spread_ratio: a perfect model gives inf, as in every search engine)
+                from spectral_predict.scoring import spread_ratio
+
+                rpd = spread_ratio(float(np.std(all_y_true_arr)), results['rmse_mean'])
                 bias_cv = float(np.mean(all_y_pred_arr - all_y_true_arr))
                 results['rpd'] = rpd
                 results['bias'] = bias_cv
             else:
-                results['accuracy_mean'] = np.mean([m['accuracy'] for m in fold_metrics])
+                # Headline CV metrics from the pooled out-of-fold predictions,
+                # as in the grid search (R030); std is the fold-to-fold spread.
+                from spectral_predict.scoring import classification_metrics
+
+                _pooled_m = classification_metrics(
+                    np.asarray(all_y_true), np.asarray(all_y_pred), classes=np.unique(y_array)
+                )
+                results['accuracy_mean'] = _pooled_m['Accuracy']
                 results['accuracy_std'] = np.std([m['accuracy'] for m in fold_metrics])
-                results['precision_mean'] = np.mean([m['precision'] for m in fold_metrics])
+                results['precision_mean'] = _pooled_m['Precision']
                 results['precision_std'] = np.std([m['precision'] for m in fold_metrics])
-                results['recall_mean'] = np.mean([m['recall'] for m in fold_metrics])
+                results['recall_mean'] = _pooled_m['Recall']
                 results['recall_std'] = np.std([m['recall'] for m in fold_metrics])
-                results['f1_mean'] = np.mean([m['f1'] for m in fold_metrics])
+                results['f1_mean'] = _pooled_m['F1']
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
                 # Compute ROC AUC from aggregated CV probabilities
@@ -41792,9 +41810,9 @@ F1 Score:  {f1:.4f}
                             else:
                                 results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr)
                         elif len(unique_classes) > 2:
-                            # Multiclass: use OVR
+                            # Multiclass: OVR macro, as in the Results tab
                             results['roc_auc'] = roc_auc_score(
-                                y_true_arr, y_proba_arr, multi_class='ovr', average='weighted'
+                                y_true_arr, y_proba_arr, multi_class='ovr', average='macro'
                             )
                     except Exception as e:
                         print(f"WARNING: Could not compute ROC AUC: {e}")
@@ -41971,9 +41989,13 @@ Calibration Performance (n={len(y_array)}):
   R2_cal:   {cal_r2:.4f}
 """
                 else:
-                    from sklearn.metrics import accuracy_score, f1_score
-                    cal_acc = accuracy_score(y_array, y_cal_pred)
-                    cal_f1 = f1_score(y_array, y_cal_pred, average='weighted', zero_division=0)
+                    # Same definitions as the Results tab (classification_metrics)
+                    from spectral_predict.scoring import classification_metrics
+                    _cal_m = classification_metrics(
+                        y_array, y_cal_pred, classes=np.unique(y_array)
+                    )
+                    cal_acc = _cal_m['Accuracy']
+                    cal_f1 = _cal_m['F1']
                     results['cal_accuracy'] = cal_acc
                     results['cal_f1'] = cal_f1
                     cal_text = f"""
@@ -42049,7 +42071,8 @@ Calibration Performance (n={len(y_array)}):
                         val_r2 = r2_score(val_y, val_y_pred)
                         val_mae = mean_absolute_error(val_y, val_y_pred)
                         val_bias = float(np.mean(val_y_pred - val_y))
-                        val_rpd = float(np.std(val_y)) / val_rmse if val_rmse > 0 else 0.0
+                        from spectral_predict.scoring import spread_ratio
+                        val_rpd = spread_ratio(float(np.std(val_y)), val_rmse)
                         results['val_rmse'] = val_rmse
                         results['val_r2'] = val_r2
                         results['val_mae'] = val_mae
@@ -42064,11 +42087,17 @@ External Validation Performance (n={n_val}):
   RPD_val:  {val_rpd:.2f}
 """
                     else:
-                        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-                        val_acc = accuracy_score(val_y, val_y_pred)
-                        val_prec = precision_score(val_y, val_y_pred, average='weighted', zero_division=0)
-                        val_rec = recall_score(val_y, val_y_pred, average='weighted', zero_division=0)
-                        val_f1 = f1_score(val_y, val_y_pred, average='weighted', zero_division=0)
+                        # Same definitions as the Results tab: classes = training
+                        # classes plus any extra holdout labels.
+                        from spectral_predict.scoring import classification_metrics
+                        _val_m = classification_metrics(
+                            val_y, val_y_pred,
+                            classes=np.unique(np.concatenate([np.unique(y_array), np.unique(val_y)])),
+                        )
+                        val_acc = _val_m['Accuracy']
+                        val_prec = _val_m['Precision']
+                        val_rec = _val_m['Recall']
+                        val_f1 = _val_m['F1']
                         results['val_accuracy'] = val_acc
                         results['val_precision'] = val_prec
                         results['val_recall'] = val_rec

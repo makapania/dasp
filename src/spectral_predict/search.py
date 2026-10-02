@@ -1553,25 +1553,22 @@ def run_search(
     n_features = X_np.shape[1]
     n_samples = X_np.shape[0]
 
-    # Encode every classification target to 0..K-1 (R029). Models, CV and all
-    # metrics then see the same sorted codes whether the user's labels are
-    # text, {0,1}, {1,2}, {2,3} or {-1,1}; the binary positive class is code 1
-    # (= the larger / second sorted original label, scoring module docstring).
-    # The returned ``label_encoder`` keeps its old contract: it is the encoder
-    # for TEXT labels and None for numeric labels. Numeric labels are decoded
-    # back in every label-valued output below (per-class keys, F1_Class<label>
-    # columns), so callers that refit on their own numeric y (the GUI's Model
-    # Development tab) never receive an encoder their model was not trained on.
+    # Handle categorical labels for classification. Models are FITTED on the
+    # user's own labels (text labels are label-encoded, as before): Model
+    # Development, the validation helper and saved models refit on those same
+    # values, and PLS-DA regresses on the label values, so re-coding numeric
+    # labels here would make the grid model differ from every rebuild of it
+    # (R029 review round 1). The label convention is applied in the METRICS
+    # instead: scoring.classification_metrics scores against the sorted class
+    # list with the second sorted label as the binary positive class.
     label_encoder = None
-    class_encoder = None
     if task_type == "classification":
-        from sklearn.preprocessing import LabelEncoder
+        # Check if labels are non-numeric (text labels like "low", "medium", "high")
+        if not pd.api.types.is_numeric_dtype(y_np.dtype):
+            from sklearn.preprocessing import LabelEncoder
 
-        class_encoder = LabelEncoder()
-        y_np = class_encoder.fit_transform(y_np)
-        if not pd.api.types.is_numeric_dtype(y.dtype):
-            # Text labels ("low", "medium", "high"): expose the encoder.
-            label_encoder = class_encoder
+            label_encoder = LabelEncoder()
+            y_np = label_encoder.fit_transform(y_np)
             # Log the label mapping
             label_mapping = dict(
                 zip(label_encoder.classes_, label_encoder.transform(label_encoder.classes_))
@@ -1584,13 +1581,13 @@ def run_search(
             for label, code in sorted(label_mapping.items(), key=lambda x: x[1]):
                 print(f"  '{label}' -> {code}")
             print(f"{'='*70}\n")
-        else:
-            _classes = class_encoder.classes_
-            if len(_classes) == 2:
-                print(
-                    f"Classification labels {_classes.tolist()}: positive class for "
-                    f"F1/Precision/Recall = {_classes[1]!r}, Specificity = TNR of {_classes[0]!r}"
-                )
+        _classes = np.unique(y_np)
+        if len(_classes) == 2:
+            _shown = label_encoder.classes_ if label_encoder is not None else _classes
+            print(
+                f"Classification labels {list(_shown)}: positive class for "
+                f"F1/Precision/Recall = {_shown[1]!r}, Specificity = TNR of {_shown[0]!r}"
+            )
 
     # ═══════════════════════════════════════════════════════════════════════════
     # UPFRONT VALIDATION FOR CLASSIFICATION IMBALANCE METHODS
@@ -4231,39 +4228,6 @@ def run_search(
             print("  Subset models may rank higher due to lower variable counts.")
             print("  Consider filtering by SubsetTag before ranking for fairer comparison.\n")
 
-    # Numeric classification labels were encoded to 0..K-1 for the search (R029);
-    # put the user's own labels back into the label-valued outputs. Text labels
-    # keep their codes here because the returned label_encoder decodes them.
-    if class_encoder is not None and label_encoder is None and len(df_results):
-        code_to_label = {
-            str(code): str(lbl) for code, lbl in enumerate(class_encoder.classes_.tolist())
-        }
-        if "per_class_metrics" in df_results.columns:
-            df_results["per_class_metrics"] = [
-                (
-                    {code_to_label.get(str(k), str(k)): v for k, v in pcm.items()}
-                    if isinstance(pcm, dict)
-                    else pcm
-                )
-                for pcm in df_results["per_class_metrics"]
-            ]
-        if "class_labels" in df_results.columns:
-            df_results["class_labels"] = [
-                (
-                    [code_to_label.get(str(k), str(k)) for k in cl]
-                    if isinstance(cl, (list, tuple))
-                    else cl
-                )
-                for cl in df_results["class_labels"]
-            ]
-        df_results = df_results.rename(
-            columns={
-                f"F1_Class{code}": f"F1_Class{lbl}"
-                for code, lbl in code_to_label.items()
-                if f"F1_Class{code}" in df_results.columns
-            }
-        )
-
     df_ranked = compute_composite_score(df_results, task_type, variable_penalty, gap_penalty)
 
     # =========================================================================
@@ -4290,18 +4254,19 @@ def run_search(
             y_val_for_val = y_val_for_val[~val_nan]
 
         # CRITICAL: Use encoded training labels (y_np) for consistency
-        # y_np was encoded earlier for every classification target, so model
-        # training and validation must use the same encoding
+        # y_np was encoded earlier if label_encoder exists (text labels), so
+        # model training and validation must use the same encoding
         y_train_for_val = y_np  # Use the (possibly encoded) training labels
 
-        # CRITICAL: Encode validation labels using the same encoder as training.
-        # A holdout class never seen in training gets a fresh code (K, K+1, ...)
-        # so it still counts against the model instead of breaking the encoding.
-        if class_encoder is not None:
+        # CRITICAL: Encode text validation labels using the same encoder as
+        # training. A holdout class never seen in training gets a fresh code
+        # (K, K+1, ...) so it counts against the model instead of breaking the
+        # encoding. Numeric labels pass through unchanged.
+        if label_encoder is not None:
             y_val_arr = np.asarray(y_val_for_val)
-            known = np.isin(y_val_arr, class_encoder.classes_)
+            known = np.isin(y_val_arr, label_encoder.classes_)
             if known.all():
-                y_val_for_val = class_encoder.transform(y_val_arr)
+                y_val_for_val = label_encoder.transform(y_val_arr)
             else:
                 unseen = np.unique(y_val_arr[~known])
                 print(
@@ -4309,8 +4274,8 @@ def run_search(
                     f"training; they are scored as misclassified classes"
                 )
                 codes = np.empty(len(y_val_arr), dtype=int)
-                codes[known] = class_encoder.transform(y_val_arr[known])
-                codes[~known] = len(class_encoder.classes_) + np.searchsorted(
+                codes[known] = label_encoder.transform(y_val_arr[known])
+                codes[~known] = len(label_encoder.classes_) + np.searchsorted(
                     unseen, y_val_arr[~known]
                 )
                 y_val_for_val = codes

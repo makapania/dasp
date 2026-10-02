@@ -74,7 +74,14 @@ from spectral_predict.regions import create_region_subsets
 from spectral_predict.variable_selection import (
     spa_selection, uve_selection, cars_selection, _cap_top_n
 )
-from spectral_predict.scoring import compute_cv_anova_pvalue, compute_specificity, lins_ccc
+from spectral_predict.scoring import (
+    align_proba_to_classes,
+    classification_metrics,
+    compute_cv_anova_pvalue,
+    compute_specificity,
+    lins_ccc,
+    regression_figures_of_merit,
+)
 from spectral_predict.search_spaces import (
     BundleSpec,
     ExtraAxesConfigError,
@@ -1871,14 +1878,17 @@ def create_unified_objective(
                         )
                         trial.set_user_attr('cv_anova_pvalue', cv_anova_p)
 
-                # Compute additional NIR spectroscopy metrics from CV predictions
-                mae_cv = mean_absolute_error(y, y_pred_cv)
-                bias_cv = float(np.mean(y_pred_cv - y))
-                y_std = float(np.std(y))
-                y_range = float(np.ptp(y))
-                rpd = y_std / rmse if rmse > 0 else 0.0
-                rer = y_range / rmse if rmse > 0 else 0.0
-                ccc_cv = lins_ccc(y, y_pred_cv)
+                # Additional NIR figures of merit from the pooled CV predictions,
+                # same function and definitions as the grid search
+                # (scoring.regression_figures_of_merit; perfect model -> RPD inf).
+                fom_cv = regression_figures_of_merit(y, y_pred_cv, context="cv")
+                mae_cv = fom_cv["MAE"]
+                bias_cv = fom_cv["Bias"]
+                rpd = fom_cv["RPD"]
+                rer = fom_cv["RER"]
+                secv = fom_cv["SEP"]
+                rpiq = fom_cv["RPIQ"]
+                ccc_cv = fom_cv["CCC"]
 
                 # Compute regional RMSE (per-quartile performance) for coloring in Results tab
                 # This enables the same quartile-based highlighting as Grid search
@@ -1936,64 +1946,27 @@ def create_unified_objective(
                             model, X_final, y, cv=cv, method='predict_proba', n_jobs=n_jobs_cv,
                             fit_params=_cv_fit_params,
                         )
-                    n_classes = len(np.unique(y))
-                    if n_classes == 2:
-                        # Binary classification
-                        roc_auc = roc_auc_score(y, y_proba[:, 1])
-                    else:
-                        # Multiclass - use weighted average
-                        roc_auc = roc_auc_score(y, y_proba, multi_class='ovr', average='weighted')
+                except Exception as e:
+                    logger.debug(f"Bayesian CV predict_proba unavailable: {e}")
+                    y_proba = None
 
-                    # Compute Log Loss from probabilities
-                    try:
-                        logloss_cv = log_loss(y, y_proba)
-                    except Exception:
-                        logloss_cv = np.nan
-                except Exception:
-                    roc_auc = np.nan
-                    logloss_cv = np.nan
-
-                # Compute additional classification metrics from CV predictions
-                # Determine averaging method (binary or macro)
-                n_classes = len(np.unique(y))
-                average_method = 'binary' if n_classes == 2 else 'macro'
-
-                try:
-                    f1_cv = f1_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    f1_cv = np.nan
-
-                try:
-                    precision_cv = precision_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    precision_cv = np.nan
-
-                try:
-                    recall_cv = recall_score(y, y_pred_cv, average=average_method, zero_division=0)
-                except Exception:
-                    recall_cv = np.nan
-
-                try:
-                    specificity_cv = compute_specificity(y, y_pred_cv, average='macro')
-                except Exception:
-                    specificity_cv = np.nan
-
-                try:
-                    kappa_cv = cohen_kappa_score(y, y_pred_cv)
-                except Exception:
-                    kappa_cv = np.nan
-
-                try:
-                    mcc_cv = matthews_corrcoef(y, y_pred_cv)
-                except Exception:
-                    mcc_cv = np.nan
-
-                try:
-                    balanced_acc_cv = balanced_accuracy_score(y, y_pred_cv)
-                    ber_cv = 1.0 - balanced_acc_cv
-                except Exception:
-                    balanced_acc_cv = np.nan
-                    ber_cv = np.nan
+                # All CV classification metrics from the pooled predictions with
+                # the same definitions as the grid search (scoring.
+                # classification_metrics: binary positive = second sorted class,
+                # multiclass macro; cross_val_predict columns are np.unique(y)).
+                _cv_m = classification_metrics(
+                    y, y_pred_cv, classes=np.unique(y), y_proba=y_proba
+                )
+                roc_auc = _cv_m["ROC_AUC"]
+                logloss_cv = _cv_m["LogLoss"]
+                f1_cv = _cv_m["F1"]
+                precision_cv = _cv_m["Precision"]
+                recall_cv = _cv_m["Recall"]
+                specificity_cv = _cv_m["Specificity"]
+                kappa_cv = _cv_m["Kappa"]
+                mcc_cv = _cv_m["MCC"]
+                balanced_acc_cv = _cv_m["BalancedAcc"]
+                ber_cv = _cv_m["BER"]
 
                 # Compute per-class metrics for coloring in Results tab
                 # This enables the same class-based highlighting as Grid search
@@ -2074,86 +2047,43 @@ def create_unified_objective(
                 trial.set_user_attr('RPD', rpd)
                 trial.set_user_attr('Bias', bias_cv)
                 trial.set_user_attr('RER', rer)
+                trial.set_user_attr('SECV', secv)
+                trial.set_user_attr('RPIQ', rpiq)
                 # Regional RMSE for quartile-based coloring in Results tab
                 trial.set_user_attr('regional_rmse', regional_rmse)
                 trial.set_user_attr('y_quartiles', y_quartiles)
             else:
-                # Calibration metrics
-                cal_accuracy = accuracy_score(y, y_pred_cal)
-                trial.set_user_attr('Accuracy', cal_accuracy)    # Calibration
+                # Calibration metrics: same definitions as the CV columns and the
+                # grid search (scoring.classification_metrics). Pre-2026-10 the
+                # calibration F1/Precision/Recall were support-weighted and the
+                # multiclass AUC weighted, so F1 and F1cv were not comparable.
                 trial.set_user_attr('Accuracycv', accuracy)      # CV
-
-                # Calibration ROC AUC and Log Loss
-                try:
-                    if hasattr(model, 'predict_proba'):
-                        y_proba_cal = model.predict_proba(X_final)
-                        n_classes = len(np.unique(y))
-                        if n_classes == 2:
-                            cal_roc_auc = roc_auc_score(y, y_proba_cal[:, 1])
-                        else:
-                            cal_roc_auc = roc_auc_score(y, y_proba_cal, multi_class='ovr', average='weighted')
-                        trial.set_user_attr('ROC_AUC', cal_roc_auc)     # Calibration
-
-                        # Calibration Log Loss
-                        try:
-                            cal_logloss = log_loss(y, y_proba_cal)
-                            trial.set_user_attr('LogLoss', cal_logloss)
-                        except Exception:
-                            trial.set_user_attr('LogLoss', np.nan)
-                    else:
-                        trial.set_user_attr('LogLoss', np.nan)
-                except Exception:
-                    trial.set_user_attr('ROC_AUC', np.nan)
-                    trial.set_user_attr('LogLoss', np.nan)
-
+                _cal_classes = np.unique(y)
+                y_proba_cal = None
+                if hasattr(model, 'predict_proba'):
+                    try:
+                        y_proba_cal = align_proba_to_classes(
+                            model.predict_proba(X_final),
+                            getattr(model, 'classes_', None),
+                            _cal_classes,
+                        )
+                    except Exception as e:
+                        logger.debug(f"Bayesian calibration predict_proba unavailable: {e}")
+                _cal_m = classification_metrics(
+                    y, y_pred_cal, classes=_cal_classes, y_proba=y_proba_cal
+                )
+                trial.set_user_attr('Accuracy', _cal_m['Accuracy'])    # Calibration
+                trial.set_user_attr('ROC_AUC', _cal_m['ROC_AUC'])
+                trial.set_user_attr('LogLoss', _cal_m['LogLoss'])
                 trial.set_user_attr('ROC_AUCcv', roc_auc)          # CV
-
-                # Calibration F1, Precision, Recall
-                try:
-                    cal_f1 = f1_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('F1', cal_f1)
-                except Exception:
-                    trial.set_user_attr('F1', np.nan)
-
-                try:
-                    cal_precision = precision_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('Precision', cal_precision)
-                except Exception:
-                    trial.set_user_attr('Precision', np.nan)
-
-                try:
-                    cal_recall = recall_score(y, y_pred_cal, average='weighted', zero_division=0)
-                    trial.set_user_attr('Recall', cal_recall)
-                except Exception:
-                    trial.set_user_attr('Recall', np.nan)
-
-                # Calibration additional metrics
-                try:
-                    cal_specificity = compute_specificity(y, y_pred_cal, average='macro')
-                    trial.set_user_attr('Specificity', cal_specificity)
-                except Exception:
-                    trial.set_user_attr('Specificity', np.nan)
-
-                try:
-                    cal_kappa = cohen_kappa_score(y, y_pred_cal)
-                    trial.set_user_attr('Kappa', cal_kappa)
-                except Exception:
-                    trial.set_user_attr('Kappa', np.nan)
-
-                try:
-                    cal_mcc = matthews_corrcoef(y, y_pred_cal)
-                    trial.set_user_attr('MCC', cal_mcc)
-                except Exception:
-                    trial.set_user_attr('MCC', np.nan)
-
-                try:
-                    cal_balanced_acc = balanced_accuracy_score(y, y_pred_cal)
-                    cal_ber = 1.0 - cal_balanced_acc
-                    trial.set_user_attr('BalancedAcc', cal_balanced_acc)
-                    trial.set_user_attr('BER', cal_ber)
-                except Exception:
-                    trial.set_user_attr('BalancedAcc', np.nan)
-                    trial.set_user_attr('BER', np.nan)
+                trial.set_user_attr('F1', _cal_m['F1'])
+                trial.set_user_attr('Precision', _cal_m['Precision'])
+                trial.set_user_attr('Recall', _cal_m['Recall'])
+                trial.set_user_attr('Specificity', _cal_m['Specificity'])
+                trial.set_user_attr('Kappa', _cal_m['Kappa'])
+                trial.set_user_attr('MCC', _cal_m['MCC'])
+                trial.set_user_attr('BalancedAcc', _cal_m['BalancedAcc'])
+                trial.set_user_attr('BER', _cal_m['BER'])
 
                 # CV metrics
                 trial.set_user_attr('F1cv', f1_cv)
@@ -3708,6 +3638,8 @@ def convert_study_to_dataframe(
             row['RPD'] = trial.user_attrs.get('RPD', np.nan)
             row['Bias'] = trial.user_attrs.get('Bias', np.nan)
             row['RER'] = trial.user_attrs.get('RER', np.nan)
+            row['SECV'] = trial.user_attrs.get('SECV', np.nan)
+            row['RPIQ'] = trial.user_attrs.get('RPIQ', np.nan)
             # Regional RMSE for quartile-based coloring in Results tab
             row['regional_rmse'] = trial.user_attrs.get('regional_rmse', None)
             row['y_quartiles'] = trial.user_attrs.get('y_quartiles', None)
@@ -3859,7 +3791,8 @@ def convert_study_to_dataframe(
 
     # Performance metrics
     if task_type == 'regression':
-        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'CompositeScore', 'Score']
+        perf_cols = ['RMSE', 'R2', 'RMSEcv', 'R2cv', 'MAEcv', 'RPD', 'Bias', 'RER', 'SECV', 'RPIQ',
+                     'CompositeScore', 'Score']
     elif task_type == 'one_class':
         perf_cols = [
             # Calibration metrics

@@ -2007,13 +2007,22 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                     cv_predictions[unfilled] = ensemble.predict(X_unfilled)
 
                 # Calculate CV metrics
+                # Same F1 definition as every search engine
+                # (scoring.classification_metrics: binary positive = second
+                # sorted class, multiclass macro); was support-weighted.
+                from .scoring import classification_metrics
+
                 accuracy = accuracy_score(y_train, cv_predictions)
-                f1 = f1_score(y_train, cv_predictions, average='weighted')
+                f1 = classification_metrics(
+                    y_train, cv_predictions, classes=np.unique(y_train)
+                )['F1']
             else:
                 # Fallback for very small datasets
+                from .scoring import classification_metrics
+
                 y_pred = ensemble.predict(X_train)
                 accuracy = accuracy_score(y_train, y_pred)
-                f1 = f1_score(y_train, y_pred, average='weighted')
+                f1 = classification_metrics(y_train, y_pred, classes=np.unique(y_train))['F1']
 
             metrics = {'accuracy': accuracy, 'f1': f1}
 

@@ -2,15 +2,24 @@
 
 Classification label convention
 -------------------------------
-Every classification metric in dasp is computed against an explicit, sorted
-class list (``np.unique`` of the training labels; text labels are first
-label-encoded, which also sorts them). For a **binary** task the *positive*
-class is the **larger / second sorted label** and the *negative* class is the
-first sorted label: ``{0, 1}`` -> 1, ``{1, 2}`` -> 2, ``{-1, 1}`` -> 1,
-``{"clean", "contaminated"}`` -> ``"contaminated"``. F1, Precision, Recall
-(= sensitivity) use that positive class and Specificity is the true-negative
-rate of the first sorted class, so a monotone relabelling of the classes gives
-identical metrics. See :func:`classification_metrics`.
+:func:`classification_metrics` scores against an explicit, sorted class list
+(``np.unique`` of the labels the model was fitted on; text labels are
+label-encoded first, which also sorts them). For a **binary** task the
+*positive* class is the **larger / second sorted label** and the *negative*
+class the first sorted label: ``{0, 1}`` -> 1, ``{1, 2}`` -> 2,
+``{-1, 1}`` -> 1, ``{"clean", "contaminated"}`` -> ``"contaminated"``.
+F1, Precision, Recall (= sensitivity) use that positive class and Specificity
+is the true-negative rate of the first sorted class, so a monotone relabelling
+of the classes gives identical metrics. Multiclass metrics are macro averages.
+
+Models are fitted on the user's own labels; the convention lives only in the
+metrics. It covers the single-label classifier metrics of the grid search
+(folds, pooled CV, calibration, ``compute_validation_metrics_for_top_models``),
+the Bayesian and NSGA-II searches (CV and calibration), Model Development (CV,
+calibration, external validation, confusion-matrix panel) and the
+class-specialist ensemble's CV F1. Not covered: one-class and multi-class
+SIMCA class models (their own metric definitions), the Predictions tab's
+statistics panel, and the generic named scorers in ``cv_utils``.
 """
 
 from __future__ import annotations
@@ -683,26 +692,28 @@ def align_proba_to_classes(y_proba, model_classes, classes) -> np.ndarray:
 
     Args:
         y_proba: ``(n, k)`` probabilities, columns in ``model_classes`` order.
-        model_classes: The model's ``classes_``; ``None`` means the columns are
-            already in ``classes`` order.
+        model_classes: The model's ``classes_``. ``None`` is accepted only for
+            a single class; with several classes the column order cannot be
+            known, so it raises rather than guess.
         classes: The full sorted class list.
 
     Returns:
         ``(n, len(classes))`` float array.
 
     Raises:
-        ValueError: If a model class is not in ``classes`` or the column count
-            does not match.
+        ValueError: If ``model_classes`` is None with more than one class, a
+            model class is not in ``classes``, or the column count does not
+            match.
     """
     y_proba = np.asarray(y_proba, dtype=np.float64)
     if y_proba.ndim == 1:
         y_proba = y_proba.reshape(-1, 1)
     classes = np.asarray(classes)
     if model_classes is None:
-        if y_proba.shape[1] != len(classes):
+        if len(classes) > 1 or y_proba.shape[1] != len(classes):
             raise ValueError(
-                f"predict_proba has {y_proba.shape[1]} columns but there are "
-                f"{len(classes)} classes and the model exposes no classes_"
+                "the model exposes no classes_, so its predict_proba column order "
+                f"is unknown ({y_proba.shape[1]} columns, {len(classes)} classes)"
             )
         return y_proba
     model_classes = np.asarray(model_classes)
@@ -790,14 +801,21 @@ def classification_metrics(
     Kappa can be NaN (e.g. a single-sample set), and AUC/LogLoss are NaN when
     no probabilities are supplied or fewer than two classes are present.
 
+    LogLoss caveat: when a CV training fold lacks a class, that fold's model
+    gives the class probability 0 (see :func:`align_proba_to_classes`), sklearn
+    clips it to ~1e-16 and each such sample adds ~36.8 nats. A single rare class
+    can therefore dominate pooled LogLoss; this matches sklearn's
+    ``cross_val_predict`` + ``log_loss`` and is reported as is.
+
     Args:
         y_true: Reference labels.
         y_pred: Predicted labels.
-        classes: Full class list (sorted internally). Defaults to the labels
-            present in ``y_true``/``y_pred``; pass the training classes when
-            scoring a subset (a fold, a holdout).
-        y_proba: Optional ``(n, len(classes))`` probabilities in ``classes``
-            order (see :func:`align_proba_to_classes`).
+        classes: Full class list. Defaults to the labels present in
+            ``y_true``/``y_pred``; pass the training classes when scoring a
+            subset (a fold, a holdout). An unsorted list is sorted and the
+            ``y_proba`` columns are permuted with it.
+        y_proba: Optional ``(n, len(classes))`` probabilities, columns in the
+            order of ``classes`` as passed (see :func:`align_proba_to_classes`).
 
     Returns:
         Dict with keys :data:`CLASSIFICATION_METRIC_KEYS`.
@@ -808,7 +826,22 @@ def classification_metrics(
         raise ValueError(f"y_true {y_true.shape} and y_pred {y_pred.shape} differ in length")
     if classes is None:
         classes = unique_labels(y_true, y_pred)
-    classes = np.unique(np.asarray(classes))
+    classes = np.asarray(classes)
+    if len(np.unique(classes)) != len(classes):
+        raise ValueError(f"classes contains duplicates: {classes.tolist()}")
+    order = np.argsort(classes, kind="stable")
+    if not np.array_equal(order, np.arange(len(classes))):
+        # Sort the class list and carry the probability columns with it, so
+        # y_proba given in the caller's (unsorted) class order keeps its meaning.
+        classes = classes[order]
+        if y_proba is not None:
+            y_proba = np.asarray(y_proba, dtype=np.float64)
+            if y_proba.ndim != 2 or y_proba.shape[1] != len(order):
+                raise ValueError(
+                    f"y_proba has shape {y_proba.shape}; expected one column per class "
+                    f"({len(order)})"
+                )
+            y_proba = y_proba[:, order]
 
     if len(classes) == 2:
         prf_kwargs = {"average": "binary", "pos_label": classes[1], "zero_division": 0}
@@ -862,11 +895,24 @@ _FOM_NUMERIC_KEYS = (
 )
 
 
-def _spread_ratio(spread: float, error: float) -> float:
+def spread_ratio(spread: float, error: float) -> float:
     """``spread / error`` with honest limits (RPD, RPIQ, RER).
 
     A zero error with a non-zero spread is a perfect prediction: ``inf``, not
     the 0.0 the pre-2026-10 RPD/RER code returned. Zero over zero is NaN.
+    Shared by the grid, Bayesian and NSGA-II searches and Model Development so
+    every engine reports the same value.
+
+    Note: ``json.dump`` writes ``inf`` as the non-standard token ``Infinity``
+    (e.g. in saved-model metadata). dasp's own loader (``json.load``) reads it
+    back; strict JSON parsers outside dasp reject it.
+
+    Args:
+        spread: SD, IQR or range of the reference values.
+        error: RMSE (RMSEcv / RMSEP).
+
+    Returns:
+        The ratio, ``inf`` or NaN.
     """
     if error > 0:
         return float(spread / error)
@@ -981,9 +1027,9 @@ def regression_figures_of_merit(y_true, y_pred, *, context: str = "validation") 
     out["SD_ref"] = sd_ref
     out["IQR_ref"] = float(q3 - q1)
     out["Range_ref"] = float(np.ptp(y_true))
-    out["RPD"] = _spread_ratio(sd_ref, rmse)
-    out["RPIQ"] = _spread_ratio(out["IQR_ref"], rmse)
-    out["RER"] = _spread_ratio(out["Range_ref"], rmse)
+    out["RPD"] = spread_ratio(sd_ref, rmse)
+    out["RPIQ"] = spread_ratio(out["IQR_ref"], rmse)
+    out["RER"] = spread_ratio(out["Range_ref"], rmse)
 
     if n < 2:
         return out

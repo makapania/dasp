@@ -81,7 +81,34 @@ def test_align_proba_to_classes():
     np.testing.assert_allclose(out, [[0.2, 0.0, 0.8], [0.6, 0.0, 0.4]])
     with pytest.raises(ValueError):
         align_proba_to_classes(p, model_classes=[0, 5], classes=[0, 1, 2])
-    np.testing.assert_allclose(align_proba_to_classes(p, None, [3, 4]), p)
+    # Without classes_ the column order of a multi-class proba is unknown: raise
+    with pytest.raises(ValueError):
+        align_proba_to_classes(p, None, [3, 4])
+    np.testing.assert_allclose(align_proba_to_classes([[1.0], [1.0]], None, [7]), [[1.0], [1.0]])
+
+
+def test_unsorted_classes_permute_probability_columns():
+    y = np.array([0, 1, 0, 1])
+    pred = np.array([0, 1, 0, 1])
+    # columns given in the caller's class order [1, 0]
+    proba_10 = np.array([[0.1, 0.9], [0.9, 0.1], [0.2, 0.8], [0.7, 0.3]])
+    m = classification_metrics(y, pred, classes=[1, 0], y_proba=proba_10)
+    assert m["ROC_AUC"] == pytest.approx(1.0)
+    assert m["LogLoss"] == pytest.approx(skm.log_loss(y, proba_10[:, ::-1]))
+    with pytest.raises(ValueError):
+        classification_metrics(y, pred, classes=[0, 0, 1])
+
+
+def test_auc_renormalised_when_holdout_lacks_a_class():
+    y = np.array([0, 0, 2, 2, 0])
+    pred = np.array([0, 2, 2, 2, 0])
+    proba = np.array(
+        [[0.6, 0.3, 0.1], [0.3, 0.3, 0.4], [0.1, 0.2, 0.7], [0.2, 0.5, 0.3], [0.5, 0.1, 0.4]]
+    )
+    m = classification_metrics(y, pred, classes=[0, 1, 2], y_proba=proba)
+    sub = proba[:, [0, 2]] / proba[:, [0, 2]].sum(axis=1, keepdims=True)
+    assert m["ROC_AUC"] == pytest.approx(skm.roc_auc_score(y == 2, sub[:, 1]))
+    assert m["LogLoss"] == pytest.approx(skm.log_loss(y, proba, labels=[0, 1, 2]))
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +259,44 @@ def test_fold_returns_probabilities_in_global_class_order():
     np.testing.assert_allclose(m["y_proba"].sum(axis=1), 1.0)
 
 
+class _ProbaFailsOnSecondFit(LogisticRegression):
+    """predict_proba unavailable for the model of the second CV fold only."""
+
+    n_fits = 0
+
+    def fit(self, X, y, sample_weight=None):
+        type(self).n_fits += 1
+        self._fit_no = type(self).n_fits
+        return super().fit(X, y, sample_weight=sample_weight)
+
+    def predict_proba(self, X):
+        if getattr(self, "_fit_no", 0) == 2:
+            raise AttributeError("no probabilities for this fold")
+        return super().predict_proba(X)
+
+
+def test_one_fold_without_probabilities_makes_pooled_auc_nan():
+    from spectral_predict.search import _run_single_config
+
+    X, y = _data((15, 15), 0.8)
+    _ProbaFailsOnSecondFit.n_fits = 0
+    r = _run_single_config(
+        X,
+        y,
+        np.arange(X.shape[1], dtype=float),
+        _ProbaFailsOnSecondFit(max_iter=2000),
+        "LogisticRegression",
+        {},
+        {"name": "raw", "deriv": None, "window": None, "polyorder": None},
+        StratifiedKFold(5, shuffle=True, random_state=0),
+        "classification",
+        True,
+        skip_preprocessing=True,
+    )
+    assert math.isnan(r["ROC_AUCcv"]) and math.isnan(r["LogLosscv"])
+    assert np.isfinite(r["F1cv"]) and np.isfinite(r["Accuracycv"])
+
+
 # ---------------------------------------------------------------------------
 # End to end: run_search under every label pair and CV strategy
 # ---------------------------------------------------------------------------
@@ -353,3 +418,164 @@ def test_save_load_predict_round_trip_text_labels(tmp_path):
     pred = predict_with_model(load_model(path), pd.DataFrame(X, columns=wl))
     np.testing.assert_array_equal(pred, enc.inverse_transform(model.predict(X)))
     assert math.isclose(np.mean(pred == y_text), np.mean(model.predict(X) == codes))
+
+
+# ---------------------------------------------------------------------------
+# Model equivalence: the grid fits the user's own labels, so rebuilding a row
+# (validation helper, Model Development helpers) reproduces it (review round 1)
+# ---------------------------------------------------------------------------
+
+
+def _uneven_search(labels, n_per_class, seed=5, **kw):
+    from spectral_predict.search import run_search
+
+    rng = np.random.default_rng(seed)
+    codes = np.concatenate([np.full(k, c) for c, k in enumerate(n_per_class)])
+    X = rng.normal(size=(len(codes), 25))
+    X[:, :4] += 0.8 * codes[:, None]
+    X[:, 4] -= 0.7 * (codes == 1)
+    Xdf = pd.DataFrame(X, columns=[float(1000 + 4 * i) for i in range(X.shape[1])])
+    y = pd.Series([labels[c] for c in codes])
+    df, enc = run_search(
+        Xdf,
+        y,
+        "classification",
+        folds=3,
+        models_to_test=["PLS-DA"],
+        preprocessing_methods={"raw": True},
+        max_n_components=3,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        **kw,
+    )
+    return Xdf, y, df, enc
+
+
+@pytest.mark.parametrize("labels", [(1, 2, 100), (2, 3)])
+def test_validation_rebuild_reproduces_grid_calibration(labels):
+    from spectral_predict.search import compute_validation_metrics_for_top_models
+
+    n_per_class = (22, 20, 18)[: len(labels)]
+    Xdf, y, df, _ = _uneven_search(labels, n_per_class)
+    X = Xdf.to_numpy()
+    out = compute_validation_metrics_for_top_models(
+        df.copy(),
+        X,
+        y.to_numpy(),
+        X,
+        y.to_numpy(),
+        "classification",
+        Xdf.columns.values,
+        top_n=len(df),
+    )
+    # Holdout = calibration set: the rebuilt model must give the grid's
+    # calibration metrics exactly (same model, same metric definitions).
+    for _, r in out.iterrows():
+        assert r["val_Accuracy"] == pytest.approx(r["Accuracy"]), r["Params"]
+        assert r["val_F1"] == pytest.approx(r["F1"])
+        assert r["val_Precision"] == pytest.approx(r["Precision"])
+        assert r["val_Recall"] == pytest.approx(r["Recall"])
+        assert r["val_ROC_AUC"] == pytest.approx(r["ROC_AUC"])
+
+
+def test_model_development_rebuild_reproduces_grid_cv_for_uneven_labels():
+    from sklearn.base import clone
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    from spectral_predict.models import PLSTransformer, parse_row_params, plsda_head_kwargs
+
+    labels = (1, 2, 100)
+    Xdf, y, df, enc = _uneven_search(labels, (22, 20, 18))
+    assert enc is None  # numeric labels: nothing to decode
+    X, yv = Xdf.to_numpy(), y.to_numpy()
+    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)  # build_cv_splitter("kfold")
+    classes = np.unique(yv)
+    for _, row in df.iterrows():
+        params = parse_row_params(row["Params"])
+        pls_kw = {k[len("pls__") :]: v for k, v in params.items() if k.startswith("pls__")}
+        pipe = Pipeline(
+            [
+                ("pls", PLSTransformer(**pls_kw)),
+                ("scaler", StandardScaler()),
+                ("lr", LogisticRegression(**plsda_head_kwargs(params))),
+            ]
+        )
+        # Manual fold loop: sklearn's cross_val_predict(method="predict_proba")
+        # label-encodes y before fitting, which changes a PLS-DA model whose
+        # labels are unevenly spaced ({1, 2, 100}); Model Development and the
+        # grid both fit the raw labels.
+        pred = np.empty_like(yv)
+        proba = np.zeros((len(yv), len(classes)))
+        for tr, te in cv.split(X, yv):
+            fitted = clone(pipe).fit(X[tr], yv[tr])
+            pred[te] = fitted.predict(X[te])
+            proba[te] = align_proba_to_classes(
+                fitted.predict_proba(X[te]), fitted.classes_, classes
+            )
+        m = classification_metrics(yv, pred, classes=classes, y_proba=proba)
+        assert row["Accuracycv"] == pytest.approx(m["Accuracy"]), row["Params"]
+        assert row["F1cv"] == pytest.approx(m["F1"])
+        assert row["ROC_AUCcv"] == pytest.approx(m["ROC_AUC"])
+        # per-class outputs keep the user's labels
+        assert set(row["per_class_metrics"]) == {str(c) for c in labels}
+
+
+def test_external_validation_metrics_match_sklearn():
+    from spectral_predict.search import (
+        _rebuild_model_from_row,
+        compute_validation_metrics_for_top_models,
+    )
+
+    Xdf, y, df, _ = _uneven_search((2, 3), (25, 20), seed=9)
+    X, yv = Xdf.to_numpy(), y.to_numpy()
+    val = np.arange(0, 45, 3)
+    cal = np.setdiff1d(np.arange(45), val)
+    out = compute_validation_metrics_for_top_models(
+        df.copy(),
+        X[cal],
+        yv[cal],
+        X[val],
+        yv[val],
+        "classification",
+        Xdf.columns.values,
+        top_n=1,
+    )
+    r = out.dropna(subset=["val_Accuracy"]).iloc[0]
+    # Rebuild as the helper does and score with sklearn, positive class = 3
+    model = _rebuild_model_from_row(r, "classification")
+    model.fit(X[cal], yv[cal])
+    pred = model.predict(X[val])
+    proba = model.predict_proba(X[val])
+    assert r["val_F1"] == pytest.approx(skm.f1_score(yv[val], pred, pos_label=3))
+    assert r["val_Recall"] == pytest.approx(skm.recall_score(yv[val], pred, pos_label=3))
+    assert r["val_ROC_AUC"] == pytest.approx(skm.roc_auc_score(yv[val] == 3, proba[:, 1]))
+
+
+def test_unseen_text_holdout_class_counts_as_error():
+    from spectral_predict.search import run_search
+
+    Xdf, y, _, _ = _uneven_search(("a", "b"), (20, 20), seed=3)
+    rng = np.random.default_rng(0)
+    X_val = rng.normal(size=(6, Xdf.shape[1]))
+    y_val = np.array(["a", "b", "a", "zzz", "b", "zzz"], dtype=object)
+    df2, _ = run_search(
+        Xdf,
+        y,
+        "classification",
+        folds=3,
+        models_to_test=["PLS-DA"],
+        preprocessing_methods={"raw": True},
+        max_n_components=2,
+        enable_variable_subsets=False,
+        enable_region_subsets=False,
+        X_validation=X_val,
+        y_validation=y_val,
+        compute_validation=True,
+        validation_top_n=2,
+    )
+    rows = df2.dropna(subset=["val_Accuracy"])
+    assert len(rows) > 0
+    # the two "zzz" samples can never be predicted, so accuracy <= 4/6
+    assert (rows["val_Accuracy"] <= 4 / 6 + 1e-12).all()
+    assert np.isfinite(rows["val_F1"]).all()
