@@ -363,6 +363,19 @@ ber = 1.0 - balanced_accuracy
 
 all_y_true_arr = pooled_labels
 y_pred_cv = pooled_preds
+
+# Out-of-fold scores aligned with all_y_true_arr (for the score histogram).
+# decision_function: >= 0 means inlier (the rule used for y_pred above).
+# Under Repeated K-Fold each sample's scores are averaged across repeats.
+cv_scores_are_decision = hasattr(model, 'decision_function')
+cv_scores = None
+if all_scores and len(all_scores) == len(all_test_idx):
+    _idx_flat = np.concatenate(all_test_idx)
+    _scores_flat = np.concatenate(all_scores)
+    if _is_repeated:
+        cv_scores = np.array([_scores_flat[_idx_flat == s].mean() for s in unique_samples])
+    else:
+        cv_scores = _scores_flat
 '''
 
 METRICS_ONE_CLASS_TEMPLATE = '''

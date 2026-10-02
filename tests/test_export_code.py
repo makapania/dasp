@@ -1059,15 +1059,27 @@ _OC_IMB_CFG = {**_OC_CFG, 'imbalance_method': 'binning'}
     # CV-prediction plots read y_pred_cv / all_y_true_arr, defined only by CV.
     (_REG_CFG, 'reg', 'script', False, True, 'Calibration CCC'),
     (_REG_CFG, 'reg', 'notebook', False, True, 'Calibration CCC'),
+    # Plots with CV on: titles must hold real values (the pred-vs-actual title
+    # used to print a literal '{rmse:.4f}'), and the one-class histogram must
+    # plot out-of-fold scores, not the +1/-1 labels.
+    (_REG_CFG, 'reg', 'script', True, True, 'Calibration CCC'),
+    (_CLS_CFG, 'cls', 'script', True, True, 'Final model trained'),
+    (_OC_CFG, 'oc', 'script', True, True, 'Calibration Balanced Accuracy'),
+    (_OC_CFG, 'oc', 'notebook', True, True, 'Calibration Balanced Accuracy'),
+    ({**_OC_CFG, 'cv_strategy': 'repeated_kfold', 'cv_n_repeats': 2}, 'oc', 'script', True,
+     True, 'Calibration Balanced Accuracy'),
 ], ids=['regression-no-cv', 'one-class-no-cv', 'classification-no-cv',
         'regression-imbalance-cv', 'regression-imbalance-no-cv',
         'one-class-imbalance-script-cv', 'one-class-imbalance-script-no-cv',
         'one-class-imbalance-notebook-cv', 'one-class-imbalance-notebook-no-cv',
-        'regression-viz-script-no-cv', 'regression-viz-notebook-no-cv'])
+        'regression-viz-script-no-cv', 'regression-viz-notebook-no-cv',
+        'regression-viz-script-cv', 'classification-viz-script-cv',
+        'one-class-viz-script-cv', 'one-class-viz-notebook-cv',
+        'one-class-viz-script-repeated-cv'])
 def test_exported_script_runs_with_metric_helpers(config, y_kind, fmt, include_cv, viz, expect,
                                                   temp_dir):
     """Exported scripts and notebooks must define every name they use, with or
-    without the CV section."""
+    without the CV section, and their plots must show real values."""
     rng = np.random.default_rng(0)
     X = rng.normal(size=(40, 30))
     y = {
@@ -1092,15 +1104,40 @@ def test_exported_script_runs_with_metric_helpers(config, y_kind, fmt, include_c
         cells = [''.join(c['source']) for c in generator.generate_notebook()['cells']
                  if c['cell_type'] == 'code']
         cells = [src for src in cells if 'pip' not in src or 'subprocess' not in src]
-        script_path.write_text('\n\n'.join(cells), encoding='utf-8')
+        script_text = '\n\n'.join(cells)
     else:
-        generator.save_script(str(script_path))
+        script_text = generator.generate_script()
+    if viz:
+        # Probe appended after the plots (Agg keeps figures open after show()).
+        script_text += (
+            "\nimport matplotlib.pyplot as _plt\n"
+            "for _n in _plt.get_fignums():\n"
+            "    for _ax in _plt.figure(_n).axes:\n"
+            "        print('PLOT_TITLE', repr(_ax.get_title()))\n"
+            "if 'cv_scores' in globals() and cv_scores is not None:\n"
+            "    print('CV_SCORE_VALUES', sorted(set(np.round(cv_scores, 12)))[:5],\n"
+            "          len(set(np.round(cv_scores, 12))))\n"
+        )
+    script_path.write_text(script_text, encoding='utf-8')
 
     env = {**os.environ, 'MPLBACKEND': 'Agg'}
     result = subprocess.run([sys.executable, str(script_path)], capture_output=True,
                             text=True, timeout=120, cwd=temp_dir, env=env)
     assert result.returncode == 0, f"Script execution failed:\n{result.stderr}"
     assert expect in result.stdout
+
+    if viz:
+        titles = [line for line in result.stdout.splitlines() if line.startswith('PLOT_TITLE')]
+        assert titles, "visualization produced no figures"
+        bad = [t for t in titles if '{' in t or '}' in t]
+        assert not bad, f"unformatted placeholders in plot titles: {bad}"
+        if y_kind == 'oc' and include_cv:
+            score_lines = [line for line in result.stdout.splitlines()
+                           if line.startswith('CV_SCORE_VALUES')]
+            assert score_lines, "one-class CV did not define cv_scores for the histogram"
+            n_unique = int(score_lines[0].rsplit(' ', 1)[1])
+            assert n_unique > 2, f"histogram data is just labels: {score_lines[0]}"
+            assert any('Decision Score Distribution' in t for t in titles)
 
 
 if __name__ == '__main__':

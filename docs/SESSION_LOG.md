@@ -928,3 +928,11 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   metrics twice. Noted, not fixed: the regression pred-vs-actual title prints a literal `{rmse:.4f}` (the viz
   templates are never `.format`ed but use `{{ }}`), and the one-class "decision score" histogram plots +1/-1
   labels, not scores.
+- **Round 3: the two plot bugs.** `templates/visualization.py` strings are emitted verbatim (never `.format`ed), so
+  `{{rmse:.4f}}` inside the generated f-string printed literal braces; the template now uses single braces, like the
+  spectra plot. The one-class histogram plotted `y_pred_cv` (the +1/-1 labels). The one-class CV template now also
+  builds `cv_scores`, the out-of-fold `decision_function` (or `score_samples`) values aligned with
+  `all_y_true_arr` (averaged per sample under Repeated K-Fold), plus `cv_scores_are_decision`. The histogram plots
+  those and marks the threshold at score = 0, the same rule the CV block uses to predict. The executed-export test
+  reads every figure title back through matplotlib and fails on any `{`/`}`, and checks the one-class scores have
+  more than two distinct values.

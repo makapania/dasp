@@ -23,7 +23,7 @@ ax.plot(lims, lims, 'r--', lw=2, label='1:1 line')
 # Labels and title
 ax.set_xlabel('Actual Values', fontsize=12)
 ax.set_ylabel('Predicted Values', fontsize=12)
-ax.set_title(f'Predicted vs Actual\\nRMSE={{rmse:.4f}}, R²={{r2:.4f}}', fontsize=14)
+ax.set_title(f'Predicted vs Actual\\nRMSE={rmse:.4f}, R²={r2:.4f}', fontsize=14)
 ax.legend()
 
 # Equal aspect ratio
@@ -127,21 +127,30 @@ ONE_CLASS_SCORE_DISTRIBUTION_TEMPLATE = '''
 # VISUALIZATION: Decision Score Distribution (One-Class)
 # =============================================================================
 
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.hist(y_pred_cv[all_y_true_arr == 1],
-        bins=30, alpha=0.6, label='Inlier', color='steelblue', edgecolor='k')
-ax.hist(y_pred_cv[all_y_true_arr == -1],
-        bins=30, alpha=0.6, label='Outlier', color='coral', edgecolor='k')
-ax.axvline(x=0, color='red', linestyle='--', lw=2, label='Decision boundary')
-ax.set_xlabel('Decision Score', fontsize=12)
-ax.set_ylabel('Frequency', fontsize=12)
-ax.set_title('One-Class Decision Score Distribution', fontsize=14)
-ax.legend()
-ax.grid(True, alpha=0.3)
+# cv_scores: out-of-fold decision_function (or score_samples) values from the
+# CV block, aligned with all_y_true_arr.
+if cv_scores is None:
+    print("No out-of-fold scores available; score histogram skipped.")
+else:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(cv_scores[all_y_true_arr == 1],
+            bins=30, alpha=0.6, label='Inlier (true)', color='steelblue', edgecolor='k')
+    ax.hist(cv_scores[all_y_true_arr == -1],
+            bins=30, alpha=0.6, label='Outlier (true)', color='coral', edgecolor='k')
+    if cv_scores_are_decision:
+        ax.axvline(x=0, color='red', linestyle='--', lw=2,
+                   label='Threshold: score = 0 (>= 0 accepted as inlier)')
+        ax.set_xlabel('Out-of-fold decision score', fontsize=12)
+    else:
+        ax.set_xlabel('Out-of-fold score_samples value (higher = more inlier-like)', fontsize=12)
+    ax.set_ylabel('Frequency', fontsize=12)
+    ax.set_title('One-Class Decision Score Distribution (cross-validated)', fontsize=14)
+    ax.legend()
+    ax.grid(True, alpha=0.3)
 
-plt.tight_layout()
-plt.savefig('one_class_score_distribution.png', dpi=150, bbox_inches='tight')
-plt.show()
+    plt.tight_layout()
+    plt.savefig('one_class_score_distribution.png', dpi=150, bbox_inches='tight')
+    plt.show()
 '''
 
 ONE_CLASS_CONFUSION_TEMPLATE = '''
