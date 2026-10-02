@@ -239,3 +239,69 @@ def test_train_ensembles_stacking_meta_model_sees_held_out_wrapped_predictions(
         np.testing.assert_allclose(meta_X[:, j], expected, rtol=1e-6, atol=1e-8)
         in_sample = np.ravel(model.predict(X))
         assert not np.allclose(meta_X[:, j], in_sample), type(model).__name__
+
+
+# --- Persistence (review round 1) ---------------------------------------------------------
+
+
+def test_saved_ensemble_stores_out_of_fold_predictions_for_uncertainty(
+    gui_app, monkeypatch, tmp_path
+):
+    """The .dasp CV data must be the honest OOF predictions, not in-sample re-predictions."""
+    import spectral_predict_gui_optimized as gui_mod
+    from spectral_predict.model_io import load_ensemble
+
+    X, y = _spectra()
+    X.index = [f"S{i}" for i in range(len(y))]
+    y_ser = pd.Series(y, index=X.index)
+    with _ensemble_settings(gui_app, methods=("ensemble_region_weighted",)):
+        results, _, logs = _train(gui_app, X, y_ser, monkeypatch)
+    assert results is not None, "\n".join(logs[-40:])
+    result = results[0]
+    assert len(result["cv_predictions"]) == len(y)
+
+    path = tmp_path / "ens.dasp"
+    monkeypatch.setattr(gui_mod.filedialog, "asksaveasfilename", lambda **kw: str(path))
+    monkeypatch.setattr(gui_app, "_get_selected_ensemble", lambda: result)
+    monkeypatch.setattr(gui_app, "ensemble_results", results, raising=False)
+    monkeypatch.setattr(gui_app, "ensemble_X", X, raising=False)
+    monkeypatch.setattr(gui_app, "ensemble_y", y_ser, raising=False)
+    gui_app._save_selected_ensemble()
+
+    assert path.exists(), "\n".join(logs[-20:])
+    cv_data = load_ensemble(str(path))["base_model_dicts"][0]["cv_data"]
+    np.testing.assert_allclose(cv_data["cv_predictions"], result["cv_predictions"])
+    np.testing.assert_allclose(cv_data["cv_residuals"], result["cv_predictions"] - y)
+    in_sample = result["ensemble"].predict(X)
+    assert not np.allclose(cv_data["cv_predictions"], in_sample)
+
+
+def test_saved_ensemble_with_subset_wrapper_predicts_full_width_numpy(gui_app, tmp_path):
+    """predict_with_model hands the loaded ensemble a full-width array; subset members cope."""
+    from spectral_predict.ensemble import RegionAwareWeightedEnsemble
+    from spectral_predict.model_io import load_ensemble, predict_with_model, save_ensemble
+
+    X, y = _spectra()
+    Xs = X.set_axis([str(c) for c in X.columns], axis=1)
+    with contextlib.redirect_stdout(io.StringIO()):
+        recon = gui_app._reconstruct_models_from_results(_rows(), Xs, y, "regression")
+    models = [m for m, _, _ in recon]
+    assert "WavelengthSubsetWrapper" in {type(m).__name__ for m in models}
+    ens = RegionAwareWeightedEnsemble(models, [n for _, n, _ in recon], n_regions=3).fit(Xs, y)
+
+    path = tmp_path / "subset_ens.dasp"
+    save_ensemble(
+        ens,
+        str(path),
+        {
+            "ensemble_type": "region_weighted",
+            "task_type": "regression",
+            "wavelengths": WAVELENGTHS,
+            "n_vars": len(WAVELENGTHS),
+        },
+    )
+    loaded = load_ensemble(str(path))
+    model_dict = {"model": loaded["ensemble"], "metadata": loaded["metadata"], "preprocessor": None}
+
+    preds = predict_with_model(model_dict, X.to_numpy())
+    np.testing.assert_allclose(np.ravel(preds), ens.predict(Xs), rtol=1e-6)

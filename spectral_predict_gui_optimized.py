@@ -2183,6 +2183,9 @@ def _subset_wavelength_columns(X, wavelength_cols, all_columns=None):
     X_arr = np.asarray(X)
     n_cols = X_arr.shape[1] if X_arr.ndim > 1 else 1
     if n_cols == len(wavelength_cols):
+        # Contract: an array exactly as wide as the subset is taken to be ALREADY subset,
+        # in wavelength_cols order. Arrays carry no column names, so this cannot be
+        # checked; callers holding the full spectrum must pass all of it.
         return X_arr
     if all_columns is not None and n_cols == len(all_columns):
         all_cols = list(all_columns)
@@ -2261,9 +2264,16 @@ class GAPreprocessWrapper(BaseEstimator, RegressorMixin):
     @property
     def transform(self):
         """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
+        if getattr(self, "_transform", None) is None and self.preprocess_config:
             self._transform = _build_transform_from_config(self.preprocess_config)
         return self._transform
+
+    def __getstate__(self):
+        # The cached transform is a local closure, which cannot be pickled (saving an
+        # ensemble with this member failed). It is rebuilt from preprocess_config.
+        state = super().__getstate__()
+        state["_transform"] = None
+        return state
 
     def fit(self, X, y):
         X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
@@ -2305,9 +2315,16 @@ class CombinedPreprocessWrapper(BaseEstimator, RegressorMixin):
     @property
     def transform(self):
         """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
+        if getattr(self, "_transform", None) is None and self.preprocess_config:
             self._transform = _build_transform_from_config(self.preprocess_config)
         return self._transform
+
+    def __getstate__(self):
+        # The cached transform is a local closure, which cannot be pickled (saving an
+        # ensemble with this member failed). It is rebuilt from preprocess_config.
+        state = super().__getstate__()
+        state["_transform"] = None
+        return state
 
     @property
     def col_indices(self):
@@ -2437,9 +2454,16 @@ class GAPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
     @property
     def transform(self):
         """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
+        if getattr(self, "_transform", None) is None and self.preprocess_config:
             self._transform = _build_transform_from_config(self.preprocess_config)
         return self._transform
+
+    def __getstate__(self):
+        # The cached transform is a local closure, which cannot be pickled (saving an
+        # ensemble with this member failed). It is rebuilt from preprocess_config.
+        state = super().__getstate__()
+        state["_transform"] = None
+        return state
 
     def fit(self, X, y):
         X_preproc = self.transform(X.values if hasattr(X, 'values') else X)
@@ -2495,9 +2519,16 @@ class CombinedPreprocessClassifierWrapper(BaseEstimator, ClassifierMixin):
     @property
     def transform(self):
         """Lazily create transform function from config."""
-        if self._transform is None and self.preprocess_config:
+        if getattr(self, "_transform", None) is None and self.preprocess_config:
             self._transform = _build_transform_from_config(self.preprocess_config)
         return self._transform
+
+    def __getstate__(self):
+        # The cached transform is a local closure, which cannot be pickled (saving an
+        # ensemble with this member failed). It is rebuilt from preprocess_config.
+        state = super().__getstate__()
+        state["_transform"] = None
+        return state
 
     @property
     def col_indices(self):
@@ -25567,7 +25598,9 @@ class SpectralPredictApp:
                         'r2': r2,              # CV R² (displayed as R²cv)
                         'mae': mae,
                         'rpd': rpd,
-                        'ensemble': ensemble
+                        'ensemble': ensemble,
+                        # Honest out-of-fold predictions (saved for uncertainty intervals)
+                        'cv_predictions': cv_predictions,
                     })
 
                     # Store trained ensemble
@@ -25688,7 +25721,8 @@ class SpectralPredictApp:
                                     'r2': q_r2,
                                     'mae': q_mae,
                                     'rpd': q_rpd,
-                                    'ensemble': q_ensemble
+                                    'ensemble': q_ensemble,
+                                    'cv_predictions': q_cv_predictions,
                                 })
 
                                 # Store trained ensemble
@@ -34437,17 +34471,10 @@ For detailed documentation, see the User Guide.
                 messagebox.showerror("Error", "Cannot determine wavelengths from training data.")
                 return
 
-            # Determine task type from target column or results
-            task_type = 'regression'  # Default
-            if hasattr(self, 'task_type'):
-                task_type = self.task_type.get()
-            elif hasattr(self, 'y') and self.y is not None:
-                # Infer from data
-                import numpy as np
-                if not pd.api.types.is_numeric_dtype(self.y.dtype):
-                    task_type = 'classification'
-                elif len(self.y.dropna().unique()) < 20:
-                    task_type = 'classification'
+            # GUI ensembles are regression-only (_train_ensembles is never run for
+            # classification). Reading the task radio here saved 'auto' when it was left
+            # on auto-detect, which also dropped the CV residuals below.
+            task_type = "regression"
 
             # Get preprocessing information from results DataFrame if available
             preprocessing = 'unknown'
@@ -34483,20 +34510,27 @@ For detailed documentation, see the User Guide.
                 X_train = self.ensemble_X.values
                 self._log_progress(f"Including applicability domain data ({X_train.shape[0]} samples)")
 
-            # Get CV data if available (from ensemble predictions)
+            # CV data for uncertainty: the honest out-of-fold predictions from ensemble
+            # training. Never re-predict the training rows with the deployed ensemble:
+            # those are calibration predictions, and intervals from them are too narrow.
             cv_residuals = None
             cv_predictions = None
             cv_actuals = None
-            if hasattr(self, 'ensemble_y') and self.ensemble_y is not None:
-                cv_actuals = self.ensemble_y.values if hasattr(self.ensemble_y, 'values') else np.array(self.ensemble_y)
-                # Get ensemble predictions
-                try:
-                    cv_predictions = ensemble.predict(self.ensemble_X.values if hasattr(self.ensemble_X, 'values') else self.ensemble_X)
-                    if task_type == 'regression':
+            oof_predictions = selected_result.get("cv_predictions")
+            if getattr(self, "ensemble_y", None) is not None and oof_predictions is not None:
+                actuals = np.asarray(self.ensemble_y, dtype=float).ravel()
+                oof_predictions = np.asarray(oof_predictions, dtype=float).ravel()
+                if len(oof_predictions) == len(actuals):
+                    cv_actuals = actuals
+                    cv_predictions = oof_predictions
+                    if task_type == "regression":
                         cv_residuals = cv_predictions - cv_actuals
-                    self._log_progress(f"Including uncertainty estimation data")
-                except Exception as e:
-                    self._log_progress(f"Warning: Could not generate CV predictions: {e}")
+                    self._log_progress("Including out-of-fold CV predictions for uncertainty")
+            if cv_predictions is None:
+                self._log_progress(
+                    "No out-of-fold CV predictions stored for this ensemble (re-train "
+                    "ensembles to include them); uncertainty data omitted"
+                )
 
             # Get preprocessor if available (usually None for ensembles as preprocessing is in pipelines)
             preprocessor = None

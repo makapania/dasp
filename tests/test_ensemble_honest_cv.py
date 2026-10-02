@@ -220,8 +220,10 @@ class _RecordingMeta(Ridge):
 def test_stacking_meta_model_sees_out_of_fold_predictions():
     X, y = _signal_data(n=50)
     members = _fitted([KNeighborsRegressor(n_neighbors=1), Ridge(alpha=1.0)], X, y)
-    meta = _RecordingMeta(alpha=1.0)
-    StackingEnsemble(members, ["1NN", "Ridge"], meta_model=meta, region_aware=False, cv=5).fit(X, y)
+    ens = StackingEnsemble(
+        members, ["1NN", "Ridge"], meta_model=_RecordingMeta(alpha=1.0), region_aware=False, cv=5
+    ).fit(X, y)
+    meta = ens.meta_model  # the fitted clone
 
     expected = np.zeros((len(y), 2))
     for train_idx, val_idx in KFold(5, shuffle=True, random_state=42).split(X):
@@ -366,3 +368,141 @@ def test_create_ensemble_still_accepts_series_targets():
             models, ["a", "b"], X_df, pd.Series(y, index=index), etype, n_regions=3
         )
         assert np.all(np.isfinite(ens.predict(X_df)))
+
+
+# --- Review round 1 ----------------------------------------------------------------------
+
+
+class _RefusesRefit(Ridge):
+    """Meta-model that raises if fitted twice, i.e. if fold state could carry over."""
+
+    def fit(self, X, y, sample_weight=None):
+        if hasattr(self, "coef_"):
+            raise RuntimeError("meta-model instance reused across fits")
+        return super().fit(X, y, sample_weight=sample_weight)
+
+
+def test_cross_validation_clones_caller_meta_model_per_fold():
+    X, y = _signal_data()
+    models = _fitted([Ridge(alpha=1.0), PLSRegression(n_components=3)], X, y)
+    meta = _RefusesRefit(alpha=1.0)
+    result = cross_validate_ensembles(
+        models, ["a", "b"], X, y, ["stacking", "region_stacking"], n_regions=3, meta_model=meta
+    )
+    assert result.errors == {}
+    assert not hasattr(meta, "coef_"), "the caller's meta-model must stay unfitted"
+
+
+def test_stacking_refit_starts_from_fresh_meta_model():
+    X, y = _signal_data()
+    models = _fitted([Ridge(alpha=1.0), PLSRegression(n_components=3)], X, y)
+    ens = StackingEnsemble(models, ["a", "b"], meta_model=_RefusesRefit(), region_aware=False)
+    ens.fit(X, y)
+    ens.fit(X[:40], y[:40])  # a second fit must not see the first fit's state
+    assert np.all(np.isfinite(ens.predict(X)))
+
+
+@pytest.mark.parametrize("key", ["preprocessors", "preprocessor_configs"])
+def test_cross_validate_ensembles_rejects_separate_preprocessing(key):
+    from sklearn.preprocessing import StandardScaler
+
+    X, y = _signal_data()
+    models = _fitted([Ridge(), PLSRegression(2)], X, y)
+    scalers = [StandardScaler().fit(X), StandardScaler().fit(X)]
+    with pytest.raises(ValueError, match=key):
+        cross_validate_ensembles(models, ["a", "b"], X, y, ["simple_average"], **{key: scalers})
+
+
+def test_cross_validate_ensembles_is_regression_only():
+    X, y = _signal_data()
+    models = _fitted([Ridge(), PLSRegression(2)], X, y)
+    labels = np.where(y > np.median(y), "high", "low")
+    with pytest.raises(ValueError, match="regression targets only"):
+        cross_validate_ensembles(models, ["a", "b"], X, labels, ["simple_average"])
+
+
+class _Shift:
+    """Row-wise 'preprocessor' that shifts every value; obvious if mis-assigned."""
+
+    def __init__(self, offset: float):
+        self.offset = offset
+
+    def transform(self, X):
+        return np.asarray(X) + self.offset
+
+
+@pytest.mark.parametrize("bad_position", [0, 1])
+@pytest.mark.parametrize("attr", ["preprocessors", "preprocessor_configs"])
+def test_dropping_a_member_keeps_survivors_preprocessing_with_short_lists(bad_position, attr):
+    """Short lists: a survivor must not inherit the dropped member's preprocessing."""
+    X, y = _signal_data(n=40)
+    ridge = Ridge(alpha=1.0).fit(X, y)
+    pls = PLSRegression(n_components=3).fit(X + 5.0, y)  # its preprocessing is +5
+    bad = _FailsOnSmallFits(min_rows=40).fit(X, y)
+    if bad_position == 0:
+        # [bad, pls, ridge] with a 2-long list: bad -> +100, pls -> +5, ridge -> raw
+        models, names, prep = [bad, pls, ridge], ["Bad", "PLS", "Ridge"], [_Shift(100), _Shift(5)]
+    else:
+        # [pls, bad, ridge] with a 2-long list: pls -> +5, bad -> +100, ridge -> raw
+        models, names, prep = [pls, bad, ridge], ["PLS", "Bad", "Ridge"], [_Shift(5), _Shift(100)]
+
+    with pytest.warns(UserWarning, match=OOF_FAILURE_WARNING):
+        ens = StackingEnsemble(models, names, region_aware=False, cv=5, **{attr: prep}).fit(X, y)
+    reference = StackingEnsemble(
+        [pls, ridge], ["PLS", "Ridge"], region_aware=False, cv=5, **{attr: [_Shift(5)]}
+    ).fit(X, y)
+
+    assert ens.model_names == ["PLS", "Ridge"]
+    assert ens._get_preprocessor(1) is None
+    np.testing.assert_allclose(ens.predict(X), reference.predict(X))
+
+
+def test_create_auto_ensembles_single_sample_gives_nan_not_calibration():
+    X, y = _signal_data(n=1)
+    results_df = pd.DataFrame(
+        {
+            "Model": ["A", "B"],
+            "regional_rmse": [
+                {"Q1": 0.1, "Q2": 0.2, "Q3": 0.1, "Q4": 0.2},
+                {"Q1": 0.2, "Q2": 0.1, "Q3": 0.2, "Q4": 0.1},
+            ],
+        }
+    )
+
+    def reconstruct(row, X_train, y_train):
+        return Ridge(alpha=1.0).fit(X_train, y_train), row["Model"]
+
+    with pytest.warns(UserWarning, match="fewer than 2 samples"):
+        out = create_auto_ensembles(results_df, X, y, "regression", reconstruct, list(range(12)))
+    assert out
+    for info in out.values():
+        assert np.isnan(info["metrics"]["r2"]) and np.isnan(info["metrics"]["rmse"])
+
+
+@pytest.mark.parametrize("etype", ["region_weighted", "mixture_experts", "stacking"])
+def test_ensemble_with_excluded_member_round_trips_through_save_and_load(tmp_path, etype):
+    from spectral_predict.model_io import load_ensemble, save_ensemble
+
+    X, y = _signal_data(n=40)
+    good = _fitted([Ridge(alpha=1.0), PLSRegression(n_components=3)], X, y)
+    bad = _FailsOnSmallFits(min_rows=40).fit(X, y)
+    with pytest.warns(UserWarning, match=OOF_FAILURE_WARNING):
+        ens = _ensemble(etype, [good[0], bad, good[1]], ["Ridge", "Bad", "PLS"], False, y)
+        ens.fit(X, y)
+    path = tmp_path / f"{etype}.dasp"
+    wavelengths = [1000.0 + i for i in range(X.shape[1])]
+    save_ensemble(
+        ens,
+        str(path),
+        {
+            "ensemble_type": etype,
+            "task_type": "regression",
+            "wavelengths": wavelengths,
+            "n_vars": len(wavelengths),
+        },
+    )
+
+    loaded = load_ensemble(str(path))
+    assert loaded["model_names"] == ["Ridge", "PLS"]
+    assert loaded["config"]["n_models"] == 2
+    np.testing.assert_allclose(loaded["ensemble"].predict(X), ens.predict(X))

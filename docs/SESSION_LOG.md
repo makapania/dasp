@@ -769,4 +769,16 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   features): -0.75 vs -0.35 on noise. Not a bug in this fix; don't assert cal >= cv in tests.
 - `create_auto_ensembles` (no production caller) had the same Series indexing and two full-data fallbacks; folds that
   cannot rebuild 2 models now give NaN metrics instead of calibration predictions, and `unique_model_count` counts only
-  successful rebuilds (R106 in passing).
+  successful rebuilds (R106 in passing). The first commit missed its two `n < 2` calibration fallbacks; round 1 of
+  review removed those too (NaN + warning).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes) added:** a caller's stacking `meta_model` is cloned per outer
+  fold and inside every `StackingEnsemble.fit` (a warm_start learner carried fold state); `cross_validate_ensembles`
+  rejects `preprocessors` / `preprocessor_configs` (members are refitted on raw rows, so a separate transform would
+  apply at predict time only; Codex measured R2 -30 vs 0.998) and non-numeric y; dropping a failed member resolves
+  every member's effective preprocessing first, because `_get_preprocessor` allows short lists and a survivor could
+  inherit the dropped member's transform.
+- **Saving any ensemble with a GA / Combined wrapper member raised PicklingError**: the wrappers cache a local
+  closure in `_transform`. They now drop it in `__getstate__` (it is rebuilt from `preprocess_config`).
+- **Saved ensemble uncertainty used in-sample residuals** labelled `cv_residuals` (`_save_selected_ensemble`
+  re-predicted the training rows). It now saves the outer-CV OOF predictions kept in each `ensemble_results` entry, or
+  no CV data at all. It also recorded `task_type='auto'` when the task radio was on auto, which dropped the residuals.

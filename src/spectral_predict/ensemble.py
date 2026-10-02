@@ -115,17 +115,23 @@ def _compute_oof_and_drop_failed(ensemble, X, y: np.ndarray) -> np.ndarray:
 
     if len(keep) < len(ensemble.models):
         n_models = len(ensemble.models)
-
-        def _subset(seq):
-            if seq is None or len(seq) != n_models:
-                return seq
-            return [seq[k] for k in keep]
+        # Resolve each ORIGINAL member's name and effective preprocessing (configs take
+        # precedence over fitted preprocessors; either list may be shorter than models)
+        # before removal, so no survivor inherits a dropped member's preprocessing.
+        names = [
+            ensemble.model_names[i] if i < len(ensemble.model_names) else f"Model_{i}"
+            for i in range(n_models)
+        ]
+        effective = [ensemble._get_preprocessor(i) for i in range(n_models)]
 
         # New lists: the caller's lists (often shared between ensembles) stay intact.
         ensemble.models = [ensemble.models[k] for k in keep]
-        ensemble.model_names = _subset(list(ensemble.model_names))
-        ensemble.preprocessors = _subset(ensemble.preprocessors)
-        ensemble.preprocessor_configs = _subset(ensemble.preprocessor_configs)
+        ensemble.model_names = [names[k] for k in keep]
+        if any(p is not None for p in effective):
+            # One full-length list aligned with the survivors; it takes precedence in
+            # _get_preprocessor, and None entries mean "raw input", as before.
+            ensemble.preprocessor_configs = [effective[k] for k in keep]
+            ensemble.preprocessors = None
     ensemble.excluded_models_ = excluded
     return np.vstack(rows)
 
@@ -879,8 +885,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                 pred_value_feature
             ])
 
-        # Fit meta-model on OOF predictions (prevents leakage)
-        self.meta_model.fit(meta_features, y)
+        # Fit a fresh clone of the meta-model on the OOF predictions. Cloning drops any
+        # state from an earlier fit (e.g. a warm_start learner reused across CV folds).
+        meta_model = clone(self.meta_model)
+        meta_model.fit(meta_features, y)
+        self.meta_model = meta_model
 
         # Set sklearn-compatible fitted attributes for Pipeline compatibility
         X_arr = np.asarray(X)
@@ -1440,32 +1449,54 @@ def cross_validate_ensembles(
     are shared between ensemble types within a fold.
 
     This only estimates performance: the deployed ensemble is still fitted on all
-    calibration rows (``create_ensemble`` with the full-data base models).
+    calibration rows (``create_ensemble`` with the full-data base models). Regression
+    only, like the ensemble classes it evaluates.
 
     Args:
-        models: Base models (fitted or not; they are cloned, never modified).
+        models: Base models (fitted or not; they are cloned, never modified). Each member
+            must carry its own preprocessing (e.g. a Pipeline), since it is refitted on
+            raw rows.
         model_names: One name per model.
         X: Features (DataFrame or array). Rows are indexed by position.
-        y: Targets (array, list or Series; any index is ignored, position is used).
+        y: Numeric regression targets (array, list or Series; any index is ignored,
+            position is used).
         ensemble_types: ``create_ensemble`` types to evaluate.
         n_regions: Regions for the region-aware types.
         n_splits: Outer folds (capped at the number of samples).
         inner_cv: Inner folds for the weight / meta-model fit.
         random_state: Seed of the shuffled outer KFold.
-        **ensemble_kwargs: Extra ``create_ensemble`` arguments (e.g. ``soft_gating``).
-            ``y_percentiles`` is rejected: fixed boundaries computed from all of ``y``
-            would carry the test folds' targets into training.
+        **ensemble_kwargs: Extra ``create_ensemble`` arguments (e.g. ``soft_gating``,
+            ``meta_model``, which is cloned for every fold). Rejected: ``y_percentiles``
+            (boundaries from all of ``y`` carry the test folds' targets into training)
+            and ``preprocessors`` / ``preprocessor_configs`` (see ``models``).
 
     Returns:
         EnsembleCVResult with per-type OOF predictions, errors and notes.
+
+    Raises:
+        ValueError: For non-numeric ``y`` or a rejected keyword.
     """
     if "y_percentiles" in ensemble_kwargs:
         raise ValueError(
             "cross_validate_ensembles does not accept y_percentiles: boundaries taken "
             "from all targets would include the test folds' y."
         )
+    for key in ("preprocessors", "preprocessor_configs"):
+        if ensemble_kwargs.get(key) is not None:
+            raise ValueError(
+                f"cross_validate_ensembles does not accept {key}: base models are refitted "
+                "on raw outer-training rows, so separate preprocessing would be applied at "
+                "predict time only, and fitted preprocessors carry statistics from every "
+                "row. Put each member's preprocessing in a Pipeline with its estimator."
+            )
     ensemble_kwargs.pop("refit_base_models", None)
-    y = np.asarray(y, dtype=float).ravel()
+    y_raw = np.asarray(y).ravel()
+    if y_raw.dtype.kind not in "biuf":
+        raise ValueError(
+            "cross_validate_ensembles supports regression targets only (numeric y); got "
+            f"dtype {y_raw.dtype}."
+        )
+    y = y_raw.astype(float)
     n_samples = len(y)
     result = EnsembleCVResult()
     if n_samples < 2:
@@ -1501,6 +1532,10 @@ def cross_validate_ensembles(
                 with warnings.catch_warnings():
                     # Reported through excluded_models_ below instead.
                     warnings.filterwarnings("ignore", message=f".*{OOF_FAILURE_WARNING}")
+                    fold_kwargs = dict(ensemble_kwargs)
+                    if fold_kwargs.get("meta_model") is not None:
+                        # Never share one (possibly warm-started) meta-model across folds.
+                        fold_kwargs["meta_model"] = clone(fold_kwargs["meta_model"])
                     ens = create_ensemble(
                         models=fold_models,
                         model_names=fold_names,
@@ -1510,7 +1545,7 @@ def cross_validate_ensembles(
                         n_regions=n_regions,
                         cv=min(inner_cv, len(y_tr)),
                         refit_base_models=True,
-                        **ensemble_kwargs,
+                        **fold_kwargs,
                     )
                     preds[etype][test_idx] = _predict_1d(ens, X_te)
                 for name, reason in getattr(ens, "excluded_models_", []):
@@ -1996,10 +2031,10 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                     )
                     r2 = rmse = np.nan
             else:
-                # Fallback for very small datasets
-                y_pred = ensemble.predict(X_train)
-                r2 = r2_score(y_train, y_pred)
-                rmse = np.sqrt(mean_squared_error(y_train, y_pred))
+                # Fewer than 2 samples: no CV is possible, and calibration predictions
+                # must not be reported as CV metrics.
+                warnings.warn(f"{ensemble_name}: fewer than 2 samples; CV metrics are NaN.")
+                r2 = rmse = np.nan
 
             metrics = {'r2': r2, 'rmse': rmse, 'y_std': y_std}
 
@@ -2083,10 +2118,10 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                     )
                     accuracy = f1 = np.nan
             else:
-                # Fallback for very small datasets
-                y_pred = ensemble.predict(X_train)
-                accuracy = accuracy_score(y_train, y_pred)
-                f1 = f1_score(y_train, y_pred, average='weighted')
+                # Fewer than 2 samples: no CV is possible, and calibration predictions
+                # must not be reported as CV metrics.
+                warnings.warn(f"{ensemble_name}: fewer than 2 samples; CV metrics are NaN.")
+                accuracy = f1 = np.nan
 
             metrics = {'accuracy': accuracy, 'f1': f1}
 
