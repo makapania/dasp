@@ -37,22 +37,55 @@ def _paired_standards(n: int = 30, p: int = 60, seed: int = 0):
     return wl, X_primary, X_satellite
 
 
+_CT_ATTRS = (
+    "current_primary_data",
+    "current_satellite_data",
+    "ct_transfer_model",
+    "current_transfer_model",
+    "ct_primary_X",
+    "ct_primary_y",
+    "ct_satellite_X",
+    "ct_satellite_y",
+    "ct_wavelengths_common",
+    "ct_X_primary_common",
+    "ct_X_satellite_common",
+    "ct_loaded_model_data_type",
+)
+_CT_VARS = (
+    "ct_method_var",
+    "ct_tsr_n_samples_var",
+    "ct_roi_mode_var",
+    "ct_roi_start_var",
+    "ct_roi_end_var",
+    "ct_primary_data_type",
+    "ct_satellite_data_type",
+    "ct_load_model_path_var",
+)
+_CT_TEXTS = ("ct_transfer_info_text", "ct_loaded_model_info_text")
+
+
+def _text_get(widget) -> tuple[str, str]:
+    return str(widget.cget("state")), widget.get("1.0", "end-1c")
+
+
+def _text_set(widget, saved: tuple[str, str]) -> None:
+    state, content = saved
+    widget.config(state="normal")
+    widget.delete("1.0", tk.END)
+    widget.insert("1.0", content)
+    widget.config(state=state)
+
+
 @pytest.fixture
 def ct_app(gui_app):
-    """gui_app with paired standards loaded and CT tab state restored afterwards."""
+    """gui_app with paired standards loaded; all CT state it touches is restored after."""
     app = gui_app
-    saved = (
-        app.ct_method_var.get(),
-        app.ct_tsr_n_samples_var.get(),
-        app.ct_roi_mode_var.get(),
-        app.current_primary_data,
-        app.current_satellite_data,
-        app.ct_transfer_model,
-        app.ct_primary_X,
-        app.ct_primary_y,
-        app.ct_satellite_X,
-        app.ct_satellite_y,
-    )
+    missing = object()
+    attrs = {name: getattr(app, name, missing) for name in _CT_ATTRS}
+    tk_vars = {name: getattr(app, name).get() for name in _CT_VARS}
+    texts = {name: _text_get(getattr(app, name)) for name in _CT_TEXTS}
+    save_state = str(app.ct_save_tm_button.cget("state"))
+
     wl, Xp, Xs = _paired_standards()
     app.current_primary_data = (wl, Xp)
     app.current_satellite_data = (wl, Xs)
@@ -60,22 +93,22 @@ def ct_app(gui_app):
     app.ct_primary_data_type.set("absorbance")
     app.ct_satellite_data_type.set("absorbance")
     app.ct_transfer_model = None
+    app.current_transfer_model = None
     yield app, Xp, Xs
-    (
-        method,
-        n_std,
-        roi,
-        app.current_primary_data,
-        app.current_satellite_data,
-        app.ct_transfer_model,
-        app.ct_primary_X,
-        app.ct_primary_y,
-        app.ct_satellite_X,
-        app.ct_satellite_y,
-    ) = saved
-    app.ct_method_var.set(method)
-    app.ct_tsr_n_samples_var.set(n_std)
-    app.ct_roi_mode_var.set(roi)
+
+    for name, value in attrs.items():
+        if value is missing:
+            if hasattr(app, name):
+                delattr(app, name)
+        else:
+            setattr(app, name, value)
+    for name, value in tk_vars.items():
+        getattr(app, name).set(value)
+    for name, value in texts.items():
+        _text_set(getattr(app, name), value)
+    app.ct_save_tm_button.config(state=save_state)
+    for widget in app.ct_transfer_plot_frame.winfo_children():
+        widget.destroy()
 
 
 def test_default_method_is_slope_bias(gui_app):
@@ -177,6 +210,81 @@ def test_quality_plot_renders_for_slope_bias_subset(ct_app):
     printed = " ".join(str(c) for c in fake_print.call_args_list)
     assert "Error creating transfer quality plots" not in printed
     assert app.ct_transfer_plot_frame.winfo_children()
+
+
+def test_quality_plot_with_region_of_interest(ct_app):
+    """An ROI model is fitted on clipped columns; the plot must clip too (round 1, item 9)."""
+    from spectral_predict_gui_optimized import ct_region_arrays
+
+    app, Xp, _ = ct_app
+    wl = app.current_primary_data[0]
+    app.ct_method_var.set("tsr")
+    app.ct_tsr_n_samples_var.set("All")
+    app.ct_roi_mode_var.set("roi")
+    app.ct_roi_start_var.set(f"{wl[10]:.3f}")
+    app.ct_roi_end_var.set(f"{wl[40]:.3f}")
+    with patch("builtins.print") as fake_print:
+        app._build_transfer_model_new()
+
+    tm = app.ct_transfer_model
+    assert tm is not None
+    n_roi = tm.meta["region_of_interest"]["n_wavelengths_region"]
+    assert len(tm.params["slope"]) == n_roi < Xp.shape[1]
+    printed = " ".join(str(c) for c in fake_print.call_args_list)
+    assert "Error creating transfer quality plots" not in printed
+    assert app.ct_transfer_plot_frame.winfo_children()
+
+    X_pri, X_sat, wl_roi = ct_region_arrays(
+        app.ct_X_primary_common, app.ct_X_satellite_common, app.ct_wavelengths_common, tm.meta
+    )
+    assert X_pri.shape[1] == X_sat.shape[1] == len(wl_roi) == n_roi
+
+
+def test_region_arrays_without_roi_are_unchanged():
+    from spectral_predict_gui_optimized import ct_region_arrays
+
+    X = np.ones((3, 5))
+    wl = np.arange(5.0)
+    out = ct_region_arrays(X, X, wl, {"note": "no roi"})
+    assert out[0] is X and out[2] is wl
+    assert ct_region_arrays(X, X, wl, None)[0] is X
+
+
+@pytest.mark.parametrize("fmt", ["pkl", "json"])
+def test_loaded_model_info_uses_display_name(ct_app, tmp_path, fmt):
+    """Load Existing Transfer Model shows PC-DS, not the raw 'ctai' key (round 1, item 2)."""
+    import pickle
+
+    from spectral_predict.calibration_transfer import (
+        TransferModel,
+        estimate_ctai,
+        save_transfer_model,
+    )
+
+    app, Xp, Xs = ct_app
+    wl = app.current_primary_data[0]
+    tm = TransferModel("p", "s", "ctai", wl, estimate_ctai(Xp, Xs, n_components=3), meta={})
+    if fmt == "pkl":
+        path = tmp_path / "tm.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(
+                {
+                    "model": tm,
+                    "method": "ctai",
+                    "primary_id": "p",
+                    "satellite_id": "s",
+                    "wavelengths_common": wl,
+                },
+                f,
+            )
+    else:
+        path = str(save_transfer_model(tm, tmp_path, name="tm")) + ".json"
+    app.ct_load_model_path_var.set(str(path))
+    app._load_existing_transfer_model()
+
+    shown = app.ct_loaded_model_info_text.get("1.0", "end-1c")
+    assert "PC-DS" in shown
+    assert "Method: ctai" not in shown
 
 
 def test_agreement_title_says_not_a_validation():

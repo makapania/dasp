@@ -759,3 +759,9 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   black-only hunks afterwards (normalise quotes, `\'`, whitespace and trailing commas, compare) before committing.
 - **Worktree Bash guard.** In an isolated worktree the Bash tool refuses heredocs/compound commands it cannot
   verify; write scripts with the Write tool and run them with PowerShell instead.
+- **`cross_val_score(groups=...)` breaks under sklearn metadata routing.** With
+  `config_context(enable_metadata_routing=True)` the `groups=` keyword raises; a broad `except ValueError`
+  around it silently skipped CV (JYPLS chose 1 component, cv_rmse=inf). Materialise
+  `list(GroupKFold(...).split(X, y, groups))` and pass `cv=splits`; that works with and without routing.
+- **The GUI holdout does not use `sample_selection.kennard_stone`.** `_validation_kennard_stone` (GUI ~20627)
+  is its own pdist/squareform implementation; R085 only affected CT standards and model_io representatives.

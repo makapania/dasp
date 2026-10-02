@@ -1303,11 +1303,15 @@ $$x_{pri,i} = \sum_{j \in W_i} b_{i,j} \cdot x_{sat,j}$$
 
 Where $W_i$ is the window around wavelength $i$.
 
-### B.3 Transfer Sample Regression (TSR)
+### B.3 Slope/Bias per Wavelength
+Saved models store this as `tsr` (historical key; not trimmed scores regression).
+
 $$x_{pri,\lambda} = slope_\lambda \cdot x_{sat,\lambda} + bias_\lambda$$
 
-### B.4 CTAI
-$$\mathbf{X}_{transferred} = \mathbf{X}_{sat} \cdot \mathbf{M} + \mathbf{T}$$
+### B.4 PC-DS: Paired Regression in Satellite PCA Space
+Saved models store this as `ctai` (historical key; not the published standard-free CTAI).
+
+$$\mathbf{X}_{transferred} = \mathbf{X}_{sat} \cdot \mathbf{M} + \mathbf{T},\qquad \mathbf{M} = \mathbf{V} \mathbf{M}_{red} \mathbf{V}^T$$
 
 ---
 

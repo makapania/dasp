@@ -453,8 +453,8 @@ def save_transfer_model(
     for key, value in transfer_model.params.items():
         if isinstance(value, np.ndarray):
             arrays_to_save[f"param_{key}"] = value
-        elif isinstance(value, (int, float)):
-            # Store scalars in metadata instead
+        elif isinstance(value, (int, float, str)):
+            # Store scalars and short strings (e.g. 'standard_selection') in metadata
             metadata[f"param_{key}"] = value
 
     np.savez(f"{path_prefix}.npz", **arrays_to_save)
@@ -1598,33 +1598,34 @@ def estimate_jypls_inv(
 
     cv_rmse = None
     if n_components is None:
-        best_rmse = np.inf
-        best_n = 1
         n_splits = min(cv_folds, n_transfer)
-        max_comp = min(max_components, n_transfer - 1, n_wavelengths)
+        # Materialise the grouped splits so no `groups=` keyword is passed to
+        # cross_val_score: under sklearn metadata routing that keyword raises.
+        splits = list(GroupKFold(n_splits=n_splits).split(X_aug, Y_aug, groups))
+        smallest_train = min(len(train) for train, _ in splits)
+        max_comp = min(max_components, n_transfer - 1, n_wavelengths, smallest_train - 1)
 
+        rmse_by_n: dict[int, float] = {}
         for n in range(1, max_comp + 1):
-            pls_cv = PLSRegression(n_components=n, scale=False)
-            try:
-                scores = cross_val_score(
-                    pls_cv,
-                    X_aug,
-                    Y_aug,
-                    groups=groups,
-                    cv=GroupKFold(n_splits=n_splits),
-                    scoring="neg_root_mean_squared_error",
-                    error_score="raise",
-                )
-            except ValueError:
-                # Too few rows in a training fold for this many components.
-                break
-            avg_rmse = -np.mean(scores)
-            if avg_rmse < best_rmse:
-                best_rmse = avg_rmse
-                best_n = n
+            scores = cross_val_score(
+                PLSRegression(n_components=n, scale=False),
+                X_aug,
+                Y_aug,
+                cv=splits,
+                scoring="neg_root_mean_squared_error",
+                error_score="raise",
+            )
+            avg_rmse = float(-np.mean(scores))
+            if np.isfinite(avg_rmse):
+                rmse_by_n[n] = avg_rmse
 
-        n_components = best_n
-        cv_rmse = best_rmse
+        if not rmse_by_n:
+            raise ValueError(
+                "JYPLS-inv could not choose the number of PLS components: cross-validation "
+                f"gave no finite error for 1..{max_comp} components. Pass n_components."
+            )
+        n_components = min(rmse_by_n, key=rmse_by_n.get)
+        cv_rmse = rmse_by_n[n_components]
 
     max_comp = min(n_transfer - 1, n_wavelengths)
     n_components = max(min(int(n_components), max_comp), 1)

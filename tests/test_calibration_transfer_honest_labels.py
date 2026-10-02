@@ -105,6 +105,22 @@ class TestSelectTransferStandards:
             ct.select_transfer_standards(self._X(), n)
 
 
+class TestStringParamsPersist:
+    def test_standard_selection_survives_json_npz_save(self, tmp_path) -> None:
+        """The JSON/NPZ save path used to drop string params (GLM round 1, item 7)."""
+        rng = np.random.default_rng(5)
+        Xp = rng.standard_normal((20, 15))
+        idx = ct.select_transfer_standards(Xp, 8)
+        params = ct.estimate_tsr(Xp, 0.9 * Xp + 0.1, idx)
+        params["standard_selection"] = "kennard-stone"
+        tm = ct.TransferModel("p", "s", "tsr", np.arange(15.0), params)
+
+        loaded = ct.load_transfer_model(ct.save_transfer_model(tm, tmp_path, name="tsr"))
+
+        assert loaded.params["standard_selection"] == "kennard-stone"
+        np.testing.assert_array_equal(loaded.params["transfer_indices"], idx)
+
+
 class TestSlopeBiasFitsOnSelectedStandards:
     def test_fit_uses_only_the_selected_rows(self) -> None:
         """Rows outside transfer_indices must not influence the slope/bias fit."""

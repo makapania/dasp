@@ -410,24 +410,57 @@ class TestJYPLSInvTransfersSpectra:
             apply_jypls_inv(X_new + 0.3, loaded.params), apply_jypls_inv(X_new + 0.3, params)
         )
 
-    def test_auto_components_keep_both_spectra_of_a_standard_in_one_fold(self, monkeypatch):
-        """CV for component choice groups each standard's two spectra together."""
+    def test_auto_components_cv_splits_never_separate_a_standard(self, monkeypatch):
+        """No CV fold trains on one spectrum of a standard and tests on its twin.
+
+        Rows i and i + n are the primary and satellite spectra of standard i and share
+        its y, so a standard's two rows must sit on the same side of every split.
+        """
         import sklearn.model_selection as ms
 
         seen = []
         real = ms.cross_val_score
 
         def spy(*args, **kwargs):
-            seen.append(kwargs.get("groups"))
+            seen.append(kwargs.get("cv"))
             return real(*args, **kwargs)
 
         monkeypatch.setattr(ms, "cross_val_score", spy)
-        X, y, _, _ = _lowrank_instrument_data(n=20)
-        estimate_jypls_inv(X, X + 0.1, y, np.arange(20), n_components=None, max_components=4)
+        n = 20
+        X, y, _, _ = _lowrank_instrument_data(n=n)
+        estimate_jypls_inv(X, X + 0.1, y, np.arange(n), n_components=None, max_components=4)
 
         assert seen, "auto component selection should run CV"
-        groups = seen[0]
-        np.testing.assert_array_equal(groups[:20], groups[20:])
+        splits = list(seen[0])
+        assert len(splits) == 5
+        for train, test in splits:
+            train_std = set((np.asarray(train) % n).tolist())
+            test_std = set((np.asarray(test) % n).tolist())
+            assert not train_std & test_std
+            assert len(train) + len(test) == 2 * n
+
+    def test_auto_components_work_with_metadata_routing(self):
+        """sklearn metadata routing must not silently disable the CV (Codex round 1)."""
+        import sklearn
+
+        X, y, _, _ = _lowrank_instrument_data(n=20, noise=0.002, seed=5)
+        kwargs = dict(n_components=None, max_components=6)
+        plain = estimate_jypls_inv(X, X + 0.1, y, np.arange(20), **kwargs)
+        with sklearn.config_context(enable_metadata_routing=True):
+            routed = estimate_jypls_inv(X, X + 0.1, y, np.arange(20), **kwargs)
+
+        assert np.isfinite(routed["cv_rmse"])
+        assert routed["n_components"] == plain["n_components"]
+        assert routed["cv_rmse"] == pytest.approx(plain["cv_rmse"])
+
+    def test_auto_components_reject_cv_with_no_finite_error(self, monkeypatch):
+        """If every component count gives a non-finite CV error, refuse to guess."""
+        import sklearn.model_selection as ms
+
+        monkeypatch.setattr(ms, "cross_val_score", lambda *a, **k: np.array([np.nan]))
+        X, y, _, _ = _lowrank_instrument_data(n=20)
+        with pytest.raises(ValueError, match="could not choose"):
+            estimate_jypls_inv(X, X + 0.1, y, np.arange(20), n_components=None, max_components=4)
 
 
 # ============================================================================
