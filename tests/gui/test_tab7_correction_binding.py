@@ -101,3 +101,50 @@ def test_regression_correction_not_saved_with_classifier(correction_on, tmp_path
     loaded = _save_and_load(app, tmp_path)
     assert loaded["bias_correction"] is None
     assert loaded["metadata"]["has_bias_correction"] is False
+
+
+def test_nonlinear_correction_rejects_model_change_during_compute(correction_on, monkeypatch):
+    """A refit that finishes while Compute runs must not adopt the old correction."""
+    import spectral_predict.bias_correction as bc
+
+    app = correction_on
+    _refit(app, "PLS", "None", subset=True)
+    real = bc.compute_nonlinear_correction
+
+    def _model_b_finishes_mid_compute(*args, **kwargs):
+        result = real(*args, **kwargs)
+        # What the refit worker does when model B's CV predictions are stored.
+        app._bind_corrections_to_new_model()
+        return result
+
+    monkeypatch.setattr(bc, "compute_nonlinear_correction", _model_b_finishes_mid_compute)
+    app._compute_nonlinear_correction()
+
+    assert app.nonlinear_correction_data is None
+    assert app._nonlinear_correction_token is None
+    assert app._correction_to_save() is None
+
+
+def test_compute_and_save_disabled_while_refit_runs(gui_app, monkeypatch):
+    import threading
+
+    _refit(gui_app, "PLS", "None", subset=True)
+    started = []
+
+    class _DeferredThread:
+        def __init__(self, target=None, daemon=None, **_kw):
+            started.append(target)
+
+        def start(self):
+            pass  # the run is "in progress" for the rest of the test
+
+    monkeypatch.setattr(threading, "Thread", _DeferredThread)
+    # Widget-level parameter validation is not under test here.
+    monkeypatch.setattr(gui_app, "_validate_refinement_parameters", lambda: True)
+    try:
+        gui_app._run_refined_model()
+        assert started, "refit thread was not launched"
+        for name in ("refine_save_button", "refine_save_button_results", "bc_compute_button"):
+            assert str(getattr(gui_app, name).cget("state")) == "disabled", name
+    finally:
+        gui_app._restore_refit_buttons_after_abort()

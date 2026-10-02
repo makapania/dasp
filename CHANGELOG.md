@@ -92,16 +92,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   raw y while CV, the reported metrics and the file's `y_transform` described the
   transformed model. It is now fitted on the transformed full-calibration y and
   inverse-transforms its predictions. `y_transform` in the file is the transform the
-  model was trained with, not the widget at save time. **Existing .dasp files saved
+  model was trained with (canonical name: `log`, `log1p`, `sqrt`, `boxcox`,
+  `yeo-johnson` or `none`), not the widget at save time. **Existing .dasp files saved
   from an early-stopping booster with a Y-transform hold a raw-y model and must be
   retrained**; no other Y-transform file could be produced before this fix.
+  Everything else that uses the model follows the transform. Python, notebook and R code
+  exports train on the transformed target in CV and in the final fit; exporting a
+  Y-transformed model with imbalance handling is refused, with a message. The Model
+  Complexity curve is computed on the transformed model. Random Forest per-sample tree
+  spread is reported in original units. SHAP for a tree model with a Y-transform uses
+  the slower KernelExplainer, as TreeExplainer cannot see inside the transform.
 - **A bias or nonlinear correction is saved only with the model it was computed for**
   (review R010/R064). A correction left from an earlier Model Development run (for
   example a polynomial fitted to another model, or a regression correction after
   switching to classification) used to be embedded in the next saved model and applied
   to all of its predictions. Each new fit now clears corrections, computing one after
   the run and then saving still works, and classification/one-class models never get
-  one. Prediction also ignores a correction stored with a non-regression model. **Already
+  one. Save and the nonlinear Compute button are disabled while a refit runs, and a
+  correction whose model changed while it was being computed is discarded. Prediction
+  also ignores a correction stored with a non-regression model. **Already
   saved regression files with a stale correction cannot be detected automatically**:
   if a model was saved with "apply correction" ticked after more than one run in the
   session, recompute the correction and re-save.

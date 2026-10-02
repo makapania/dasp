@@ -762,3 +762,21 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   correction for non-regression at save and ignores one at predict (legacy files).
 - **Pre-existing, not fixed:** `_plot_wavelength_importance` applies `refined_preprocessor` (full-spectrum prep) to
   `refined_X_train` (already preprocessed + subset), so the residual-correlation overlay double-preprocesses.
+- **Review round 1 (Codex + GLM, MERGE-WITH-FIXES):**
+  - Token race: Compute runs on the Tk thread while the refit worker can swap the model. Capture the token BEFORE
+    reading `refined_y_*`, keep the result only if the token is unchanged; the worker sets the token to None before
+    the model swap and issues the new one only after the CV predictions are stored. Save/Compute are also disabled
+    while a refit runs (GA abort paths now re-enable them).
+  - Every consumer that rebuilds or inspects the model must handle a TTR: code export (now `YTransformRegressor` in
+    the generated script; `_fit_fold` re-enters with transformed train/eval y for early stopping; export refuses
+    Y-transform + imbalance), RF tree variance in `predict_with_uncertainty` (inverse-transform each tree), complexity
+    curve (clones of `final_pipe`, params `regressor__model__<p>`). SHAP has no TreeExplainer for a TTR and falls
+    back to KernelExplainer (works, slower, original units).
+  - **Tree-count hook for fix/booster-early-stopping:** set any final-fit parameter on `final_pipe` at the
+    "FINAL-FIT PARAMETER HOOK" comment (just after the Y-transform wrap); `_final_param_prefix` is `'regressor__'`
+    when it is a TTR, so the booster tree count is `regressor__model__n_estimators`.
+  - Saved `y_transform` is now the canonical name (`log`, `boxcox`, `none`); files from before this fix hold display
+    names ('Log', 'None'), so readers must normalize.
+  - Export parity gotcha: a Tab 7 XGBoost refit fills params missing from `Params` with GUI defaults (subsample 0.8,
+    colsample_bytree 0.6, ...) that the code export does not know, so export CV differs unless the row is complete.
+    Pre-existing, not Y-transform specific; test rows carry full params.

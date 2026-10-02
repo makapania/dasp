@@ -32,12 +32,21 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from spectral_predict.model_io import load_model, predict_with_model
-from spectral_predict.y_transform import YTransformWrapper
+from spectral_predict.y_transform import YTransformWrapper, normalize_y_transform_method
 
 pytestmark = pytest.mark.gui
 
 TRANSFORMS = ["Log", "Log1p", "Sqrt", "Box-Cox", "Yeo-Johnson"]
 N_SAMPLES = 36
+
+
+@pytest.fixture(autouse=True)
+def _reset_y_transform_widget(gui_app):
+    """The session app is shared: never leak a selected transform into later tests."""
+    yield
+    gui_app.refine_y_transform.set("None")
+
+
 N_WL = 60
 
 
@@ -68,7 +77,20 @@ def _row(model: str, early_stopping: bool) -> dict:
     elif model == "Ridge":
         params, extra = {"alpha": 0.01}, {}
     elif model == "XGBoost":
-        params = {"n_estimators": 40, "max_depth": 2, "learning_rate": 0.2, "random_state": 0}
+        # Full row (as a real Results row carries): Tab 7 fills unspecified XGBoost
+        # params with GUI defaults that the code export does not know about.
+        params = {
+            "n_estimators": 40,
+            "max_depth": 2,
+            "learning_rate": 0.2,
+            "random_state": 0,
+            "subsample": 0.8,
+            "colsample_bytree": 0.6,
+            "reg_lambda": 1.5,
+            "reg_alpha": 0.2,
+            "min_child_weight": 1,
+            "gamma": 0.0,
+        }
         extra = {}
     else:  # pragma: no cover - guard against typos in parametrisation
         raise ValueError(model)
@@ -152,7 +174,7 @@ def test_ytransform_refit_save_load_predict_parity(gui_app, tmp_path, y_transfor
     gui_app.refine_y_transform.set("None")
     loaded = _save_and_load(gui_app, tmp_path)
 
-    assert loaded["metadata"]["y_transform"] == y_transform
+    assert loaded["metadata"]["y_transform"] == normalize_y_transform_method(y_transform)
     saved_model = loaded["model"]
     assert isinstance(saved_model, TransformedTargetRegressor)
 
@@ -196,7 +218,7 @@ def test_ytransform_early_stopping_final_model_uses_transform(
 
     gui_app.refine_y_transform.set("None")
     loaded = _save_and_load(gui_app, tmp_path)
-    assert loaded["metadata"]["y_transform"] == y_transform
+    assert loaded["metadata"]["y_transform"] == normalize_y_transform_method(y_transform)
     _assert_roundtrip_parity(gui_app, loaded, X_df, y)
 
 
@@ -205,5 +227,131 @@ def test_no_transform_records_none_and_keeps_plain_model(gui_app, tmp_path):
     assert not isinstance(gui_app.refined_model, TransformedTargetRegressor)
     gui_app.refine_y_transform.set("Log")  # widget moved after training
     loaded = _save_and_load(gui_app, tmp_path)
-    assert loaded["metadata"]["y_transform"] == "None"
+    assert loaded["metadata"]["y_transform"] == "none"
     _assert_roundtrip_parity(gui_app, loaded, X_df, y)
+
+
+# --- Review round 1: consumers of a Y-transformed refit -----------------------------
+
+
+def _exec_export(app) -> dict:
+    """Generate the embedded-data notebook for the current refit and execute it."""
+    from spectral_predict.code_generator import CodeGenerator, ExportOptions
+
+    cfg = app._build_export_model_config()
+    opts = ExportOptions(
+        format="notebook",
+        include_data=True,
+        data_X=app.refined_X_train,
+        data_y=app.refined_y_train,
+        wavelengths=app.refined_wavelengths,
+        colab_ready=False,
+        include_visualization=False,
+    )
+    ns: dict = {}
+    with contextlib.redirect_stdout(io.StringIO()):
+        for cell in CodeGenerator(cfg, opts).generate_notebook()["cells"]:
+            code = "".join(cell["source"])
+            if cell["cell_type"] != "code" or "subprocess.check_call" in code:
+                continue
+            exec(code, ns)
+    return ns
+
+
+@pytest.mark.parametrize(
+    "model,y_transform,early_stopping",
+    [("PLS", "Log", False), ("Ridge", "Box-Cox", False), ("XGBoost", "Log", True)],
+)
+def test_exported_refinement_preserves_y_transform(gui_app, model, y_transform, early_stopping):
+    """Exported CV and final model reproduce the transformed in-app refit."""
+    _refit(gui_app, model, y_transform, subset=True, early_stopping=early_stopping)
+    cfg = gui_app._build_export_model_config()
+    assert cfg["y_transform"] == normalize_y_transform_method(y_transform)
+
+    ns = _exec_export(gui_app)
+
+    inapp_cv = np.empty(len(gui_app.refined_y_pred))
+    inapp_cv[gui_app.refined_cv_indices] = gui_app.refined_y_pred
+    np.testing.assert_allclose(ns["all_y_pred_arr"], inapp_cv, rtol=1e-6, atol=1e-8)
+
+    X_work = gui_app.refined_X_train
+    np.testing.assert_allclose(
+        ns["model"].predict(X_work), gui_app.refined_model.predict(X_work), rtol=1e-6, atol=1e-8
+    )
+
+
+@pytest.mark.parametrize("model,param", [("PLS", "n_components"), ("Ridge", "alpha")])
+def test_complexity_curve_uses_frozen_y_transform(gui_app, model, param):
+    """The Model Complexity curve is computed on the transformed-target model."""
+    from sklearn.model_selection import validation_curve
+
+    from spectral_predict.cv_utils import build_cv_splitter
+
+    _refit(gui_app, model, "Log", subset=True)
+    curve = gui_app.complexity_curve_data
+    assert curve is not None and curve["param_name"] == param
+
+    # Independent reference: clones of the SAVED transformed model, varied on the
+    # same parameter and scored in original units.
+    saved = gui_app.refined_model
+    inner = saved.regressor
+    name = f"regressor__model__{param}" if isinstance(inner, Pipeline) else f"regressor__{param}"
+    cv = build_cv_splitter(
+        strategy="kfold", n_folds=3, task_type="regression", n_repeats=5, random_state=42
+    )
+    X_work, y = gui_app.refined_X_train, gui_app.refined_y_train
+    _, cv_raw = validation_curve(
+        clone(saved),
+        X_work,
+        y,
+        param_name=name,
+        param_range=curve["param_values"],
+        cv=cv,
+        scoring="neg_root_mean_squared_error",
+    )
+    np.testing.assert_allclose(curve["cv_scores"], -cv_raw.mean(axis=1), rtol=1e-6)
+
+
+def test_classification_ignores_y_transform_widget(gui_app, tmp_path):
+    X_df, y = _spectra()
+    labels = pd.Series(np.where(y.values > np.median(y.values), "hi", "lo"), index=y.index)
+    gui_app.X_original = X_df
+    gui_app.X = X_df
+    gui_app.y = labels
+    gui_app.active_indices = None
+    gui_app.excluded_spectra = set()
+    gui_app.validation_enabled.set(False)
+    gui_app.validation_indices = []
+    gui_app.use_autoscale.set(False)
+    gui_app.selected_model_config = {
+        "Model": "PLS-DA",
+        "Task": "classification",
+        "Params": str({"n_components": 2}),
+        "LVs": 2,
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+    }
+    gui_app._original_wavelength_order = [float(c) for c in X_df.columns]
+    gui_app.refine_task_type.set("classification")
+    gui_app.refine_model_type.set("PLS-DA")
+    gui_app.refine_preprocess.set("raw")
+    gui_app.refine_folds.set(3)
+    gui_app.refine_cv_strategy.set("kfold")
+    gui_app.refine_y_transform.set("Log")
+    gui_app.model_loaded_from_results = True
+    gui_app.refine_hyperparams_modified = False
+    gui_app.refined_model = None
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            gui_app._run_refined_model_thread()
+        gui_app.root.update()
+    finally:
+        gui_app.refine_y_transform.set("None")
+    assert gui_app.refined_model is not None, buf.getvalue()[-3000:]
+
+    assert not isinstance(gui_app.refined_model, TransformedTargetRegressor)
+    assert gui_app.refined_config["y_transform"] == "none"
+    loaded = _save_and_load(gui_app, tmp_path)
+    assert loaded["metadata"]["y_transform"] == "none"

@@ -16000,8 +16000,9 @@ class SpectralPredictApp:
         nl_options = ['Polynomial (2)', 'Polynomial (3)', 'Polynomial (4)', 'Spline']
         ttk.Combobox(adv_row, textvariable=self.nonlinear_correction_method,
                      values=nl_options, width=15, state='readonly').pack(side='left', padx=5)
-        ttk.Button(adv_row, text="Compute",
-                   command=self._compute_nonlinear_correction).pack(side='left', padx=10)
+        self.bc_compute_button = ttk.Button(adv_row, text="Compute",
+                                            command=self._compute_nonlinear_correction)
+        self.bc_compute_button.pack(side='left', padx=10)
         ttk.Checkbutton(adv_row, text="Use nonlinear instead of linear",
                         variable=self.use_nonlinear_correction).pack(side='left', padx=10)
 
@@ -37672,10 +37673,13 @@ Performance (Classification):
         try:
             from spectral_predict.bias_correction import compute_bias_slope
 
+            # Token captured before the predictions it describes (see
+            # _compute_nonlinear_correction); a later model swap invalidates it.
+            token = getattr(self, '_refined_model_token', None)
             self.bias_correction_data = compute_bias_slope(
                 self.refined_y_true, self.refined_y_pred
             )
-            self._bias_correction_token = getattr(self, '_refined_model_token', None)
+            self._bias_correction_token = token
 
             bc = self.bias_correction_data
             orig = bc['metrics_original']
@@ -37718,6 +37722,14 @@ Performance (Classification):
         if not self.refined_config or self.refined_config.get('task_type') != 'regression':
             return  # R010: corrections are regression-only
 
+        # R010: a refit can finish while this runs (Compute stays clickable). Capture
+        # the model token BEFORE the CV predictions and keep the result only if the
+        # model is unchanged afterwards. Token None = a model swap is in progress.
+        token = getattr(self, '_refined_model_token', None)
+        y_true, y_pred = self.refined_y_true, self.refined_y_pred
+        if token is None:
+            return
+
         try:
             from spectral_predict.bias_correction import compute_nonlinear_correction
 
@@ -37730,11 +37742,16 @@ Performance (Classification):
                 # Extract degree from "Polynomial (N)"
                 degree = int(method_str.split('(')[1].rstrip(')').strip())
 
-            self.nonlinear_correction_data = compute_nonlinear_correction(
-                self.refined_y_true, self.refined_y_pred,
+            result = compute_nonlinear_correction(
+                y_true, y_pred,
                 method=method, degree=degree
             )
-            self._nonlinear_correction_token = getattr(self, '_refined_model_token', None)
+            if getattr(self, '_refined_model_token', None) is not token:
+                self._reset_nonlinear_correction_text()
+                print("Nonlinear correction discarded: the model changed while computing.")
+                return
+            self.nonlinear_correction_data = result
+            self._nonlinear_correction_token = token
 
             nl = self.nonlinear_correction_data
             orig = nl['metrics_original']
@@ -39370,12 +39387,65 @@ F1 Score:  {f1:.4f}
     # Model Complexity Analysis Methods
     # ==========================================================================
 
-    def _compute_validation_curve(self, model_type, X, y, params, cv, task_type, n_components=None):
+    def _compute_wrapped_validation_curve(
+        self, model_type: str, estimator, X, y, cv, task_type: str, n_components=None
+    ) -> dict | None:
+        """Validation curve on clones of the actual (Y-transformed) training estimator.
+
+        ``estimator`` is the TransformedTargetRegressor around the training pipeline,
+        so every point is fitted on the transformed target and scored in original
+        units, like the model being refined. The complexity parameter is varied on
+        the inner model through its nested name (``regressor__model__<param>``).
+        """
+        from spectral_predict.diagnostics import compute_sklearn_validation_curve
+
+        inner = estimator.regressor
+        prefix = 'regressor__'
+        if hasattr(inner, 'named_steps') and 'model' in inner.named_steps:
+            prefix += 'model__'
+        current = estimator.get_params()
+        use_log = True
+
+        if model_type == 'PLS':
+            n_train_min = min(len(tr) for tr, _ in cv.split(X, y))
+            base = int(n_components or current.get(prefix + 'n_components', 2))
+            upper = max(1, min(base + 2, X.shape[1], n_train_min - 1))
+            name, values, use_log = 'n_components', list(range(1, upper + 1)), False
+        elif model_type in ('Ridge', 'Lasso', 'ElasticNet', 'MLP'):
+            base = float(current.get(prefix + 'alpha', 1.0))
+            name = 'alpha'
+            values = list(np.logspace(np.log10(base) - 2, np.log10(base) + 2, 8))
+        elif model_type in ('SVR', 'SVM'):
+            base = float(current.get(prefix + 'C', 1.0))
+            name = 'C'
+            values = list(np.logspace(np.log10(base) - 2, np.log10(base) + 2, 8))
+        elif model_type in ('RandomForest', 'XGBoost', 'LightGBM', 'CatBoost'):
+            name = 'iterations' if model_type == 'CatBoost' else 'n_estimators'
+            base = int(current.get(prefix + name) or 100)
+            values = sorted({max(10, int(v)) for v in np.linspace(base * 0.1, base * 1.5, 8)})
+            use_log = False
+        else:
+            print(f"Warning: Validation curve not implemented for Y-transformed {model_type}")
+            return None
+
+        result = compute_sklearn_validation_curve(
+            estimator, X, y, prefix + name, values, cv, task=task_type
+        )
+        result['param_name'] = name
+        result['selected_idx'] = int(np.argmin(np.abs(np.array(values, dtype=float) - base)))
+        result['use_log_scale'] = use_log
+        return result
+
+    def _compute_validation_curve(
+        self, model_type, X, y, params, cv, task_type, n_components=None, estimator=None
+    ):
         """
         Compute validation curve for the given model type.
 
         Dispatches to appropriate method based on model type.
-        Returns dict with validation curve data.
+        Returns dict with validation curve data. With ``estimator`` (a fitted or
+        unfitted Y-transform TransformedTargetRegressor), the curve is computed on
+        clones of that estimator instead of a freshly built, untransformed model.
         """
         from spectral_predict.diagnostics import (
             compute_pls_complexity_curve,
@@ -39385,6 +39455,11 @@ F1 Score:  {f1:.4f}
         )
 
         try:
+            if estimator is not None:
+                return self._compute_wrapped_validation_curve(
+                    model_type, estimator, X, y, cv, task_type, n_components
+                )
+
             # PLS models
             if model_type in ('PLS', 'PLS-DA'):
                 max_comp = n_components + 2 if n_components else 10
@@ -39738,12 +39813,36 @@ F1 Score:  {f1:.4f}
         self.refine_run_button.config(state='disabled')
         self.refine_run_button_selection.config(state='disabled')
         self.refine_run_button_results.config(state='disabled')
+        # R010: no saving or correction computing while the model is being replaced;
+        # _update_refined_results re-enables them when the run ends.
+        self._set_refit_dependent_buttons('disabled')
         self.refine_status.config(text="Running refined model...")
         self.root.config(cursor="wait")
 
         # Run in thread (daemon=True for clean process exit)
         thread = threading.Thread(target=self._run_refined_model_thread, daemon=True)
         thread.start()
+
+    def _set_refit_dependent_buttons(self, state: str) -> None:
+        """Enable/disable the Save and nonlinear-correction Compute buttons."""
+        for name in ('refine_save_button', 'refine_save_button_results', 'bc_compute_button'):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.config(state=state)
+
+    def _restore_refit_buttons_after_abort(self) -> None:
+        """Re-enable controls when a refit aborts before replacing the model (GA paths)."""
+        self.root.config(cursor="")
+        run_buttons = (
+            'refine_run_button', 'refine_run_button_selection', 'refine_run_button_results'
+        )
+        for name in run_buttons:
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.config(state='normal')
+        # The previous model (if any) is still the current one.
+        if self.refined_model is not None:
+            self._set_refit_dependent_buttons('normal')
 
     def _run_refined_model_thread(self):
         """Execute the refined model in a background thread."""
@@ -41210,6 +41309,7 @@ F1 Score:  {f1:.4f}
                             "Please ensure the module is installed or select a different preprocessing method.",
                         ),
                     )
+                    self.root.after(0, self._restore_refit_buttons_after_abort)
                     return
 
                 # Check if we're loading from a saved GA model or running new GA optimization
@@ -41298,6 +41398,7 @@ F1 Score:  {f1:.4f}
                                 "Please check console for details or try a different preprocessing method.",
                             ),
                         )
+                        self.root.after(0, self._restore_refit_buttons_after_abort)
                         return
 
                 # Build pipeline with ONLY the model (GA preprocessing already applied)
@@ -41580,6 +41681,8 @@ F1 Score:  {f1:.4f}
             # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
             # Read the widget ONCE: this value is frozen into refined_config below, so the
             # saved metadata describes the trained model, not the widget at save time.
+            from spectral_predict.y_transform import normalize_y_transform_method
+
             y_transform = getattr(self, 'refine_y_transform', tk.StringVar(value='None')).get()
             y_transform_active = (
                 str(y_transform).strip().lower() not in ('none', '')
@@ -42025,6 +42128,13 @@ Configuration:
                 # this the saved model was a raw-y fit labelled with the transform.
                 from spectral_predict.y_transform import YTransformWrapper
                 final_pipe = YTransformWrapper.wrap(final_pipe, y_transform)
+            # FINAL-FIT PARAMETER HOOK: anything that must change the final model's
+            # parameters (e.g. a tree count chosen from CV early stopping) goes HERE,
+            # on `final_pipe`, before .fit. With a Y-transform `final_pipe` is a
+            # TransformedTargetRegressor, so pipeline params need the 'regressor__'
+            # prefix (e.g. 'regressor__model__n_estimators'); use this prefix:
+            _final_param_prefix = 'regressor__' if isinstance(final_pipe, _TTR) else ''
+            print(f"DEBUG: final-fit param prefix: '{_final_param_prefix}'")
             # Mirror the per-fold sample_weight wiring: full-data balanced weights
             # for sample_weight-only classifiers (XGBoost). PLS-DA / CatBoost / RF /
             # SVC / LightGBM / NeuralBoosted carry their class_weight or
@@ -42265,9 +42375,12 @@ External Validation Performance (n={n_val}):
                 'ga_genes': self.refined_ga_genes,
                 'ga_config': self.refined_ga_config,
                 'ga_model_type': self.refined_ga_model_type,
-                # Frozen at training time (R014): the transform actually fitted, or
-                # 'None' (also for classification, where the widget is ignored).
-                'y_transform': y_transform if y_transform_active else 'None',
+                # Frozen at training time (R014): canonical name of the transform
+                # actually fitted ('log', 'boxcox', ...), or 'none' (also for
+                # classification, where the widget is ignored).
+                'y_transform': (
+                    normalize_y_transform_method(y_transform) if y_transform_active else 'none'
+                ),
             }
 
             # Add coupled optimization params if present
@@ -42338,7 +42451,10 @@ External Validation Performance (n={n_val}):
                     params=params_for_curve,
                     cv=cv,
                     task_type=task_type,
-                    n_components=n_components_for_curve
+                    n_components=n_components_for_curve,
+                    # Y-transform: evaluate clones of the actual wrapped estimator so
+                    # the curve describes the transformed-target model (not raw y).
+                    estimator=final_pipe if isinstance(final_pipe, _TTR) else None,
                 )
                 if self.complexity_curve_data:
                     print(f"DEBUG: Validation curve computed successfully "
@@ -42375,6 +42491,8 @@ External Validation Performance (n={n_val}):
         self.refine_run_button.config(state='normal')
         self.refine_run_button_selection.config(state='normal')
         self.refine_run_button_results.config(state='normal')
+        if getattr(self, 'bc_compute_button', None) is not None:
+            self.bc_compute_button.config(state='normal')
 
         if is_error:
             self.refine_status.config(text="[X] Error running refined model")
@@ -42550,8 +42668,10 @@ External Validation Performance (n={n_val}):
                     )
                 ),
                 # Y-transform: the value frozen when the model was trained (R014), not
-                # the live widget. One-class refits never set it, so default to 'None'.
-                'y_transform': (self.refined_config or {}).get('y_transform', 'None'),
+                # the live widget; canonical name. One-class refits never set it.
+                # (Files saved before this fix hold the display name, e.g. 'Log'/'None';
+                # readers should pass it through normalize_y_transform_method.)
+                'y_transform': (self.refined_config or {}).get('y_transform', 'none'),
             }
 
             # Add coupled optimization params if present
@@ -42708,6 +42828,117 @@ External Validation Performance (n={n_val}):
             )
             print(f"Error saving model:\n{error_msg}")
 
+    def _build_export_model_config(self) -> dict:
+        """Build the code-export ``model_config`` for the current refined model."""
+        # Parse tuned parameters from results table (critical for reproducibility)
+        params_from_search = {}
+        if self.selected_model_config is not None:
+            raw_params = self.selected_model_config.get('Params')
+            if isinstance(raw_params, dict):
+                params_from_search = raw_params
+            elif isinstance(raw_params, str) and raw_params.strip():
+                try:
+                    parsed = ast.literal_eval(raw_params)
+                    if isinstance(parsed, dict):
+                        params_from_search = parsed
+                except (ValueError, SyntaxError):
+                    params_from_search = {}
+
+        # Build variable indices when full wavelength list is available
+        variable_indices = self.refined_config.get('ga_genes')
+        if variable_indices is None and self.refined_full_wavelengths:
+            # Map selected wavelengths back to full wavelength indices (preserve order)
+            full_map = {}
+            for idx, wl in enumerate(self.refined_full_wavelengths):
+                try:
+                    key = f"{float(wl):.1f}"
+                except (TypeError, ValueError):
+                    continue
+                if key not in full_map:
+                    full_map[key] = idx
+
+            indices = []
+            for wl in self.refined_wavelengths or []:
+                try:
+                    key = f"{float(wl):.1f}"
+                except (TypeError, ValueError):
+                    continue
+                if key in full_map:
+                    indices.append(full_map[key])
+            if indices:
+                variable_indices = indices
+
+        # Build model config
+        model_config = {
+            'model_name': self.refined_config['model_name'],
+            'preprocessing': self.refined_config['preprocessing'],
+            'target_name': self.refined_config.get('target_name', 'target'),
+            'task_type': self.refined_config['task_type'],
+            'params': params_from_search,
+            'metrics': (
+                {'RMSE': self.refined_performance.get('rmse_mean'),
+                 'R2': self.refined_performance.get('r2_mean')}
+                if self.refined_config['task_type'] == 'regression'
+                else {'BalancedAcc': self.refined_performance.get('BalancedAcc'),
+                      'Sensitivity': self.refined_performance.get('Sensitivity'),
+                      'Specificity': self.refined_performance.get('Specificity'),
+                      'AUC': self.refined_performance.get('AUC')}
+                if self.refined_config['task_type'] == 'one_class'
+                else {'Accuracy': self.refined_performance.get('accuracy_mean'),
+                      'F1': self.refined_performance.get('f1_mean')}
+            ),
+            'wavelengths': self.refined_wavelengths,
+            'cv_folds': self.refined_config.get('cv_folds', 5),
+            'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
+            'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
+            # Preprocessing window size (critical for SG derivatives)
+            'window_size': self.refined_config.get('window', 17),
+            # Derivative order / polyorder (for deriv_snv variants)
+            'deriv_order': self.selected_model_config.get('Deriv') if self.selected_model_config else None,
+            'polyorder': self.selected_model_config.get('Poly') if self.selected_model_config else None,
+            # Imbalance handling (for reproducibility)
+            'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
+            'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
+            # Early stopping rounds (boosters only) — must be threaded
+            # so the export reproduces the in-app per-fold CV. Without
+            # this, exported notebooks for LightGBM/XGBoost/CatBoost
+            # silently train more trees than the in-app run did and
+            # can flip predictions on borderline samples.
+            'early_stopping_rounds': (
+                self.selected_model_config.get('early_stopping_rounds')
+                if self.selected_model_config else None
+            ),
+            # T-36: autoscale flag — exported scripts must apply UV scaling after
+            # SNV/derivatives if it was active during training, else they will not
+            # reproduce the saved model.
+            # T-36 fix (post-merge review): prefer the trained config over the
+            # live checkbox so an exported script always describes the actual
+            # trained pipeline even if the user toggled the checkbox afterwards.
+            # T-36 fix (post-merge review v2): parse via the shared
+            # string-aware helper to avoid the bool("False") == True trap.
+            'autoscale': _parse_autoscale_flag(
+                (self.refined_config or {}).get(
+                    'autoscale',
+                    (self.selected_model_config or {}).get(
+                        'autoscale',
+                        (self.selected_model_config or {}).get(
+                            'Autoscale', self.use_autoscale.get()
+                        ),
+                    ),
+                )
+            ),
+            # Variable selection indices (GA or wavelength subset)
+            'variable_indices': variable_indices,
+            'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
+            # GUI does NOT trim derivative edges; keep export aligned
+            'trim_derivative_edges': False,
+            'inlier_class_label': self.refined_config.get('inlier_class_label', ''),
+            # Tab 7 target transform (canonical name, frozen at training time): the
+            # exported CV and final fit must train on the same transformed target.
+            'y_transform': (self.refined_config or {}).get('y_transform', 'none'),
+        }
+        return model_config
+
     def _export_for_publication(self):
         """Export analysis code for publication/reviewers - SIMPLE VERSION."""
         # Check if model has been trained
@@ -42787,110 +43018,7 @@ External Validation Performance (n={n_val}):
                 from spectral_predict.export_bundle import create_export_bundle
                 from datetime import datetime
 
-                # Parse tuned parameters from results table (critical for reproducibility)
-                params_from_search = {}
-                if self.selected_model_config is not None:
-                    raw_params = self.selected_model_config.get('Params')
-                    if isinstance(raw_params, dict):
-                        params_from_search = raw_params
-                    elif isinstance(raw_params, str) and raw_params.strip():
-                        try:
-                            parsed = ast.literal_eval(raw_params)
-                            if isinstance(parsed, dict):
-                                params_from_search = parsed
-                        except (ValueError, SyntaxError):
-                            params_from_search = {}
-
-                # Build variable indices when full wavelength list is available
-                variable_indices = self.refined_config.get('ga_genes')
-                if variable_indices is None and self.refined_full_wavelengths:
-                    # Map selected wavelengths back to full wavelength indices (preserve order)
-                    full_map = {}
-                    for idx, wl in enumerate(self.refined_full_wavelengths):
-                        try:
-                            key = f"{float(wl):.1f}"
-                        except (TypeError, ValueError):
-                            continue
-                        if key not in full_map:
-                            full_map[key] = idx
-
-                    indices = []
-                    for wl in self.refined_wavelengths or []:
-                        try:
-                            key = f"{float(wl):.1f}"
-                        except (TypeError, ValueError):
-                            continue
-                        if key in full_map:
-                            indices.append(full_map[key])
-                    if indices:
-                        variable_indices = indices
-
-                # Build model config
-                model_config = {
-                    'model_name': self.refined_config['model_name'],
-                    'preprocessing': self.refined_config['preprocessing'],
-                    'target_name': self.refined_config.get('target_name', 'target'),
-                    'task_type': self.refined_config['task_type'],
-                    'params': params_from_search,
-                    'metrics': (
-                        {'RMSE': self.refined_performance.get('rmse_mean'),
-                         'R2': self.refined_performance.get('r2_mean')}
-                        if self.refined_config['task_type'] == 'regression'
-                        else {'BalancedAcc': self.refined_performance.get('BalancedAcc'),
-                              'Sensitivity': self.refined_performance.get('Sensitivity'),
-                              'Specificity': self.refined_performance.get('Specificity'),
-                              'AUC': self.refined_performance.get('AUC')}
-                        if self.refined_config['task_type'] == 'one_class'
-                        else {'Accuracy': self.refined_performance.get('accuracy_mean'),
-                              'F1': self.refined_performance.get('f1_mean')}
-                    ),
-                    'wavelengths': self.refined_wavelengths,
-                    'cv_folds': self.refined_config.get('cv_folds', 5),
-                    'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
-                    'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
-                    # Preprocessing window size (critical for SG derivatives)
-                    'window_size': self.refined_config.get('window', 17),
-                    # Derivative order / polyorder (for deriv_snv variants)
-                    'deriv_order': self.selected_model_config.get('Deriv') if self.selected_model_config else None,
-                    'polyorder': self.selected_model_config.get('Poly') if self.selected_model_config else None,
-                    # Imbalance handling (for reproducibility)
-                    'imbalance_method': self.selected_model_config.get('imbalance_method') if self.selected_model_config else None,
-                    'imbalance_params': self.selected_model_config.get('imbalance_params', {}) if self.selected_model_config else {},
-                    # Early stopping rounds (boosters only) — must be threaded
-                    # so the export reproduces the in-app per-fold CV. Without
-                    # this, exported notebooks for LightGBM/XGBoost/CatBoost
-                    # silently train more trees than the in-app run did and
-                    # can flip predictions on borderline samples.
-                    'early_stopping_rounds': (
-                        self.selected_model_config.get('early_stopping_rounds')
-                        if self.selected_model_config else None
-                    ),
-                    # T-36: autoscale flag — exported scripts must apply UV scaling after
-                    # SNV/derivatives if it was active during training, else they will not
-                    # reproduce the saved model.
-                    # T-36 fix (post-merge review): prefer the trained config over the
-                    # live checkbox so an exported script always describes the actual
-                    # trained pipeline even if the user toggled the checkbox afterwards.
-                    # T-36 fix (post-merge review v2): parse via the shared
-                    # string-aware helper to avoid the bool("False") == True trap.
-                    'autoscale': _parse_autoscale_flag(
-                        (self.refined_config or {}).get(
-                            'autoscale',
-                            (self.selected_model_config or {}).get(
-                                'autoscale',
-                                (self.selected_model_config or {}).get(
-                                    'Autoscale', self.use_autoscale.get()
-                                ),
-                            ),
-                        )
-                    ),
-                    # Variable selection indices (GA or wavelength subset)
-                    'variable_indices': variable_indices,
-                    'variable_selection_method': 'GA' if self.refined_config.get('ga_genes') else None,
-                    # GUI does NOT trim derivative edges; keep export aligned
-                    'trim_derivative_edges': False,
-                    'inlier_class_label': self.refined_config.get('inlier_class_label', ''),
-                }
+                model_config = self._build_export_model_config()
 
                 # Get data
                 data_X = getattr(self, 'refined_X_train', None)

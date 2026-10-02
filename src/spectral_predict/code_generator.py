@@ -133,6 +133,22 @@ class CodeGenerator:
         self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
         self.imbalance_method = model_config.get('imbalance_method', None)
         self.inlier_class_label = model_config.get('inlier_class_label', '')
+        # Target transform used by Tab 7 (canonical name, 'none' when inactive). The
+        # exported CV and final fit must train on the same transformed target.
+        from .y_transform import normalize_y_transform_method
+
+        self.y_transform = (
+            normalize_y_transform_method(model_config.get('y_transform'))
+            if self.task_type == 'regression'
+            else 'none'
+        )
+        if self.y_transform != 'none' and self.imbalance_method:
+            raise ValueError(
+                "Code export does not support a Y-transform combined with imbalance "
+                f"handling ({self.imbalance_method!r}): the exported script would "
+                "resample on a different target scale than the app. Save the model as "
+                ".dasp instead."
+            )
 
         # Update options with target column from config
         if self.target_name:
@@ -1041,7 +1057,81 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
             "# MODEL DEFINITION\n"
             "# =============================================================================\n"
             + model_code
+            + self._render_y_transform_wrapper()
         )
+
+    def _render_y_transform_wrapper(self) -> str:
+        """Wrap ``model`` so it trains on the transformed target, like the app.
+
+        The app wraps the post-subset pipeline in sklearn's TransformedTargetRegressor
+        (transform fitted on each training set's y, predictions inverse-transformed).
+        For boosters with early stopping it transforms the training and held-out fold
+        targets by hand. ``YTransformRegressor`` reproduces both: ``fit`` matches the
+        TTR, and ``_fit_fold`` routes early stopping through ``_fit_with`` so the
+        eval set is transformed with the training fold's transformer.
+        """
+        if self.y_transform == 'none':
+            return ''
+        return f'''
+# =============================================================================
+# TARGET (Y) TRANSFORM: {self.y_transform}
+# =============================================================================
+# The model is trained on the transformed target and its predictions are
+# inverse-transformed back to original units (as in the app). The transform is
+# fitted on each training set's y only.
+from sklearn.base import BaseEstimator, RegressorMixin, clone as _clone_est
+from sklearn.preprocessing import FunctionTransformer, PowerTransformer
+
+Y_TRANSFORM = {self.y_transform!r}
+
+
+def _make_y_transformer(method):
+    if method == 'log':
+        return FunctionTransformer(func=np.log, inverse_func=np.exp)
+    if method == 'log1p':
+        return FunctionTransformer(func=np.log1p, inverse_func=np.expm1)
+    if method == 'sqrt':
+        return FunctionTransformer(func=np.sqrt, inverse_func=np.square)
+    if method == 'boxcox':
+        return PowerTransformer(method='box-cox', standardize=False)
+    if method == 'yeo-johnson':
+        return PowerTransformer(method='yeo-johnson', standardize=False)
+    raise ValueError(f"Unknown Y-transform: {{method}}")
+
+
+class YTransformRegressor(BaseEstimator, RegressorMixin):
+    """Fit ``regressor`` on transformed y; inverse-transform its predictions."""
+
+    def __init__(self, regressor=None, method='log'):
+        self.regressor = regressor
+        self.method = method
+
+    def _fit_with(self, fit_fn, X, y, X_val=None, y_val=None, esr=0, **fit_kwargs):
+        y2 = np.asarray(y, dtype=float).reshape(-1, 1)
+        self.transformer_ = _make_y_transformer(self.method).fit(y2)
+        y_t = self.transformer_.transform(y2).ravel()
+        y_val_t = None
+        if y_val is not None:
+            y_val_t = self.transformer_.transform(
+                np.asarray(y_val, dtype=float).reshape(-1, 1)
+            ).ravel()
+        self.regressor_ = _clone_est(self.regressor)
+        fit_fn(self.regressor_, X, y_t, X_val, y_val_t, esr, **fit_kwargs)
+        return self
+
+    def fit(self, X, y, **fit_kwargs):
+        def _plain_fit(m, X_, y_, _X_val, _y_val, _esr, **kw):
+            m.fit(X_, y_, **kw)
+
+        return self._fit_with(_plain_fit, X, y, **fit_kwargs)
+
+    def predict(self, X):
+        pred = np.asarray(self.regressor_.predict(X), dtype=float).reshape(-1, 1)
+        return self.transformer_.inverse_transform(pred).ravel()
+
+
+model = YTransformRegressor(regressor=model, method=Y_TRANSFORM)
+'''
 
     # Pipeline-specific params that should never be passed to model constructors.
     # n_jobs is intentionally NOT included: it is a model constructor kwarg for
@@ -1497,6 +1587,17 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         body just calls plain fit. Keeps codegen branching minimal.
         """
         esr = self.early_stopping_rounds if self.early_stopping_rounds else 0
+        # With a Y-transform the wrapper fits its transformer on the training fold and
+        # re-enters _fit_fold with transformed train/eval targets (app ES path).
+        y_transform_branch = (
+            "    if isinstance(_model, YTransformRegressor):\n"
+            "        _model._fit_with(\n"
+            "            _fit_fold, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs\n"
+            "        )\n"
+            "        return\n"
+            if self.y_transform != 'none'
+            else ''
+        )
         return f'''
 # =============================================================================
 # PER-FOLD FIT HELPER (mirrors in-app cv_utils._fit_with_early_stopping)
@@ -1508,7 +1609,7 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
 EARLY_STOPPING_ROUNDS = {esr}
 
 def _fit_fold(_model, _X_tr, _y_tr, _X_val, _y_val, _esr, **_fit_kwargs):
-    if not _esr or _esr <= 0:
+{y_transform_branch}    if not _esr or _esr <= 0:
         _model.fit(_X_tr, _y_tr, **_fit_kwargs)
         return
     _cls = type(_model).__name__

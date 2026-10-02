@@ -1135,10 +1135,26 @@ def predict_with_uncertainty(
             has_uncertainty = True
 
         # For Random Forest: calculate per-sample tree variance
+        # A Y-transformed model is a TransformedTargetRegressor around the forest:
+        # its trees predict the transformed target, so each tree's prediction is
+        # inverse-transformed before the spread is taken (original units).
+        from sklearn.compose import TransformedTargetRegressor
+
+        forest = model
+        target_transformer = None
+        if isinstance(model, TransformedTargetRegressor) and hasattr(model, 'regressor_'):
+            forest = model.regressor_
+            target_transformer = model.transformer_
         model_class = metadata.get('model_class', '')
-        if 'RandomForest' in model_class and hasattr(model, 'estimators_'):
+        is_forest = 'RandomForest' in model_class or 'RandomForest' in type(forest).__name__
+        if is_forest and hasattr(forest, 'estimators_'):
             # Get predictions from each tree
-            tree_predictions = np.array([tree.predict(X_processed) for tree in model.estimators_])
+            tree_predictions = np.array([tree.predict(X_processed) for tree in forest.estimators_])
+            if target_transformer is not None:
+                tree_predictions = np.array([
+                    target_transformer.inverse_transform(p.reshape(-1, 1)).ravel()
+                    for p in tree_predictions
+                ])
             # Calculate variance across trees for each sample
             tree_variance = np.std(tree_predictions, axis=0)
             uncertainty['tree_variance'] = tree_variance
