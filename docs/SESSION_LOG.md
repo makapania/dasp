@@ -783,3 +783,16 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   (the py312 spec build cannot parse it). Use `black --target-version py312`.
 - Not covered by the convention: one-class / multi-class SIMCA metrics, the Predictions tab statistics panel
   (GUI ~45332, weighted), `cv_utils` named scorers.
+- **Round 2 gotcha: repeated-CV probability accumulation broadcast narrower fold probabilities.** SMOTE-ENN on hard
+  data can leave a fold model with ONE class; `cross_val_predict_pooled` added its (n,1) proba into every class
+  column, rows summed to K and Bayesian LogLosscv read ~2e-16 for a failing model. Fold probabilities are now aligned
+  via the fold model's `classes_` (cv_utils `_proba_in_class_order`, also in the early-stopping loop), and
+  `classification_metrics` makes AUC/LogLoss NaN when proba rows do not sum to 1 (atol 1e-4).
+- **Open: Bayesian and NSGA-II still LabelEncode numeric labels before fitting.** Encoding only text labels there (as
+  grid / Model Dev do) breaks XGBoost, which rejects labels that are not 0..K-1 (`Invalid classes inferred ... got
+  [1 2]`); grid and Model Development already fail on XGBoost with such labels. Needs a decision (per-model encoding,
+  or an XGBoost label-encoding wrapper in models.py) before changing; study identity must be versioned when it is.
+- Model Development repeated CV now reduces to one prediction per sample (vote / mean / mean proba) before headline
+  metrics, plots and stored predictions, as the grid does; its comparison line now uses the row's Accuracycv.
+- NSGA-II classification objective = 1 - pooled accuracy (fold accuracies weighted by test size), so Accuracycv
+  matches the pooled definition.

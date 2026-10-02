@@ -25513,7 +25513,9 @@ class SpectralPredictApp:
                         mae = mean_absolute_error(y_filtered, ensemble_pred)
 
                     # Calculate RPD (Ratio of Performance to Deviation)
-                    rpd = np.std(y_filtered) / rmse if rmse > 0 else 0
+                    # (scoring.spread_ratio: a perfect ensemble gives inf, as everywhere else)
+                    from spectral_predict.scoring import spread_ratio
+                    rpd = spread_ratio(float(np.std(y_filtered)), rmse)
 
                     # Compute calibration metrics (ensemble prediction on training data)
                     cal_predictions = ensemble.predict(X_filtered)
@@ -41566,6 +41568,19 @@ F1 Score:  {f1:.4f}
             all_y_pred = []
             all_y_proba = []  # Store prediction probabilities for classification
             all_cv_indices = []  # Store CV sample indices for specimen ID mapping
+
+            def _aligned_fold_proba(proba, fitted):
+                """One probability column per dataset class (zeros for a class the
+                fold model never saw), as in the grid search."""
+                from spectral_predict.scoring import align_proba_to_classes
+                try:
+                    return align_proba_to_classes(
+                        proba, getattr(fitted, 'classes_', None), np.unique(y_array)
+                    )
+                except ValueError as _e:
+                    print(f"WARNING: fold probabilities could not be aligned: {_e}")
+                    return proba
+
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
             final_model = pipe.steps[-1][1]
@@ -41644,7 +41659,7 @@ F1 Score:  {f1:.4f}
 
                             if hasattr(final_model_fold, 'predict_proba'):
                                 y_proba = final_model_fold.predict_proba(X_test_transformed)
-                                all_y_proba.append(y_proba)
+                                all_y_proba.append(_aligned_fold_proba(y_proba, final_model_fold))
                         else:
                             _fit_with_early_stopping(
                                 pipe_fold,
@@ -41655,7 +41670,7 @@ F1 Score:  {f1:.4f}
                             y_pred = pipe_fold.predict(X_test)
                             if hasattr(pipe_fold, 'predict_proba'):
                                 y_proba = pipe_fold.predict_proba(X_test)
-                                all_y_proba.append(y_proba)
+                                all_y_proba.append(_aligned_fold_proba(y_proba, pipe_fold))
                     else:
                         # Per-fold balanced sample weights threaded via the 'model'
                         # step name (sklearn fit_params convention) for sample_weight-only
@@ -41685,14 +41700,16 @@ F1 Score:  {f1:.4f}
                 if not use_early_stopping:
                     if hasattr(pipe_fold, 'predict_proba'):
                         y_proba = pipe_fold.predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(_aligned_fold_proba(y_proba, pipe_fold))
                     elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
                         y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(
+                            _aligned_fold_proba(y_proba, pipe_fold.named_steps['model'])
+                        )
                     elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
                         # For PLS-DA, LogisticRegression is named 'lr'
                         y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
-                        all_y_proba.append(y_proba)
+                        all_y_proba.append(_aligned_fold_proba(y_proba, pipe_fold.named_steps['lr']))
 
                 if task_type == "regression":
                     rmse = np.sqrt(mean_squared_error(y_test, y_pred))
@@ -41729,6 +41746,42 @@ F1 Score:  {f1:.4f}
                         "accuracy": _fold_m['Accuracy'], "precision": _fold_m['Precision'],
                         "recall": _fold_m['Recall'], "f1": _fold_m['F1'],
                     })
+
+            # Repeated CV: reduce to ONE out-of-fold prediction per sample before
+            # headline scoring, plots and stored predictions, with the grid
+            # search's policy (cv_utils.reduce_repeated_cv_predictions): mean
+            # prediction (regression) or majority vote (classification, ties to
+            # the earliest fold), probabilities averaged. fold_metrics (the *_std
+            # spread) keep every fold.
+            _cv_idx = np.asarray(all_cv_indices)
+            if len(_cv_idx) and len(np.unique(_cv_idx)) < len(_cv_idx):
+                from collections import Counter as _Counter
+
+                _yt = np.asarray(all_y_true)
+                _yp = np.asarray(all_y_pred)
+                _pr = None
+                if all_y_proba:
+                    try:
+                        _pr = np.concatenate(all_y_proba, axis=0)
+                        if len(_pr) != len(_cv_idx):
+                            _pr = None
+                    except ValueError:
+                        _pr = None
+                _samples = np.unique(_cv_idx)
+                _red_true, _red_pred, _red_proba = [], [], []
+                for _s in _samples:
+                    _m = _cv_idx == _s
+                    _red_true.append(_yt[_m][0])
+                    if task_type == "regression":
+                        _red_pred.append(float(np.mean(_yp[_m])))
+                    else:
+                        _red_pred.append(_Counter(_yp[_m].tolist()).most_common(1)[0][0])
+                    if _pr is not None:
+                        _red_proba.append(_pr[_m].mean(axis=0))
+                all_y_true = list(_red_true)
+                all_y_pred = list(_red_pred)
+                all_cv_indices = list(_samples)
+                all_y_proba = [np.vstack(_red_proba)] if _pr is not None else []
 
             # Compute mean and std across folds
             results = {}
@@ -41795,25 +41848,18 @@ F1 Score:  {f1:.4f}
                 results['f1_mean'] = _pooled_m['F1']
                 results['f1_std'] = np.std([m['f1'] for m in fold_metrics])
 
-                # Compute ROC AUC from aggregated CV probabilities
+                # ROC AUC from the pooled, class-aligned CV probabilities, with
+                # the same definition as the Results tab.
                 results['roc_auc'] = np.nan
                 if all_y_proba:
                     try:
-                        from sklearn.metrics import roc_auc_score
-                        y_true_arr = np.array(all_y_true)
-                        y_proba_arr = np.concatenate(all_y_proba, axis=0)
-                        unique_classes = np.unique(y_true_arr)
-                        if len(unique_classes) == 2:
-                            # Binary: use probability of positive class
-                            if y_proba_arr.ndim == 2:
-                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr[:, 1])
-                            else:
-                                results['roc_auc'] = roc_auc_score(y_true_arr, y_proba_arr)
-                        elif len(unique_classes) > 2:
-                            # Multiclass: OVR macro, as in the Results tab
-                            results['roc_auc'] = roc_auc_score(
-                                y_true_arr, y_proba_arr, multi_class='ovr', average='macro'
-                            )
+                        _pooled_auc = classification_metrics(
+                            np.asarray(all_y_true),
+                            np.asarray(all_y_pred),
+                            classes=np.unique(y_array),
+                            y_proba=np.concatenate(all_y_proba, axis=0),
+                        )['ROC_AUC']
+                        results['roc_auc'] = _pooled_auc
                     except Exception as e:
                         print(f"WARNING: Could not compute ROC AUC: {e}")
 
@@ -41920,8 +41966,10 @@ NOTE: {'Derivative + subset detected! Using full-spectrum preprocessing to match
                 # Build comparison text for classification
                 loaded_acc = "N/A"
                 acc_diff = "N/A"
-                if self.selected_model_config is not None and 'Accuracy' in self.selected_model_config:
-                    loaded_acc_value = self.selected_model_config.get('Accuracy')
+                # Compare CV with CV: the row's Accuracycv, not its calibration
+                # Accuracy (which made an unchanged model look worse).
+                if self.selected_model_config is not None and 'Accuracycv' in self.selected_model_config:
+                    loaded_acc_value = self.selected_model_config.get('Accuracycv')
                     if loaded_acc_value is not None and not pd.isna(loaded_acc_value):
                         loaded_acc = f"{loaded_acc_value:.4f}"
                         acc_diff_value = results['accuracy_mean'] - loaded_acc_value
@@ -41940,8 +41988,8 @@ Cross-Validation Performance ({cv_strategy}{f', {n_folds} folds' if cv_strategy 
   F1 Score:  {results['f1_mean']:.4f} ± {results['f1_std']:.4f}{roc_auc_text}
 
 COMPARISON TO LOADED MODEL:
-  Original Accuracy (from Results tab): {loaded_acc}
-  Refined Accuracy (just computed):     {results['accuracy_mean']:.4f}
+  Original CV Accuracy (Results tab):   {loaded_acc}
+  Refined CV Accuracy (just computed):  {results['accuracy_mean']:.4f}
   Difference:                           {acc_diff}
 """
 

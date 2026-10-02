@@ -111,6 +111,79 @@ def test_auc_renormalised_when_holdout_lacks_a_class():
     assert m["LogLoss"] == pytest.approx(skm.log_loss(y, proba, labels=[0, 1, 2]))
 
 
+def test_probability_rows_not_summing_to_one_are_rejected():
+    y = np.array([0, 1, 2, 0, 1, 2])
+    pred = np.array([0, 0, 0, 0, 0, 0])
+    broadcast = np.ones((6, 3))  # one-column proba broadcast into 3 columns
+    m = classification_metrics(y, pred, classes=[0, 1, 2], y_proba=broadcast)
+    assert math.isnan(m["LogLoss"]) and math.isnan(m["ROC_AUC"])
+    assert m["Accuracy"] == pytest.approx(2 / 6)
+
+
+# ---------------------------------------------------------------------------
+# cv_utils.cross_val_predict_pooled: per-fold probabilities aligned to classes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "cv",
+    [
+        StratifiedKFold(3, shuffle=True, random_state=0),
+        pytest.param("repeated", id="repeated"),
+    ],
+)
+@pytest.mark.parametrize("labels", [(0, 1, 2), (1, 2, 100)])
+def test_pooled_proba_aligned_when_fold_model_lacks_a_class(cv, labels):
+    from sklearn.model_selection import RepeatedStratifiedKFold
+
+    from spectral_predict.cv_utils import cross_val_predict_pooled
+
+    if cv == "repeated":
+        cv = RepeatedStratifiedKFold(n_splits=3, n_repeats=2, random_state=0)
+    X, codes = _data((10, 10, 10), 2.0)
+    y = np.array([labels[c] for c in codes])
+    drop = labels[2]
+
+    class _DropsThird(LogisticRegression):
+        """Never learns the third class, like a resampler that removed it."""
+
+        def fit(self, X, y, sample_weight=None):
+            keep = np.asarray(y) != drop
+            return super().fit(np.asarray(X)[keep], np.asarray(y)[keep])
+
+    model = _DropsThird(max_iter=1000)
+    proba = cross_val_predict_pooled(model, X, y, cv=cv, method="predict_proba")
+    assert proba.shape == (30, 3)
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0)
+    np.testing.assert_allclose(proba[:, 2], 0.0)
+
+
+def test_smote_enn_class_removal_does_not_fake_a_perfect_logloss():
+    from imblearn.pipeline import Pipeline as ImbPipeline
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import RepeatedStratifiedKFold
+
+    from spectral_predict.cv_utils import cross_val_predict_pooled
+    from spectral_predict.imbalance import build_imbalance_transformer
+
+    # Constant spectra: SMOTE-ENN leaves fold models with fewer classes
+    X = np.ones((30, 5))
+    y = np.repeat([0, 1, 2], 10)
+    pipe = ImbPipeline(
+        [
+            ("imbalance", build_imbalance_transformer("smote_enn", random_state=0)),
+            ("model", RandomForestClassifier(n_estimators=10, random_state=0)),
+        ]
+    )
+    cv = RepeatedStratifiedKFold(n_splits=3, n_repeats=2, random_state=0)
+    pred = cross_val_predict_pooled(pipe, X, y, cv=cv)
+    proba = cross_val_predict_pooled(pipe, X, y, cv=cv, method="predict_proba")
+    np.testing.assert_allclose(proba.sum(axis=1), 1.0)
+    m = classification_metrics(y, pred, classes=[0, 1, 2], y_proba=proba)
+    assert m["Accuracy"] < 0.5
+    assert not (m["LogLoss"] < 1e-6)  # was 2e-16 before the alignment fix
+
+
 # ---------------------------------------------------------------------------
 # Ranking robustness
 # ---------------------------------------------------------------------------

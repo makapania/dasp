@@ -12,12 +12,20 @@ F1, Precision, Recall (= sensitivity) use that positive class and Specificity
 is the true-negative rate of the first sorted class, so a monotone relabelling
 of the classes gives identical metrics. Multiclass metrics are macro averages.
 
-Models are fitted on the user's own labels; the convention lives only in the
-metrics. It covers the single-label classifier metrics of the grid search
-(folds, pooled CV, calibration, ``compute_validation_metrics_for_top_models``),
-the Bayesian and NSGA-II searches (CV and calibration), Model Development (CV,
+The convention lives only in the metrics. The grid search, its validation
+rebuild and Model Development fit the user's own labels (text labels
+label-encoded); the Bayesian and NSGA-II searches still label-encode every
+target before fitting, which changes a PLS-DA model whose numeric labels are
+unevenly spaced (e.g. {1, 2, 100}) -- their metrics follow the convention but
+describe that encoded fit. Covered: the single-label classifier metrics of the
+grid search (folds, pooled CV, calibration,
+``compute_validation_metrics_for_top_models``), the Bayesian and NSGA-II
+searches (pooled CV and calibration; NSGA-II's accuracy objective is the pooled
+accuracy), Model Development (pooled CV with repeated-CV reduction per sample,
 calibration, external validation, confusion-matrix panel) and the
-class-specialist ensemble's CV F1. Not covered: one-class and multi-class
+class-specialist ensemble's CV F1. Pooled probabilities are always aligned to
+the dataset's class order, and probability rows that do not sum to 1 make
+AUC/LogLoss NaN. Not covered: one-class and multi-class
 SIMCA class models (their own metric definitions), the Predictions tab's
 statistics panel, and the generic named scorers in ``cv_utils``.
 """
@@ -749,6 +757,17 @@ def _probability_metrics(y_true: np.ndarray, y_proba, classes: np.ndarray) -> tu
         )
     if not np.isfinite(y_proba).all():
         logger.warning("classification_metrics: non-finite probabilities; AUC/LogLoss set NaN")
+        return float("nan"), float("nan")
+    row_sums = y_proba.sum(axis=1)
+    if not np.allclose(row_sums, 1.0, rtol=0.0, atol=1e-4):  # float32 boosters ~1e-7
+        # e.g. narrower fold probabilities broadcast into every class column:
+        # log-loss would read a failing model as near-perfect.
+        logger.warning(
+            "classification_metrics: probability rows do not sum to 1 (range %.6g-%.6g); "
+            "AUC/LogLoss set NaN",
+            float(row_sums.min()),
+            float(row_sums.max()),
+        )
         return float("nan"), float("nan")
 
     try:

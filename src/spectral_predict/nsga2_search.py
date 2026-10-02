@@ -1559,8 +1559,14 @@ class SpectralOptimizationProblem(Problem):
                                 pipeline_model, X_subset, self.y, cv=cv,
                                 scoring='accuracy',
                             )
-                # Return 1 - accuracy (to minimize)
-                return 1.0 - np.mean(scores)
+                # Return 1 - pooled accuracy (to minimize). Weighting each fold's
+                # accuracy by its test size gives exactly the accuracy of the
+                # pooled out-of-fold predictions (total correct / n), the
+                # definition used by the grid search and the displayed CV
+                # metrics; a plain fold mean favours configs that do well on
+                # the smaller folds.
+                fold_sizes = [len(test_idx) for _, test_idx in cv.split(X_subset, self.y)]
+                return 1.0 - float(np.average(scores, weights=fold_sizes))
 
         except Exception as e:
             # Track and log model failures for debugging
