@@ -8,15 +8,133 @@ This module implements advanced ensemble strategies that go beyond simple averag
 4. Traditional stacking for comparison
 """
 
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin, clone
 from sklearn.linear_model import Ridge, LogisticRegression
 from sklearn.model_selection import cross_val_predict, KFold
-import warnings
 
 from .preprocessing_wrapper import PreprocessorConfig
 from .wavelength_matching import _full_spectrum_fallback_refusal, resolve_wavelength_list
+
+# Substring the OOF-failure warning always carries (tests and callers filter on it).
+OOF_FAILURE_WARNING = "failed during OOF prediction"
+
+
+def _take_rows(X, idx):
+    """Rows of ``X`` by POSITION, for DataFrames (``.iloc``) and array-likes alike.
+
+    Never use ``X[idx]`` / ``y[idx]`` on pandas objects with positional split indices:
+    under pandas 3 that is a label lookup, which raises KeyError for string sample IDs
+    and silently picks the wrong rows for a permuted integer index.
+    """
+    if hasattr(X, "iloc"):
+        return X.iloc[idx]
+    return np.asarray(X)[idx]
+
+
+def _predict_1d(model, X) -> np.ndarray:
+    """``model.predict(X)`` flattened to 1-D (PLSRegression returns ``(n, 1)``)."""
+    return np.asarray(model.predict(X)).ravel()
+
+
+def _compute_oof_and_drop_failed(ensemble, X, y: np.ndarray) -> np.ndarray:
+    """Out-of-fold base-model predictions for an ensemble's weight / meta-model fit.
+
+    Each base model is cloned and refitted on every inner training fold, then predicts
+    the held-out fold. A model whose refit or prediction raises, or which returns
+    non-finite predictions, is removed from the ensemble entirely: from ``models``,
+    ``model_names`` and any per-model preprocessor lists, so it takes no part in
+    boundaries, weights, the meta-model, ``predict`` or saved metadata. The removed
+    models are recorded in ``ensemble.excluded_models_`` as ``(name, reason)``.
+
+    Returns:
+        Array ``(n_surviving_models, n_samples)`` of OOF predictions.
+
+    Raises:
+        ValueError: If no base model produces OOF predictions.
+    """
+    n_samples = len(y)
+    n_splits = min(ensemble.cv, n_samples)
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    splits = list(kf.split(np.zeros((n_samples, 1))))
+
+    if not ensemble.refit_base_models:
+        warnings.warn(
+            f"{type(ensemble).__name__}(refit_base_models=False) learns its combination "
+            "from predictions of models fitted on all rows, i.e. in-sample predictions. "
+            "Use the default refit_base_models=True for out-of-fold weights.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    rows = []
+    keep = []
+    excluded = []
+    for i, model in enumerate(ensemble.models):
+        name = ensemble.model_names[i] if i < len(ensemble.model_names) else f"Model_{i}"
+        preprocessor = ensemble._get_preprocessor(i)
+        oof_pred = np.full(n_samples, np.nan)
+        try:
+            for train_idx, val_idx in splits:
+                X_train, X_val = _take_rows(X, train_idx), _take_rows(X, val_idx)
+                if preprocessor is not None:
+                    X_train, X_val = preprocessor.transform(X_train), preprocessor.transform(X_val)
+                if ensemble.refit_base_models:
+                    fold_model = _clone_for_refit(model)
+                    fold_model.fit(X_train, y[train_idx])
+                else:
+                    fold_model = model
+                oof_pred[val_idx] = _predict_1d(fold_model, X_val)
+            if not np.all(np.isfinite(oof_pred)):
+                raise ValueError("non-finite out-of-fold predictions")
+        except Exception as e:  # noqa: BLE001 - any failing member is excluded, not fatal
+            warnings.warn(
+                f"Model {name} {OOF_FAILURE_WARNING}:\n"
+                f"  Type: {type(model).__name__}\n"
+                f"  Error: {e}\n"
+                f"  This model is excluded from the ensemble (weights, routing and "
+                f"predictions).",
+                UserWarning,
+                stacklevel=3,
+            )
+            excluded.append((name, str(e)))
+            continue
+        rows.append(oof_pred)
+        keep.append(i)
+
+    if not keep:
+        raise ValueError(
+            f"{type(ensemble).__name__}: every base model {OOF_FAILURE_WARNING}; "
+            f"no ensemble can be built. Failures: {excluded}"
+        )
+
+    if len(keep) < len(ensemble.models):
+        n_models = len(ensemble.models)
+        # Resolve each ORIGINAL member's name and effective preprocessing (configs take
+        # precedence over fitted preprocessors; either list may be shorter than models)
+        # before removal, so no survivor inherits a dropped member's preprocessing.
+        names = [
+            ensemble.model_names[i] if i < len(ensemble.model_names) else f"Model_{i}"
+            for i in range(n_models)
+        ]
+        effective = [ensemble._get_preprocessor(i) for i in range(n_models)]
+
+        # New lists: the caller's lists (often shared between ensembles) stay intact.
+        ensemble.models = [ensemble.models[k] for k in keep]
+        ensemble.model_names = [names[k] for k in keep]
+        if any(p is not None for p in effective):
+            # One full-length list aligned with the survivors; it takes precedence in
+            # _get_preprocessor, and None entries mean "raw input", as before.
+            ensemble.preprocessor_configs = [effective[k] for k in keep]
+            ensemble.preprocessors = None
+    ensemble.excluded_models_ = excluded
+    return np.vstack(rows)
 
 
 def _clone_for_refit(model):
@@ -98,7 +216,10 @@ class SimpleAverageEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         """
         self.models = models
         self.model_names = model_names if model_names else [f"Model_{i}" for i in range(len(models))]
@@ -282,17 +403,20 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
         refit_base_models : bool, default=True
-            If True, clone and refit base models on each CV fold (standard behavior).
-            If False, use the original pre-fitted models directly without refitting.
-            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
-            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
+            If True, clone and refit base models on each inner CV fold, so the
+            combination is learned from genuinely held-out predictions. False reuses
+            the pre-fitted models, i.e. learns from in-sample predictions; it is kept
+            only for API compatibility and warns when used.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -341,67 +465,11 @@ class RegionAwareWeightedEnsemble(BaseEstimator, RegressorMixin):
         predictions the models haven't seen during training, providing
         realistic estimates of model performance.
 
-        The original fitted models are preserved for use in predict().
+        The original fitted models are preserved for use in predict(). A model whose
+        OOF refit fails is removed from ``models`` (see ``excluded_models_``).
         """
-        # Ensure y is numpy array
         y = np.asarray(y).ravel()
-        n_samples = len(y)
-
-        # Set up cross-validation using self.cv parameter
-        n_splits = min(self.cv, n_samples)
-        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-
-        # Generate out-of-fold predictions for all models
-        predictions = np.zeros((len(self.models), n_samples))
-
-        for i, model in enumerate(self.models):
-            try:
-                # Get preprocessor for this model
-                preprocessor = self._get_preprocessor(i)
-
-                # Generate OOF predictions using CV
-                oof_pred = np.zeros(n_samples)
-                for train_idx, val_idx in kf.split(X):
-                    # Split data
-                    if hasattr(X, 'iloc'):  # DataFrame
-                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-                    else:  # numpy array
-                        X_train, X_val = X[train_idx], X[val_idx]
-                    y_train = y[train_idx]
-
-                    # Apply preprocessing
-                    if preprocessor is not None:
-                        X_train_proc = preprocessor.transform(X_train)
-                        X_val_proc = preprocessor.transform(X_val)
-                    else:
-                        X_train_proc, X_val_proc = X_train, X_val
-
-                    # Clone and fit model on this fold (or use original if refit disabled)
-                    if self.refit_base_models:
-                        fold_model = _clone_for_refit(model)
-                        fold_model.fit(X_train_proc, y_train)
-                    else:
-                        # Use original pre-fitted model (preserves scaler stats)
-                        # This avoids StandardScaler divergence for wrapped models
-                        fold_model = model
-
-                    # Predict on validation fold
-                    pred = fold_model.predict(X_val_proc)
-                    oof_pred[val_idx] = np.asarray(pred).ravel()
-
-                predictions[i] = oof_pred
-            except Exception as e:
-                # More informative error message to help diagnose sklearn.clone() issues
-                warnings.warn(
-                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
-                    f"  Type: {type(model).__name__}\n"
-                    f"  Error: {e}\n"
-                    f"  This model will be excluded from weight calculation.\n"
-                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
-                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
-                )
-                # Use NaN to mark as failed - allows excluding from weight calculation
-                predictions[i] = np.full(n_samples, np.nan)
+        predictions = _compute_oof_and_drop_failed(self, X, y)
 
         # Define region boundaries
         if self.y_percentiles is not None:
@@ -537,17 +605,20 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
         refit_base_models : bool, default=True
-            If True, clone and refit base models on each CV fold (standard behavior).
-            If False, use the original pre-fitted models directly without refitting.
-            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
-            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
+            If True, clone and refit base models on each inner CV fold, so the
+            combination is learned from genuinely held-out predictions. False reuses
+            the pre-fitted models, i.e. learns from in-sample predictions; it is kept
+            only for API compatibility and warns when used.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -597,67 +668,11 @@ class MixtureOfExpertsEnsemble(BaseEstimator, RegressorMixin):
         expert assignments. This ensures expert selection is based on realistic
         model performance estimates.
 
-        The original fitted models are preserved for use in predict().
+        The original fitted models are preserved for use in predict(). A model whose
+        OOF refit fails is removed from ``models`` (see ``excluded_models_``).
         """
-        # Ensure y is numpy array
         y = np.asarray(y).ravel()
-        n_samples = len(y)
-
-        # Set up cross-validation using self.cv parameter
-        n_splits = min(self.cv, n_samples)
-        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-
-        # Generate out-of-fold predictions for all models
-        predictions = np.zeros((len(self.models), n_samples))
-
-        for i, model in enumerate(self.models):
-            try:
-                # Get preprocessor for this model
-                preprocessor = self._get_preprocessor(i)
-
-                # Generate OOF predictions using CV
-                oof_pred = np.zeros(n_samples)
-                for train_idx, val_idx in kf.split(X):
-                    # Split data
-                    if hasattr(X, 'iloc'):  # DataFrame
-                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-                    else:  # numpy array
-                        X_train, X_val = X[train_idx], X[val_idx]
-                    y_train = y[train_idx]
-
-                    # Apply preprocessing
-                    if preprocessor is not None:
-                        X_train_proc = preprocessor.transform(X_train)
-                        X_val_proc = preprocessor.transform(X_val)
-                    else:
-                        X_train_proc, X_val_proc = X_train, X_val
-
-                    # Clone and fit model on this fold (or use original if refit disabled)
-                    if self.refit_base_models:
-                        fold_model = _clone_for_refit(model)
-                        fold_model.fit(X_train_proc, y_train)
-                    else:
-                        # Use original pre-fitted model (preserves scaler stats)
-                        # This avoids StandardScaler divergence for wrapped models
-                        fold_model = model
-
-                    # Predict on validation fold
-                    pred = fold_model.predict(X_val_proc)
-                    oof_pred[val_idx] = np.asarray(pred).ravel()
-
-                predictions[i] = oof_pred
-            except Exception as e:
-                # More informative error message to help diagnose sklearn.clone() issues
-                warnings.warn(
-                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
-                    f"  Type: {type(model).__name__}\n"
-                    f"  Error: {e}\n"
-                    f"  This model will be excluded from weight calculation.\n"
-                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
-                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
-                )
-                # Use NaN to mark as failed - allows excluding from weight calculation
-                predictions[i] = np.full(n_samples, np.nan)
+        predictions = _compute_oof_and_drop_failed(self, X, y)
 
         # Define region boundaries
         if self.y_percentiles is not None:
@@ -774,7 +789,8 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         models : list of fitted models
         model_names : list of str, optional
         meta_model : estimator, optional
-            Meta-learner (default: Ridge regression)
+            Meta-learner (default: Ridge regression). Must be sklearn-cloneable:
+            ``fit`` trains a fresh clone, so no state carries over between fits.
         region_aware : bool, default=True
             Include region features in meta-model
         n_regions : int, default=5
@@ -785,17 +801,20 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
             models receive raw data directly.
         preprocessor_configs : list of PreprocessorConfig, optional
             Configuration objects for reconstructing preprocessing per model.
-            Used when preprocessors aren't available directly.
+            Used when preprocessors aren't available directly. Any object with a
+            ``transform`` method works; after a failed member is dropped this list
+            holds each survivor's resolved preprocessing (a config or a fitted
+            preprocessor), aligned with ``models``.
         y_percentiles : array-like, optional
             Pre-computed TRUE Y percentile values. If provided, these boundaries
             will be used for region assignment instead of computing from predictions.
             This ensures consistent region assignment between selection (based on
             TRUE Y) and routing (based on these boundaries).
         refit_base_models : bool, default=True
-            If True, clone and refit base models on each CV fold (standard behavior).
-            If False, use the original pre-fitted models directly without refitting.
-            Set to False when models are wrapped (e.g., WavelengthSubsetWrapper from
-            CARS/NSGA-II) to avoid StandardScaler divergence that causes ~0.03 R² loss.
+            If True, clone and refit base models on each inner CV fold, so the
+            combination is learned from genuinely held-out predictions. False reuses
+            the pre-fitted models, i.e. learns from in-sample predictions; it is kept
+            only for API compatibility and warns when used.
         """
         self.models = models
         self.model_names = model_names or [f"Model_{i}" for i in range(len(models))]
@@ -844,67 +863,12 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
         The meta-model is trained on these OOF predictions, ensuring it learns
         to combine base model predictions on unseen data.
 
-        The original fitted base models are preserved for use in predict().
+        The original fitted base models are preserved for use in predict(). A model
+        whose OOF refit fails is removed from ``models`` (see ``excluded_models_``).
         """
-        # Ensure y is numpy array
         y = np.asarray(y).ravel()
         n_samples = len(y)
-
-        # Set up cross-validation using self.cv parameter
-        n_splits = min(self.cv, n_samples)
-        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-
-        # Generate out-of-fold predictions for all models
-        meta_features = np.zeros((n_samples, len(self.models)))
-
-        for i, model in enumerate(self.models):
-            try:
-                # Get preprocessor for this model
-                preprocessor = self._get_preprocessor(i)
-
-                # Generate OOF predictions using CV
-                oof_pred = np.zeros(n_samples)
-                for train_idx, val_idx in kf.split(X):
-                    # Split data
-                    if hasattr(X, 'iloc'):  # DataFrame
-                        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-                    else:  # numpy array
-                        X_train, X_val = X[train_idx], X[val_idx]
-                    y_train = y[train_idx]
-
-                    # Apply preprocessing
-                    if preprocessor is not None:
-                        X_train_proc = preprocessor.transform(X_train)
-                        X_val_proc = preprocessor.transform(X_val)
-                    else:
-                        X_train_proc, X_val_proc = X_train, X_val
-
-                    # Clone and fit model on this fold (or use original if refit disabled)
-                    if self.refit_base_models:
-                        fold_model = _clone_for_refit(model)
-                        fold_model.fit(X_train_proc, y_train)
-                    else:
-                        # Use original pre-fitted model (preserves scaler stats)
-                        # This avoids StandardScaler divergence for wrapped models
-                        fold_model = model
-
-                    # Predict on validation fold
-                    pred = fold_model.predict(X_val_proc)
-                    oof_pred[val_idx] = np.asarray(pred).ravel()
-
-                meta_features[:, i] = oof_pred
-            except Exception as e:
-                # More informative error message to help diagnose sklearn.clone() issues
-                warnings.warn(
-                    f"Model {self.model_names[i]} failed during OOF prediction:\n"
-                    f"  Type: {type(model).__name__}\n"
-                    f"  Error: {e}\n"
-                    f"  This model will be excluded from weight calculation.\n"
-                    f"  If this is a wrapper class, ensure it inherits from sklearn.base.BaseEstimator\n"
-                    f"  and implements get_params()/set_params() for sklearn.clone() compatibility."
-                )
-                # Use NaN to mark as failed - allows excluding from weight calculation
-                meta_features[:, i] = np.full(n_samples, np.nan)
+        meta_features = _compute_oof_and_drop_failed(self, X, y).T  # (n_samples, n_models)
 
         # Add region-aware features if enabled
         if self.region_aware:
@@ -935,8 +899,11 @@ class StackingEnsemble(BaseEstimator, RegressorMixin):
                 pred_value_feature
             ])
 
-        # Fit meta-model on OOF predictions (prevents leakage)
-        self.meta_model.fit(meta_features, y)
+        # Fit a fresh clone of the meta-model on the OOF predictions. Cloning drops any
+        # state from an earlier fit (e.g. a warm_start learner reused across CV folds).
+        meta_model = clone(self.meta_model)
+        meta_model.fit(meta_features, y)
+        self.meta_model = meta_model
 
         # Set sklearn-compatible fitted attributes for Pipeline compatibility
         X_arr = np.asarray(X)
@@ -1417,8 +1384,8 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         - soft_gating : bool, for mixture_experts
         - meta_model : estimator, for stacking
         - refit_base_models : bool, default=True
-            If True, clone and refit base models on each CV fold.
-            If False, use original pre-fitted models (for wrapped CARS/NSGA-II models).
+            If True, clone and refit base models on each inner CV fold. False learns
+            the combination in-sample (kept for API compatibility; warns).
 
     Returns
     -------
@@ -1462,6 +1429,160 @@ def create_ensemble(models, model_names, X, y, ensemble_type='region_weighted',
         raise ValueError(f"Unknown ensemble type: {ensemble_type}")
 
     return ensemble
+
+
+@dataclass
+class EnsembleCVResult:
+    """Outcome of :func:`cross_validate_ensembles`.
+
+    Attributes:
+        predictions: ensemble type -> out-of-fold predictions, shape ``(n_samples,)``,
+            for every type that succeeded in all outer folds.
+        errors: ensemble type -> reason, for types that failed in some outer fold
+            (no partial predictions are reported for them).
+        notes: human-readable messages, e.g. base models that could not be fitted on
+            an outer training fold or were excluded from a fold's ensemble.
+    """
+
+    predictions: dict[str, np.ndarray] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+
+
+def cross_validate_ensembles(
+    models: list,
+    model_names: list[str],
+    X,
+    y,
+    ensemble_types: list[str],
+    *,
+    n_regions: int = 5,
+    n_splits: int = 5,
+    inner_cv: int = 5,
+    random_state: int = 42,
+    **ensemble_kwargs,
+) -> EnsembleCVResult:
+    """Honest cross-validated predictions for one or more ensemble types.
+
+    For each outer fold, every base model is cloned from its configuration and refitted
+    on the outer-training rows only; the ensemble then learns its weights / gating /
+    meta-model from inner out-of-fold predictions within those rows, and predicts the
+    outer test rows. No object fitted on a test row ever scores it. The base-model refits
+    are shared between ensemble types within a fold.
+
+    This only estimates performance: the deployed ensemble is still fitted on all
+    calibration rows (``create_ensemble`` with the full-data base models). Regression
+    only, like the ensemble classes it evaluates.
+
+    Args:
+        models: Base models (fitted or not; they are cloned, never modified). Each member
+            must carry its own preprocessing (e.g. a Pipeline), since it is refitted on
+            raw rows.
+        model_names: One name per model.
+        X: Features (DataFrame or array). Rows are indexed by position.
+        y: Numeric regression targets (array, list or Series; any index is ignored,
+            position is used).
+        ensemble_types: ``create_ensemble`` types to evaluate.
+        n_regions: Regions for the region-aware types.
+        n_splits: Outer folds (capped at the number of samples).
+        inner_cv: Inner folds for the weight / meta-model fit.
+        random_state: Seed of the shuffled outer KFold.
+        **ensemble_kwargs: Extra ``create_ensemble`` arguments (e.g. ``soft_gating``,
+            ``meta_model``, which is cloned for every fold). Rejected: ``y_percentiles``
+            (boundaries from all of ``y`` carry the test folds' targets into training)
+            and ``preprocessors`` / ``preprocessor_configs`` (see ``models``).
+
+    Returns:
+        EnsembleCVResult with per-type OOF predictions, errors and notes.
+
+    Raises:
+        ValueError: For non-numeric ``y`` or a rejected keyword.
+    """
+    if "y_percentiles" in ensemble_kwargs:
+        raise ValueError(
+            "cross_validate_ensembles does not accept y_percentiles: boundaries taken "
+            "from all targets would include the test folds' y."
+        )
+    for key in ("preprocessors", "preprocessor_configs"):
+        if ensemble_kwargs.get(key) is not None:
+            raise ValueError(
+                f"cross_validate_ensembles does not accept {key}: base models are refitted "
+                "on raw outer-training rows, so separate preprocessing would be applied at "
+                "predict time only, and fitted preprocessors carry statistics from every "
+                "row. Put each member's preprocessing in a Pipeline with its estimator."
+            )
+    ensemble_kwargs.pop("refit_base_models", None)
+    y_raw = np.asarray(y).ravel()
+    if y_raw.dtype.kind not in "biuf":
+        raise ValueError(
+            "cross_validate_ensembles supports regression targets only (numeric y); got "
+            f"dtype {y_raw.dtype}."
+        )
+    y = y_raw.astype(float)
+    n_samples = len(y)
+    result = EnsembleCVResult()
+    if n_samples < 2:
+        for etype in ensemble_types:
+            result.errors[etype] = "need at least 2 samples for cross-validation"
+        return result
+
+    preds = {etype: np.full(n_samples, np.nan) for etype in ensemble_types}
+    kf = KFold(n_splits=min(n_splits, n_samples), shuffle=True, random_state=random_state)
+
+    for fold, (train_idx, test_idx) in enumerate(kf.split(np.zeros((n_samples, 1))), 1):
+        X_tr, X_te = _take_rows(X, train_idx), _take_rows(X, test_idx)
+        y_tr = y[train_idx]
+
+        fold_models, fold_names = [], []
+        for model, name in zip(models, model_names):
+            try:
+                fold_models.append(_clone_for_refit(model).fit(X_tr, y_tr))
+                fold_names.append(name)
+            except Exception as e:  # noqa: BLE001 - a member that cannot fit is dropped
+                result.notes.append(
+                    f"outer fold {fold}: base model {name} could not be fitted on "
+                    f"{len(y_tr)} training rows and is left out of this fold ({e})"
+                )
+
+        for etype in ensemble_types:
+            if etype in result.errors:
+                continue
+            if not fold_models:
+                result.errors[etype] = f"outer fold {fold}: no base model could be fitted"
+                continue
+            try:
+                with warnings.catch_warnings():
+                    # Reported through excluded_models_ below instead.
+                    warnings.filterwarnings("ignore", message=f".*{OOF_FAILURE_WARNING}")
+                    fold_kwargs = dict(ensemble_kwargs)
+                    if fold_kwargs.get("meta_model") is not None:
+                        # Never share one (possibly warm-started) meta-model across folds.
+                        fold_kwargs["meta_model"] = clone(fold_kwargs["meta_model"])
+                    ens = create_ensemble(
+                        models=fold_models,
+                        model_names=fold_names,
+                        X=X_tr,
+                        y=y_tr,
+                        ensemble_type=etype,
+                        n_regions=n_regions,
+                        cv=min(inner_cv, len(y_tr)),
+                        refit_base_models=True,
+                        **fold_kwargs,
+                    )
+                    preds[etype][test_idx] = _predict_1d(ens, X_te)
+                for name, reason in getattr(ens, "excluded_models_", []):
+                    result.notes.append(f"outer fold {fold}, {etype}: {name} excluded ({reason})")
+            except Exception as e:  # noqa: BLE001 - reported per ensemble type
+                result.errors[etype] = f"outer fold {fold}: {e}"
+
+    for etype in ensemble_types:
+        if etype in result.errors:
+            continue
+        if not np.all(np.isfinite(preds[etype])):
+            result.errors[etype] = "non-finite cross-validated predictions"
+            continue
+        result.predictions[etype] = preds[etype]
+    return result
 
 
 def compute_regional_rankings(results_df, top_n=10):
@@ -1707,7 +1828,6 @@ def select_top_models_per_region(results_df, top_n, task_type, reconstruct_func,
 
         for idx, metric_val, rank in region_rankings[:top_n]:
             if idx in results_df.index:
-                all_selected_indices.add(idx)
                 row = results_df.loc[idx]
 
                 # Reconstruct the model
@@ -1716,6 +1836,9 @@ def select_top_models_per_region(results_df, top_n, task_type, reconstruct_func,
                     # Model already handles preprocessing internally
                     models_per_region[region].append((fitted_model, None))
                     model_names_per_region[region].append(model_name)
+                    # Counted only once reconstructed, so a fold whose rebuilds all fail
+                    # cannot pass the ">= 2 models" check with empty region lists.
+                    all_selected_indices.add(idx)
                 except Exception as e:
                     warnings.warn(f"Failed to reconstruct model for region {region}: {e}")
 
@@ -1845,12 +1968,31 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
         'metrics': dict with 'r2', 'rmse' (regression) or 'accuracy', 'f1' (classification)
         'n_models': int - number of unique base models
         'specialist_info': dict mapping region/class -> list of model names
+
+    Notes
+    -----
+    The CV metrics are NOT fully held-out. Members are refitted per fold, but the
+    specialist for each region/class is chosen from ``results_df``'s regional / per-class
+    rankings, which the search computed over all rows, so each fold's held-out targets
+    influence which experts score it. Honest selection would recompute the rankings
+    from inner CV on every outer-training partition; that is not implemented because
+    this function has no production caller. A ``UserWarning`` says so on every call.
     """
     from sklearn.metrics import r2_score, mean_squared_error, accuracy_score, f1_score
     from sklearn.model_selection import KFold
 
+    warnings.warn(
+        "create_auto_ensembles: CV metrics are optimistic. Specialists are selected from "
+        "search-time regional/class rankings computed on all rows, so held-out targets "
+        "influence expert selection in every fold.",
+        UserWarning,
+        stacklevel=2,
+    )
     auto_ensembles = {}
     region_boundaries = [0, 25, 50, 75, 100]  # Quartile percentiles
+    # Positional targets: a label-indexed Series indexed with KFold positions raises
+    # KeyError (string IDs) or picks wrong rows (permuted integer IDs) under pandas 3.
+    y_train = np.asarray(y_train).ravel()
     n_cv_folds = min(5, len(y_train))
 
     for top_n, ensemble_name in [(1, 'Ensemble-Top1'), (2, 'Ensemble-Top2'), (3, 'Ensemble-Top3')]:
@@ -1894,11 +2036,8 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                 cv_predictions = np.full(len(y_train), np.nan)
 
                 for train_idx, val_idx in kf.split(X_train):
-                    # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
-                    if hasattr(X_train, 'iloc'):
-                        X_cv_train, X_cv_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-                    else:
-                        X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    X_cv_train = _take_rows(X_train, train_idx)
+                    X_cv_val = _take_rows(X_train, val_idx)
                     y_cv_train = y_train[train_idx]
 
                     # Reconstruct models for this CV fold
@@ -1917,18 +2056,23 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                         )
                         cv_ensemble.fit(X_cv_train, y_cv_train)
                         cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
-                    else:
-                        # Fallback: use main ensemble for this fold
-                        cv_predictions[val_idx] = ensemble.predict(X_cv_val)
+                    # else: leave the fold NaN. The full-data ensemble was fitted on these
+                    # rows, so using it here would report calibration as CV.
 
-                # Calculate CV metrics
-                r2 = r2_score(y_train, cv_predictions)
-                rmse = np.sqrt(mean_squared_error(y_train, cv_predictions))
+                if np.all(np.isfinite(cv_predictions)):
+                    r2 = r2_score(y_train, cv_predictions)
+                    rmse = np.sqrt(mean_squared_error(y_train, cv_predictions))
+                else:
+                    warnings.warn(
+                        f"{ensemble_name}: fewer than 2 base models could be rebuilt on some "
+                        "CV training fold; cross-validated metrics are unavailable (NaN)."
+                    )
+                    r2 = rmse = np.nan
             else:
-                # Fallback for very small datasets
-                y_pred = ensemble.predict(X_train)
-                r2 = r2_score(y_train, y_pred)
-                rmse = np.sqrt(mean_squared_error(y_train, y_pred))
+                # Fewer than 2 samples: no CV is possible, and calibration predictions
+                # must not be reported as CV metrics.
+                warnings.warn(f"{ensemble_name}: fewer than 2 samples; CV metrics are NaN.")
+                r2 = rmse = np.nan
 
             metrics = {'r2': r2, 'rmse': rmse, 'y_std': y_std}
 
@@ -1979,11 +2123,8 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                 cv_filled = np.zeros(len(y_train), dtype=bool)
 
                 for train_idx, val_idx in kf.split(X_train):
-                    # Use iloc for DataFrame row indexing, direct indexing for numpy arrays
-                    if hasattr(X_train, 'iloc'):
-                        X_cv_train, X_cv_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-                    else:
-                        X_cv_train, X_cv_val = X_train[train_idx], X_train[val_idx]
+                    X_cv_train = _take_rows(X_train, train_idx)
+                    X_cv_val = _take_rows(X_train, val_idx)
                     y_cv_train = y_train[train_idx]
 
                     # Reconstruct models for this CV fold
@@ -2001,28 +2142,24 @@ def create_auto_ensembles(results_df, X_train, y_train, task_type, reconstruct_f
                         )
                         cv_ensemble.fit(X_cv_train, y_cv_train)
                         cv_predictions[val_idx] = cv_ensemble.predict(X_cv_val)
-                    else:
-                        # Fallback: use main ensemble for this fold
-                        cv_predictions[val_idx] = ensemble.predict(X_cv_val)
-                    cv_filled[val_idx] = True
+                        cv_filled[val_idx] = True
+                    # else: leave the fold unfilled. The full-data ensemble was fitted on
+                    # these rows, so using it here would report calibration as CV.
 
-                # Safety check: fill any unfilled indices with main ensemble predictions
-                if not np.all(cv_filled):
-                    unfilled = ~cv_filled
-                    if hasattr(X_train, 'iloc'):
-                        X_unfilled = X_train.iloc[unfilled]
-                    else:
-                        X_unfilled = X_train[unfilled]
-                    cv_predictions[unfilled] = ensemble.predict(X_unfilled)
-
-                # Calculate CV metrics
-                accuracy = accuracy_score(y_train, cv_predictions)
-                f1 = f1_score(y_train, cv_predictions, average='weighted')
+                if np.all(cv_filled):
+                    accuracy = accuracy_score(y_train, cv_predictions)
+                    f1 = f1_score(y_train, cv_predictions, average="weighted")
+                else:
+                    warnings.warn(
+                        f"{ensemble_name}: fewer than 2 base models could be rebuilt on some "
+                        "CV training fold; cross-validated metrics are unavailable (NaN)."
+                    )
+                    accuracy = f1 = np.nan
             else:
-                # Fallback for very small datasets
-                y_pred = ensemble.predict(X_train)
-                accuracy = accuracy_score(y_train, y_pred)
-                f1 = f1_score(y_train, y_pred, average='weighted')
+                # Fewer than 2 samples: no CV is possible, and calibration predictions
+                # must not be reported as CV metrics.
+                warnings.warn(f"{ensemble_name}: fewer than 2 samples; CV metrics are NaN.")
+                accuracy = f1 = np.nan
 
             metrics = {'accuracy': accuracy, 'f1': f1}
 

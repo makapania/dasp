@@ -613,6 +613,14 @@ def test_full_spectrum_fallback_needs_an_affirmative_full_tag(wavenumber_split, 
 class TestEnsembleWavelengthPaths:
     """Ensemble rebuild paths use the shared resolver (Codex round 2, items 6-7)."""
 
+    def test_wrapper_matcher_no_longer_takes_the_first_collision(self):
+        from spectral_predict.model_wrappers import _match_wavelengths_normalized
+
+        cols = ["1000.01", "1000.02", "1001.0"]
+        assert _match_wavelengths_normalized([1000.02, 1001.0], cols) == ["1000.02", "1001.0"]
+        with pytest.raises(KeyError):
+            _match_wavelengths_normalized([1000.5], cols)
+
     def test_preprocessor_config_maps_exact_columns_and_raises_on_misses(self):
         from spectral_predict.preprocessing_wrapper import PreprocessorConfig
 

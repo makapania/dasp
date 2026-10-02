@@ -15,7 +15,7 @@ wavelengths from spectral data:
 These algorithms are particularly useful for:
 1. Reducing model complexity and overfitting
 2. Improving prediction performance
-3. Enhancing calibration transfer (especially NS-PFCE)
+3. Optional wavelength selection for Iterative ridge DS (stored key 'nspfce')
 4. Identifying key spectral regions
 """
 

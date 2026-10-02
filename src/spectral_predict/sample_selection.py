@@ -103,12 +103,13 @@ def kennard_stone(
     distances = pdist(X, metric=metric)
     distance_matrix = squareform(distances)
 
-    # Find the pair with maximum distance
-    max_dist_idx = np.argmax(distances)
-    # Convert condensed distance matrix index to (i, j) pair
-    n = n_total
-    i = int(np.floor(0.5 * (1 + np.sqrt(1 + 8 * max_dist_idx))))
-    j = max_dist_idx - i * (i - 1) // 2
+    # Find the pair with maximum distance. pdist's condensed vector is in
+    # upper-triangular row-major order, so index the square matrix instead of
+    # inverting the condensed index by hand (same pattern as spxy below).
+    i, j = np.unravel_index(np.argmax(distance_matrix), distance_matrix.shape)
+    i, j = int(i), int(j)
+    if i == j:  # every distance is zero (identical rows): any pair is farthest
+        i, j = 0, 1
 
     selected_indices = [i, j]
     remaining_indices = list(range(n_total))
