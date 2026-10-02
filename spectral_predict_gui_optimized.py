@@ -296,9 +296,100 @@ try:
         choose_common_grid,
         equalize_dataset,
     )
+    # User-facing transfer-method names. The stored keys ('tsr', 'ctai', 'nspfce')
+    # are historical and persist in saved transfer models, so labels come from here.
+    from spectral_predict.calibration_transfer import DEFAULT_METHOD as CT_DEFAULT_METHOD
+    from spectral_predict.calibration_transfer import (
+        method_display_name as ct_method_display_name,
+    )
     HAS_CALIBRATION_TRANSFER = True
 except ImportError:
     HAS_CALIBRATION_TRANSFER = False
+    CT_DEFAULT_METHOD = 'tsr'
+
+    def ct_method_display_name(method: str, short: bool = False) -> str:
+        """Fallback when calibration transfer is unavailable: the raw key, upper-cased."""
+        return str(method).upper()
+
+
+def parse_transfer_standards_count(text: str) -> int | None:
+    """Parse the slope/bias 'standards' entry: 'All' or blank -> None, else an integer.
+
+    Raises:
+        ValueError: If the text is neither 'All' nor a whole number.
+    """
+    cleaned = str(text).strip()
+    if cleaned == "" or cleaned.lower() == "all":
+        return None
+    try:
+        return int(cleaned)
+    except ValueError:
+        raise ValueError(
+            f"Slope/bias standards must be 'All' or a whole number, got {text!r}"
+        ) from None
+
+
+def ct_region_arrays(
+    X_primary: "np.ndarray",
+    X_satellite: "np.ndarray",
+    wavelengths: "np.ndarray",
+    meta: "dict | None",
+) -> "tuple[np.ndarray, np.ndarray, np.ndarray]":
+    """Clip paired spectra to a transfer model's region of interest, if it has one.
+
+    A model built with a region of interest was fitted on those columns only
+    (``meta['region_of_interest']['indices']``); applying it to the full-width
+    arrays fails on shape. Without a region the inputs are returned unchanged.
+    """
+    roi = (meta or {}).get('region_of_interest') or {}
+    if not roi.get('enabled') or roi.get('indices') is None:
+        return X_primary, X_satellite, wavelengths
+    idx = np.asarray(roi['indices'], dtype=int)
+    return X_primary[:, idx], X_satellite[:, idx], np.asarray(wavelengths)[idx]
+
+
+def ct_derivative_window(n_wavelengths: int) -> int | None:
+    """Savitzky-Golay window (polyorder 2) for the transfer-quality derivative tabs.
+
+    Up to 11 points, odd and no wider than the plotted region; ``None`` when fewer
+    than 3 wavelengths are plotted, so no derivative can be drawn.
+    """
+    window = min(11, n_wavelengths - 1)
+    if window % 2 == 0:
+        window -= 1
+    window = max(window, 5)
+    if window > n_wavelengths:
+        window = n_wavelengths if n_wavelengths % 2 else n_wavelengths - 1
+    return window if window >= 3 else None
+
+
+CT_AGREEMENT_TITLE = (
+    "Spectral agreement on loaded standards (includes fitting data — not a validation)"
+)
+
+
+def ct_spectral_agreement_on_fit_rows(
+    X_primary: "np.ndarray", X_transferred: "np.ndarray", method: str, params: dict
+) -> "tuple[float, np.ndarray]":
+    """R² between primary and transferred spectra on the rows the transfer was fitted on.
+
+    Slope/bias ('tsr') stores the standards it used in ``params['transfer_indices']``;
+    every other GUI-built method is fitted on all loaded rows. The value is a
+    resubstitution figure on fitting data, not a validation (R128).
+
+    Returns:
+        (r2, rows) where rows are the row indices used.
+    """
+    from sklearn.metrics import r2_score
+
+    n_rows = X_primary.shape[0]
+    rows = np.arange(n_rows)
+    if method == "tsr" and params.get("transfer_indices") is not None:
+        candidate = np.asarray(params["transfer_indices"], dtype=int)
+        if candidate.size and candidate.min() >= 0 and candidate.max() < n_rows:
+            rows = candidate
+    r2 = float(r2_score(X_primary[rows].ravel(), X_transferred[rows].ravel()))
+    return r2, rows
 
 
 # ===== NATIVE TKINTER TOOLTIP CLASS =====
@@ -1011,54 +1102,50 @@ TOOLTIP_CONTENT = {
     # ===== CALIBRATION TRANSFER METHODS =====
     'calibration_transfer': {
         # Transfer Methods
-        'method_DS': (
-            "Direct Standardization (DS) is a simple pairwise calibration transfer method. "
-            "Builds a linear transformation matrix F that directly maps satellite spectra to primary spectra: "
-            "X_primary ≈ X_satellite × F. Fast and straightforward, works well when primary and satellite "
-            "instruments have similar wavelength grids. Best for simple spectral differences. "
-            "Requires paired samples measured on both instruments. Lambda parameter controls regularization."
+        "method_DS": (
+            "Direct Standardization (DS): one full matrix that maps every satellite wavelength "
+            "to every primary wavelength, X_primary ~ X_satellite x F, fitted by ridge regression "
+            "on the paired standards (the same samples measured on both instruments, row for row). "
+            "It has far more coefficients than there are standards, so it can reproduce the "
+            "standards almost exactly and still do worse on new samples; increase Lambda if so. "
+            "Check it on standards that were not used to fit it."
         ),
-        'method_PDS': (
-            "Piecewise Direct Standardization (PDS) is a local version of DS that models each primary "
-            "wavelength independently using a sliding window of neighboring satellite wavelengths. "
-            "More flexible than global DS, better at handling nonlinear wavelength dependencies. "
-            "Window size controls how many neighboring wavelengths are used (typical: 7-15). "
-            "Larger windows = smoother transfer but may miss local spectral features. "
-            "Good for instruments with slight wavelength misalignments."
+        "method_PDS": (
+            "Piecewise Direct Standardization (PDS): each primary wavelength is predicted from a "
+            "small window of neighbouring satellite wavelengths, fitted on the paired standards. "
+            "Handles small wavelength shifts and bandwidth differences, which a per-wavelength "
+            "correction cannot. Window size sets how many neighbours are used (odd number; "
+            "typical 7-15). Needs more paired standards than the window size."
         ),
-        'method_TSR': (
-            "Transfer by Sample Regression (TSR) selects a subset of representative transfer samples "
-            "that span the spectral space, then uses only these samples to build the transformation. "
-            "More efficient than using all transfer samples, reduces overfitting. Sample selection uses "
-            "Kennard-Stone algorithm to ensure good coverage of spectral diversity. "
-            "Number of samples controls subset size (typical: 10-30). Fewer = faster but may miss patterns, "
-            "more = comprehensive but slower. Robust choice for heterogeneous sample sets."
+        "method_TSR": (
+            "Slope/bias per wavelength (default). For each wavelength separately, the primary value "
+            "is regressed on the satellite value over the paired standards: primary = slope x "
+            "satellite + bias. Two coefficients per wavelength, so it can be fitted from few "
+            "standards. It cannot correct wavelength shifts (use PDS for those). "
+            "Standardization in the spirit of Shenk & Westerhaus (1991, Crop Sci 31:1694-1696). "
+            "Saved models call it 'tsr'; this is not trimmed scores regression."
         ),
-        'method_CTAI': (
-            "Calibration Transfer via Adaptive Integration (CTAI) combines spectral standardization "
-            "with adaptive selection of informative wavelengths. Uses an iterative algorithm to identify "
-            "and weight wavelengths that transfer well between instruments while down-weighting problematic "
-            "regions (e.g., noise, nonlinear response). More sophisticated than DS/PDS, adapts to "
-            "instrument-specific characteristics. Recommended when instruments have different noise profiles "
-            "or response characteristics. Generally provides robust transfer with minimal tuning."
+        "method_CTAI": (
+            "PC-DS: paired regression in the satellite PCA space. Both instruments' spectra of the "
+            "paired standards are projected onto the satellite's leading principal components, the "
+            "primary scores are regressed on the satellite scores, and the map is projected back. "
+            "Needs the same standards on both instruments and the same wavelength grid. "
+            "Saved models call it 'ctai', but it is not the published standard-free CTAI "
+            "(Zhao et al. 2019)."
         ),
-        'method_NSPFCE': (
-            "Null-Space Projection followed by Feature Correlation Enhancement (NS-PFCE) is an advanced "
-            "method that removes instrument-specific variance while preserving chemical information. "
-            "Uses wavelength selection algorithms (VCPA-IRIV, CARS, SPA) to identify informative features, "
-            "then projects out instrument-specific interference using null-space operations. "
-            "Excellent for complex scenarios with significant instrumental differences (e.g., different "
-            "detectors, optical configurations). Slower than other methods but very effective. "
-            "Wavelength selection is critical for performance - VCPA-IRIV recommended for most cases."
+        "method_NSPFCE": (
+            "Iterative ridge DS: a dasp heuristic, not the published PFCE/NS-PFCE. Starts from a "
+            "per-wavelength scaling and repeatedly re-solves a lightly regularised (ridge 1e-6) "
+            "full-matrix DS on the paired standards, with damped updates and a re-fitted offset. "
+            "Like DS, it can fit the standards closely and do worse than no correction on new "
+            "samples when there are few standards. Saved models call it 'nspfce'."
         ),
-        'method_JYPLS': (
-            "Joint-Y Partial Least Squares Inverse (JYPLS-inv) uses PLS regression to model the "
-            "primary-satellite relationship, treating primary spectra as 'Y' and satellite spectra as 'X'. "
-            "The PLS model learns latent variables capturing the systematic spectral differences. "
-            "Number of components controls model complexity (typical: 3-15, or 'Auto' for cross-validation). "
-            "More flexible than DS for nonlinear relationships, but requires more transfer samples (30+). "
-            "Sample selection uses Kennard-Stone for representativeness. "
-            "Good when spectral differences are complex but systematic."
+        "method_JYPLS": (
+            "JYPLS-inv (experimental, disabled): stacks both instruments' spectra of the paired "
+            "standards with their shared measured reference values, fits one PLS model, maps "
+            "satellite scores to primary scores, and reconstructs primary spectra from the PLS "
+            "loadings. Needs a measured reference value for every standard. Not checked against "
+            "a published JYPLS-inv algorithm."
         ),
 
         # Transfer Parameters
@@ -1078,13 +1165,11 @@ TOOLTIP_CONTENT = {
             "Large windows (17-25) = more global, smoother, approaches regular DS. "
             "Match to your spectral resolution: higher resolution allows smaller windows."
         ),
-        'param_tsr_samples': (
-            "Number of representative samples selected for Transfer by Sample Regression (TSR). "
-            "Subset selected using Kennard-Stone algorithm to span spectral diversity. "
-            "Fewer samples (8-12) = faster, simpler model, may miss spectral patterns (default: 12). "
-            "More samples (20-30) = more comprehensive, better coverage, slower. "
-            "Rule of thumb: 10-20% of total transfer samples, minimum 10. "
-            "Increase if transfer fails to capture sample diversity. Decrease if overfitting occurs."
+        "param_tsr_samples": (
+            "How many of the loaded paired standards the slope/bias fit uses. "
+            "'All' (default) uses every loaded pair. A smaller number picks that many by "
+            "Kennard-Stone on the primary spectra; the rest are not used in the fit. "
+            "At least 2 are needed; more standards give steadier slopes."
         ),
         'param_jypls_samples': (
             "Number of representative samples selected for JYPLS-inv calibration transfer. "
@@ -1104,31 +1189,24 @@ TOOLTIP_CONTENT = {
             "Too few = underfitting (incomplete transfer). Too many = overfitting (noise transfer). "
             "Start with 'Auto' or 5-8 for typical applications."
         ),
-        'param_nspfce_max_iter': (
-            "Maximum iterations for NS-PFCE optimization algorithm. Controls convergence of the iterative "
-            "null-space projection process. More iterations allow finding better projection but take longer. "
-            "50-100 = fast, usually sufficient for simple cases (default: 100). "
-            "200-500 = thorough optimization for complex instrumental differences. "
-            "Algorithm may converge early (before max iterations) if tolerance is met. "
-            "Increase if transfer quality is poor and you suspect incomplete convergence. "
-            "Monitor convergence messages - if hitting max iterations, consider increasing."
+        "param_nspfce_max_iter": (
+            "Maximum iterations for Iterative ridge DS. Each iteration re-solves the ridge DS and "
+            "takes a damped step; it stops early when the change in mean squared error on the "
+            "standards falls below the tolerance. Default 100."
         ),
-        'param_nspfce_wavelength_selection': (
-            "Enable wavelength selection for NS-PFCE optimization. "
-            "UNCHECKED (default): Uses all wavelengths. Recommended for most cases - NS-PFCE performs excellently "
-            "without wavelength selection, is faster, and outputs full-width spectra compatible with existing models. "
-            "CHECKED: Uses feature selection (CARS, SPA, or VCPA-IRIV) to focus on a subset of wavelengths. "
-            "Output spectra contain ONLY selected wavelengths (reduced width). "
-            "Use with caution - downstream models must be trained on the same reduced wavelength set."
+        "param_nspfce_wavelength_selection": (
+            "Iterative ridge DS: select wavelengths before fitting. "
+            "UNCHECKED (default): all wavelengths; output is full width. "
+            "CHECKED: a selector (CARS, SPA or VCPA-IRIV, run against the spectral mean) keeps a "
+            "subset, and the output contains ONLY those wavelengths, so models that expect the "
+            "full grid cannot use it."
         ),
-        'param_nspfce_selector': (
-            "Wavelength selection algorithm for NS-PFCE (only when wavelength selection is enabled). "
-            "cars (default) = Competitive Adaptive Reweighted Sampling. Fast and robust, uses competitive mechanism. "
-            "Good for most applications. "
-            "spa = Successive Projections Algorithm. Very fast, selects orthogonal variables. Good for "
-            "highly collinear spectral data. "
-            "vcpa-iriv = Variable Combination Population Analysis + Iteratively Retaining Informative Variables. "
-            "Most comprehensive but slowest. Identifies stable informative wavelengths through multiple iterations."
+        "param_nspfce_selector": (
+            "Wavelength selector for Iterative ridge DS (only when wavelength selection is on). "
+            "cars = Competitive Adaptive Reweighted Sampling. "
+            "spa = Successive Projections Algorithm. "
+            "vcpa-iriv = VCPA followed by IRIV; slowest. "
+            "All three run against the spectral mean as a stand-in target, not a measured property."
         ),
     },
 
@@ -2867,10 +2945,6 @@ class SpectralPredictApp:
         self.ct_equalized_wavelengths = None  # Wavelengths after equalization
         self.ct_equalized_X = None  # Equalized spectra
         self.ct_equalized_sample_ids = None  # Sample IDs with instrument prefixes
-
-        # Transfer Model Registry - persistent storage of built transfer models
-        self.transfer_model_registry = {}  # Dict of model_key -> TransferModel
-        # model_key format: "PrimaryID_SatelliteID_Method"
 
         # Interference Removal Tab (Tab 11) variables - Phase 4: Advanced GUI
         # Tab 11A: Interferent Library Management
@@ -46428,179 +46502,6 @@ External Validation Performance (n={n_val}):
     #
     #     messagebox.showinfo("Success", f"Loaded {len(inst_ids)} instruments from registry")
 
-    def _refresh_ct_registry(self):
-        """Refresh the transfer model registry view and instruments list."""
-        # Update instruments listbox
-        self.ct_instrument_listbox.delete(0, tk.END)
-        for inst_id in sorted(self.instrument_spectral_data.keys()):
-            self.ct_instrument_listbox.insert(tk.END, inst_id)
-
-        # Update transfer models treeview
-        for item in self.ct_registry_tree.get_children():
-            self.ct_registry_tree.delete(item)
-
-        for model_key, model_data in self.transfer_model_registry.items():
-            primary_id = model_data['primary_id']
-            satellite_id = model_data['satellite_id']
-            method = model_data['method']
-            date_built = model_data['date_built']
-            n_samples = model_data['n_samples']
-
-            self.ct_registry_tree.insert('', 'end', iid=model_key,
-                                        values=(primary_id, satellite_id, method, date_built, n_samples))
-
-        # Update registry combos in sections C and D
-        registry_keys = list(self.transfer_model_registry.keys())
-        if hasattr(self, 'ct_eq_registry_combo'):
-            self.ct_eq_registry_combo['values'] = registry_keys
-        if hasattr(self, 'ct_pred_registry_combo'):
-            self.ct_pred_registry_combo['values'] = registry_keys
-
-    def _load_model_from_registry(self):
-        """Load selected transfer model from registry to current model."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model from the registry")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _delete_from_registry(self):
-        """Delete selected transfer model from registry."""
-        selected = self.ct_registry_tree.selection()
-        if not selected:
-            messagebox.showwarning("Warning", "Please select a transfer model to delete")
-            return
-
-        model_key = selected[0]
-        model_data = self.transfer_model_registry[model_key]
-
-        response = messagebox.askyesno("Confirm Delete",
-            f"Delete transfer model?\n\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}\n\n"
-            f"This cannot be undone.")
-
-        if response:
-            del self.transfer_model_registry[model_key]
-            self._refresh_ct_registry()
-            messagebox.showinfo("Success", "Transfer model deleted from registry")
-
-    def _import_model_to_registry(self):
-        """Import a transfer model from file into the registry."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        from spectral_predict.calibration_transfer import load_transfer_model
-
-        file_path = filedialog.askopenfilename(
-            title="Select Transfer Model JSON File",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
-
-        if not file_path:
-            return
-
-        try:
-            # Load the model
-            transfer_model = load_transfer_model(file_path)
-
-            # Try to extract primary/satellite IDs and method from the model
-            # These might be stored as metadata in the model
-            primary_id = getattr(transfer_model, 'primary_id', 'Unknown_Primary')
-            satellite_id = getattr(transfer_model, 'satellite_id', 'Unknown_Satellite')
-            method = transfer_model.method
-
-            # Create registry key
-            import datetime
-            model_key = f"{primary_id}_{satellite_id}_{method}"
-
-            # Check if already exists
-            if model_key in self.transfer_model_registry:
-                response = messagebox.askyesno("Model Exists",
-                    f"A model with key '{model_key}' already exists in the registry.\n\n"
-                    f"Do you want to replace it?")
-                if not response:
-                    return
-
-            # Store in registry
-            self.transfer_model_registry[model_key] = {
-                'model': transfer_model,
-                'primary_id': primary_id,
-                'satellite_id': satellite_id,
-                'method': method,
-                'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'n_samples': 0,  # Unknown from loaded file
-                'n_features': 0  # Unknown from loaded file
-            }
-
-            self._refresh_ct_registry()
-
-            messagebox.showinfo("Success",
-                f"Transfer model imported to registry:\n"
-                f"Key: {model_key}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to import transfer model:\n{str(e)}")
-
-    def _load_ct_eq_from_registry(self):
-        """Load transfer model from registry for file equalization (Section C)."""
-        model_key = self.ct_eq_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for file equalization:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _load_ct_pred_from_registry(self):
-        """Load transfer model from registry for prediction (Section D)."""
-        model_key = self.ct_pred_registry_combo_var.get()
-        if not model_key or model_key not in self.transfer_model_registry:
-            messagebox.showwarning("Warning", "Please select a valid transfer model from the registry")
-            return
-
-        model_data = self.transfer_model_registry[model_key]
-        self.ct_transfer_model = model_data['model']
-
-        messagebox.showinfo("Success",
-            f"Loaded transfer model from registry for prediction:\n"
-            f"Primary: {model_data['primary_id']}\n"
-            f"Satellite: {model_data['satellite_id']}\n"
-            f"Method: {model_data['method'].upper()}")
-
-    def _on_pred_tm_source_changed(self):
-        """Handle transfer model source change in Section D."""
-        source = self.ct_pred_tm_source_var.get()
-
-        # Hide/show appropriate frames
-        if source == 'registry':
-            self.ct_pred_registry_frame.pack(fill='x', pady=(5, 0))
-            self.ct_pred_load_tm_frame.pack_forget()
-        elif source == 'file':
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack(fill='x', pady=(5, 0))
-        else:  # current
-            self.ct_pred_registry_frame.pack_forget()
-            self.ct_pred_load_tm_frame.pack_forget()
-
     def _browse_ct_pred_primary_model(self):
         """Browse for primary calibration model in Section D."""
         file_path = filedialog.askopenfilename(
@@ -46953,412 +46854,6 @@ External Validation Performance (n={n_val}):
     #     except Exception as e:
     #         messagebox.showerror("Error", f"Failed to import from Instrument Lab:\n{str(e)}")
 
-    def _build_ct_transfer_model(self):
-        """Build calibration transfer model (DS or PDS)."""
-        if not HAS_CALIBRATION_TRANSFER:
-            messagebox.showerror("Error", "Calibration transfer modules not available")
-            return
-
-        # VALIDATION: Data Loaded Check
-        if not hasattr(self, 'ct_X_primary_common') or not hasattr(self, 'ct_X_satellite_common'):
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        if self.ct_X_primary_common is None or self.ct_X_satellite_common is None:
-            messagebox.showerror(
-                "No Paired Spectra Loaded",
-                "Please load paired standardization spectra in Section B first."
-            )
-            return
-
-        method = self.ct_method_var.get()
-        primary_id = self.ct_primary_instrument_id.get()
-        satellite_id = self.ct_satellite_instrument_id.get()
-
-        # VALIDATION: Different Instruments Check
-        if primary_id == satellite_id:
-            messagebox.showerror(
-                "Same Instrument Selected",
-                "Primary and satellite instruments must be different for calibration transfer."
-            )
-            return
-
-        try:
-            # --- ROI: optionally clip to region for estimation ---
-            roi_config = self._get_roi_config()
-            roi_meta = {}
-            X_primary_est = self.ct_X_primary_common
-            X_satellite_est = self.ct_X_satellite_common
-            wl_est = self.ct_wavelengths_common
-            if roi_config['enabled']:
-                from spectral_predict.calibration_transfer import clip_wavelengths_to_region
-                X_primary_est, wl_roi, roi_indices = clip_wavelengths_to_region(
-                    X_primary_est, wl_est, roi_config['start'], roi_config['end'])
-                X_satellite_est, _, _ = clip_wavelengths_to_region(
-                    X_satellite_est, wl_est, roi_config['start'], roi_config['end'])
-                roi_meta = {
-                    'enabled': True,
-                    'start': roi_config['start'],
-                    'end': roi_config['end'],
-                    'indices': roi_indices.tolist(),
-                    'n_wavelengths_region': len(roi_indices),
-                    'n_wavelengths_full': len(wl_est),
-                }
-                messagebox.showinfo("ROI",
-                    f"Estimating transfer on region {roi_config['start']:.1f}–{roi_config['end']:.1f} nm\n"
-                    f"({len(roi_indices)} of {len(wl_est)} wavelengths)")
-
-            if method == 'ds':
-                # Build DS transfer model
-                # VALIDATION: DS Ridge Lambda parameter
-                try:
-                    lam = float(self.ct_ds_lambda_var.get())
-                    if lam <= 0 or lam > 100:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"DS Ridge Lambda must be between 0 and 100.\nYou entered: {lam}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "DS Ridge Lambda must be a number.")
-                    return
-                A = estimate_ds(X_primary_est, X_satellite_est, lam=lam)
-
-                # Create TransferModel object
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_ds = {'lambda': lam, 'note': 'DS transfer built in GUI'}
-                if roi_meta:
-                    meta_ds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'A': A},
-                    meta=meta_ds
-                )
-
-                info_text = (f"Transfer Method: Direct Standardization (DS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Ridge Lambda: {lam}\n"
-                            f"Matrix Shape: {A.shape}")
-
-            elif method == 'pds':
-                # Build PDS transfer model
-                # VALIDATION: PDS Window parameter
-                try:
-                    window = int(self.ct_pds_window_var.get())
-                    if window < 5 or window > 101:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be between 5 and 101.\nYou entered: {window}"
-                        )
-                        return
-                    if window % 2 == 0:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"PDS Window must be an odd number.\nYou entered: {window} (even)"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "PDS Window must be an integer.")
-                    return
-                B = estimate_pds(X_primary_est, X_satellite_est, window=window)
-
-                from spectral_predict.calibration_transfer import TransferModel
-                meta_pds = {'note': 'PDS transfer built in GUI'}
-                if roi_meta:
-                    meta_pds['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='pds',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params={'B': B, 'window': window},
-                    meta=meta_pds
-                )
-
-                info_text = (f"Transfer Method: Piecewise Direct Standardization (PDS)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Window Size: {window}\n"
-                            f"Coefficient Matrix Shape: {B.shape}")
-
-            elif method == 'tsr':
-                # Build TSR (Transfer Sample Regression) model
-                from spectral_predict.calibration_transfer import estimate_tsr, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples (default 12)
-                try:
-                    n_transfer = int(getattr(self, 'ct_tsr_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 2:
-                        messagebox.showerror("Invalid Parameter", "Need at least 2 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Select transfer samples using Kennard-Stone (on full data for sample selection)
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Estimate TSR model (on ROI-clipped data if applicable)
-                tsr_params = estimate_tsr(
-                    X_primary_est,
-                    X_satellite_est,
-                    transfer_indices
-                )
-
-                meta_tsr = {'note': 'TSR transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_tsr['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='tsr',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=tsr_params,
-                    meta=meta_tsr
-                )
-
-                info_text = (f"Transfer Method: Transfer Sample Regression (TSR)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"Mean R²: {tsr_params['mean_r_squared']:.4f}\n"
-                            f"Slope Range: [{tsr_params['slope'].min():.3f}, {tsr_params['slope'].max():.3f}]")
-
-            elif method == 'ctai':
-                # Build CTAI (Affine Invariance) model - NO transfer samples needed!
-                from spectral_predict.calibration_transfer import estimate_ctai, TransferModel
-
-                # Estimate CTAI model
-                ctai_params = estimate_ctai(
-                    X_primary_est,
-                    X_satellite_est
-                )
-
-                meta_ctai = {'note': 'CTAI transfer built in GUI (no standards needed)'}
-                if roi_meta:
-                    meta_ctai['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='ctai',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=ctai_params,
-                    meta=meta_ctai
-                )
-
-                info_text = (f"Transfer Method: CTAI (Affine Invariance)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"NO TRANSFER SAMPLES NEEDED >\n"
-                            f"Components: {ctai_params['n_components']}\n"
-                            f"Explained Variance: {ctai_params['explained_variance']:.4f}\n"
-                            f"Reconstruction RMSE: {ctai_params['reconstruction_error']:.6f}")
-
-            elif method == 'jypls-inv':
-                # Build JYPLS-inv (Joint-Y PLS with Inversion) model
-                from spectral_predict.calibration_transfer import estimate_jypls_inv, TransferModel
-                from spectral_predict.sample_selection import kennard_stone
-
-                # Get number of transfer samples
-                try:
-                    n_transfer = int(getattr(self, 'ct_jypls_n_samples_var', tk.IntVar(value=12)).get())
-                    if n_transfer < 5:
-                        messagebox.showerror("Invalid Parameter", "JYPLS-inv needs at least 5 transfer samples")
-                        return
-                    if n_transfer > self.ct_X_primary_common.shape[0]:
-                        messagebox.showerror("Invalid Parameter",
-                            f"Cannot select {n_transfer} samples from {self.ct_X_primary_common.shape[0]} available")
-                        return
-                except (ValueError, AttributeError):
-                    n_transfer = 12  # Default
-
-                # Get PLS components
-                n_comp_str = self.ct_jypls_n_components_var.get()
-                if n_comp_str == 'Auto':
-                    n_components = None  # Auto-select via CV
-                else:
-                    n_components = int(n_comp_str)
-
-                # Select transfer samples using Kennard-Stone
-                transfer_indices = kennard_stone(self.ct_X_primary_common, n_samples=n_transfer)
-
-                # Need Y values for JYPLS-inv - use spectral mean as pseudo-Y
-                # In real applications, user would provide reference values
-                y_transfer = X_primary_est[transfer_indices].mean(axis=1)
-
-                # Estimate JYPLS-inv model (on ROI-clipped data if applicable)
-                jypls_params = estimate_jypls_inv(
-                    X_primary_est,
-                    X_satellite_est,
-                    y_transfer,
-                    transfer_indices,
-                    n_components=n_components
-                )
-
-                meta_jypls = {'note': 'JYPLS-inv transfer built in GUI', 'n_transfer_samples': n_transfer}
-                if roi_meta:
-                    meta_jypls['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='jypls-inv',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=jypls_params,
-                    meta=meta_jypls
-                )
-
-                info_text = (f"Transfer Method: JYPLS-inv (Joint-Y PLS with Inversion)\n"
-                            f"Primary: {primary_id} -> Satellite: {satellite_id}\n"
-                            f"Transfer Samples: {n_transfer} (Kennard-Stone selection)\n"
-                            f"PLS Components: {jypls_params['n_components']}\n"
-                            f"CV RMSE: {jypls_params['cv_rmse']:.6f}\n"
-                            f"Explained Variance: {jypls_params['explained_variance_ratio']:.4f}")
-
-            elif method == 'nspfce':
-                # Build NS-PFCE (Non-supervised Parameter-Free Calibration Enhancement) model
-                from spectral_predict.calibration_transfer import estimate_nspfce, TransferModel
-
-                # Get NS-PFCE parameters
-                use_wavelength_selection = self.ct_nspfce_use_wavelength_selection_var.get()
-                wavelength_selector = self.ct_nspfce_selector_var.get()
-
-                try:
-                    max_iterations = int(self.ct_nspfce_max_iterations_var.get())
-                    if max_iterations < 10 or max_iterations > 500:
-                        messagebox.showerror(
-                            "Invalid Parameter",
-                            f"NS-PFCE Max Iterations must be between 10 and 500.\nYou entered: {max_iterations}"
-                        )
-                        return
-                except ValueError:
-                    messagebox.showerror("Invalid Parameter", "NS-PFCE Max Iterations must be an integer.")
-                    return
-
-                # Estimate NS-PFCE model (on ROI-clipped data if applicable)
-                # NS-PFCE needs wavelengths array matching the spectral columns
-                wl_for_nspfce = wl_roi if roi_meta else wl_est
-                nspfce_params = estimate_nspfce(
-                    X_primary_est,
-                    X_satellite_est,
-                    wl_for_nspfce,
-                    use_wavelength_selection=use_wavelength_selection,
-                    wavelength_selector=wavelength_selector,
-                    max_iterations=max_iterations
-                )
-
-                meta_nspfce = {
-                    'note': 'NS-PFCE transfer built in GUI',
-                    'use_wavelength_selection': use_wavelength_selection,
-                    'wavelength_selector': wavelength_selector if use_wavelength_selection else 'N/A'
-                }
-                if roi_meta:
-                    meta_nspfce['region_of_interest'] = roi_meta
-                self.ct_transfer_model = TransferModel(
-                    primary_id=primary_id,
-                    satellite_id=satellite_id,
-                    method='nspfce',
-                    wavelengths_common=self.ct_wavelengths_common,
-                    params=nspfce_params,
-                    meta=meta_nspfce
-                )
-
-                # Build info text
-                info_lines = [
-                    f"Transfer Method: NS-PFCE (Non-supervised Parameter-Free)",
-                    f"Primary: {primary_id} -> Satellite: {satellite_id}",
-                    f"Iterations: {nspfce_params['n_iterations']} / {max_iterations}",
-                    f"Converged: {'Yes >' if nspfce_params['converged'] else 'No (max iter reached)'}",
-                ]
-
-                if use_wavelength_selection:
-                    n_selected = len(nspfce_params.get('selected_wavelength_indices', []))
-                    n_total = len(self.ct_wavelengths_common)
-                    info_lines.append(f"Wavelength Selection: {wavelength_selector.upper()}")
-                    info_lines.append(f"Selected Wavelengths: {n_selected} / {n_total} ({100*n_selected/n_total:.1f}%)")
-                else:
-                    info_lines.append(f"Wavelength Selection: Not used")
-
-                if nspfce_params['convergence_history']:
-                    final_error = nspfce_params['convergence_history'][-1]
-                    info_lines.append(f"Final RMSE: {final_error:.6f}")
-
-                info_text = "\n".join(info_lines)
-
-            # Display transfer model info
-            self.ct_transfer_info_text.config(state='normal')
-            self.ct_transfer_info_text.delete('1.0', tk.END)
-            self.ct_transfer_info_text.insert('1.0', info_text)
-            self.ct_transfer_info_text.config(state='disabled')
-
-            # Generate transfer quality plots
-            self._plot_transfer_quality(method)
-
-            # Update active transfer model status
-            self._update_active_transfer_model_status()
-
-            # Save to transfer model registry
-            primary_id = self.ct_primary_instrument_id.get()
-            satellite_id = self.ct_satellite_instrument_id.get()
-            if primary_id and satellite_id:
-                import datetime
-                model_key = f"{primary_id}_{satellite_id}_{method}"
-                # Store model with metadata
-                self.transfer_model_registry[model_key] = {
-                    'model': self.ct_transfer_model,
-                    'primary_id': primary_id,
-                    'satellite_id': satellite_id,
-                    'method': method,
-                    'date_built': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'n_samples': self.ct_X_primary_common.shape[0] if self.ct_X_primary_common is not None else 0,
-                    'n_features': self.ct_wavelengths_common.shape[0] if self.ct_wavelengths_common is not None else 0
-                }
-
-            messagebox.showinfo("Success",
-                f"{method.upper()} transfer model built successfully\n\n"
-                f"Model saved to registry: {model_key}" if primary_id and satellite_id else
-                f"{method.upper()} transfer model built successfully")
-        except KeyError as e:
-            # Specific handling for missing dictionary keys
-            messagebox.showerror(
-                "Configuration Error",
-                f"Failed to build transfer model - missing expected parameter:\n{str(e)}\n\n"
-                f"This may indicate a version mismatch or incomplete calibration transfer implementation."
-            )
-        except ValueError as e:
-            # Specific handling for validation errors
-            messagebox.showerror(
-                "Data Validation Error",
-                f"Failed to build transfer model due to invalid data:\n{str(e)}\n\n"
-                f"Please check your data for NaN/inf values or ensure data shapes are correct."
-            )
-        except np.linalg.LinAlgError as e:
-            # Specific handling for numerical errors
-            messagebox.showerror(
-                "Numerical Error",
-                f"Failed to build transfer model due to numerical instability:\n{str(e)}\n\n"
-                f"This often occurs with poorly conditioned data. Try:\n"
-                f"- Preprocessing your data (scaling, normalization)\n"
-                f"- Using more samples\n"
-                f"- Checking for duplicate or near-duplicate spectra"
-            )
-        except Exception as e:
-            # Generic fallback for unexpected errors
-            import traceback
-            error_details = traceback.format_exc()
-            print(f"Transfer model build error:\n{error_details}")  # Log to console
-            messagebox.showerror(
-                "Error",
-                f"Failed to build transfer model:\n{str(e)}\n\n"
-                f"Check the console for detailed traceback."
-            )
-
     def _save_ct_transfer_model(self):
         """Save current transfer model to disk."""
         if not HAS_CALIBRATION_TRANSFER:
@@ -47659,7 +47154,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_transfer_model = load_transfer_model(path_prefix)
             messagebox.showinfo("Success",
                 f"Transfer model loaded:\n"
-                f"Method: {self.ct_pred_transfer_model.method.upper()}\n"
+                f"Method: {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
                 f"Primary: {self.ct_pred_transfer_model.primary_id}\n"
                 f"Satellite: {self.ct_pred_transfer_model.satellite_id}")
         except Exception as e:
@@ -47765,7 +47260,7 @@ External Validation Performance (n={n_val}):
             self.ct_pred_sample_ids = [f"Sample_{i+1}" for i in range(len(y_pred))]
 
             # Display results
-            pred_text = f"Transferred {len(y_pred)} spectra using {self.ct_pred_transfer_model.method.upper()}\n"
+            pred_text = f"Transferred {len(y_pred)} spectra using {ct_method_display_name(self.ct_pred_transfer_model.method)}\n"
             pred_text += f"Predictions (first 10):\n"
             y_pred_arr = np.array(y_pred)
             is_numeric = pd.api.types.is_numeric_dtype(y_pred_arr.dtype)
@@ -47893,11 +47388,13 @@ External Validation Performance (n={n_val}):
             tm = TransferModel.load(filepath)
             self.ct_eq_loaded_transfer_model = tm
 
-            info_text = (f"Loaded Transfer Model:\n"
-                        f"  Primary: {tm.primary_id}\n"
-                        f"  Satellite: {tm.satellite_id}\n"
-                        f"  Method: {tm.method.upper()}\n"
-                        f"  Wavelengths: {len(tm.wavelengths_common)}")
+            info_text = (
+                f"Loaded Transfer Model:\n"
+                f"  Primary: {tm.primary_id}\n"
+                f"  Satellite: {tm.satellite_id}\n"
+                f"  Method: {ct_method_display_name(tm.method)}\n"
+                f"  Wavelengths: {len(tm.wavelengths_common)}"
+            )
 
             self.ct_eq_status_text.config(state='normal')
             self.ct_eq_status_text.delete('1.0', tk.END)
@@ -48009,7 +47506,10 @@ External Validation Performance (n={n_val}):
 
             # Apply transfer transformation
             self.ct_eq_status_text.config(state='normal')
-            self.ct_eq_status_text.insert(tk.END, f"Applying {transfer_model.method.upper()} transformation...\n")
+            self.ct_eq_status_text.insert(
+                tk.END,
+                f"Applying {ct_method_display_name(transfer_model.method)} transformation...\n",
+            )
             self.ct_eq_status_text.config(state='disabled')
             self.root.update()
 
@@ -48167,7 +47667,7 @@ External Validation Performance (n={n_val}):
 
         Shows:
         1. Transfer Quality Plot (3 subplots): Primary, Satellite before, Satellite after
-        2. Transfer Scatter Plot: Primary vs Transferred with R²
+        2. Spectral agreement scatter on the fitting standards with R² (not a validation)
         """
         if not HAS_MATPLOTLIB:
             return
@@ -48177,26 +47677,35 @@ External Validation Performance (n={n_val}):
             for widget in self.ct_transfer_plot_frame.winfo_children():
                 widget.destroy()
 
+            # A model built on a region of interest was fitted on the clipped columns,
+            # so plot (and apply it to) the same columns.
+            X_pri, X_sat, wl_plot = ct_region_arrays(
+                self.ct_X_primary_common,
+                self.ct_X_satellite_common,
+                self.ct_wavelengths_common,
+                getattr(self.ct_transfer_model, 'meta', None),
+            )
+
             # Apply transfer to get transferred spectra
             if method == 'ds':
                 A = self.ct_transfer_model.params['A']
-                X_transferred = apply_ds(self.ct_X_satellite_common, A)
+                X_transferred = apply_ds(X_sat, A)
             elif method == 'pds':
                 B = self.ct_transfer_model.params['B']
                 window = self.ct_transfer_model.params['window']
-                X_transferred = apply_pds(self.ct_X_satellite_common, B, window)
+                X_transferred = apply_pds(X_sat, B, window)
             elif method == 'tsr':
                 from spectral_predict.calibration_transfer import apply_tsr
-                X_transferred = apply_tsr(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_tsr(X_sat, self.ct_transfer_model.params)
             elif method == 'ctai':
                 from spectral_predict.calibration_transfer import apply_ctai
-                X_transferred = apply_ctai(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_ctai(X_sat, self.ct_transfer_model.params)
             elif method == 'jypls-inv':
                 from spectral_predict.calibration_transfer import apply_jypls_inv
-                X_transferred = apply_jypls_inv(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_jypls_inv(X_sat, self.ct_transfer_model.params)
             elif method == 'nspfce':
                 from spectral_predict.calibration_transfer import apply_nspfce
-                X_transferred = apply_nspfce(self.ct_X_satellite_common, self.ct_transfer_model.params)
+                X_transferred = apply_nspfce(X_sat, self.ct_transfer_model.params)
             else:
                 # Unsupported method for plotting
                 return
@@ -48208,20 +47717,18 @@ External Validation Performance (n={n_val}):
             derivative_notebook = ttk.Notebook(self.ct_transfer_plot_frame)
             derivative_notebook.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
+            # Savitzky-Golay window for the derivative tabs; None when the plotted
+            # region is too narrow for any derivative (e.g. an ROI of 1-2 wavelengths).
+            deriv_window = ct_derivative_window(len(wl_plot))
+
             # Helper function to compute derivatives
             def compute_derivative(X, wavelengths, deriv_order):
                 """Compute derivative using Savitzky-Golay filter."""
                 from scipy.signal import savgol_filter
                 if deriv_order == 0:
                     return X
-                # Use window length of 11 and polynomial order 2 (common for NIR)
-                window_length = min(11, len(wavelengths) - 1)
-                if window_length % 2 == 0:
-                    window_length -= 1  # Must be odd
-                if window_length < 5:
-                    window_length = 5
                 X_deriv = np.apply_along_axis(
-                    lambda y: savgol_filter(y, window_length, polyorder=2, deriv=deriv_order),
+                    lambda y: savgol_filter(y, deriv_window, polyorder=2, deriv=deriv_order),
                     axis=1, arr=X
                 )
                 return X_deriv
@@ -48236,8 +47743,8 @@ External Validation Performance (n={n_val}):
                 ax1 = fig.add_subplot(131)
                 primary_mean = np.mean(primary_data, axis=0)
                 primary_std = np.std(primary_data, axis=0)
-                ax1.plot(self.ct_wavelengths_common, primary_mean, 'b-', linewidth=2, label='Mean')
-                ax1.fill_between(self.ct_wavelengths_common,
+                ax1.plot(wl_plot, primary_mean, 'b-', linewidth=2, label='Mean')
+                ax1.fill_between(wl_plot,
                                primary_mean - primary_std,
                                primary_mean + primary_std,
                                alpha=0.3, color='b', label='±1 Std')
@@ -48251,8 +47758,8 @@ External Validation Performance (n={n_val}):
                 ax2 = fig.add_subplot(132)
                 satellite_mean = np.mean(satellite_data, axis=0)
                 satellite_std = np.std(satellite_data, axis=0)
-                ax2.plot(self.ct_wavelengths_common, satellite_mean, 'r-', linewidth=2, label='Mean')
-                ax2.fill_between(self.ct_wavelengths_common,
+                ax2.plot(wl_plot, satellite_mean, 'r-', linewidth=2, label='Mean')
+                ax2.fill_between(wl_plot,
                                satellite_mean - satellite_std,
                                satellite_mean + satellite_std,
                                alpha=0.3, color='r', label='±1 Std')
@@ -48266,8 +47773,8 @@ External Validation Performance (n={n_val}):
                 ax3 = fig.add_subplot(133)
                 trans_mean = np.mean(transferred_data, axis=0)
                 trans_std = np.std(transferred_data, axis=0)
-                ax3.plot(self.ct_wavelengths_common, trans_mean, 'g-', linewidth=2, label='Mean')
-                ax3.fill_between(self.ct_wavelengths_common,
+                ax3.plot(wl_plot, trans_mean, 'g-', linewidth=2, label='Mean')
+                ax3.fill_between(wl_plot,
                                trans_mean - trans_std,
                                trans_mean + trans_std,
                                alpha=0.3, color='g', label='±1 Std')
@@ -48280,21 +47787,12 @@ External Validation Performance (n={n_val}):
                 fig.tight_layout()
                 return fig
 
-            # Compute all derivatives
-            primary_d1 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 1)
-            satellite_d1 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 1)
-            transferred_d1 = compute_derivative(X_transferred, self.ct_wavelengths_common, 1)
-
-            primary_d2 = compute_derivative(self.ct_X_primary_common, self.ct_wavelengths_common, 2)
-            satellite_d2 = compute_derivative(self.ct_X_satellite_common, self.ct_wavelengths_common, 2)
-            transferred_d2 = compute_derivative(X_transferred, self.ct_wavelengths_common, 2)
-
-            # Tab 1: Raw spectra
+            # Tab 1: Raw spectra (drawn first so a derivative failure cannot hide it)
             tab_raw = ttk.Frame(derivative_notebook)
             derivative_notebook.add(tab_raw, text='Raw Spectra')
 
             fig_raw = create_comparison_figure(
-                self.ct_X_primary_common, self.ct_X_satellite_common, X_transferred,
+                X_pri, X_sat, X_transferred,
                 self._get_spectral_ylabel(), 'Spectra'
             )
 
@@ -48303,45 +47801,50 @@ External Validation Performance (n={n_val}):
             canvas_raw.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             self._add_plot_export_button(tab_raw, fig_raw, "transfer_quality_raw")
 
-            # Tab 2: 1st derivative
-            tab_d1 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d1, text='1st Derivative')
-
-            fig_d1 = create_comparison_figure(
-                primary_d1, satellite_d1, transferred_d1,
-                '1st Derivative', '(1st Derivative)'
-            )
-
-            canvas_d1 = FigureCanvasTkAgg(fig_d1, tab_d1)
-            canvas_d1.draw()
-            canvas_d1.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d1, fig_d1, "transfer_quality_1st_deriv")
-
-            # Tab 3: 2nd derivative
-            tab_d2 = ttk.Frame(derivative_notebook)
-            derivative_notebook.add(tab_d2, text='2nd Derivative')
-
-            fig_d2 = create_comparison_figure(
-                primary_d2, satellite_d2, transferred_d2,
-                '2nd Derivative', '(2nd Derivative)'
-            )
-
-            canvas_d2 = FigureCanvasTkAgg(fig_d2, tab_d2)
-            canvas_d2.draw()
-            canvas_d2.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-            self._add_plot_export_button(tab_d2, fig_d2, "transfer_quality_2nd_deriv")
+            # Tabs 2-3: derivatives, only when the region is wide enough
+            if deriv_window is None:
+                tab_note = ttk.Frame(derivative_notebook)
+                derivative_notebook.add(tab_note, text='Derivatives')
+                ttk.Label(
+                    tab_note,
+                    text=(f"Derivative plots need at least 3 wavelengths; "
+                          f"this region has {len(wl_plot)}."),
+                ).pack(anchor='w', padx=10, pady=10)
+            else:
+                try:
+                    for order, tab_text, ylabel, suffix, export_name in (
+                        (1, '1st Derivative', '1st Derivative', '(1st Derivative)',
+                         "transfer_quality_1st_deriv"),
+                        (2, '2nd Derivative', '2nd Derivative', '(2nd Derivative)',
+                         "transfer_quality_2nd_deriv"),
+                    ):
+                        tab_d = ttk.Frame(derivative_notebook)
+                        derivative_notebook.add(tab_d, text=tab_text)
+                        fig_d = create_comparison_figure(
+                            compute_derivative(X_pri, wl_plot, order),
+                            compute_derivative(X_sat, wl_plot, order),
+                            compute_derivative(X_transferred, wl_plot, order),
+                            ylabel, suffix,
+                        )
+                        canvas_d = FigureCanvasTkAgg(fig_d, tab_d)
+                        canvas_d.draw()
+                        canvas_d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+                        self._add_plot_export_button(tab_d, fig_d, export_name)
+                except Exception:
+                    logging.getLogger(__name__).exception("Transfer derivative plots failed")
 
             # === Plot 2: Transfer Scatter Plot ===
             fig2 = Figure(figsize=(7, 6))
             ax = fig2.add_subplot(111)
 
-            # Flatten arrays for scatter plot
-            primary_flat = self.ct_X_primary_common.ravel()
-            transferred_flat = X_transferred.ravel()
-
-            # Calculate R²
-            from sklearn.metrics import r2_score
-            r2 = r2_score(primary_flat, transferred_flat)
+            # Agreement on the standards the transfer was fitted on (resubstitution,
+            # not a validation). For slope/bias only the selected standards were
+            # fitted, so the other loaded rows are left out rather than mixed in.
+            r2, fit_rows = ct_spectral_agreement_on_fit_rows(
+                X_pri, X_transferred, method, self.ct_transfer_model.params
+            )
+            primary_flat = X_pri[fit_rows].ravel()
+            transferred_flat = X_transferred[fit_rows].ravel()
 
             # Scatter plot with alpha for density
             ax.scatter(primary_flat, transferred_flat, alpha=0.3, s=10, edgecolors='none')
@@ -48353,8 +47856,11 @@ External Validation Performance (n={n_val}):
 
             ax.set_xlabel('Primary Spectra Values', fontsize=11)
             ax.set_ylabel('Transferred Satellite Values', fontsize=11)
-            ax.set_title(f'Transfer Quality Scatter Plot (R² = {r2:.4f})',
-                        fontsize=12, fontweight='bold')
+            ax.set_title(
+                f"{CT_AGREEMENT_TITLE}\nR² = {r2:.4f} on the {len(fit_rows)} fitting standards",
+                fontsize=11,
+                fontweight="bold",
+            )
             ax.legend(fontsize=10)
             ax.grid(True, alpha=0.3)
 
@@ -48369,6 +47875,7 @@ External Validation Performance (n={n_val}):
             self._add_plot_export_button(self.ct_transfer_plot_frame, fig2, "transfer_scatter")
 
         except Exception as e:
+            logging.getLogger(__name__).exception("Transfer quality plot failed")
             print(f"Error creating transfer quality plots: {str(e)}")
 
     def _plot_equalization_quality(self, instruments_data, equalized_data, common_grid):
@@ -48817,7 +48324,7 @@ External Validation Performance (n={n_val}):
 
     def _display_transfer_model_info(self, method, primary_id, satellite_id, date_created, n_samples, wavelengths, model_data_type=None):
         """Display transfer model information in text widget."""
-        info_text = f"Method: {method}\n"
+        info_text = f"Method: {ct_method_display_name(method)} (saved key '{method}')\n"
         info_text += f"Primary ID: {primary_id}\n"
         info_text += f"Satellite ID: {satellite_id}\n"
         info_text += f"Date Created: {date_created}\n"
@@ -48873,7 +48380,7 @@ External Validation Performance (n={n_val}):
             # Extract model info
             method = getattr(transfer_model, 'method', 'Unknown')
             if isinstance(method, str):
-                method_str = method.upper()
+                method_str = ct_method_display_name(method)
             else:
                 method_str = str(method).upper()
 
@@ -49343,13 +48850,17 @@ External Validation Performance (n={n_val}):
                 params = {'B': B, 'window': window}
 
             elif method == 'tsr':
-                n_samples = int(self.ct_tsr_n_samples_var.get())
-                if n_samples > X_primary_common.shape[0]:
-                    raise ValueError(f"TSR requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-                # TSR requires transfer_indices: assume all loaded samples are paired
-                transfer_indices = np.arange(n_samples)
-                params = estimate_tsr(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                     transfer_indices)
+                # Per-wavelength slope/bias. Loaded rows are paired standards; use all
+                # of them, or a Kennard-Stone subset of the requested size (QW2: this
+                # used to take the first n rows although the tooltip promised KS).
+                from spectral_predict.calibration_transfer import select_transfer_standards
+
+                n_standards = parse_transfer_standards_count(self.ct_tsr_n_samples_var.get())
+                transfer_indices = select_transfer_standards(X_primary_common, n_standards)
+                params = estimate_tsr(X_primary_common, X_satellite_common, transfer_indices)
+                params["standard_selection"] = (
+                    "all" if len(transfer_indices) == X_primary_common.shape[0] else "kennard-stone"
+                )
 
             elif method == 'ctai':
                 params = estimate_ctai(X_primary_common, X_satellite_common)
@@ -49401,10 +48912,6 @@ External Validation Performance (n={n_val}):
                     # Extract Y values for selected transfer samples (REAL VALUES!)
                     y_transfer = y_paired[transfer_indices]
 
-                    # Use selected samples for building
-                    X_primary_transfer = X_primary_paired[transfer_indices]
-                    X_satellite_transfer = X_satellite_paired[transfer_indices]
-
                     # Show info about Y values used
                     y_min, y_max = y_transfer.min(), y_transfer.max()
                     y_mean, y_std = y_transfer.mean(), y_transfer.std()
@@ -49415,27 +48922,23 @@ External Validation Performance (n={n_val}):
                         f"Y mean: {y_mean:.3f} ± {y_std:.3f}\n\n"
                         f"Selected using Kennard-Stone algorithm.")
 
-                    params = estimate_jypls_inv(X_primary_transfer, X_satellite_transfer,
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # transfer_indices index the paired arrays, so pass those (passing
+                    # the already-subset rows indexed them twice).
+                    params = estimate_jypls_inv(
+                        X_primary_paired,
+                        X_satellite_paired,
+                        y_transfer,
+                        transfer_indices,
+                        n_components=n_components,
+                    )
 
                 else:
-                    # Simple loading: Fall back to placeholder (not recommended)
-                    if n_samples > X_primary_common.shape[0]:
-                        raise ValueError(f"JYPLS-inv requires {n_samples} samples, but only {X_primary_common.shape[0]} available.")
-
-                    messagebox.showwarning("JYPLS-inv Limitation",
-                        "JYPLS-inv requires reference property values (Y) for transfer samples.\n\n"
-                        "Building with placeholder zeros because enhanced loading was not used.\n\n"
-                        "For accurate results, use the 'Load Primary/Satellite Data with Y values' section above.\n"
-                        "Otherwise, consider using CTAI or NS-PFCE instead, which don't require reference values.")
-
-                    y_transfer = np.zeros(n_samples)  # Placeholder
-                    transfer_indices = np.arange(n_samples)
-
-                    params = estimate_jypls_inv(X_primary_common[:n_samples], X_satellite_common[:n_samples],
-                                               y_transfer, transfer_indices,
-                                               n_components=n_components)
+                    # No measured reference values: refuse rather than substitute zeros (R091).
+                    raise ValueError(
+                        "JYPLS-inv needs a measured reference value (y) for every transfer "
+                        "standard. Load primary and satellite data with y values, or use "
+                        "another method."
+                    )
 
             else:
                 raise ValueError(f"Unknown method: {method}")
@@ -49481,8 +48984,15 @@ External Validation Performance (n={n_val}):
 
             # Update info display
             info_text = f"Transfer Model Built Successfully!\n"
-            info_text += f"Method: {method.upper()}\n"
-            info_text += f"Training Samples: {X_primary_common.shape[0]}\n"
+            info_text += f"Method: {ct_method_display_name(method)}\n"
+            info_text += f"Paired standards loaded: {X_primary_common.shape[0]}\n"
+            if method == "tsr":
+                how = (
+                    "all loaded pairs"
+                    if params.get("standard_selection") == "all"
+                    else "Kennard-Stone subset"
+                )
+                info_text += f"Standards used in fit: {len(params['transfer_indices'])} ({how})\n"
             info_text += f"Wavelength Range: {wl_common[0]:.1f} - {wl_common[-1]:.1f} nm ({len(wl_common)} points)\n"
             if roi_meta:
                 info_text += (
@@ -53797,7 +53307,7 @@ External Validation Performance (n={n_val}):
                     transfer_model = calibration_transfer.load_transfer_model(prefix)
 
                 # Create display description
-                description = f"{transfer_model.method.upper()}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
+                description = f"{ct_method_display_name(transfer_model.method)}: {transfer_model.satellite_id} -> {transfer_model.primary_id}"
 
                 # Add to list maintaining order
                 self.transfer_models.append({
@@ -54641,10 +54151,14 @@ External Validation Performance (n={n_val}):
         ct_guide_title.pack(anchor='w', pady=(0, 8))
 
         ct_decision_content = (
-            "Same wavelength range + 10+ standards:  PDS (Piecewise Direct Standardization)\n"
-            "Same wavelength range + <10 standards:  DS (Direct Standardization)\n"
-            "Different wavelength ranges:            CTAI (Cross-Transfer Adaptive Interpolation)\n"
-            "No transfer standards available:        Feature-based matching methods"
+            "Every method here needs paired standards: the same samples measured on both\n"
+            "instruments, row for row, on one common wavelength grid.\n"
+            "Default:                      Slope/bias per wavelength (2 coefficients per wavelength)\n"
+            "Wavelength shift / bandwidth: PDS (local window of neighbouring wavelengths)\n"
+            "DS, PC-DS, Iterative ridge DS: full-matrix maps; with few standards they can fit\n"
+            "                              the standards closely and do worse on new samples.\n"
+            "The agreement plot below is computed on the fitting standards, not a validation:\n"
+            "check any transfer on standards that were not used to fit it."
         )
         ct_decision_label = tk.Label(
             ct_guide_frame,
@@ -54851,7 +54365,8 @@ External Validation Performance (n={n_val}):
         method_buttons_frame = ttk.Frame(method_section)
         method_buttons_frame.pack(fill='x', pady=(0, 10))
 
-        self.ct_method_var = tk.StringVar(value='nspfce')
+        # Default: per-wavelength slope/bias (key 'tsr'); fewest coefficients (QW2).
+        self.ct_method_var = tk.StringVar(value=CT_DEFAULT_METHOD)
 
         # DS method
         ds_radio = ttk.Radiobutton(method_buttons_frame, text="DS",
@@ -54865,27 +54380,44 @@ External Validation Performance (n={n_val}):
         pds_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(pds_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_PDS'], delay=500)
 
-        # TSR method
-        tsr_radio = ttk.Radiobutton(method_buttons_frame, text="TSR",
-                                    variable=self.ct_method_var, value='tsr')
+        # Slope/bias per wavelength (stored key 'tsr'; not trimmed scores regression)
+        tsr_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("tsr", short=True),
+            variable=self.ct_method_var,
+            value="tsr",
+        )
         tsr_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(tsr_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_TSR'], delay=500)
 
-        # CTAI method
-        ctai_radio = ttk.Radiobutton(method_buttons_frame, text="CTAI",
-                                     variable=self.ct_method_var, value='ctai')
+        # PC-DS (stored key 'ctai'; not the published CTAI)
+        ctai_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("ctai", short=True),
+            variable=self.ct_method_var,
+            value="ctai",
+        )
         ctai_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(ctai_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_CTAI'], delay=500)
 
-        # NS-PFCE method
-        nspfce_radio = ttk.Radiobutton(method_buttons_frame, text="NS-PFCE",
-                                       variable=self.ct_method_var, value='nspfce')
+        # Iterative ridge DS (stored key 'nspfce'; a dasp heuristic, not PFCE)
+        nspfce_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("nspfce", short=True),
+            variable=self.ct_method_var,
+            value="nspfce",
+        )
         nspfce_radio.pack(side='left', padx=(0, 10))
         CreateToolTip(nspfce_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_NSPFCE'], delay=500)
 
         # JYPLS-inv method
-        jypls_radio = ttk.Radiobutton(method_buttons_frame, text="JYPLS-inv",
-                                      variable=self.ct_method_var, value='jypls-inv', state='disabled')
+        jypls_radio = ttk.Radiobutton(
+            method_buttons_frame,
+            text=ct_method_display_name("jypls-inv", short=True),
+            variable=self.ct_method_var,
+            value="jypls-inv",
+            state="disabled",
+        )
         jypls_radio.pack(side='left')
         CreateToolTip(jypls_radio, text=TOOLTIP_CONTENT['calibration_transfer']['method_JYPLS'], delay=500)
 
@@ -54922,12 +54454,15 @@ External Validation Performance (n={n_val}):
         row2 = ttk.Frame(params_frame)
         row2.pack(fill='x', pady=(0, 5))
 
-        # TSR Samples
-        tsr_samples_label = ttk.Label(row2, text="TSR Samples:", style='CardLabel.TLabel', width=20)
+        # Slope/bias standards (stored as ct_tsr_n_samples_var)
+        tsr_samples_label = ttk.Label(
+            row2, text="Slope/bias standards:", style="CardLabel.TLabel", width=20
+        )
         tsr_samples_label.pack(side='left')
         CreateToolTip(tsr_samples_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
 
-        self.ct_tsr_n_samples_var = tk.StringVar(value='12')
+        # 'All' = every loaded pair; a number = that many chosen by Kennard-Stone.
+        self.ct_tsr_n_samples_var = tk.StringVar(value="All")
         tsr_samples_entry = ttk.Entry(row2, textvariable=self.ct_tsr_n_samples_var, width=12)
         tsr_samples_entry.pack(side='left', padx=(0, 20))
         CreateToolTip(tsr_samples_entry, text=TOOLTIP_CONTENT['calibration_transfer']['param_tsr_samples'], delay=500)
@@ -54958,8 +54493,10 @@ External Validation Performance (n={n_val}):
         jypls_comp_combo.pack(side='left', padx=(0, 20))
         CreateToolTip(jypls_comp_combo, text=TOOLTIP_CONTENT['calibration_transfer']['param_jypls_components'], delay=500)
 
-        # NS-PFCE Max Iter
-        nspfce_maxiter_label = ttk.Label(row3, text="NS-PFCE Max Iter:", style='CardLabel.TLabel', width=20)
+        # Iterative ridge DS max iterations (stored as nspfce_*)
+        nspfce_maxiter_label = ttk.Label(
+            row3, text="Ridge DS Max Iter:", style="CardLabel.TLabel", width=20
+        )
         nspfce_maxiter_label.pack(side='left')
         CreateToolTip(nspfce_maxiter_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_max_iter'], delay=500)
 
@@ -54972,16 +54509,18 @@ External Validation Performance (n={n_val}):
         row4 = ttk.Frame(params_frame)
         row4.pack(fill='x')
 
-        # NS-PFCE Wavelength Selection
-        # Default to False - NS-PFCE works great without WL selection (faster, full spectrum output)
-        # When WL selection is enabled, output is reduced to only selected wavelengths
+        # Iterative ridge DS wavelength selection (stored as nspfce_*): off by default.
+        # When enabled, output is reduced to only the selected wavelengths.
         self.ct_nspfce_use_wavelength_selection_var = tk.BooleanVar(value=False)
-        nspfce_wavsel_check = ttk.Checkbutton(row4, text="NS-PFCE: Use Wavelength Selection",
-                                              variable=self.ct_nspfce_use_wavelength_selection_var)
+        nspfce_wavsel_check = ttk.Checkbutton(
+            row4,
+            text="Iterative ridge DS: Use Wavelength Selection",
+            variable=self.ct_nspfce_use_wavelength_selection_var,
+        )
         nspfce_wavsel_check.pack(side='left', padx=(0, 20))
         CreateToolTip(nspfce_wavsel_check, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_wavelength_selection'], delay=500)
 
-        # NS-PFCE Selector (only used when wavelength selection is enabled)
+        # Iterative ridge DS selector (only used when wavelength selection is enabled)
         nspfce_selector_label = ttk.Label(row4, text="Selector:", style='CardLabel.TLabel')
         nspfce_selector_label.pack(side='left')
         CreateToolTip(nspfce_selector_label, text=TOOLTIP_CONTENT['calibration_transfer']['param_nspfce_selector'], delay=500)
