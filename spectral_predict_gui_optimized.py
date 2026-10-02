@@ -59055,6 +59055,8 @@ External Validation Performance (n={n_val}):
 
             # Detect data type (Feature 5)
             self._contam_detect_data_type()
+            # Groups added before this clean data were not checked against it
+            self._contam_revalidate_groups()
 
             # Auto-populate spectra plot if groups already loaded (Feature 1)
             self._contam_auto_populate_spectra_plot()
@@ -59062,37 +59064,122 @@ External Validation Performance (n={n_val}):
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load clean data:\n{str(e)}")
 
+    def _contam_clean_type_record(self):
+        """Data type record of the loaded clean data (None if none is loaded)."""
+        if getattr(self, 'contam_clean_data', None) is None:
+            return None
+        return {
+            'data_type': self.contam_current_data_type.get(),
+            'source_data_type': (
+                None if getattr(self, 'contam_data_converted', False)
+                else getattr(self, 'contam_source_data_type', None)
+            ),
+            'stated': bool((getattr(self, 'contam_clean_metadata', None) or {}).get('data_type')),
+        }
+
+    @staticmethod
+    def _contam_type_problem(group_record, clean_record):
+        """Why a contaminant group cannot be analysed with the clean data, or None.
+
+        The non-convertible policy comes first: if either side is 'other'
+        (Kubelka-Munk, Raman, single-channel ...), both must be 'other' with the same
+        canonical source; Kubelka-Munk and Raman are both 'other' but not comparable.
+        Then convertible types must agree when the group's reader stated its type;
+        a group typed only by the value heuristic follows the clean data.
+        """
+        g_type, c_type = group_record.get('data_type'), clean_record.get('data_type')
+        g_label = _data_type_label(g_type, group_record.get('source_data_type'))
+        c_label = _data_type_label(c_type, clean_record.get('source_data_type'))
+        if not (_is_convertible_data_type(g_type) and _is_convertible_data_type(c_type)):
+            same_source = canonical_source_data_type(
+                group_record.get('source_data_type')
+            ) == canonical_source_data_type(clean_record.get('source_data_type'))
+            if g_type != c_type or not same_source:
+                return f"{g_label} data, but the clean data is {c_label}"
+            return None
+        if g_type != c_type and group_record.get('stated'):
+            return f"{g_label} data, but the clean data is {c_label}"
+        return None
+
     def _contam_group_type(self, label, metadata, group_data):
         """Data type record for a contaminant group, or None if it is refused.
 
-        A group must have the clean data's current type. When the group's reader
-        states a different type, or either side is a non-convertible ('other') type,
-        the group is refused with a message. A group typed only by the value
-        heuristic is taken to match the clean data, as before.
+        The record keeps the group's own type, source and value scale. When clean
+        data is loaded the group must be compatible with it (``_contam_type_problem``);
+        a group added before the clean data is checked when the clean data loads,
+        and again before every analysis.
         """
         group_type, _confidence, group_source = _resolve_loaded_data_type(metadata, group_data)
-        clean_loaded = getattr(self, 'contam_clean_data', None) is not None
-        clean_type = self.contam_current_data_type.get() if clean_loaded else None
-        stated = bool((metadata or {}).get('data_type'))
-        if clean_type and group_type != clean_type:
-            if stated or not (
-                _is_convertible_data_type(group_type) and _is_convertible_data_type(clean_type)
-            ):
-                clean_label = _data_type_label(
-                    clean_type, getattr(self, 'contam_source_data_type', None))
-                messagebox.showerror(
-                    "Data Type Mismatch",
-                    f"Contaminant group '{label}' is {_data_type_label(group_type, group_source)} "
-                    f"data, but the clean data is {clean_label}.\n\nAll groups must have "
-                    "the clean data's data type. Convert the data or load matching files.")
-                return None
-            # Heuristic-only disagreement between convertible types: follow the clean data
-            group_type, group_source = clean_type, getattr(self, 'contam_source_data_type', None)
-        return {
+        record = {
             'data_type': group_type,
             'source_data_type': group_source,
             'value_scale': _loaded_value_scale(metadata, group_data, group_type),
+            'stated': bool((metadata or {}).get('data_type')),
         }
+        clean_record = self._contam_clean_type_record()
+        if clean_record is not None:
+            problem = self._contam_type_problem(record, clean_record)
+            if problem:
+                messagebox.showerror(
+                    "Data Type Mismatch",
+                    f"Contaminant group '{label}' is {problem}.\n\nAll groups must have "
+                    "the clean data's data type. Convert the data or load matching files.")
+                return None
+        return record
+
+    def _contam_incompatible_groups(self):
+        """``{label: problem}`` for stored groups that do not match the clean data."""
+        clean_record = self._contam_clean_type_record()
+        if clean_record is None:
+            return {}
+        records = getattr(self, 'contam_group_types', {})
+        problems = {}
+        for label in self.contam_groups:
+            record = records.get(label)
+            if record is None:
+                continue  # no record (legacy): follows the clean data
+            problem = self._contam_type_problem(record, clean_record)
+            if problem:
+                problems[label] = problem
+        return problems
+
+    def _contam_remove_groups(self, labels):
+        """Remove groups by label from the data, records and listbox."""
+        for label in labels:
+            self.contam_groups.pop(label, None)
+            self.contam_group_paths.pop(label, None)
+            getattr(self, 'contam_group_types', {}).pop(label, None)
+        listbox = getattr(self, 'contam_groups_listbox', None)
+        if listbox is not None and hasattr(listbox, 'size'):
+            for idx in reversed(range(listbox.size())):
+                if str(listbox.get(idx)).split(':')[0] in labels:
+                    listbox.delete(idx)
+
+    def _contam_revalidate_groups(self):
+        """After the clean data changes, offer to remove groups that no longer match."""
+        problems = self._contam_incompatible_groups()
+        if not problems:
+            return
+        detail = "\n".join(f"  - {label}: {problem}" for label, problem in problems.items())
+        if messagebox.askyesno(
+            "Data Type Mismatch",
+            "These contaminant groups do not match the clean data:\n"
+            f"{detail}\n\nRemove them? (Analyses refuse to run while they remain.)",
+        ):
+            self._contam_remove_groups(list(problems))
+            self._contam_update_summary()
+
+    def _contam_groups_block_analysis(self):
+        """Show an error and return True if any group's type mismatches the clean data."""
+        problems = self._contam_incompatible_groups()
+        if not problems:
+            return False
+        detail = "\n".join(f"  - {label}: {problem}" for label, problem in problems.items())
+        messagebox.showerror(
+            "Data Type Mismatch",
+            "These contaminant groups do not match the clean data:\n"
+            f"{detail}\n\nRemove or replace them before running the analysis.")
+        return True
 
     def _contam_add_single_group(self, label: str, filepath: str) -> bool:
         """Load, validate, and store a single contaminant group.
@@ -59101,6 +59188,11 @@ External Validation Performance (n={n_val}):
         """
         try:
             group_data, group_wavelengths, sample_names = self._contam_load_spectra_from_path(filepath)
+            group_data = np.asarray(group_data)
+            if group_data.ndim != 2 or group_data.shape[0] == 0 or group_data.shape[1] == 0:
+                messagebox.showerror(
+                    "Error", f"Group '{label}' contains no spectra; it was not added.")
+                return False
             group_metadata = getattr(self, '_contam_last_metadata', None)
             group_type = self._contam_group_type(label, group_metadata, group_data)
             if group_type is None:
@@ -59301,6 +59393,9 @@ External Validation Performance (n={n_val}):
 
         if len(self.contam_groups) == 0:
             messagebox.showerror("Error", "Please add at least one contaminant group")
+            return
+
+        if self._contam_groups_block_analysis():
             return
 
         try:
@@ -59609,6 +59704,9 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Error", "Please add at least one contaminant group")
             return
 
+        if self._contam_groups_block_analysis():
+            return
+
         method = self.contam_method.get()
         n_components = self.contam_n_components.get()
         threshold = self.contam_threshold.get()
@@ -59873,31 +59971,44 @@ External Validation Performance (n={n_val}):
                 return
 
         try:
-            # Each dataset converts with its own scale (main-tab state is swapped out and
-            # restored by _convert_with_source); groups convert only if they carry the
-            # same ordinate type as the clean data
             group_types = getattr(self, 'contam_group_types', {})
-            skipped = [
-                label for label in self.contam_groups
-                if group_types.get(label, {}).get('data_type', current) != current
-            ]
-            if skipped:
+            problems = self._contam_incompatible_groups()
+            if problems:
                 messagebox.showerror(
                     "Data Type Mismatch",
-                    f"Contaminant groups {skipped} do not have the clean data's data type "
-                    f"({current}); nothing was converted. Remove or replace them first.")
+                    f"Contaminant groups {sorted(problems)} do not have the clean data's data "
+                    f"type ({current}); nothing was converted. Remove or replace them first.")
                 return
-            self.contam_clean_data, _ = self._convert_with_source(
-                self.contam_clean_data, current, target, None, self.contam_data_value_scale)
-            for label in list(self.contam_groups.keys()):
+            # Compute every converted array first, then commit, so a failure part-way
+            # leaves data and type state unchanged. Each dataset converts with its own
+            # source type and scale (_convert_with_source swaps out main-tab state).
+            clean_source = (
+                None if self.contam_data_converted
+                else getattr(self, 'contam_source_data_type', None))
+            new_clean, new_clean_scale = self._convert_with_source(
+                self.contam_clean_data, current, target, clean_source,
+                self.contam_data_value_scale)
+            new_groups = {}
+            for label, data in self.contam_groups.items():
                 record = group_types.get(label)
-                scale = record['value_scale'] if record else self.contam_data_value_scale
-                self.contam_groups[label], scale = self._convert_with_source(
-                    self.contam_groups[label], current, target, None, scale)
-                if record:
+                if record is not None:
+                    source, scale = record.get('source_data_type'), record['value_scale']
+                else:
+                    source, scale = clean_source, self.contam_data_value_scale
+                if np.asarray(data).size == 0:
+                    raise ValueError(f"group '{label}' contains no spectra")
+                new_groups[label] = self._convert_with_source(data, current, target, source, scale)
+
+            # Commit
+            self.contam_clean_data = new_clean
+            self.contam_data_value_scale = new_clean_scale
+            for label, (converted, scale) in new_groups.items():
+                self.contam_groups[label] = converted
+                record = group_types.get(label)
+                if record is not None:
                     record['data_type'] = target
                     record['value_scale'] = scale
-
+                    record['source_data_type'] = None  # no longer the file's own type
             self.contam_current_data_type.set(target)
             self.contam_data_converted = not self.contam_data_converted
 
@@ -60303,6 +60414,21 @@ External Validation Performance (n={n_val}):
             # Detect data type (Feature 5); a combined file carries no reader type
             self.contam_clean_metadata = None
             self._contam_detect_data_type()
+            # The groups come from the same file, so they share its ordinate type. Each
+            # gets its own record so conversion tracks it; the value scale is decided
+            # from the whole file's spectra (not from the clean rows alone) and applied
+            # to every dataset, since one export uses one scale
+            clean_record = self._contam_clean_type_record() or {}
+            file_scale = _loaded_value_scale(
+                None, df[wl_cols].values.astype(float), clean_record.get('data_type'))
+            self.contam_data_value_scale = file_scale
+            for val in self.contam_groups:
+                self.contam_group_types[val] = {
+                    'data_type': clean_record.get('data_type'),
+                    'source_data_type': clean_record.get('source_data_type'),
+                    'value_scale': file_scale,
+                    'stated': False,
+                }
 
             # Update summary and alignment
             self._contam_update_summary()

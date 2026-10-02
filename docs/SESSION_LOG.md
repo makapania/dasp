@@ -804,6 +804,18 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   converted % reflectance converts back to %. Source labels are canonicalised (`io.canonical_source_data_type`;
   Omnic 'Log(1/R)' == OPUS 'log_reflectance'). PowerShell 5.1 mangles `"` inside native-command arguments:
   write commit messages to a file and use `git commit -F`.
+- **Review round 5 (final).** Contaminant compatibility: the non-convertible policy runs before any equality
+  check ('other' matches only 'other' with the same canonical source, so Kubelka-Munk vs Raman is refused); stored
+  groups are re-validated when clean data loads (with an offer to remove offenders) and again before
+  difference analysis / automated detection; combined-file groups get their own records with a scale decided
+  from the whole file; empty groups are rejected and `_contam_convert_data_type` computes every array before
+  committing. ASCII folder summaries now keep every number-format (decimal-comma) warning in full and summarise
+  other kinds per category with all files named; exponent fragments ("4,123E+3,0,123") count as warning-only
+  evidence; a leading zero refuses only when a competing split exists ("0400,0.5" loads, "1,000,0.123" refuses).
+  Note: the GUI's transmittance and reflectance formulas are the same number (-log10 T == log10(1/T)), so
+  passing the carried source into contamination conversion is bookkeeping, not a value change. Deferred by the
+  coordinator (see PROJECT_STATUS Follow-Ups): CSV/reference implicit-index shift and ASD-text decimal-comma
+  misreads, both pre-existing.
 - **Tooling gotcha.** The Bash tool's heredocs turned `\b` and `\n` inside Python string literals into real
   control characters (a backspace ended up in a regex). Write code containing backslashes with the Write/Edit
   tools, not via heredoc.

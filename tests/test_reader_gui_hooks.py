@@ -375,7 +375,8 @@ def test_prediction_load_real_ascii_folder_shows_parse_warning(tmp_path, dialogs
 
     assert app.prediction_data.shape == (2, 50)
     shown = [c for c in dialogs if c[1] == "Prediction data import warnings"]
-    assert shown and "skipped 1 line" in shown[0][2]
+    assert shown and "skipped non-numeric lines" in shown[0][2]
+    assert "s0.dpt" in shown[0][2] and "s1.dpt" in shown[0][2]
 
 
 def test_main_tab_other_type_conversion_refused(dialogs):
@@ -979,3 +980,159 @@ def test_metadata_captures_and_prediction_source_stay_wired():
         "prediction_source_data_type=(\n                            None if self.pred_data_has_been_converted"
         in source
     )
+
+
+# ---------------------------------------------------------------------------
+# Review round 5: contaminant compatibility, empty groups, transactional conversion
+# ---------------------------------------------------------------------------
+
+
+class _Listbox:
+    def __init__(self):
+        self.items = []
+
+    def insert(self, index, text):
+        self.items.append(text)
+
+    def delete(self, first, last=None):
+        if last is not None:
+            self.items = []
+        else:
+            del self.items[first]
+
+    def size(self):
+        return len(self.items)
+
+    def get(self, idx):
+        return self.items[idx]
+
+
+def _contam_folder_app(monkeypatch, tmp_path, folders):
+    """Contamination app with OPUS folders: {name: {block: values}} (2 files each)."""
+    files = {}
+    for name, blocks in folders.items():
+        d = tmp_path / name
+        d.mkdir()
+        files.update({d / f"{name}{i}.0": blocks for i in range(2)})
+    _install_opus(monkeypatch, files)
+    app = _contam_app(monkeypatch, tmp_path / next(iter(folders)))
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _Listbox()
+    app.contam_wavelengths = None
+    app.contam_clean_data = None
+    app.contam_group_types = {}
+    return app
+
+
+def test_other_types_with_different_sources_are_refused(tmp_path, monkeypatch, dialogs):
+    app = _contam_folder_app(
+        monkeypatch, tmp_path, {"km": {"km": np.full(60, 0.3)}, "ra": {"ra": np.full(60, 500.0)}}
+    )
+    app._contam_load_clean_data()
+    assert app.contam_current_data_type.get() == "other"
+
+    assert app._contam_add_single_group("Raman", str(tmp_path / "ra")) is False
+    refusal = [c for c in dialogs if c[1] == "Data Type Mismatch"]
+    assert refusal and "Raman intensity" in refusal[0][2] and "Kubelka-Munk" in refusal[0][2]
+
+
+def test_other_types_with_the_same_source_are_accepted(tmp_path, monkeypatch, dialogs):
+    app = _contam_folder_app(
+        monkeypatch, tmp_path, {"km": {"km": np.full(60, 0.3)}, "km2": {"km": np.full(60, 0.4)}}
+    )
+    app._contam_load_clean_data()
+
+    assert app._contam_add_single_group("KM2", str(tmp_path / "km2")) is True
+
+
+def test_group_added_before_clean_data_is_revalidated(tmp_path, monkeypatch, dialogs):
+    app = _contam_folder_app(
+        monkeypatch, tmp_path, {"clean": {"r": np.full(60, 0.5)}, "km": {"km": np.full(60, 0.45)}}
+    )
+    assert app._contam_add_single_group("KM", str(tmp_path / "km")) is True  # no clean yet
+    asked = []
+    monkeypatch.setattr(
+        gui.messagebox, "askyesno", lambda title, msg, **k: asked.append(msg) or True
+    )
+
+    app._contam_load_clean_data()
+
+    assert asked and "KM" in asked[0] and "Kubelka-Munk" in asked[0]
+    assert "KM" not in app.contam_groups and app.contam_groups_listbox.items == []
+
+
+def test_analysis_runs_are_blocked_while_a_group_mismatches(tmp_path, monkeypatch, dialogs):
+    app = _contam_folder_app(
+        monkeypatch, tmp_path, {"clean": {"r": np.full(60, 0.5)}, "km": {"km": np.full(60, 0.45)}}
+    )
+    app._contam_add_single_group("KM", str(tmp_path / "km"))
+    monkeypatch.setattr(gui.messagebox, "askyesno", lambda *a, **k: False)  # keep the group
+    app._contam_load_clean_data()
+    assert "KM" in app.contam_groups
+    preprocessed = []
+    app._contam_preprocess_data = lambda X: preprocessed.append(X) or X
+    app.contam_preprocessing = _Var("None (Raw)")
+
+    app._contam_run_difference_analysis()
+    app._contam_run_automated_detection()
+
+    blocked = [c for c in dialogs if c[0] == "showerror" and c[1] == "Data Type Mismatch"]
+    assert len(blocked) == 2 and "KM" in blocked[0][2]
+    assert preprocessed == []  # neither analysis started
+
+
+def test_empty_group_is_rejected(tmp_path, monkeypatch, dialogs):
+    path = tmp_path / "empty.npy"
+    np.save(path, np.empty((0, 3)))
+    app = _contam_app(monkeypatch, tmp_path)
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _Listbox()
+    app.contam_wavelengths = None
+    app.contam_clean_data = np.full((2, 3), 0.5)
+    app.contam_current_data_type.set("reflectance")
+
+    assert app._contam_add_single_group("E", str(path)) is False
+    assert "E" not in app.contam_groups
+    assert any("no spectra" in c[2] for c in dialogs)
+
+
+def test_contaminant_conversion_is_transactional(monkeypatch, tmp_path, dialogs):
+    app = _contam_app(monkeypatch, tmp_path)
+    app.contam_clean_data = np.full((2, 3), 0.5)
+    app.contam_current_data_type.set("reflectance")
+    app.contam_original_data_type.set("reflectance")
+    app.contam_data_value_scale = 1.0
+    app.contam_groups = {"A": np.full((2, 3), 0.25), "E": np.empty((0, 3))}
+    app.contam_group_types = {}
+
+    app._contam_convert_data_type()
+
+    # The empty group fails the conversion; nothing was committed
+    np.testing.assert_array_equal(app.contam_clean_data, np.full((2, 3), 0.5))
+    np.testing.assert_array_equal(app.contam_groups["A"], np.full((2, 3), 0.25))
+    assert app.contam_current_data_type.get() == "reflectance"
+    assert any(c[1] == "Error" and "no spectra" in c[2] for c in dialogs)
+
+
+def test_combined_file_groups_get_their_own_records(monkeypatch, tmp_path, dialogs):
+    app = _contam_app(monkeypatch, tmp_path)
+    app.contam_group_paths = {}
+    app.contam_groups_listbox = _Listbox()
+    app.contam_group_types = {}
+    wl = [str(1000 + i) for i in range(5)]
+    rows = [["clean"] + [50.0] * 5, ["clean"] + [52.0] * 5, ["sand"] + [30.0] * 5]
+    app._contam_combined_df = pd.DataFrame(rows, columns=["group"] + wl)
+    app._contam_combined_wl_cols = wl
+    app.contam_combined_group_col = _Var("group")
+    app.contam_combined_clean_value = _Var("clean")
+    app.contam_combined_file_path = _Var("combined.csv")
+    app._contam_combined_status = _AnyWidget()
+
+    app._contam_process_combined_file()
+
+    assert app.contam_group_types["sand"]["data_type"] == "reflectance"
+    assert app.contam_group_types["sand"]["value_scale"] == 100.0
+    app._contam_convert_data_type()
+    app._contam_convert_data_type()
+    np.testing.assert_allclose(app.contam_groups["sand"], 30.0)
+    np.testing.assert_allclose(app.contam_clean_data[0], 50.0)

@@ -793,3 +793,81 @@ def test_unit_in_leading_heading_fields_of_two_column_data_is_used(tmp_path):
 
     assert meta["x_unit"] == "nm"
     assert meta["x_unit_detection_method"] == "ascii_header"
+
+
+# ---------------------------------------------------------------------------
+# Review round 5
+# ---------------------------------------------------------------------------
+
+
+def test_folder_summary_never_hides_number_format_warnings(tmp_path):
+    """a/b/c carry harmless extra-column notes; z.dat's decimal-comma note must survive."""
+    for name in ("a", "b", "c"):
+        _write(tmp_path, f"{name}.dat", "1000,0.1,x\n1001,0.2,x\n1002,0.3,x\n")
+    _write(tmp_path, "z.dat", "1000,5,0,123\n1001,5,0,124\n1002,5,0,125\n")
+
+    with pytest.warns(UserWarning):
+        _, meta = read_ascii_spectra(tmp_path)
+
+    warnings_text = meta["import_warnings"]
+    comma = [m for m in warnings_text if "decimal-comma" in m]
+    assert len(comma) == 1 and comma[0].startswith("z.dat:")
+    extra = [m for m in warnings_text if "ignored extra columns" in m]
+    assert len(extra) == 1
+    for name in ("a.dat", "b.dat", "c.dat", "z.dat"):
+        assert name in extra[0]
+
+
+def test_folder_lists_every_file_with_number_format_warning(tmp_path):
+    names = [f"f{i}.dat" for i in range(6)]
+    for name in names:
+        _write(tmp_path, name, "1000,5,0,123\n1001,5,0,124\n")
+
+    with pytest.warns(UserWarning):
+        _, meta = read_ascii_spectra(tmp_path)
+
+    comma = [m for m in meta["import_warnings"] if "decimal-comma" in m]
+    assert sorted(m.split(":", 1)[0] for m in comma) == names
+
+
+def test_exponent_fragments_raise_the_ambiguity_warning(tmp_path):
+    path = _write(tmp_path, "exp.dat", "4,123E+3,0,123\n3,999E+3,0,124\n")
+
+    with pytest.warns(UserWarning, match="decimal-comma"):
+        df, meta = read_ascii_spectra(path)
+
+    # The default decimal-point reading is unchanged
+    assert df.columns.tolist() == [3.0, 4.0]
+    assert any("decimal-comma" in m for m in meta["import_warnings"])
+
+
+def test_exponent_with_point_decimal_third_field_is_no_evidence(tmp_path):
+    path = _write(tmp_path, "exp_ok.dat", "4,123E+3,0.5\n3,999E+3,0.6\n")
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, meta = read_ascii_spectra(path)
+
+    assert not [m for m in meta["import_warnings"] if "decimal-comma" in m]
+    assert not [w for w in caught if "decimal-comma" in str(w.message)]
+
+
+@pytest.mark.parametrize(
+    "text, x",
+    [
+        ("0400,0.5\n0401,0.6\n0402,0.7\n", [400.0, 401.0, 402.0]),  # zero-padded x
+        ("1000,05\n1001,06\n1002,07\n", [1000.0, 1001.0, 1002.0]),  # zero-padded y
+    ],
+)
+def test_zero_padding_without_a_competing_split_loads(tmp_path, text, x):
+    path = _write(tmp_path, "pad.dat", text)
+
+    df, _ = read_ascii_spectra(path)
+
+    assert df.columns.tolist() == x
+
+
+def test_leading_zero_with_a_thousands_split_still_refuses(tmp_path):
+    path = _write(tmp_path, "thousands.dat", "1,000,0.123\n2,000,0.124\n")
+    with pytest.raises(ValueError, match="leading zero"):
+        read_ascii_spectra(path)

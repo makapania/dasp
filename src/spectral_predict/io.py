@@ -1911,6 +1911,8 @@ _INT_TOKEN = re.compile(r'^[+-]?\d+$')
 # thousands-separated x as well as x, y.
 _THOUSANDS_HEAD = re.compile(r'^[+-]?\d{1,3}$')
 _THOUSANDS_GROUP = re.compile(r'^\d{3}(\.\d*)?$')
+# "4,123E+3": the fraction digits of a decimal-comma number written with an exponent
+_EXPONENT_FRACTION = re.compile(r'^\d+[eE][+-]?\d+$')
 # "05", "000", "000.5": a leading zero before another digit is a thousands group or a
 # fraction fragment, never how a spectrometer writes an x or y value.
 _LEADING_ZERO_TOKEN = re.compile(r'^[+-]?0\d')
@@ -2053,50 +2055,61 @@ def _decimal_comma_check(
     ("4000,5,0,123": x and y could be decimal-comma numbers), or with a 1-3 digit
     field and a 3-digit group followed by a number ("1,234,0.123": x could be
     thousands-separated). "4000,1523,0.5" fits neither: a point-decimal field cannot
-    be half of a decimal-comma number.
+    be half of a decimal-comma number. A row whose second field is an exponent
+    fraction ("4,123E+3,0,123") also fits, but only as warning evidence.
 
     Returns:
-        ``(refusal, warning)``: a refusal reason when an x/y field has a leading zero
-        ("05", "000.5": a fraction or thousands group), or when fitting rows exist
-        and the decimal-point reading has rows with differing field counts or
-        duplicate x values; else a warning when fitting rows exist; else two Nones.
+        ``(refusal, warning)``. A refusal reason when fitting rows exist and the
+        decimal-point reading has rows with differing field counts, duplicate x
+        values, or an x/y field with a leading zero ("1,000,0.123": a thousands or
+        fraction group); else a warning when any row fits; else two Nones. A leading
+        zero alone ("0400,0.5", "1000,05") is zero padding, not ambiguity.
     """
     fitting = []
+    exponent_fitting = []
+    leading_zero = None
     for toks in data_tokens:
-        if any(_LEADING_ZERO_TOKEN.match(t) for t in toks[:2]):
-            return (
-                f"a field such as {toks[:3]} has a leading zero (thousands or fraction "
-                f"group)",
-                None,
-            )
+        if leading_zero is None and any(_LEADING_ZERO_TOKEN.match(t) for t in toks[:2]):
+            leading_zero = toks
         if len(toks) < 3 or _try_float(toks[2], '.') is None:
             continue
         # A decimal-comma pair needs the third field to be digits too ("4000,5,0,123"
         # or "4000,0,123"); a point-decimal third field ("4000,1523,0.5") cannot be part
         # of one, so that row is no evidence for it.
-        decimal_comma = all(_INT_TOKEN.match(t) for t in toks[:3])
+        third_int = bool(_INT_TOKEN.match(toks[2]))
+        decimal_comma = bool(_INT_TOKEN.match(toks[0]) and _INT_TOKEN.match(toks[1]) and third_int)
         thousands = bool(_THOUSANDS_HEAD.match(toks[0]) and _THOUSANDS_GROUP.match(toks[1]))
         if decimal_comma or thousands:
             fitting.append(toks)
-    if not fitting:
+        elif _INT_TOKEN.match(toks[0]) and _EXPONENT_FRACTION.match(toks[1]) and third_int:
+            exponent_fitting.append(toks)
+    if fitting:
+        example = fitting[0][:4]
+        if leading_zero is not None:
+            return (
+                f"a field such as {leading_zero[:3]} has a leading zero (thousands or "
+                f"fraction group)",
+                None,
+            )
+        if len({len(t) for t in data_tokens}) > 1:
+            return (
+                f"rows have different field counts and rows such as {example} split into "
+                f"decimal-comma or thousands-separated numbers",
+                None,
+            )
+        if len(set(xs)) < len(xs):
+            return (
+                f"the decimal-point reading repeats x values, and rows such as {example} "
+                f"split into decimal-comma or thousands-separated numbers",
+                None,
+            )
+    evidence = fitting or exponent_fitting
+    if not evidence:
         return None, None
-    example = fitting[0][:4]
-    if len({len(t) for t in data_tokens}) > 1:
-        return (
-            f"rows have different field counts and rows such as {example} split into "
-            f"decimal-comma or thousands-separated numbers",
-            None,
-        )
-    if len(set(xs)) < len(xs):
-        return (
-            f"the decimal-point reading repeats x values, and rows such as {example} "
-            f"split into decimal-comma or thousands-separated numbers",
-            None,
-        )
     return None, (
-        f"rows such as {example} also fit a decimal-comma (or thousands-separator) "
-        f"reading; they were read with decimal points (x={fitting[0][0]}, "
-        f"y={fitting[0][1]}). If the file uses decimal commas, re-export it with ';' as "
+        f"rows such as {evidence[0][:4]} also fit a decimal-comma (or thousands-separator) "
+        f"reading; they were read with decimal points (x={evidence[0][0]}, "
+        f"y={evidence[0][1]}). If the file uses decimal commas, re-export it with ';' as "
         f"the delimiter and read it with decimal=','"
     )
 
@@ -2209,8 +2222,12 @@ def _parse_ascii_file(
         raise ValueError(f"{filepath.name}: {e}") from None
 
     file_warnings: list[str] = []
+    # Parallel to file_warnings: the category of each message, so folder summaries
+    # can list every file with a number-format ambiguity instead of a sample
+    warning_kinds: list[str] = []
     if used_decimal == ',' and decimal is None:
         file_warnings.append(f"{filepath.name}: read with a decimal comma")
+        warning_kinds.append('number_format')
 
     first_data = next(i for i, p in enumerate(parsed) if p is not None)
     header_lines = lines[:first_data]
@@ -2237,11 +2254,13 @@ def _parse_ascii_file(
             )
         if comma_warning:
             file_warnings.append(f"{filepath.name}: {comma_warning}")
+            warning_kinds.append('number_format')
         if all(len(t) == 2 and _INT_TOKEN.match(t[0]) and _INT_TOKEN.match(t[1]) for t in data_tokens):
             file_warnings.append(
                 f"{filepath.name}: every row is two comma-separated integers; read as x, y "
                 f"(a single decimal-comma column would look the same)"
             )
+            warning_kinds.append('number_format')
 
     n_columns = len(data_tokens[0])
     x = np.array(xs, dtype=float)
@@ -2255,6 +2274,7 @@ def _parse_ascii_file(
             f"{filepath.name}: skipped {skipped} line(s) after the data began with no "
             f"numeric x/y (or non-finite x)"
         )
+        warning_kinds.append('skipped_lines')
     column_counts = sorted({len(t) for t in data_tokens})
     if column_counts != [2]:
         n_text = sum(
@@ -2265,11 +2285,13 @@ def _parse_ascii_file(
             f"{filepath.name}: rows have {column_counts} fields; using column 1 as x and "
             f"column 2 as y, columns 3+ ignored{detail}"
         )
+        warning_kinds.append('extra_columns')
     n_dupes = int(df['x'].duplicated().sum())
     if n_dupes:
         file_warnings.append(
             f"{filepath.name}: {n_dupes} duplicate x value(s); kept the first of each"
         )
+        warning_kinds.append('duplicates')
         df = df.drop_duplicates(subset='x', keep='first')
     df = df.sort_values('x', kind='stable').reset_index(drop=True)
 
@@ -2291,6 +2313,7 @@ def _parse_ascii_file(
     )
     if unit_warning:
         file_warnings.append(f"{filepath.name}: {unit_warning}")
+        warning_kinds.append('units')
 
     for message in file_warnings:
         warnings.warn(message, UserWarning, stacklevel=3)
@@ -2304,8 +2327,35 @@ def _parse_ascii_file(
         'n_columns': n_columns,
         'n_skipped_lines': skipped,
         'warnings': file_warnings,
+        'warning_kinds': warning_kinds,
     }
     return df, info
+
+
+_ASCII_WARNING_KIND_LABELS = {
+    'skipped_lines': "skipped non-numeric lines",
+    'extra_columns': "ignored extra columns",
+    'duplicates': "duplicate x values",
+    'units': "x units named for another column",
+}
+
+
+def _summarise_ascii_file_warnings(file_warnings: list[tuple[str, str]]) -> list[str]:
+    """Folder-level import warnings from per-file ``(kind, message)`` pairs.
+
+    Number-format ambiguities (decimal comma, a competing decimal-comma reading)
+    can change values, so every such message is kept in full. Other kinds are
+    summarised as one line per kind naming every affected file.
+    """
+    summary = [msg for kind, msg in file_warnings if kind == 'number_format']
+    by_kind: Dict[str, list[str]] = {}
+    for kind, msg in file_warnings:
+        if kind != 'number_format':
+            by_kind.setdefault(kind, []).append(msg.split(':', 1)[0])
+    for kind, files in by_kind.items():
+        label = _ASCII_WARNING_KIND_LABELS.get(kind, kind)
+        summary.append(f"{len(files)} file(s) with {label}: {sorted(set(files))}")
+    return summary
 
 
 def _ascii_x_unit_metadata(
@@ -2409,6 +2459,7 @@ def read_ascii_spectra(
     unit_keys, _ = _ascii_x_unit_metadata({path.name: info['header_x_unit']})
 
     file_warnings = info.pop('warnings')
+    info.pop('warning_kinds')
     metadata = {
         'n_spectra': 1,
         'n_points': result.shape[1],
@@ -2457,7 +2508,7 @@ def _read_ascii_dir(
     duplicate_stems: list[str] = []
     failed: list[str] = []
     import_warnings: list[str] = []
-    file_warnings: list[str] = []
+    file_warnings: list[tuple[str, str]] = []  # (kind, message)
     for ascii_file in ascii_files:
         stem = ascii_file.stem
         try:
@@ -2471,7 +2522,7 @@ def _read_ascii_dir(
             duplicate_stems.append(stem)
         spectra[stem] = pd.Series(df_xy['y'].to_numpy(), index=df_xy['x'].to_numpy())
         units[ascii_file.name] = info['header_x_unit']
-        file_warnings.extend(info['warnings'])
+        file_warnings.extend(zip(info['warning_kinds'], info['warnings']))
 
     if not spectra:
         raise ValueError(f"No valid ASCII spectra could be read from {directory}: {failed[:5]}")
@@ -2497,10 +2548,7 @@ def _read_ascii_dir(
     import_warnings.extend(unit_warnings)
     for message in import_warnings:
         warnings.warn(message, UserWarning, stacklevel=3)
-    if file_warnings:
-        import_warnings.append(
-            f"{len(file_warnings)} per-file parse warning(s), e.g. {file_warnings[:3]}"
-        )
+    import_warnings.extend(_summarise_ascii_file_warnings(file_warnings))
 
     data_type, type_confidence, detection_method = detect_spectral_data_type(df)
     value_scale = infer_reflectance_scale(df) if data_type == "reflectance" else 1.0
