@@ -49,8 +49,20 @@ pytestmark = pytest.mark.gui
 
 
 def _reconstruct(app, row: dict, X: pd.DataFrame, y: np.ndarray, task: str):
+    # Real full-spectrum rows carry SubsetTag/n_vars; without all_vars the rebuild
+    # only uses every column when they say so (fix/wavelength-mapping).
     top_models_df = pd.DataFrame(
-        [{"Poly": 2, "Deriv": 0, "Window": 17, "Preprocess": "raw", **row}]
+        [
+            {
+                "Poly": 2,
+                "Deriv": 0,
+                "Window": 17,
+                "Preprocess": "raw",
+                "SubsetTag": "full",
+                "n_vars": X.shape[1],
+                **row,
+            }
+        ]
     )
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -355,6 +367,8 @@ def test_ensemble_reconstruction_accepts_dict_params_cell(gui_app):
                 "Deriv": None,
                 "Window": None,
                 "Poly": None,
+                "SubsetTag": "full",
+                "n_vars": X.shape[1],
             }
         ]
     )
@@ -524,7 +538,8 @@ def test_ensemble_loop_survives_malformed_chromosome_rows(gui_app, monkeypatch):
     # Bad genes and an unbuildable name: skipped, with a log line.
     skipped = {**good, "preprocess_chromosome": "[100000000000000000000000000000, 3]"}
     plain = {"Model": "Ridge", "Params": str({"alpha": 1.0}), "Preprocess": "raw"}
-    top_models_df = pd.DataFrame([good, fallback, skipped, plain])
+    full = {"SubsetTag": "full", "n_vars": X.shape[1]}
+    top_models_df = pd.DataFrame([{**full, **r} for r in (good, fallback, skipped, plain)])
     logs: list[str] = []
     monkeypatch.setattr(gui_app, "_log_progress", logs.append)
 

@@ -1084,6 +1084,7 @@ def compute_validation_metrics_for_top_one_class_models(
     # Rows that could not be validated, with the reason (returned on
     # df.attrs["validation_failures"] so callers can report them; R078).
     validation_failures: dict = {}
+    validation_succeeded: list = []
     # A re-run must not leave an earlier run's numbers on a row that now fails.
     df_results.loc[top_indices, list(_VAL_OC_COLUMNS)] = np.nan
 
@@ -1336,6 +1337,10 @@ def compute_validation_metrics_for_top_one_class_models(
             logger.warning("[OC Validation] Row %s failed: %s", idx, row_err)
             validation_failures[idx] = f"validation failed: {row_err}"
             continue
+        else:
+            # Only rows that ran to the end. val_BalancedAcc can be legitimately NaN
+            # (inlier-only validation set), so callers must not infer success from it.
+            validation_succeeded.append(idx)
 
     logger.info("[OC Validation] Completed validation metrics for %d models", n_to_process)
 
@@ -1384,6 +1389,7 @@ def compute_validation_metrics_for_top_one_class_models(
 
     df_results.attrs["validation_failures"] = validation_failures
     df_results.attrs["validation_attempted"] = list(top_indices)
+    df_results.attrs["validation_succeeded"] = validation_succeeded
     return df_results
 
 

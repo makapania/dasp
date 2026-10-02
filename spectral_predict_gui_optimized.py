@@ -1973,12 +1973,20 @@ def _validation_summary_lines(results_df, top_n: int, metric_col: str) -> list[s
         attempted = list(results_df.index[: min(int(top_n), len(results_df))])
     attempted = [i for i in attempted if i in results_df.index]
     n_requested = len(attempted)
-    # Count only this run's successes over the rows it attempted: a recorded failure
-    # never counts, even if the frame still holds a number from an earlier run.
-    ok = [
-        i for i in attempted
-        if i not in failures and metric_col in results_df and pd.notna(results_df.at[i, metric_col])
-    ]
+    # Count only this run's successes over the rows it attempted. The helpers record
+    # them explicitly; a metric can be legitimately NaN (one-class val_BalancedAcc on
+    # an inlier-only validation set), so it is only a fallback for older callers.
+    succeeded = results_df.attrs.get("validation_succeeded")
+    if succeeded is not None:
+        done = set(succeeded)
+        ok = [i for i in attempted if i in done and i not in failures]
+    else:
+        ok = [
+            i for i in attempted
+            if i not in failures
+            and metric_col in results_df
+            and pd.notna(results_df.at[i, metric_col])
+        ]
     n_ok = len(ok)
     if n_ok >= n_requested:
         return [f"  [OK] Validation metrics computed for top {n_requested} models"]
@@ -24700,139 +24708,32 @@ class SpectralPredictApp:
         # GA preprocessing suffixes
         GA_SUFFIXES = ('_pls', '_neural_svm', '_tree', '_neuralboosted')
 
-        def match_wavelengths_exact(requested_wavelengths, available_columns, precision=1):
+        def parse_wavelength_subset(row, X_columns):
+            """Columns of ``X_columns`` a results row was trained on, in stored order.
+
+            Uses the shared resolver (``resolve_wavelength_list``): every stored
+            wavelength must name exactly one column. Returns None when the row used
+            every column. Raises ValueError when the list cannot be mapped, or when it
+            is missing on a row that does not demonstrably cover the whole axis, so
+            the caller excludes the row instead of training a full-spectrum model.
             """
-            Match wavelengths with exact precision after normalization.
+            from spectral_predict.wavelength_matching import _full_spectrum_fallback_refusal
 
-            This function solves the CARS wavelength matching bug where tolerance-based
-            matching (±0.5nm) could match wrong wavelengths or fail silently.
-
-            FIXED VERSION - preserves order during multi-precision fallback.
-
-            Args:
-                requested_wavelengths: List of float wavelengths to match
-                available_columns: Column names from X_train (can be strings or floats)
-                precision: Decimal places to round to (default 1)
-
-            Returns:
-                List of matched column names (in order of requested_wavelengths)
-
-            Raises:
-                ValueError: If any wavelength cannot be matched exactly
-            """
-            # Build lookup dict: normalized wavelength string -> original column name
-            col_lookup = {}
-            col_names = list(available_columns)
-
-            for col in col_names:
-                try:
-                    col_float = float(col)
-                    # Round to specified precision and convert to string key
-                    normalized_key = f"{round(col_float, precision):.{precision}f}"
-                    # Store first match only (for duplicate handling)
-                    if normalized_key not in col_lookup:
-                        col_lookup[normalized_key] = col
-                except (ValueError, TypeError):
-                    # Non-numeric column - skip
-                    continue
-
-            # Match each requested wavelength - TRACK MATCHES BY INDEX to preserve order
-            matched_by_index = {}  # index -> matched column
-            missing_by_index = {}  # index -> wavelength
-
-            for idx, wl in enumerate(requested_wavelengths):
-                normalized_key = f"{round(wl, precision):.{precision}f}"
-                if normalized_key in col_lookup:
-                    matched_by_index[idx] = col_lookup[normalized_key]
-                else:
-                    missing_by_index[idx] = wl
-
-            # Try different precision levels for missing wavelengths
-            if missing_by_index:
-                for alt_precision in [0, 2, 3]:
-                    if alt_precision == precision:
-                        continue
-
-                    # Rebuild lookup at alternative precision
-                    col_lookup_alt = {}
-                    for col in col_names:
-                        try:
-                            col_float = float(col)
-                            normalized_key = f"{round(col_float, alt_precision):.{alt_precision}f}"
-                            if normalized_key not in col_lookup_alt:
-                                col_lookup_alt[normalized_key] = col
-                        except (ValueError, TypeError):
-                            continue
-
-                    # Try matching still-missing wavelengths
-                    still_missing = {}
-                    for idx, wl in missing_by_index.items():
-                        normalized_key = f"{round(wl, alt_precision):.{alt_precision}f}"
-                        if normalized_key in col_lookup_alt:
-                            matched_by_index[idx] = col_lookup_alt[normalized_key]  # PRESERVES ORDER
-                        else:
-                            still_missing[idx] = wl
-
-                    missing_by_index = still_missing
-                    if not missing_by_index:
-                        break
-
-            # Report any still-missing wavelengths
-            if missing_by_index:
-                missing_wls = list(missing_by_index.values())
-                raise ValueError(
-                    f"Could not find matching columns for {len(missing_wls)} wavelengths: "
-                    f"{missing_wls[:5]}{'...' if len(missing_wls) > 5 else ''}"
-                )
-
-            # Return matched columns IN ORIGINAL ORDER
-            return [matched_by_index[i] for i in range(len(requested_wavelengths))]
-
-        def parse_wavelength_subset(all_vars_str, X_columns):
-            """
-            Parse wavelength subset from all_vars string and find matching columns.
-
-            Uses exact matching with normalized precision to avoid CARS wavelength
-            mismatch bugs where tolerance-based matching could fail silently.
-
-            FIXED VERSION - no code duplication, uses match_wavelengths_exact() only.
-
-            Args:
-                all_vars_str: Comma-separated wavelength values like "1500,1520,1540"
-                X_columns: List/Index of column names from X_train
-
-            Returns:
-                List of column names to use, or None if no subset should be applied
-            """
-            if not all_vars_str or all_vars_str == 'N/A' or pd.isna(all_vars_str):
+            row_dict = row._asdict() if hasattr(row, '_asdict') else dict(row)
+            col_names = list(X_columns)
+            all_vars_str = row_dict.get('all_vars')
+            if not isinstance(all_vars_str, str) or all_vars_str.strip() in ('', 'N/A'):
+                reason = _full_spectrum_fallback_refusal(row_dict, len(col_names))
+                if reason is not None:
+                    raise ValueError(reason)
                 return None
-
             try:
-                # Parse comma-separated wavelengths
-                wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
-
-                col_names = list(X_columns)
-
-                # Use exact matching with normalized precision
-                try:
-                    matching_cols = match_wavelengths_exact(wavelengths, col_names, precision=1)
-                except ValueError as e:
-                    # Log warning and skip subsetting for this model
-                    self._log_progress(f"    [WARN] Wavelength matching failed: {e}")
-                    self._log_progress(f"    [WARN] Training model without wavelength subsetting")
-                    return None
-
-                # Only return if we found a meaningful subset
-                if len(matching_cols) > 0 and len(matching_cols) < len(col_names):
-                    return matching_cols
-                return None
-
-            except Exception as e:
-                # If parsing fails, log and don't subset
-                self._log_progress(f"    [WARN] Failed to parse wavelength subset: {e}")
-                return None
-
-        # NOTE: WavelengthSubsetWrapper is now defined at module level (sklearn-compatible)
+                indices = resolve_wavelength_list(all_vars_str, [float(c) for c in col_names])
+            except WavelengthMatchError as e:
+                raise ValueError(f"all_vars does not match the spectral axis: {e}") from e
+            if indices.tolist() == list(range(len(col_names))):
+                return None  # every column, in axis order
+            return [col_names[i] for i in indices]
 
         def parse_ga_preprocess_name(name):
             """
@@ -25084,11 +24985,11 @@ class SpectralPredictApp:
                     steps.append(('model', model))
 
                 # Check for wavelength subset (NSGA-II and other methods store selected wavelengths in all_vars)
-                wavelength_subset = None
-                if hasattr(row, 'all_vars'):
-                    wavelength_subset = parse_wavelength_subset(row.all_vars, X_train.columns)
-                    if wavelength_subset:
-                        self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
+                # Raises (row excluded, reason logged) rather than silently training on
+                # the full spectrum when all_vars is missing or cannot be mapped.
+                wavelength_subset = parse_wavelength_subset(row, X_train.columns)
+                if wavelength_subset:
+                    self._log_progress(f"    [Subset] Using {len(wavelength_subset)} of {len(X_train.columns)} wavelengths")
 
                 if shared_prep is not None and wavelength_subset is not None:
                     # Select the subset from the preprocessed full spectrum, as search did

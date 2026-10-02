@@ -195,6 +195,35 @@ class TestStoredWavelengthLists:
         with pytest.raises(WavelengthMatchError):
             resolve_wavelength_list("1e-05", axis)  # legacy %g text: two columns print it
 
+    def test_legacy_token_is_classified_by_its_text_not_by_reformatting(self):
+        """Codex round 2: float('1e-318') prints as '9.99999e-319', yet '1e-318' is
+        %g text for the subnormal that does print that way."""
+        v = float("1e-318")
+        x = 1.000004e-318
+        assert f"{v:g}" != "1e-318" and f"{x:g}" == "1e-318"
+        assert resolve_wavelength_list("1e-318", [v, x]).tolist() == [1]
+        with pytest.raises(WavelengthMatchError, match="not on the axis"):
+            resolve_wavelength_list("1e-318", [v])
+
+    @pytest.mark.parametrize(
+        "token,is_g",
+        [
+            ("1500", True),
+            ("7407.41", True),
+            ("1e+07", True),
+            ("0.000123457", True),
+            ("1500.0", False),
+            ("3999.6419", False),
+            ("1000000", False),  # %g writes 1e+06
+            ("0.0000123", False),  # %g writes 1.23e-05
+            ("10000.10", False),
+        ],
+    )
+    def test_g_token_syntax(self, token, is_g):
+        from spectral_predict.wavelength_matching import _looks_like_g_token
+
+        assert _looks_like_g_token(token) is is_g
+
     @pytest.mark.parametrize(
         "values", [[1500.0, 1500.5], [7407.407407407408, 10000.1, -3.25, 1e-05, 1e7]]
     )
@@ -337,6 +366,40 @@ class TestLegacySavedModels:
         with pytest.raises(WavelengthMatchError, match="Retrain"):
             predict_with_model(loaded, pd.DataFrame(X, columns=axis))
 
+    def test_exact_ensemble_on_a_grid_g_cannot_tell_apart_predicts(self, tmp_path):
+        """Codex round 2: every value of [10000.0, 10000.02, ...] prints as %g
+        "10000". Legacy %g matching must apply only to pre-fix Tab 7 models, and
+        new ensembles carry the stamp."""
+        from spectral_predict.ensemble import SimpleAverageEnsemble
+        from spectral_predict.model_io import load_ensemble, save_ensemble
+
+        axis = 10000.0 + 0.02 * np.arange(40)
+        X = _spectra(30, axis)
+        y = X[:, 3] - X[:, 20]
+        models = [PLSRegression(n_components=k).fit(X, y) for k in (2, 3)]
+        ensemble = SimpleAverageEnsemble(models, model_names=["PLS2", "PLS3"])
+        metadata = {
+            "ensemble_type": "simple_average",
+            "ensemble_name": "avg",
+            "task_type": "regression",
+            "wavelengths": axis.tolist(),
+            "full_wavelengths": axis.tolist(),
+            "use_full_spectrum_preprocessing": True,
+            "n_vars": axis.size,
+            "preprocessing": "raw",
+        }
+        path = tmp_path / "ens.dasp"
+        save_ensemble(ensemble, str(path), metadata)
+        loaded = load_ensemble(str(path))
+        assert loaded["metadata"]["wavelength_matching"] == 1
+
+        expected = np.mean([np.ravel(m.predict(X)) for m in models], axis=0)
+        for meta in (loaded["metadata"], {**loaded["metadata"], "wavelength_matching": None}):
+            meta = {k: v for k, v in meta.items() if v is not None}
+            model_dict = {"model": loaded["ensemble"], "preprocessor": None, "metadata": meta}
+            got = predict_with_model(model_dict, pd.DataFrame(X, columns=axis))
+            np.testing.assert_allclose(np.ravel(got), expected, rtol=1e-12)
+
     def test_ensemble_member_on_fine_grid_is_not_flagged(self, tmp_path):
         """Ensemble members store the whole exact axis; they never went through the
         Tab 7 first-hit rule, so replaying it would be a false 'retrain' warning."""
@@ -475,6 +538,55 @@ def test_full_row_without_all_vars_validates_only_if_n_vars_covers_the_axis(wave
     assert np.isfinite(out.loc[0, "RMSEP"])
     assert set(out.attrs["validation_failures"]) == {1, 2}
     assert out.attrs["validation_attempted"] == [0, 1, 2]
+    assert out.attrs["validation_succeeded"] == [0]
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        {"SubsetTag": None, "Subset": "top10"},  # null SubsetTag must not hide Subset
+        {"SubsetTag": None},
+        {"SubsetTag": ""},
+        {"SubsetTag": "N/A"},
+        {},
+    ],
+    ids=["null_tag_subset_top10", "null_tag", "empty_tag", "NA_tag", "no_tag"],
+)
+def test_full_spectrum_fallback_needs_an_affirmative_full_tag(wavenumber_split, tags):
+    axis = wavenumber_split[0]
+    row = {k: v for k, v in _regression_row("N/A").items() if k != "SubsetTag"}
+    row.update(tags, n_vars=axis.size)
+    out = _validate([row], wavenumber_split)
+    assert np.isnan(out.loc[0, "RMSEP"])
+    assert 0 in out.attrs["validation_failures"]
+
+
+class TestEnsembleWavelengthPaths:
+    """Ensemble rebuild paths use the shared resolver (Codex round 2, items 6-7)."""
+
+    def test_preprocessor_config_maps_exact_columns_and_raises_on_misses(self):
+        from spectral_predict.preprocessing_wrapper import PreprocessorConfig
+
+        axis = [1000.0, 1000.01, 1000.02, 1001.0]
+        cfg = PreprocessorConfig("raw", wavelengths=[1000.02, 1000.0], all_wavelengths=axis)
+        assert cfg.wavelength_indices_.tolist() == [2, 0]
+        with pytest.raises(WavelengthMatchError):
+            PreprocessorConfig("raw", wavelengths=[1000.02, 1003.0], all_wavelengths=axis)
+
+    def test_extract_preprocessor_config_resolves_text_and_refuses_silent_full(self):
+        from spectral_predict.ensemble import extract_preprocessor_config
+
+        axis = [1000.0, 1000.01, 1000.02, 1001.0]
+        cfg = extract_preprocessor_config({"all_vars": "1000.020,1001.0"}, axis)
+        assert cfg.wavelengths == [1000.02, 1001.0]
+        with pytest.raises(ValueError):
+            extract_preprocessor_config({"all_vars": "1000.020,9999.0"}, axis)
+        with pytest.raises(ValueError, match="subset"):
+            extract_preprocessor_config({"all_vars": "N/A", "SubsetTag": "top2"}, axis)
+        full = extract_preprocessor_config(
+            {"all_vars": "N/A", "SubsetTag": "full", "n_vars": 4}, axis
+        )
+        assert full.wavelengths is None
 
 
 # --------------------------------------------------------------------------------------
@@ -552,17 +664,20 @@ def test_legacy_artifact_with_stale_float_encoder_predicts_raw_labels(tmp_path):
     np.testing.assert_array_equal(got, model.predict(X))
 
 
-def test_superset_encoder_is_not_saved_with_a_binary_model(tmp_path):
-    """GLM L-3: codes 0/1 fit inside a 3-class encoder, but decoding through it
-    would use the wrong class list."""
+def test_encoder_knowing_more_classes_than_the_model_saw_is_kept(tmp_path):
+    """Codex round 2: an encoder fit on a, b, c and a model trained on its codes for
+    a and b only is a valid pair; decoding must still give a/b, not 0/1."""
     X, y = _clf_data(["a", "b"])
-    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(
-        X, LabelEncoder().fit_transform(y)
-    )
-    superset = LabelEncoder().fit(["a", "b", "c"])
-    with pytest.warns(UserWarning, match="does not match the model"):
-        loaded = _save_load(tmp_path, model, superset, X.shape[1])
-    assert loaded["label_encoder"] is None
+    encoder = LabelEncoder().fit(["a", "b", "c"])
+    model = RandomForestClassifier(n_estimators=20, random_state=0).fit(X, encoder.transform(y))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        loaded = _save_load(tmp_path, model, encoder, X.shape[1])
+        got = predict_with_model(loaded, X, validate_wavelengths=False)
+    assert loaded["label_encoder"] is not None
+    assert set(got) <= {"a", "b"}
+    np.testing.assert_array_equal(got, encoder.inverse_transform(model.predict(X)))
 
 
 # --------------------------------------------------------------------------------------
@@ -582,3 +697,50 @@ def test_validation_summary_ignores_stale_metrics_on_failed_rows():
 
     df.attrs["validation_failures"] = {}
     assert "[OK]" in _validation_summary_lines(df, top_n=2, metric_col="R2pred")[0]
+
+
+def test_validation_summary_trusts_recorded_successes_over_a_nan_metric():
+    """Codex round 2: one-class val_BalancedAcc is NaN by design on an inlier-only
+    validation set; a completed row is still a success."""
+    from spectral_predict_gui_optimized import _validation_summary_lines
+
+    df = pd.DataFrame({"Model": ["IsolationForest"] * 2, "val_BalancedAcc": [np.nan, np.nan]})
+    df.attrs.update(
+        validation_failures={}, validation_attempted=[0, 1], validation_succeeded=[0, 1]
+    )
+    assert "[OK]" in _validation_summary_lines(df, 2, "val_BalancedAcc")[0]
+    df.attrs["validation_succeeded"] = [0]
+    assert "only 1 of the top 2" in _validation_summary_lines(df, 2, "val_BalancedAcc")[0]
+
+
+def test_rerank_moves_validation_attrs_with_their_rows():
+    """Codex round 2: compute_composite_score resets the index after sorting; the
+    failure reason of a PLS row ended up on a Ridge row."""
+    from spectral_predict.scoring import compute_composite_score
+
+    df = pd.DataFrame(
+        {
+            "Model": ["PLS", "Ridge"],
+            "RMSE": [2.0, 1.0],
+            "R2": [0.5, 0.9],
+            "RMSEcv": [2.0, 1.0],
+            "R2cv": [0.5, 0.9],
+            "n_vars": [10, 10],
+            "full_vars": [10, 10],
+            "LVs": [2, np.nan],
+            "SubsetTag": ["full", "full"],
+            "top_vars": ["N/A", "N/A"],
+        }
+    )
+    df.attrs.update(
+        validation_failures={0: "PLS failed"},
+        validation_attempted=[0, 1],
+        validation_succeeded=[1],
+    )
+    out = compute_composite_score(df, "regression")
+    pls_pos = int(np.flatnonzero(out["Model"].to_numpy() == "PLS")[0])
+    ridge_pos = int(np.flatnonzero(out["Model"].to_numpy() == "Ridge")[0])
+    assert pls_pos != 0  # the re-rank really moved the rows
+    assert out.attrs["validation_failures"] == {pls_pos: "PLS failed"}
+    assert out.attrs["validation_succeeded"] == [ridge_pos]
+    assert sorted(out.attrs["validation_attempted"]) == [0, 1]

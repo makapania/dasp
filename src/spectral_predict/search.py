@@ -111,6 +111,7 @@ from .model_registry import supports_subset_analysis, supports_feature_importanc
 from .constants import RANDOM_STATE
 from .wavelength_matching import (
     WavelengthMatchError,
+    _full_spectrum_fallback_refusal,
     format_wavelength_list,
     resolve_wavelength_list,
 )
@@ -773,29 +774,6 @@ def _multiclass_holdout_metrics(
     }
 
 
-def _full_spectrum_fallback_refusal(row, n_cols: int) -> str | None:
-    """Why a row without a usable ``all_vars`` must not be validated on every column.
-
-    Returns None only when the row is tagged full-spectrum and its ``n_vars`` equals
-    the number of columns being validated, i.e. it demonstrably used the whole axis.
-    """
-    tag = row.get("SubsetTag", row.get("Subset"))
-    if isinstance(tag, float) and np.isnan(tag):
-        tag = None
-    if tag is not None and str(tag).strip().lower() not in ("full", "n/a", ""):
-        return f"all_vars is missing for a wavelength-subset row (SubsetTag={tag!r})"
-    try:
-        n_vars = int(row.get("n_vars"))
-    except (TypeError, ValueError):
-        return "all_vars is missing and n_vars does not confirm a full-spectrum model"
-    if n_vars != n_cols:
-        return (
-            f"all_vars is missing and n_vars ({n_vars}) differs from the {n_cols} "
-            f"columns being validated"
-        )
-    return None
-
-
 def compute_validation_metrics_for_top_models(
     df_results: pd.DataFrame,
     X_train: np.ndarray,
@@ -962,6 +940,10 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
     # Rows whose validation could not be computed, with the reason. Returned on
     # df.attrs["validation_failures"] so callers can show them (R031).
     validation_failures: dict = {}
+    # Rows validated to completion in THIS call (df.attrs["validation_succeeded"]).
+    # Callers count these instead of inferring success from a metric that can be
+    # legitimately NaN.
+    validation_succeeded: list = []
 
     for i, idx in enumerate(top_indices):
         row = df_results.loc[idx]
@@ -983,10 +965,12 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                 )
                 for _col, _val in mc_metrics.items():
                     df_results.loc[idx, _col] = _val
+                validation_succeeded.append(idx)
             except Exception as e:  # noqa: BLE001 — one bad row must not abort the rest
                 print(
                     f"  [Warning] Failed multi-class holdout metrics for model {i+1}: {e}"
                 )
+                validation_failures[idx] = f"multi-class holdout metrics failed: {e}"
             continue
 
         try:
@@ -1324,6 +1308,9 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
             traceback.print_exc()
             continue
+        else:
+            # Reached only when the row ran to the end (a skip `continue`s past it).
+            validation_succeeded.append(idx)
 
         # Progress update
         if progress_callback and (i + 1) % 10 == 0:
@@ -1383,6 +1370,7 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
 
     df_results.attrs["validation_failures"] = validation_failures
     df_results.attrs["validation_attempted"] = list(top_indices)
+    df_results.attrs["validation_succeeded"] = validation_succeeded
     return df_results
 
 

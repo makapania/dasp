@@ -31,7 +31,9 @@ when two columns print the same.
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -298,8 +300,69 @@ def resolve_wavelength_list(text: str, axis: Sequence[float] | np.ndarray) -> np
         raise WavelengthMatchError("wavelength list contains NaN or infinite values")
     ax = _as_axis(axis)
 
-    g_tokens: list[str | None] = [
-        None if _is_exact_token(t) or _g_text(v) != t else t
-        for t, v in zip(tokens, values.tolist())
-    ]
+    g_tokens: list[str | None] = [t if _looks_like_g_token(t) else None for t in tokens]
     return _match(values, ax, np.abs(values) * _FLOAT_SLACK, g_tokens)
+
+
+_G_TOKEN = re.compile(r"-?(\d+)(?:\.(\d*[1-9]))?(?:e([+-]\d{2,3}))?")
+
+
+def _looks_like_g_token(token: str) -> bool:
+    """Whether ``token`` has the syntax ``%g`` (6 significant digits) writes.
+
+    Decided from the text alone, so it holds where re-formatting the parsed value
+    would not reproduce the token (e.g. subnormals): no trailing zeros after the
+    decimal point, at most 6 significant digits, and an exponent only with a single
+    leading digit.
+    """
+    match = _G_TOKEN.fullmatch(token)
+    if match is None:
+        return False
+    integer, fraction, exponent = match.group(1), match.group(2) or "", match.group(3)
+    if exponent is not None:
+        return len(integer) == 1 and integer != "0" and 1 + len(fraction) <= 6
+    if len(integer) > 1 and integer.startswith("0"):
+        return False
+    # %g writes fixed notation only for 1e-4 <= |v| < 1e6.
+    if len(integer) > 6:
+        return False
+    if integer == "0" and fraction and len(fraction) - len(fraction.lstrip("0")) > 3:
+        return False
+    digits = (integer + fraction).lstrip("0")
+    if not fraction:
+        digits = digits.rstrip("0")
+    return len(digits) <= 6
+
+
+def _is_null_cell(value: object) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return str(value).strip().lower() in ("", "n/a", "nan", "none")
+
+
+def _full_spectrum_fallback_refusal(row: Mapping[str, Any], n_cols: int) -> str | None:
+    """Why a results row without a usable ``all_vars`` must not use every column.
+
+    Returns None only when the row is affirmatively tagged full-spectrum
+    (``SubsetTag``, or ``Subset`` when ``SubsetTag`` is empty, equals ``"full"``) and
+    its ``n_vars`` equals ``n_cols``: it demonstrably used the whole axis.
+    """
+    tag = row.get("SubsetTag")
+    if _is_null_cell(tag):
+        tag = row.get("Subset")
+    if _is_null_cell(tag):
+        return "all_vars is missing and the row has no SubsetTag saying it used the full spectrum"
+    if str(tag).strip().lower() != "full":
+        return f"all_vars is missing for a wavelength-subset row (SubsetTag={tag!r})"
+    try:
+        n_vars = int(row.get("n_vars"))
+    except (TypeError, ValueError):
+        return "all_vars is missing and n_vars does not confirm a full-spectrum model"
+    if n_vars != n_cols:
+        return (
+            f"all_vars is missing and n_vars ({n_vars}) differs from the {n_cols} "
+            f"columns being used"
+        )
+    return None

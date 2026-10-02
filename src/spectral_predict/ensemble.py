@@ -16,6 +16,7 @@ from sklearn.model_selection import cross_val_predict, KFold
 import warnings
 
 from .preprocessing_wrapper import PreprocessorConfig
+from .wavelength_matching import _full_spectrum_fallback_refusal, resolve_wavelength_list
 
 
 def _clone_for_refit(model):
@@ -1344,6 +1345,12 @@ def extract_preprocessor_config(row, all_wavelengths):
     -------
     PreprocessorConfig
         Configuration object for preprocessing reconstruction
+
+    Raises
+    ------
+    ValueError
+        ``all_vars`` cannot be mapped one-to-one onto ``all_wavelengths``, or it is
+        missing on a row that is not tagged full-spectrum with a matching ``n_vars``.
     """
     # Extract preprocessing parameters
     preprocess_name = row.get('Preprocess', 'raw')
@@ -1351,17 +1358,19 @@ def extract_preprocessor_config(row, all_wavelengths):
     window = row.get('Window', 15)
     polyorder = row.get('Poly', 2)
 
-    # Parse wavelength subset from all_vars column
+    # Parse wavelength subset from all_vars column. Resolve it to exact axis values
+    # with the shared contract (old %g text included); a list that cannot be mapped
+    # raises WavelengthMatchError instead of silently using every wavelength.
     all_vars_str = row.get('all_vars', 'N/A')
     wavelengths = None
 
-    if all_vars_str and all_vars_str != 'N/A' and not pd.isna(all_vars_str):
-        try:
-            # Parse comma-separated wavelengths
-            wavelengths = [float(w.strip()) for w in str(all_vars_str).split(',')]
-        except (ValueError, AttributeError):
-            # If parsing fails, use all wavelengths
-            wavelengths = None
+    if isinstance(all_vars_str, str) and all_vars_str.strip() not in ('', 'N/A'):
+        axis = np.asarray(all_wavelengths, dtype=float)
+        wavelengths = [float(axis[i]) for i in resolve_wavelength_list(all_vars_str, axis)]
+    else:
+        reason = _full_spectrum_fallback_refusal(row, len(all_wavelengths))
+        if reason is not None:
+            raise ValueError(reason)
 
     # Create PreprocessorConfig
     config = PreprocessorConfig(

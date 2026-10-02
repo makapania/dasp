@@ -784,6 +784,28 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   The one-class helper now clears val_* on attempted rows first (it used to keep an earlier run's numbers). A
   supervised row with no usable `all_vars` is validated on the full spectrum only if it is tagged full AND its
   `n_vars` equals the column count.
-- Not changed (ensemble paths, still own matchers): GUI `_match_wavelengths_normalized`/`match_wavelengths_exact`
-  (1-decimal rounding, silent "train without subsetting" on failure) and `preprocessing_wrapper` (nearest within 0.5,
-  silent drop). Candidates for the same contract.
+- **Review round 2 (Codex BLOCK on 820c039):**
+  - The R016 class-count rule was wrong: an encoder fit on a,b,c with a model trained on codes for a,b only is a
+    valid pair. Only provable staleness (model classes not codes 0..n-1 of the encoder) is rejected; ownership is
+    enforced where the encoder is chosen (Tab 7 saves only `refined_label_encoder`).
+  - Legacy `%g` interpretation at predict is limited to `_is_legacy_tab7_model` metadata (unstamped Tab 7 Path A).
+    Ensembles/multiclass keep exact-first; `save_ensemble` stamps its top-level metadata too.
+  - Legacy tokens are classified by their TEXT (`_looks_like_g_token`: <=6 significant digits, no trailing zero
+    after the point, fixed notation only for 1e-4 <= |v| < 1e6), never by re-formatting the parsed value, which
+    fails for subnormals (`float('1e-318')` prints `9.99999e-319`).
+  - Success is recorded, not inferred: `attrs["validation_succeeded"]` from both helpers (try/else). One-class
+    `val_BalancedAcc` is NaN by design on an inlier-only validation set.
+  - The missing-`all_vars` fallback needs an affirmative `"full"` tag (`SubsetTag`, or `Subset` when SubsetTag is
+    null) and matching `n_vars`; the rule is `wavelength_matching._full_spectrum_fallback_refusal`, shared by
+    search validation, GUI ensemble rebuild and `ensemble.extract_preprocessor_config`.
+  - Ensemble paths converted: GUI `_reconstruct_models_from_results` (`parse_wavelength_subset` now takes the row;
+    failures raise and the row is excluded with "[!] Failed to reconstruct"), `preprocessing_wrapper.
+    PreprocessorConfig` and `ensemble.extract_preprocessor_config`. NOT converted here, by coordination:
+    module-level `_match_wavelengths_normalized` (WavelengthSubsetWrapper predict path, still 1-decimal rounding +
+    first collision) moves to `model_wrappers.py` on fix/ensemble-cv and is to be ported there at merge. Test fixtures that rebuilt full rows without `all_vars` now carry
+    `SubsetTag="full"` + `n_vars`, as real search rows do.
+  - `compute_composite_score` re-keys validation attrs after `reset_index` (`scoring._remap_validation_attrs`).
+- **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
+  when validation is missing; `predict_with_uncertainty` (~1219) labels probability columns with every encoder
+  class even when the model saw fewer; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
+  merely re-saved without retraining would lose its retrain warning.

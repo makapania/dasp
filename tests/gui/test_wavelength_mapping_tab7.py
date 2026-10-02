@@ -227,3 +227,33 @@ def test_task_switch_from_text_to_numeric_labels_drops_the_encoder(gui_app, tmp_
     np.testing.assert_array_equal(
         predict_with_model(loaded, X_num), gui_app.refined_model.predict(X_num.values)
     )
+
+
+def test_ensemble_reconstruction_uses_the_named_columns_and_excludes_bad_rows(gui_app, monkeypatch):
+    """Codex round 2: the ensemble rebuild rounded to 1 decimal and took the first
+    collision ("1000.020" -> 1000.01), and a missing all_vars meant full spectrum."""
+    axis = np.array([1000.0, 1000.01, 1000.02, 1001.0] + list(1002.0 + np.arange(20)))
+    X = pd.DataFrame(_spectra(30, axis), columns=list(axis))
+    y = X.iloc[:, 2].to_numpy() + X.iloc[:, 3].to_numpy()
+    base = {
+        "Model": "Ridge",
+        "Params": str({"alpha": 1.0}),
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+        "Poly": 2,
+        "CompositeScore": 0.0,
+    }
+    rows = [
+        {**base, "all_vars": "1000.020,1001.0", "SubsetTag": "top2", "n_vars": 2},
+        {**base, "all_vars": np.nan, "SubsetTag": "top2", "n_vars": 2},
+        {**base, "all_vars": "1000.020,9999.0", "SubsetTag": "top2", "n_vars": 2},
+    ]
+    logs: list[str] = []
+    monkeypatch.setattr(gui_app, "_log_progress", logs.append)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rebuilt = gui_app._reconstruct_models_from_results(pd.DataFrame(rows), X, y, "regression")
+
+    assert len(rebuilt) == 1, logs
+    assert rebuilt[0][2]["wavelengths"] == [1000.02, 1001.0]
+    assert sum("Failed to reconstruct" in line for line in logs) == 2

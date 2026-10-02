@@ -158,7 +158,11 @@ class TestExtractPreprocessorConfig:
             'Deriv': 0,
             'Window': 15,
             'Poly': 2,
-            'all_vars': 'N/A'
+            'all_vars': 'N/A',
+            # A full-spectrum row says so; without all_vars nothing else may
+            # mean 'use every wavelength' (fix/wavelength-mapping).
+            'SubsetTag': 'full',
+            'n_vars': 50,
         })
         all_wavelengths = list(range(1500, 1550))
 
@@ -175,7 +179,11 @@ class TestExtractPreprocessorConfig:
             'Deriv': 0,
             'Window': 15,
             'Poly': 2,
-            'all_vars': 'N/A'
+            'all_vars': 'N/A',
+            # A full-spectrum row says so; without all_vars nothing else may
+            # mean 'use every wavelength' (fix/wavelength-mapping).
+            'SubsetTag': 'full',
+            'n_vars': 50,
         })
         all_wavelengths = list(range(1500, 1550))
 
@@ -192,7 +200,11 @@ class TestExtractPreprocessorConfig:
             'Deriv': 1,
             'Window': 11,
             'Poly': 2,
-            'all_vars': 'N/A'
+            'all_vars': 'N/A',
+            # A full-spectrum row says so; without all_vars nothing else may
+            # mean 'use every wavelength' (fix/wavelength-mapping).
+            'SubsetTag': 'full',
+            'n_vars': 50,
         })
         all_wavelengths = list(range(1500, 1550))
 
@@ -222,20 +234,20 @@ class TestExtractPreprocessorConfig:
         assert len(config.all_wavelengths) == 50
 
     def test_extract_handles_missing_all_vars(self):
-        """Test that missing all_vars is handled gracefully."""
-        row = pd.Series({
-            'Preprocess': 'raw',
-            'Deriv': 0,
-            'Window': 15,
-            'Poly': 2
-            # all_vars is missing
-        })
+        """Missing all_vars means 'no subsetting' only for a row tagged full-spectrum
+        whose n_vars covers the axis; otherwise it is an error, never a silent
+        full-spectrum model."""
+        base = {'Preprocess': 'raw', 'Deriv': 0, 'Window': 15, 'Poly': 2}
         all_wavelengths = list(range(1500, 1550))
 
-        config = extract_preprocessor_config(row, all_wavelengths)
-
-        # Should default to None (no subsetting)
+        config = extract_preprocessor_config(
+            pd.Series({**base, 'SubsetTag': 'full', 'n_vars': 50}), all_wavelengths
+        )
         assert config.wavelengths is None
+
+        for tags in ({}, {'SubsetTag': 'top10', 'n_vars': 10}, {'SubsetTag': 'full', 'n_vars': 40}):
+            with pytest.raises(ValueError):
+                extract_preprocessor_config(pd.Series({**base, **tags}), all_wavelengths)
 
 
 class TestSimpleAverageEnsembleWithConfigs:

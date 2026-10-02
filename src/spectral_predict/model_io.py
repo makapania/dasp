@@ -58,9 +58,12 @@ WAVELENGTH_MATCHING_VERSION = 1
 def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
     """Whether ``label_encoder`` can be the encoder ``model`` was trained with.
 
-    A model fitted on encoded labels predicts the integer codes ``0..n-1``. If the
+    A model fitted on encoded labels predicts integer codes in ``0..n-1``. If the
     model's own ``classes_`` hold anything else (``1, 2, 3`` or ``1.0, 2.0``), it was
     trained on the raw labels and decoding its predictions would shift them (R016).
+    Only this provable staleness is rejected: a model may have seen fewer classes than
+    the encoder knows, so the class counts need not agree. Ownership itself is
+    enforced where the encoder is chosen (Tab 7 saves only its own encoder).
     Returns True when the model exposes no numeric ``classes_`` (nothing to check).
     """
     classes = getattr(model, 'classes_', None)
@@ -71,9 +74,6 @@ def _label_encoder_matches_model(model: Any, label_encoder: Any) -> bool:
         n_codes = len(label_encoder.classes_)
     except (TypeError, AttributeError):
         return True
-    if model_classes.size != n_codes:
-        # A superset (or subset) encoder decodes through the wrong class list.
-        return False
     if model_classes.dtype.kind not in 'iuf':
         # Text classes: the model decodes itself and predict_with_model passes text
         # predictions through untouched, so the encoder can do no harm.
@@ -154,7 +154,9 @@ def _model_subset_indices(
     matched with the ``%g``-text rule instead of the fixed 0.01 window; if even that
     cannot name one channel per wavelength, the error says to retrain.
     """
-    legacy = metadata.get('wavelength_matching') is None
+    # Only pre-fix Tab 7 refits stored parsed %g text; ensembles, multi-class SIMCA and
+    # every stamped model keep exact-first matching.
+    legacy = _is_legacy_tab7_model(metadata)
     try:
         return match_wavelengths(required_wl, full_wavelengths, legacy_g=legacy)
     except WavelengthMatchError as exc:
@@ -1766,6 +1768,8 @@ def save_ensemble(ensemble: Any, filepath: str, metadata: Dict[str, Any]) -> Non
     cv_actuals = metadata.pop('cv_actuals', None)
     preprocessor = metadata.pop('preprocessor', None)
     label_encoder = metadata.pop('label_encoder', None)
+    # Same stamp save_model writes: this ensemble stores exact axis values.
+    metadata['wavelength_matching'] = WAVELENGTH_MATCHING_VERSION
 
     # Create temporary directory for base model files
     with tempfile.TemporaryDirectory() as tmpdir:
