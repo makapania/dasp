@@ -101,6 +101,18 @@ samples, to produce that fold's score. Examples: early stopping on the test fold
 base models trained on the fold they are scored on. When a finding claims leakage, say which
 of these it is before proposing a fix.
 
+## Clean up windows and processes (user rule, 2026-10-02)
+
+When you test anything, close what you opened as soon as you no longer need it. This covers
+GUI windows you launched, matplotlib figures, and pytest or script runs together with the
+loky/multiprocessing workers they spawned. Do not end a turn with them still open.
+- Headless scripts: use `matplotlib.use("Agg")`, and never call `plt.show()`.
+- A GUI you launched for a screenshot: take the screenshot, then destroy the window or end the
+  process.
+- Before you finish, check for `python.exe` processes you started, including orphaned workers
+  whose parent has exited, and stop them. Never kill processes another agent or the user is
+  still using.
+
 ## Development Notes
 
 - Tier (Quick/Standard/Comprehensive) only affects which models are tested
