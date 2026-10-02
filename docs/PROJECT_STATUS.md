@@ -29,7 +29,11 @@ Wave 2 stops the app misleading:
    Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
-8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).
+8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade). **Implemented on `feat/dpi-fonts`** (not merged
+   yet). It adds system DPI awareness before `tk.Tk()` plus a DPI-aware manifest in the spec (the frozen build is
+   untested), the `_px`/`_px_geometry` scale helpers, and six named fonts (`self.fonts`) wired into every ttk style.
+   The literal font-tuple sweep (101 tuples) and the per-tab pixel padding are queued in
+   `docs/plans/2026-10-02-font-tuple-sweep.md`; do them after the concurrent GUI branches merge.
 Wave 3 (flagships): F2 calibration transfer that validates itself (backend, then GUI), F1 CVPlan/grouped CV, F4 real
 DD-SIMCA, CS1 EMSC-with-interferent then F3 in-fold saved contaminant correction, F5 publication output, MW1 stability
 selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever a flagship touches that area.

@@ -749,3 +749,25 @@ predictions give a pooled CV curve; one round count is chosen (like PLS LVs from
 reported at it, and the final model is fit on all calibration data with that count. Rejected: inner 10% holdout per
 fold (too noisy at n~40-50), and n_estimators as a plain grid axis. Accepted caveat: the mild optimism of choosing on
 the same folds, as for PLS LV selection. Implemented on branch fix/booster-early-stopping.
+
+## 2026-10-02 - QW7 DPI/fonts gotchas (branch feat/dpi-fonts)
+- **Tk has no font fallback list.** `font=(('Segoe UI','Arial'),10)` becomes the Tcl string `{{Segoe UI} Arial} 10`,
+  which Tk reads as ONE family called "Segoe UI Arial"; Windows substitutes Arial. `('TkDefaultFont', 10, 'bold')`
+  has the same problem: inside a tuple the name is a family, not the named font, so it also renders Arial. Use
+  `tkfont.Font` named fonts (`self.fonts[...]`, Tk names `Dasp*`). Tk deletes a named font when the Python object that
+  created it is garbage-collected, which is why `_init_named_fonts` also keeps the owning objects on `root`.
+- **What scales by itself and what does not, once DPI aware.** Point sizes follow `tk scaling`, which goes from 1.333
+  to 1.667 at 125%. Embedded matplotlib canvases rescale from `tk scaling` (`_update_device_pixel_ratio`), and Tk 9's
+  Treeview row height follows the font. Literal pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one
+  that breaks: the custom-range dialog hid its Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap
+  such sizes in `_px_geometry`.
+- **Test processes are DPI-unaware**, so `_UI_SCALE` is 1.0 there and pixel assertions are unchanged. Only `main()`
+  calls `_enable_windows_dpi_awareness()`.
+- **A custom PyInstaller 6 `manifest=` REPLACES the built-in template rather than merging.** The spec therefore copies
+  the template's compatibility/longPathAware block verbatim; PyInstaller still injects the execution level and
+  Common-Controls v6.
+- **`sed -i` from Git Bash rewrites `spectral_predict_gui_optimized.py` from CRLF to LF.** The index stores CRLF, so
+  every line then shows as changed. Restore with a byte-level `\n` to `\r\n` pass, or use the Edit tool.
+- **Screenshot capture:** in a DPI-unaware process, `ImageGrab.grab(window=hwnd)` returns the pre-stretch logical
+  bitmap, which hides the blur. Grab the full screen, which comes back in physical pixels, and crop it by
+  `full.width / winfo_screenwidth()`.
