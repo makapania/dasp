@@ -427,10 +427,20 @@ def reduce_repeated_cv_predictions(
     mask = [len(v) > 0 for v in votes_per_sample]
     truth_arr = np.array([t for t, k in zip(truth_label, mask) if k])
     pred_arr = np.array([
-        Counter(v).most_common(1)[0][0]
+        _majority_label(v)
         for v, k in zip(votes_per_sample, mask) if k
     ])
     return truth_arr, pred_arr
+
+
+def _majority_label(votes: list):
+    """The one repeated-CV voting rule: most votes; a tie goes to the label voted first.
+
+    Votes are appended in fold order, and ``Counter.most_common`` keeps insertion
+    order among equal counts. :func:`pooled_round_curve` (booster round selection)
+    reproduces exactly this rule, and the exported templates use the same Counter.
+    """
+    return Counter(votes).most_common(1)[0][0]
 
 
 def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
@@ -443,7 +453,7 @@ def _majority_vote(votes_per_sample: list, dtype) -> np.ndarray:
     out = np.empty(n_samples, dtype=dtype)
     for i, votes in enumerate(votes_per_sample):
         if votes:
-            out[i] = Counter(votes).most_common(1)[0][0]
+            out[i] = _majority_label(votes)
     return out
 
 
@@ -474,6 +484,7 @@ def cross_val_predict_pooled(
     n_jobs: int = 1,
     method: str = 'predict',
     fit_params: Optional[Dict[str, Any]] = None,
+    balanced_weight_param: Optional[str] = None,
 ) -> np.ndarray:
     """Cross-validated predictions that work for all CV strategies including repeated CV.
 
@@ -502,6 +513,11 @@ def cross_val_predict_pooled(
         train_idx; scalars pass through unchanged. Required for sample_weight-
         only classifiers (XGBoost, RidgeClassifier) under
         imbalance_method='class_weight'.
+    balanced_weight_param : str or None, default=None
+        Fit kwarg (e.g. ``'model__sample_weight'``) that receives balanced class
+        weights computed from each training fold's y alone. Use this instead of
+        slicing weights computed from all of y, which would make a fold's fit
+        depend on its test labels.
 
     Returns
     -------
@@ -514,8 +530,16 @@ def cross_val_predict_pooled(
     # the legacy `fit_params=` kwarg in favour of metadata routing
     # (`set_config(enable_metadata_routing=True)` + `set_fit_request(...)`),
     # which would require global state mutation we'd rather avoid here.
-    if not _is_repeated_cv(cv) and not fit_params:
+    if not _is_repeated_cv(cv) and not fit_params and balanced_weight_param is None:
         return cross_val_predict(model, X, y, cv=cv, n_jobs=n_jobs, method=method)
+
+    def _fold_fit_kwargs(train_idx):
+        kwargs = _slice_fit_params(fit_params, train_idx, n_samples)
+        if balanced_weight_param is not None:
+            from sklearn.utils.class_weight import compute_sample_weight
+
+            kwargs[balanced_weight_param] = compute_sample_weight('balanced', y[train_idx])
+        return kwargs
 
     # Manual loop: handles repeated CV AND any cv with fit_params.
     # For classifier predict, reduce by majority vote (averaging integer class
@@ -528,10 +552,7 @@ def cross_val_predict_pooled(
         votes_per_sample: List[list] = [[] for _ in range(n_samples)]
         for train_idx, test_idx in cv.split(X, y):
             model_clone = clone(model)
-            model_clone.fit(
-                X[train_idx], y[train_idx],
-                **_slice_fit_params(fit_params, train_idx, n_samples),
-            )
+            model_clone.fit(X[train_idx], y[train_idx], **_fold_fit_kwargs(train_idx))
             preds = np.ravel(model_clone.predict(X[test_idx]))
             for i, sample_idx in enumerate(test_idx):
                 votes_per_sample[sample_idx].append(preds[i])
@@ -546,10 +567,7 @@ def cross_val_predict_pooled(
 
     for train_idx, test_idx in cv.split(X, y):
         model_clone = clone(model)
-        model_clone.fit(
-            X[train_idx], y[train_idx],
-            **_slice_fit_params(fit_params, train_idx, n_samples),
-        )
+        model_clone.fit(X[train_idx], y[train_idx], **_fold_fit_kwargs(train_idx))
         if method == 'predict_proba':
             preds = model_clone.predict_proba(X[test_idx])
         else:
@@ -630,20 +648,65 @@ BOOSTING_ROUND_POLICY = "pooled_cv_curve_v1"
 
 # CatBoost accepts several aliases for its round count.
 _CATBOOST_ROUND_KEYS = ("iterations", "n_estimators", "num_boost_round", "num_trees")
+# LightGBM aliases of num_iterations; any of them overrides n_estimators at fit time.
+_LGBM_ROUND_ALIASES = (
+    "num_iterations",
+    "num_iteration",
+    "n_iter",
+    "num_tree",
+    "num_trees",
+    "num_round",
+    "num_rounds",
+    "num_boost_round",
+    "nrounds",
+    "max_iter",
+)
+# LightGBM aliases of early_stopping_round (they need an eval set, which is never passed).
+_LGBM_EARLY_STOP_KEYS = (
+    "early_stopping_round",
+    "early_stopping_rounds",
+    "early_stopping",
+    "n_iter_no_change",
+)
+_LGBM_BOOSTING_KEYS = ("boosting_type", "boosting", "boost", "boosting_algorithm")
+# CatBoost overfitting-detector settings (they also need an eval set).
+_CATBOOST_EVAL_KEYS = ("early_stopping_rounds", "od_wait", "od_type", "od_pval")
+
+
+def _lgbm_round_aliases(params: dict) -> dict:
+    """LightGBM round-count aliases set on an estimator, ``{name: value}``."""
+    return {k: params[k] for k in _LGBM_ROUND_ALIASES if params.get(k) is not None}
 
 
 def booster_max_rounds(model) -> int:
     """Return the configured (maximum) number of boosting rounds of a booster.
+
+    LightGBM round aliases (``num_iterations`` etc.) override ``n_estimators`` at
+    fit time, so they win here too.
 
     Args:
         model: An XGBoost, LightGBM or CatBoost estimator, or a Pipeline ending in one.
 
     Returns:
         The round count the estimator will fit (its library default when unset).
+
+    Raises:
+        ValueError: LightGBM round aliases with conflicting values.
     """
     est = _get_model_from_pipeline(model)
     params = est.get_params()
-    if isinstance(est, XGBOOST_MODELS + LIGHTGBM_MODELS):
+    if isinstance(est, XGBOOST_MODELS):
+        value = params.get("n_estimators")
+        return int(value) if value is not None else 100
+    if isinstance(est, LIGHTGBM_MODELS):
+        aliases = _lgbm_round_aliases(params)
+        if "num_iterations" in aliases:
+            return int(aliases["num_iterations"])
+        if aliases:
+            values = {int(v) for v in aliases.values()}
+            if len(values) > 1:
+                raise ValueError(f"Conflicting LightGBM round-count aliases: {aliases}")
+            return values.pop()
         value = params.get("n_estimators")
         return int(value) if value is not None else 100
     if CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
@@ -657,14 +720,22 @@ def booster_max_rounds(model) -> int:
 def set_booster_rounds(model, n_rounds: int) -> None:
     """Set the number of boosting rounds on a booster (or a Pipeline's final step) in place.
 
+    LightGBM round aliases present on the estimator are set to the same count, so
+    none of them can override it.
+
     Args:
         model: An XGBoost, LightGBM or CatBoost estimator, or a Pipeline ending in one.
         n_rounds: Round count to fit.
     """
     est = _get_model_from_pipeline(model)
     n_rounds = int(n_rounds)
-    if isinstance(est, XGBOOST_MODELS + LIGHTGBM_MODELS):
+    if isinstance(est, XGBOOST_MODELS):
         est.set_params(n_estimators=n_rounds)
+        return
+    if isinstance(est, LIGHTGBM_MODELS):
+        updates = {k: n_rounds for k in _lgbm_round_aliases(est.get_params())}
+        updates["n_estimators"] = n_rounds
+        est.set_params(**updates)
         return
     if CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
         params = est.get_params()
@@ -672,8 +743,9 @@ def set_booster_rounds(model, n_rounds: int) -> None:
         if params.get("learning_rate") is None:
             warnings.warn(
                 "CatBoost has no explicit learning_rate; its automatic rate depends on the "
-                "round count, so the refit with the selected round count is not a truncation "
-                "of the cross-validated models.",
+                "round count, so a refit with a different round count is not a truncation "
+                "of the cross-validated models. Use apply_round_selection with the "
+                "cross-validation result, which pins the rate.",
                 stacklevel=2,
             )
         est.set_params(**{key: n_rounds})
@@ -681,14 +753,98 @@ def set_booster_rounds(model, n_rounds: int) -> None:
     raise TypeError(f"{type(est).__name__} is not a supported boosting model")
 
 
-def _clear_eval_only_params(est) -> None:
-    """Drop constructor settings that require an eval_set (none is ever passed)."""
-    if isinstance(est, XGBOOST_MODELS) and est.get_params().get("early_stopping_rounds"):
-        est.set_params(early_stopping_rounds=None)
-    if CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
-        params = est.get_params()
-        if params.get("early_stopping_rounds") or params.get("use_best_model"):
-            est.set_params(early_stopping_rounds=None, use_best_model=False)
+def strip_eval_only_params(model) -> None:
+    """Remove settings that need an eval_set (none is ever passed), in place.
+
+    XGBoost: constructor ``early_stopping_rounds`` and ``EarlyStopping`` callbacks
+    (other callbacks are kept). LightGBM: every ``early_stopping_round`` alias.
+    CatBoost: overfitting-detector settings and ``use_best_model``.
+
+    Args:
+        model: A booster or a Pipeline ending in one (anything else is left alone).
+    """
+    est = _get_model_from_pipeline(model)
+    params = est.get_params()
+    updates: Dict[str, Any] = {}
+    if isinstance(est, XGBOOST_MODELS):
+        if params.get("early_stopping_rounds") is not None:
+            updates["early_stopping_rounds"] = None
+        callbacks = params.get("callbacks")
+        if callbacks:
+            from xgboost.callback import EarlyStopping
+
+            kept = [cb for cb in callbacks if not isinstance(cb, EarlyStopping)]
+            if len(kept) != len(callbacks):
+                updates["callbacks"] = kept or None
+    elif isinstance(est, LIGHTGBM_MODELS):
+        updates = {k: None for k in _LGBM_EARLY_STOP_KEYS if params.get(k) is not None}
+    elif CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
+        updates = {k: None for k in _CATBOOST_EVAL_KEYS if params.get(k) is not None}
+        if params.get("use_best_model"):
+            updates["use_best_model"] = False
+    if updates:
+        est.set_params(**updates)
+
+
+def round_selection_unsupported_reason(model) -> Optional[str]:
+    """Why prefix-based round selection would be invalid for this booster, or None.
+
+    Selection reads the k-round model off a maximum-round fit, which is only
+    valid when later rounds never change earlier contributions.
+
+    Args:
+        model: A booster or a Pipeline ending in one.
+
+    Returns:
+        A user-facing reason, or None when round selection is valid.
+    """
+    est = _get_model_from_pipeline(model)
+    if not is_boosting_model(est):
+        return None
+    params = est.get_params()
+    if isinstance(est, XGBOOST_MODELS):
+        booster = str(params.get("booster") or "gbtree").lower()
+        if booster == "gblinear":
+            return (
+                "XGBoost booster='gblinear' has no per-round predictions "
+                "(iteration_range is ignored)"
+            )
+        if booster == "dart":
+            return (
+                "XGBoost booster='dart' re-weights earlier trees as rounds are added, so "
+                "the first k rounds of a longer fit are not the k-round model"
+            )
+    elif isinstance(est, LIGHTGBM_MODELS):
+        for key in _LGBM_BOOSTING_KEYS:
+            if str(params.get(key) or "").lower() == "dart":
+                return (
+                    "LightGBM boosting='dart' re-weights earlier trees as rounds are "
+                    "added, so the first k rounds of a longer fit are not the k-round model"
+                )
+    elif CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
+        if params.get("model_shrink_rate"):
+            return (
+                "CatBoost model_shrink_rate shrinks earlier trees as rounds are added, so "
+                "the first k rounds of a longer fit are not the k-round model"
+            )
+        if params.get("posterior_sampling"):
+            return (
+                "CatBoost posterior_sampling shrinks earlier trees as rounds are added, so "
+                "the first k rounds of a longer fit are not the k-round model"
+            )
+    return None
+
+
+def _auto_params(final) -> Dict[str, Any]:
+    """Settings a fitted booster chose itself that a refit with fewer rounds would change.
+
+    CatBoost without an explicit learning_rate picks one from the round count (and
+    data size); returns ``{'learning_rate': <rate used>}`` so the refit can pin it.
+    """
+    if CATBOOST_AVAILABLE and isinstance(final, CATBOOST_MODELS):
+        if final.get_params().get("learning_rate") is None and hasattr(final, "learning_rate_"):
+            return {"learning_rate": float(final.learning_rate_)}
+    return {}
 
 
 def _catboost_staged_raw(model, X: np.ndarray) -> np.ndarray:
@@ -710,8 +866,22 @@ def _catboost_staged_raw(model, X: np.ndarray) -> np.ndarray:
 
 
 def _catboost_staged(model, X: np.ndarray, is_clf: bool) -> np.ndarray:
-    """Staged CatBoost predictions (regression) or class probabilities (classification)."""
+    """Staged CatBoost predictions (regression) or class probabilities (classification).
+
+    Every candidate is accepted only when its last round equals the model's own
+    ``predict`` / ``predict_proba``, so a loss with a link function (Poisson,
+    Tweedie: exponent) is staged on the prediction scale, never as raw margins.
+
+    Raises:
+        ValueError: No staging matches the native predictions (unsupported loss).
+    """
     reference = model.predict_proba(X) if is_clf else np.ravel(model.predict(X))
+
+    def _matches(staged: np.ndarray) -> bool:
+        return staged.shape[1:] == reference.shape and bool(
+            np.allclose(staged[-1], reference, rtol=1e-6, atol=1e-9)
+        )
+
     try:
         raw = _catboost_staged_raw(model, X)
         if is_clf:
@@ -722,17 +892,36 @@ def _catboost_staged(model, X: np.ndarray, is_clf: bool) -> np.ndarray:
                 shifted = raw - raw.max(axis=2, keepdims=True)
                 expd = np.exp(shifted)
                 staged = expd / expd.sum(axis=2, keepdims=True)
-        else:
-            if raw.shape[2] != 1:
-                raise ValueError("multi-dimensional CatBoost regression")
-            staged = raw[:, :, 0]
-        if np.allclose(staged[-1], reference, rtol=1e-6, atol=1e-9):
-            return staged
-    except Exception as exc:  # unusual loss / tree layout: fall back to the slow path
+            if _matches(staged):
+                return staged
+        elif raw.shape[2] == 1:
+            for staged in (raw[:, :, 0], np.exp(raw[:, :, 0])):
+                if _matches(staged):
+                    return staged
+    except Exception as exc:  # unusual tree layout: fall back to the slow path
         logger.debug("CatBoost leaf-based staging unavailable (%s); using staged_predict", exc)
     if is_clf:
-        return np.stack(list(model.staged_predict_proba(X, eval_period=1)))
-    return np.stack([np.ravel(p) for p in model.staged_predict(X, eval_period=1)])
+        staged = np.stack(list(model.staged_predict_proba(X, eval_period=1)))
+        if _matches(staged):
+            return staged
+    else:
+        for prediction_type in ("RawFormulaVal", "Exponent"):
+            try:
+                staged = np.stack(
+                    [
+                        np.ravel(p)
+                        for p in model.staged_predict(
+                            X, prediction_type=prediction_type, eval_period=1
+                        )
+                    ]
+                )
+            except Exception:  # prediction type not valid for this loss
+                continue
+            if _matches(staged):
+                return staged
+    raise ValueError(
+        f"Cannot stage CatBoost predictions for loss {model.get_params().get('loss_function')!r}"
+    )
 
 
 def booster_staged_predict(model, X: np.ndarray, n_rounds: Optional[int] = None) -> np.ndarray:
@@ -805,6 +994,34 @@ def staged_labels(staged_proba: np.ndarray, classes: np.ndarray) -> np.ndarray:
     return np.asarray(classes)[np.argmax(staged_proba, axis=2)]
 
 
+def _align_proba(proba: np.ndarray, fold_classes: np.ndarray, classes: np.ndarray) -> np.ndarray:
+    """Map probability columns of a fold model onto the global class order."""
+    fold_classes = np.asarray(fold_classes)
+    if fold_classes.shape == classes.shape and np.array_equal(fold_classes, classes):
+        return proba
+    out = np.zeros(proba.shape[:-1] + (len(classes),))
+    out[..., np.searchsorted(classes, fold_classes)] = proba
+    return out
+
+
+def _stage_fold(final, X_test: np.ndarray, max_rounds: int, classes, fitted_tt=None):
+    """Staged test predictions of one fitted fold booster.
+
+    Returns:
+        ``(staged, proba)``: regression ``(R, n_test)`` values and None; classification
+        ``(R, n_test)`` labels and ``(R, n_test, C)`` probabilities in ``classes`` order.
+    """
+    staged = booster_staged_predict(final, X_test, n_rounds=max_rounds)
+    if fitted_tt is not None:
+        staged = np.asarray(fitted_tt.inverse_transform(staged.reshape(-1, 1))).reshape(
+            staged.shape
+        )
+    if classes is None:
+        return staged, None
+    proba = _align_proba(staged, final.classes_, classes)
+    return staged_labels(proba, classes), proba
+
+
 def pooled_round_curve(
     fold_staged: List[np.ndarray],
     fold_test_idx: List[np.ndarray],
@@ -814,9 +1031,10 @@ def pooled_round_curve(
     """Pooled CV figure of merit at every round count.
 
     Regression: RMSE of the per-sample predictions (averaged over repeats under
-    repeated CV). Classification: accuracy of the per-sample labels (majority
-    vote over repeats). Each sample appears once per repeat, as in
-    :func:`cross_val_predict_pooled`.
+    repeated CV). Classification: accuracy of the per-sample labels, reduced over
+    repeats by the same majority vote as the reported predictions
+    (:func:`_majority_label`: most votes; a tie goes to the label voted first, in
+    fold order). Each sample appears once per repeat.
 
     Args:
         fold_staged: Per fold, staged predictions ``(R, n_test)``. For classification
@@ -842,13 +1060,18 @@ def pooled_round_curve(
         pred = sums[:, mask] / counts[mask]
         return np.sqrt(np.mean((pred - y[mask].astype(float)) ** 2, axis=1))
     classes = np.unique(y)
+    n_folds = len(fold_staged)
     votes = np.zeros((n_rounds, n, len(classes)))
+    first_vote = np.full((n_rounds, n, len(classes)), float(n_folds))
     rows = np.arange(n_rounds)[:, None]
-    for staged, test_idx in zip(fold_staged, fold_test_idx):
-        cls_idx = np.searchsorted(classes, staged)
-        cls_idx = np.clip(cls_idx, 0, len(classes) - 1)
-        np.add.at(votes, (rows, np.asarray(test_idx)[None, :], cls_idx), 1.0)
-    pred = classes[np.argmax(votes[:, mask, :], axis=2)]
+    for fold_i, (staged, test_idx) in enumerate(zip(fold_staged, fold_test_idx)):
+        cls_idx = np.clip(np.searchsorted(classes, staged), 0, len(classes) - 1)
+        where = (rows, np.asarray(test_idx)[None, :], cls_idx)
+        votes[where] += 1.0  # one vote per (round, sample) within a fold
+        first_vote[where] = np.minimum(first_vote[where], fold_i)
+    # Most votes; ties go to the label voted first (Counter.most_common semantics).
+    key = votes * (n_folds + 1) - first_vote
+    pred = classes[np.argmax(key[:, mask, :], axis=2)]
     return np.mean(pred == y[mask][None, :], axis=1)
 
 
@@ -897,6 +1120,7 @@ def select_n_rounds(
     many consecutive rounds bring no improvement (the semantics of
     ``early_stopping_rounds`` in XGBoost/LightGBM/CatBoost, applied to the pooled
     curve instead of a single fold). NaN values never count as improvements.
+    When every value is NaN the full curve length is returned.
 
     Args:
         curve: Figure of merit per round count (index 0 = 1 round).
@@ -908,8 +1132,13 @@ def select_n_rounds(
 
     Returns:
         The selected round count (1-based).
+
+    Raises:
+        ValueError: Empty curve.
     """
     curve = np.asarray(curve, dtype=float)
+    if curve.size == 0:
+        raise ValueError("Cannot select a round count from an empty curve")
     tb = None if tiebreak is None else np.asarray(tiebreak, dtype=float)
     best_i: Optional[int] = None
     best = -np.inf if higher_is_better else np.inf
@@ -923,20 +1152,31 @@ def select_n_rounds(
             better = tb is not None and not np.isnan(tb[i]) and tb[i] < best_tb
         if better:
             best_i, best = i, value
-            best_tb = tb[i] if tb is not None else np.inf
+            best_tb = tb[i] if tb is not None and not np.isnan(tb[i]) else np.inf
         elif best_i is not None and patience and i - best_i >= patience:
             break
     return (best_i if best_i is not None else len(curve) - 1) + 1
 
 
-def _align_proba(proba: np.ndarray, fold_classes: np.ndarray, classes: np.ndarray) -> np.ndarray:
-    """Map probability columns of a fold model onto the global class order."""
-    fold_classes = np.asarray(fold_classes)
-    if fold_classes.shape == classes.shape and np.array_equal(fold_classes, classes):
-        return proba
-    out = np.zeros(proba.shape[:-1] + (len(classes),))
-    out[..., np.searchsorted(classes, fold_classes)] = proba
-    return out
+def _select_from_staged(
+    staged_out: List[np.ndarray],
+    proba_out: Optional[List[np.ndarray]],
+    test_indices: List[np.ndarray],
+    y: np.ndarray,
+    classes,
+    patience: Optional[int],
+):
+    """Pooled curve and the selected round count for a set of staged folds.
+
+    Returns:
+        ``(n_rounds, curve)``.
+    """
+    is_clf = classes is not None
+    curve = pooled_round_curve(
+        staged_out, test_indices, y, "classification" if is_clf else "regression"
+    )
+    tiebreak = pooled_round_logloss(proba_out, test_indices, y, classes) if is_clf else None
+    return select_n_rounds(curve, patience, higher_is_better=is_clf, tiebreak=tiebreak), curve
 
 
 @dataclass
@@ -956,6 +1196,9 @@ class BoostingRoundsCV:
         fold_models: Per fold, the fitted (pipeline) clone when ``keep_models`` was set;
             its booster holds ``max_rounds`` rounds, use :func:`booster_predict_at`.
         fit_times: Per fold fit time in seconds.
+        pinned_params: Settings the folds were fitted with that the final refit must
+            reuse (CatBoost's automatic learning rate); applied by
+            :func:`apply_round_selection`.
     """
 
     n_rounds: int
@@ -968,6 +1211,29 @@ class BoostingRoundsCV:
     classes: Optional[np.ndarray] = None
     fold_models: Optional[list] = None
     fit_times: List[float] = field(default_factory=list)
+    pinned_params: Dict[str, Any] = field(default_factory=dict)
+
+
+def apply_round_selection(model, selection) -> None:
+    """Prepare a booster (or Pipeline) for its final fit with the CV-selected round count.
+
+    Sets the round count, pins any setting the folds were fitted with (CatBoost's
+    automatic learning rate) and removes eval-only settings, in place. This is the
+    one place a final fit gets its tree count.
+
+    Args:
+        model: Booster or Pipeline ending in one.
+        selection: A :class:`BoostingRoundsCV`, or a plain round count.
+    """
+    if isinstance(selection, BoostingRoundsCV):
+        n_rounds, pinned = selection.n_rounds, selection.pinned_params
+    else:
+        n_rounds, pinned = int(selection), {}
+    est = _get_model_from_pipeline(model)
+    strip_eval_only_params(est)
+    if pinned:
+        est.set_params(**pinned)
+    set_booster_rounds(est, n_rounds)
 
 
 def _fit_fold_full_rounds(
@@ -985,9 +1251,10 @@ def _fit_fold_full_rounds(
     (``fit_resample``) touch training rows only and are skipped for the test rows.
     When ``sample_weight_train`` is given and a sampler changed the row count, the
     weights are recomputed as balanced weights on the resampled y (unchanged
-    behaviour of the previous helper). ``target_transformer`` (regression only) is
-    cloned, fitted on the training y and used for the booster fit, as
-    TransformedTargetRegressor would.
+    behaviour of the previous helper). ``balanced_sample_weight`` computes balanced
+    class weights from the (post-resampling) training y alone. ``target_transformer``
+    (regression only) is cloned, fitted on the training y and used for the booster
+    fit, as TransformedTargetRegressor would.
 
     Returns:
         (fitted pipeline clone, fitted final estimator, transformed X_test,
@@ -995,7 +1262,7 @@ def _fit_fold_full_rounds(
     """
     model_clone = clone(model)
     final = _get_model_from_pipeline(model_clone)
-    _clear_eval_only_params(final)
+    strip_eval_only_params(final)
     Xt_train, Xt_test, yt_train = X_train, X_test, y_train
     sw = sample_weight_train
     if hasattr(model_clone, "steps"):
@@ -1025,6 +1292,28 @@ def _fit_fold_full_rounds(
     return model_clone, final, Xt_test, fitted_tt
 
 
+def pin_auto_params(model, X_train: np.ndarray, y_train: np.ndarray) -> Dict[str, Any]:
+    """Pin settings a booster would choose from its round count, before fold-parallel CV.
+
+    Only CatBoost without an explicit learning_rate needs this: one fit on the given
+    training rows reads the rate it chose, which is then set on ``model`` (in place)
+    so every fold and the final refit use the same rate. No-op otherwise.
+
+    Returns:
+        The pinned settings (empty when nothing needed pinning).
+    """
+    est = _get_model_from_pipeline(model)
+    if not (CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS)):
+        return {}
+    if est.get_params().get("learning_rate") is not None:
+        return {}
+    _, final, _, _ = _fit_fold_full_rounds(model, X_train, y_train, X_train[:1], None, False)
+    pinned = _auto_params(final)
+    if pinned:
+        est.set_params(**pinned)
+    return pinned
+
+
 def cross_val_boosting_rounds(
     model,
     X: np.ndarray,
@@ -1043,10 +1332,9 @@ def cross_val_boosting_rounds(
     eval_set; its test rows are predicted at every round count. The pooled
     curve (RMSECV for regressors; accuracy for classifiers, exact ties broken by
     pooled log-loss) picks the round count with :func:`select_n_rounds`, and
-    every fold's predictions are
-    reported at that count. Changing only a test fold's labels can change the
-    selected count (it is a CV statistic, like the PLS LV count) but never the
-    fold's fitted model.
+    every fold's predictions are reported at that count. Changing only a test
+    fold's labels can change the selected count (it is a CV statistic, like the
+    PLS LV count) but never the fold's fitted model.
 
     Args:
         model: Booster or Pipeline ending in one.
@@ -1054,9 +1342,12 @@ def cross_val_boosting_rounds(
         y: Targets.
         cv: Any sklearn splitter (repeated CV and LOO included).
         patience: ``early_stopping_rounds`` semantics on the pooled curve.
-        sample_weight: Optional weights for all samples, sliced per training fold.
-        balanced_sample_weight: Recompute balanced class weights on each training
-            fold's (post-resampling) y instead of slicing ``sample_weight``.
+        sample_weight: Optional weights for all samples, sliced per training fold. Do
+            not pass weights derived from all of y (e.g. balanced class weights): a
+            fold's fit would then depend on its test labels. Use
+            ``balanced_sample_weight`` for those.
+        balanced_sample_weight: Balanced class weights computed from each training
+            fold's (post-resampling) y.
         keep_models: Keep the fitted fold clones on the result.
         target_transformer: Regression only. A y transformer (cloned per fold, fitted
             on the training y); staged predictions are inverse-transformed before the
@@ -1064,6 +1355,10 @@ def cross_val_boosting_rounds(
 
     Returns:
         A :class:`BoostingRoundsCV`.
+
+    Raises:
+        ValueError: The booster's configuration makes round selection invalid (see
+            :func:`round_selection_unsupported_reason`).
     """
     import time
 
@@ -1072,6 +1367,9 @@ def cross_val_boosting_rounds(
     final_proto = _get_model_from_pipeline(model)
     if not is_boosting_model(final_proto):
         raise TypeError(f"{type(final_proto).__name__} is not a supported boosting model")
+    reason = round_selection_unsupported_reason(final_proto)
+    if reason is not None:
+        raise ValueError(f"Boosting-round selection is not valid here: {reason}")
     is_clf = _model_is_classifier(final_proto)
     max_rounds = booster_max_rounds(final_proto)
     classes = np.unique(y) if is_clf else None
@@ -1082,6 +1380,7 @@ def cross_val_boosting_rounds(
     train_indices: List[np.ndarray] = []
     models: list = []
     fit_times: List[float] = []
+    pinned: Dict[str, Any] = {}
     for train_idx, test_idx in cv.split(X, y):
         sw_train = sample_weight[train_idx] if sample_weight is not None else None
         start = time.time()
@@ -1095,27 +1394,25 @@ def cross_val_boosting_rounds(
             target_transformer=None if is_clf else target_transformer,
         )
         fit_times.append(time.time() - start)
-        staged = booster_staged_predict(final, Xt_test, n_rounds=max_rounds)
-        if fitted_tt is not None:
-            staged = np.asarray(fitted_tt.inverse_transform(staged.reshape(-1, 1))).reshape(
-                staged.shape
-            )
+        if not test_indices:
+            # CatBoost without a learning_rate chooses one from the round count: pin
+            # the first fold's choice for the remaining folds and the final refit.
+            pinned = _auto_params(final)
+            if pinned:
+                model = clone(model)
+                _get_model_from_pipeline(model).set_params(**pinned)
+        staged, proba = _stage_fold(final, Xt_test, max_rounds, classes, fitted_tt)
+        staged_out.append(staged)
         if is_clf:
-            staged = _align_proba(staged, final.classes_, classes)
-            proba_out.append(staged)
-            staged_out.append(staged_labels(staged, classes))
-        else:
-            staged_out.append(staged)
+            proba_out.append(proba)
         test_indices.append(np.asarray(test_idx))
         train_indices.append(np.asarray(train_idx))
         if keep_models:
             models.append(fitted)
 
-    curve = pooled_round_curve(
-        staged_out, test_indices, y, "classification" if is_clf else "regression"
+    n_rounds, curve = _select_from_staged(
+        staged_out, proba_out if is_clf else None, test_indices, y, classes, patience
     )
-    tiebreak = pooled_round_logloss(proba_out, test_indices, y, classes) if is_clf else None
-    n_rounds = select_n_rounds(curve, patience, higher_is_better=is_clf, tiebreak=tiebreak)
     return BoostingRoundsCV(
         n_rounds=n_rounds,
         max_rounds=max_rounds,
@@ -1127,6 +1424,7 @@ def cross_val_boosting_rounds(
         classes=classes,
         fold_models=models if keep_models else None,
         fit_times=fit_times,
+        pinned_params=pinned,
     )
 
 
@@ -1137,7 +1435,8 @@ def pool_boosting_predictions(
 
     Same reduction as :func:`cross_val_predict_pooled`: one prediction per sample
     under plain K-fold/LOO; under repeated CV, regression and probabilities are
-    averaged and classifier labels are majority-voted.
+    averaged and classifier labels are majority-voted (:func:`_majority_vote`, the
+    rule :func:`pooled_round_curve` selects with).
     """
     is_proba = method == "predict_proba"
     is_clf_labels = (not is_proba) and res.classes is not None
@@ -1210,13 +1509,35 @@ def _compute_score(y_true: np.ndarray, y_pred: np.ndarray, scoring: str) -> floa
         raise ValueError(f"Unsupported scoring method: {scoring}")
 
 
-def _uses_round_selection(model, early_stopping_rounds: Optional[int]) -> bool:
-    """True when ``model`` is a booster and a positive patience was requested."""
-    return (
-        is_boosting_model(_get_model_from_pipeline(model))
-        and early_stopping_rounds is not None
-        and early_stopping_rounds > 0
-    )
+def uses_round_selection(model, early_stopping_rounds: Optional[int], warn: bool = True) -> bool:
+    """True when ``model`` is a booster, a positive patience was requested and the
+    booster's configuration allows prefix-based round selection.
+
+    A booster whose configuration does not allow it (XGBoost gblinear/DART,
+    LightGBM DART, CatBoost shrinkage; see :func:`round_selection_unsupported_reason`)
+    is fitted at its configured round count instead, with a warning.
+
+    Args:
+        model: Estimator or Pipeline.
+        early_stopping_rounds: Requested patience.
+        warn: Emit the fallback warning.
+    """
+    est = _get_model_from_pipeline(model)
+    if not (
+        is_boosting_model(est) and early_stopping_rounds is not None and early_stopping_rounds > 0
+    ):
+        return False
+    reason = round_selection_unsupported_reason(est)
+    if reason is not None:
+        if warn:
+            warnings.warn(
+                f"Boosting-round selection skipped: {reason}. The configured round count "
+                "is fitted as is.",
+                UserWarning,
+                stacklevel=3,
+            )
+        return False
+    return True
 
 
 def _predict_with_fold_model(fitted, X: np.ndarray, n_rounds: int) -> np.ndarray:
@@ -1231,6 +1552,52 @@ def _predict_with_fold_model(fitted, X: np.ndarray, n_rounds: int) -> np.ndarray
     return booster_predict_at(final, Xt, n_rounds)
 
 
+def _weight_param_name(model) -> str:
+    """Fit kwarg that routes sample_weight to the final estimator."""
+    if hasattr(model, "steps"):
+        return f"{model.steps[-1][0]}__sample_weight"
+    return "sample_weight"
+
+
+def _cross_validate_balanced(
+    model, X, y, cv, scoring_dict: Dict[str, str], return_train_score: bool
+) -> Dict[str, np.ndarray]:
+    """cross_validate with balanced class weights computed from each training fold."""
+    import time
+
+    from sklearn.utils.class_weight import compute_sample_weight
+
+    X_arr = np.asarray(X) if not hasattr(X, "iloc") else X.to_numpy()
+    y_arr = np.asarray(y)
+    key = _weight_param_name(model)
+    results: Dict[str, Any] = {"fit_time": [], "score_time": []}
+    for name in scoring_dict:
+        results[f"test_{name}"] = []
+        if return_train_score:
+            results[f"train_{name}"] = []
+    for train_idx, test_idx in cv.split(X_arr, y_arr):
+        fold_model = clone(model)
+        start = time.time()
+        fold_model.fit(
+            X_arr[train_idx],
+            y_arr[train_idx],
+            **{key: compute_sample_weight("balanced", y_arr[train_idx])},
+        )
+        results["fit_time"].append(time.time() - start)
+        start = time.time()
+        y_pred = np.ravel(fold_model.predict(X_arr[test_idx]))
+        for name, scorer in scoring_dict.items():
+            results[f"test_{name}"].append(_compute_score(y_arr[test_idx], y_pred, scorer))
+        if return_train_score:
+            y_train_pred = np.ravel(fold_model.predict(X_arr[train_idx]))
+            for name, scorer in scoring_dict.items():
+                results[f"train_{name}"].append(
+                    _compute_score(y_arr[train_idx], y_train_pred, scorer)
+                )
+        results["score_time"].append(time.time() - start)
+    return {k: np.asarray(v) for k, v in results.items()}
+
+
 def cross_validate_with_early_stopping(
     model,
     X: np.ndarray,
@@ -1242,6 +1609,7 @@ def cross_validate_with_early_stopping(
     return_train_score: bool = False,
     return_estimator: bool = False,
     sample_weight: Optional[np.ndarray] = None,
+    balanced_sample_weight: bool = False,
 ) -> Dict[str, np.ndarray]:
     """Cross-validate, choosing a booster's round count from the pooled CV curve.
 
@@ -1262,7 +1630,9 @@ def cross_validate_with_early_stopping(
         return_train_score: Also score the training rows (at the selected count).
         return_estimator: Return the fitted estimators (not supported for boosters with
             round selection, whose fold models hold the maximum round count).
-        sample_weight: Optional per-sample weights.
+        sample_weight: Optional per-sample weights (must not be derived from all of y).
+        balanced_sample_weight: Balanced class weights computed from each training
+            fold's y (the class_weight path for sample_weight-only classifiers).
 
     Returns:
         Dict with ``test_<name>`` (or ``test_score``) arrays, ``fit_time``,
@@ -1270,7 +1640,14 @@ def cross_validate_with_early_stopping(
     """
     import time
 
-    if not _uses_round_selection(model, early_stopping_rounds):
+    scoring_dict = {"score": scoring} if isinstance(scoring, str) else dict(scoring)
+    if not uses_round_selection(model, early_stopping_rounds):
+        if balanced_sample_weight:
+            if return_estimator:
+                raise NotImplementedError(
+                    "return_estimator is not supported with balanced_sample_weight"
+                )
+            return _cross_validate_balanced(model, X, y, cv, scoring_dict, return_train_score)
         cv_kwargs: Dict[str, Any] = dict(
             cv=cv,
             scoring=scoring,
@@ -1307,7 +1684,6 @@ def cross_validate_with_early_stopping(
             "keep_models=True) and booster_predict_at instead."
         )
 
-    scoring_dict = {"score": scoring} if isinstance(scoring, str) else dict(scoring)
     X_arr = np.asarray(X) if not hasattr(X, "iloc") else X.to_numpy()
     y_arr = np.asarray(y)
     res = cross_val_boosting_rounds(
@@ -1317,6 +1693,7 @@ def cross_validate_with_early_stopping(
         cv,
         patience=early_stopping_rounds,
         sample_weight=sample_weight,
+        balanced_sample_weight=balanced_sample_weight,
         keep_models=return_train_score,
     )
 
@@ -1355,6 +1732,7 @@ def cross_val_predict_with_early_stopping(
     method: str = "predict",
     sample_weight: Optional[np.ndarray] = None,
     return_n_rounds: bool = False,
+    balanced_sample_weight: bool = False,
 ):
     """Cross-validated predictions, choosing a booster's round count from the pooled curve.
 
@@ -1364,32 +1742,34 @@ def cross_val_predict_with_early_stopping(
 
     Args:
         model: Estimator or Pipeline (terminal step named ``model`` when
-            ``sample_weight`` is used with a non-booster).
+            weights are used with a non-booster).
         X: Feature matrix.
         y: Target vector.
         cv: CV splitter (LOO and repeated CV included).
         early_stopping_rounds: Patience on the pooled curve; 0/None disables selection.
         method: ``'predict'`` or ``'predict_proba'``.
         sample_weight: Per-sample weights of length n_samples, sliced per training
-            fold (recomputed as balanced weights after an in-fold sampler).
+            fold (must not be derived from all of y).
         return_n_rounds: Also return the selected round count (None when no
             selection ran).
+        balanced_sample_weight: Balanced class weights computed from each training
+            fold's y.
 
     Returns:
         Per-sample predictions, or ``(predictions, n_rounds)`` with ``return_n_rounds``.
     """
-    if not _uses_round_selection(model, early_stopping_rounds):
-        if sample_weight is not None:
-            preds = cross_val_predict_pooled(
-                model,
-                X,
-                y,
-                cv=cv,
-                method=method,
-                fit_params={"model__sample_weight": sample_weight},
-            )
-        else:
-            preds = cross_val_predict_pooled(model, X, y, cv=cv, method=method)
+    if not uses_round_selection(model, early_stopping_rounds):
+        preds = cross_val_predict_pooled(
+            model,
+            X,
+            y,
+            cv=cv,
+            method=method,
+            fit_params=(
+                {"model__sample_weight": sample_weight} if sample_weight is not None else None
+            ),
+            balanced_weight_param=(_weight_param_name(model) if balanced_sample_weight else None),
+        )
         return (preds, None) if return_n_rounds else preds
 
     y_arr = np.asarray(y)
@@ -1400,6 +1780,7 @@ def cross_val_predict_with_early_stopping(
         cv,
         patience=early_stopping_rounds,
         sample_weight=sample_weight,
+        balanced_sample_weight=balanced_sample_weight,
     )
     preds = pool_boosting_predictions(res, y_arr.shape[0], method=method, y_dtype=y_arr.dtype)
     return (preds, res.n_rounds) if return_n_rounds else preds
@@ -1414,6 +1795,7 @@ def cross_val_score_with_early_stopping(
     early_stopping_rounds: int = 40,
     n_jobs: int = 1,
     sample_weight: Optional[np.ndarray] = None,
+    balanced_sample_weight: bool = False,
 ) -> np.ndarray:
     """Per-fold CV scores; boosters are scored at one pooled-curve round count.
 
@@ -1427,7 +1809,9 @@ def cross_val_score_with_early_stopping(
         scoring: Scoring name.
         early_stopping_rounds: Patience on the pooled curve (boosters only).
         n_jobs: Parallel jobs (non-boosters only).
-        sample_weight: Optional per-sample weights.
+        sample_weight: Optional per-sample weights (must not be derived from all of y).
+        balanced_sample_weight: Balanced class weights computed from each training
+            fold's y.
 
     Returns:
         Array of per-fold scores.
@@ -1441,5 +1825,6 @@ def cross_val_score_with_early_stopping(
         early_stopping_rounds=early_stopping_rounds,
         n_jobs=n_jobs,
         sample_weight=sample_weight,
+        balanced_sample_weight=balanced_sample_weight,
     )
     return results["test_score"]

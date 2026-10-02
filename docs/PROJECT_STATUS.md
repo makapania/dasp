@@ -56,6 +56,15 @@ selection, SP1/SP2 PLS kernel and SPA. Structural enablers ST1a/ST2/ST4 whenever
 > **2026-09-27:** T-51 PR D is done and green, open as **PR #82** (branch `feat/T51-pr-d-gui`), not merged yet.
 > The full hand-off is in that branch's `docs/PROJECT_STATUS.md`. Merge #82 first; this section is replaced then.
 
+**Booster round selection (branch `fix/booster-early-stopping`, Wave 1 item 1, R028/R003/R022/R126).** XGBoost,
+LightGBM and CatBoost no longer early-stop each CV fold on its own test fold. The round count is chosen once from the
+pooled CV curve, as the PLS LV count is (`cv_utils.cross_val_boosting_rounds`; `early_stopping_rounds` is the patience),
+and every CV metric, Tab 7 and the export use that count. **Booster CV scores drop** (example data: LightGBM RMSEcv
+3.900 -> 3.949, XGBoost 3.960 -> 4.062). Results gain an `n_estimators_selected` column and Params carry the count.
+Booster Bayesian studies with selection on get a `|boost_rounds=pooled_cv_curve_v1` identity segment: old booster
+studies are reported (`booster_scoring_changed`, resume declined) and preserved, never resumed. DART, gblinear and
+CatBoost shrinkage are fitted at their configured count (recorded as no selection). Details: SESSION_LOG 2026-10-02.
+
 ### PR #81 (sparse-selector top-N cap) MERGED 2026-09-26 as `e3c6d59`
 CARS-family top-N subsets no longer pad with zero-score long wavelengths (grid, one-class, multiclass, Bayesian).
 There were three review rounds.

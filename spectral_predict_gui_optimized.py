@@ -31219,8 +31219,8 @@ class SpectralPredictApp:
     _RESUME_ISSUE_NOTICES = (
         ("resume_declined", (
             "[RUN] Resume: saved trials were NOT reused for this model; it starts over.",
-            "Resumed run: some saved trials could not be reused (different data "
-            "or software environment) — those models start over. See log.",
+            "Resumed run: some saved trials could not be reused (different data, "
+            "software environment or scoring method) — those models start over. See log.",
             "Saved trials not reused",
             "Part of the resumed run is starting over instead of continuing "
             "from its saved trials.",
@@ -39693,9 +39693,10 @@ F1 Score:  {f1:.4f}
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
             from spectral_predict.cv_utils import (
+                apply_round_selection,
                 cross_val_boosting_rounds,
                 is_boosting_model,
-                set_booster_rounds,
+                round_selection_unsupported_reason,
             )
 
             # Parse wavelength specification
@@ -41544,7 +41545,8 @@ F1 Score:  {f1:.4f}
 
                 _final = pipe.steps[-1][1]
                 _needs_es = (_es_rounds is not None and _es_rounds > 0 and
-                             is_boosting_model(_final))
+                             is_boosting_model(_final) and
+                             round_selection_unsupported_reason(_final) is None)
 
                 if _needs_es:
                     # Do NOT wrap with TTR — y-transform handled manually in CV loop
@@ -41579,10 +41581,19 @@ F1 Score:  {f1:.4f}
                 is_boosting_model(final_model)
             )
             # Boosters: choose ONE round count from the pooled CV curve (no fold sees
-            # its own test y), then fit every fold and the final model with it. A row
-            # whose Params already carry the selected count reproduces it exactly.
+            # its own test y). Each fold is fitted once, at the maximum round count;
+            # its CV predictions below are read at the selected count (no second fit).
+            # A row whose Params already carry the selected count reproduces it.
             n_rounds_selected = None
             n_rounds_max = None
+            _rounds = None
+            _rounds_skipped = None
+            if use_early_stopping:
+                _rounds_skipped = round_selection_unsupported_reason(final_model)
+                if _rounds_skipped is not None:
+                    # DART / gblinear / CatBoost shrinkage: fitted at the configured count.
+                    print(f"DEBUG: boosting-round selection skipped: {_rounds_skipped}")
+                    use_early_stopping = False
             if use_early_stopping:
                 _rounds_target_tf = None
                 if y_transform_active:
@@ -41596,7 +41607,10 @@ F1 Score:  {f1:.4f}
                 )
                 n_rounds_selected = _rounds.n_rounds
                 n_rounds_max = _rounds.max_rounds
-                set_booster_rounds(pipe, n_rounds_selected)
+                # ── BOOSTING ROUND COUNT FOR THE FINAL FIT: set here, once. ──
+                # final_pipe = clone(pipe) below inherits it (with any pinned
+                # setting, e.g. CatBoost's automatic learning rate).
+                apply_round_selection(pipe, _rounds)
                 print(
                     f"DEBUG: {model_name} boosting rounds: {n_rounds_selected} of "
                     f"{n_rounds_max}, chosen from the pooled CV curve "
@@ -41614,67 +41628,14 @@ F1 Score:  {f1:.4f}
                 # Fit pipeline (preprocessing + model) and predict
                 try:
                     if use_early_stopping:
-                        X_train_transformed = X_train.copy()
-                        X_test_transformed = X_test.copy()
-                        y_train_fold = y_train
-
-                        if hasattr(pipe_fold, 'steps'):
-                            for step_name, step in pipe_fold.steps[:-1]:
-                                if hasattr(step, 'fit_resample'):
-                                    X_train_transformed, y_train_fold = step.fit_resample(
-                                        X_train_transformed, y_train_fold
-                                    )
-                                else:
-                                    step.fit(X_train_transformed, y_train_fold)
-                                    if hasattr(step, 'transform'):
-                                        X_train_transformed = step.transform(X_train_transformed)
-                                        X_test_transformed = step.transform(X_test_transformed)
-
-                            final_model_fold = pipe_fold.steps[-1][1]
-
-                            # Y-transform for boosters: manually transform the training y
-                            # (same per-fold transformer as the round selection above)
-                            _y_transformer = None
-                            if y_transform_active:
-                                from spectral_predict.y_transform import YTransformWrapper
-                                _y_transformer = YTransformWrapper._get_transformer(y_transform)
-                                y_train_fold = _y_transformer.fit_transform(
-                                    y_train_fold.reshape(-1, 1)).ravel()
-
-                            # Per-fold balanced sample weights for sample_weight-only models
-                            # (XGBoost class_weight path — mirrors search.py:4068, 4088).
-                            # Computed AFTER any in-fold resampler so weights match resampled y.
-                            _es_sample_weight = None
-                            if use_sample_weight_for_classification:
-                                from sklearn.utils.class_weight import compute_sample_weight
-                                _es_sample_weight = compute_sample_weight(
-                                    'balanced', y_train_fold
-                                )
-
-                            # The round count was fixed above from the pooled CV
-                            # curve; no eval_set, the test fold is never seen.
-                            _rounds_fit_kwargs = {}
-                            if _es_sample_weight is not None:
-                                _rounds_fit_kwargs['sample_weight'] = _es_sample_weight
-                            final_model_fold.fit(
-                                X_train_transformed, y_train_fold, **_rounds_fit_kwargs
-                            )
-                            y_pred = final_model_fold.predict(X_test_transformed)
-
-                            # Inverse-transform predictions if y-transform active
-                            if _y_transformer is not None:
-                                y_pred = _y_transformer.inverse_transform(
-                                    y_pred.reshape(-1, 1)).ravel()
-
-                            if hasattr(final_model_fold, 'predict_proba'):
-                                y_proba = final_model_fold.predict_proba(X_test_transformed)
-                                all_y_proba.append(y_proba)
-                        else:
-                            pipe_fold.fit(X_train, y_train)
-                            y_pred = pipe_fold.predict(X_test)
-                            if hasattr(pipe_fold, 'predict_proba'):
-                                y_proba = pipe_fold.predict_proba(X_test)
-                                all_y_proba.append(y_proba)
+                        # This fold's predictions at the selected round count, from
+                        # the one maximum-round fit made while choosing it (y-transform
+                        # already inverted; balanced weights from the training fold).
+                        if not np.array_equal(_rounds.test_indices[fold_idx], test_idx):
+                            raise RuntimeError("CV splits changed between passes")
+                        y_pred = _rounds.fold_predictions[fold_idx]
+                        if _rounds.fold_probas is not None:
+                            all_y_proba.append(_rounds.fold_probas[fold_idx])
                     else:
                         # Per-fold balanced sample weights threaded via the 'model'
                         # step name (sklearn fit_params convention) for sample_weight-only
@@ -41742,11 +41703,18 @@ F1 Score:  {f1:.4f}
                     f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
                     fold_metrics.append({"accuracy": acc, "precision": prec, "recall": rec, "f1": f1})
 
-            _rounds_line = (
-                f"  Boosting rounds: {n_rounds_selected} of {n_rounds_max} (one count for all "
-                f"folds, chosen from the pooled CV curve; patience {early_stopping_rounds})\n"
-                if n_rounds_selected is not None else ""
-            )
+            if n_rounds_selected is not None:
+                _rounds_line = (
+                    f"  Boosting rounds: {n_rounds_selected} of {n_rounds_max} (one count for "
+                    f"all folds, chosen from the pooled CV curve; patience "
+                    f"{early_stopping_rounds})\n"
+                )
+            elif _rounds_skipped is not None:
+                _rounds_line = (
+                    f"  Boosting rounds: configured count, not selected ({_rounds_skipped})\n"
+                )
+            else:
+                _rounds_line = ""
 
             # Compute mean and std across folds
             results = {}

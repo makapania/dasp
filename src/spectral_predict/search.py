@@ -112,16 +112,14 @@ from .constants import RANDOM_STATE
 
 # Import early stopping CV utilities
 from .cv_utils import (
-    _align_proba,
+    _select_from_staged,
+    _stage_fold,
+    apply_round_selection,
     booster_max_rounds,
-    booster_staged_predict,
     build_cv_splitter,
-    is_boosting_model,
-    pooled_round_curve,
-    pooled_round_logloss,
-    select_n_rounds,
-    set_booster_rounds,
-    staged_labels,
+    pin_auto_params,
+    strip_eval_only_params,
+    uses_round_selection,
 )
 
 from .ga_preprocessing import optimize_preprocessing, PREPROC_TYPES, WINDOW_SIZES
@@ -4388,6 +4386,11 @@ def _run_single_fold(
     """
     # Clone pipeline to avoid thread-safety issues
     pipe_clone = clone(pipe)
+    # Boosters with round selection: fitted at their maximum round count, never with
+    # an eval_set, so eval-only settings (early_stopping_rounds etc.) are removed.
+    select_rounds = uses_round_selection(pipe_clone, early_stopping_rounds, warn=False)
+    if select_rounds:
+        strip_eval_only_params(pipe_clone)
 
     # Split data
     X_train, X_test = X[train_idx], X[test_idx]
@@ -4507,21 +4510,20 @@ def _run_single_fold(
     # with its maximum round count, sample weights included. Return its test-fold
     # predictions at every round count; the caller pools them across folds and
     # scores every fold at ONE selected count.
-    final_estimator = pipe_clone.steps[-1][1] if hasattr(pipe_clone, "steps") else pipe_clone
-    if (
-        early_stopping_rounds is not None
-        and early_stopping_rounds > 0
-        and is_boosting_model(final_estimator)
-    ):
-        staged = booster_staged_predict(
+    if select_rounds:
+        final_estimator = pipe_clone.steps[-1][1] if hasattr(pipe_clone, "steps") else pipe_clone
+        staged, proba = _stage_fold(
             final_estimator,
             _transform_test(X_test),
-            n_rounds=booster_max_rounds(final_estimator),
+            booster_max_rounds(final_estimator),
+            None if task_type == "regression" else np.unique(y),
         )
-        out = {"y_test": y_test, "test_idx": np.asarray(test_idx), "staged": staged}
-        if task_type != "regression":
-            out["classes"] = np.asarray(final_estimator.classes_)
-        return out
+        return {
+            "y_test": y_test,
+            "test_idx": np.asarray(test_idx),
+            "staged": staged,
+            "proba": proba,
+        }
 
     if manual_fit_used:
         y_pred = final_model.predict(_transform_test(X_test))
@@ -4677,31 +4679,19 @@ def _finalize_boosting_folds(fold_results, y, task_type, is_binary_classificatio
     (fold_metrics, n_rounds) : (list of dict, int)
     """
     test_idx = [r["test_idx"] for r in fold_results]
-    if task_type == "regression":
-        staged = [r["staged"] for r in fold_results]
-        curve = pooled_round_curve(staged, test_idx, y, "regression")
-        n_rounds = select_n_rounds(curve, patience, higher_is_better=False)
-        metrics = [
-            _fold_metrics(task_type, is_binary_classification, r["y_test"], s[n_rounds - 1], None)
-            for r, s in zip(fold_results, staged)
-        ]
-        return metrics, n_rounds
-
-    classes = np.unique(y)
-    probas = [_align_proba(r["staged"], r["classes"], classes) for r in fold_results]
-    labels = [staged_labels(p, classes) for p in probas]
-    curve = pooled_round_curve(labels, test_idx, y, "classification")
-    tiebreak = pooled_round_logloss(probas, test_idx, y, classes)
-    n_rounds = select_n_rounds(curve, patience, higher_is_better=True, tiebreak=tiebreak)
+    staged = [r["staged"] for r in fold_results]
+    classes = None if task_type == "regression" else np.unique(y)
+    probas = None if classes is None else [r["proba"] for r in fold_results]
+    n_rounds, _ = _select_from_staged(staged, probas, test_idx, y, classes, patience)
     metrics = [
         _fold_metrics(
             task_type,
             is_binary_classification,
             r["y_test"],
-            lab[n_rounds - 1],
-            lambda p=p: (p[n_rounds - 1], classes),
+            s[n_rounds - 1],
+            None if classes is None else (lambda p=r["proba"]: (p[n_rounds - 1], classes)),
         )
-        for r, lab, p in zip(fold_results, labels, probas)
+        for r, s in zip(fold_results, staged)
     ]
     return metrics, n_rounds
 
@@ -4939,6 +4929,15 @@ def _run_single_config(
     # Realize splits once so we can both run folds AND pool by sample later.
     # Generators get consumed; we need the test indices for repeated-CV pooling.
     splits = list(cv_splitter.split(X, y))
+
+    # Boosters with round selection (R028): settings the booster would choose from
+    # its round count (CatBoost's automatic learning rate) are pinned before the
+    # fold-parallel CV, so every fold and the final refit share them. Configurations
+    # where selection is invalid (DART, gblinear, CatBoost shrinkage) are fitted at
+    # their configured round count instead, with one warning.
+    if uses_round_selection(pipe, early_stopping_rounds):
+        pipe = clone(pipe)
+        pin_auto_params(pipe, X[splits[0][0]], y[splits[0][0]])
 
     # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
     if n_jobs_cv == 1:
@@ -5196,7 +5195,7 @@ def _run_single_config(
         # Params (n_estimators / iterations) describe the model that was scored.
         if n_rounds_selected is not None:
             pipe = clone(pipe)
-            set_booster_rounds(pipe, n_rounds_selected)
+            apply_round_selection(pipe, n_rounds_selected)
         pipe.fit(X, y)
 
         # Get the fitted model from pipeline for parameter capture
@@ -5415,8 +5414,10 @@ def _run_single_config(
         # early_stopping_rounds is the patience used to pick ONE boosting-round
         # count from the pooled CV curve; n_estimators_selected is that count (also
         # written into Params, so Tab 7, saved models and exports refit it).
+        # Effective value: None when no selection ran (non-booster, patience 0, or a
+        # booster configuration where selection is invalid), so Tab 7 does not run one.
         "early_stopping_rounds": (
-            early_stopping_rounds if model_name in ("XGBoost", "LightGBM", "CatBoost") else None
+            early_stopping_rounds if n_rounds_selected is not None else None
         ),
         "n_estimators_selected": n_rounds_selected,
         # Store actual imbalance settings for Model Development tab to use

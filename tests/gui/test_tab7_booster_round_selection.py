@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import io
+import traceback
 
 import numpy as np
 import pandas as pd
@@ -122,3 +123,26 @@ def test_tab7_refit_of_old_row_selects_rounds_without_test_fold(gui_app):
         patience=10,
     ).n_rounds
     assert _n_estimators(model) == expected
+
+
+def test_tab7_fits_each_booster_fold_once(gui_app, monkeypatch):
+    """Tab 7 reports the round-selection fits' predictions: one fit per fold plus the
+    final fit, not a second fit of every fold."""
+    from lightgbm import LGBMRegressor
+
+    X_df, y = _data()
+    row = _grid_row(X_df, y)
+    calls = []
+    real_fit = LGBMRegressor.fit
+
+    def counting_fit(self, *args, **kwargs):
+        # The validation-curve diagnostic refits the model on purpose; count only
+        # the CV and final fits.
+        names = {frame.name for frame in traceback.extract_stack()}
+        if "_compute_validation_curve" not in names:
+            calls.append(1)
+        return real_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(LGBMRegressor, "fit", counting_fit)
+    _refit(gui_app, X_df, y, row)
+    assert len(calls) == 3 + 1

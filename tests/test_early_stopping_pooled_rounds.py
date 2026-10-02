@@ -495,3 +495,415 @@ def test_nsga2_display_metrics_come_from_the_objective_predictions(task):
     for _, row in df.iterrows():
         k = int(row["n_estimators_selected"])
         assert _rounds_param(row["Params"]) == k
+
+
+# --- Review round 1 follow-ups --------------------------------------------------------
+
+
+def _weighted_cases():
+    from xgboost import XGBClassifier
+
+    return XGBClassifier(n_estimators=40, learning_rate=0.2, max_depth=3, random_state=0, n_jobs=1)
+
+
+def test_balanced_weights_come_from_the_training_fold_only():
+    """Item 1: balanced class weights are computed from each training fold's y, so a
+    weighted fold model cannot depend on its test labels either."""
+    X, y = _classification_data()
+    y = y.copy()
+    y[:6] = 2  # imbalanced, three classes
+    cv = _FixedSplits(StratifiedKFold(4, shuffle=True, random_state=42).split(X, y))
+    _, test_idx = next(iter(cv.split(X, y)))
+    y2 = y.copy()
+    y2[test_idx] = (y2[test_idx] + 1) % 3
+
+    kw = dict(patience=10, balanced_sample_weight=True, keep_models=True)
+    res1 = cross_val_boosting_rounds(_weighted_cases(), X, y, cv, **kw)
+    res2 = cross_val_boosting_rounds(_weighted_cases(), X, y2, cv, **kw)
+    np.testing.assert_array_equal(
+        booster_staged_predict(res1.fold_models[0], X[test_idx]),
+        booster_staged_predict(res2.fold_models[0], X[test_idx]),
+    )
+
+
+def test_non_booster_balanced_weights_come_from_the_training_fold_only():
+    from sklearn.linear_model import RidgeClassifier
+
+    from spectral_predict.cv_utils import cross_val_predict_pooled
+
+    X, y = _classification_data()
+    y = y.copy()
+    y[:8] = 1
+    cv = _FixedSplits(StratifiedKFold(4, shuffle=True, random_state=0).split(X, y))
+    _, test_idx = next(iter(cv.split(X, y)))
+    y2 = y.copy()
+    y2[test_idx] = 1 - y2[test_idx]
+    p1 = cross_val_predict_pooled(
+        RidgeClassifier(), X, y, cv, balanced_weight_param="sample_weight"
+    )
+    p2 = cross_val_predict_pooled(
+        RidgeClassifier(), X, y2, cv, balanced_weight_param="sample_weight"
+    )
+    np.testing.assert_array_equal(p1[test_idx], p2[test_idx])
+
+
+def test_bayesian_and_nsga2_weighted_cv_use_per_fold_weights(monkeypatch):
+    """Item 1: neither search passes weights computed from all of y into its CV."""
+    import spectral_predict.cv_utils as cvu
+    from spectral_predict import nsga2_search, run_state, unified_bayesian
+
+    calls = []
+    real = cvu.cross_val_boosting_rounds
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(unified_bayesian, "cross_val_boosting_rounds", spy)
+    monkeypatch.setattr(cvu, "cross_val_boosting_rounds", spy)
+    run_state._active_storage_url = None
+    run_state._active_run_id = None
+    X, y = _classification_data()
+    y = y.copy()
+    y[:6] = 0
+    unified_bayesian.run_unified_bayesian(
+        X=X,
+        y=y,
+        wavelengths=np.linspace(900, 1700, X.shape[1]),
+        model_name="XGBoost",
+        task_type="classification",
+        n_trials=2,
+        cv_folds=3,
+        early_stopping_rounds=10,
+        imbalance_method="class_weight",
+        random_state=42,
+        verbose=False,
+        progress_callback=None,
+        enable_sqlite_persistence="never",
+    )
+    nsga2_search.run_nsga2_search(
+        X=X,
+        y=y,
+        task_type="classification",
+        population_size=4,
+        n_generations=1,
+        cv_folds=3,
+        min_wavelengths=5,
+        random_state=42,
+        verbose=0,
+        models=["XGBoost"],
+        early_stopping_rounds=10,
+        imbalance_method="class_weight",
+    )
+    assert calls
+    for kwargs in calls:
+        assert kwargs.get("sample_weight") is None
+        assert kwargs.get("balanced_sample_weight") is True
+
+
+def test_previous_policy_booster_study_is_reported_not_reused(tmp_path, monkeypatch):
+    """Item 2: a saved study scored under the old (test-fold) early stopping is found,
+    reported as not reused (resume_declined) and left untouched."""
+    import optuna
+
+    from spectral_predict import run_state
+    from spectral_predict.unified_bayesian import (
+        PREVIOUS_POLICY_STUDY_BASE_ATTR,
+        RESUME_DECLINED_KEY,
+        run_unified_bayesian,
+    )
+
+    X, y = _regression_data(n=30)
+    opts = dict(
+        X=X,
+        y=y,
+        wavelengths=np.linspace(900, 1700, X.shape[1]),
+        model_name="LightGBM",
+        task_type="regression",
+        cv_folds=3,
+        early_stopping_rounds=10,
+        random_state=42,
+        verbose=False,
+    )
+    path = tmp_path / "old_policy.sqlite3"
+    url = f"sqlite:///{path.as_posix()}"
+    monkeypatch.setattr(run_state, "get_storage_url", lambda: url)
+    _, template = run_unified_bayesian(**opts, n_trials=0, enable_sqlite_persistence="never")
+    old_base = template.user_attrs[PREVIOUS_POLICY_STUDY_BASE_ATTR]
+    assert old_base and not template.study_name.startswith(old_base)
+
+    old_name = f"{old_base}_env1_olddigest"
+    prior = optuna.create_study(study_name=old_name, storage=url)
+    prior.add_trial(optuna.trial.create_trial(value=0.5))
+    old_trials = prior.trials
+    notes = []
+
+    _, current = run_unified_bayesian(
+        **opts, n_trials=1, enable_sqlite_persistence="always", progress_callback=notes.append
+    )
+
+    notices = [n for n in notes if n.get("booster_scoring_changed")]
+    assert len(notices) == 1
+    assert old_name in notices[0]["message"]
+    assert notices[0].get(RESUME_DECLINED_KEY) is True
+    assert current.study_name != old_name and len(current.trials) == 1
+    assert optuna.load_study(study_name=old_name, storage=url).trials == old_trials
+
+
+def _unsupported_boosters():
+    from catboost import CatBoostRegressor
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+
+    return [
+        pytest.param(
+            XGBRegressor(booster="gblinear", n_estimators=20, n_jobs=1), id="xgb-gblinear"
+        ),
+        pytest.param(XGBRegressor(booster="dart", n_estimators=20, n_jobs=1), id="xgb-dart"),
+        pytest.param(
+            LGBMRegressor(boosting_type="dart", n_estimators=20, verbose=-1), id="lgbm-dart"
+        ),
+        pytest.param(
+            CatBoostRegressor(
+                iterations=20,
+                learning_rate=0.1,
+                model_shrink_rate=0.1,
+                verbose=0,
+                allow_writing_files=False,
+            ),
+            id="catboost-shrink",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("model", _unsupported_boosters())
+def test_invalid_prefix_configurations_are_not_round_selected(model):
+    """Item 3: gblinear, DART and CatBoost shrinkage fall back to the configured count."""
+    from spectral_predict.cv_utils import round_selection_unsupported_reason
+
+    X, y = _regression_data()
+    assert round_selection_unsupported_reason(model)
+    with pytest.raises(ValueError, match="not valid"):
+        cross_val_boosting_rounds(model, X, y, KFold(3), patience=5)
+    with pytest.warns(UserWarning, match="selection skipped"):
+        preds, n_rounds = cross_val_predict_with_early_stopping(
+            model, X, y, KFold(3), early_stopping_rounds=5, return_n_rounds=True
+        )
+    assert n_rounds is None
+    np.testing.assert_allclose(preds, cross_val_predict(clone(model), X, y, cv=KFold(3)))
+
+
+def test_invalid_configuration_grid_row_records_no_selection():
+    from lightgbm import LGBMRegressor
+
+    from spectral_predict.search import _run_single_config
+
+    X, y = _regression_data()
+    model = LGBMRegressor(boosting_type="dart", n_estimators=20, verbose=-1)
+    with pytest.warns(UserWarning, match="selection skipped"):
+        row = _run_single_config(
+            X,
+            y,
+            np.linspace(1000.0, 1100.0, X.shape[1]),
+            model,
+            "LightGBM",
+            {},
+            {"name": "raw", "deriv": 0, "window": 0, "polyorder": 0},
+            KFold(3, shuffle=True, random_state=0),
+            "regression",
+            False,
+            skip_preprocessing=True,
+            early_stopping_rounds=10,
+        )
+    assert row["n_estimators_selected"] is None
+    assert row["early_stopping_rounds"] is None
+    assert _rounds_param(row["Params"]) == 20
+
+
+def test_catboost_automatic_learning_rate_is_pinned_for_the_refit():
+    """Item 3: CatBoost without learning_rate picks one from the round count; the folds'
+    rate is pinned so the k-round refit is the model the curve was read from."""
+    from catboost import CatBoostRegressor
+
+    X, y = _regression_data()
+    cv = KFold(4, shuffle=True, random_state=1)
+    model = CatBoostRegressor(
+        iterations=60, depth=3, random_seed=0, verbose=0, thread_count=1, allow_writing_files=False
+    )
+    res = cross_val_boosting_rounds(model, X, y, cv, patience=10)
+    assert set(res.pinned_params) == {"learning_rate"}
+
+    refit = clone(model)
+    from spectral_predict.cv_utils import apply_round_selection
+
+    apply_round_selection(refit, res)
+    assert refit.get_params()["learning_rate"] == res.pinned_params["learning_rate"]
+    np.testing.assert_allclose(
+        cross_val_predict(refit, X, y, cv=cv),
+        pool_boosting_predictions(res, len(y)),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+def test_catboost_link_function_losses_are_staged_on_the_prediction_scale():
+    """Item 8: Poisson/Tweedie predictions are exponentiated; staging must match."""
+    from catboost import CatBoostRegressor
+
+    X, y = _regression_data()
+    y = np.abs(y) * 3
+    for loss in ("Poisson", "Tweedie:variance_power=1.5"):
+        model = CatBoostRegressor(
+            iterations=30,
+            learning_rate=0.1,
+            loss_function=loss,
+            verbose=0,
+            thread_count=1,
+            allow_writing_files=False,
+        )
+        model.fit(X, y)
+        staged = booster_staged_predict(model, X)
+        np.testing.assert_allclose(staged[-1], model.predict(X), rtol=1e-9)
+        np.testing.assert_allclose(staged[9], model.predict(X, ntree_end=10), rtol=1e-9)
+
+
+def test_repeated_cv_selection_uses_the_reported_vote():
+    """Item 4: the classification curve is the accuracy of the predictions that would
+    be reported at each round count (same majority-vote tie rule)."""
+    from sklearn.model_selection import RepeatedStratifiedKFold
+    from xgboost import XGBClassifier
+
+    from spectral_predict.cv_utils import booster_predict_at
+
+    X, y = _classification_data()
+    y = y.copy()
+    y[:10] = 2
+    cv = RepeatedStratifiedKFold(n_splits=3, n_repeats=2, random_state=1)
+    res = cross_val_boosting_rounds(
+        XGBClassifier(n_estimators=25, max_depth=2, n_jobs=1),
+        X,
+        y,
+        cv,
+        patience=None,
+        keep_models=True,
+    )
+    for k in range(1, 26):
+        res.fold_predictions = [
+            booster_predict_at(m, X[te], k) for m, te in zip(res.fold_models, res.test_indices)
+        ]
+        pooled = pool_boosting_predictions(res, len(y), y_dtype=y.dtype)
+        assert res.curve[k - 1] == pytest.approx(np.mean(pooled == y), abs=1e-12), k
+
+
+def test_lightgbm_round_aliases_are_normalised():
+    """Item 6: a LightGBM round alias overrides n_estimators; read and set it."""
+    from lightgbm import LGBMRegressor
+
+    from spectral_predict.cv_utils import booster_max_rounds
+
+    X, y = _regression_data()
+    model = LGBMRegressor(n_estimators=50, num_iterations=30, verbose=-1)
+    assert booster_max_rounds(model) == 30
+    set_booster_rounds(model, 5)
+    assert model.fit(X, y).booster_.current_iteration() == 5
+
+
+def test_eval_only_settings_are_removed_for_cv_and_final_fit():
+    """Item 7: early-stopping settings that need an eval set are stripped for the folds
+    and the final fit; unrelated callbacks are kept."""
+    from catboost import CatBoostRegressor
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+    from xgboost.callback import EarlyStopping, LearningRateScheduler
+
+    from spectral_predict.cv_utils import apply_round_selection
+
+    X, y = _regression_data()
+    lr_schedule = LearningRateScheduler(lambda i: 0.1)
+    models = [
+        LGBMRegressor(n_estimators=20, early_stopping_round=5, verbose=-1),
+        XGBRegressor(
+            n_estimators=20,
+            early_stopping_rounds=5,
+            callbacks=[EarlyStopping(rounds=3), lr_schedule],
+        ),
+        CatBoostRegressor(
+            iterations=20,
+            learning_rate=0.1,
+            early_stopping_rounds=5,
+            use_best_model=True,
+            verbose=0,
+            allow_writing_files=False,
+        ),
+    ]
+    for model in models:
+        res = cross_val_boosting_rounds(model, X, y, KFold(3), patience=5)
+        final = clone(model)
+        apply_round_selection(final, res)
+        final.fit(X, y)
+        if isinstance(model, XGBRegressor):
+            callbacks = final.get_params()["callbacks"]
+            assert len(callbacks) == 1 and isinstance(callbacks[0], LearningRateScheduler)
+            assert final.get_params()["early_stopping_rounds"] is None
+
+
+def test_select_n_rounds_edge_cases():
+    """Item 10: empty curve raises; a NaN tie-break on the incumbent can be beaten."""
+    with pytest.raises(ValueError):
+        select_n_rounds(np.array([]), None, higher_is_better=False)
+    acc = np.array([0.5, 0.8, 0.8])
+    tiebreak = np.array([0.7, np.nan, 0.4])
+    assert select_n_rounds(acc, None, higher_is_better=True, tiebreak=tiebreak) == 3
+
+
+def test_nsga2_calibration_and_knee_row_use_selected_rounds():
+    """Item 5: calibration metrics describe the stored (selected-count) model, and the
+    "best from all evaluations" row gets the same treatment as Pareto rows."""
+    from spectral_predict.nsga2_search import (
+        _compute_calibration_metrics,
+        convert_nsga2_to_v1_format,
+        run_nsga2_search,
+    )
+
+    X, y = _regression_data()
+    result = run_nsga2_search(
+        X=X,
+        y=y,
+        task_type="regression",
+        population_size=6,
+        n_generations=2,
+        cv_folds=3,
+        min_wavelengths=5,
+        random_state=42,
+        verbose=0,
+        models=["LightGBM"],
+        early_stopping_rounds=10,
+        selection_bias=0.0,
+    )
+    knee = result["knee_solution"]
+    knee["objectives"]["error"] = -1.0  # force the best-from-all row into the frame
+    result["knee_idx"] = -1
+    df = convert_nsga2_to_v1_format(result, X.shape[1], "regression", folds=3, X=X, y=y)
+    best = df[df.get("Is_Best_Error", False) == True]  # noqa: E712
+    assert len(best) == 1
+    assert _rounds_param(best.iloc[0]["Params"]) == int(best.iloc[0]["n_estimators_selected"])
+    from spectral_predict.nsga2_search import _booster_cv_metrics
+
+    expected = []
+    for solution in result["pareto_solutions"]:
+        boost = _booster_cv_metrics(
+            X, y, solution, result["model_types"], "regression", 3, 42, early_stopping_rounds=10
+        )
+        cal = _compute_calibration_metrics(
+            X,
+            y,
+            solution,
+            X.shape[1],
+            result["model_types"],
+            "regression",
+            param_overrides=boost["param_overrides"],
+        )
+        expected.append(cal["RMSE"])
+    pareto_rows = df[df.get("Is_Best_Error", False) != True]  # noqa: E712
+    for rmse in pareto_rows["RMSE"]:
+        assert min(abs(rmse - e) for e in expected) < 1e-12

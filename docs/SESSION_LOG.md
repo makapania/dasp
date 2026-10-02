@@ -768,3 +768,21 @@ Gotchas worth knowing:
   the export runs a pre-pass `_choose_boosting_rounds` and then a plain CV loop at the selected count.
 - Example data (BoneCollagen, snv, 5-fold, 200 rounds, patience 40): LightGBM RMSEcv 3.900 -> 3.949 (k=93),
   XGBoost 3.960 -> 4.062 (k=177). The bias is modest on real signal and large on noise (review repro: R2cv +0.02 vs -0.54).
+- **Review round 1 (Codex BLOCK, GLM merge-with-fixes) gotchas:**
+  - Balanced class weights computed from ALL of y and then sliced per fold (Bayesian and NSGA-II XGBoost
+    class_weight paths) also leak test labels into a fold's fit. CV now uses `balanced_sample_weight=True` /
+    `cross_val_predict_pooled(balanced_weight_param=...)`; all-of-y weights only for the full-data refit.
+  - Prefix selection is invalid for XGBoost gblinear (iteration_range ignored: flat curve), XGBoost/LightGBM DART
+    and CatBoost model_shrink_rate/posterior_sampling (later rounds rescale earlier trees).
+    `round_selection_unsupported_reason` -> fitted at the configured count, row records no selection.
+  - CatBoost with learning_rate=None picks its rate from the round count: `learning_rate_` of the first fold is pinned
+    for the other folds and the refit (`BoostingRoundsCV.pinned_params`, `apply_round_selection`); exact (diff 0.0).
+  - LightGBM `num_iterations` aliases override `n_estimators`; setting an alias to None crashes LightGBM, so
+    `set_booster_rounds` sets every present alias to the same count. Early-stopping aliases CAN be set to None.
+  - CatBoost Poisson/Tweedie: `predict` exponentiates, `staged_predict` defaults to raw; staging is accepted only when
+    its last round equals native predict (raw, exp(raw), or staged_predict 'Exponent').
+  - Repeated-CV vote ties: reported predictions use `Counter.most_common` (first-voted label wins ties); the selection
+    curve now reproduces that exactly (`first_vote` array) - test checks curve[k] == accuracy of reported preds at k.
+  - Changing a booster study's identity hid the old study from the env/legacy notice (it searched the new base only).
+    The previous-policy base is recomputed (`previous_policy_study_base` study attr) and reported like an env change.
+  - Tab 7's validation-curve diagnostic refits the model ~27 times on purpose; a fit-count test must exclude it.

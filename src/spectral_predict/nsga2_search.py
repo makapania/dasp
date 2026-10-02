@@ -26,8 +26,8 @@ from sklearn.model_selection import cross_val_score, cross_val_predict, KFold, S
 # Import early stopping CV utilities
 from .cv_utils import (
     cross_val_score_with_early_stopping,
-    cross_val_predict_with_early_stopping,
     is_boosting_model,
+    round_selection_unsupported_reason,
 )
 from sklearn.metrics import (
     r2_score, mean_absolute_error, balanced_accuracy_score,
@@ -1512,49 +1512,26 @@ class SpectralOptimizationProblem(Problem):
                 return rmse
             else:
                 cv = StratifiedKFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
-                # Per-fold balanced sample_weight for sample_weight-only classifiers
-                # (XGBoost-like). The early-stopping helper slices it per train_idx;
-                # sklearn's native cross_val_score does the same via fit_params.
-                _balanced_sw = None
-                if use_sample_weight_for_classification:
-                    from sklearn.utils.class_weight import compute_sample_weight
-                    _balanced_sw = compute_sample_weight('balanced', self.y)
+                # Balanced sample_weight for sample_weight-only classifiers
+                # (XGBoost-like) is computed from each training fold's own y:
+                # weights computed from all of y would make a fold's fit depend on
+                # its test labels.
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore')
-                    if use_early_stopping:
+                    if use_early_stopping or use_sample_weight_for_classification:
                         scores = cross_val_score_with_early_stopping(
                             pipeline_model, X_subset, self.y, cv=cv,
                             scoring='accuracy',
-                            early_stopping_rounds=self.early_stopping_rounds,
-                            sample_weight=_balanced_sw,
+                            early_stopping_rounds=(
+                                self.early_stopping_rounds if use_early_stopping else None
+                            ),
+                            balanced_sample_weight=use_sample_weight_for_classification,
                         )
                     else:
-                        # sklearn 1.8 removed the legacy `fit_params=` kwarg for
-                        # cross_val_score; sample_weight must flow via metadata
-                        # routing (see cross_validate_with_early_stopping for the
-                        # matching pattern).
-                        if _balanced_sw is not None:
-                            import sklearn
-                            from sklearn.base import clone as _sk_clone
-                            from spectral_predict.cv_utils import _get_model_from_pipeline
-                            # Clone first so set_fit_request doesn't mutate the
-                            # caller's pipeline_model — the routing-state setter
-                            # persists past the config_context exit.
-                            _routed_model = _sk_clone(pipeline_model)
-                            _inner = _get_model_from_pipeline(_routed_model)
-                            if hasattr(_inner, 'set_fit_request'):
-                                _inner.set_fit_request(sample_weight=True)
-                            with sklearn.config_context(enable_metadata_routing=True):
-                                scores = cross_val_score(
-                                    _routed_model, X_subset, self.y, cv=cv,
-                                    scoring='accuracy',
-                                    params={'sample_weight': _balanced_sw},
-                                )
-                        else:
-                            scores = cross_val_score(
-                                pipeline_model, X_subset, self.y, cv=cv,
-                                scoring='accuracy',
-                            )
+                        scores = cross_val_score(
+                            pipeline_model, X_subset, self.y, cv=cv,
+                            scoring='accuracy',
+                        )
                 # Return 1 - accuracy (to minimize)
                 return 1.0 - np.mean(scores)
 
@@ -2197,6 +2174,7 @@ def run_nsga2_search(
         # Use this solution
         knee_chromosome = all_solutions[best_idx].astype(int)
         knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type, n_samples=problem.X.shape[0])
+        knee_solution['chromosome'] = knee_chromosome  # booster rows re-run selection
         knee_solution['objectives'] = {
             'error': all_objectives[best_idx, 0],
             'n_wavelengths': all_objectives[best_idx, 1] * problem.n_wavelengths,
@@ -2221,6 +2199,7 @@ def run_nsga2_search(
         # Decode knee solution
         knee_chromosome = pareto_solutions[knee_idx].astype(int)
         knee_solution = decode_solution(knee_chromosome, problem.n_wavelengths, models, task_type, n_samples=problem.X.shape[0])
+        knee_solution['chromosome'] = knee_chromosome  # booster rows re-run selection
         knee_solution['objectives'] = {
             'error': pareto_front[knee_idx, 0],
             'n_wavelengths': pareto_front[knee_idx, 1] * problem.n_wavelengths,
@@ -2764,9 +2743,11 @@ def _booster_cv_metrics(
     model = _build_model(model_type, model_param, task_type, random_state, hyperparams)
     if model is None or not is_boosting_model(model):
         return None
+    if round_selection_unsupported_reason(model) is not None:
+        return None  # the objective fitted the configured round count too
 
     y_arr = np.asarray(y)
-    sample_weight = None
+    balanced = False
     if task_type == "classification":
         # Same 0..n-1 encoding as SpectralOptimizationProblem.
         if y_arr.dtype == object:
@@ -2778,9 +2759,7 @@ def _booster_cv_metrics(
             elif hasattr(model, "class_weight"):
                 model.set_params(class_weight="balanced")
             else:
-                from sklearn.utils.class_weight import compute_sample_weight
-
-                sample_weight = compute_sample_weight("balanced", y_arr)
+                balanced = True  # from each training fold's y, as the objective does
 
     from sklearn.pipeline import Pipeline
 
@@ -2815,11 +2794,16 @@ def _booster_cv_metrics(
             y_arr,
             cv,
             patience=early_stopping_rounds,
-            sample_weight=sample_weight,
+            balanced_sample_weight=balanced,
         )
 
     rounds_key = "iterations" if model_type == "CatBoost" else "n_estimators"
-    out: Dict[str, Any] = {"n_rounds": res.n_rounds, "rounds_key": rounds_key}
+    out: Dict[str, Any] = {
+        "n_rounds": res.n_rounds,
+        "rounds_key": rounds_key,
+        # What the final (calibration) fit and the stored Params must use.
+        "param_overrides": {rounds_key: res.n_rounds, **res.pinned_params},
+    }
     if task_type == "regression":
         # RMSEcv as the objective computes it: mean of per-fold RMSE.
         fold_rmse = [
@@ -2891,17 +2875,15 @@ def _booster_cv_metrics(
     return out
 
 
-def _with_selected_rounds(params_str: str, rounds_key: str, n_rounds: int) -> str:
-    """Write the CV-selected round count into a stored Params string."""
-    import ast
-
+def _with_selected_rounds(params_str: str, overrides: Dict[str, Any]) -> str:
+    """Write the CV-selected round count (and pinned settings) into a stored Params string."""
     try:
         params = ast.literal_eval(params_str) if params_str else {}
     except (ValueError, SyntaxError):
         return params_str
     if not isinstance(params, dict):
         return params_str
-    params[rounds_key] = int(n_rounds)
+    params.update(overrides)
     return str(params)
 
 
@@ -3667,6 +3649,7 @@ def _compute_calibration_metrics(
     model_types: List[str],
     task_type: str,
     imbalance_method: Optional[str] = None,
+    param_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, float]:
     """
     Compute calibration (training set) metrics for a single NSGA-II solution.
@@ -3695,6 +3678,9 @@ def _compute_calibration_metrics(
         at fit time. Without this, the user-visible Accuracy / F1 / AUC etc.
         for CatBoost/XGBoost classifiers under class_weight described an
         UNWEIGHTED model (Codex HIGH on PR #38).
+    param_overrides : dict or None, default=None
+        Model parameters set before the fit; boosters pass the CV-selected round
+        count so the calibration metrics describe the stored model.
 
     Returns
     -------
@@ -3801,6 +3787,8 @@ def _compute_calibration_metrics(
             model = _build_model(model_type, model_param, task_type, 42, hyperparams)
 
         # Check if model was built successfully
+        if model is not None and param_overrides:
+            model.set_params(**param_overrides)
         if model is None:
             logger.error(f"_build_model returned None for {model_type} in _compute_calibration_metrics")
             if task_type == 'regression':
@@ -3920,6 +3908,80 @@ def _compute_calibration_metrics(
         return {}
 
 
+def _apply_booster_selection_to_best_row(
+    best_row: Dict[str, Any],
+    knee_sol: Dict[str, Any],
+    X: Optional[np.ndarray],
+    y: Optional[np.ndarray],
+    n_wavelengths: int,
+    model_types: List[str],
+    task_type: str,
+    folds: int,
+    result: Dict[str, Any],
+    compute_r2: bool,
+) -> None:
+    """Give the "best from all evaluations" row the same booster treatment as Pareto rows.
+
+    Re-runs the objective's round selection on the knee chromosome, writes the
+    selected count into Params and ``n_estimators_selected``, and computes the CV and
+    calibration metrics at that count (R022 follow-up). No-op for non-boosters.
+    """
+    chromosome = knee_sol.get("chromosome")
+    if X is None or y is None or chromosome is None:
+        return
+    boost = _booster_cv_metrics(
+        X,
+        y,
+        chromosome,
+        model_types,
+        task_type,
+        folds,
+        result.get("random_state", 42),
+        imbalance_method=result.get("imbalance_method"),
+        imbalance_params=result.get("imbalance_params"),
+        early_stopping_rounds=result.get("early_stopping_rounds"),
+    )
+    if boost is None:
+        return
+    cal = _compute_calibration_metrics(
+        X,
+        y,
+        chromosome,
+        n_wavelengths,
+        model_types,
+        task_type,
+        imbalance_method=result.get("imbalance_method"),
+        param_overrides=boost["param_overrides"],
+    )
+    best_row.update({k: v for k, v in cal.items()})
+    if task_type == "regression":
+        best_row["RMSEcv"] = boost["RMSEcv"]
+        best_row["R2cv"] = boost["R2cv"] if compute_r2 else None
+        for key in ("MAEcv", "Bias", "RPD", "RER", "CCCcv"):
+            best_row[key] = boost[key]
+        best_row["CompositeScore"] = best_row["RMSEcv"]
+    else:
+        for key in (
+            "ROC_AUCcv",
+            "F1cv",
+            "Precisioncv",
+            "Recallcv",
+            "Specificitycv",
+            "Kappacv",
+            "MCCcv",
+            "BalancedAcccv",
+            "BERcv",
+            "LogLosscv",
+        ):
+            best_row[key] = boost[key]
+    params_str = decode_solution(
+        chromosome, n_wavelengths, model_types, task_type, n_samples=len(y)
+    )["model_params"]
+    best_row["Params"] = _with_selected_rounds(params_str, boost["param_overrides"])
+    best_row["Parameters"] = best_row["Params"]
+    best_row["n_estimators_selected"] = boost["n_rounds"]
+
+
 def convert_nsga2_to_v1_format(
     result: Dict[str, Any],
     n_wavelengths: int,
@@ -4015,11 +4077,26 @@ def convert_nsga2_to_v1_format(
         imbalance_method = result.get('imbalance_method')
         imbalance_params = result.get('imbalance_params')
 
+        # Boosters (R022): every displayed CV metric comes from the same fold
+        # predictions, at the same pooled-curve round count, as the objective. The
+        # round count is selected FIRST so the calibration fit and Params use it.
+        boost = None
+        if X is not None and y is not None:
+            boost = _booster_cv_metrics(
+                X, y, solution, model_types, task_type, folds,
+                result.get('random_state', 42),
+                imbalance_method=imbalance_method,
+                imbalance_params=imbalance_params,
+                early_stopping_rounds=result.get('early_stopping_rounds'),
+            )
+        _overrides = boost['param_overrides'] if boost is not None else None
+
         if task_type == 'regression':
             # Compute calibration metrics (training data)
             if X is not None and y is not None:
                 cal_metrics = _compute_calibration_metrics(
-                    X, y, solution, n_wavelengths, model_types, task_type
+                    X, y, solution, n_wavelengths, model_types, task_type,
+                    param_overrides=_overrides,
                 )
                 row['RMSE'] = cal_metrics.get('RMSE', np.nan)
                 row['R2'] = cal_metrics.get('R2', np.nan)
@@ -4029,17 +4106,6 @@ def convert_nsga2_to_v1_format(
                 row['R2'] = np.nan
                 row['CCC'] = np.nan
 
-            # Boosters (R022): every displayed CV metric comes from the same fold
-            # predictions, at the same pooled-curve round count, as the objective.
-            boost = None
-            if X is not None and y is not None:
-                boost = _booster_cv_metrics(
-                    X, y, solution, model_types, task_type, folds,
-                    result.get('random_state', 42),
-                    imbalance_method=imbalance_method,
-                    imbalance_params=imbalance_params,
-                    early_stopping_rounds=result.get('early_stopping_rounds'),
-                )
             if boost is not None:
                 row['RMSEcv'] = boost['RMSEcv']
                 row['R2cv'] = boost['R2cv'] if compute_r2 else None
@@ -4091,6 +4157,7 @@ def convert_nsga2_to_v1_format(
                 cal_metrics = _compute_calibration_metrics(
                     X, y, solution, n_wavelengths, model_types, task_type,
                     imbalance_method=imbalance_method,
+                    param_overrides=_overrides,
                 )
                 row['Accuracy'] = cal_metrics.get('Accuracy', np.nan)
                 row['ROC_AUC'] = cal_metrics.get('ROC_AUC', np.nan)
@@ -4118,15 +4185,6 @@ def convert_nsga2_to_v1_format(
 
             # CV metrics: compute actual CV metrics for F1, ROC_AUC, Precision, Recall with imbalance handling
             row['Accuracycv'] = 1.0 - objectives[0]  # From optimization objective
-            boost = None
-            if X is not None and y is not None:
-                boost = _booster_cv_metrics(
-                    X, y, solution, model_types, task_type, folds,
-                    result.get('random_state', 42),
-                    imbalance_method=imbalance_method,
-                    imbalance_params=imbalance_params,
-                    early_stopping_rounds=result.get('early_stopping_rounds'),
-                )
             if boost is not None:
                 # Same fold predictions as the objective (R022).
                 for _k in ('ROC_AUCcv', 'F1cv', 'Precisioncv', 'Recallcv', 'Specificitycv',
@@ -4173,9 +4231,7 @@ def convert_nsga2_to_v1_format(
         # Boosters: the stored Params carry the CV-selected round count, so Tab 7,
         # saved models and exports refit the model that was scored.
         if boost is not None:
-            row['Params'] = _with_selected_rounds(
-                row['Params'], boost['rounds_key'], boost['n_rounds']
-            )
+            row['Params'] = _with_selected_rounds(row['Params'], boost['param_overrides'])
             row['Parameters'] = row['Params']
             row['n_estimators_selected'] = boost['n_rounds']
 
@@ -4338,6 +4394,10 @@ def convert_nsga2_to_v1_format(
                         for class_idx, class_label in enumerate(np.unique(y)):
                             best_row[f'F1_Class{class_idx}'] = best_row.get('F1', np.nan)
 
+                _apply_booster_selection_to_best_row(
+                    best_row, knee_sol, X, y, n_wavelengths, model_types, task_type, folds,
+                    result, compute_r2,
+                )
                 rows.append(best_row)
 
     df = pd.DataFrame(rows)

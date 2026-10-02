@@ -253,3 +253,21 @@ def test_export_never_passes_an_eval_set(imbalance_method):
     code = _notebook_code(_build_model_config(40, imbalance_method=imbalance_method), X, y)
     assert "eval_set=" not in code
     assert "_choose_boosting_rounds(" in code
+
+
+def test_export_fits_each_booster_fold_once(monkeypatch):
+    """One fit per fold (at the maximum round count) plus the final fit: the CV loop
+    reports the round-selection fits' predictions instead of refitting each fold."""
+    from lightgbm import LGBMClassifier
+
+    calls = []
+    real_fit = LGBMClassifier.fit
+
+    def counting_fit(self, *args, **kwargs):
+        calls.append(1)
+        return real_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(LGBMClassifier, "fit", counting_fit)
+    X, y = _make_data()
+    _exec_generated(_build_model_config(40), X, y)
+    assert len(calls) == 5 + 1

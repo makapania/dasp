@@ -1479,16 +1479,20 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         """Render the boosting-round selection helpers used by the exported CV.
 
         In-app CV chooses a booster's round count ONCE from the pooled CV curve
-        (``cv_utils.cross_val_boosting_rounds``): each fold is fitted with the
+        (``cv_utils.cross_val_boosting_rounds``): each fold is fitted once with the
         maximum round count and no eval_set, its test rows are predicted at every
         round count, and the count with the best pooled RMSECV / accuracy is kept.
         The export emits the same primitives (their source is copied from
         ``cv_utils`` so the two cannot drift) plus ``_choose_boosting_rounds``,
-        which every CV template calls before its loop. The chosen count is set on
-        ``model``, so the CV loop and the final model both use it.
+        which every CV template calls before its loop. It returns the selected
+        count and each fold's predictions at that count, which the CV loop reports
+        instead of fitting the fold again, and sets the count on ``model`` for the
+        final fit.
 
-        Non-boosters and ``EARLY_STOPPING_ROUNDS = 0`` make
-        ``_choose_boosting_rounds`` a no-op, so the CV loop is a plain fit.
+        Non-boosters, ``EARLY_STOPPING_ROUNDS = 0`` and booster configurations where
+        prefix selection is invalid (DART, gblinear, CatBoost shrinkage) make
+        ``_choose_boosting_rounds`` return ``(None, None)``: the CV loop then fits
+        every fold normally.
         """
         import inspect
 
@@ -1498,17 +1502,32 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         copied = "\n\n".join(
             inspect.getsource(fn)
             for fn in (
+                _cvu._lgbm_round_aliases,
                 _cvu.booster_max_rounds,
                 _cvu.set_booster_rounds,
-                _cvu._clear_eval_only_params,
+                _cvu.strip_eval_only_params,
+                _cvu.round_selection_unsupported_reason,
+                _cvu._auto_params,
                 _cvu._catboost_staged_raw,
                 _cvu._catboost_staged,
                 _cvu.booster_staged_predict,
                 _cvu.staged_labels,
+                _cvu._align_proba,
+                _cvu._stage_fold,
                 _cvu.pooled_round_curve,
                 _cvu.pooled_round_logloss,
                 _cvu.select_n_rounds,
-                _cvu._align_proba,
+                _cvu._select_from_staged,
+            )
+        )
+        constants = "\n".join(
+            f"{name} = {getattr(_cvu, name)!r}"
+            for name in (
+                "_CATBOOST_ROUND_KEYS",
+                "_LGBM_ROUND_ALIASES",
+                "_LGBM_EARLY_STOP_KEYS",
+                "_LGBM_BOOSTING_KEYS",
+                "_CATBOOST_EVAL_KEYS",
             )
         )
         return f'''
@@ -1517,18 +1536,18 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
 # =============================================================================
 # Boosters (LightGBM/XGBoost/CatBoost): the number of boosting rounds is chosen
 # ONCE from the pooled cross-validation curve, like the number of PLS latent
-# variables. Each fold is fitted with the maximum round count and no eval_set,
-# so a fold never sees its own test samples. Its test rows are predicted at
-# every round count, the predictions are pooled across folds, and the count
-# with the lowest pooled RMSECV (regression) or highest pooled accuracy
-# (classification; exact ties go to the lower pooled log-loss) is kept.
+# variables. Each fold is fitted once, with the maximum round count and no
+# eval_set, so a fold never sees its own test samples. Its test rows are
+# predicted at every round count, the predictions are pooled across folds, and
+# the count with the lowest pooled RMSECV (regression) or highest pooled
+# accuracy (classification; exact ties go to the lower pooled log-loss) is kept.
 # EARLY_STOPPING_ROUNDS is the patience: the scan of the pooled curve stops
 # after that many rounds without improvement. 0 keeps the configured count.
 # Non-boosters are unaffected.
 
 import logging
 import warnings
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from sklearn.base import clone, is_classifier
 
 logger = logging.getLogger("spectral_export")
@@ -1551,7 +1570,7 @@ try:
 except ImportError:
     CATBOOST_MODELS = ()
     CATBOOST_AVAILABLE = False
-_CATBOOST_ROUND_KEYS = {_cvu._CATBOOST_ROUND_KEYS!r}
+{constants}
 
 
 def _get_model_from_pipeline(m):
@@ -1562,30 +1581,40 @@ def _model_is_classifier(m):
     return is_classifier(_get_model_from_pipeline(m))
 
 
+def is_boosting_model(m):
+    return isinstance(m, XGBOOST_MODELS + LIGHTGBM_MODELS + CATBOOST_MODELS)
+
+
 {copied}
 
 def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
-    """Pick ONE boosting-round count from the pooled CV curve and set it on model.
+    """Pick ONE boosting-round count from the pooled CV curve.
 
     prepare_fold(X_train, y_train) -> (X_train, y_train, fit kwargs) applies the
-    same in-fold resampling / weighting as the CV loop below. Returns the count,
-    or None for non-boosters and EARLY_STOPPING_ROUNDS = 0.
+    same in-fold resampling / weighting as the CV loop below. Each fold is fitted
+    once. Returns (count, per-fold predictions at that count) and sets the count
+    on model for the final fit; (None, None) when no selection applies.
     """
     final = _get_model_from_pipeline(model)
-    boosters = XGBOOST_MODELS + LIGHTGBM_MODELS + CATBOOST_MODELS
-    if not patience or patience <= 0 or not isinstance(final, boosters):
-        return None
+    if not patience or patience <= 0 or not is_boosting_model(final):
+        return None, None
+    reason = round_selection_unsupported_reason(final)
+    if reason is not None:
+        print(f"Boosting-round selection skipped: {{reason}}; the configured count is used.")
+        return None, None
     y = np.asarray(y)
     is_clf = task == 'classification'
     max_rounds = booster_max_rounds(model)
     classes = np.unique(y) if is_clf else None
+    prototype = model
+    pinned = {{}}
     staged_out, proba_out, test_out = [], [], []
     for train_idx, test_idx in cv.split(X, y):
         X_tr, y_tr, _fit_kw = X[train_idx], y[train_idx], {{}}
         if prepare_fold is not None:
             X_tr, y_tr, _fit_kw = prepare_fold(X_tr, y_tr)
-        fold_model = clone(model)
-        _clear_eval_only_params(_get_model_from_pipeline(fold_model))
+        fold_model = clone(prototype)
+        strip_eval_only_params(fold_model)
         fold_model.fit(X_tr, y_tr, **_fit_kw)
         X_te = X[test_idx]
         if hasattr(fold_model, 'steps'):
@@ -1594,21 +1623,28 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
                     continue
                 X_te = step.transform(X_te)
         fold_final = _get_model_from_pipeline(fold_model)
-        staged = booster_staged_predict(fold_final, X_te, n_rounds=max_rounds)
+        if not test_out:
+            # CatBoost without a learning_rate: pin the first fold's choice.
+            pinned = _auto_params(fold_final)
+            if pinned:
+                prototype = clone(model)
+                _get_model_from_pipeline(prototype).set_params(**pinned)
+        staged, proba = _stage_fold(fold_final, X_te, max_rounds, classes)
+        staged_out.append(staged)
         if is_clf:
-            staged = _align_proba(staged, fold_final.classes_, classes)
-            proba_out.append(staged)
-            staged_out.append(staged_labels(staged, classes))
-        else:
-            staged_out.append(staged)
+            proba_out.append(proba)
         test_out.append(np.asarray(test_idx))
-    curve = pooled_round_curve(staged_out, test_out, y, task)
-    tiebreak = pooled_round_logloss(proba_out, test_out, y, classes) if is_clf else None
-    n_rounds = select_n_rounds(curve, patience, higher_is_better=is_clf, tiebreak=tiebreak)
-    set_booster_rounds(model, n_rounds)
+    n_rounds, _ = _select_from_staged(
+        staged_out, proba_out if is_clf else None, test_out, y, classes, patience
+    )
+    # Final fit: the selected count (and any pinned setting) on model.
+    strip_eval_only_params(final)
+    if pinned:
+        final.set_params(**pinned)
+    set_booster_rounds(final, n_rounds)
     print(f"Boosting rounds: {{n_rounds}} of {{max_rounds}} "
           f"(one count for all folds, pooled CV curve, patience {{patience}})")
-    return n_rounds
+    return n_rounds, [s[n_rounds - 1] for s in staged_out]
 '''
 
     def _render_cross_validation(self) -> str:
@@ -1929,10 +1965,11 @@ def _prepare_train_fold(X_train, y_train):
             X_train_fold, y_train_fold = resampler.fit_resample(X_train, y_train)
 {sample_weight_block_cv}
 
-# Boosters: fix ONE round count from the pooled CV curve before the loop (see
-# BOOSTING ROUNDS above). It is set on `model`, so the folds and the final
-# model use it. No-op for other models.
-N_BOOST_ROUNDS = _choose_boosting_rounds(
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
     model, {x_var}, y, cv, EARLY_STOPPING_ROUNDS, 'classification',
     prepare_fold=_prepare_train_fold,
 )
@@ -1945,15 +1982,21 @@ fold_f1 = []
 preds_per_sample = {{}}
 truth_per_sample = {{}}
 
-for train_idx, test_idx in cv.split({x_var}, y):
+for fold_i, (train_idx, test_idx) in enumerate(cv.split({x_var}, y)):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    # Apply imbalance handling inside the fold
-    X_train_fold, y_train_fold, _fold_fit_kw = _prepare_train_fold(X_train, y_train)
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_i]).ravel()
+    else:
+        # Apply imbalance handling inside the fold
+        X_train_fold, y_train_fold, _fold_fit_kw = _prepare_train_fold(X_train, y_train)
 
-    fold_model = clone(model)
-    fold_model.fit(X_train_fold, y_train_fold, **_fold_fit_kw)
+        fold_model = clone(model)
+        fold_model.fit(X_train_fold, y_train_fold, **_fold_fit_kw)
+        y_pred_fold = fold_model.predict(X_test).ravel()
     # .ravel() flattens (n, 1) outputs (e.g., CatBoost multiclass) to (n,) so
     # downstream Counter majority-vote and accuracy/f1 metrics receive 1-D
     # arrays unconditionally. No-op for the (n,) shape that sklearn classifiers
@@ -1963,7 +2006,6 @@ for train_idx, test_idx in cv.split({x_var}, y):
     # path bypasses templates/validation.py entirely (the dispatcher at
     # _render_cross_validation routes here whenever imbalance_method is set),
     # so it needs the same shape coercion at this site.
-    y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(y_pred_fold[local_i])
@@ -2031,10 +2073,11 @@ def _prepare_train_fold(X_train, y_train):
     return X_train_fold, y_train_fold, fit_kwargs
 
 
-# Boosters: fix ONE round count from the pooled CV curve before the loop (see
-# BOOSTING ROUNDS above). It is set on `model`, so the folds and the final
-# model use it. No-op for other models.
-N_BOOST_ROUNDS = _choose_boosting_rounds(
+# Boosters: choose ONE round count from the pooled CV curve before the loop (see
+# BOOSTING ROUNDS above). Each fold is fitted once there; the loop reports those
+# fits' predictions at the chosen count, and the count is set on `model` for the
+# final fit. (None, None) for other models: the loop fits every fold itself.
+N_BOOST_ROUNDS, BOOST_FOLD_PREDS = _choose_boosting_rounds(
     model, {x_var}, y, cv, EARLY_STOPPING_ROUNDS, 'regression',
     prepare_fold=_prepare_train_fold,
 )
@@ -2048,16 +2091,21 @@ fold_mae = []
 preds_per_sample = {{}}
 truth_per_sample = {{}}
 
-for train_idx, test_idx in cv.split({x_var}):
+for fold_i, (train_idx, test_idx) in enumerate(cv.split({x_var})):
     X_train, X_test = {x_var}[train_idx], {x_var}[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
-    # Apply imbalance handling inside the fold
-    X_train_fold, y_train_fold, fit_kwargs = _prepare_train_fold(X_train, y_train)
+    if BOOST_FOLD_PREDS is not None:
+        # Booster: this fold's predictions at the selected round count, from the
+        # single fit made while choosing it.
+        y_pred_fold = np.asarray(BOOST_FOLD_PREDS[fold_i]).ravel()
+    else:
+        # Apply imbalance handling inside the fold
+        X_train_fold, y_train_fold, fit_kwargs = _prepare_train_fold(X_train, y_train)
 
-    fold_model = clone(model)
-    fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
-    y_pred_fold = fold_model.predict(X_test).ravel()
+        fold_model = clone(model)
+        fold_model.fit(X_train_fold, y_train_fold, **fit_kwargs)
+        y_pred_fold = fold_model.predict(X_test).ravel()
 
     for local_i, sample_idx in enumerate(test_idx):
         preds_per_sample.setdefault(int(sample_idx), []).append(float(y_pred_fold[local_i]))
