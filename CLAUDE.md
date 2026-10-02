@@ -85,6 +85,22 @@ dasp/
 - **Calibration Transfer**: Direct Standardization (DS), Piecewise DS (PDS)
 - **File Formats**: CSV, Excel, ASD, OPUS, SPC, JCAMP-DX, PerkinElmer
 
+## Validation conventions: chemometrics, not generic ML (user rule, 2026-10-02)
+
+The reference standard is Unscrambler and similar chemometrics software, not ML textbook
+"leakage" rules. Do **not** flag or "fix" any of these as leakage:
+- **Row-wise preprocessing applied before CV.** SNV, Savitzky-Golay derivatives and smoothing
+  each transform one spectrum on its own and never see another sample or y.
+- **Bands or regions chosen beforehand from chemistry.** We know what the bands represent;
+  choosing them is the point of the analysis. Wavelengths must not change partway through
+  an analysis.
+- **A holdout set fixed before modelling** (e.g. Kennard-Stone, SPXY or a manual split).
+
+What still counts as a real problem is anything that uses a test fold's **y**, or fits on test
+samples, to produce that fold's score. Examples: early stopping on the test fold, or ensemble
+base models trained on the fold they are scored on. When a finding claims leakage, say which
+of these it is before proposing a fix.
+
 ## Development Notes
 
 - Tier (Quick/Standard/Comprehensive) only affects which models are tested

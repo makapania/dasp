@@ -734,3 +734,11 @@ verifier's: 2 critical, 30 high, 61 medium, 40 low. Duplicate pairs: R009/R026, 
 6. **Classification metrics:** labels other than {0,1} give NaN/crash (R029); LOO averages per-fold F1 over 1-sample
    folds (R030).
 Fix order proposed: themes 1-2 first (they change reported and deployed numbers), then 5 (R017), 3 and 4.
+
+## 2026-10-02 - User rule: chemometrics validation conventions, not ML "leakage" rules
+The user (Unscrambler is the reference standard) ruled that these are NOT leakage and must not be "fixed": row-wise
+preprocessing (SNV, SG derivatives) applied before CV; bands/regions chosen a priori from chemistry (wavelengths must
+not change mid-analysis); a holdout fixed before modelling. Real leakage = a test fold's y, or fitting on test samples,
+producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
+the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
+and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
