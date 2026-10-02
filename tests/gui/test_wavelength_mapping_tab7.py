@@ -310,6 +310,34 @@ def test_ensemble_reconstruction_uses_the_named_columns_and_excludes_bad_rows(gu
     assert sum("Failed to reconstruct" in line for line in logs) == 2
 
 
+def test_tab8_uncertainty_display_aligns_models_with_different_classes(gui_app):
+    """Codex round 5: headers came from the first model, so a b/c model's P(b) was
+    shown under P(a). Headers are now the union; absent classes are blank."""
+    names = ["s0", "s1"]
+    gui_app.predictions_df = pd.DataFrame({"Sample": names, "AB": ["a", "b"], "BC": ["c", "b"]})
+    gui_app.predictions_uncertainty = {
+        "AB": {
+            "probabilities": np.array([[0.9, 0.1], [0.2, 0.8]]),
+            "confidence": np.array([0.9, 0.8]),
+            "class_names": ["a", "b"],
+        },
+        "BC": {
+            "probabilities": np.array([[0.3, 0.7], [0.6, 0.4]]),
+            "confidence": np.array([0.7, 0.6]),
+            "class_names": ["b", "c"],
+        },
+    }
+    gui_app._display_uncertainty()
+
+    tree = gui_app.uncertainty_tree
+    assert list(tree["columns"])[4:] == ["P(a)", "P(b)", "P(c)"]
+    rows = [tuple(str(v) for v in tree.item(i, "values")) for i in tree.get_children()]
+    by_key = {(r[0], r[1]): r[4:] for r in rows}
+    assert by_key[("s0", "AB")] == ("90.00", "10.00", "")
+    assert by_key[("s0", "BC")] == ("", "30.00", "70.00")
+    assert by_key[("s1", "BC")] == ("", "60.00", "40.00")
+
+
 def test_tab8_uncertainty_display_with_superset_encoder(gui_app, tmp_path):
     """Codex round 4: class names came from every encoder class (3) while the model
     gave 2 probability columns, so _display_uncertainty raised IndexError."""

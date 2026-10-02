@@ -44415,7 +44415,15 @@ External Validation Performance (n={n_val}):
         if is_classification:
             # === CLASSIFICATION: Show probabilities and confidence ===
             # Build columns: Sample | Model | Predicted | Confidence | Prob(Class1) | Prob(Class2) | ...
-            class_names = first_uncertainty.get('class_names', [])
+            # Headers are the union of every loaded model's class labels: models can
+            # know different classes (a/b vs b/c), and each row's probabilities are
+            # placed under their own label, blank where that model lacks the class.
+            class_names = list(dict.fromkeys(
+                cls
+                for unc in self.predictions_uncertainty.values()
+                if 'probabilities' in unc
+                for cls in (unc.get('class_names') or [])
+            ))
 
             columns = ['Sample', 'Model', 'Predicted', 'Confidence%']
             if class_names:
@@ -44442,7 +44450,8 @@ External Validation Performance (n={n_val}):
 
                 probabilities = uncertainty['probabilities']
                 confidence = uncertainty['confidence']
-                class_names = uncertainty.get('class_names', [])
+                model_classes = list(uncertainty.get('class_names') or [])
+                column_of = {cls: j for j, cls in enumerate(model_classes)}
 
                 # Get predictions for this model
                 predictions = self.predictions_df[model_name].values
@@ -44455,10 +44464,10 @@ External Validation Performance (n={n_val}):
                         f"{confidence[i]*100:.2f}"
                     ]
 
-                    # Add class probabilities
-                    if class_names:
-                        for j in range(len(class_names)):
-                            row_values.append(f"{probabilities[i, j]*100:.2f}")
+                    # Add class probabilities under their own label (blank if absent)
+                    for cls in class_names:
+                        j = column_of.get(cls)
+                        row_values.append("" if j is None else f"{probabilities[i, j]*100:.2f}")
 
                     # Color-code by confidence
                     item_id = self.uncertainty_tree.insert('', 'end', values=row_values)

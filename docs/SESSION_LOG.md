@@ -827,6 +827,11 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   helper (`_decoding_encoder`) shared by prediction and `predict_with_uncertainty`, whose probability column names
   now follow `model.classes_` (decoded only through a qualifying encoder, never more names than columns). That
   fixes the Tab 8 `_display_uncertainty` IndexError with a superset encoder.
+- **Review round 5:** `model_wrappers._match_wavelengths_normalized` partitions PER ITEM (numeric requests via
+  `match_wavelengths`, non-numeric ones such as an ID column must be present literally, order restored); an
+  all-or-nothing numeric parse broke legacy wrappers with `[1000.0, "id"]`. Tab 8 `_display_uncertainty` uses the
+  union of all loaded models' class labels as headers and places each model's probabilities under its own labels
+  (blank where absent); headers used to come from the first model only.
 - **Follow-ups not done (review round 2, deliberately out of scope):** `scoring.py` ~112 substitutes the CV gap
   when validation is missing; `save_model` stamps `wavelength_matching` on any save, so an old fitted model
   merely re-saved without retraining would lose its retrain warning.

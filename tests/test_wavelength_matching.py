@@ -621,6 +621,59 @@ class TestEnsembleWavelengthPaths:
         with pytest.raises(KeyError):
             _match_wavelengths_normalized([1000.5], cols)
 
+    def test_wrapper_matcher_handles_numeric_and_literal_columns_per_item(self):
+        """Codex round 5: one non-numeric request used to push the whole list to
+        literal matching, so [1000.0, 'id'] against ['1000.0', 'id'] raised."""
+        from spectral_predict.model_wrappers import _match_wavelengths_normalized
+
+        cols = ["1000.0", "1002.0", "id"]
+        assert _match_wavelengths_normalized([1000.0, "id"], cols) == ["1000.0", "id"]
+        assert _match_wavelengths_normalized(["id", 1002.0], cols) == ["id", "1002.0"]
+        with pytest.raises(KeyError):
+            _match_wavelengths_normalized([1000.0, "batch"], cols)
+
+    @staticmethod
+    def _mixed_frame():
+        rng = np.random.default_rng(9)
+        X = pd.DataFrame(rng.normal(size=(30, 3)), columns=["1000.0", "1002.0", "id"])
+        y = 2 * X["1000.0"].to_numpy() + X["id"].to_numpy()
+        return X, y
+
+    def test_subset_wrapper_with_a_literal_column_predicts(self):
+        from sklearn.linear_model import Ridge
+
+        from spectral_predict.model_wrappers import WavelengthSubsetWrapper
+
+        X, y = self._mixed_frame()
+        wrapper = WavelengthSubsetWrapper(Ridge(alpha=1.0), [1000.0, "id"]).fit(X, y)
+        expected = Ridge(alpha=1.0).fit(X[["1000.0", "id"]], y).predict(X[["1000.0", "id"]])
+        np.testing.assert_allclose(wrapper.predict(X), expected)
+
+    def test_legacy_unpickled_classifier_wrapper_with_a_literal_column(self):
+        import io
+        import pickle
+
+        from sklearn.linear_model import LogisticRegression
+
+        from spectral_predict import model_wrappers as mw
+        from tests.test_model_wrappers import _gui_era_class
+
+        X, y = self._mixed_frame()
+        labels = (y > np.median(y)).astype(int)
+        name = "WavelengthSubsetClassifierWrapper"
+        with _gui_era_class("__main__", name) as legacy_cls:
+            wrapper = mw.WavelengthSubsetClassifierWrapper(
+                LogisticRegression(max_iter=500), [1000.0, "id"]
+            )
+            wrapper.__class__ = legacy_cls
+            wrapper.fit(X, labels)
+            blob = pickle.dumps(wrapper)
+            expected_proba = wrapper.predict_proba(X)
+        loaded = mw.LegacyWrapperUnpickler(io.BytesIO(blob)).load()
+        assert type(loaded) is mw.WavelengthSubsetClassifierWrapper
+        np.testing.assert_allclose(loaded.predict_proba(X), expected_proba)
+        np.testing.assert_array_equal(loaded.predict(X), wrapper.predict(X))
+
     def test_preprocessor_config_maps_exact_columns_and_raises_on_misses(self):
         from spectral_predict.preprocessing_wrapper import PreprocessorConfig
 

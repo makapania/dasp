@@ -126,18 +126,33 @@ def _match_wavelengths_normalized(requested_cols, available_columns, precision=1
             numeric_pos.append(pos)
         except (ValueError, TypeError):
             continue
-    try:
-        requested = [float(c) for c in requested_cols]
-    except (ValueError, TypeError):
-        missing = [c for c in requested_cols if c not in col_names]
-        if missing:
-            raise KeyError(f"Could not match wavelength columns: {missing[:5]}") from None
-        return list(requested_cols)
-    try:
-        idx = match_wavelengths(requested, numeric_vals)
-    except WavelengthMatchError as e:
-        raise KeyError(f"Could not match all wavelength columns: {e}") from e
-    return [col_names[numeric_pos[i]] for i in idx]
+
+    # Partition per item: numeric requests go through the shared matcher, others (e.g.
+    # an ID column a legacy wrapper kept) must be present literally. Order is restored.
+    requested = list(requested_cols)
+    result: list = [None] * len(requested)
+    numeric_slots, numeric_req, missing = [], [], []
+    for k, col in enumerate(requested):
+        try:
+            value = float(col)
+        except (ValueError, TypeError):
+            if col in col_names:
+                result[k] = col
+            else:
+                missing.append(col)
+            continue
+        numeric_slots.append(k)
+        numeric_req.append(value)
+    if missing:
+        raise KeyError(f"Could not match wavelength columns: {missing[:5]}")
+    if numeric_req:
+        try:
+            idx = match_wavelengths(numeric_req, numeric_vals)
+        except WavelengthMatchError as e:
+            raise KeyError(f"Could not match all wavelength columns: {e}") from e
+        for k, i in zip(numeric_slots, idx):
+            result[k] = col_names[numeric_pos[i]]
+    return result
 
 
 def _subset_wavelength_columns(X, wavelength_cols, all_columns=None):
