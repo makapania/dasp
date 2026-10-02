@@ -137,6 +137,42 @@ def test_export_script_trains_on_transformed_target():
     np.testing.assert_allclose(ns["model"].predict(X), expected.predict(X), rtol=1e-8)
 
 
+def _exported_wrapper_namespace(method: str) -> dict:
+    """Execute only the generated Y-transform section; return its namespace."""
+    gen = CodeGenerator(_export_config(y_transform=method), ExportOptions())
+    ns: dict = {"np": np, "model": PLSRegression(n_components=2)}
+    exec(gen._render_y_transform_wrapper(), ns)
+    return ns
+
+
+def test_exported_y_transform_is_regressor_and_supports_voting():
+    from sklearn.base import is_regressor
+    from sklearn.ensemble import VotingRegressor
+
+    X, y = _data()
+    ns = _exported_wrapper_namespace("log")
+    exported = ns["model"]
+    assert is_regressor(exported)
+    voting = VotingRegressor([("exported", exported), ("plain", PLSRegression(n_components=2))])
+    pred = voting.fit(X, y).predict(X)
+    assert pred.shape == (len(y),) and np.all(np.isfinite(pred))
+
+
+@pytest.mark.parametrize("method", ["log", "log1p", "sqrt", "boxcox", "yeo-johnson"])
+@pytest.mark.parametrize("column", [False, True], ids=["1d", "column"])
+def test_exported_y_transform_preserves_target_shape(method, column):
+    """Same values AND shape as sklearn's TransformedTargetRegressor."""
+    X, y = _data()
+    y_fit = y.reshape(-1, 1) if column else y
+    ns = _exported_wrapper_namespace(method)
+    exported = clone(ns["model"]).fit(X, y_fit)
+    reference = YTransformWrapper.wrap(PLSRegression(n_components=2), method).fit(X, y_fit)
+
+    got, want = exported.predict(X), reference.predict(X)
+    assert got.shape == want.shape
+    np.testing.assert_allclose(got, want, rtol=1e-8)
+
+
 def test_log1p_rejects_minus_one():
     assert YTransformWrapper.validate(np.array([-1.0, 0.5]), "Log1p") is not None
     assert YTransformWrapper.validate(np.array([-0.5, 0.5]), "Log1p") is None

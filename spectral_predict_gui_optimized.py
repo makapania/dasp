@@ -3039,6 +3039,9 @@ class SpectralPredictApp:
         self._refined_model_token = None
         self._bias_correction_token = None
         self._nonlinear_correction_token = None
+        # One Model Development refit at a time (see _run_refined_model)
+        self._refit_active = False
+        self._refit_generation = 0
         self.apply_bias_correction = tk.BooleanVar(value=False)
         self.save_correction_with_model = tk.BooleanVar(value=True)
         self.use_nonlinear_correction = tk.BooleanVar(value=False)
@@ -37637,6 +37640,31 @@ Performance (Classification):
             return self.bias_correction_data
         return None
 
+    def _refined_state_snapshot(self) -> dict:
+        """One consistent view of the current refined model for saving (R010).
+
+        Everything the save needs is read here in one go, together with the model
+        token, so a later model swap cannot mix two runs' objects in one file.
+        """
+        return {
+            'token': getattr(self, '_refined_model_token', None),
+            'model': self.refined_model,
+            'preprocessor': getattr(self, 'refined_preprocessor', None),
+            'config': dict(self.refined_config) if self.refined_config else None,
+            'performance': getattr(self, 'refined_performance', None),
+            'wavelengths': getattr(self, 'refined_wavelengths', None),
+            'full_wavelengths': getattr(self, 'refined_full_wavelengths', None),
+            'label_encoder': getattr(self, 'refined_label_encoder', None),
+            'y_true': getattr(self, 'refined_y_true', None),
+            'y_pred': getattr(self, 'refined_y_pred', None),
+            'y_proba': getattr(self, 'refined_y_proba', None),
+            'X_train': getattr(self, 'refined_X_train', None),
+            'oc_scaler': getattr(self, 'refined_oc_scaler', None),
+            'oc_pca_reducer': getattr(self, 'refined_oc_pca_reducer', None),
+            'oc_score_stats': getattr(self, 'refined_oc_score_stats', None),
+            'correction': self._correction_to_save(),
+        }
+
     def _reset_nonlinear_correction_text(self) -> None:
         """Clear the nonlinear-correction metrics box (they described an older model)."""
         widget = getattr(self, 'bc_nonlinear_text', None)
@@ -37676,9 +37704,13 @@ Performance (Classification):
             # Token captured before the predictions it describes (see
             # _compute_nonlinear_correction); a later model swap invalidates it.
             token = getattr(self, '_refined_model_token', None)
-            self.bias_correction_data = compute_bias_slope(
-                self.refined_y_true, self.refined_y_pred
-            )
+            y_true, y_pred = self.refined_y_true, self.refined_y_pred
+            if token is None:
+                return  # a model swap is in progress
+            result = compute_bias_slope(y_true, y_pred)
+            if getattr(self, '_refined_model_token', None) is not token:
+                return  # the model changed while computing; its own run recomputes
+            self.bias_correction_data = result
             self._bias_correction_token = token
 
             bc = self.bias_correction_data
@@ -39428,11 +39460,14 @@ F1 Score:  {f1:.4f}
             print(f"Warning: Validation curve not implemented for Y-transformed {model_type}")
             return None
 
+        # The fitted value must be on the grid, so "Selected" marks the actual model.
+        if base not in values:
+            values = sorted(values + [base])
         result = compute_sklearn_validation_curve(
             estimator, X, y, prefix + name, values, cv, task=task_type
         )
         result['param_name'] = name
-        result['selected_idx'] = int(np.argmin(np.abs(np.array(values, dtype=float) - base)))
+        result['selected_idx'] = values.index(base)
         result['use_log_scale'] = use_log
         return result
 
@@ -39796,6 +39831,16 @@ F1 Score:  {f1:.4f}
 
     def _run_refined_model(self):
         """Run the refined model with user-specified parameters."""
+        # R010: one refit at a time. Other paths (tab return, loading defaults or a
+        # Results row) re-enable the Run buttons while a run is still going, so the
+        # buttons are not a sufficient guard.
+        if getattr(self, '_refit_active', False):
+            messagebox.showwarning(
+                "Model Run In Progress",
+                "A Model Development run is already in progress. "
+                "Wait for it to finish before starting another.",
+            )
+            return
         if self.X is None:
             messagebox.showwarning("No Data", "Please load data first")
             return
@@ -39820,8 +39865,28 @@ F1 Score:  {f1:.4f}
         self.root.config(cursor="wait")
 
         # Run in thread (daemon=True for clean process exit)
-        thread = threading.Thread(target=self._run_refined_model_thread, daemon=True)
+        self._refit_generation = getattr(self, '_refit_generation', 0) + 1
+        self._refit_active = True
+        thread = threading.Thread(
+            target=self._refit_worker, args=(self._refit_generation,), daemon=True
+        )
         thread.start()
+
+    def _refit_worker(self, generation: int) -> None:
+        """Thread body: run the refit, then mark it finished on the Tk thread.
+
+        The finish callback is queued after any result callbacks the run queued, so
+        the run counts as active until its results have been published.
+        """
+        try:
+            self._run_refined_model_thread()
+        finally:
+            self.root.after(0, lambda: self._end_refit(generation))
+
+    def _end_refit(self, generation: int) -> None:
+        """Clear the active-refit flag if ``generation`` is still the current run."""
+        if generation == getattr(self, '_refit_generation', 0):
+            self._refit_active = False
 
     def _set_refit_dependent_buttons(self, state: str) -> None:
         """Enable/disable the Save and nonlinear-correction Compute buttons."""
@@ -39841,7 +39906,7 @@ F1 Score:  {f1:.4f}
             if widget is not None:
                 widget.config(state='normal')
         # The previous model (if any) is still the current one.
-        if self.refined_model is not None:
+        if self.refined_model is not None and self._refined_model_token is not None:
             self._set_refit_dependent_buttons('normal')
 
     def _run_refined_model_thread(self):
@@ -42496,9 +42561,17 @@ External Validation Performance (n={n_val}):
 
         if is_error:
             self.refine_status.config(text="[X] Error running refined model")
-            self.refine_save_button.config(state='disabled')
-            self.refine_save_button_results.config(state='disabled')
-            self.export_code_button.config(state='disabled')
+            # If the run failed before replacing the model, the previous model is still
+            # complete and current (its token is set), so it may still be saved or
+            # exported. A failure mid-swap leaves the token None: keep them disabled.
+            previous_ok = (
+                self.refined_model is not None
+                and getattr(self, '_refined_model_token', None) is not None
+            )
+            state = 'normal' if previous_ok else 'disabled'
+            self.refine_save_button.config(state=state)
+            self.refine_save_button_results.config(state=state)
+            self.export_code_button.config(state=state)
             # Disable SHAP buttons on error
             if HAS_SHAP and hasattr(self, 'shap_compute_btn'):
                 self.shap_compute_btn.config(state='disabled')
@@ -42548,22 +42621,34 @@ External Validation Performance (n={n_val}):
             )
             return
 
+        # R010: never save while a refit is publishing a new model, and save ONE
+        # consistent snapshot (model, preprocessor, config, predictions, correction).
+        if getattr(self, '_refit_active', False):
+            messagebox.showwarning(
+                "Model Run In Progress",
+                "A Model Development run is still in progress. Save once it has finished.",
+            )
+            return
+        snap = self._refined_state_snapshot()
+        cfg = snap['config'] or {}
+        perf_src = snap['performance'] or {}
+
         try:
             from spectral_predict.model_io import save_model
             from datetime import datetime
 
             # Ask for save location
             # Create prefix: C/R for Classification/Regression + number of variables
-            task_type = self.refined_config['task_type']
+            task_type = cfg['task_type']
             task_prefix = 'OC' if task_type == 'one_class' else ('C' if task_type == 'classification' else 'R')
-            n_vars = self.refined_config['n_vars']
+            n_vars = cfg['n_vars']
             imbalance_suffix = _get_imbalance_suffix(
                 self.selected_model_config.get('imbalance_method') if self.selected_model_config else None
             )
             data_type_suffix = "_abs" if self.current_data_type.get() == "absorbance" else "_ref"
 
             # Build descriptive filename tokens
-            preprocess_token = (self.refined_config.get('preprocessing') or 'raw').lower().replace(' ', '')
+            preprocess_token = (cfg.get('preprocessing') or 'raw').lower().replace(' ', '')
 
             target_name = self.target_column.get()
             if target_name and target_name != '(No target variable)':
@@ -42573,23 +42658,23 @@ External Validation Performance (n={n_val}):
                 target_token = ""
 
             perf_token = ""
-            if self.refined_performance:
-                if self.refined_config['task_type'] == 'regression':
-                    val_r2 = self.refined_performance.get('val_r2')
-                    cv_r2 = self.refined_performance.get('r2_mean')
+            if perf_src:
+                if cfg['task_type'] == 'regression':
+                    val_r2 = perf_src.get('val_r2')
+                    cv_r2 = perf_src.get('r2_mean')
                     if val_r2 is not None and np.isfinite(val_r2):
                         perf_token = f"r2p-{val_r2:.2f}"
                     elif cv_r2 is not None and np.isfinite(cv_r2):
                         perf_token = f"r2-{cv_r2:.2f}"
                 else:  # classification
-                    val_acc = self.refined_performance.get('val_accuracy')
-                    cv_acc = self.refined_performance.get('accuracy_mean')
+                    val_acc = perf_src.get('val_accuracy')
+                    cv_acc = perf_src.get('accuracy_mean')
                     if val_acc is not None and np.isfinite(val_acc):
                         perf_token = f"acc-{val_acc:.2f}"
                     elif cv_acc is not None and np.isfinite(cv_acc):
                         perf_token = f"acc-{cv_acc:.2f}"
 
-            parts = [f"{task_prefix}{n_vars}", self.refined_config['model_name'], preprocess_token]
+            parts = [f"{task_prefix}{n_vars}", cfg['model_name'], preprocess_token]
             if target_token:
                 parts.append(target_token)
             if perf_token:
@@ -42614,22 +42699,28 @@ External Validation Performance (n={n_val}):
 
             if not filepath:
                 return  # User cancelled
+            if getattr(self, '_refined_model_token', None) is not snap['token']:
+                messagebox.showwarning(
+                    "Model Changed",
+                    "The refined model changed while saving. Nothing was saved; save again.",
+                )
+                return
 
             # Build comprehensive metadata
             metadata = {
-                'model_name': self.refined_config['model_name'],
-                'task_type': self.refined_config['task_type'],
-                'preprocessing': self.refined_config['preprocessing'],
-                'window': self.refined_config['window'],
-                'wavelengths': self.refined_wavelengths,
-                'n_vars': self.refined_config['n_vars'],
-                'n_samples': self.refined_config['n_samples'],
-                'cv_folds': self.refined_config['cv_folds'],
-                'cv_strategy': self.refined_config.get('cv_strategy', 'kfold'),
-                'cv_n_repeats': self.refined_config.get('cv_n_repeats', 5),
+                'model_name': cfg['model_name'],
+                'task_type': cfg['task_type'],
+                'preprocessing': cfg['preprocessing'],
+                'window': cfg['window'],
+                'wavelengths': snap['wavelengths'],
+                'n_vars': cfg['n_vars'],
+                'n_samples': cfg['n_samples'],
+                'cv_folds': cfg['cv_folds'],
+                'cv_strategy': cfg.get('cv_strategy', 'kfold'),
+                'cv_n_repeats': cfg.get('cv_n_repeats', 5),
                 'performance': {},
-                'use_full_spectrum_preprocessing': self.refined_config.get('use_full_spectrum_preprocessing', False),
-                'full_wavelengths': self.refined_full_wavelengths,  # All wavelengths for derivative+subset
+                'use_full_spectrum_preprocessing': cfg.get('use_full_spectrum_preprocessing', False),
+                'full_wavelengths': snap['full_wavelengths'],  # All wavelengths for derivative+subset
                 'data_type': self.current_data_type.get(),  # Store data type (absorbance/reflectance)
                 'x_unit': self.current_x_unit.get(),  # Store x-axis unit (nm/cm-1)
                 # Validation set metadata
@@ -42657,7 +42748,7 @@ External Validation Performance (n={n_val}):
                 # string-aware helper so a round-tripped string "False" doesn't
                 # silently coerce to True via Python's bool() builtin.
                 'autoscale': _parse_autoscale_flag(
-                    (self.refined_config or {}).get(
+                    cfg.get(
                         'autoscale',
                         (self.selected_model_config or {}).get(
                             'autoscale',
@@ -42671,57 +42762,57 @@ External Validation Performance (n={n_val}):
                 # the live widget; canonical name. One-class refits never set it.
                 # (Files saved before this fix hold the display name, e.g. 'Log'/'None';
                 # readers should pass it through normalize_y_transform_method.)
-                'y_transform': (self.refined_config or {}).get('y_transform', 'none'),
+                'y_transform': cfg.get('y_transform', 'none'),
             }
 
             # Add coupled optimization params if present
-            if 'optuna_params' in self.refined_config:
-                metadata['optuna_params'] = self.refined_config['optuna_params']
+            if 'optuna_params' in cfg:
+                metadata['optuna_params'] = cfg['optuna_params']
                 metadata['is_coupled_result'] = True
 
             # Add performance metrics based on task type
-            if self.refined_config['task_type'] == 'regression':
+            if cfg['task_type'] == 'regression':
                 perf = {
-                    'RMSE': self.refined_performance.get('rmse_mean'),
-                    'RMSE_std': self.refined_performance.get('rmse_std'),
-                    'R2': self.refined_performance.get('r2_mean'),
-                    'R2_std': self.refined_performance.get('r2_std'),
-                    'MAE': self.refined_performance.get('mae_mean'),
-                    'MAE_std': self.refined_performance.get('mae_std'),
+                    'RMSE': perf_src.get('rmse_mean'),
+                    'RMSE_std': perf_src.get('rmse_std'),
+                    'R2': perf_src.get('r2_mean'),
+                    'R2_std': perf_src.get('r2_std'),
+                    'MAE': perf_src.get('mae_mean'),
+                    'MAE_std': perf_src.get('mae_std'),
                 }
                 # Add new CV metrics
                 for key in ('rpd', 'bias'):
-                    val = self.refined_performance.get(key)
+                    val = perf_src.get(key)
                     if val is not None:
                         perf[key.upper() if key == 'rpd' else 'Bias'] = val
                 # Add calibration metrics
                 for key, label in [('cal_rmse', 'cal_RMSE'), ('cal_r2', 'cal_R2')]:
-                    val = self.refined_performance.get(key)
+                    val = perf_src.get(key)
                     if val is not None:
                         perf[label] = val
                 # Add validation metrics
                 for key, label in [('val_rmse', 'val_RMSE'), ('val_r2', 'val_R2'),
                                    ('val_mae', 'val_MAE'), ('val_bias', 'val_Bias'),
                                    ('val_rpd', 'val_RPD')]:
-                    val = self.refined_performance.get(key)
+                    val = perf_src.get(key)
                     if val is not None:
                         perf[label] = val
                 metadata['performance'] = perf
                 # Add regional performance for consensus predictions
-                if 'regional_rmse' in self.refined_performance:
-                    metadata['regional_rmse'] = self.refined_performance['regional_rmse']
-                if 'y_quartiles' in self.refined_performance:
-                    metadata['y_quartiles'] = self.refined_performance['y_quartiles']
-            elif self.refined_config['task_type'] == 'one_class':
+                if 'regional_rmse' in perf_src:
+                    metadata['regional_rmse'] = perf_src['regional_rmse']
+                if 'y_quartiles' in perf_src:
+                    metadata['y_quartiles'] = perf_src['y_quartiles']
+            elif cfg['task_type'] == 'one_class':
                 perf = {
-                    'BalancedAcc': self.refined_performance.get('BalancedAcc'),
-                    'Sensitivity': self.refined_performance.get('Sensitivity'),
-                    'Specificity': self.refined_performance.get('Specificity'),
-                    'AUC': self.refined_performance.get('AUC'),
-                    'BalancedAcccv': self.refined_performance.get('BalancedAcccv'),
-                    'Sensitivitycv': self.refined_performance.get('Sensitivitycv'),
-                    'Specificitycv': self.refined_performance.get('Specificitycv'),
-                    'AUCcv': self.refined_performance.get('AUCcv'),
+                    'BalancedAcc': perf_src.get('BalancedAcc'),
+                    'Sensitivity': perf_src.get('Sensitivity'),
+                    'Specificity': perf_src.get('Specificity'),
+                    'AUC': perf_src.get('AUC'),
+                    'BalancedAcccv': perf_src.get('BalancedAcccv'),
+                    'Sensitivitycv': perf_src.get('Sensitivitycv'),
+                    'Specificitycv': perf_src.get('Specificitycv'),
+                    'AUCcv': perf_src.get('AUCcv'),
                 }
                 metadata['performance'] = perf
                 # Prefer the RESOLVED inlier label captured by the
@@ -42729,44 +42820,44 @@ External Validation Performance (n={n_val}):
                 # value. When the user accepts auto-detect via the
                 # confirm dialog at line 21852, self.inlier_class_label
                 # remains an empty string and would round-trip into the
-                # saved model as ''. self.refined_config carries the
+                # saved model as ''. cfg carries the
                 # actually-trained label.
                 resolved_inlier = (
-                    self.refined_config.get('inlier_class_label', '')
-                    if hasattr(self, 'refined_config') and self.refined_config
+                    cfg.get('inlier_class_label', '')
+                    if cfg
                     else ''
                 )
                 metadata['inlier_class_label'] = (
                     resolved_inlier if resolved_inlier else self.inlier_class_label.get()
                 )
                 # Attach fitted scaler/PCA reducer for one-class persistence
-                metadata['scaler'] = getattr(self, 'refined_oc_scaler', None)
-                metadata['pca_reducer'] = getattr(self, 'refined_oc_pca_reducer', None)
-                metadata['oc_score_stats'] = getattr(self, 'refined_oc_score_stats', None)
+                metadata['scaler'] = snap['oc_scaler']
+                metadata['pca_reducer'] = snap['oc_pca_reducer']
+                metadata['oc_score_stats'] = snap['oc_score_stats']
             else:  # classification
                 perf = {
-                    'Accuracy': self.refined_performance.get('accuracy_mean'),
-                    'Accuracy_std': self.refined_performance.get('accuracy_std'),
-                    'Precision': self.refined_performance.get('precision_mean'),
-                    'Precision_std': self.refined_performance.get('precision_std'),
-                    'Recall': self.refined_performance.get('recall_mean'),
-                    'Recall_std': self.refined_performance.get('recall_std'),
-                    'F1': self.refined_performance.get('f1_mean'),
-                    'F1_std': self.refined_performance.get('f1_std'),
+                    'Accuracy': perf_src.get('accuracy_mean'),
+                    'Accuracy_std': perf_src.get('accuracy_std'),
+                    'Precision': perf_src.get('precision_mean'),
+                    'Precision_std': perf_src.get('precision_std'),
+                    'Recall': perf_src.get('recall_mean'),
+                    'Recall_std': perf_src.get('recall_std'),
+                    'F1': perf_src.get('f1_mean'),
+                    'F1_std': perf_src.get('f1_std'),
                 }
                 # Add ROC AUC
-                roc_val = self.refined_performance.get('roc_auc')
+                roc_val = perf_src.get('roc_auc')
                 if roc_val is not None and not np.isnan(roc_val):
                     perf['ROC_AUC'] = roc_val
                 # Add calibration metrics
                 for key, label in [('cal_accuracy', 'cal_Accuracy'), ('cal_f1', 'cal_F1')]:
-                    val = self.refined_performance.get(key)
+                    val = perf_src.get(key)
                     if val is not None:
                         perf[label] = val
                 # Add validation metrics
                 for key, label in [('val_accuracy', 'val_Accuracy'), ('val_precision', 'val_Precision'),
                                    ('val_recall', 'val_Recall'), ('val_f1', 'val_F1')]:
-                    val = self.refined_performance.get(key)
+                    val = perf_src.get(key)
                     if val is not None:
                         perf[label] = val
                 metadata['performance'] = perf
@@ -42774,38 +42865,38 @@ External Validation Performance (n={n_val}):
             # Save the model
             # Use refined_label_encoder if available (from Model Development tab),
             # otherwise fallback to global label_encoder (from Results tab)
-            label_encoder_to_save = getattr(self, 'refined_label_encoder', None) or self.label_encoder
+            label_encoder_to_save = snap['label_encoder'] or self.label_encoder
 
             # Prepare CV data for uncertainty estimation
             cv_residuals = None
             cv_predictions = None
             cv_actuals = None
 
-            if hasattr(self, 'refined_y_true') and hasattr(self, 'refined_y_pred'):
-                cv_actuals = np.array(self.refined_y_true)
-                cv_predictions = np.array(self.refined_y_pred)
+            if snap['y_true'] is not None and snap['y_pred'] is not None:
+                cv_actuals = np.array(snap['y_true'])
+                cv_predictions = np.array(snap['y_pred'])
 
-                if self.refined_config['task_type'] == 'regression':
+                if cfg['task_type'] == 'regression':
                     # For regression: residuals = predictions - actuals
                     cv_residuals = cv_predictions - cv_actuals
-                elif self.refined_config['task_type'] == 'classification':
+                elif cfg['task_type'] == 'classification':
                     # For classification: store probabilities if available
-                    if hasattr(self, 'refined_y_proba'):
-                        cv_residuals = np.array(self.refined_y_proba)  # Store probabilities as "residuals"
+                    if snap['y_proba'] is not None:
+                        cv_residuals = np.array(snap['y_proba'])  # Store probabilities as "residuals"
 
             # Get training data for applicability domain (if available)
-            X_train = getattr(self, 'refined_X_train', None)
+            X_train = snap['X_train']
             if X_train is not None:
                 print(f"DEBUG: Passing X_train to save_model (shape: {X_train.shape})")
             else:
                 print("DEBUG: No X_train available - model will not have applicability domain data")
 
             # Determine bias correction to save (only one computed for THIS model, R010)
-            bias_correction_to_save = self._correction_to_save()
+            bias_correction_to_save = snap['correction']
 
             save_model(
-                model=self.refined_model,
-                preprocessor=self.refined_preprocessor,
+                model=snap['model'],
+                preprocessor=snap['preprocessor'],
                 metadata=metadata,
                 filepath=filepath,
                 label_encoder=label_encoder_to_save,

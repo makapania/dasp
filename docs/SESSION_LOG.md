@@ -780,3 +780,19 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   - Export parity gotcha: a Tab 7 XGBoost refit fills params missing from `Params` with GUI defaults (subsample 0.8,
     colsample_bytree 0.6, ...) that the code export does not know, so export CV differs unless the row is complete.
     Pre-existing, not Y-transform specific; test rows carry full params.
+- **Review round 2 (Codex BLOCK, GLM MERGE):**
+  - Disabled Run buttons are NOT a refit guard: the Model Development tab handler treats a disabled Run as
+    "uninitialised" and re-enables it, and loading defaults or a Results row re-enables it too. `_run_refined_model`
+    now refuses while `_refit_active`; the flag is cleared by `_end_refit(generation)`, queued in the worker's
+    `finally` AFTER the run's own result callbacks. Save refuses while a refit is active, reads everything once via
+    `_refined_state_snapshot()`, and aborts if the model token changed during the file dialog.
+  - Error path: Save/Export stay enabled when the previous model is still complete (`refined_model` set AND token
+    set); a failure mid-swap (token None) disables them.
+  - Exported `YTransformRegressor` must be `(RegressorMixin, BaseEstimator)` (mixin first) or `is_regressor` is
+    False and VotingRegressor rejects it; it also mirrors TTR's (n,)/(n,1) output shape.
+  - Complexity grids must contain the fitted value (8-point grids around a base usually miss it).
+- **Merge / follow-up items (not fixed here):**
+  - R015: the bundle export ships already-preprocessed `refined_X_train` but its script preprocesses again
+    (pre-existing; still true with the Y-transform wrapper).
+  - fix/booster-early-stopping: its export round/tree-count selector must look inside `YTransformRegressor`
+    (`model.regressor`) in generated code, and inside the TTR (`regressor__model__...`) in the app.

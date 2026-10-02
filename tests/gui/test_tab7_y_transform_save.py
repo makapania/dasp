@@ -312,6 +312,36 @@ def test_complexity_curve_uses_frozen_y_transform(gui_app, model, param):
     np.testing.assert_allclose(curve["cv_scores"], -cv_raw.mean(axis=1), rtol=1e-6)
 
 
+@pytest.mark.parametrize(
+    "model_name,estimator,param,base",
+    [
+        ("RandomForest", "rf", "n_estimators", 100),
+        ("Ridge", "ridge", "alpha", 0.37),
+    ],
+)
+def test_ttr_complexity_curve_includes_selected_value(gui_app, model_name, estimator, param, base):
+    """Codex round 2: the fitted value is on the grid and is the one marked selected."""
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.linear_model import Ridge
+    from sklearn.model_selection import KFold
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(30, 5))
+    y = np.exp(0.3 * X[:, 0]) + 0.5
+    inner = (
+        RandomForestRegressor(n_estimators=base, max_depth=3, random_state=0)
+        if estimator == "rf"
+        else Ridge(alpha=base)
+    )
+    ttr = YTransformWrapper.wrap(Pipeline([("model", inner)]), "Log")
+    with contextlib.redirect_stdout(io.StringIO()):
+        curve = gui_app._compute_wrapped_validation_curve(
+            model_name, ttr, X, y, KFold(3, shuffle=True, random_state=0), "regression"
+        )
+    assert curve["param_name"] == param
+    assert curve["param_values"][curve["selected_idx"]] == base
+
+
 def test_classification_ignores_y_transform_widget(gui_app, tmp_path):
     X_df, y = _spectra()
     labels = pd.Series(np.where(y.values > np.median(y.values), "hi", "lo"), index=y.index)

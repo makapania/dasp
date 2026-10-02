@@ -1099,14 +1099,19 @@ def _make_y_transformer(method):
     raise ValueError(f"Unknown Y-transform: {{method}}")
 
 
-class YTransformRegressor(BaseEstimator, RegressorMixin):
-    """Fit ``regressor`` on transformed y; inverse-transform its predictions."""
+class YTransformRegressor(RegressorMixin, BaseEstimator):
+    """Fit ``regressor`` on transformed y; inverse-transform its predictions.
+
+    Output shape follows sklearn's TransformedTargetRegressor: (n,) for a 1-D
+    training target, (n, 1) for a column target.
+    """
 
     def __init__(self, regressor=None, method='log'):
         self.regressor = regressor
         self.method = method
 
     def _fit_with(self, fit_fn, X, y, X_val=None, y_val=None, esr=0, **fit_kwargs):
+        self.training_dim_ = np.ndim(y)
         y2 = np.asarray(y, dtype=float).reshape(-1, 1)
         self.transformer_ = _make_y_transformer(self.method).fit(y2)
         y_t = self.transformer_.transform(y2).ravel()
@@ -1127,7 +1132,8 @@ class YTransformRegressor(BaseEstimator, RegressorMixin):
 
     def predict(self, X):
         pred = np.asarray(self.regressor_.predict(X), dtype=float).reshape(-1, 1)
-        return self.transformer_.inverse_transform(pred).ravel()
+        out = self.transformer_.inverse_transform(pred)
+        return out.ravel() if self.training_dim_ == 1 else out
 
 
 model = YTransformRegressor(regressor=model, method=Y_TRANSFORM)
