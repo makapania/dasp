@@ -354,25 +354,69 @@ class TestOSC:
         # Variance removed should be positive
         assert all(osc.variance_removed_ > 0)
 
-    def test_osc_improves_prediction(self):
-        """Test that OSC improves prediction by removing orthogonal variation."""
-        # Train PLS without OSC
-        pls_no_osc = PLSRegression(n_components=5)
-        pls_no_osc.fit(self.X, self.y)
-        y_pred_no_osc = pls_no_osc.predict(self.X)
-        rmse_no_osc = np.sqrt(np.mean((self.y - y_pred_no_osc.ravel()) ** 2))
+    # Behavioural tests on controlled, separable synthetic data. The thresholds
+    # hold for this setup (one analyte shape, one larger y-independent nuisance
+    # shape, small noise) and are not general guarantees.
 
-        # Train PLS with OSC
-        osc = OSC(n_components=1)
-        X_osc = osc.fit_transform(self.X, self.y)
-        pls_with_osc = PLSRegression(n_components=5)
-        pls_with_osc.fit(X_osc, self.y)
-        y_pred_with_osc = pls_with_osc.predict(X_osc)
-        rmse_with_osc = np.sqrt(np.mean((self.y - y_pred_with_osc.ravel()) ** 2))
+    @staticmethod
+    def _separable_data(seed, n):
+        rng = np.random.default_rng(seed)
+        grid = np.arange(150)
+        analyte = np.exp(-0.5 * ((grid - 40) / 5) ** 2)
+        nuisance = np.exp(-0.5 * ((grid - 110) / 8) ** 2)
+        y = rng.uniform(0, 1, n)
+        X = (0.5 + np.outer(y, analyte) + np.outer(3 * rng.normal(0, 1, n), nuisance)
+             + rng.normal(0, 0.002, (n, grid.size)))
+        return X, y, analyte / np.linalg.norm(analyte), nuisance / np.linalg.norm(nuisance)
 
-        # OSC should reduce RMSE (or at worst, not increase it significantly)
-        # Note: This test may be stochastic, so we allow small degradation
-        assert rmse_with_osc <= rmse_no_osc * 1.1  # Allow 10% tolerance
+    @staticmethod
+    def _removed_scores(osc, X):
+        """Replay the scores transform() subtracts, component by component."""
+        Xd = X - osc.X_mean_
+        scores = []
+        for k in range(osc.weights_.shape[1]):
+            t = Xd @ osc.weights_[:, k]
+            scores.append(t)
+            Xd = Xd - np.outer(t, osc.loadings_[:, k])
+        return scores
+
+    @pytest.mark.parametrize("n_components", [1, 2, 3])
+    def test_osc_removed_scores_are_orthogonal_to_y(self, n_components):
+        """Fearn (2000): every removed score satisfies t'y = 0. The previous OSC
+        removed the first PLS loading, whose score correlates ~1 with y (R025)."""
+        osc = OSC(n_components=n_components).fit(self.X, self.y)
+        scores = self._removed_scores(osc, self.X)
+        assert len(scores) == n_components
+        for t in scores:
+            assert abs(np.corrcoef(t, self.y)[0, 1]) < 1e-8
+
+    def test_osc_preserves_analyte_and_removes_nuisance(self):
+        X, y, analyte, nuisance = self._separable_data(seed=0, n=80)
+        X_corr = OSC(n_components=1).fit_transform(X, y)
+
+        slope_before = np.polyfit(y, X @ analyte, 1)[0]
+        slope_after = np.polyfit(y, X_corr @ analyte, 1)[0]
+        assert slope_after / slope_before > 0.9  # analyte response kept
+        assert np.var(X_corr @ nuisance) < 0.05 * np.var(X @ nuisance)  # nuisance gone
+
+    def test_osc_held_out_prediction_not_worse(self):
+        """Fit on a training set, score on samples OSC and PLS never saw."""
+        X, y, _, _ = self._separable_data(seed=1, n=120)
+        X_tr, y_tr, X_te, y_te = X[:80], y[:80], X[80:], y[80:]
+
+        raw = PLSRegression(n_components=1).fit(X_tr, y_tr)
+        rmsep_raw = np.sqrt(np.mean((raw.predict(X_te).ravel() - y_te) ** 2))
+
+        osc = OSC(n_components=1).fit(X_tr, y_tr)
+        corrected = PLSRegression(n_components=1).fit(osc.transform(X_tr), y_tr)
+        rmsep_osc = np.sqrt(np.mean((corrected.predict(osc.transform(X_te)).ravel() - y_te) ** 2))
+
+        assert rmsep_osc <= rmsep_raw * 1.05
+
+    def test_osc_output_on_original_scale(self):
+        osc = OSC(n_components=1).fit(self.X + 10.0, self.y)
+        X_corr = osc.transform(self.X + 10.0)
+        np.testing.assert_allclose(X_corr.mean(axis=0), osc.X_mean_, atol=1e-10)
 
     def test_osc_requires_y(self):
         """Test that OSC requires y for fitting."""
@@ -445,20 +489,16 @@ class TestOSC:
         # Training mean should be close to 1.0 (allow some variance due to random data)
         assert abs(np.mean(osc.X_mean_) - 1.0) < 0.2
 
-        # Transform test set
+        # Scores of new data use the TRAINING mean. The output stays on the
+        # original scale (X - T P'), so the test set keeps its own level (~5): it
+        # is neither re-centred on its own mean (leakage) nor shifted to ~0.
         X_test_osc = osc.transform(X_test)
-
-        # Test set should NOT be centered to zero (should use training mean, not test mean)
-        # If leakage exists, X_test_osc would be centered to ~0
-        # Without leakage, X_test_osc mean should be around 5.0 - 1.0 = 4.0
         test_mean = np.mean(X_test_osc)
-        assert abs(test_mean - 4.0) < 1.0  # Allow some variance from OSC correction
-        assert abs(test_mean) > 2.0  # Definitely not centered to zero
+        assert abs(test_mean - 5.0) < 1.0
 
-        # Also verify training data IS centered properly
+        # Replaying on the training data is exact: same mean as the input.
         X_train_osc = osc.transform(X_train)
-        train_mean = np.mean(X_train_osc)
-        assert abs(train_mean) < 0.5  # Training data should be near zero after centering
+        np.testing.assert_allclose(X_train_osc.mean(axis=0), X_train.mean(axis=0), atol=1e-10)
 
     def test_osc_excessive_components_warning(self):
         """Test OSC warns when n_components exceeds maximum (debugger recommendation)."""
@@ -771,13 +811,41 @@ class TestDOSC:
         assert hasattr(dosc, 'X_mean_')
         np.testing.assert_allclose(dosc.X_mean_, np.mean(X_train, axis=0), rtol=1e-10)
 
-        # Transform test set - should use TRAINING mean, not test mean
+        # Scores of new data use the TRAINING mean; the output is X - T P' on the
+        # original scale, so the test set keeps its own level (~5).
         X_test_corrected = dosc.transform(X_test)
-
-        # Test mean should NOT be centered to zero (uses training mean)
         test_mean = np.mean(X_test_corrected)
-        assert abs(test_mean - 4.0) < 1.0  # Should preserve offset
-        assert abs(test_mean) > 2.0  # Not centered to zero
+        assert abs(test_mean - 5.0) < 1.0
+
+    @pytest.mark.parametrize("n_components", [1, 2, 3])
+    def test_dosc_removed_scores_are_orthogonal_to_y(self, n_components):
+        """Westerhuis et al. (2001): removed scores T satisfy T'y = 0.
+
+        The previous DOSC projected onto principal directions of the PLS
+        X-residual; its replayed scores correlated with y.
+        """
+        dosc = DOSC(n_components=n_components).fit(self.X, self.y)
+        T = (self.X - dosc.X_mean_) @ dosc.weights_
+        for k in range(T.shape[1]):
+            assert abs(np.corrcoef(T[:, k], self.y)[0, 1]) < 1e-8
+        np.testing.assert_allclose(
+            dosc.transform(self.X), self.X - T @ dosc.loadings_.T, atol=1e-10
+        )
+
+    def test_dosc_preserves_y_signal_and_removes_drift(self):
+        """Controlled synthetic case: y-signal shape kept, drift removed."""
+        dosc = DOSC(n_components=1).fit(self.X, self.y)
+        X_corr = dosc.transform(self.X)
+        signal = np.sin(np.linspace(0, 2 * np.pi, self.n_wavelengths))
+        signal /= np.linalg.norm(signal)
+        drift = np.linspace(0, 1, self.n_wavelengths)
+        drift /= np.linalg.norm(drift)
+        slope_before = np.polyfit(self.y, self.X @ signal, 1)[0]
+        slope_after = np.polyfit(self.y, X_corr @ signal, 1)[0]
+        assert slope_after / slope_before > 0.9
+        resid_drift = X_corr @ drift - np.polyval(np.polyfit(self.y, X_corr @ drift, 1), self.y)
+        raw_drift = self.X @ drift - np.polyval(np.polyfit(self.y, self.X @ drift, 1), self.y)
+        assert np.var(resid_drift) < 0.2 * np.var(raw_drift)
 
     def test_dosc_explained_variance(self):
         """Test DOSC explained variance calculation."""
@@ -1164,26 +1232,33 @@ class TestEPO:
 
         assert epo.n_components_ == 2  # Should auto-reduce
 
-    def test_epo_constant_interferents(self):
-        """CRITICAL: EPO must reject constant interferent library."""
+    def test_epo_constant_interferents_are_a_valid_offset(self):
+        """A constant non-zero library is one interferent shape (a flat offset).
+
+        The library is not centred (Roger et al. 2003), so identical rows give one
+        direction instead of being rejected as "no variance" (R024).
+        """
         X_interferents_constant = np.ones((10, self.n_wavelengths))
         epo = EPO(n_components=2)
-
-        with pytest.raises(ValueError, match="near-zero variance"):
+        with pytest.warns(UserWarning):  # only one direction exists
             epo.fit(self.X, X_interferents=X_interferents_constant)
+
+        flat = np.ones(self.n_wavelengths) / np.sqrt(self.n_wavelengths)
+        assert abs(abs(epo.interferent_components_[:, 0] @ flat) - 1.0) < 1e-10
+        np.testing.assert_allclose(flat @ epo.P_orth_, 0.0, atol=1e-12)
 
     def test_epo_zero_interferents(self):
         """CRITICAL: EPO must reject all-zero interferent library."""
         X_interferents_zero = np.zeros((10, self.n_wavelengths))
         epo = EPO(n_components=2)
 
-        with pytest.raises(ValueError, match="near-zero variance"):
+        with pytest.raises(ValueError, match="zero at every wavelength"):
             epo.fit(self.X, X_interferents=X_interferents_zero)
 
-    def test_epo_partial_constant_wavelengths(self):
-        """CRITICAL: EPO should warn if some wavelengths are constant."""
+    def test_epo_partial_zero_wavelengths(self):
+        """EPO warns when some wavelengths are zero in every interferent spectrum."""
         X_interferents_partial = np.random.randn(10, self.n_wavelengths)
-        X_interferents_partial[:, 10:15] = 5.0  # Make 5 wavelengths constant
+        X_interferents_partial[:, 10:15] = 0.0
 
         epo = EPO(n_components=2)
 
@@ -1292,8 +1367,12 @@ class TestEPO:
 
     def test_epo_explained_variance(self):
         """Test EPO explained variance calculation."""
+        # The fixture library is one shape at ten levels (rank 1). EPO no longer
+        # pads the basis with arbitrary null-space vectors, so tests that need
+        # several components use a library that spans several directions.
+        library = np.random.RandomState(0).randn(10, self.n_wavelengths)
         epo = EPO(n_components=3)
-        epo.fit(self.X, X_interferents=self.X_interferents)
+        epo.fit(self.X, X_interferents=library)
 
         explained_var = epo.get_explained_variance()
 
@@ -1311,8 +1390,12 @@ class TestEPO:
 
     def test_epo_interferent_components(self):
         """Test EPO interferent component extraction."""
+        # The fixture library is one shape at ten levels (rank 1). EPO no longer
+        # pads the basis with arbitrary null-space vectors, so tests that need
+        # several components use a library that spans several directions.
+        library = np.random.RandomState(0).randn(10, self.n_wavelengths)
         epo = EPO(n_components=2)
-        epo.fit(self.X, X_interferents=self.X_interferents)
+        epo.fit(self.X, X_interferents=library)
 
         components = epo.get_interferent_components()
 
@@ -1441,8 +1524,12 @@ class TestEPO:
         from spectral_predict.model_io import save_model, load_model
 
         # Fit EPO
+        # The fixture library is one shape at ten levels (rank 1). EPO no longer
+        # pads the basis with arbitrary null-space vectors, so tests that need
+        # several components use a library that spans several directions.
+        library = np.random.RandomState(0).randn(10, self.n_wavelengths)
         epo = EPO(n_components=3)
-        epo.fit(self.X, X_interferents=self.X_interferents)
+        epo.fit(self.X, X_interferents=library)
 
         explained_var = epo.get_explained_variance()
 
@@ -1500,14 +1587,31 @@ class TestEPO:
     # ========== EDGE CASE TESTS ==========
 
     def test_epo_single_interferent_sample(self):
-        """Test EPO with single interferent sample (should fail - need >=2 for variance)."""
-        X_interferents_single = self.X_interferents[:1, :]  # Only 1 sample
+        """One interferent spectrum is enough: EPO removes its direction.
 
-        epo = EPO(n_components=1)
+        The old code centred the library, so a single spectrum had "no variance"
+        and was rejected; the uncentred EPO of Roger et al. (2003) uses it as is.
+        """
+        X_interferents_single = self.X_interferents[:1, :]
 
-        # Single sample has zero variance after centering, should reject
-        with pytest.raises(ValueError, match="near-zero variance"):
-            epo.fit(self.X, X_interferents=X_interferents_single)
+        epo = EPO(n_components=1, center=False)
+        epo.fit(self.X, X_interferents=X_interferents_single)
+
+        pattern = self.interferent_pattern / np.linalg.norm(self.interferent_pattern)
+        assert epo.n_components_ == 1
+        np.testing.assert_allclose(pattern @ epo.P_orth_, 0.0, atol=1e-12)
+
+    def test_epo_library_of_one_shape_removes_it_completely(self):
+        """Scaled copies of one interferent: centring them (old code) kept only
+        the level-to-level scatter; uncentred EPO removes the shape itself."""
+        epo = EPO(n_components=1, center=False)
+        epo.fit(self.X, X_interferents=self.X_interferents)
+
+        X_corrected = epo.transform(self.X)
+        pattern = self.interferent_pattern / np.linalg.norm(self.interferent_pattern)
+        assert np.max(np.abs(X_corrected @ pattern)) < 1e-10
+        # center=False returns X @ P, a spectrum on the original scale.
+        np.testing.assert_allclose(X_corrected, self.X @ epo.P_orth_)
 
     def test_epo_excessive_components_warning(self):
         """Test warning when requesting too many components."""

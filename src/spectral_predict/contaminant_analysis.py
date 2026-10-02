@@ -45,7 +45,7 @@ Difference spectrum analysis (exploratory):
 
 Estimated EPO (no Y values needed):
     >>> from spectral_predict.contaminant_analysis import EstimatedEPO
-    >>> epo = EstimatedEPO(n_components=3)
+    >>> epo = EstimatedEPO()  # mean_diff: removes the group-mean difference
     >>> epo.fit_groups(X_contaminated, X_uncontaminated)
     >>> X_all_corrected = epo.transform(np.vstack([X_contaminated, X_uncontaminated]))
 
@@ -67,7 +67,6 @@ from __future__ import annotations
 
 import numpy as np
 import warnings
-from hashlib import blake2b
 from typing import Optional, Tuple, List, Dict, Any, Union
 
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -381,108 +380,182 @@ class DifferenceAnalyzer(BaseEstimator, TransformerMixin):
         )
 
 
+def _uncentred_nuisance_subspace(
+    library: np.ndarray,
+    n_components: int,
+    svd_tol: float,
+    warn_if_reduced: bool = True,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Basis of the nuisance subspace spanned by the rows of ``library``.
+
+    EPO (Roger, Chauchard & Bellon-Maurel 2003, Chemom. Intell. Lab. Syst.
+    66(2):191-204) takes the SVD of the nuisance-difference matrix D itself and
+    projects onto the orthogonal complement of its leading right singular
+    vectors. D is deliberately NOT column-centred: when every row of D carries
+    the same contaminant shift, centring subtracts that shift and leaves only the
+    row-to-row jitter, so the "removed" directions are noise and the contaminant
+    stays in the spectra (finding R024).
+
+    Args:
+        library: Nuisance spectra or difference spectra, one per row.
+        n_components: Maximum number of directions to keep.
+        svd_tol: Singular values at or below this are treated as zero.
+        warn_if_reduced: Warn when fewer than ``n_components`` directions exist.
+
+    Returns:
+        ``(V, explained_variance, k)``: V is ``(n_wavelengths, k)`` with
+        orthonormal columns, ``k`` may be 0 (nothing to remove).
+    """
+    n_features = library.shape[1]
+    if not np.all(np.isfinite(library)):
+        raise ValueError("Interferent library contains NaN or Inf values.")
+    try:
+        _, S, Vt = np.linalg.svd(library, full_matrices=False)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("SVD failed on interferent library. Check for NaN/Inf values.") from exc
+
+    n_valid = int(np.sum(S > svd_tol))
+    if n_valid == 0:
+        warnings.warn(
+            "Interferent library has no significant signal (all differences are ~0). "
+            "EPO will have no effect.",
+            UserWarning,
+        )
+        return np.zeros((n_features, 0)), np.zeros(0), 0
+
+    k = min(int(n_components), n_valid)
+    if k < n_components and warn_if_reduced:
+        warnings.warn(
+            f"Only {n_valid} significant direction(s) in interferent library. "
+            f"Using {k} instead of {n_components}.",
+            UserWarning,
+        )
+    total = float(np.sum(S**2))
+    explained = (S[:k] ** 2) / total if total > 0 else np.zeros(k)
+    return Vt[:k].T.copy(), explained, k
+
+
 class EstimatedEPO(BaseEstimator, TransformerMixin):
     """
     External Parameter Orthogonalization using estimated interferent library.
 
-    This is an adaptation of EPO (Roger et al., 2003) for cases where pure
-    contaminant spectra are not available. Instead, the interferent library
-    is estimated from the differences between contaminated and uncontaminated
-    sample groups.
+    This is an adaptation of EPO (Roger, Chauchard & Bellon-Maurel 2003, Chemom.
+    Intell. Lab. Syst. 66(2):191-204) for cases where pure contaminant spectra are
+    not available. The nuisance-difference matrix D is estimated from the
+    contaminated and uncontaminated groups, and every spectrum is projected
+    orthogonal to the leading right singular vectors V of the UNCENTRED D:
+    ``X_corrected = X @ (I - V V^T)``. The output stays on the original spectral
+    scale, so it is still a spectrum.
 
     No Y values (target variable) are required - this is unsupervised.
 
-    Algorithm:
-    1. Compute difference vectors between groups (multiple methods)
-    2. Build "pseudo-interferent" library from these differences
-    3. Extract principal components of the interferent library
-    4. Project all spectra orthogonal to this interferent subspace
+    Limits. With unpaired groups the only estimable nuisance direction is the
+    difference of the group means, and that difference also contains any genuine
+    chemical difference between the groups (e.g. the treated bones happen to have
+    more collagen). Analyte signal that overlaps the removed direction is removed
+    with it. Projection cannot separate two signals that share a direction.
 
     Parameters
     ----------
-    n_components : int, default=2
-        Number of interferent components to remove. Start small (1-3) and
-        increase cautiously to avoid removing analyte signal.
+    n_components : int, default=1
+        Maximum number of nuisance directions to remove. 'mean_diff' always yields
+        one direction; more are only possible with paired 'pca_diff' or an explicit
+        library passed to fit().
 
-    estimation_method : {'mean_diff', 'pca_diff', 'bootstrap'}, default='pca_diff'
-        Method for building interferent library:
-        - 'mean_diff': Single difference between group means
-        - 'pca_diff': PCA on concatenated groups to find discriminating directions
-        - 'bootstrap': Bootstrap sampling to build multiple difference vectors
-
-    n_bootstrap : int, default=50
-        Number of bootstrap samples for 'bootstrap' method
-
-    center : bool, default=True
-        Whether to mean-center data before EPO
+    estimation_method : {'mean_diff', 'pca_diff'}, default='mean_diff'
+        How D is built:
+        - 'mean_diff': one row, the contaminated-group mean minus the clean-group
+          mean.
+        - 'pca_diff': per-sample paired differences ``X_contaminated[i] -
+          X_uncontaminated[i]`` (the same specimen measured with and without the
+          contaminant). Requires ``fit_groups(..., paired=True)``; without pairing
+          it falls back to 'mean_diff' with a warning, because differences between
+          unrelated specimens are dominated by specimen-to-specimen chemistry.
+        The former 'bootstrap' option was removed: the spread of bootstrapped mean
+        differences is sampling jitter, i.e. analyte variation, and projecting it
+        out deleted the analyte (Codex cross-check, 2026-10-02).
 
     svd_tol : float, default=1e-8
-        Tolerance for SVD truncation
+        Singular values at or below this are treated as zero.
 
     random_state : int or None, default=None
-        Random seed for bootstrap sampling
+        Unused: no estimation method is random any more. Kept so existing calls
+        that pass it keep working.
 
     Attributes
     ----------
     n_features_in_ : int
         Number of wavelengths
 
-    interferent_library_ : ndarray, shape (n_interferents, n_wavelengths)
-        Estimated interferent spectra library
+    estimation_method_used_ : str
+        The method actually used ('pca_diff' falls back to 'mean_diff' when
+        unpaired).
+
+    interferent_library_ : ndarray, shape (n_rows, n_wavelengths)
+        The nuisance-difference matrix D (uncentred).
 
     interferent_components_ : ndarray, shape (n_wavelengths, n_components_)
-        Principal components of interferent subspace
+        Orthonormal basis V of the removed subspace.
+
+    n_components_ : int
+        Number of directions removed (0 when the groups do not differ).
 
     P_orth_ : ndarray, shape (n_wavelengths, n_wavelengths)
-        Orthogonal projection matrix
-
-    X_mean_ : ndarray, shape (n_wavelengths,)
-        Mean spectrum for centering
+        Projection matrix ``I - V V^T``.
 
     explained_variance_ : ndarray, shape (n_components_,)
-        Variance explained by each interferent component
+        Share of the energy of D captured by each removed direction.
 
     Examples
     --------
     >>> import numpy as np
     >>> from spectral_predict.contaminant_analysis import EstimatedEPO
-    >>>
-    >>> # Sample data
-    >>> X_contaminated = np.random.randn(30, 100) + 0.5  # With contaminant
-    >>> X_uncontaminated = np.random.randn(40, 100)      # Clean
-    >>>
-    >>> # Fit EPO on group differences
-    >>> epo = EstimatedEPO(n_components=2)
-    >>> epo.fit_groups(X_contaminated, X_uncontaminated)
-    >>>
-    >>> # Transform all spectra
-    >>> X_all = np.vstack([X_contaminated, X_uncontaminated])
-    >>> X_corrected = epo.transform(X_all)
+    >>> rng = np.random.default_rng(0)
+    >>> band = np.exp(-0.5 * ((np.arange(100) - 60) / 4) ** 2)
+    >>> X_uncontaminated = 1 + rng.normal(0, 0.01, (40, 100))
+    >>> X_contaminated = 1 + band + rng.normal(0, 0.01, (30, 100))
+    >>> epo = EstimatedEPO().fit_groups(X_contaminated, X_uncontaminated)
+    >>> X_corrected = epo.transform(X_contaminated)   # spectra, band removed
     """
+
+    _METHODS = ("mean_diff", "pca_diff")
 
     def __init__(
         self,
-        n_components: int = 2,
-        estimation_method: str = 'pca_diff',
-        n_bootstrap: int = 50,
-        center: bool = True,
+        n_components: int = 1,
+        estimation_method: str = "mean_diff",
         svd_tol: float = 1e-8,
-        random_state: Optional[int] = None
+        random_state: Optional[int] = None,
     ):
         self.n_components = n_components
         self.estimation_method = estimation_method
-        self.n_bootstrap = n_bootstrap
-        self.center = center
         self.svd_tol = svd_tol
         self.random_state = random_state
+
+    def _check_params(self) -> None:
+        if self.estimation_method == "bootstrap":
+            raise ValueError(
+                "estimation_method='bootstrap' was removed: the spread of bootstrapped "
+                "mean differences is sampling jitter (mostly analyte variation), so "
+                "projecting it out removed the analyte. Use 'mean_diff', or 'pca_diff' "
+                "with paired spectra."
+            )
+        if self.estimation_method not in self._METHODS:
+            raise ValueError(
+                f"estimation_method must be 'mean_diff' or 'pca_diff', "
+                f"got '{self.estimation_method}'"
+            )
+        if not isinstance(self.n_components, (int, np.integer)) or self.n_components < 1:
+            raise ValueError(f"n_components must be a positive integer, got {self.n_components!r}")
 
     def fit_groups(
         self,
         X_contaminated: np.ndarray,
-        X_uncontaminated: np.ndarray
-    ) -> 'EstimatedEPO':
+        X_uncontaminated: np.ndarray,
+        paired: bool = False,
+    ) -> "EstimatedEPO":
         """
-        Fit EPO using estimated interferent library from group differences.
+        Fit EPO using a nuisance-difference matrix estimated from two groups.
 
         Parameters
         ----------
@@ -492,12 +565,16 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
         X_uncontaminated : array-like, shape (n_uncontaminated, n_wavelengths)
             Spectral data from uncontaminated samples
 
+        paired : bool, default=False
+            True when row i of both arrays is the same specimen (scanned with and
+            without the contaminant). Only 'pca_diff' uses it.
+
         Returns
         -------
         self : EstimatedEPO
             Fitted transformer
         """
-        # Validate inputs
+        self._check_params()
         X_contaminated = check_array(X_contaminated, dtype=np.float64)
         X_uncontaminated = check_array(X_uncontaminated, dtype=np.float64)
 
@@ -509,60 +586,55 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
 
         self.n_features_in_ = X_contaminated.shape[1]
 
-        # Combine groups for centering
-        X_all = np.vstack([X_contaminated, X_uncontaminated])
+        method = self.estimation_method
+        if method == "pca_diff" and not paired:
+            warnings.warn(
+                "estimation_method='pca_diff' needs paired spectra (fit_groups(..., "
+                "paired=True)); falling back to 'mean_diff'.",
+                UserWarning,
+            )
+            method = "mean_diff"
 
-        # Store mean for centering
-        if self.center:
-            self.X_mean_ = np.mean(X_all, axis=0)
+        if method == "pca_diff":
+            if X_contaminated.shape != X_uncontaminated.shape:
+                raise ValueError(
+                    "paired=True needs one uncontaminated spectrum per contaminated "
+                    f"spectrum; got {X_contaminated.shape[0]} and {X_uncontaminated.shape[0]} rows."
+                )
+            library = X_contaminated - X_uncontaminated
         else:
-            self.X_mean_ = np.zeros(self.n_features_in_)
+            library = (X_contaminated.mean(axis=0) - X_uncontaminated.mean(axis=0)).reshape(1, -1)
 
-        # Build interferent library based on estimation method
-        if self.estimation_method == 'mean_diff':
-            self.interferent_library_ = self._estimate_mean_diff(
-                X_contaminated, X_uncontaminated
-            )
-        elif self.estimation_method == 'pca_diff':
-            self.interferent_library_ = self._estimate_pca_diff(
-                X_contaminated, X_uncontaminated
-            )
-        elif self.estimation_method == 'bootstrap':
-            self.interferent_library_ = self._estimate_bootstrap(
-                X_contaminated, X_uncontaminated
-            )
-        else:
-            raise ValueError(
-                f"estimation_method must be 'mean_diff', 'pca_diff', or 'bootstrap', "
-                f"got '{self.estimation_method}'"
-            )
-
-        # Build EPO projection matrix from interferent library
-        self._build_projection_matrix()
-
+        self.estimation_method_used_ = method
+        self.interferent_library_ = library
+        self._build_projection_matrix(warn_if_reduced=method != "mean_diff")
         return self
 
-    def fit(self, X: np.ndarray, y=None, X_interferents: Optional[np.ndarray] = None) -> 'EstimatedEPO':
+    def fit(
+        self, X: np.ndarray, y=None, X_interferents: Optional[np.ndarray] = None
+    ) -> "EstimatedEPO":
         """
-        Fit EPO with explicit interferent library (for sklearn compatibility).
+        Fit EPO with an explicit interferent library (for sklearn compatibility).
 
         For the typical use case with two groups, use fit_groups() instead.
 
         Parameters
         ----------
         X : array-like, shape (n_samples, n_wavelengths)
-            Training spectral data (used only for centering)
+            Training spectral data (used only to check the wavelength count)
 
         y : Ignored
             Not used
 
         X_interferents : array-like, shape (n_interferents, n_wavelengths)
-            Explicit interferent library. If None, raises error.
+            Interferent spectra or difference spectra. Used uncentred.
 
         Returns
         -------
         self : EstimatedEPO
         """
+        if not isinstance(self.n_components, (int, np.integer)) or self.n_components < 1:
+            raise ValueError(f"n_components must be a positive integer, got {self.n_components!r}")
         X = check_array(X, dtype=np.float64)
         self.n_features_in_ = X.shape[1]
 
@@ -580,166 +652,24 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
                 f"Got {X_interferents.shape[1]} and {self.n_features_in_}"
             )
 
-        if self.center:
-            self.X_mean_ = np.mean(X, axis=0)
-        else:
-            self.X_mean_ = np.zeros(self.n_features_in_)
-
+        self.estimation_method_used_ = "explicit_library"
         self.interferent_library_ = X_interferents
-        self._build_projection_matrix()
-
+        self._build_projection_matrix(warn_if_reduced=True)
         return self
 
-    def _estimate_mean_diff(
-        self,
-        X_contaminated: np.ndarray,
-        X_uncontaminated: np.ndarray
-    ) -> np.ndarray:
-        """Build library from mean difference (single vector)."""
-        mean_cont = np.mean(X_contaminated, axis=0)
-        mean_uncont = np.mean(X_uncontaminated, axis=0)
-        diff = mean_cont - mean_uncont
-
-        # Return as 2D array
-        return diff.reshape(1, -1)
-
-    def _estimate_pca_diff(
-        self,
-        X_contaminated: np.ndarray,
-        X_uncontaminated: np.ndarray
-    ) -> np.ndarray:
-        """
-        Build library from PCA on discriminating directions.
-
-        Algorithm:
-        1. Compute within-group covariance matrices
-        2. Compute between-group covariance (group mean difference)
-        3. Use LDA-like approach to find discriminating directions
-        """
-        n_cont = X_contaminated.shape[0]
-        n_uncont = X_uncontaminated.shape[0]
-
-        # Group means
-        mean_cont = np.mean(X_contaminated, axis=0)
-        mean_uncont = np.mean(X_uncontaminated, axis=0)
-        overall_mean = (n_cont * mean_cont + n_uncont * mean_uncont) / (n_cont + n_uncont)
-
-        # Between-group scatter (difference direction)
-        diff = mean_cont - mean_uncont
-
-        # Create multiple "pseudo-interferent" spectra by adding noise
-        # This helps build a more robust interferent subspace
-        rng = np.random.RandomState(self.random_state)
-
-        n_pseudo = max(self.n_components * 3, 10)  # At least 10 pseudo-spectra
-        pseudo_library = []
-
-        # Add mean difference
-        pseudo_library.append(diff)
-
-        # Add variations around mean difference
-        diff_std = np.std(diff) if np.std(diff) > 1e-10 else 1.0
-        for _ in range(n_pseudo - 1):
-            noise = rng.randn(len(diff)) * diff_std * 0.1
-            pseudo_library.append(diff + noise)
-
-        return np.array(pseudo_library)
-
-    def _estimate_bootstrap(
-        self,
-        X_contaminated: np.ndarray,
-        X_uncontaminated: np.ndarray
-    ) -> np.ndarray:
-        """Build library from bootstrap sampling of group differences."""
-        rng = np.random.RandomState(self.random_state)
-
-        n_cont = X_contaminated.shape[0]
-        n_uncont = X_uncontaminated.shape[0]
-
-        pseudo_library = []
-
-        for _ in range(self.n_bootstrap):
-            # Sample with replacement from each group
-            cont_idx = rng.choice(n_cont, size=n_cont, replace=True)
-            uncont_idx = rng.choice(n_uncont, size=n_uncont, replace=True)
-
-            # Compute means of bootstrap samples
-            mean_cont = np.mean(X_contaminated[cont_idx], axis=0)
-            mean_uncont = np.mean(X_uncontaminated[uncont_idx], axis=0)
-
-            # Store difference
-            pseudo_library.append(mean_cont - mean_uncont)
-
-        return np.array(pseudo_library)
-
-    def _build_projection_matrix(self):
-        """Build orthogonal projection matrix from interferent library."""
-        # Center interferent library
-        lib_mean = np.mean(self.interferent_library_, axis=0)
-        lib_centered = self.interferent_library_ - lib_mean
-
-        # Handle case of single interferent spectrum
-        if self.interferent_library_.shape[0] == 1:
-            # Use the single spectrum directly
-            v = self.interferent_library_[0]
-            v_norm = v / (np.linalg.norm(v) + 1e-10)
-            self.interferent_components_ = v_norm.reshape(-1, 1)
-            self.explained_variance_ = np.array([1.0])
-            self.n_components_ = 1
-        else:
-            # SVD to get principal components
-            try:
-                U, S, Vt = np.linalg.svd(lib_centered, full_matrices=False)
-            except np.linalg.LinAlgError:
-                raise ValueError(
-                    "SVD failed on interferent library. Check for NaN/Inf values."
-                )
-
-            # Truncate small singular values
-            S_valid = S > self.svd_tol
-            n_valid = np.sum(S_valid)
-
-            if n_valid == 0:
-                warnings.warn(
-                    "Interferent library has no significant variation. "
-                    "EPO will have no effect.",
-                    UserWarning
-                )
-                self.interferent_components_ = np.zeros((self.n_features_in_, 1))
-                self.explained_variance_ = np.array([0.0])
-                self.n_components_ = 0
-                self.P_orth_ = np.eye(self.n_features_in_)
-                return
-
-            # Effective number of components
-            effective_n = min(self.n_components, n_valid)
-            if effective_n < self.n_components:
-                warnings.warn(
-                    f"Only {n_valid} significant components in interferent library. "
-                    f"Using {effective_n} instead of {self.n_components}.",
-                    UserWarning
-                )
-
-            self.n_components_ = effective_n
-
-            # Store components (columns of V)
-            V = Vt.T
-            self.interferent_components_ = V[:, :self.n_components_]
-
-            # Store explained variance
-            total_var = np.sum(S**2)
-            if total_var > 0:
-                self.explained_variance_ = (S[:self.n_components_]**2) / total_var
-            else:
-                self.explained_variance_ = np.zeros(self.n_components_)
-
-        # Build orthogonal projection matrix: P_orth = I - V @ V.T
-        V_comp = self.interferent_components_
-        self.P_orth_ = np.eye(self.n_features_in_) - V_comp @ V_comp.T
+    def _build_projection_matrix(self, warn_if_reduced: bool = True) -> None:
+        """Build ``P_orth_ = I - V V^T`` from the uncentred interferent library."""
+        V, explained, k = _uncentred_nuisance_subspace(
+            self.interferent_library_, self.n_components, self.svd_tol, warn_if_reduced
+        )
+        self.interferent_components_ = V
+        self.explained_variance_ = explained
+        self.n_components_ = k
+        self.P_orth_ = np.eye(self.n_features_in_) - V @ V.T
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         """
-        Apply EPO transformation to remove estimated interferent signal.
+        Remove the estimated nuisance subspace from spectra.
 
         Parameters
         ----------
@@ -749,10 +679,10 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_corrected : ndarray, shape (n_samples, n_wavelengths)
-            Transformed data with interferent signal removed.
-            Note: Data is mean-centered using training mean.
+            ``X @ P_orth_``: spectra on the original scale with the nuisance
+            directions projected out. No mean is subtracted.
         """
-        check_is_fitted(self, ['P_orth_', 'X_mean_'])
+        check_is_fitted(self, ["P_orth_"])
         X = check_array(X, dtype=np.float64)
 
         if X.shape[1] != self.n_features_in_:
@@ -761,11 +691,7 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
                 f"{self.n_features_in_} features."
             )
 
-        # Center and project
-        X_centered = X - self.X_mean_
-        X_corrected = X_centered @ self.P_orth_
-
-        return X_corrected
+        return X @ self.P_orth_
 
     def get_interferent_components(self) -> np.ndarray:
         """Get the estimated interferent principal components."""
@@ -1130,6 +1056,13 @@ class ContaminantOPLSDA(BaseEstimator, TransformerMixin):
         Transform X by removing orthogonal (within-group) variation.
 
         This returns data with only the predictive variation retained.
+
+        This is NOT a contaminant correction. The target here is group membership,
+        so the predictive variation it keeps IS the contaminant, and the
+        within-group variation it removes is where analyte chemistry lives. The
+        output is also centred (and autoscaled when ``scale=True``), not a
+        spectrum. Use the class for diagnostics (VIP, S-plot, influence); use
+        EstimatedEPO or MultiGroupEPO to remove a contaminant.
 
         Parameters
         ----------
@@ -1857,8 +1790,9 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
     n_epo_components : int, default=2
         Number of EPO components per contaminant type
 
-    estimation_method : str, default='pca_diff'
-        Method for EPO estimation ('mean_diff', 'pca_diff', 'bootstrap')
+    estimation_method : str, default='mean_diff'
+        Method for EPO estimation ('mean_diff' or 'pca_diff'; groups here are
+        unpaired, so 'pca_diff' falls back to 'mean_diff')
 
     aggregation : {'max', 'mean', 'sum'}, default='max'
         How to combine influences from multiple contaminants:
@@ -1914,7 +1848,7 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         n_epo_components: int = 2,
-        estimation_method: str = 'pca_diff',
+        estimation_method: str = 'mean_diff',
         aggregation: str = 'max',
         random_state: int = 42
     ):
@@ -2145,13 +2079,13 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
             Spectral data to transform
 
         remove_all : bool, default=True
-            If True, sequentially apply all EPO transformers.
+            If True, project out the union of every contaminant's EPO subspace.
             If False, only return mean-centered data.
 
         Returns
         -------
         X_corrected : ndarray, shape (n_samples, n_wavelengths)
-            Transformed data with contaminant signals removed
+            Spectra on the original scale with contaminant signals removed
         """
         check_is_fitted(self, 'epo_transformers_')
         X = check_array(X, dtype=np.float64)
@@ -2164,14 +2098,18 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
         if not remove_all:
             return X - np.mean(self.X_uncontaminated_, axis=0)
 
-        # Sequentially apply all EPO transformers
-        X_corrected = X.copy()
-        for label in self.contaminant_labels_:
-            # Note: Each transformer centers the data, so we need to handle this
-            epo = self.epo_transformers_[label]
-            X_corrected = epo.transform(X_corrected + epo.X_mean_)
-
-        return X_corrected
+        # One joint projection. Applying the per-contaminant projections one after
+        # another does not remove both directions when they are not orthogonal: the
+        # second projection re-introduces part of the first direction.
+        V = np.hstack([
+            self.epo_transformers_[label].interferent_components_
+            for label in self.contaminant_labels_
+        ])
+        if V.shape[1] == 0:
+            return X.copy()
+        U, S, _ = np.linalg.svd(V, full_matrices=False)
+        basis = U[:, S > 1e-10 * max(1.0, S[0])]
+        return X - (X @ basis) @ basis.T
 
 
 def _label_token(label: Any) -> str:
@@ -2191,12 +2129,34 @@ def _label_order(item: tuple[Any, Any]) -> tuple[int, str]:
     return (0, label) if isinstance(label, str) else (1, _label_token(label))
 
 
+# A direction of the group-mean-difference matrix is treated as contaminant
+# signal only if its energy exceeds this multiple of the expected sampling energy
+# of the mean differences (about three standard errors in amplitude). With two
+# standard errors (factor 4) a group drawn from the same population as the
+# reference was flagged about 1 time in 20 when its spread lies along one
+# direction, and that direction (often the analyte) was then projected out.
+_NOISE_FLOOR_FACTOR = 9.0
+
+
+def _mean_sampling_energy(X: np.ndarray) -> float:
+    """Expected squared norm of the sampling error of a group mean spectrum."""
+    if X.shape[0] < 2:
+        return 0.0
+    return float(np.sum(np.var(X, axis=0, ddof=1)) / X.shape[0])
+
+
 class MultiGroupEPO(BaseEstimator, TransformerMixin):
     """
     EPO for removing multiple interferent types simultaneously.
 
-    Builds a combined interferent subspace from multiple contaminant groups
-    and removes them in a single transformation step.
+    Each contaminant group contributes one row to the nuisance-difference matrix
+    D: its mean spectrum minus the reference (clean) mean. The removed subspace is
+    spanned by the leading right singular vectors V of the UNCENTRED D, and
+    ``transform`` returns ``X @ (I - V V^T)`` on the original spectral scale
+    (Roger, Chauchard & Bellon-Maurel 2003, Chemom. Intell. Lab. Syst.
+    66(2):191-204). Centring D would subtract the shift the groups share, so two
+    groups carrying the same contaminant at the same dose would have their
+    contaminant cancelled out of the library (finding R024).
 
     This is more mathematically rigorous than sequential application of
     individual EPO transformers.
@@ -2204,17 +2164,22 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
     Parameters
     ----------
     n_components_per_group : int, default=2
-        Number of EPO components to extract per contaminant group
+        Unpaired groups give one direction each (their mean difference), so at
+        most ``n_groups`` directions exist. The total is capped at
+        ``n_components_per_group * n_groups`` when n_total_components is None.
 
     n_total_components : int or None, default=None
-        Total number of components for final combined EPO.
-        If None, uses n_components_per_group * n_groups.
-
-    center : bool, default=True
-        Whether to mean-center data
+        Total number of directions to remove. If None (automatic), a direction
+        of D is kept only when its energy (squared singular value) exceeds
+        9x the expected sampling energy of the group mean differences (about
+        three standard errors),
+        ``sum_g sum_wavelengths (var_g / n_g + var_ref / n_ref)``. That keeps
+        one direction for groups sharing one contaminant (at any doses), two
+        for two distinct contaminants, and none when the groups do not differ
+        beyond sampling. Set an integer to override.
 
     svd_tol : float, default=1e-8
-        Tolerance for SVD truncation
+        Singular values at or below this are treated as zero.
 
     Attributes
     ----------
@@ -2235,6 +2200,15 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
 
     per_group_variance_ : dict
         Variance contribution from each group
+
+    singular_values_ : ndarray
+        Singular values of the uncentred difference matrix D.
+
+    noise_energy_ : float
+        Expected sampling energy of D, the reference for the automatic count.
+
+    n_components_ : int
+        Number of directions removed (0 when no group differs beyond sampling).
 
     Examples
     --------
@@ -2261,12 +2235,10 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         self,
         n_components_per_group: int = 2,
         n_total_components: Optional[int] = None,
-        center: bool = True,
         svd_tol: float = 1e-8
     ):
         self.n_components_per_group = n_components_per_group
         self.n_total_components = n_total_components
-        self.center = center
         self.svd_tol = svd_tol
 
     def fit(
@@ -2314,97 +2286,60 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         self.group_labels_ = list(validated_groups.keys())
         n_groups = len(self.group_labels_)
 
-        # Compute overall mean for centering
-        all_samples = [X_uncontaminated] + list(validated_groups.values())
-        X_all = np.vstack(all_samples)
-
-        if self.center:
-            self.X_mean_ = np.mean(X_all, axis=0)
-        else:
-            self.X_mean_ = np.zeros(self.n_features_in_)
-
         # Reference mean
         ref_mean = np.mean(X_uncontaminated, axis=0)
 
-        # Build combined interferent library
-        # Each group contributes difference vectors
-        interferent_library_parts = []
+        # Nuisance-difference matrix: one uncentred row per group, in sorted label
+        # order. No synthetic noise copies: the old library was each difference plus
+        # random jitter, and after centring only the jitter was left to project out.
+        rows = []
         self.per_group_variance_ = {}
-
+        noise_energy = 0.0
+        ref_term = _mean_sampling_energy(X_uncontaminated)
         for label, X_contaminated in validated_groups.items():
-            # Compute mean difference
-            cont_mean = np.mean(X_contaminated, axis=0)
-            diff = cont_mean - ref_mean
-
-            # Build pseudo-interferent spectra for this group
-            # Use bootstrap-like approach
-            n_pseudo = max(self.n_components_per_group * 2, 5)
-            diff_std = np.std(diff) if np.std(diff) > 1e-10 else 1.0
-
-            group_library = [diff]
-            # Stable digest, NOT hash(): Python randomizes str hashing per process
-            # (PYTHONHASHSEED), and these draws feed the SVD that produces the
-            # projection matrix applied to spectra in transform(). Seeding off
-            # hash() therefore made the returned scientific data differ between
-            # runs of the same analysis. blake2b is stable across processes,
-            # machines and Python versions.
-            seed = int.from_bytes(
-                blake2b(_label_token(label).encode("utf-8"), digest_size=4).digest(), "big"
-            ) % 2**31
-            rng = np.random.RandomState(seed)
-            for _ in range(n_pseudo - 1):
-                noise = rng.randn(len(diff)) * diff_std * 0.1
-                group_library.append(diff + noise)
-
-            group_array = np.array(group_library)
-            interferent_library_parts.append(group_array)
-
-            # Track variance contribution
+            diff = np.mean(X_contaminated, axis=0) - ref_mean
+            rows.append(diff)
             self.per_group_variance_[label] = np.var(diff)
+            noise_energy += _mean_sampling_energy(X_contaminated) + ref_term
 
-        # Combine all interferent libraries
-        self.combined_interferent_library_ = np.vstack(interferent_library_parts)
+        self.combined_interferent_library_ = np.vstack(rows)
+        self.noise_energy_ = noise_energy
+        self.singular_values_ = np.linalg.svd(
+            self.combined_interferent_library_, compute_uv=False
+        )
 
-        # Center the combined library
-        lib_mean = np.mean(self.combined_interferent_library_, axis=0)
-        lib_centered = self.combined_interferent_library_ - lib_mean
-
-        # SVD to get combined interferent subspace
-        try:
-            U, S, Vt = np.linalg.svd(lib_centered, full_matrices=False)
-        except np.linalg.LinAlgError:
-            raise ValueError("SVD failed on combined interferent library")
-
-        # Determine number of components
-        n_valid = np.sum(S > self.svd_tol)
         if self.n_total_components is None:
-            n_components = min(
-                self.n_components_per_group * n_groups,
-                n_valid,
-                self.n_features_in_ - 1
+            # Automatic: keep only directions whose energy clearly exceeds what
+            # sampling alone puts into the mean differences. Without this, with
+            # two groups sharing one contaminant the second direction is the
+            # difference between the groups' mean ANALYTE levels (sampling), and
+            # projecting it out deletes the analyte.
+            n_wanted = self.n_components_per_group * n_groups
+            n_signal = int(np.sum(self.singular_values_**2 > _NOISE_FLOOR_FACTOR * noise_energy))
+            has_signal = self.singular_values_.size and self.singular_values_[0] > self.svd_tol
+            if n_signal == 0 and has_signal:
+                warnings.warn(
+                    "The contaminant groups do not differ from the reference by more "
+                    "than sampling variation; MultiGroupEPO removes nothing. Set "
+                    "n_total_components to force a removal.",
+                    UserWarning,
+                )
+            n_wanted = min(n_wanted, n_signal)
+        else:
+            n_wanted = self.n_total_components
+        n_wanted = max(0, min(int(n_wanted), self.n_features_in_ - 1))
+
+        if n_wanted == 0:
+            V, explained, k = np.zeros((self.n_features_in_, 0)), np.zeros(0), 0
+        else:
+            V, explained, k = _uncentred_nuisance_subspace(
+                self.combined_interferent_library_, n_wanted, self.svd_tol,
+                warn_if_reduced=False,
             )
-        else:
-            n_components = min(self.n_total_components, n_valid, self.n_features_in_ - 1)
-
-        if n_components < 1:
-            n_components = 1
-
-        self.n_components_ = n_components
-
-        # Store components
-        V = Vt.T
-        self.interferent_components_ = V[:, :n_components]
-
-        # Store explained variance
-        total_var = np.sum(S**2)
-        if total_var > 0:
-            self.explained_variance_ = (S[:n_components]**2) / total_var
-        else:
-            self.explained_variance_ = np.zeros(n_components)
-
-        # Build projection matrix
-        V_comp = self.interferent_components_
-        self.P_orth_ = np.eye(self.n_features_in_) - V_comp @ V_comp.T
+        self.n_components_ = k
+        self.interferent_components_ = V
+        self.explained_variance_ = explained
+        self.P_orth_ = np.eye(self.n_features_in_) - V @ V.T
 
         return self
 
@@ -2420,9 +2355,10 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_corrected : ndarray, shape (n_samples, n_wavelengths)
-            Transformed data with all interferent signals removed
+            ``X @ P_orth_``: spectra on the original scale with all group
+            nuisance directions removed. No mean is subtracted.
         """
-        check_is_fitted(self, ['P_orth_', 'X_mean_'])
+        check_is_fitted(self, ['P_orth_'])
         X = check_array(X, dtype=np.float64)
 
         if X.shape[1] != self.n_features_in_:
@@ -2430,10 +2366,7 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
                 f"X has {X.shape[1]} features, expected {self.n_features_in_}"
             )
 
-        X_centered = X - self.X_mean_
-        X_corrected = X_centered @ self.P_orth_
-
-        return X_corrected
+        return X @ self.P_orth_
 
     def get_wavelength_influence(self) -> np.ndarray:
         """

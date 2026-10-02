@@ -742,3 +742,33 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - fix/contaminant-maths (QW3, QW6, R024, R025, R075, R113, R114): gotchas
+- **EPO must not centre the nuisance library.** `EstimatedEPO`, `MultiGroupEPO` and `interference.EPO` all
+  column-centred D before the SVD. When the rows share one contaminant shift (mean diff + noise copies,
+  bootstrapped mean diffs, equal-dose groups, one shape at several levels) centring subtracts the contaminant and the
+  SVD returns jitter. Now: SVD of the uncentred D, `P = I - VV^T`, `transform = X @ P` (a spectrum). `bootstrap` was
+  removed outright: uncentred, its 2nd+ directions are sampling jitter = analyte variation.
+- **Uncentred multi-group D needs a rank rule.** With k = n_groups, two groups sharing one contaminant give a 2nd
+  direction that is the difference of their mean ANALYTE levels; projecting it out kept 0.35% of the analyte.
+  `MultiGroupEPO` now keeps a direction only if S_k^2 > 9 x the expected sampling energy of the mean differences
+  (`sum var_g/n_g + var_ref/n_ref`). A factor of 4 (2 SE) flagged a same-population group ~1 in 20 when its spread
+  lies along one direction (the analyte), so 9 (3 SE).
+- **`interference.EPO` padded its basis with null-space vectors** when the library rank < n_components (it computed
+  `S_truncated` and never used it). Harmless-looking with the old centred library; with an uncentred rank-1 library it
+  projected out arbitrary directions. Now capped at the library rank with a warning; tests that asked for 2-3
+  components from the rank-1 fixture library now use a random library.
+- **numpy 2.5 `np.linalg.pinv` default cutoff kept the ~1e-14 singular value left by mean-centring** (trace of
+  `X X^+` was 79.05 for rank 79) and broke `T = X W` in DOSC at the 1e-4 level. Pass
+  `rcond=max(shape)*eps` explicitly.
+- **OSC/DOSC replaced** (Fearn 2000 / Westerhuis et al. 2001): removed scores satisfy t'y = 0 to ~1e-15; weights and
+  loadings are stored and replayed; output is `X - T P'` on the original scale. Old OSC removed the first PLS loading
+  (corr(t,y) 0.98 on the bench); old DOSC's replayed scores correlated 0.2 with y.
+- **Corrected EPO spectra are projections, not "decontaminated" spectra.** A clean spectrum also loses its own
+  projection on the contaminant direction (baseline overlap), so its level drops a few percent. Tests assert
+  `X @ P` and "not centred", not "clean spectra unchanged".
+- **GUI:** `self.X_train` / `self.wavelengths` are never assigned anywhere, so the Interference Application page's
+  "Load from Import Tab" always said "no data". It now reads `self.X` / `self.y` (aligned by sample label). The same
+  dead attributes are still read by the Diagnostics sub-tab (GUI ~57351, ~61000, ~61050); not fixed here.
+- Repo line endings are mixed: the GUI and the test files are stored CRLF, `src/` modules LF. Python rewrites with
+  default newline handling turned the whole GUI diff into 124k lines; write CRLF files back with `newline=''`.

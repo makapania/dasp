@@ -67,7 +67,6 @@ Pipeline integration:
 
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.cross_decomposition import PLSRegression
 from sklearn.utils.validation import check_array, check_is_fitted
 import warnings
 
@@ -353,79 +352,85 @@ class MSC(BaseEstimator, TransformerMixin):
         return X_corrected
 
 
+def _as_2d_target(y) -> np.ndarray:
+    y = check_array(y, accept_sparse=False, dtype=np.float64, ensure_2d=False)
+    return y.reshape(-1, 1) if y.ndim == 1 else y
+
+
 class OSC(BaseEstimator, TransformerMixin):
     """
-    Orthogonal Signal Correction (OSC).
+    Orthogonal Signal Correction (OSC), Fearn (2000) formulation.
 
-    Removes systematic variation in X (spectra) that is orthogonal to y (target variable).
-    Particularly effective for removing moisture and temperature effects that don't
-    correlate with the analyte of interest.
+    Removes the largest systematic variation in X (spectra) whose scores are
+    orthogonal to y. Each component k is found as follows (X and y mean-centred,
+    X already deflated by components 1..k-1):
 
-    Algorithm:
-    1. Build PLS model between X and y
-    2. Extract orthogonal components (variation in X not correlated with y)
-    3. Remove these components from X
-    4. Iterate until convergence or max components reached
+    1. Project the weight space away from the y-covariance directions:
+       ``Z = X (I - Q Q^T)``, where Q is an orthonormal basis of ``X^T y``.
+    2. The weight ``w`` is the first right singular vector of Z (the
+       largest-variance direction among those with ``(X w)^T y = 0``).
+    3. Score ``t = X w`` (so ``t^T y = 0`` exactly), loading
+       ``p = X^T t / (t^T t)``, and deflate ``X <- X - t p^T``.
+
+    The weights W and loadings P are stored and replayed on new spectra in
+    ``transform``, which needs no y.
 
     Parameters
     ----------
     n_components : int, default=1
-        Number of orthogonal components to remove (typically 1-3 is sufficient)
+        Number of y-orthogonal components to remove (typically 1-3).
 
-    tol : float, default=1e-6
-        Convergence tolerance for OSC algorithm
-
-    max_iter : int, default=100
-        Maximum iterations for OSC algorithm
+    tol : float, default=1e-10
+        Relative singular-value threshold below which no further component is
+        extracted (nothing systematic is left that is orthogonal to y).
 
     Attributes
     ----------
-    P_osc_ : array, shape (n_wavelengths, n_components)
-        OSC projection matrix for removing orthogonal variation
+    weights_ : ndarray, shape (n_wavelengths, n_components_)
+        Weight vectors w; scores of new data are ``(X - X_mean_) @ w``.
 
-    n_features_in_ : int
-        Number of wavelengths
+    loadings_ : ndarray, shape (n_wavelengths, n_components_)
+        Loading vectors p used to deflate.
 
-    variance_removed_ : array, shape (n_components,)
-        Variance explained by each OSC component
+    P_osc_ : ndarray, shape (n_wavelengths, n_components_)
+        Alias of ``weights_`` (kept for existing callers).
 
-    Examples
-    --------
-    >>> from spectral_predict.interference import OSC
-    >>> # Remove 1 component of Y-orthogonal variation (e.g., moisture)
-    >>> osc = OSC(n_components=1)
-    >>> X_train_corrected = osc.fit_transform(X_train, y_train)
-    >>> X_test_corrected = osc.transform(X_test)
-    >>>
-    >>> # Remove multiple components
-    >>> osc = OSC(n_components=3)
-    >>> X_corrected = osc.fit_transform(X, y)
-    >>> print(f"Variance removed by each component: {osc.variance_removed_}")
+    n_components_ : int
+        Number of components actually removed.
+
+    variance_removed_ : ndarray, shape (n_components_,)
+        Share of the total (centred) X sum of squares removed by each component.
+
+    X_mean_ : ndarray, shape (n_wavelengths,)
+        Training mean used to centre new data before computing scores.
 
     References
     ----------
-    Wold et al. (1998). "Orthogonal signal correction of near-infrared spectra."
-    Chemometrics and Intelligent Laboratory Systems, 44(1-2), 175-185.
+    Fearn, T. (2000). On orthogonal signal correction. Chemometrics and
+    Intelligent Laboratory Systems 50(1):47-52.
+    Wold, S., Antti, H., Lindgren, F. & Ohman, J. (1998). Orthogonal signal
+    correction of near-infrared spectra. Chemometrics and Intelligent
+    Laboratory Systems 44(1-2):175-185.
 
     Notes
     -----
-    OSC must be fitted with y (target variable) to determine which variation is
-    orthogonal. The same transformation is then applied to test data (without y).
-    This is safe for cross-validation as long as OSC is fitted only on training folds.
+    OSC must be fitted with y. Fit it on training data only; within
+    cross-validation it belongs inside the fold.
 
-    **Important:** OSC returns mean-centered data (using training set mean). This is
-    correct behavior and necessary for the algorithm. If you need the original scale,
-    add the training mean back after OSC transformation.
+    The output is on the original spectral scale: ``X - T P^T`` with the scores T
+    computed from mean-centred X. The training mean is not subtracted.
+
+    The previous implementation removed the first PLS loading, i.e. the
+    y-PREDICTIVE direction (finding R025).
     """
 
-    def __init__(self, n_components=1, tol=1e-6, max_iter=100):
+    def __init__(self, n_components=1, tol=1e-10):
         self.n_components = n_components
         self.tol = tol
-        self.max_iter = max_iter
 
     def fit(self, X, y):
         """
-        Compute OSC transformation from training data.
+        Compute OSC weights and loadings from training data.
 
         Parameters
         ----------
@@ -440,92 +445,88 @@ class OSC(BaseEstimator, TransformerMixin):
             Fitted transformer
         """
         X = check_array(X, accept_sparse=False, dtype=np.float64)
-        y = check_array(y, accept_sparse=False, dtype=np.float64, ensure_2d=False)
-
-        if y.ndim == 1:
-            y = y.reshape(-1, 1)
+        y = _as_2d_target(y)
 
         if X.shape[0] != y.shape[0]:
-            raise ValueError(f"X and y must have same number of samples. Got X: {X.shape[0]}, y: {y.shape[0]}")
+            raise ValueError(
+                f"X and y must have same number of samples. Got X: {X.shape[0]}, y: {y.shape[0]}"
+            )
 
         self.n_features_in_ = X.shape[1]
         n_samples = X.shape[0]
 
-        # Validate n_components
-        if self.n_components > min(n_samples - 1, self.n_features_in_):
+        max_components = max(0, min(n_samples - 1, self.n_features_in_))
+        if self.n_components > max_components:
             warnings.warn(
                 f"n_components={self.n_components} is greater than the maximum possible "
-                f"({min(n_samples - 1, self.n_features_in_)}). Using maximum instead.",
-                UserWarning
+                f"({max_components}). Using maximum instead.",
+                UserWarning,
             )
-            effective_components = min(self.n_components, n_samples - 1, self.n_features_in_)
-        else:
-            effective_components = self.n_components
+        n_wanted = max(0, min(int(self.n_components), max_components))
 
-        # Center data (store means for transform)
         self.X_mean_ = np.mean(X, axis=0)
         self.y_mean_ = np.mean(y, axis=0)
-        X_centered = X - self.X_mean_
-        y_centered = y - self.y_mean_
+        Xd = X - self.X_mean_
+        yc = y - self.y_mean_
 
-        # Storage for OSC components
-        P_osc_list = []
-        variance_removed = []
+        total_ss = float(np.sum(Xd**2))
+        scale = np.sqrt(total_ss) if total_ss > 0 else 1.0
 
-        X_osc = X_centered.copy()
+        weights: list[np.ndarray] = []
+        loadings: list[np.ndarray] = []
+        variance_removed: list[float] = []
 
-        for comp in range(effective_components):
-            # 1. Build PLS model to find Y-relevant subspace
-            pls = PLSRegression(n_components=min(5, n_samples - 1, X_osc.shape[1]))
-            pls.fit(X_osc, y_centered)
-
-            # 2. Project X onto Y-relevant subspace
-            # X_scores = X @ pls.x_weights_
-            # X_y_relevant = X_scores @ pls.x_loadings_.T
-
-            # 3. Compute orthogonal component (X - X_y_relevant)
-            # For OSC, we use the first PLS component as proxy for Y-direction
-            # and compute orthogonal subspace
-
-            # Get first PLS score and loading
-            t = pls.x_scores_[:, 0:1]  # First score vector
-            p = pls.x_loadings_[:, 0:1]  # First loading vector
-
-            # Orthogonalize: remove component in direction of p
-            # This is the Y-orthogonal variation we want to remove
-            w_ortho = p / np.linalg.norm(p)  # Normalize
-
-            # Check convergence (if loading magnitude is very small, stop)
-            if np.linalg.norm(w_ortho) < self.tol:
+        cov = Xd.T @ yc  # (n_features, n_targets); unchanged by OSC deflation
+        U_c, s_c, _ = np.linalg.svd(cov, full_matrices=False)
+        if s_c.size == 0 or s_c[0] <= 1e-12 * scale * max(1.0, float(np.linalg.norm(yc))):
+            if n_wanted > 0:
                 warnings.warn(
-                    f"OSC converged early at component {comp + 1} (loading magnitude < tol)",
-                    UserWarning
+                    "y has no covariance with X (constant y or y orthogonal to X); "
+                    "OSC cannot tell y-related from y-orthogonal variation and removes "
+                    "nothing.",
+                    UserWarning,
                 )
-                break
-
-            P_osc_list.append(w_ortho.ravel())
-
-            # Compute variance explained by this component
-            t_ortho = X_osc @ w_ortho
-            var_explained = np.sum(t_ortho ** 2) / np.sum(X_osc ** 2)
-            variance_removed.append(var_explained)
-
-            # Remove this orthogonal component from X
-            X_osc = X_osc - t_ortho @ w_ortho.T
-
-        if len(P_osc_list) == 0:
-            warnings.warn("No OSC components extracted. Returning identity transformation.", UserWarning)
-            self.P_osc_ = np.zeros((self.n_features_in_, 0))
+            n_wanted = 0
         else:
-            self.P_osc_ = np.column_stack(P_osc_list)
+            Q = U_c[:, s_c > 1e-12 * s_c[0]]
 
+        for _ in range(n_wanted):
+            Z = Xd - (Xd @ Q) @ Q.T
+            _, S, Vt = np.linalg.svd(Z, full_matrices=False)
+            if S.size == 0 or S[0] <= self.tol * scale:
+                break
+            w = Vt[0]
+            # Exact orthogonality to Q (guards against round-off in the SVD).
+            w = w - Q @ (Q.T @ w)
+            w /= np.linalg.norm(w)
+            t = Xd @ w
+            tt = float(t @ t)
+            if tt <= 0:
+                break
+            p = Xd.T @ t / tt
+            Xd = Xd - np.outer(t, p)
+            weights.append(w)
+            loadings.append(p)
+            variance_removed.append(tt * float(p @ p) / total_ss if total_ss > 0 else 0.0)
+
+        if len(weights) < n_wanted:
+            warnings.warn(
+                f"OSC found only {len(weights)} y-orthogonal component(s) above tol; "
+                f"{n_wanted} were requested.",
+                UserWarning,
+            )
+
+        n_feat = self.n_features_in_
+        self.weights_ = np.column_stack(weights) if weights else np.zeros((n_feat, 0))
+        self.loadings_ = np.column_stack(loadings) if loadings else np.zeros((n_feat, 0))
+        self.P_osc_ = self.weights_
+        self.n_components_ = self.weights_.shape[1]
         self.variance_removed_ = np.array(variance_removed)
-
         return self
 
     def transform(self, X):
         """
-        Apply OSC transformation to remove orthogonal variation.
+        Remove the fitted y-orthogonal components from spectra.
 
         Parameters
         ----------
@@ -535,9 +536,10 @@ class OSC(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_osc : array, shape (n_samples, n_wavelengths)
-            Transformed spectral data with orthogonal components removed
+            ``X - T P^T`` on the original scale, where the scores T are computed
+            from X centred with the training mean.
         """
-        check_is_fitted(self, ['P_osc_', 'n_features_in_'])
+        check_is_fitted(self, ["weights_", "loadings_", "n_features_in_"])
         X = check_array(X, accept_sparse=False, dtype=np.float64)
 
         if X.shape[1] != self.n_features_in_:
@@ -545,20 +547,11 @@ class OSC(BaseEstimator, TransformerMixin):
                 f"X has {X.shape[1]} features, but OSC was fitted with {self.n_features_in_} features"
             )
 
-        if self.P_osc_.shape[1] == 0:
-            # No components extracted, return unchanged
-            return X
-
-        # Center using training mean to prevent data leakage
-        X_centered = X - self.X_mean_
-
-        # Project onto orthogonal components and remove
-        for i in range(self.P_osc_.shape[1]):
-            w_ortho = self.P_osc_[:, i:i+1]
-            t_ortho = X_centered @ w_ortho
-            X_centered = X_centered - t_ortho @ w_ortho.T
-
-        return X_centered
+        Xd = X - self.X_mean_
+        for k in range(self.weights_.shape[1]):
+            t = Xd @ self.weights_[:, k]
+            Xd = Xd - np.outer(t, self.loadings_[:, k])
+        return Xd + self.X_mean_
 
 
 # Placeholder classes for EPO, GLSW, DOSC (to be implemented in Phase 2)
@@ -839,11 +832,12 @@ class EPO(BaseEstimator, TransformerMixin):
         WARNING: Start with 1-3 components and increase cautiously.
 
     center : bool, default=True
-        Whether to mean-center data before applying EPO.
-        - True: Center X using training mean, center interferents using interferent mean
-        - False: No centering (assumes data already centered)
-
-        Note: EPO returns mean-centered data (training mean subtracted).
+        Whether to subtract the training mean from X before projecting.
+        - True: transform returns ``(X - X_mean_) @ P_orth_`` (centred features,
+          suitable inside a modelling pipeline).
+        - False: transform returns ``X @ P_orth_``, a spectrum on the original
+          scale with the interferent removed.
+        The interferent library itself is never centred.
 
     svd_tol : float, default=1e-8
         Tolerance for SVD truncation. Singular values below this threshold
@@ -862,7 +856,7 @@ class EPO(BaseEstimator, TransformerMixin):
         Mean of training data (used for centering in transform).
 
     interferent_mean_ : ndarray, shape (n_features_in_,)
-        Mean of interferent library.
+        Mean of interferent library (informational; not subtracted).
 
     P_orth_ : ndarray, shape (n_features_in_, n_features_in_)
         Orthogonal projection matrix for removing interferent signal.
@@ -995,33 +989,32 @@ class EPO(BaseEstimator, TransformerMixin):
                 "Provide at least one interferent spectrum."
             )
 
-        # Store means for centering
+        # Store means. `center` only affects X in transform. The interferent
+        # library is NEVER centred: EPO (Roger et al. 2003) takes the SVD of the
+        # nuisance matrix itself, and centring a library whose rows share one
+        # interferent shape subtracts that shape and leaves only the row-to-row
+        # scatter to project out (finding R024).
         if self.center:
             self.X_mean_ = np.mean(X, axis=0)
-            self.interferent_mean_ = np.mean(X_interferents, axis=0)
-            X_interferents_centered = X_interferents - self.interferent_mean_
         else:
             self.X_mean_ = np.zeros(self.n_features_in_)
-            self.interferent_mean_ = np.zeros(self.n_features_in_)
-            X_interferents_centered = X_interferents.copy()
+        self.interferent_mean_ = np.mean(X_interferents, axis=0)
 
-        # ✅ CRITICAL FIX #3: Check for zero/low variance in interferents
-        interferent_std = np.std(X_interferents_centered, axis=0)
-
-        # Check if entire library is constant
-        if np.all(interferent_std < 1e-12):
+        # The library must carry some signal. A constant non-zero library is a
+        # valid interferent (a flat offset); an all-zero one is not.
+        interferent_absmax = np.max(np.abs(X_interferents), axis=0)
+        if np.all(interferent_absmax < 1e-12):
             raise ValueError(
-                "X_interferents has near-zero variance across all wavelengths. "
-                "Cannot build interferent subspace from constant spectra. "
-                "Provide interferent library with variation (e.g., different moisture levels)."
+                "X_interferents is (near) zero at every wavelength. "
+                "Cannot build interferent subspace from empty spectra."
             )
 
-        # Check if some wavelengths are constant (this is OK, but warn)
-        n_constant_wavelengths = np.sum(interferent_std < 1e-12)
+        # Wavelengths where every interferent spectrum is zero (this is OK, but warn)
+        n_constant_wavelengths = np.sum(interferent_absmax < 1e-12)
         if n_constant_wavelengths > 0:
             warnings.warn(
-                f"{n_constant_wavelengths}/{X_interferents.shape[1]} wavelengths have "
-                f"zero variance in interferent library. These wavelengths will not "
+                f"{n_constant_wavelengths}/{X_interferents.shape[1]} wavelengths are "
+                f"zero in every interferent spectrum. These wavelengths will not "
                 f"contribute to interferent subspace.",
                 UserWarning
             )
@@ -1062,16 +1055,25 @@ class EPO(BaseEstimator, TransformerMixin):
         # SVD: X_interferents = U @ S @ Vt
         # We want the first n_components_ right singular vectors (rows of Vt)
         try:
-            U, S, Vt = np.linalg.svd(X_interferents_centered, full_matrices=False)
+            U, S, Vt = np.linalg.svd(X_interferents, full_matrices=False)
         except np.linalg.LinAlgError:
             raise ValueError(
                 "SVD failed on interferent library. This may indicate numerical issues. "
                 "Check for NaN/Inf values or extreme outliers in X_interferents."
             )
 
-        # Truncate small singular values for numerical stability
-        S_truncated = S.copy()
-        S_truncated[S < self.svd_tol] = 0.0
+        # Keep only directions the library actually spans. Without this, a library
+        # of rank r < n_components contributed arbitrary null-space vectors, and
+        # projecting those out removed random (possibly analyte) directions.
+        cutoff = max(self.svd_tol, S[0] * max(X_interferents.shape) * np.finfo(np.float64).eps)
+        n_valid = int(np.sum(S > cutoff))
+        if n_valid < self.n_components_:
+            warnings.warn(
+                f"Interferent library spans only {n_valid} direction(s); "
+                f"using {n_valid} instead of {self.n_components_} components.",
+                UserWarning
+            )
+            self.n_components_ = n_valid
 
         # Get interferent principal components (first n_components_ columns of V)
         # Note: Vt is (n_components, n_features), we want V = Vt.T
@@ -1159,13 +1161,17 @@ class DOSC(BaseEstimator, TransformerMixin):
     """
     Direct Orthogonal Signal Correction (DOSC).
 
-    Simplified variant of OSC with direct computation of Y-orthogonal subspace.
-    DOSC removes systematic variation in X that is orthogonal to Y using a
-    direct PLS-based projection, avoiding the iterative deflation of standard OSC.
+    Non-iterative OSC (Westerhuis, de Jong & Smilde 2001). y is first replaced by
+    its least-squares projection Y_hat onto the column space of X; X is deflated
+    by Y_hat in sample space; the leading principal-component scores T of that
+    residual are the removed scores. T lies in the column space of X and is
+    orthogonal to Y_hat, so ``T^T y = 0``. Weights ``W = X^+ T`` replay the
+    scores on new spectra (``T_new = (X_new - X_mean_) W``), and loadings
+    ``P = X^T T (T^T T)^-1`` give ``X_corrected = X - T P^T``.
 
-    This method is more stable and computationally efficient than iterative OSC,
-    making it suitable for removing systematic noise (e.g., baseline drift,
-    temperature effects) that is not related to the target variable.
+    When there are more wavelengths than samples, ``X^+`` is the minimum-norm
+    pseudo-inverse and W can amplify noise on new spectra (a known property of
+    DOSC). Check held-out predictions before relying on it.
 
     Parameters
     ----------
@@ -1178,12 +1184,9 @@ class DOSC(BaseEstimator, TransformerMixin):
         Recommended to keep True for most applications.
 
     n_pls_components : int or 'auto', default='auto'
-        Number of PLS components to use for finding Y-predictive subspace.
-        - 'auto': Automatically determined as min(10, n_samples-1, n_features)
-        - int: Specific number of components (must be > 0)
-
-        More components = better Y-space approximation but slower and risk overfitting.
-        Fewer components = faster, more robust but may miss Y-patterns.
+        Ignored. The earlier implementation used a PLS model here, and its removed
+        scores were not orthogonal to y. The parameter is still validated and
+        accepted so saved settings and pipelines that pass it keep constructing.
 
     Attributes
     ----------
@@ -1200,11 +1203,17 @@ class DOSC(BaseEstimator, TransformerMixin):
     y_mean_ : ndarray, shape (n_targets,)
         Mean of y (stored for reference).
 
+    weights_ : ndarray, shape (n_features_in_, n_components_)
+        W, maps centred spectra to removed scores.
+
+    loadings_ : ndarray, shape (n_features_in_, n_components_)
+        P, the spectral shapes that are subtracted.
+
     P_orth_ : ndarray, shape (n_features_in_, n_features_in_)
-        Orthogonal projection matrix for removing Y-orthogonal variation.
+        Linear part of the correction, ``I - W P^T`` (not an orthogonal projector).
 
     dosc_components_ : ndarray, shape (n_features_in_, n_components_)
-        Y-orthogonal components extracted from X.
+        Unit-norm loading directions of the removed components.
 
     explained_variance_ : ndarray, shape (n_components_,)
         Variance in X explained by each Y-orthogonal component.
@@ -1328,59 +1337,77 @@ class DOSC(BaseEstimator, TransformerMixin):
         else:
             effective_components = self.n_components
 
-        self.n_components_ = effective_components
+        # DOSC, Westerhuis, de Jong & Smilde (2001):
+        # 1. Y_hat: least-squares projection of y onto the column space of X.
+        # 2. A_y = X deflated by Y_hat (sample space): (I - P_Yhat) X.
+        # 3. T = leading principal-component scores of A_y. T lies in col(X) and is
+        #    orthogonal to Y_hat, hence orthogonal to y itself (y - Y_hat is
+        #    orthogonal to col(X)).
+        # 4. Weights W = X^+ T, so new spectra give scores X_new W; loadings
+        #    P = X^T T (T^T T)^-1; X_corrected = X - T P^T.
+        # The previous implementation projected X onto principal directions of the
+        # PLS X-residual. Those directions do not give scores orthogonal to y.
+        coef, *_ = np.linalg.lstsq(X_centered, y_centered, rcond=None)
+        y_hat = X_centered @ coef
+        y_scale = max(1.0, float(np.abs(y_centered).max()))
+        if not np.any(np.abs(y_hat) > 1e-12 * y_scale):
+            warnings.warn(
+                "y has no projection on X (constant y or y orthogonal to X); DOSC "
+                "cannot tell y-related from y-orthogonal variation and removes nothing.",
+                UserWarning,
+            )
+            effective_components = 0
+        A_y = X_centered - y_hat @ (np.linalg.pinv(y_hat) @ X_centered)
 
-        # Compute Y-orthogonal subspace using PLS
-        # 1. Fit PLS to get Y-predictive directions
-        # Determine number of PLS components to use
-        if self.n_pls_components == 'auto':
-            n_pls_components = min(10, n_samples - 1, n_features)  # Use up to 10 PLS components
-        else:
-            # User-specified value, but cap at maximum possible
-            n_pls_components = min(self.n_pls_components, n_samples - 1, n_features)
-            if n_pls_components < self.n_pls_components:
-                warnings.warn(
-                    f"n_pls_components={self.n_pls_components} exceeds maximum possible "
-                    f"({min(n_samples - 1, n_features)}). Using {n_pls_components} instead.",
-                    UserWarning
-                )
-
-        pls = PLSRegression(n_components=n_pls_components)
-        pls.fit(X_centered, y_centered)
-
-        # 2. Get PLS X-loadings (P) and X-scores (T)
-        # X = T @ P.T + E_pls
-        # T = X @ W, where W are PLS weights
-        T_pls = pls.x_scores_  # Shape: (n_samples, n_pls_components)
-        P_pls = pls.x_loadings_  # Shape: (n_features, n_pls_components)
-
-        # 3. Compute residuals orthogonal to Y-predictive space
-        X_reconstructed_pls = T_pls @ P_pls.T
-        E_orth = X_centered - X_reconstructed_pls  # Y-orthogonal residuals
-
-        # 4. Extract principal components of Y-orthogonal residuals
         try:
-            U, S, Vt = np.linalg.svd(E_orth, full_matrices=False)
+            U, S, _ = np.linalg.svd(A_y, full_matrices=False)
         except np.linalg.LinAlgError:
             raise ValueError(
                 "SVD failed on Y-orthogonal residuals. Check for NaN/Inf in data."
             )
 
-        # 5. Take first n_components_ Y-orthogonal directions
-        V = Vt.T  # Shape: (n_features, min(n_samples, n_features))
-        self.dosc_components_ = V[:, :self.n_components_]
+        total_ss = float(np.sum(X_centered**2))
+        scale = np.sqrt(total_ss) if total_ss > 0 else 1.0
+        n_valid = int(np.sum(S > 1e-10 * scale))
+        if n_valid < effective_components:
+            warnings.warn(
+                f"Only {n_valid} y-orthogonal component(s) found; using {n_valid} "
+                f"instead of {effective_components}.",
+                UserWarning,
+            )
+            effective_components = n_valid
+        self.n_components_ = effective_components
 
-        # 6. Store explained variance
-        total_variance = np.sum(S ** 2)
-        if total_variance > 0:
-            self.explained_variance_ = (S[:self.n_components_] ** 2) / total_variance
+        T = U[:, :effective_components] * S[:effective_components]
+        if effective_components > 0:
+            # Explicit cutoff: centring leaves one ~1e-14 singular value, and the
+            # library default keeps and inverts it, which breaks T = X W (and with
+            # it the orthogonality of the replayed scores to y) at the 1e-4 level.
+            rcond = max(X_centered.shape) * np.finfo(np.float64).eps
+            W = np.linalg.pinv(X_centered, rcond=rcond) @ T
+            T = X_centered @ W  # identical up to round-off; keeps fit == transform
+            P = X_centered.T @ T @ np.linalg.inv(T.T @ T)
         else:
-            self.explained_variance_ = np.zeros(self.n_components_)
+            W = np.zeros((n_features, 0))
+            P = np.zeros((n_features, 0))
 
-        # 7. Build orthogonal projection matrix
-        # P_orth = I - V_dosc @ V_dosc.T
-        V_dosc = self.dosc_components_
-        self.P_orth_ = np.eye(n_features) - V_dosc @ V_dosc.T
+        self.weights_ = W
+        self.loadings_ = P
+        # Unit-norm loading directions, for inspection and influence plots.
+        norms = np.linalg.norm(P, axis=0)
+        norms[norms == 0] = 1.0
+        self.dosc_components_ = P / norms
+
+        # Share of the X sum of squares removed by each component.
+        if total_ss > 0 and effective_components > 0:
+            self.explained_variance_ = (
+                np.sum(T**2, axis=0) * np.sum(P**2, axis=0) / total_ss
+            )
+        else:
+            self.explained_variance_ = np.zeros(effective_components)
+
+        # Linear part of the correction: x_corrected = x - (x - mean) W P^T.
+        self.P_orth_ = np.eye(n_features) - W @ P.T
 
         return self
 
@@ -1396,11 +1423,10 @@ class DOSC(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_corrected : ndarray, shape (n_samples, n_features)
-            Mean-centered data with Y-orthogonal variation removed
-
-            Note: Data is mean-centered using training mean (X_mean_).
+            ``X - T P^T`` on the original scale, with scores
+            ``T = (X - X_mean_) W``. The training mean is not subtracted.
         """
-        check_is_fitted(self, ['P_orth_', 'X_mean_'])
+        check_is_fitted(self, ['weights_', 'loadings_', 'X_mean_'])
 
         # Validate X
         X = check_array(X, accept_sparse=False, dtype=np.float64)
@@ -1412,13 +1438,8 @@ class DOSC(BaseEstimator, TransformerMixin):
                 f"{self.n_features_in_} features."
             )
 
-        # Center using TRAINING mean (prevent data leakage)
-        X_centered = X - self.X_mean_
-
-        # Apply orthogonal projection
-        X_corrected = X_centered @ self.P_orth_
-
-        return X_corrected
+        T = (X - self.X_mean_) @ self.weights_
+        return X - T @ self.loadings_.T
 
     def get_dosc_components(self):
         """

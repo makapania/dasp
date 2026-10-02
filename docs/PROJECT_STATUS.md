@@ -27,6 +27,11 @@ Wave 2 stops the app misleading:
    interference controls.
 6. **QW3:** contaminant maths. EPO `pca_diff` removes noise (R024), OSC removes the predictive direction (R025), the
    Interference tab crashes (R075), plus R113/R114. Add behavioural tests.
+   **Done on branch `fix/contaminant-maths` (2026-10-02, not pushed; awaiting review):** uncentred EPO + mean_diff
+   default, MultiGroupEPO noise-floor rank rule, Fearn OSC / Westerhuis DOSC, OPLS-DA filter out of Apply Correction,
+   Restore + working Export, all six Interference Application methods run, QW6 dead controls greyed out / use_msc
+   removed. Gotchas in SESSION_LOG 2026-10-02. Still open: corrections never reach CV/saved models (F3); the
+   Diagnostics sub-tab reads never-assigned self.X_train/self.wavelengths.
 7. **QW4 + QW5:** holdout direction (KS/SPXY must pick CALIBRATION; R085 starting pair), figures of merit; classification
    metrics R029/R030.
 8. **QW7:** DPI awareness and fonts (the cheapest visible upgrade).

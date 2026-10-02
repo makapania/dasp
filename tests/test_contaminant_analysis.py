@@ -219,124 +219,202 @@ class TestDifferenceAnalyzer:
 
 
 # ============================================================================
+# Behavioural fixtures for EPO (controlled, separable synthetic data)
+# ============================================================================
+#
+# Every threshold in the behavioural EPO tests below holds for THIS controlled
+# case only: Gaussian bands that barely overlap, a smooth baseline, small noise,
+# unpaired groups of 40. They are not general guarantees. An orthogonal
+# projection cannot keep analyte signal that shares a direction with the
+# contaminant, and with unpaired groups the group-mean difference also carries
+# any real chemical difference between the groups.
+
+N_WL = 200
+_GRID = np.arange(N_WL)
+
+
+def _band(centre: float, width: float = 6.0) -> np.ndarray:
+    return np.exp(-0.5 * ((_GRID - centre) / width) ** 2)
+
+
+ANALYTE = _band(60)
+CONTAM = _band(140)
+CONTAM_2 = _band(100)
+BASELINE = 0.5 + 0.2 * np.sin(_GRID / 40)
+
+
+def _unit(v: np.ndarray) -> np.ndarray:
+    return v / np.linalg.norm(v)
+
+
+def _spectra(rng, n: int, contaminants=()) -> np.ndarray:
+    """Baseline + analyte at a random level + noise + each (band, low, high) dose."""
+    X = BASELINE + np.outer(rng.uniform(0.5, 1.5, n), ANALYTE) + rng.normal(0, 0.002, (n, N_WL))
+    for band, low, high in contaminants:
+        X = X + np.outer(rng.uniform(low, high, n), band)
+    return X
+
+
+def _linear_part(transformer) -> np.ndarray:
+    """L such that transform(x) = x @ L + constant."""
+    offset = transformer.transform(np.zeros((1, N_WL)))
+    return transformer.transform(np.eye(N_WL)) - offset
+
+
+def _share_removed(transformer, direction: np.ndarray) -> float:
+    """Fraction of a unit band's energy that the correction removes."""
+    return 1.0 - float(np.linalg.norm(_unit(direction) @ _linear_part(transformer)) ** 2)
+
+
+def _share_kept(transformer, direction: np.ndarray) -> float:
+    return float(np.linalg.norm(_unit(direction) @ _linear_part(transformer)) ** 2)
+
+
+# ============================================================================
 # EstimatedEPO Tests
 # ============================================================================
 
 
 class TestEstimatedEPO:
-    """Tests for EstimatedEPO class."""
+    """EstimatedEPO: uncentred nuisance-difference EPO (Roger et al. 2003)."""
 
     def test_initialization(self):
-        """Test EstimatedEPO initialization."""
         epo = EstimatedEPO(n_components=2, estimation_method="pca_diff")
         assert epo.n_components == 2
         assert epo.estimation_method == "pca_diff"
 
+    def test_default_method_is_mean_diff(self):
+        assert EstimatedEPO().estimation_method == "mean_diff"
+
     def test_fit_groups_basic(self):
-        """Test basic fit_groups method."""
         X_clean = generate_clean_spectra()
         X_contam = generate_contaminated_spectra()
 
-        epo = EstimatedEPO(n_components=2)
+        epo = EstimatedEPO()
         epo.fit_groups(X_contam, X_clean)
 
-        assert hasattr(epo, "interferent_library_")
-        assert hasattr(epo, "P_orth_")
-        assert hasattr(epo, "interferent_components_")
+        assert epo.interferent_library_.shape == (1, X_clean.shape[1])
+        assert epo.P_orth_.shape == (X_clean.shape[1], X_clean.shape[1])
+        assert epo.n_components_ == 1
 
-    def test_fit_groups_estimation_methods(self):
-        """Test different estimation methods."""
-        X_clean = generate_clean_spectra()
-        X_contam = generate_contaminated_spectra()
+    def test_mean_diff_removes_contaminant_and_keeps_analyte(self):
+        rng = np.random.default_rng(1)
+        X_clean = _spectra(rng, 40)
+        X_contam = _spectra(rng, 40, [(CONTAM, 0.6, 1.4)])
 
-        for method in ["mean_diff", "pca_diff", "bootstrap"]:
-            epo = EstimatedEPO(n_components=2, estimation_method=method)
+        epo = EstimatedEPO().fit_groups(X_contam, X_clean)
+
+        # Controlled synthetic case only (see the fixture comment).
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
+
+    def test_default_corrects_group_difference(self):
+        """The previous default ('pca_diff' + library centring) left ~99% of it."""
+        rng = np.random.default_rng(2)
+        X_clean = _spectra(rng, 40)
+        X_contam = _spectra(rng, 40, [(CONTAM, 0.6, 1.4)])
+
+        epo = EstimatedEPO().fit_groups(X_contam, X_clean)
+        before = np.linalg.norm(X_contam.mean(0) - X_clean.mean(0))
+        after = np.linalg.norm(epo.transform(X_contam).mean(0) - epo.transform(X_clean).mean(0))
+
+        assert after < 0.05 * before
+
+    def test_transform_returns_spectra_on_original_scale(self):
+        rng = np.random.default_rng(3)
+        X_clean = _spectra(rng, 40)
+        X_contam = _spectra(rng, 40, [(CONTAM, 0.6, 1.4)])
+        epo = EstimatedEPO().fit_groups(X_contam, X_clean)
+
+        out = epo.transform(X_clean)
+        V = epo.interferent_components_
+
+        np.testing.assert_allclose(out, X_clean @ epo.P_orth_)
+        np.testing.assert_allclose(out, X_clean - (X_clean @ V) @ V.T, atol=1e-12)
+        # Not mean-centred: the corrected spectra keep their level (only the
+        # baseline's small overlap with the contaminant direction is removed).
+        assert out.mean() / X_clean.mean() > 0.9
+        # A spectrum orthogonal to the removed direction passes through unchanged.
+        ortho = ANALYTE - (ANALYTE @ V) @ V.T
+        np.testing.assert_allclose(epo.transform(ortho[None, :])[0], ortho, atol=1e-12)
+
+    def test_pca_diff_unpaired_falls_back_to_mean_diff(self):
+        rng = np.random.default_rng(4)
+        X_clean = _spectra(rng, 40)
+        X_contam = _spectra(rng, 30, [(CONTAM, 0.6, 1.4)])
+
+        epo = EstimatedEPO(n_components=2, estimation_method="pca_diff")
+        with pytest.warns(UserWarning, match="paired"):
             epo.fit_groups(X_contam, X_clean)
-            assert epo.interferent_library_ is not None
 
-    def test_transform(self):
-        """Test transform method."""
-        X_clean = generate_clean_spectra(n_samples=40)
-        X_contam = generate_contaminated_spectra(n_samples=30)
+        assert epo.estimation_method_used_ == "mean_diff"
+        assert epo.n_components_ == 1
 
-        epo = EstimatedEPO(n_components=2)
-        epo.fit_groups(X_contam, X_clean)
+    def test_pca_diff_paired_removes_two_contaminant_shapes(self):
+        """Paired spectra (same specimen with/without contaminant): the analyte
+        cancels inside each pair, and the SVD of the uncentred differences picks
+        up both contaminant shapes."""
+        rng = np.random.default_rng(5)
+        X_clean = _spectra(rng, 30)
+        X_contam = (
+            X_clean
+            + np.outer(rng.uniform(0.5, 1.5, 30), CONTAM)
+            + np.outer(rng.uniform(0.0, 1.0, 30), CONTAM_2)
+            + rng.normal(0, 0.002, (30, N_WL))
+        )
 
-        # Transform all data
-        X_all = np.vstack([X_contam, X_clean])
-        X_corrected = epo.transform(X_all)
+        epo = EstimatedEPO(n_components=2, estimation_method="pca_diff")
+        epo.fit_groups(X_contam, X_clean, paired=True)
 
-        assert X_corrected.shape == X_all.shape
-        assert isinstance(X_corrected, np.ndarray)
+        assert epo.n_components_ == 2
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_removed(epo, CONTAM_2) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
+
+    def test_pca_diff_paired_requires_matching_rows(self):
+        epo = EstimatedEPO(estimation_method="pca_diff")
+        with pytest.raises(ValueError, match="paired=True"):
+            epo.fit_groups(np.ones((5, 10)), np.ones((4, 10)), paired=True)
+
+    def test_bootstrap_method_removed(self):
+        """'bootstrap' projected out sampling jitter, i.e. the analyte."""
+        epo = EstimatedEPO(estimation_method="bootstrap")
+        with pytest.raises(ValueError, match="removed"):
+            epo.fit_groups(generate_contaminated_spectra(), generate_clean_spectra())
+
+    def test_zero_difference_removes_nothing(self):
+        X = generate_clean_spectra(seed=7)
+        epo = EstimatedEPO()
+        with pytest.warns(UserWarning, match="no significant signal"):
+            epo.fit_groups(X, X.copy())
+
+        assert epo.n_components_ == 0
+        np.testing.assert_allclose(epo.transform(X), X)
+
+    def test_explicit_library_is_not_centred(self):
+        """A library of one interferent shape at several levels: centring it
+        would leave only the level-to-level scatter (R024)."""
+        rng = np.random.default_rng(8)
+        X = _spectra(rng, 30, [(CONTAM, 0.0, 2.0)])
+        library = np.outer(np.linspace(0.5, 3.0, 6), CONTAM)
+
+        epo = EstimatedEPO(n_components=1).fit(X, X_interferents=library)
+
+        assert _share_removed(epo, CONTAM) > 0.999
+        assert _share_kept(epo, ANALYTE) > 0.90
 
     def test_get_wavelength_influence(self):
-        """Test get_wavelength_influence method."""
-        X_clean = generate_clean_spectra()
-        X_contam = generate_contaminated_spectra()
-
-        epo = EstimatedEPO(n_components=2)
-        epo.fit_groups(X_contam, X_clean)
-
+        rng = np.random.default_rng(9)
+        epo = EstimatedEPO().fit_groups(
+            _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]), _spectra(rng, 40)
+        )
         influence = epo.get_wavelength_influence()
-        assert influence.shape == (X_clean.shape[1],)
+        assert influence.shape == (N_WL,)
         assert np.all(influence >= 0)
-
-    def test_transform_reduces_contaminant_influence(self):
-        """Test that EPO actually reduces contaminant influence."""
-        n_wavelengths = 100
-        n_samples_clean = 40
-        n_samples_contam = 30
-        X_clean = generate_clean_spectra(
-            n_wavelengths=n_wavelengths, n_samples=n_samples_clean
-        )
-        X_contam = generate_contaminated_spectra(
-            n_wavelengths=n_wavelengths, n_samples=n_samples_contam, contaminant_strength=1.0
-        )
-
-        # Measure difference before EPO
-        diff_before = np.mean(X_contam, axis=0) - np.mean(X_clean, axis=0)
-        variance_before = np.var(diff_before)
-
-        # Apply EPO
-        epo = EstimatedEPO(n_components=2)
-        epo.fit_groups(X_contam, X_clean)
-        X_all = np.vstack([X_contam, X_clean])
-        X_corrected = epo.transform(X_all)
-
-        # Split back
-        X_contam_corrected = X_corrected[:n_samples_contam]
-        X_clean_corrected = X_corrected[n_samples_contam:]
-
-        # Measure difference after EPO
-        diff_after = np.mean(X_contam_corrected, axis=0) - np.mean(X_clean_corrected, axis=0)
-        variance_after = np.var(diff_after)
-
-        # EPO should reduce the variance of the difference (but may not always succeed)
-        # This is a probabilistic test, so we just check it doesn't increase dramatically
-        assert variance_after <= variance_before * 1.5
-
-    def test_bootstrap_method_with_random_state(self):
-        """Test bootstrap method produces reproducible results."""
-        X_clean = generate_clean_spectra()
-        X_contam = generate_contaminated_spectra()
-
-        epo1 = EstimatedEPO(
-            n_components=2, estimation_method="bootstrap", random_state=42, n_bootstrap=30
-        )
-        epo1.fit_groups(X_contam, X_clean)
-
-        epo2 = EstimatedEPO(
-            n_components=2, estimation_method="bootstrap", random_state=42, n_bootstrap=30
-        )
-        epo2.fit_groups(X_contam, X_clean)
-
-        # Should produce same results
-        np.testing.assert_array_almost_equal(
-            epo1.interferent_library_, epo2.interferent_library_
-        )
+        # Peaks at the contaminant band, not at the analyte band.
+        assert abs(int(np.argmax(influence)) - 140) <= 3
 
     def test_invalid_estimation_method_error(self):
-        """Test error with invalid estimation method."""
         X_clean = generate_clean_spectra()
         X_contam = generate_contaminated_spectra()
 
@@ -748,48 +826,125 @@ class TestMultiContaminantAnalyzer:
 
 
 class TestMultiGroupEPO:
-    """Tests for MultiGroupEPO class."""
+    """MultiGroupEPO: one uncentred mean-difference row per group.
+
+    Thresholds hold for the controlled separable synthetic data only (see the
+    fixture comment above TestEstimatedEPO).
+    """
 
     def test_initialization(self):
-        """Test MultiGroupEPO initialization."""
         epo = MultiGroupEPO(n_components_per_group=2)
         assert epo.n_components_per_group == 2
 
-    def test_fit_multiple_groups(self):
-        """Test fitting with multiple contaminant groups."""
-        n_wavelengths = 100
-        X_clean = generate_clean_spectra(n_wavelengths=n_wavelengths)
+    def test_equal_dose_shared_contaminant(self):
+        """Two groups with the same contaminant at the same dose. Centring the
+        library (old code) cancelled the shared shift and removed ~65%."""
+        rng = np.random.default_rng(11)
+        X_clean = _spectra(rng, 40)
+        groups = {
+            "g1": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+            "g2": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
 
-        X_contam_type1 = generate_contaminated_spectra(
-            n_wavelengths=n_wavelengths, contaminant_regions=[(20, 30)], seed=10
-        )
-        X_contam_type2 = generate_contaminated_spectra(
-            n_wavelengths=n_wavelengths, contaminant_regions=[(70, 80)], seed=20
-        )
+        assert epo.n_components_ == 1
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
 
-        contaminant_groups = {"type1": X_contam_type1, "type2": X_contam_type2}
+    def test_different_dose_shared_contaminant(self):
+        rng = np.random.default_rng(12)
+        X_clean = _spectra(rng, 40)
+        groups = {
+            "low": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+            "high": _spectra(rng, 40, [(CONTAM, 2.6, 3.4)]),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
 
-        epo = MultiGroupEPO(n_components_per_group=2)
-        epo.fit(X_clean, contaminant_groups)
+        assert epo.n_components_ == 1
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
 
-        assert hasattr(epo, "combined_interferent_library_")
-        assert hasattr(epo, "P_orth_")
+    def test_shared_plus_distinct_contaminants(self):
+        rng = np.random.default_rng(13)
+        X_clean = _spectra(rng, 40)
+        groups = {
+            "glyptal": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+            "glyptal+paraloid": _spectra(rng, 40, [(CONTAM, 0.6, 1.4), (CONTAM_2, 0.6, 1.4)]),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
 
-    def test_transform(self):
-        """Test transform method."""
-        n_wavelengths = 100
-        X_clean = generate_clean_spectra(n_wavelengths=n_wavelengths)
-        X_contam = generate_contaminated_spectra(n_wavelengths=n_wavelengths)
+        assert epo.n_components_ == 2
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_removed(epo, CONTAM_2) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
 
-        contaminant_groups = {"type1": X_contam}
+    def test_groups_from_same_population_remove_nothing(self):
+        """No contaminant: the mean differences are sampling noise only."""
+        rng = np.random.default_rng(14)
+        X_clean = _spectra(rng, 40)
+        groups = {"a": _spectra(rng, 40), "b": _spectra(rng, 40)}
+        epo = MultiGroupEPO()
+        with pytest.warns(UserWarning, match="sampling variation"):
+            epo.fit(X_clean, groups)
 
-        epo = MultiGroupEPO(n_components_per_group=2)
-        epo.fit(X_clean, contaminant_groups)
+        assert epo.n_components_ == 0
+        np.testing.assert_allclose(epo.transform(X_clean), X_clean)
 
-        X_all = np.vstack([X_clean, X_contam])
-        X_corrected = epo.transform(X_all)
+    def test_exact_zero_difference(self):
+        X = generate_clean_spectra(seed=15)
+        epo = MultiGroupEPO().fit(X, {"same": X.copy()})
+        assert epo.n_components_ == 0
+        np.testing.assert_allclose(epo.transform(X), X)
 
-        assert X_corrected.shape == X_all.shape
+    def test_n_total_components_overrides_noise_floor(self):
+        rng = np.random.default_rng(16)
+        X_clean = _spectra(rng, 40)
+        groups = {"a": _spectra(rng, 40), "b": _spectra(rng, 40)}
+        epo = MultiGroupEPO(n_total_components=1).fit(X_clean, groups)
+        assert epo.n_components_ == 1
+
+    def test_transform_returns_spectra_on_original_scale(self):
+        rng = np.random.default_rng(17)
+        X_clean = _spectra(rng, 40)
+        epo = MultiGroupEPO().fit(X_clean, {"g": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)])})
+
+        out = epo.transform(X_clean)
+        np.testing.assert_allclose(out, X_clean @ epo.P_orth_)
+        assert out.mean() / X_clean.mean() > 0.9
+
+    def test_combined_library_is_uncentred_mean_differences(self):
+        rng = np.random.default_rng(18)
+        X_clean = _spectra(rng, 20)
+        groups = {
+            "b": _spectra(rng, 20, [(CONTAM, 1, 1)]),
+            "a": _spectra(rng, 20, [(CONTAM_2, 1, 1)]),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
+
+        expected = np.vstack([
+            groups["a"].mean(0) - X_clean.mean(0),
+            groups["b"].mean(0) - X_clean.mean(0),
+        ])
+        np.testing.assert_allclose(epo.combined_interferent_library_, expected)
+
+
+class TestMultiContaminantAnalyzerTransform:
+    def test_joint_projection_removes_every_contaminant(self):
+        """Sequential per-contaminant projections re-introduce part of the first
+        direction when the directions are not orthogonal; the joint one does not."""
+        rng = np.random.default_rng(19)
+        X_clean = _spectra(rng, 40)
+        overlapping = _band(130, 10)  # overlaps CONTAM
+        groups = {
+            "a": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+            "b": _spectra(rng, 40, [(overlapping, 0.6, 1.4)]),
+        }
+        analyzer = MultiContaminantAnalyzer().fit(X_clean, groups)
+
+        assert _share_removed(analyzer, CONTAM) > 0.95
+        assert _share_removed(analyzer, overlapping) > 0.95
+        out = analyzer.transform(X_clean)
+        assert out.mean() / X_clean.mean() > 0.8  # spectra, not centred residuals
 
 
 class TestMultiContaminantGLSW:
@@ -1060,9 +1215,12 @@ class TestIntegration:
         analyzer_after.fit(X_contam_corrected, X_clean_corrected)
         diff_after = analyzer_after.get_difference_spectrum()
 
-        # Difference may be reduced or not (EPO doesn't guarantee reduction)
-        # Just verify the workflow completes without error
+        # The group-mean difference is the removed direction, so the raw mean
+        # difference is gone (up to round-off) for the data EPO was fitted on.
         assert diff_after.shape == diff_before.shape
+        raw_before = X_contam.mean(0) - X_clean.mean(0)
+        raw_after = X_contam_corrected.mean(0) - X_clean_corrected.mean(0)
+        assert np.linalg.norm(raw_after) < 1e-8 * np.linalg.norm(raw_before)
 
     def test_multi_contaminant_full_workflow(self):
         """Test workflow with multiple contaminant types."""
