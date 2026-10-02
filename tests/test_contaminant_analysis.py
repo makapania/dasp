@@ -7,6 +7,8 @@ Uses synthetic data with known contaminant signatures for verification.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from sklearn.exceptions import NotFittedError
@@ -928,7 +930,97 @@ class TestMultiGroupEPO:
         np.testing.assert_allclose(epo.combined_interferent_library_, expected)
 
 
+class TestMultiGroupEPOAutomaticCount:
+    """Review round 1 (items 6, 7): the automatic direction count."""
+
+    def test_zero_difference_group_does_not_hide_a_clear_contaminant(self):
+        """Codex: adding a small no-difference group suppressed a clear
+        contaminant under the summed 9x rule. Rows are now precision-weighted and
+        tested against a bootstrap of the residuals."""
+        rng = np.random.default_rng(31)
+        X_clean = _spectra(rng, 20)
+        groups = {
+            "glyptal": _spectra(rng, 20, [(CONTAM, 1.0, 1.0)]),
+            "blank": _spectra(rng, 2),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
+        assert epo.n_components_ == 1
+        # (The share removed/kept below also depends on the unpaired confound: the
+        # glyptal row carries that group's analyte sampling difference too.)
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_kept(epo, ANALYTE) > 0.90
+
+    def test_contaminant_in_one_of_four_groups_is_found(self):
+        rng = np.random.default_rng(32)
+        X_clean = _spectra(rng, 10)
+        groups = {f"g{i}": _spectra(rng, 10) for i in range(3)}
+        groups["treated"] = _spectra(rng, 10, [(CONTAM, 1.0, 1.0)])
+        epo = MultiGroupEPO().fit(X_clean, groups)
+        assert epo.n_components_ == 1
+        assert _share_removed(epo, CONTAM) > 0.95
+
+    def test_unequal_group_sizes(self):
+        rng = np.random.default_rng(33)
+        X_clean = _spectra(rng, 25)
+        groups = {
+            "small": _spectra(rng, 4, [(CONTAM, 0.6, 1.4)]),
+            "large": _spectra(rng, 40, [(CONTAM_2, 0.6, 1.4)]),
+        }
+        epo = MultiGroupEPO().fit(X_clean, groups)
+        assert epo.n_components_ == 2
+        assert _share_removed(epo, CONTAM) > 0.95
+        assert _share_removed(epo, CONTAM_2) > 0.95
+
+    def test_false_positive_rate_without_contaminant(self):
+        """Controlled synthetic case, alpha = 0.01: about 1% of runs on groups
+        from one population should remove anything. Allow up to 4/60."""
+        hits = 0
+        for seed in range(60):
+            rng = np.random.default_rng(1000 + seed)
+            X_clean = _spectra(rng, 8)
+            groups = {"a": _spectra(rng, 8), "b": _spectra(rng, 8)}
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                hits += MultiGroupEPO().fit(X_clean, groups).n_components_ > 0
+        assert hits <= 4
+
+    def test_singletons_do_not_imply_zero_uncertainty(self):
+        """Codex/GLM: one spectrum per group gave a zero noise floor, so noise
+        directions were removed and reported as success."""
+        X_clean = np.array([[1.0, 0.0, 1.0]])
+        groups = {"g": np.array([[1.1, 0.0, 1.0]])}
+        with pytest.raises(ValueError, match="at least 2 spectra"):
+            MultiGroupEPO().fit(X_clean, groups)
+        # An explicit count is still allowed.
+        epo = MultiGroupEPO(n_total_components=1).fit(X_clean, groups)
+        assert epo.n_components_ == 1
+
+    def test_same_data_same_result(self):
+        rng = np.random.default_rng(34)
+        X_clean = _spectra(rng, 10)
+        groups = {"g": _spectra(rng, 10, [(CONTAM, 0.3, 0.3)])}
+        a = MultiGroupEPO().fit(X_clean, groups)
+        b = MultiGroupEPO().fit(X_clean, groups)
+        assert a.p_values_ == b.p_values_
+        np.testing.assert_array_equal(a.P_orth_, b.P_orth_)
+
+
 class TestMultiContaminantAnalyzerTransform:
+    def test_joint_projection_shared_contaminant_preserves_analyte(self):
+        """Codex: two groups sharing ONE contaminant. The numerical rank of the
+        union of per-group directions is 2 (the second is the groups' analyte
+        sampling difference), and projecting it out erased the analyte."""
+        rng = np.random.default_rng(35)
+        X_clean = _spectra(rng, 40)
+        groups = {
+            "a": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+            "b": _spectra(rng, 40, [(CONTAM, 0.6, 1.4)]),
+        }
+        analyzer = MultiContaminantAnalyzer().fit(X_clean, groups)
+        assert analyzer.joint_epo_.n_components_ == 1
+        assert _share_removed(analyzer, CONTAM) > 0.95
+        assert _share_kept(analyzer, ANALYTE) > 0.90
+
     def test_joint_projection_removes_every_contaminant(self):
         """Sequential per-contaminant projections re-introduce part of the first
         direction when the directions are not orthogonal; the joint one does not."""
@@ -1251,3 +1343,69 @@ class TestIntegration:
         X_corrected = epo.transform(X_all)
 
         assert X_corrected.shape == X_all.shape
+
+
+# ---------------------------------------------------------------------------
+# Old -> new pickles (review round 1): objects fitted by dasp before 2026-10
+# ---------------------------------------------------------------------------
+
+
+def _legacy(cls, state):
+    """An object as pickle restores it: the new class with the old __dict__."""
+    import pickle
+
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+    return pickle.loads(pickle.dumps(obj))
+
+
+class TestLegacyPickles:
+    def setup_method(self):
+        rng = np.random.RandomState(5)
+        self.X = rng.randn(20, 10) + 1.0
+        self.X_new = rng.randn(3, 10) + 1.0
+        v = rng.randn(10)
+        v /= np.linalg.norm(v)
+        self.V = v[:, None]
+        self.P = np.eye(10) - np.outer(v, v)
+        self.mean = self.X.mean(axis=0)
+
+    def _old_state(self, **extra):
+        state = {"n_features_in_": 10, "X_mean_": self.mean, "P_orth_": self.P,
+                 "interferent_components_": self.V, "explained_variance_": np.ones(1),
+                 "n_components_": 1}
+        state.update(extra)
+        return state
+
+    def test_legacy_epo_prediction_parity(self):
+        """Old EstimatedEPO/MultiGroupEPO returned (X - X_mean_) @ P. A saved
+        downstream model was trained on that, so it is replayed exactly."""
+        epo = _legacy(EstimatedEPO, self._old_state(
+            n_components=2, estimation_method="pca_diff", n_bootstrap=50, center=True,
+            svd_tol=1e-8, random_state=None, interferent_library_=np.ones((3, 10))))
+        with pytest.warns(UserWarning, match="older dasp"):
+            np.testing.assert_allclose(epo.transform(self.X_new), (self.X_new - self.mean) @ self.P)
+
+        mg = _legacy(MultiGroupEPO, self._old_state(
+            n_components_per_group=2, n_total_components=None, center=True, svd_tol=1e-8,
+            group_labels_=["a"], combined_interferent_library_=np.ones((5, 10))))
+        with pytest.warns(UserWarning, match="older dasp"):
+            np.testing.assert_allclose(mg.transform(self.X_new), (self.X_new - self.mean) @ self.P)
+
+    def test_refit_legacy_epo(self):
+        epo = _legacy(EstimatedEPO, self._old_state(
+            n_components=1, estimation_method="mean_diff", n_bootstrap=50, center=True,
+            svd_tol=1e-8, random_state=None))
+        epo.fit_groups(self.X[:10] + 0.5, self.X[10:])
+        assert epo.fit_version_ >= 2
+        np.testing.assert_allclose(epo.transform(self.X_new), self.X_new @ epo.P_orth_)
+
+    def test_legacy_multi_contaminant_analyzer_replays_sequential_projection(self):
+        P2 = np.eye(10) - np.outer(np.eye(10)[0], np.eye(10)[0])
+        e1 = _legacy(EstimatedEPO, self._old_state())
+        e2 = _legacy(EstimatedEPO, self._old_state(P_orth_=P2))
+        mca = _legacy(MultiContaminantAnalyzer, {
+            "n_epo_components": 2, "estimation_method": "pca_diff", "aggregation": "max",
+            "random_state": 42, "n_features_in_": 10, "contaminant_labels_": ["a", "b"],
+            "epo_transformers_": {"a": e1, "b": e2}, "X_uncontaminated_": self.X})
+        np.testing.assert_allclose(mca.transform(self.X_new), self.X_new @ self.P @ P2)

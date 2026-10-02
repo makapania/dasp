@@ -357,6 +357,22 @@ def _as_2d_target(y) -> np.ndarray:
     return y.reshape(-1, 1) if y.ndim == 1 else y
 
 
+# Fitted-state versions. OSC/DOSC objects pickled before 2026-10 (e.g. inside a
+# saved preprocessing pipeline) have no ``fit_version_``; their transform replays
+# the old output exactly so the saved downstream model still gets its inputs.
+_OSC_FIT_VERSION = 2
+_DOSC_FIT_VERSION = 2
+
+
+def _warn_legacy(name):
+    warnings.warn(
+        f"{name} was fitted by an older dasp whose removed scores were not orthogonal "
+        "to y. Replaying its original output so a saved model's predictions are "
+        "unchanged. Refit the preprocessing to use the corrected method.",
+        UserWarning,
+    )
+
+
 class OSC(BaseEstimator, TransformerMixin):
     """
     Orthogonal Signal Correction (OSC), Fearn (2000) formulation.
@@ -522,6 +538,7 @@ class OSC(BaseEstimator, TransformerMixin):
         self.P_osc_ = self.weights_
         self.n_components_ = self.weights_.shape[1]
         self.variance_removed_ = np.array(variance_removed)
+        self.fit_version_ = _OSC_FIT_VERSION
         return self
 
     def transform(self, X):
@@ -539,6 +556,8 @@ class OSC(BaseEstimator, TransformerMixin):
             ``X - T P^T`` on the original scale, where the scores T are computed
             from X centred with the training mean.
         """
+        if not hasattr(self, "fit_version_") and hasattr(self, "P_osc_"):
+            return self._legacy_transform(X)
         check_is_fitted(self, ["weights_", "loadings_", "n_features_in_"])
         X = check_array(X, accept_sparse=False, dtype=np.float64)
 
@@ -552,6 +571,27 @@ class OSC(BaseEstimator, TransformerMixin):
             t = Xd @ self.weights_[:, k]
             Xd = Xd - np.outer(t, self.loadings_[:, k])
         return Xd + self.X_mean_
+
+    def _legacy_transform(self, X):
+        """Replay an OSC pickled by dasp before 2026-10 (exact old output).
+
+        That version removed the first PLS loading (the y-PREDICTIVE direction,
+        finding R025) and returned centred data. A model saved downstream of it was
+        trained on exactly that output, so it is reproduced for prediction parity.
+        """
+        _warn_legacy("OSC")
+        X = check_array(X, accept_sparse=False, dtype=np.float64)
+        if X.shape[1] != self.n_features_in_:
+            raise ValueError(
+                f"X has {X.shape[1]} features, but OSC was fitted with {self.n_features_in_} features"
+            )
+        if self.P_osc_.shape[1] == 0:
+            return X
+        X_centered = X - self.X_mean_
+        for i in range(self.P_osc_.shape[1]):
+            w_ortho = self.P_osc_[:, i:i + 1]
+            X_centered = X_centered - (X_centered @ w_ortho) @ w_ortho.T
+        return X_centered
 
 
 # Placeholder classes for EPO, GLSW, DOSC (to be implemented in Phase 2)
@@ -837,7 +877,22 @@ class EPO(BaseEstimator, TransformerMixin):
           suitable inside a modelling pipeline).
         - False: transform returns ``X @ P_orth_``, a spectrum on the original
           scale with the interferent removed.
-        The interferent library itself is never centred.
+
+    library_type : {'samples', 'differences'}, default='samples'
+        What the rows of ``X_interferents`` are. EPO removes the subspace of the
+        nuisance-difference matrix D (Roger et al. 2003), so D is built
+        accordingly:
+        - 'samples': whole spectra of the same material(s) measured at different
+          interferent levels (e.g. one sample at several moisture contents). The
+          rows also contain the analyte, so D is the rows minus their mean
+          spectrum: the mean is the reference condition, and only the variation
+          between rows (the interferent) is removed. A constant shift shared by
+          every row cannot be told apart from the analyte and is kept.
+        - 'differences': pure interferent spectra, or difference spectra
+          (spectrum at a condition minus the same specimen at the reference
+          condition). These contain no analyte, so D is the rows themselves,
+          uncentred; centring them would cancel an interferent that every row
+          shares (finding R024).
 
     svd_tol : float, default=1e-8
         Tolerance for SVD truncation. Singular values below this threshold
@@ -901,10 +956,11 @@ class EPO(BaseEstimator, TransformerMixin):
     Chemometrics and Intelligent Laboratory Systems, 66(2), 191-204.
     """
 
-    def __init__(self, n_components=2, center=True, svd_tol=1e-8):
+    def __init__(self, n_components=2, center=True, svd_tol=1e-8, library_type='samples'):
         self.n_components = n_components
         self.center = center
         self.svd_tol = svd_tol
+        self.library_type = library_type
 
     def fit(self, X, y=None, X_interferents=None):
         """
@@ -923,7 +979,8 @@ class EPO(BaseEstimator, TransformerMixin):
             REQUIRED - EPO cannot function without this.
 
             Example: If measuring plant nitrogen but moisture interferes, provide
-            spectra of samples with varying moisture content.
+            spectra of samples with varying moisture content (library_type='samples'),
+            or moisture difference spectra (library_type='differences').
 
         Returns
         -------
@@ -962,6 +1019,11 @@ class EPO(BaseEstimator, TransformerMixin):
                 f"svd_tol must be non-negative, got {self.svd_tol}"
             )
 
+        if self.library_type not in ('samples', 'differences'):
+            raise ValueError(
+                f"library_type must be 'samples' or 'differences', got {self.library_type!r}"
+            )
+
         # ✅ CRITICAL FIX #1: Validate X_interferents is provided
         if X_interferents is None:
             raise ValueError(
@@ -989,33 +1051,45 @@ class EPO(BaseEstimator, TransformerMixin):
                 "Provide at least one interferent spectrum."
             )
 
-        # Store means. `center` only affects X in transform. The interferent
-        # library is NEVER centred: EPO (Roger et al. 2003) takes the SVD of the
-        # nuisance matrix itself, and centring a library whose rows share one
-        # interferent shape subtracts that shape and leaves only the row-to-row
-        # scatter to project out (finding R024).
+        # `center` only affects X in transform. The nuisance matrix D depends on
+        # what the library rows are (see library_type).
         if self.center:
             self.X_mean_ = np.mean(X, axis=0)
         else:
             self.X_mean_ = np.zeros(self.n_features_in_)
         self.interferent_mean_ = np.mean(X_interferents, axis=0)
 
-        # The library must carry some signal. A constant non-zero library is a
-        # valid interferent (a flat offset); an all-zero one is not.
-        interferent_absmax = np.max(np.abs(X_interferents), axis=0)
-        if np.all(interferent_absmax < 1e-12):
-            raise ValueError(
-                "X_interferents is (near) zero at every wavelength. "
-                "Cannot build interferent subspace from empty spectra."
-            )
+        if self.library_type == 'samples':
+            # Whole spectra (analyte + interferent): differences from the library
+            # mean isolate the interferent variation. Using the rows uncentred
+            # would remove the shared analyte spectrum instead.
+            nuisance = X_interferents - self.interferent_mean_
+            per_wavelength = np.std(nuisance, axis=0)
+            if np.all(per_wavelength < 1e-12):
+                raise ValueError(
+                    "X_interferents has near-zero variance across all wavelengths, so a "
+                    "library of whole sample spectra holds no interferent variation. If "
+                    "the rows are pure interferent or difference spectra, use "
+                    "library_type='differences'."
+                )
+            n_flat = int(np.sum(per_wavelength < 1e-12))
+            flat_msg = "have zero variance in the interferent library"
+        else:
+            # Pure interferent or difference spectra: used as they are, uncentred.
+            nuisance = X_interferents
+            per_wavelength = np.max(np.abs(X_interferents), axis=0)
+            if np.all(per_wavelength < 1e-12):
+                raise ValueError(
+                    "X_interferents is (near) zero at every wavelength. "
+                    "Cannot build interferent subspace from empty spectra."
+                )
+            n_flat = int(np.sum(per_wavelength < 1e-12))
+            flat_msg = "are zero in every interferent spectrum"
 
-        # Wavelengths where every interferent spectrum is zero (this is OK, but warn)
-        n_constant_wavelengths = np.sum(interferent_absmax < 1e-12)
-        if n_constant_wavelengths > 0:
+        if n_flat > 0:
             warnings.warn(
-                f"{n_constant_wavelengths}/{X_interferents.shape[1]} wavelengths are "
-                f"zero in every interferent spectrum. These wavelengths will not "
-                f"contribute to interferent subspace.",
+                f"{n_flat}/{X_interferents.shape[1]} wavelengths {flat_msg}. These "
+                f"wavelengths will not contribute to interferent subspace.",
                 UserWarning
             )
 
@@ -1055,7 +1129,7 @@ class EPO(BaseEstimator, TransformerMixin):
         # SVD: X_interferents = U @ S @ Vt
         # We want the first n_components_ right singular vectors (rows of Vt)
         try:
-            U, S, Vt = np.linalg.svd(X_interferents, full_matrices=False)
+            U, S, Vt = np.linalg.svd(nuisance, full_matrices=False)
         except np.linalg.LinAlgError:
             raise ValueError(
                 "SVD failed on interferent library. This may indicate numerical issues. "
@@ -1065,7 +1139,7 @@ class EPO(BaseEstimator, TransformerMixin):
         # Keep only directions the library actually spans. Without this, a library
         # of rank r < n_components contributed arbitrary null-space vectors, and
         # projecting those out removed random (possibly analyte) directions.
-        cutoff = max(self.svd_tol, S[0] * max(X_interferents.shape) * np.finfo(np.float64).eps)
+        cutoff = max(self.svd_tol, S[0] * max(nuisance.shape) * np.finfo(np.float64).eps)
         n_valid = int(np.sum(S > cutoff))
         if n_valid < self.n_components_:
             warnings.warn(
@@ -1107,10 +1181,10 @@ class EPO(BaseEstimator, TransformerMixin):
         Returns
         -------
         X_corrected : ndarray, shape (n_samples, n_wavelengths)
-            Mean-centered data with interferent signal removed
-
-            Note: Data is mean-centered using training mean (X_mean_).
-            This is correct behavior for EPO.
+            ``(X - X_mean_) @ P_orth_``. With ``center=True`` (default) X_mean_
+            is the training mean, so the output is centred features; with
+            ``center=False`` X_mean_ is zero and the output is a spectrum on the
+            original scale.
         """
         check_is_fitted(self, ['P_orth_', 'X_mean_'])
 
@@ -1386,7 +1460,7 @@ class DOSC(BaseEstimator, TransformerMixin):
             rcond = max(X_centered.shape) * np.finfo(np.float64).eps
             W = np.linalg.pinv(X_centered, rcond=rcond) @ T
             T = X_centered @ W  # identical up to round-off; keeps fit == transform
-            P = X_centered.T @ T @ np.linalg.inv(T.T @ T)
+            P = X_centered.T @ T @ np.linalg.pinv(T.T @ T, rcond=rcond)
         else:
             W = np.zeros((n_features, 0))
             P = np.zeros((n_features, 0))
@@ -1408,6 +1482,7 @@ class DOSC(BaseEstimator, TransformerMixin):
 
         # Linear part of the correction: x_corrected = x - (x - mean) W P^T.
         self.P_orth_ = np.eye(n_features) - W @ P.T
+        self.fit_version_ = _DOSC_FIT_VERSION
 
         return self
 
@@ -1426,7 +1501,9 @@ class DOSC(BaseEstimator, TransformerMixin):
             ``X - T P^T`` on the original scale, with scores
             ``T = (X - X_mean_) W``. The training mean is not subtracted.
         """
-        check_is_fitted(self, ['weights_', 'loadings_', 'X_mean_'])
+        legacy = not hasattr(self, "fit_version_") and hasattr(self, "P_orth_")
+        if not legacy:
+            check_is_fitted(self, ['weights_', 'loadings_', 'X_mean_'])
 
         # Validate X
         X = check_array(X, accept_sparse=False, dtype=np.float64)
@@ -1437,6 +1514,11 @@ class DOSC(BaseEstimator, TransformerMixin):
                 f"X has {X.shape[1]} features, but DOSC was fitted with "
                 f"{self.n_features_in_} features."
             )
+
+        if legacy:
+            # Pickled before 2026-10: replay the old (X - X_mean_) @ P_orth_ exactly.
+            _warn_legacy("DOSC")
+            return (X - self.X_mean_) @ self.P_orth_
 
         T = (X - self.X_mean_) @ self.weights_
         return X - T @ self.loadings_.T

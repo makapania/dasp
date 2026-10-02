@@ -380,6 +380,29 @@ class DifferenceAnalyzer(BaseEstimator, TransformerMixin):
         )
 
 
+# Fitted-state version of EstimatedEPO / MultiGroupEPO. Objects fitted (and
+# pickled, e.g. inside a saved preprocessing pipeline) before 2026-10 have no
+# ``fit_version_`` and returned ``(X - X_mean_) @ P_orth_``; their transform replays
+# exactly that so a saved downstream model still sees the input it was trained on.
+_EPO_FIT_VERSION = 2
+
+
+def _legacy_epo_transform(est: Any, X: np.ndarray) -> np.ndarray:
+    """Replay the pre-2026-10 transform of an unpickled EPO object."""
+    if not hasattr(est, "X_mean_"):
+        raise ValueError(
+            f"This {type(est).__name__} was saved by an older dasp in a form that cannot "
+            "be replayed. Refit the preprocessing."
+        )
+    warnings.warn(
+        f"{type(est).__name__} was fitted by an older dasp (centred EPO, which did not "
+        "remove the contaminant; finding R024). Replaying its original output so a saved "
+        "model's predictions are unchanged. Refit to use the corrected EPO.",
+        UserWarning,
+    )
+    return (X - est.X_mean_) @ est.P_orth_
+
+
 def _uncentred_nuisance_subspace(
     library: np.ndarray,
     n_components: int,
@@ -633,8 +656,7 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
         -------
         self : EstimatedEPO
         """
-        if not isinstance(self.n_components, (int, np.integer)) or self.n_components < 1:
-            raise ValueError(f"n_components must be a positive integer, got {self.n_components!r}")
+        self._check_params()
         X = check_array(X, dtype=np.float64)
         self.n_features_in_ = X.shape[1]
 
@@ -666,6 +688,7 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
         self.explained_variance_ = explained
         self.n_components_ = k
         self.P_orth_ = np.eye(self.n_features_in_) - V @ V.T
+        self.fit_version_ = _EPO_FIT_VERSION
 
     def transform(self, X: np.ndarray) -> np.ndarray:
         """
@@ -691,6 +714,8 @@ class EstimatedEPO(BaseEstimator, TransformerMixin):
                 f"{self.n_features_in_} features."
             )
 
+        if not hasattr(self, "fit_version_"):
+            return _legacy_epo_transform(self, X)
         return X @ self.P_orth_
 
     def get_interferent_components(self) -> np.ndarray:
@@ -1930,6 +1955,21 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
             diff_analyzer.fit(X_contaminated, X_uncontaminated)
             self.difference_spectra_[label] = diff_analyzer.get_difference_spectrum()
 
+        # Joint correction: MultiGroupEPO decides how many directions the groups
+        # support together. The union of the per-group directions has full numerical
+        # rank even when the groups share ONE contaminant (the extra directions are
+        # sampling differences in their analyte levels), so projecting that union out
+        # erased the analyte.
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self.joint_epo_ = MultiGroupEPO(
+                    n_components_per_group=self.n_epo_components
+                ).fit(X_uncontaminated, validated_groups)
+        except ValueError as exc:  # e.g. single-spectrum groups: no automatic count
+            self.joint_epo_ = None
+            self.joint_epo_error_ = str(exc)
+
         # Combine influences based on aggregation method
         influence_matrix = np.vstack([
             self.per_contaminant_influence_[label]
@@ -2079,7 +2119,8 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
             Spectral data to transform
 
         remove_all : bool, default=True
-            If True, project out the union of every contaminant's EPO subspace.
+            If True, project out the contaminant subspace that MultiGroupEPO
+            finds for all groups together (``joint_epo_``).
             If False, only return mean-centered data.
 
         Returns
@@ -2098,18 +2139,22 @@ class MultiContaminantAnalyzer(BaseEstimator, TransformerMixin):
         if not remove_all:
             return X - np.mean(self.X_uncontaminated_, axis=0)
 
-        # One joint projection. Applying the per-contaminant projections one after
-        # another does not remove both directions when they are not orthogonal: the
-        # second projection re-introduces part of the first direction.
-        V = np.hstack([
-            self.epo_transformers_[label].interferent_components_
-            for label in self.contaminant_labels_
-        ])
-        if V.shape[1] == 0:
-            return X.copy()
-        U, S, _ = np.linalg.svd(V, full_matrices=False)
-        basis = U[:, S > 1e-10 * max(1.0, S[0])]
-        return X - (X @ basis) @ basis.T
+        if not hasattr(self, "joint_epo_"):
+            # Fitted by an older dasp: replay its sequential per-contaminant
+            # projections so saved results are reproduced.
+            X_corrected = X.copy()
+            for label in self.contaminant_labels_:
+                X_corrected = X_corrected @ self.epo_transformers_[label].P_orth_
+            return X_corrected
+        if self.joint_epo_ is None:
+            raise ValueError(
+                "No joint contaminant correction could be fitted: "
+                f"{getattr(self, 'joint_epo_error_', '')}"
+            )
+        # One joint projection whose rank is set by MultiGroupEPO's sampling
+        # test (sequential per-contaminant projections re-introduce part of the
+        # earlier directions when they are not orthogonal).
+        return self.joint_epo_.transform(X)
 
 
 def _label_token(label: Any) -> str:
@@ -2129,20 +2174,104 @@ def _label_order(item: tuple[Any, Any]) -> tuple[int, str]:
     return (0, label) if isinstance(label, str) else (1, _label_token(label))
 
 
-# A direction of the group-mean-difference matrix is treated as contaminant
-# signal only if its energy exceeds this multiple of the expected sampling energy
-# of the mean differences (about three standard errors in amplitude). With two
-# standard errors (factor 4) a group drawn from the same population as the
-# reference was flagged about 1 time in 20 when its spread lies along one
-# direction, and that direction (often the analyte) was then projected out.
-_NOISE_FLOOR_FACTOR = 9.0
+def _row_weights(sizes: list[int]) -> np.ndarray:
+    """Precision weights 1/sqrt(1/n_g + 1/n_ref) of the mean-difference rows."""
+    return np.array([1.0 / np.sqrt(1.0 / n + 1.0 / sizes[0]) for n in sizes[1:]])
 
 
-def _mean_sampling_energy(X: np.ndarray) -> float:
-    """Expected squared norm of the sampling error of a group mean spectrum."""
-    if X.shape[0] < 2:
-        return 0.0
-    return float(np.sum(np.var(X, axis=0, ddof=1)) / X.shape[0])
+def _sampling_rank(
+    X_ref: np.ndarray,
+    groups: list[np.ndarray],
+    max_rank: int,
+    alpha: float,
+    n_resamples: int,
+    random_state: Optional[int],
+) -> tuple[int, list[float]]:
+    """Number of group-difference directions that sampling alone cannot explain.
+
+    D has one row per group: group mean minus reference mean, weighted by
+    ``1/sqrt(1/n_g + 1/n_ref)`` so every row has the same sampling scale (a small,
+    noisy group cannot dominate the statistic and hide a clear contaminant in a
+    larger one). Directions are accepted one at a time. At step k, D and the
+    within-group residuals (each spectrum minus its own group mean) are deflated
+    by the k-1 directions already accepted, and the largest squared singular
+    value of D is compared with its distribution under "no further difference".
+    That distribution is simulated by a bootstrap of the pooled residuals: every
+    group mean is replaced by the mean of n_g randomly signed residuals drawn
+    with replacement (each rescaled by sqrt(n/(n-1))). This uses the full residual
+    covariance, so a large analyte spread along one direction is allowed for, and
+    keeps the correlation the shared reference mean puts between rows. The
+    simulated statistic is the same maximum over directions, so the test
+    accounts for the direction having been chosen from the data. Pooling assumes
+    the groups share one within-group covariance in the directions still tested.
+
+    A bootstrap treats the estimated covariance as known, which is
+    anti-conservative with few spectra (like using z instead of t). The simulated
+    statistics are therefore scaled by ``F_{1-alpha}(1, df) / chi2_{1-alpha}(1)``
+    with ``df = n_spectra - n_groups - 1``, the exact ratio for one dominant
+    Gaussian noise direction, used as an approximate small-sample correction.
+    The level is approximate: measured false-positive rates were 0-1.5% at
+    alpha = 0.01 for 1-4 groups of 5-40 spectra (SESSION_LOG 2026-10-02, round 2).
+
+    Returns:
+        ``(k, p_values)``: accepted directions and the p-value of every step tested.
+    """
+    from scipy import stats
+
+    rng = np.random.RandomState(random_state)
+    all_groups = [X_ref] + list(groups)
+    sizes = [g.shape[0] for g in all_groups]
+    n_total = int(sum(sizes))
+    means = [g.mean(axis=0) for g in all_groups]
+    # Rows weighted by their sampling precision, so a small, noisy group cannot
+    # dominate the maximum (and hide a clear contaminant in a larger group).
+    weights = _row_weights(sizes)
+    D = np.vstack([m - means[0] for m in means[1:]]) * weights[:, None]
+    resid = np.vstack([g - m for g, m in zip(all_groups, means)])
+
+    # Null draws: every group mean (reference included) is replaced by the mean
+    # of n_g randomly signed residuals drawn with replacement from the POOLED
+    # residuals (each rescaled by sqrt(n/(n-1)) so it has the spectra's
+    # covariance). Pooling gives the covariance estimate n_spectra - n_groups
+    # degrees of freedom, which is what the small-sample factor below assumes.
+    scale = np.concatenate([np.full(n, np.sqrt(n / (n - 1))) for n in sizes])
+    resid = resid * scale[:, None]
+    A = np.zeros((len(groups), n_total))
+    starts = np.concatenate([[0], np.cumsum(sizes)])
+    for g in range(len(groups)):
+        A[g, starts[g + 1]: starts[g + 2]] = weights[g] / sizes[g + 1]
+        A[g, : sizes[0]] = -weights[g] / sizes[0]
+    draws = rng.randint(0, n_total, size=(n_resamples, n_total))
+    signs = rng.choice([-1.0, 1.0], size=(n_resamples, n_total))
+    df_resid = max(1, n_total - len(all_groups))
+    small_sample = float(
+        stats.f.ppf(1 - alpha, 1, df_resid) / stats.chi2.ppf(1 - alpha, 1)
+    )
+
+    p_values: list[float] = []
+    for _ in range(max_rank):
+        if not np.any(D):
+            break
+        sv_obs = np.linalg.svd(D, compute_uv=False)[0] ** 2
+        # Work in the residuals' row space (cheap when wavelengths >> spectra).
+        U, S, _ = np.linalg.svd(resid, full_matrices=False)
+        Z = U * S
+        sv_null = np.empty(n_resamples)
+        for lo in range(0, n_resamples, 128):  # chunks bound the memory
+            hi = min(lo + 128, n_resamples)
+            picked = Z[draws[lo:hi]] * signs[lo:hi, :, None]
+            sims = np.einsum("gn,dnr->dgr", A, picked, optimize=True)
+            sv_null[lo:hi] = np.linalg.svd(sims, compute_uv=False)[:, 0] ** 2
+        sv_null *= small_sample
+        p_value = (int(np.sum(sv_null >= sv_obs)) + 1) / (n_resamples + 1)
+        p_values.append(p_value)
+        if p_value > alpha:
+            break
+        v = np.linalg.svd(D, full_matrices=False)[2][0]
+        D = D - np.outer(D @ v, v)
+        resid = resid - np.outer(resid @ v, v)
+    accepted = sum(1 for p in p_values if p <= alpha)
+    return accepted, p_values
 
 
 class MultiGroupEPO(BaseEstimator, TransformerMixin):
@@ -2161,22 +2290,44 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
     This is more mathematically rigorous than sequential application of
     individual EPO transformers.
 
+    Limits. With unpaired groups the removed directions are group-mean
+    differences, and those also contain any genuine chemical difference between
+    the groups (e.g. the treated bones happen to have more collagen). That shared
+    chemistry is removed together with the contaminant. Use groups that differ
+    only by the contaminant, or paired spectra (the same specimen with and
+    without the contaminant, ``EstimatedEPO(estimation_method='pca_diff')`` with
+    ``paired=True``). Analyte signal that overlaps a removed direction is removed
+    with it; projection cannot separate two signals that share a direction.
+
     Parameters
     ----------
     n_components_per_group : int, default=2
         Unpaired groups give one direction each (their mean difference), so at
-        most ``n_groups`` directions exist. The total is capped at
-        ``n_components_per_group * n_groups`` when n_total_components is None.
+        most ``n_groups`` directions exist. The automatic count is capped at
+        ``n_components_per_group * n_groups``.
 
     n_total_components : int or None, default=None
-        Total number of directions to remove. If None (automatic), a direction
-        of D is kept only when its energy (squared singular value) exceeds
-        9x the expected sampling energy of the group mean differences (about
-        three standard errors),
-        ``sum_g sum_wavelengths (var_g / n_g + var_ref / n_ref)``. That keeps
-        one direction for groups sharing one contaminant (at any doses), two
-        for two distinct contaminants, and none when the groups do not differ
-        beyond sampling. Set an integer to override.
+        Number of directions to remove. If None (automatic), directions are
+        accepted one at a time while the largest remaining squared singular
+        value of D exceeds its simulated sampling distribution (sign-flip
+        bootstrap of the within-group residuals, see ``_sampling_rank``) at
+        level ``alpha``. In the controlled synthetic tests this keeps one
+        direction for groups sharing one contaminant, two for two distinct
+        contaminants, and none when the groups do not differ beyond sampling.
+        A contaminant whose mean-difference energy is smaller than the sampling
+        spread of the group means along their noisiest direction (often the
+        analyte, when groups are small) is not detectable this way; set an
+        integer to override. The automatic count needs at least 2 spectra in the
+        reference and in every group.
+
+    alpha : float, default=0.01
+        Approximate significance level of each step.
+
+    n_resamples : int, default=999
+        Bootstrap draws per step.
+
+    random_state : int or None, default=0
+        Seed for the bootstrap, so the same data give the same result.
 
     svd_tol : float, default=1e-8
         Singular values at or below this are treated as zero.
@@ -2201,11 +2352,15 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
     per_group_variance_ : dict
         Variance contribution from each group
 
-    singular_values_ : ndarray
-        Singular values of the uncentred difference matrix D.
+    row_weights_ : ndarray
+        Precision weights ``1/sqrt(1/n_g + 1/n_ref)`` applied to the rows of D
+        before the SVD (all equal when the groups have equal sizes).
 
-    noise_energy_ : float
-        Expected sampling energy of D, the reference for the automatic count.
+    singular_values_ : ndarray
+        Singular values of the weighted, uncentred difference matrix.
+
+    p_values_ : list of float
+        Bootstrap p-value of every step tested (automatic count only).
 
     n_components_ : int
         Number of directions removed (0 when no group differs beyond sampling).
@@ -2235,10 +2390,16 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         self,
         n_components_per_group: int = 2,
         n_total_components: Optional[int] = None,
+        alpha: float = 0.01,
+        n_resamples: int = 999,
+        random_state: Optional[int] = 0,
         svd_tol: float = 1e-8
     ):
         self.n_components_per_group = n_components_per_group
         self.n_total_components = n_total_components
+        self.alpha = alpha
+        self.n_resamples = n_resamples
+        self.random_state = random_state
         self.svd_tol = svd_tol
 
     def fit(
@@ -2294,37 +2455,45 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         # random jitter, and after centring only the jitter was left to project out.
         rows = []
         self.per_group_variance_ = {}
-        noise_energy = 0.0
-        ref_term = _mean_sampling_energy(X_uncontaminated)
         for label, X_contaminated in validated_groups.items():
             diff = np.mean(X_contaminated, axis=0) - ref_mean
             rows.append(diff)
             self.per_group_variance_[label] = np.var(diff)
-            noise_energy += _mean_sampling_energy(X_contaminated) + ref_term
 
         self.combined_interferent_library_ = np.vstack(rows)
-        self.noise_energy_ = noise_energy
+        sizes = [X_uncontaminated.shape[0]] + [g.shape[0] for g in validated_groups.values()]
+        self.row_weights_ = _row_weights(sizes)
         self.singular_values_ = np.linalg.svd(
-            self.combined_interferent_library_, compute_uv=False
+            self.combined_interferent_library_ * self.row_weights_[:, None], compute_uv=False
         )
+        self.p_values_ = []
 
         if self.n_total_components is None:
-            # Automatic: keep only directions whose energy clearly exceeds what
-            # sampling alone puts into the mean differences. Without this, with
-            # two groups sharing one contaminant the second direction is the
-            # difference between the groups' mean ANALYTE levels (sampling), and
-            # projecting it out deletes the analyte.
-            n_wanted = self.n_components_per_group * n_groups
-            n_signal = int(np.sum(self.singular_values_**2 > _NOISE_FLOOR_FACTOR * noise_energy))
-            has_signal = self.singular_values_.size and self.singular_values_[0] > self.svd_tol
-            if n_signal == 0 and has_signal:
-                warnings.warn(
-                    "The contaminant groups do not differ from the reference by more "
-                    "than sampling variation; MultiGroupEPO removes nothing. Set "
-                    "n_total_components to force a removal.",
-                    UserWarning,
+            if min(sizes) < 2:
+                raise ValueError(
+                    "The automatic component count needs at least 2 spectra in the "
+                    "reference group and in every contaminant group (sampling variation "
+                    "cannot be estimated from one spectrum). Set n_total_components "
+                    "explicitly."
                 )
-            n_wanted = min(n_wanted, n_signal)
+            has_signal = self.singular_values_.size and self.singular_values_[0] > self.svd_tol
+            if has_signal:
+                max_rank = min(self.n_components_per_group * n_groups, n_groups,
+                               self.n_features_in_ - 1)
+                n_wanted, self.p_values_ = _sampling_rank(
+                    X_uncontaminated, list(validated_groups.values()), max_rank,
+                    self.alpha, self.n_resamples, self.random_state,
+                )
+                if n_wanted == 0:
+                    warnings.warn(
+                        "The contaminant groups do not differ from the reference by more "
+                        "than sampling variation (p = "
+                        f"{self.p_values_[0]:.3g}); MultiGroupEPO removes nothing. Set "
+                        "n_total_components to force a removal.",
+                        UserWarning,
+                    )
+            else:
+                n_wanted = 0
         else:
             n_wanted = self.n_total_components
         n_wanted = max(0, min(int(n_wanted), self.n_features_in_ - 1))
@@ -2332,14 +2501,17 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         if n_wanted == 0:
             V, explained, k = np.zeros((self.n_features_in_, 0)), np.zeros(0), 0
         else:
+            # Directions from the precision-weighted rows, the same matrix the
+            # automatic count tests (identical to D up to scale for equal groups).
             V, explained, k = _uncentred_nuisance_subspace(
-                self.combined_interferent_library_, n_wanted, self.svd_tol,
-                warn_if_reduced=False,
+                self.combined_interferent_library_ * self.row_weights_[:, None],
+                n_wanted, self.svd_tol, warn_if_reduced=False,
             )
         self.n_components_ = k
         self.interferent_components_ = V
         self.explained_variance_ = explained
         self.P_orth_ = np.eye(self.n_features_in_) - V @ V.T
+        self.fit_version_ = _EPO_FIT_VERSION
 
         return self
 
@@ -2356,7 +2528,9 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
         -------
         X_corrected : ndarray, shape (n_samples, n_wavelengths)
             ``X @ P_orth_``: spectra on the original scale with all group
-            nuisance directions removed. No mean is subtracted.
+            nuisance directions removed. No mean is subtracted. Objects fitted by
+            dasp before October 2026 replay their original ``(X - X_mean_) @ P``
+            (see ``_legacy_epo_transform``).
         """
         check_is_fitted(self, ['P_orth_'])
         X = check_array(X, dtype=np.float64)
@@ -2366,6 +2540,8 @@ class MultiGroupEPO(BaseEstimator, TransformerMixin):
                 f"X has {X.shape[1]} features, expected {self.n_features_in_}"
             )
 
+        if not hasattr(self, "fit_version_"):
+            return _legacy_epo_transform(self, X)
         return X @ self.P_orth_
 
     def get_wavelength_influence(self) -> np.ndarray:

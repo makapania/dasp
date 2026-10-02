@@ -2664,6 +2664,10 @@ def _launch_settings_snapshot(app):
         return None
 
 
+class _ContamNothingToRemove(ValueError):
+    """Automatic EPO found no contaminant direction; shown as information, not error."""
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
 
@@ -2926,6 +2930,7 @@ class SpectralPredictApp:
         # self.X is still that frame, so it never brings back an older dataset).
         self.X_before_contam_correction = None
         self._contam_X_written = None
+        self._contam_X_fingerprint = None
         # R114: last corrected spectra (DataFrame) for "Export Corrected Spectra".
         self.contam_corrected_X = None
         self.contam_method = tk.StringVar(value='Estimated EPO')
@@ -58340,6 +58345,30 @@ External Validation Performance (n={n_val}):
                 variable=self.contam_correction_method, value=method,
                 style='TRadiobutton'
             ).pack(anchor=tk.W, pady=2)
+
+        # EPO: number of contaminant directions ('auto' = statistical test) and
+        # the scientific caution for unpaired groups (review round 1, items 5/6).
+        epo_opts = ttk.Frame(method_frame, style='TFrame')
+        epo_opts.pack(anchor=tk.W, pady=(6, 2), padx=(20, 0))
+        ttk.Label(epo_opts, text="EPO directions to remove:",
+                  style='TLabel').pack(side=tk.LEFT, padx=(0, 6))
+        self.contam_epo_components = tk.StringVar(value='auto')
+        ttk.Combobox(epo_opts, textvariable=self.contam_epo_components,
+                     values=['auto', '1', '2', '3', '4', '5'], width=6,
+                     state='readonly').pack(side=tk.LEFT)
+        ttk.Label(epo_opts,
+                  text="(auto: only directions the groups differ in beyond sampling variation)",
+                  style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(6, 0))
+        self.contam_epo_caution_label = ttk.Label(
+            method_frame,
+            text=("EPO caution: the removed direction is the difference between the group "
+                  "means, so the clean and contaminated groups must differ ONLY by the "
+                  "contaminant. Any real chemical difference between the groups (e.g. more "
+                  "collagen in the treated bones) is removed with it. Paired spectra (the "
+                  "same specimen scanned clean and contaminated) avoid this, but this page "
+                  "cannot pair spectra yet."),
+            style='Small.TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
+        self.contam_epo_caution_label.pack(anchor=tk.W, pady=(4, 0), padx=(20, 0))
         row += 1
 
         # Section 2: Apply Correction
@@ -58475,6 +58504,7 @@ External Validation Performance (n={n_val}):
         self.contam_peak_threshold.set(10.0)
         self.contam_correction_method.set('Exclude Regions')
         self.contam_apply_source.set('Contaminant Groups')
+        self.contam_epo_components.set('auto')
 
         # 6. Clear UI widgets on 13A
         self.contam_groups_listbox.delete(0, tk.END)
@@ -60161,12 +60191,14 @@ External Validation Performance (n={n_val}):
                 # new dataset was loaded or it was changed elsewhere), so Restore
                 # can never bring back a different dataset.
                 if (self.X_before_contam_correction is None
-                        or self.X is not self._contam_X_written):
+                        or not self._contam_X_unchanged_since_write()):
                     self.X_before_contam_correction = self.X.copy()
 
                 self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=corrected_columns)
                 self._contam_X_written = self.X
+                self._contam_X_fingerprint = self._contam_fingerprint(self.X)
                 self.contam_corrected_X = self.X.copy()
+                validation_note = self._contam_resync_validation()
                 if hasattr(self, 'contam_restore_btn'):
                     self.contam_restore_btn.config(state='normal')
             else:
@@ -60196,8 +60228,16 @@ External Validation Performance (n={n_val}):
                 "\n\nThe main dataset now holds the corrected spectra. Use 'Restore Main "
                 "Dataset' to undo. Changing the wavelength range on the Import tab "
                 "rebuilds the data from the original file and drops this correction."
+                + validation_note
                 if target == 'Main Dataset' else ""
             )
+            if method == 'EPO Projection':
+                restore_note += (
+                    "\n\nCaution: the removed direction is the difference between the "
+                    "group means. It contains any real chemical difference between the "
+                    "clean and contaminated groups, which is removed together with the "
+                    "contaminant. Use groups that differ only by the contaminant."
+                )
             messagebox.showinfo("Success",
                 f"Correction applied!\n\n"
                 f"Method: {method}{detail}\n"
@@ -60205,6 +60245,11 @@ External Validation Performance (n={n_val}):
                 f"Original shape: {X_to_correct.shape}\n"
                 f"Corrected shape: {X_corrected.shape}{restore_note}")
 
+        except _ContamNothingToRemove as e:
+            self.contam_apply_status_label.config(
+                text="No contaminant direction found: nothing removed (see message)",
+                foreground='#b45309')
+            messagebox.showinfo("Nothing Removed", str(e))
         except Exception as e:
             self.contam_apply_status_label.config(text="✗ Correction failed", foreground='red')
             messagebox.showerror("Error", f"Correction failed:\n{str(e)}")
@@ -60248,14 +60293,24 @@ External Validation Performance (n={n_val}):
         group; directions that clear the sampling-noise floor are removed. The
         result is ``X @ (I - V V^T)``: spectra on the original scale.
         """
+        import warnings
+
         from spectral_predict.contaminant_analysis import MultiGroupEPO
 
-        epo = MultiGroupEPO()
-        epo.fit(self.contam_clean_data, self.contam_groups)
+        choice = str(self.contam_epo_components.get()).strip().lower()
+        n_total = None if choice in ('', 'auto') else int(choice)
+        epo = MultiGroupEPO(n_total_components=n_total)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            epo.fit(self.contam_clean_data, self.contam_groups)
         if epo.n_components_ == 0:
-            raise ValueError(
-                "The contaminant groups do not differ from the clean group by more than "
-                "sampling variation, so there is no contaminant direction to remove."
+            p_txt = f" (p = {epo.p_values_[0]:.3g})" if epo.p_values_ else ""
+            raise _ContamNothingToRemove(
+                "The automatic test found no direction in which the contaminant groups "
+                f"differ from the clean group by more than sampling variation{p_txt}, so "
+                "nothing was removed.\n\nIf you know the contaminant is there (small "
+                "groups make weak contaminants hard to detect), set 'EPO directions to "
+                "remove' to 1 and apply again."
             )
 
         # Store for potential reuse
@@ -60328,21 +60383,70 @@ External Validation Performance (n={n_val}):
             messagebox.showinfo("Nothing to Restore",
                                 "No contaminant correction has been applied to the main dataset.")
             return
-        if self.X is not self._contam_X_written:
+        if not self._contam_X_unchanged_since_write():
             messagebox.showwarning(
                 "Cannot Restore",
                 "The main dataset has changed since the correction was applied (new data "
                 "loaded or edited elsewhere), so the saved copy may belong to a different "
-                "dataset. Reload the data instead.")
+                "dataset or would undo those later edits. Reload the data instead.")
             return
         self.X = backup.copy()
         self.X_before_contam_correction = None
         self._contam_X_written = None
+        self._contam_X_fingerprint = None
+        validation_note = self._contam_resync_validation()
         if hasattr(self, 'contam_restore_btn'):
             self.contam_restore_btn.config(state='disabled')
         self.contam_apply_status_label.config(
-            text="↶ Main dataset restored to its state before contaminant correction",
+            text="↶ Main dataset restored to its state before contaminant correction"
+                 + validation_note.replace("\n", " "),
             foreground='green')
+
+    @staticmethod
+    def _contam_fingerprint(frame):
+        """Cheap content fingerprint: shape, labels and a hash of the values."""
+        import hashlib
+
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(np.ascontiguousarray(frame.to_numpy(dtype=float)).tobytes())
+        digest.update(repr(list(frame.index)).encode('utf-8'))
+        digest.update(repr(list(frame.columns)).encode('utf-8'))
+        return frame.shape, digest.hexdigest()
+
+    def _contam_X_unchanged_since_write(self):
+        """True while self.X is still the frame (and content) a correction wrote.
+
+        Identity alone is not enough: an in-place edit of self.X keeps the same
+        object, and restoring over it would silently discard that edit.
+        """
+        if self.X is None or self.X is not self._contam_X_written:
+            return False
+        return self._contam_fingerprint(self.X) == getattr(self, '_contam_X_fingerprint', None)
+
+    def _contam_resync_validation(self):
+        """Rebuild validation_X from self.X after a correction or Restore.
+
+        The holdout spectra are cached separately (validation_X); without this a
+        search would score corrected calibration spectra against uncorrected
+        holdout spectra (or the reverse after Restore). Rows are taken from self.X
+        by the existing validation IDs, in the cached order. Returns a note for the
+        user ('' when there is no holdout).
+        """
+        if not self.validation_indices:
+            return ""
+        if self.validation_X is not None and len(self.validation_X) > 0:
+            validation_idx = list(self.validation_X.index)
+        elif self.validation_y is not None and len(self.validation_y) > 0:
+            validation_idx = list(self.validation_y.index)
+        else:
+            validation_idx = list(self.validation_indices)
+        missing = [i for i in validation_idx if i not in self.X.index]
+        if missing:
+            return (f"\n\nWARNING: {len(missing)} holdout sample(s) are not in the main "
+                    "dataset, so the holdout spectra could not be updated. Recreate the "
+                    "holdout before running an analysis.")
+        self.validation_X = self.X.loc[validation_idx]
+        return f"\n\nThe {len(validation_idx)} holdout spectra were updated to match."
 
     def _contam_export_corrected_spectra(self):
         """Export the last corrected spectra to CSV, Excel or NumPy (R114)."""
@@ -60769,6 +60873,19 @@ External Validation Performance (n={n_val}):
             if library_names:
                 self.app_epo_library_combo.current(0)
 
+            ttk.Label(self.app_method_settings_frame, text="Library contains:").pack(anchor=tk.W, pady=2)
+            self.app_epo_library_type = tk.StringVar(value='samples')
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Whole spectra at different interferent levels (differenced from their mean)",
+                variable=self.app_epo_library_type, value='samples'
+            ).pack(anchor=tk.W)
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Pure interferent or difference spectra (used as they are)",
+                variable=self.app_epo_library_type, value='differences'
+            ).pack(anchor=tk.W)
+
             ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
             self.app_epo_n_components = tk.IntVar(value=2)
             ttk.Spinbox(
@@ -60888,7 +61005,8 @@ External Validation Performance (n={n_val}):
                 lib = self.interferent_libraries[library_name]
                 n_components = self.app_epo_n_components.get()
                 # center=False: return X @ P, corrected spectra on the original scale.
-                epo = EPO(n_components=n_components, center=False, svd_tol=1e-8)
+                epo = EPO(n_components=n_components, center=False, svd_tol=1e-8,
+                          library_type=self.app_epo_library_type.get())
                 X_corrected = epo.fit_transform(X, X_interferents=lib['X'])
                 wavelengths_corrected = wavelengths
 

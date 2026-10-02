@@ -772,3 +772,36 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   dead attributes are still read by the Diagnostics sub-tab (GUI ~57351, ~61000, ~61050); not fixed here.
 - Repo line endings are mixed: the GUI and the test files are stored CRLF, `src/` modules LF. Python rewrites with
   default newline handling turned the whole GUI diff into 124k lines; write CRLF files back with `newline=''`.
+
+## 2026-10-02 - fix/contaminant-maths round 2 (Codex BLOCK / GLM merge-with-fixes on 0205c32)
+- **Pickles.** Old fitted EstimatedEPO/MultiGroupEPO (have `X_mean_`, no `fit_version_`) silently changed output;
+  old OSC/DOSC raised NotFittedError. Now every fit stamps `fit_version_ = 2`; objects without it replay the old
+  transform exactly (with a warning) so saved downstream models keep their predictions. Verified cross-process:
+  fitted with f6a2287 code, unpickled with the branch, max |old - new| <= 9e-16 for all six classes and an
+  OSC+PLS pipeline.
+- **interference.EPO needs two library kinds.** Uncentred SVD is right only for difference/pure-interferent
+  libraries. A library of whole spectra (one sample at several moisture levels) contains the analyte; uncentred,
+  its first direction IS the analyte (kept 0.33% analyte, 99.7% moisture). `library_type='samples'` (default,
+  = differences from the library mean, the old behaviour) vs `'differences'` (uncentred). GUI Application page
+  asks which; preprocess.py passes `library_type` through.
+- **MultiContaminantAnalyzer joint projection** took the numerical rank of the union of per-group directions, so
+  two groups sharing one contaminant removed their analyte sampling difference too (analyte kept 0.02%). It now
+  delegates to MultiGroupEPO (`joint_epo_`).
+- **MultiGroupEPO automatic count replaced** (the 9x summed-energy rule was not a per-direction test and diluted
+  a contaminant in one of k groups). Now: rows weighted by 1/sqrt(1/n_g + 1/n_ref); sequential test of the largest
+  remaining squared singular value against a bootstrap of the POOLED within-group residuals (randomly signed,
+  rescaled sqrt(n/(n-1))), with a small-sample factor F_{1-a}(1,df)/chi2_{1-a}(1), df = N - groups - 1; alpha 0.01,
+  999 draws, seed 0. Two failed variants, for the record: label permutation across all spectra lost power when
+  a real contaminant was present (it inflates the null; Codex blank-group case 0.01); a sign-flip of each
+  group's OWN residuals was anti-conservative at n=5 (false positives 5-7%). Needs >= 2 spectra per group for
+  auto, else `n_total_components`. Rates (200 runs, analyte swing ~1, constant dose, old 9x -> new):
+  all-groups dose 0.2: n=5 0.05->0.04, n=10 0.01->0.01, n=40 0.91->1.00; dose 0.5: n=5 0.48->0.28, n=10 1->1;
+  one of k groups: k=2 n=5 d=0.5 0.07->0.12, d=1 0.98->1.00; k=2 n=10 d=0.5 0.30->0.91; k=4 n=5 d=1 0.37->0.96;
+  k=4 n=10 d=0.5 0.00->0.11; false positives 0-2% old, 0-1.5% new; Codex blank-group case 0.21->0.94. A
+  contaminant smaller than the group means' sampling spread along their noisiest direction (the analyte, at
+  small n) is not detectable by any data-driven direction test; the Apply page has an override.
+- **GUI:** Restore/Apply now rebuild `validation_X` from `self.X` by the cached validation IDs (minimal, so
+  fix/gui-dataset-state's `_install_dataset` can absorb it); Restore also checks a content fingerprint (an
+  in-place edit kept object identity); EPO "directions to remove" (auto/1-5) and an unpaired-groups caution;
+  "auto found nothing" is an information dialog with the override hint. Pairing is NOT offered: the loaders
+  discard contaminated-group sample names and the combined import has no specimen-ID column.

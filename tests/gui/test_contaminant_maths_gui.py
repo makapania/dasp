@@ -66,9 +66,18 @@ def contam_app(gui_harness):
     # Shared session app: clear state earlier tests may have left.
     app.X_before_contam_correction = None
     app._contam_X_written = None
+    app._contam_X_fingerprint = None
     app.contam_corrected_X = None
     app.contam_correction_method.set("EPO Projection")
-    return gui_harness
+    app.contam_epo_components.set("auto")
+    app.validation_indices = set()
+    app.validation_X = None
+    app.validation_y = None
+    yield gui_harness
+    app.validation_indices = set()
+    app.validation_X = None
+    app.validation_y = None
+    app.contam_epo_components.set("auto")
 
 
 @pytest.mark.gui
@@ -142,6 +151,70 @@ class TestContaminantCorrection:
         contam_app.invoke_method("_contam_apply_correction")
         contam_app.invoke_method("_contam_restore_main_dataset")
         pd.testing.assert_frame_equal(app.X, second)
+
+
+@pytest.mark.gui
+class TestRoundTwoGuards:
+    """Review round 1: holdout resync, in-place edits, components control, caution."""
+
+    def _with_holdout(self, app):
+        ids = list(app.X.index[:6])
+        app.validation_indices = set(ids)
+        app.validation_X = app.X.loc[ids]
+        app.validation_y = pd.Series(np.arange(6.0), index=ids)
+        return ids
+
+    def test_apply_and_restore_resynchronize_validation_spectra(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        ids = self._with_holdout(app)
+        original = app.X.copy()
+
+        contam_app.invoke_method("_contam_apply_correction")
+        pd.testing.assert_frame_equal(app.validation_X, app.X.loc[ids])
+        assert not np.allclose(app.validation_X.to_numpy(), original.loc[ids].to_numpy())
+
+        contam_app.invoke_method("_contam_restore_main_dataset")
+        pd.testing.assert_frame_equal(app.X, original)
+        pd.testing.assert_frame_equal(app.validation_X, original.loc[ids])
+
+    def test_in_place_edit_blocks_restore(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Main Dataset")
+        contam_app.invoke_method("_contam_apply_correction")
+        app.X.iloc[0, 0] += 1.0  # same object, edited in place
+        edited = app.X.copy()
+        with patch("tkinter.messagebox.showwarning") as warn:
+            app._contam_restore_main_dataset()
+        assert warn.called
+        pd.testing.assert_frame_equal(app.X, edited)
+
+    def test_auto_finds_nothing_explains_and_offers_override(self, contam_app):
+        app = contam_app.app
+        rng = np.random.default_rng(99)
+        app.contam_groups = {"Same": _spectra(rng, 40)}  # no contaminant
+        app.contam_apply_source.set("Main Dataset")
+        X_before = app.X.copy()
+        with (
+            patch("tkinter.messagebox.showinfo") as info,
+            patch("tkinter.messagebox.showerror") as err,
+        ):
+            app._contam_apply_correction()
+        assert not err.called
+        assert info.called and "EPO directions to remove" in info.call_args[0][1]
+        pd.testing.assert_frame_equal(app.X, X_before)
+
+        app.contam_epo_components.set("1")
+        contam_app.invoke_method("_contam_apply_correction")
+        assert app.contam_epo_transformer.n_components_ == 1
+
+    def test_epo_success_message_carries_the_caution(self, contam_app):
+        app = contam_app.app
+        app.contam_apply_source.set("Contaminant Groups")
+        with patch("tkinter.messagebox.showinfo") as info:
+            app._contam_apply_correction()
+        assert "Caution" in info.call_args[0][1]
+        assert "differ ONLY by the contaminant" in app.contam_epo_caution_label.cget("text")
 
 
 @pytest.mark.gui
@@ -244,6 +317,7 @@ def _run_method(harness, method):
         app.app_wl_exclude_entry.insert(0, "1500-1600")
     if method == "EPO":
         app.app_epo_library_combo.set("moisture")
+        app.app_epo_library_type.set("differences")  # the fixture library is pure CONTAM
     with (
         patch("tkinter.messagebox.showerror") as err,
         patch("tkinter.messagebox.showwarning") as warn,
