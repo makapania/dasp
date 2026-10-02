@@ -326,6 +326,12 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
         If True, append a StandardScaler step (mean-center + unit variance per
         wavelength column) AFTER SNV/derivatives and BEFORE imbalance handling.
         UV scaling — equivalent to SIMCA's default scaling for PLS.
+    interference : dict, optional
+        Interference-removal settings. ``interference['advanced']['epo']`` accepts
+        ``library_type``: 'samples' (default; library rows are whole spectra and are
+        differenced from their mean) or 'differences' (pure interferent or difference
+        spectra, used uncentred). 'samples' is what released versions did with the
+        default ``center=True``; use 'differences' for a pure-interferent library.
 
     Returns
     -------
@@ -393,8 +399,10 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                     # We need a wrapper to pass X_interferents
                     class EPOWithLibrary(EPO):
                         """Wrapper for EPO that auto-passes interferent library during fit."""
-                        def __init__(self, interferent_library, n_components=2, center=True, svd_tol=1e-8):
-                            super().__init__(n_components=n_components, center=center, svd_tol=svd_tol)
+                        def __init__(self, interferent_library, n_components=2, center=True,
+                                     svd_tol=1e-8, library_type='samples'):
+                            super().__init__(n_components=n_components, center=center,
+                                             svd_tol=svd_tol, library_type=library_type)
                             self.interferent_library = interferent_library
 
                         def fit(self, X, y=None):
@@ -405,7 +413,10 @@ def build_preprocessing_pipeline(preprocess_name, deriv=None, window=None, polyo
                         interferent_library=lib['X'],
                         n_components=epo_settings.get('n_components', 2),
                         center=epo_settings.get('center', True),
-                        svd_tol=epo_settings.get('svd_tol', 1e-8)
+                        svd_tol=epo_settings.get('svd_tol', 1e-8),
+                        # 'samples' (whole spectra, differenced from their mean) or
+                        # 'differences' (pure interferent / difference spectra).
+                        library_type=epo_settings.get('library_type', 'samples'),
                     )
                     steps.append(("epo", epo))
                 else:

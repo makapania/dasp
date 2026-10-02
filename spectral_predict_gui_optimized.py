@@ -2464,8 +2464,20 @@ def _launch_settings_snapshot(app):
         return None
 
 
+class _ContamNothingToRemove(ValueError):
+    """Automatic EPO found no contaminant direction; shown as information, not error."""
+
+
+class _ContamCancelled(Exception):
+    """The user cancelled the EPO count confirmation; nothing is changed."""
+
+
 class SpectralPredictApp:
     """Main application window with 6-tab design."""
+
+    # The automatic EPO direction count only suggests; the user confirms before
+    # anything is removed. Set False to apply the suggestion directly.
+    _CONTAM_AUTO_COUNT_ADVISORY = True
 
     def __init__(self, root):
         self.root = root
@@ -2700,7 +2712,10 @@ class SpectralPredictApp:
                 'method': tk.StringVar(value='covariance'),
                 'n_components': tk.StringVar(value='auto'),  # Replaced window_size with n_components
                 'regularization': tk.StringVar(value='1e-6'),
-                'apply_to_analysis': tk.BooleanVar(value=True)
+                # Read by nothing: the search hand-off is disabled (see the
+                # interference_settings comment at the run_search call). Kept False
+                # and the checkbox disabled so the UI does not promise otherwise.
+                'apply_to_analysis': tk.BooleanVar(value=False)
             }
         }
 
@@ -2720,6 +2735,14 @@ class SpectralPredictApp:
         self.contam_group_paths = {}  # Dict of {label: filepath}
         self.contam_wavelengths = None
         self.contam_results = None  # Analysis results dict
+        # R113: the main dataset as it was before a contaminant correction wrote to
+        # it, and the exact frame that correction wrote (Restore only acts while
+        # self.X is still that frame, so it never brings back an older dataset).
+        self.X_before_contam_correction = None
+        self._contam_X_written = None
+        self._contam_X_fingerprint = None
+        # R114: last corrected spectra (DataFrame) for "Export Corrected Spectra".
+        self.contam_corrected_X = None
         self.contam_method = tk.StringVar(value='Estimated EPO')
         self.contam_threshold = tk.DoubleVar(value=0.15)
         self.contam_n_components = tk.IntVar(value=2)
@@ -3138,7 +3161,6 @@ class SpectralPredictApp:
         # Interference removal methods (Phase 3: Basic integration)
         self.enable_wavelength_exclusion = tk.BooleanVar(value=False)
         self.wavelength_exclude_ranges = tk.StringVar(value="1400-1500, 1900-2000")  # Default moisture bands
-        self.use_msc = tk.BooleanVar(value=False)  # Multiplicative Scatter Correction
         self.use_osc = tk.BooleanVar(value=False)  # Orthogonal Signal Correction
         self.osc_n_components = tk.IntVar(value=2)  # Number of OSC components (default: 2)
 
@@ -11834,6 +11856,7 @@ class SpectralPredictApp:
         importance_combo = ttk.Combobox(self.smart_preproc_options_frame, textvariable=self.smart_preprocess_importance,
                                      values=["cars_tree", "model_specific", "lightgbm", "vip"], state="readonly", width=14)
         importance_combo.grid(row=0, column=1, sticky=tk.W, padx=5)
+        self.smart_importance_combo = importance_combo
 
         # Importance method descriptions
         self.importance_desc_label = ttk.Label(self.smart_preproc_options_frame,
@@ -17082,6 +17105,7 @@ class SpectralPredictApp:
     def _update_one_class_controls_visibility(self):
         """Show/hide one-class specific controls based on task type."""
         task_type = self.task_type.get()
+        self._refresh_smart_importance_state()
         if task_type == "one_class":
             # Ensure the multi-class panels are hidden.
             if hasattr(self, 'mc_model_config_frame'):
@@ -23423,6 +23447,25 @@ class SpectralPredictApp:
                 self._toggle_ga_preprocessing_options()
         else:
             self.tpe_preproc_options_frame.grid_remove()
+
+    def _refresh_smart_importance_state(self):
+        """Grey out the discovery importance dropdown for one-class (QW6).
+
+        One-class discovery never computes importance: the initial scan skips it
+        and the per-model expansion needs models_to_test, which the one-class
+        search does not pass. So the dropdown would have no effect.
+        """
+        combo = getattr(self, 'smart_importance_combo', None)
+        if combo is None:
+            return
+        if self.task_type.get() == 'one_class':
+            combo.config(state='disabled')
+            if hasattr(self, 'importance_desc_label'):
+                self.importance_desc_label.config(
+                    text="Not used for one-class: one-class discovery computes no importance")
+        else:
+            combo.config(state='readonly')
+            self._update_importance_description()
 
     def _update_importance_description(self, event=None):
         """Update importance method description label based on selection."""
@@ -54910,6 +54953,20 @@ External Validation Performance (n={n_val}):
         self._create_section_header(content_frame, "Advanced Method Configuration", row=row, columnspan=2)
         row += 1
 
+        # QW6: nothing on this page reaches the model search. The hand-off
+        # (interference_settings at the run_search call) is disabled because it
+        # broke R² reproducibility, so every control here is greyed out rather
+        # than left looking active. Use the Application page to correct spectra.
+        self.interference_config_banner = ttk.Label(
+            content_frame,
+            text=("Not applied during analysis. These EPO, DOSC and GLSW settings are not "
+                  "passed to the model search, so they are disabled. To correct spectra "
+                  "explicitly, use the Application page."),
+            style='TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
+        self.interference_config_banner.grid(row=row, column=0, columnspan=2, sticky=tk.W,
+                                             pady=(0, 15))
+        row += 1
+
         # ========================================================================
         # EPO (External Parameter Orthogonalization)
         # ========================================================================
@@ -54917,12 +54974,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # EPO Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable EPO",
-                       variable=self.advanced_interference_settings['epo']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_epo_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # EPO Enable checkbox (disabled: not applied during analysis, see banner)
+        self.epo_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable EPO (not applied during analysis)",
+            variable=self.advanced_interference_settings['epo']['enabled'],
+            style='TCheckbutton',
+            command=self._on_epo_toggled, state='disabled')
+        self.epo_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # EPO Description
@@ -55009,12 +55068,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # DOSC Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable DOSC",
-                       variable=self.advanced_interference_settings['dosc']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_dosc_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # DOSC Enable checkbox (disabled: not applied during analysis, see banner)
+        self.dosc_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable DOSC (not applied during analysis)",
+            variable=self.advanced_interference_settings['dosc']['enabled'],
+            style='TCheckbutton',
+            command=self._on_dosc_toggled, state='disabled')
+        self.dosc_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # DOSC Description
@@ -55080,12 +55141,14 @@ External Validation Performance (n={n_val}):
                                     row=row, columnspan=2)
         row += 1
 
-        # GLSW Enable checkbox
-        ttk.Checkbutton(content_frame,
-                       text="Enable GLSW",
-                       variable=self.advanced_interference_settings['glsw']['enabled'],
-                       style='TCheckbutton',
-                       command=self._on_glsw_toggled).grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
+        # GLSW Enable checkbox (disabled: not applied during analysis, see banner)
+        self.glsw_enable_checkbox = ttk.Checkbutton(
+            content_frame,
+            text="Enable GLSW (not applied during analysis)",
+            variable=self.advanced_interference_settings['glsw']['enabled'],
+            style='TCheckbutton',
+            command=self._on_glsw_toggled, state='disabled')
+        self.glsw_enable_checkbox.grid(row=row, column=0, sticky=tk.W, pady=(0, 10))
         row += 1
 
         # GLSW Description
@@ -55147,11 +55210,15 @@ External Validation Performance (n={n_val}):
                  style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(10, 0))
         glsw_row += 1
 
-        # Apply to analysis
-        ttk.Checkbutton(self.glsw_settings_frame,
-                       text="Apply GLSW weighting to model training",
-                       variable=self.advanced_interference_settings['glsw']['apply_to_analysis'],
-                       style='TCheckbutton').grid(row=glsw_row, column=0, columnspan=2,
+        # Apply to analysis: read by nothing (search hand-off disabled), so it is
+        # off, disabled, and labelled as such.
+        self.glsw_apply_to_analysis_checkbox = ttk.Checkbutton(
+            self.glsw_settings_frame,
+            text=("Apply GLSW weighting to model training "
+                  "(not available: not applied during analysis)"),
+            variable=self.advanced_interference_settings['glsw']['apply_to_analysis'],
+            style='TCheckbutton', state='disabled')
+        self.glsw_apply_to_analysis_checkbox.grid(row=glsw_row, column=0, columnspan=2,
                                                   sticky=tk.W, pady=5)
         glsw_row += 1
 
@@ -55165,8 +55232,8 @@ External Validation Performance (n={n_val}):
         row += 1
 
         ttk.Label(content_frame,
-                 text="Advanced methods configured here will be applied during analysis if enabled.\n"
-                      "They work together with simple methods from Tab 4A (Wavelength Exclusion, MSC, OSC).",
+                 text="Methods configured here are NOT applied during analysis (see the note at "
+                      "the top of this page).",
                  style='TLabel', justify=tk.LEFT).grid(row=row, column=0, columnspan=2,
                                                        sticky=tk.W, pady=(0, 10))
         row += 1
@@ -57505,10 +57572,13 @@ External Validation Performance (n={n_val}):
         method_frame.grid(row=row, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         self.contam_correction_method = tk.StringVar(value='Exclude Regions')
+        # No 'OPLS-DA Filter' here: its target is group membership, so it KEEPS
+        # the contaminant and removes the within-group (analyte) variation, and it
+        # outputs autoscaled values rather than spectra. OPLS-DA stays available
+        # as a detection diagnostic on the Automated Detection page.
         correction_methods = [
             'Exclude Regions',
             'EPO Projection',
-            'OPLS-DA Filter',
             'GLSW Weighting'
         ]
 
@@ -57518,6 +57588,36 @@ External Validation Performance (n={n_val}):
                 variable=self.contam_correction_method, value=method,
                 style='TRadiobutton'
             ).pack(anchor=tk.W, pady=2)
+
+        # EPO: number of contaminant directions ('auto' = statistical test) and
+        # the scientific caution for unpaired groups (review round 1, items 5/6).
+        epo_opts = ttk.Frame(method_frame, style='TFrame')
+        epo_opts.pack(anchor=tk.W, pady=(6, 2), padx=(20, 0))
+        ttk.Label(epo_opts, text="EPO directions to remove:",
+                  style='TLabel').pack(side=tk.LEFT, padx=(0, 6))
+        self.contam_epo_components = tk.StringVar(value='auto')
+        ttk.Combobox(epo_opts, textvariable=self.contam_epo_components,
+                     values=['auto', '1', '2', '3', '4', '5'], width=6,
+                     state='readonly').pack(side=tk.LEFT)
+        ttk.Label(epo_opts,
+                  text="(auto: only directions the groups differ in beyond sampling variation)",
+                  style='Small.TLabel', foreground='gray').pack(side=tk.LEFT, padx=(6, 0))
+        self.contam_epo_caution_label = ttk.Label(
+            method_frame,
+            text=("EPO caution: the removed direction is the difference between the group "
+                  "means, so the clean and contaminated groups must differ ONLY by the "
+                  "contaminant. Any real chemical difference between the groups (e.g. more "
+                  "collagen in the treated bones) is removed with it. Paired spectra (the "
+                  "same specimen scanned clean and contaminated) avoid this, but this page "
+                  "cannot pair spectra yet.\n"
+                  "'auto' only suggests a count, and it can be wrong both ways: it can miss "
+                  "a contaminant confined to one of several groups (with groups of 10, one "
+                  "contaminated group out of four at a moderate dose was found only ~7% of "
+                  "the time), and groups with skewed variation and very different spreads "
+                  "can produce a spurious direction. Groups of 2-3 spectra need a manual "
+                  "count."),
+            style='Small.TLabel', foreground='#b45309', wraplength=640, justify=tk.LEFT)
+        self.contam_epo_caution_label.pack(anchor=tk.W, pady=(4, 0), padx=(20, 0))
         row += 1
 
         # Section 2: Apply Correction
@@ -57538,10 +57638,16 @@ External Validation Performance (n={n_val}):
         ttk.Radiobutton(source_frame, text="Main Dataset (Tab 1)", variable=self.contam_apply_source,
                        value='Main Dataset', style='TRadiobutton').pack(side=tk.LEFT, padx=5)
 
-        # Apply button
-        ttk.Button(apply_frame, text="▶️ Apply Correction",
+        # Apply / Restore buttons
+        contam_apply_btns = ttk.Frame(apply_frame, style='TFrame')
+        contam_apply_btns.pack(anchor=tk.W, pady=(0, 10))
+        ttk.Button(contam_apply_btns, text="▶️ Apply Correction",
                   command=self._contam_apply_correction,
-                  style='Modern.TButton').pack(anchor=tk.W, pady=(0, 10))
+                  style='Modern.TButton').pack(side=tk.LEFT, padx=(0, 10))
+        self.contam_restore_btn = ttk.Button(
+            contam_apply_btns, text="↶ Restore Main Dataset",
+            command=self._contam_restore_main_dataset, state='disabled')
+        self.contam_restore_btn.pack(side=tk.LEFT)
 
         self.contam_apply_status_label = ttk.Label(
             apply_frame, text="No correction applied yet",
@@ -57647,6 +57753,7 @@ External Validation Performance (n={n_val}):
         self.contam_peak_threshold.set(10.0)
         self.contam_correction_method.set('Exclude Regions')
         self.contam_apply_source.set('Contaminant Groups')
+        self.contam_epo_components.set('auto')
 
         # 6. Clear UI widgets on 13A
         self.contam_groups_listbox.delete(0, tk.END)
@@ -58490,11 +58597,13 @@ External Validation Performance (n={n_val}):
             self._contam_plot_spectra_with_exclusions(results)
 
             preproc_line = f"\nPreprocessing: {preproc}" if preproc != 'None (Raw)' else ""
+            notes = results.get('notes') or []
+            notes_text = ("\n\nNote: " + "\n".join(notes)) if notes else ""
             messagebox.showinfo("Success",
                 f"Automated detection complete!\n"
                 f"Method: {method}{preproc_line}\n"
                 f"Found {len(results.get('exclusion_regions', []))} regions to exclude.\n\n"
-                f"See influence plot below for details.")
+                f"See influence plot below for details.{notes_text}")
 
         except Exception as e:
             self.contam_detection_status_label.config(
@@ -59315,45 +59424,86 @@ External Validation Performance (n={n_val}):
                 X_corrected = self._apply_epo_projection(X_to_correct)
             elif method == 'GLSW Weighting':
                 X_corrected = self._apply_glsw_weighting(X_to_correct)
-            elif method == 'OPLS-DA Filter':
-                X_corrected = self._apply_opls_filter(X_to_correct)
             else:
                 raise ValueError(f"Unknown method: {method}")
 
+            import pandas as pd
+            if method == 'Exclude Regions':
+                corrected_columns = self._get_remaining_wavelengths()
+            elif target == 'Main Dataset':
+                corrected_columns = self.X.columns
+            else:
+                corrected_columns = self.contam_wavelengths
+
             # Store corrected data
             if target == 'Main Dataset':
-                # Backup original
-                if not hasattr(self, 'X_before_contam_correction'):
+                # Back up the dataset before the first correction. Take a fresh
+                # backup whenever self.X is not the frame this tab last wrote (a
+                # new dataset was loaded or it was changed elsewhere), so Restore
+                # can never bring back a different dataset.
+                if (self.X_before_contam_correction is None
+                        or not self._contam_X_unchanged_since_write()):
                     self.X_before_contam_correction = self.X.copy()
 
-                # Update with corrected data
-                import pandas as pd
-                if method == 'Exclude Regions':
-                    # Fewer columns after exclusion
-                    remaining_wavelengths = self._get_remaining_wavelengths()
-                    self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=remaining_wavelengths)
-                else:
-                    # Same columns, corrected values
-                    self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=self.X.columns)
-
+                self.X = pd.DataFrame(X_corrected, index=self.X.index, columns=corrected_columns)
+                self._contam_X_written = self.X
+                self._contam_X_fingerprint = self._contam_fingerprint(self.X)
                 self.contam_corrected_X = self.X.copy()
+                validation_note = self._contam_resync_validation()
+                if hasattr(self, 'contam_restore_btn'):
+                    self.contam_restore_btn.config(state='normal')
+            else:
+                row_labels = [
+                    f"{label}_{i + 1}"
+                    for label, X_group in self.contam_groups.items()
+                    for i in range(len(X_group))
+                ]
+                self.contam_corrected_X = pd.DataFrame(
+                    X_corrected, index=row_labels, columns=corrected_columns
+                )
 
             # Show success
+            detail = ""
+            if method == 'EPO Projection':
+                n_removed = getattr(self.contam_epo_transformer, 'n_components_', 0)
+                detail = f" ({n_removed} contaminant direction(s) removed)"
             self.contam_apply_status_label.config(
-                text=f"✓ {method} applied to {target}",
+                text=f"✓ {method} applied to {target}{detail}",
                 foreground='green'
             )
 
             # Show before/after plot
             self._show_correction_comparison(X_to_correct, X_corrected, method)
 
+            restore_note = (
+                "\n\nThe main dataset now holds the corrected spectra. Use 'Restore Main "
+                "Dataset' to undo. Changing the wavelength range on the Import tab "
+                "rebuilds the data from the original file and drops this correction."
+                + validation_note
+                if target == 'Main Dataset' else ""
+            )
+            if method == 'EPO Projection':
+                restore_note += (
+                    "\n\nCaution: the removed direction is the difference between the "
+                    "group means. It contains any real chemical difference between the "
+                    "clean and contaminated groups, which is removed together with the "
+                    "contaminant. Use groups that differ only by the contaminant."
+                )
             messagebox.showinfo("Success",
                 f"Correction applied!\n\n"
-                f"Method: {method}\n"
+                f"Method: {method}{detail}\n"
                 f"Target: {target}\n"
                 f"Original shape: {X_to_correct.shape}\n"
-                f"Corrected shape: {X_corrected.shape}")
+                f"Corrected shape: {X_corrected.shape}{restore_note}")
 
+        except _ContamCancelled:
+            self.contam_apply_status_label.config(
+                text="Cancelled: nothing was changed", foreground='gray')
+        except _ContamNothingToRemove as e:
+            self.contam_apply_status_label.config(
+                text="No contaminant direction found: nothing removed (see message)",
+                foreground='#b45309')
+            messagebox.showinfo("Nothing Removed", str(e))
         except Exception as e:
             self.contam_apply_status_label.config(text="✗ Correction failed", foreground='red')
             messagebox.showerror("Error", f"Correction failed:\n{str(e)}")
@@ -59391,17 +59541,72 @@ External Validation Performance (n={n_val}):
         return self.contam_wavelengths
 
     def _apply_epo_projection(self, X: np.ndarray) -> np.ndarray:
-        """Apply EPO projection to remove contaminant signal."""
-        from spectral_predict.contaminant_analysis import EstimatedEPO
+        """Project the contaminant directions out of X (EPO, Roger et al. 2003).
 
-        n_components = self.contam_n_components.get()
+        Each contaminant group contributes its mean difference from the clean
+        group; directions that clear the sampling-noise floor are removed. The
+        result is ``X @ (I - V V^T)``: spectra on the original scale.
+        """
+        import warnings
 
-        # Combine all contaminant groups
-        X_contam = np.vstack(list(self.contam_groups.values()))
+        from spectral_predict.contaminant_analysis import MultiGroupEPO
 
-        # Fit EPO on clean vs contaminated
-        epo = EstimatedEPO(n_components=n_components)
-        epo.fit_groups(X_contam, self.contam_clean_data)
+        choice = str(self.contam_epo_components.get()).strip().lower()
+        n_total = None if choice in ('', 'auto') else int(choice)
+        n_groups = len(self.contam_groups)
+        sizes = [len(self.contam_clean_data)] + [len(g) for g in self.contam_groups.values()]
+        if n_total is None and min(sizes) < 2:
+            raise _ContamNothingToRemove(
+                "The automatic count needs at least 2 spectra in the clean group and in "
+                "every contaminant group (sampling variation cannot be judged from one "
+                "spectrum), so nothing was removed.\n\nSet 'EPO directions to remove' to a "
+                "number and apply again."
+            )
+        epo = MultiGroupEPO(n_total_components=n_total)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            epo.fit(self.contam_clean_data, self.contam_groups)
+        if epo.n_components_ == 0:
+            p_txt = f" (p = {epo.p_values_[0]:.3g})" if epo.p_values_ else ""
+            raise _ContamNothingToRemove(
+                "The automatic test found no direction in which the contaminant groups "
+                f"differ from the clean group by more than sampling variation{p_txt}, so "
+                "nothing was removed.\n\nIf you know the contaminant is there (small "
+                "groups make weak contaminants hard to detect), set 'EPO directions to "
+                "remove' to 1 and apply again."
+            )
+
+        if n_total is None and self._CONTAM_AUTO_COUNT_ADVISORY:
+            # The automatic count is advisory: nothing is removed until the user
+            # confirms or picks a number (review round 2, item 2).
+            k = epo.n_components_
+            p_txt = ", ".join(f"{p:.3g}" for p in epo.p_values_[:k])
+            skew_note = self._contam_skew_warning(epo)
+            answer = messagebox.askyesnocancel(
+                "Confirm EPO Directions",
+                f"The automatic test suggests removing {k} contaminant direction(s) "
+                f"(p = {p_txt}).\n\n"
+                "These p-values are approximate, not calibrated: they assume roughly "
+                "symmetric variation within each group. Skewed or heavy-tailed groups with "
+                "very different spreads can produce a spurious direction, and a contaminant "
+                "confined to one of several groups can be missed. Prefer a manual count "
+                f"when in doubt.{skew_note}\n\n"
+                f"Yes: remove {k}.\nNo: choose a number.\nCancel: remove nothing.")
+            if answer is None:
+                raise _ContamCancelled()
+            if answer is False:
+                from tkinter import simpledialog
+
+                chosen = simpledialog.askinteger(
+                    "EPO Directions",
+                    f"Number of contaminant directions to remove (1-{n_groups}):",
+                    minvalue=1, maxvalue=n_groups, parent=self.root)
+                if chosen is None:
+                    raise _ContamCancelled()
+                epo = MultiGroupEPO(n_total_components=int(chosen))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    epo.fit(self.contam_clean_data, self.contam_groups)
 
         # Store for potential reuse
         self.contam_epo_transformer = epo
@@ -59421,22 +59626,6 @@ External Validation Performance (n={n_val}):
         self.contam_glsw_transformer = glsw
 
         return glsw.transform(X)
-
-    def _apply_opls_filter(self, X: np.ndarray) -> np.ndarray:
-        """Apply OPLS orthogonal signal correction."""
-        from spectral_predict.contaminant_analysis import ContaminantOPLSDA
-
-        n_components = self.contam_n_components.get()
-        X_contam = np.vstack(list(self.contam_groups.values()))
-
-        opls = ContaminantOPLSDA(n_components=min(n_components, 1))
-        opls.fit(X_contam, self.contam_clean_data)
-
-        self.contam_opls_transformer = opls
-
-        # OPLS transform returns scores, need to reconstruct
-        # For now, use the orthogonal-corrected approach
-        return opls.transform(X)
 
     def _show_correction_comparison(self, X_before: np.ndarray, X_after: np.ndarray, method: str):
         """Show before/after comparison plot."""
@@ -59482,8 +59671,120 @@ External Validation Performance (n={n_val}):
 
         ttk.Button(popup, text="Close", command=popup.destroy).pack(pady=10)
 
+    def _contam_restore_main_dataset(self):
+        """Undo contaminant corrections on the main dataset (R113)."""
+        backup = self.X_before_contam_correction
+        if backup is None:
+            messagebox.showinfo("Nothing to Restore",
+                                "No contaminant correction has been applied to the main dataset.")
+            return
+        if not self._contam_X_unchanged_since_write():
+            messagebox.showwarning(
+                "Cannot Restore",
+                "The main dataset has changed since the correction was applied (new data "
+                "loaded or edited elsewhere), so the saved copy may belong to a different "
+                "dataset or would undo those later edits. Reload the data instead.")
+            return
+        self.X = backup.copy()
+        self.X_before_contam_correction = None
+        self._contam_X_written = None
+        self._contam_X_fingerprint = None
+        validation_note = self._contam_resync_validation()
+        if hasattr(self, 'contam_restore_btn'):
+            self.contam_restore_btn.config(state='disabled')
+        self.contam_apply_status_label.config(
+            text="↶ Main dataset restored to its state before contaminant correction"
+                 + validation_note.replace("\n", " "),
+            foreground='green')
+
+    def _contam_skew_warning(self, epo):
+        """Dialog note when a group's spread along a suggested direction is strongly skewed.
+
+        The automatic count's bootstrap symmetrises residuals; with skewed groups
+        of very different spread it can suggest a spurious direction (review round
+        3: 9% false removals for lognormal groups). Sample skewness |g1| > 1 in a
+        group of at least 8 spectra is flagged; it is a hint, not a test.
+        """
+        from scipy import stats
+
+        if epo.n_components_ == 0:
+            return ""
+        v = epo.interferent_components_[:, 0]
+        groups = [("clean", self.contam_clean_data)] + list(self.contam_groups.items())
+        flagged = []
+        for label, X_g in groups:
+            X_g = np.asarray(X_g, dtype=float)
+            if X_g.shape[0] < 8:
+                continue
+            scores = (X_g - X_g.mean(axis=0)) @ v
+            if np.std(scores) > 0 and abs(stats.skew(scores)) > 1.0:
+                flagged.append(str(label))
+        if not flagged:
+            return ""
+        return ("\n\nWarning: the variation along the suggested direction is strongly "
+                f"skewed in: {', '.join(flagged)}. The suggestion is less reliable here; "
+                "consider a manual count.")
+
+    @staticmethod
+    def _contam_fingerprint(frame):
+        """Cheap content fingerprint: shape, labels and a hash of the values."""
+        import hashlib
+
+        digest = hashlib.blake2b(digest_size=16)
+        digest.update(np.ascontiguousarray(frame.to_numpy(dtype=float)).tobytes())
+        digest.update(repr(list(frame.index)).encode('utf-8'))
+        digest.update(repr(list(frame.columns)).encode('utf-8'))
+        return frame.shape, digest.hexdigest()
+
+    def _contam_X_unchanged_since_write(self):
+        """True while self.X is still the frame (and content) a correction wrote.
+
+        Identity alone is not enough: an in-place edit of self.X keeps the same
+        object, and restoring over it would silently discard that edit.
+        """
+        if self.X is None or self.X is not self._contam_X_written:
+            return False
+        return self._contam_fingerprint(self.X) == getattr(self, '_contam_X_fingerprint', None)
+
+    def _contam_resync_validation(self):
+        """Rebuild validation_X from self.X after a correction or Restore.
+
+        The holdout spectra are cached separately (validation_X); without this a
+        search would score corrected calibration spectra against uncorrected
+        holdout spectra (or the reverse after Restore). Rows are taken from self.X
+        by the existing validation IDs, in the cached order. Returns a note for the
+        user ('' when there is no holdout).
+        """
+        if not self.validation_indices:
+            return ""
+        if self.validation_X is not None and len(self.validation_X) > 0:
+            validation_idx = list(self.validation_X.index)
+        elif self.validation_y is not None and len(self.validation_y) > 0:
+            validation_idx = list(self.validation_y.index)
+        else:
+            validation_idx = list(self.validation_indices)
+        missing = [i for i in validation_idx if i not in self.X.index]
+        if missing:
+            # A stale holdout must not stay usable: clear it (cache, indices and
+            # the Validation checkbox) so no analysis scores against it.
+            self._reset_validation_set()
+            if hasattr(self, 'validation_status_label'):
+                self.validation_status_label.config(
+                    text="Holdout cleared: it no longer matched the main dataset")
+            return (f"\n\nThe holdout set was CLEARED: {len(missing)} holdout sample(s) "
+                    "are not in the main dataset, so its spectra could not be updated. "
+                    "Recreate the holdout before running an analysis.")
+        self.validation_X = self.X.loc[validation_idx]
+        return f"\n\nThe {len(validation_idx)} holdout spectra were updated to match."
+
     def _contam_export_corrected_spectra(self):
-        """Export corrected spectral data."""
+        """Export the last corrected spectra to CSV, Excel or NumPy (R114)."""
+        corrected = getattr(self, 'contam_corrected_X', None)
+        if corrected is None:
+            messagebox.showwarning("No Corrected Data",
+                                   "Apply a correction first (section 2 on this page).")
+            return
+
         filepath = filedialog.asksaveasfilename(
             title="Export Corrected Spectra",
             defaultextension=".csv",
@@ -59494,8 +59795,15 @@ External Validation Performance (n={n_val}):
             return
 
         try:
-            # Placeholder - would export actual corrected data
-            messagebox.showinfo("Info", "Export functionality would save corrected spectra here")
+            suffix = Path(filepath).suffix.lower()
+            if suffix == '.npy':
+                np.save(filepath, corrected.to_numpy(dtype=float))
+            elif suffix in ('.xlsx', '.xls'):
+                corrected.to_excel(filepath, index_label='Sample')
+            else:
+                corrected.to_csv(filepath, index_label='Sample')
+            if not Path(filepath).exists():
+                raise OSError(f"{filepath} was not created")
 
             self.contam_export_status_label.config(
                 text=f"✓ Corrected spectra exported to {Path(filepath).name}",
@@ -59580,9 +59888,9 @@ External Validation Performance (n={n_val}):
 
     def _on_epo_toggled(self):
         """Handle EPO enable/disable."""
+        # Always disabled: not applied during analysis (QW6).
         enabled = self.advanced_interference_settings['epo']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_epo_settings_state(state)
+        self._toggle_epo_settings_state('disabled')
         self._update_method_summary()
 
         if enabled:
@@ -59639,9 +59947,8 @@ External Validation Performance (n={n_val}):
 
     def _on_dosc_toggled(self):
         """Handle DOSC enable/disable."""
-        enabled = self.advanced_interference_settings['dosc']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_dosc_settings_state(state)
+        # Always disabled: not applied during analysis (QW6).
+        self._toggle_dosc_settings_state('disabled')
         self._update_method_summary()
 
     def _toggle_dosc_settings_state(self, state):
@@ -59662,9 +59969,8 @@ External Validation Performance (n={n_val}):
 
     def _on_glsw_toggled(self):
         """Handle GLSW enable/disable."""
-        enabled = self.advanced_interference_settings['glsw']['enabled'].get()
-        state = 'normal' if enabled else 'disabled'
-        self._toggle_glsw_settings_state(state)
+        # Always disabled: not applied during analysis (QW6).
+        self._toggle_glsw_settings_state('disabled')
         self._update_method_summary()
 
     def _toggle_glsw_settings_state(self, state):
@@ -59757,6 +60063,7 @@ External Validation Performance (n={n_val}):
             self.app_spectra = {
                 'wavelengths': wavelengths,
                 'X': X,
+                'y': None,  # no reference values: OSC/DOSC unavailable
                 'n_spectra': len(csv_files),
                 'source': 'folder'
             }
@@ -59772,30 +60079,79 @@ External Validation Performance (n={n_val}):
             messagebox.showerror("Error Loading Folder", f"Failed to load spectra:\n{str(e)}")
 
     def _app_load_from_import(self):
-        """Load spectra from Import tab data."""
+        """Load spectra (and numeric reference values, if any) from the Import tab."""
         from tkinter import messagebox
+        import pandas as pd
 
-        if not hasattr(self, 'X_train') or self.X_train is None:
+        if self.X is None or len(self.X) == 0:
             messagebox.showwarning(
                 "No Data",
                 "No data loaded in Import tab. Please load data first."
             )
             return
 
-        # Use training data from Import tab
+        X_df = self.X
+        try:
+            wavelengths = np.asarray(X_df.columns, dtype=float)
+        except (TypeError, ValueError):
+            wavelengths = np.arange(X_df.shape[1], dtype=float)
+
+        # Reference values aligned row-for-row with the spectra. OSC and DOSC need
+        # them; text class labels are not usable as a regression target.
+        y = None
+        if self.y is not None:
+            # Align by sample label only; never by position.
+            try:
+                y_num = pd.to_numeric(pd.Series(self.y).reindex(X_df.index), errors='coerce')
+            except ValueError:  # duplicate labels cannot be aligned unambiguously
+                y_num = None
+            if y_num is not None and y_num.notna().sum() >= 3 and y_num.nunique() > 1:
+                y = y_num.to_numpy(dtype=float)
+
         self.app_spectra = {
-            'wavelengths': self.wavelengths,
-            'X': self.X_train,
-            'n_spectra': self.X_train.shape[0],
+            'wavelengths': wavelengths,
+            'X': X_df.to_numpy(dtype=float),
+            'y': y,
+            'sample_ids': list(X_df.index),
+            'n_spectra': X_df.shape[0],
             'source': 'import_tab'
         }
 
+        y_note = (
+            f"   Reference values: {int(np.isfinite(y).sum())} aligned (OSC/DOSC available)"
+            if y is not None else
+            "   No numeric reference values: OSC and DOSC are unavailable"
+        )
         self.app_data_info_label.config(
-            text=f"> Loaded {self.X_train.shape[0]} spectra from Import tab\n"
-                 f"   Shape: {self.X_train.shape}\n"
-                 f"   Wavelengths: {self.wavelengths[0]:.1f} - {self.wavelengths[-1]:.1f} nm",
+            text=f"> Loaded {X_df.shape[0]} spectra from Import tab\n"
+                 f"   Shape: {X_df.shape}\n"
+                 f"   Wavelengths: {wavelengths[0]:.1f} - {wavelengths[-1]:.1f} nm\n"
+                 f"{y_note}",
             foreground='green'
         )
+
+    def _app_reference_target(self, method):
+        """Numeric y aligned with the Application spectra, or None after telling the user."""
+        from tkinter import messagebox
+
+        y = self.app_spectra.get('y') if self.app_spectra else None
+        if y is None:
+            messagebox.showwarning(
+                "Reference Values Needed",
+                f"{method} removes variation that is unrelated (orthogonal) to a reference "
+                f"value, so it needs numeric reference values (y) aligned with the spectra.\n\n"
+                f"Load spectra and reference data on the Import tab, then use 'Load from "
+                f"Import Tab' here. Spectra loaded from a folder have no reference values."
+            )
+            return None
+        y = np.asarray(y, dtype=float)
+        if y.shape[0] != self.app_spectra['X'].shape[0] or np.isfinite(y).sum() < 3:
+            messagebox.showwarning(
+                "Reference Values Needed",
+                f"{method} needs at least 3 numeric reference values aligned with the spectra."
+            )
+            return None
+        return y
 
     def _on_app_method_changed(self, event=None):
         """Update method settings when method selection changes."""
@@ -59831,6 +60187,7 @@ External Validation Performance (n={n_val}):
                 textvariable=self.app_osc_n_components,
                 width=10
             ).pack(anchor=tk.W)
+            self._app_add_reference_note()
 
         elif method == 'EPO':
             ttk.Label(self.app_method_settings_frame, text="Interferent Library:").pack(anchor=tk.W, pady=2)
@@ -59844,6 +60201,19 @@ External Validation Performance (n={n_val}):
             self.app_epo_library_combo.pack(anchor=tk.W, pady=2)
             if library_names:
                 self.app_epo_library_combo.current(0)
+
+            ttk.Label(self.app_method_settings_frame, text="Library contains:").pack(anchor=tk.W, pady=2)
+            self.app_epo_library_type = tk.StringVar(value='samples')
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Whole spectra at different interferent levels (differenced from their mean)",
+                variable=self.app_epo_library_type, value='samples'
+            ).pack(anchor=tk.W)
+            ttk.Radiobutton(
+                self.app_method_settings_frame,
+                text="Pure interferent or difference spectra (used as they are)",
+                variable=self.app_epo_library_type, value='differences'
+            ).pack(anchor=tk.W)
 
             ttk.Label(self.app_method_settings_frame, text="Number of Components:").pack(anchor=tk.W, pady=2)
             self.app_epo_n_components = tk.IntVar(value=2)
@@ -59863,6 +60233,7 @@ External Validation Performance (n={n_val}):
                 textvariable=self.app_dosc_n_components,
                 width=10
             ).pack(anchor=tk.W)
+            self._app_add_reference_note()
 
         elif method == 'GLSW':
             ttk.Label(self.app_method_settings_frame, text="Method:").pack(anchor=tk.W, pady=2)
@@ -59879,6 +60250,19 @@ External Validation Performance (n={n_val}):
                 variable=self.app_glsw_method,
                 value='residual'
             ).pack(anchor=tk.W)
+
+    def _app_add_reference_note(self):
+        """Caption under OSC/DOSC settings: they need aligned numeric reference values."""
+        spectra = getattr(self, 'app_spectra', None)
+        has_y = bool(spectra) and spectra.get('y') is not None
+        ttk.Label(
+            self.app_method_settings_frame,
+            text=("Uses the reference values loaded with the spectra (y)." if has_y else
+                  "Needs numeric reference values (y): use 'Load from Import Tab' "
+                  "with reference data loaded."),
+            font=('Arial', 8),
+            foreground='gray' if has_y else 'orange',
+        ).pack(anchor=tk.W, pady=(4, 0))
 
     def _app_apply_correction(self):
         """Apply selected interference removal method to loaded spectra."""
@@ -59912,7 +60296,7 @@ External Validation Performance (n={n_val}):
                 if ranges:
                     excluder = WavelengthExcluder(wavelengths, exclude_ranges=ranges)
                     X_corrected = excluder.fit_transform(X)
-                    wavelengths_corrected = excluder.wavelengths_kept_
+                    wavelengths_corrected = excluder.wavelengths_out_
                 else:
                     messagebox.showwarning("Invalid Ranges", "No valid wavelength ranges specified")
                     return
@@ -59923,11 +60307,21 @@ External Validation Performance (n={n_val}):
                 X_corrected = msc.fit_transform(X)
                 wavelengths_corrected = wavelengths
 
-            elif method == 'OSC':
-                from spectral_predict.interference import OSC
-                n_components = self.app_osc_n_components.get()
-                osc = OSC(n_components=n_components)
-                X_corrected = osc.fit_transform(X)
+            elif method in ('OSC', 'DOSC'):
+                # Both remove variation whose scores are orthogonal to a reference
+                # value, so they need numeric y aligned row-for-row with X.
+                y = self._app_reference_target(method)
+                if y is None:
+                    return
+                has_y = np.isfinite(y)
+                if method == 'OSC':
+                    from spectral_predict.interference import OSC
+                    corrector = OSC(n_components=self.app_osc_n_components.get())
+                else:
+                    from spectral_predict.interference import DOSC
+                    corrector = DOSC(n_components=self.app_dosc_n_components.get(), center=True)
+                corrector.fit(X[has_y], y[has_y])
+                X_corrected = corrector.transform(X)
                 wavelengths_corrected = wavelengths
 
             elif method == 'EPO':
@@ -59939,15 +60333,10 @@ External Validation Performance (n={n_val}):
 
                 lib = self.interferent_libraries[library_name]
                 n_components = self.app_epo_n_components.get()
-                epo = EPO(n_components=n_components, center=True, svd_tol=1e-8)
+                # center=False: return X @ P, corrected spectra on the original scale.
+                epo = EPO(n_components=n_components, center=False, svd_tol=1e-8,
+                          library_type=self.app_epo_library_type.get())
                 X_corrected = epo.fit_transform(X, X_interferents=lib['X'])
-                wavelengths_corrected = wavelengths
-
-            elif method == 'DOSC':
-                from spectral_predict.interference import DOSC
-                n_components = self.app_dosc_n_components.get()
-                dosc = DOSC(n_components=n_components, center=True)
-                X_corrected = dosc.fit_transform(X)
                 wavelengths_corrected = wavelengths
 
             elif method == 'GLSW':
