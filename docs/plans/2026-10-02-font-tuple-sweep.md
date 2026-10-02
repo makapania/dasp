@@ -28,11 +28,15 @@ touches lines across the whole of `spectral_predict_gui_optimized.py`.*
   The family is resolved from what is installed: Segoe UI and Consolas on Windows.
 - **Styles and main window.** All ttk styles in `_apply_theme` use the named fonts. So do the
   top bar, `_create_accent_button` and the theme-change toast.
-- **Dialogs.** The 11 fixed `Toplevel.geometry("WxH")` calls go through `_px_geometry`, which
-  also clamps them to 90% of the screen.
-- **Results table and row height (review round 1).**
-  - Results-table column widths and the widening applied to sorted columns go through
-    `_px()`.
+- **Dialogs.** The 11 fixed `Toplevel.geometry("WxH")` calls use
+  `_px_geometry("WxH", self.root)`. This scales the size, clamps it to the work area of the
+  owner's monitor (Win32 `rcWork`, falling back to the Tk screen size) and centres the dialog
+  on the owner. Ten of the 11 dialogs were already resizable. "Set Analysis Subset" was not,
+  so it is now resizable too, because a clamped size could otherwise hide its controls.
+- **Results table and row height (review rounds 1 and 2).**
+  - Results-table column widths use `_px()` minimums. Float columns are sized from their
+    `.6g` text, measured in the row font (`_float_column_text_width`), plus Tk's cell padding.
+  - The widening applied to sorted columns goes through `_px()`.
   - The `Treeview` rowheight is set explicitly from the row font (linespace + `_px(2)`).
   - The text-logo fallback derives its point size from the unscaled base.
 
@@ -192,15 +196,27 @@ Contaminant). Wrap the values in `_px()` during the sweep.
   restores the old proportions everywhere. This pairs naturally with QW8 (flatten cards).
 - **29 `wraplength=N` values.** Text wraps after fewer words, but it is not clipped.
 - **Legend swatches** `tk.Canvas(width=14, height=14)` at :15148, :33423 and :33479.
-- **Other Treeview column widths (about 58 `.column(..., width=N)` calls).** The Results table
-  is fixed (see above). Ensemble results (:34226, 60-200 px), CT comparison, library search,
-  outliers and the multi-class decision view still use 96-dpi pixel widths. Values such as
-  `1.23456e-05` need about 81 px at 125%, so any column of 80 px or less that holds
-  scientific notation will truncate. Wrap the widths in `_px()`.
-- **Dialog sizes and the screen edge.** Fixed in round 1: `_px_geometry` now clamps to 90% of
-  the screen size that `_apply_ui_scale` records. At 150% on a 1920×1080 panel the peak
-  calculator becomes 780×972 instead of 780×1080. Tk does not expose the work area, hence
-  the 90% margin for the taskbar. The dialog is resizable, so a user can still enlarge it.
+- **Sibling-table column widths (about 58 `.column(..., width=N)` calls; review round 2,
+  GLM M-2, deferred to this sweep).** The Results table is fixed (see above). These tables
+  still use 96-dpi pixel widths:
+  - ensemble results (:34226, 60-200 px)
+  - CT comparison
+  - library search
+  - outliers
+  - the multi-class decision view
+  - the peak tables
+
+  At 125%, `1.23456e-05` needs about 81 px of text plus about 10 px of cell padding, so any
+  numeric column under about 91 px truncates. Plain `_px()` is not enough: `_px(70)` is 88.
+  Size numeric columns the way the Results table now does: `_float_column_text_width` plus
+  `2 * _px(4) + _px(2)`, with `_px(base)` as the minimum.
+- **Dialog sizes and the screen edge.** Fixed in round 2. `_px_geometry(size, owner)` clamps
+  to the owner monitor's work area, minus room for the title bar, and centres the dialog on
+  the owner. Two limits remain:
+  - The work area is read once, when the dialog opens. Moving the dialog to another monitor
+    afterwards is not handled, because the process is system-aware, not per-monitor.
+  - Ten of the 11 dialogs were already resizable. "Set Analysis Subset" (:35829) was made
+    resizable in round 2, because a clamped size could hide its controls.
 
 ### Checked and needing no change
 

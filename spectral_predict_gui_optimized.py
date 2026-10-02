@@ -1664,22 +1664,11 @@ def _apply_ui_scale(root: tk.Misc) -> float:
     Idempotent: values are always recomputed from the 96-dpi base values, so
     constructing a second app in the same process does not compound the scaling.
     """
-    global _UI_SCALE, _SCREEN_SIZE
+    global _UI_SCALE
     _UI_SCALE = _compute_ui_scale(root)
     SPACING.update({k: _px(v) for k, v in _BASE_SPACING.items()})
     SIDEBAR_CONFIG.update({k: _px(v) for k, v in _BASE_SIDEBAR_CONFIG.items()})
-    try:
-        _SCREEN_SIZE = (int(root.winfo_screenwidth()), int(root.winfo_screenheight()))
-    except (AttributeError, tk.TclError):
-        _SCREEN_SIZE = None
     return _UI_SCALE
-
-
-# Screen size in pixels, recorded by _apply_ui_scale; None until then.
-_SCREEN_SIZE: tuple[int, int] | None = None
-# Largest fraction of the screen a fixed-size dialog may take (leaves room for the
-# taskbar and title bar, since the exact work area is not available from Tk).
-_DIALOG_MAX_SCREEN_FRACTION = 0.9
 
 
 def _px(value: float) -> int:
@@ -1687,19 +1676,95 @@ def _px(value: float) -> int:
     return int(round(value * _UI_SCALE))
 
 
-def _px_geometry(size: str) -> str:
+def _monitor_work_area(window: tk.Misc) -> tuple[int, int, int, int]:
+    """Return ``(left, top, right, bottom)`` of the usable area around ``window``.
+
+    On Windows this is the work area (screen minus taskbar) of the monitor that holds
+    ``window``'s toplevel, in the process's own DPI coordinate space, which is also
+    the space Tk geometry strings use. Elsewhere, or if the Win32 calls fail, it is
+    the screen Tk reports (the primary monitor on Windows).
+    """
+    fallback = (0, 0, int(window.winfo_screenwidth()), int(window.winfo_screenheight()))
+    if sys.platform != 'win32':
+        return fallback
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _MonitorInfo(ctypes.Structure):
+            _fields_ = [
+                ('cbSize', wintypes.DWORD),
+                ('rcMonitor', wintypes.RECT),
+                ('rcWork', wintypes.RECT),
+                ('dwFlags', wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        user32.MonitorFromWindow.restype = wintypes.HMONITOR
+        user32.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        user32.GetMonitorInfoW.restype = wintypes.BOOL
+        user32.GetMonitorInfoW.argtypes = [wintypes.HMONITOR, ctypes.POINTER(_MonitorInfo)]
+        hwnd = int(window.winfo_toplevel().wm_frame(), 16)
+        monitor = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(_MonitorInfo)
+        if not monitor or not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return fallback
+        work = info.rcWork
+        if work.right <= work.left or work.bottom <= work.top:
+            return fallback
+        return work.left, work.top, work.right, work.bottom
+    except (AttributeError, OSError, ValueError, tk.TclError) as exc:
+        logger.debug("Monitor work area unavailable (%s); using screen size", exc)
+        return fallback
+
+
+def _px_geometry(size: str, owner: tk.Misc | None = None) -> str:
     """Scale a ``"WIDTHxHEIGHT"`` Toplevel size given at 96 dpi, e.g. ``"350x180"``.
 
     Fixed-size dialogs do not grow to fit their content, while their point-sized
     fonts do grow with the display scale, so an unscaled size clips the bottom rows.
-    The result is clamped to 90% of the screen, so a tall dialog at 150% on a 1080p
-    panel still fits; the user can resize it if the content needs more room.
+
+    With ``owner`` (the window the dialog belongs to), the size is clamped to the work
+    area of the owner's monitor, leaving room for the title bar and borders, and the
+    dialog is centred on the owner and kept inside that work area: the result is
+    ``"WxH+X+Y"``. Without ``owner`` only the scaled ``"WxH"`` is returned.
     """
     width, height = (_px(int(v)) for v in size.lower().split('x'))
-    if _SCREEN_SIZE is not None:
-        width = min(width, int(_SCREEN_SIZE[0] * _DIALOG_MAX_SCREEN_FRACTION))
-        height = min(height, int(_SCREEN_SIZE[1] * _DIALOG_MAX_SCREEN_FRACTION))
-    return f"{width}x{height}"
+    if owner is None:
+        return f"{width}x{height}"
+    left, top, right, bottom = _monitor_work_area(owner)
+    # Tk sizes the client area; the frame adds the title bar and borders.
+    width = max(1, min(width, right - left - _px(16)))
+    height = max(1, min(height, bottom - top - _px(40)))
+    try:
+        cx = owner.winfo_rootx() + owner.winfo_width() // 2
+        cy = owner.winfo_rooty() + owner.winfo_height() // 2
+    except tk.TclError:
+        cx, cy = (left + right) // 2, (top + bottom) // 2
+    x = min(max(cx - width // 2, left), right - width - _px(16))
+    y = min(max(cy - height // 2, top), bottom - height - _px(40))
+    return f"{width}x{height}+{max(x, left)}+{max(y, top)}"
+
+
+def _float_column_text_width(values: pd.Series, font: tkfont.Font) -> int:
+    """Pixel width of the widest ``.6g``-formatted value in a float column, in ``font``.
+
+    ``font.measure`` already returns pixels at the current display scale, so the
+    result must not be multiplied by ``_UI_SCALE``. Only a bounded set of candidates
+    is formatted (the first 500 rows plus the extremes), so large tables stay fast.
+    """
+    numeric = pd.to_numeric(values, errors='coerce').to_numpy(dtype=float)
+    finite = numeric[np.isfinite(numeric)]
+    if finite.size == 0:
+        return 0
+    extremes = [finite.min(), finite.max()]
+    nonzero = finite[finite != 0]
+    if nonzero.size:
+        extremes.append(nonzero[np.argmin(np.abs(nonzero))])  # smallest magnitude, signed
+    candidates = {f"{v:.6g}" for v in np.concatenate([finite[:500], extremes])}
+    widest = sorted(candidates, key=len, reverse=True)[:5]
+    return max(font.measure(text) for text in widest)
 
 
 # ===== NAMED FONTS =====
@@ -5013,10 +5078,14 @@ class SpectralPredictApp:
                        foreground=self.colors['text'],
                        font=fonts['body'])
 
-        # Treeview row height. Tk 9 derives it from the font (linespace + 2), but Tk 8.6
-        # (the DASP_BUILD_PYTHON=312 rollback build) fixes it at 20 px whatever the font,
-        # so once the process is DPI aware the rows clip at 125% and above. Setting it
-        # explicitly from the row font gives the same rows on both Tk versions.
+        # Treeview row height. Tk 9 sets it once, at style init, from the row font
+        # (linespace + 2) and does not re-sync it later; Tk 8.6 (the DASP_BUILD_PYTHON=312
+        # rollback build) fixes it at 20 px whatever the font, so once the process is DPI
+        # aware the rows clip at 125% and above. Setting it explicitly from the row font
+        # gives the same rows on both Tk versions (_px(2) is 1-2 px more than Tk 9's own
+        # value at 150%/200%, which is harmless).
+        # INVARIANT: Treeview tag fonts (tag_configure(font=...)) must not be taller than
+        # TkDefaultFont, or their rows clip; size this from the tallest font if that changes.
         row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
         style.configure('Treeview', rowheight=row_font.metrics('linespace') + _px(2))
 
@@ -9494,7 +9563,7 @@ class SpectralPredictApp:
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Peak Calculator")
-        dialog.geometry(_px_geometry("520x720"))
+        dialog.geometry(_px_geometry("520x720", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -19737,7 +19806,7 @@ class SpectralPredictApp:
             # Create a custom dialog with scrollable text
             dialog = tk.Toplevel(self.root)
             dialog.title("Data Alignment Report")
-            dialog.geometry(_px_geometry("600x500"))
+            dialog.geometry(_px_geometry("600x500", self.root))
 
             # Add text widget with scrollbar
             frame = ttk.Frame(dialog, padding=10)
@@ -31987,7 +32056,7 @@ For detailed documentation, see the User Guide.
 
             win = tk.Toplevel(self.root)
             win.title("Multi-Class Decision Matrix")
-            win.geometry(_px_geometry("980x720"))
+            win.geometry(_px_geometry("980x720", self.root))
 
             header = ttk.Frame(win)
             header.pack(fill='x', padx=10, pady=(10, 4))
@@ -32719,6 +32788,13 @@ For detailed documentation, see the User Guide.
             # Set up columns
             self.results_tree['columns'] = columns
 
+            # Float cells are shown as .6g text, which can be as wide as "-1.23456e-05".
+            # Size those columns from the formatted text in the row font (pixels at the
+            # current scale) plus Tk's horizontal cell padding (4 px per side at 96 dpi)
+            # and a small margin; the 96-dpi widths below act as minimums.
+            row_font = tkfont.nametofont('TkDefaultFont', root=self.root)
+            cell_padding = 2 * _px(4) + _px(2)
+
             # Configure column widths and anchors
             for col in columns:
                 # Set column width based on content
@@ -32735,7 +32811,12 @@ For detailed documentation, see the User Guide.
                 else:
                     width = 80
                 # Widths are 96-dpi pixels; the cell font grows with the display scale.
-                self.results_tree.column(col, width=_px(width), anchor='center', stretch=False)
+                width = _px(width)
+                if pd.api.types.is_float_dtype(results_df[col]):
+                    text_width = _float_column_text_width(results_df[col], row_font)
+                    if text_width:
+                        width = max(width, text_width + cell_padding)
+                self.results_tree.column(col, width=width, anchor='center', stretch=False)
 
             # Store default widths for reset functionality
             self._results_default_col_widths = {
@@ -35745,8 +35826,9 @@ For detailed documentation, see the User Guide.
 
         dialog = tk.Toplevel(self.root)
         dialog.title("Set Analysis Subset")
-        dialog.geometry(_px_geometry("520x500"))
-        dialog.resizable(False, False)
+        dialog.geometry(_px_geometry("520x500", self.root))
+        # Resizable: _px_geometry may shrink it to fit a small monitor's work area.
+        dialog.resizable(True, True)
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -42815,7 +42897,7 @@ External Validation Performance (n={n_val}):
         # Simple dialog - just ask for format and export directly
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Code")
-        dialog.geometry(_px_geometry("550x520"))
+        dialog.geometry(_px_geometry("550x520", self.root))
         dialog.configure(bg='#f0f0f0')
         dialog.transient(self.root)
         dialog.resizable(True, True)
@@ -43597,7 +43679,7 @@ External Validation Performance (n={n_val}):
         # Create preview window
         preview_window = tk.Toplevel(self.root)
         preview_window.title("Wavelength Selection Preview")
-        preview_window.geometry(_px_geometry("800x500"))
+        preview_window.geometry(_px_geometry("800x500", self.root))
 
         # Info text
         info_text = f"Selected {len(selected_wl)} wavelengths out of {len(available_wl)} available"
@@ -43712,7 +43794,7 @@ External Validation Performance (n={n_val}):
         """Show dialog for custom wavelength range."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Custom Wavelength Range")
-        dialog.geometry(_px_geometry("350x200"))
+        dialog.geometry(_px_geometry("350x200", self.root))
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -53851,7 +53933,7 @@ External Validation Performance (n={n_val}):
         # Create rule dialog
         dialog = tk.Toplevel(self.root)
         dialog.title("Add Conditional Flagging Rule")
-        dialog.geometry(_px_geometry("550x450"))
+        dialog.geometry(_px_geometry("550x450", self.root))
         dialog.configure(bg=self.colors['bg'])
 
         # Make modal
@@ -57043,7 +57125,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             preview_win = tk.Toplevel(self.root)
             preview_win.title(f"Preview: {sample_id}")
-            preview_win.geometry(_px_geometry("800x400"))
+            preview_win.geometry(_px_geometry("800x400", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=preview_win)
             canvas.draw()
@@ -57260,7 +57342,7 @@ External Validation Performance (n={n_val}):
             # Show in popup window
             compare_win = tk.Toplevel(self.root)
             compare_win.title(f"Comparison: {sample_id} vs {result_id}")
-            compare_win.geometry(_px_geometry("1000x500"))
+            compare_win.geometry(_px_geometry("1000x500", self.root))
 
             canvas = FigureCanvasTkAgg(fig, master=compare_win)
             canvas.draw()
@@ -60402,7 +60484,7 @@ External Validation Performance (n={n_val}):
         # Show in popup window
         popup = tk.Toplevel(self.root)
         popup.title("Correction Comparison")
-        popup.geometry(_px_geometry("900x500"))
+        popup.geometry(_px_geometry("900x500", self.root))
 
         canvas = FigureCanvasTkAgg(fig, master=popup)
         canvas.draw()

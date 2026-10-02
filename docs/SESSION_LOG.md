@@ -761,13 +761,27 @@ the same folds, as for PLS LV selection. Implemented on branch fix/booster-early
   pixel values do NOT scale. Fixed `Toplevel.geometry("WxH")` is the one that breaks: the custom-range dialog hid its
   Apply/Cancel buttons at 125% (it was already 9 px short at 100%). Wrap such sizes in `_px_geometry`. Fixed Treeview
   column widths break too: the 80 px Results column cut `1.23456e-05` to `1.23456e-0` at 125%.
-- **Treeview row height depends on the Tk version (round-1 correction).** My first note said "Treeview row height
-  follows the font". That is true only on Tk 9: 3.14 ships Tk 9.0.4, which gives linespace + 2, so 17 px at 96 dpi
-  and 22 px at 120 dpi. Tk 8.6.15 (in `.venv312`, used by the `DASP_BUILD_PYTHON=312` rollback build) leaves
-  `rowheight` empty and uses a fixed 20 px. That is exactly the linespace at 125% and clips text above that.
-  `_apply_theme` now sets `Treeview` rowheight to the TkDefaultFont linespace + `_px(2)`, which gives the same rows on
-  both versions (verified under .venv312 and .venv314). The default build is still 3.14
-  (`BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")`).
+- **Treeview row height depends on the Tk version (round-1 correction, round-2 wording).** My first note said
+  "Treeview row height follows the font". It does not follow it live on either version:
+  - **Tk 9.0.4** (shipped with 3.14) sets `rowheight` once, at style init, from the row font (linespace + 2): 17 px at
+    96 dpi, 22 px at 120 dpi. It does not re-sync if the font or scaling changes later.
+  - **Tk 8.6.15** (in `.venv312`, used by the `DASP_BUILD_PYTHON=312` rollback build) leaves `rowheight` empty and uses
+    a fixed 20 px. That is exactly the linespace at 125% and clips text above it.
+
+  `_apply_theme` now sets the `Treeview` rowheight to the TkDefaultFont linespace + `_px(2)`, which gives the same rows
+  on both versions (verified under .venv312 and .venv314). That is 1-2 px more than Tk 9's own value at 150% and 200%,
+  which is harmless. Invariant, also commented at that line: Treeview tag fonts must not be taller than TkDefaultFont.
+  The default build is still 3.14 (`BUILD_PYTHON_VERSION = os.environ.get("DASP_BUILD_PYTHON", "314")`).
+- **Column widths: measure, don't multiply (round 2).** Scaling a 70 px column with `_px(70)` gave 88 px at 125%, but
+  `1.23456e-05` needs 81 px of text plus Tk's cell padding (4 px per side at 96 dpi, scaled), i.e. 91 px. Text does not
+  scale exactly linearly (hinting), so the Results table now sizes float columns from the `.6g` text measured in the
+  row font (`_float_column_text_width`) plus padding, with the 96-dpi widths as minimums. `font.measure()` already
+  returns pixels at the current scale, so never multiply its result by `_UI_SCALE`.
+- **Dialog placement (round 2).** Tk's `winfo_screenwidth/height` on Windows describe the *primary* monitor only.
+  `_px_geometry(size, owner)` now asks Win32 for the work area of the owner's monitor (`MonitorFromWindow` +
+  `GetMonitorInfoW` `rcWork`, in the process's own DPI coordinate space, which is also Tk's) when the dialog opens. It
+  clamps the size, leaving room for the title bar, and centres the dialog on the owner inside that area. Without
+  Win32 it falls back to the Tk screen size.
 - **Test processes start DPI-unaware**, so the session app's `_UI_SCALE` is 1.0 and pixel assertions are unchanged.
   Only `main()` calls `_enable_windows_dpi_awareness()`. However, the GUI module calls `matplotlib.use('TkAgg')`, so
   the first pyplot figure in a test with no running Tk mainloop declares **per-monitor** DPI awareness

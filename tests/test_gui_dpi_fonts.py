@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import spectral_predict_gui_optimized as gui
@@ -35,13 +36,13 @@ class _FakeRoot:
 @pytest.fixture
 def restore_scale():
     """Snapshot the module scale state and put it back exactly as it was."""
-    saved = (gui._UI_SCALE, gui._SCREEN_SIZE, dict(gui.SPACING), dict(gui.SIDEBAR_CONFIG))
+    saved = (gui._UI_SCALE, dict(gui.SPACING), dict(gui.SIDEBAR_CONFIG))
     yield
-    gui._UI_SCALE, gui._SCREEN_SIZE = saved[0], saved[1]
+    gui._UI_SCALE = saved[0]
     gui.SPACING.clear()
-    gui.SPACING.update(saved[2])
+    gui.SPACING.update(saved[1])
     gui.SIDEBAR_CONFIG.clear()
-    gui.SIDEBAR_CONFIG.update(saved[3])
+    gui.SIDEBAR_CONFIG.update(saved[2])
 
 
 @pytest.fixture
@@ -75,10 +76,49 @@ def test_px_geometry_scales_dialog_sizes(restore_scale):
     assert gui._px_geometry("350x200") == "525x300"
 
 
-def test_px_geometry_clamps_to_screen(restore_scale):
+class _FakeOwner(_FakeRoot):
+    """Owner window centred on a 1920x1080 screen (no Win32 handle, so the fallback runs)."""
+
+    def __init__(self) -> None:
+        super().__init__(144.0, screen=(1920, 1080))
+
+    def winfo_rootx(self) -> int:
+        return 460
+
+    def winfo_rooty(self) -> int:
+        return 240
+
+    def winfo_width(self) -> int:
+        return 1000
+
+    def winfo_height(self) -> int:
+        return 600
+
+
+def test_px_geometry_without_owner_is_size_only(restore_scale):
+    gui._apply_ui_scale(_FakeRoot(144.0))
+    assert gui._px_geometry("520x720") == "780x1080"
+
+
+def test_px_geometry_clamps_and_places_inside_the_work_area(restore_scale):
     # Peak calculator at 150% on a 1920x1080 panel: 780x1080 would not fit.
-    gui._apply_ui_scale(_FakeRoot(144.0, screen=(1920, 1080)))
-    assert gui._px_geometry("520x720") == "780x972"
+    gui._apply_ui_scale(_FakeRoot(144.0))
+    geometry = gui._px_geometry("520x720", _FakeOwner())
+    size, x, y = geometry.split("+")
+    width, height = (int(v) for v in size.split("x"))
+    assert width == 780
+    assert height == 1080 - gui._px(40)  # room for the title bar
+    assert 0 <= int(x) and int(x) + width <= 1920
+    assert 0 <= int(y) and int(y) + height + gui._px(40) <= 1080
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 monitor API")
+def test_monitor_work_area_on_windows(tk_root):
+    tk_root.deiconify()
+    tk_root.update_idletasks()
+    left, top, right, bottom = gui._monitor_work_area(tk_root)
+    assert right - left > 0 and bottom - top > 0
+    tk_root.withdraw()
 
 
 def test_scale_never_shrinks_below_one(restore_scale):
@@ -110,46 +150,19 @@ def test_ttk_style_resolves_to_named_font(tk_root):
     assert tkfont.Font(root=tk_root, font=spec).actual("family") == fonts["body"].cget("family")
 
 
-_MEASURE_AT_96_DPI = """
-import tkinter as tk, tkinter.font as tkfont
-r = tk.Tk(); r.withdraw()
-r.tk.call("tk", "scaling", 96 / 72)
-print(tkfont.nametofont("TkDefaultFont", root=r).measure("1.23456e-05"))
-r.destroy()
-"""
+def test_float_column_width_is_the_widest_formatted_value(tk_root):
+    """Width comes from real measurements in the row font, whatever its face or scale."""
+    font = tkfont.nametofont("TkDefaultFont", root=tk_root)
+    values = pd.Series([0.5, 1.23456e-05, 12.0, np.nan])
+    assert gui._float_column_text_width(values, font) == font.measure("1.23456e-05")
 
 
-@pytest.fixture(scope="module")
-def sci_text_px_96() -> int:
-    """Width of '1.23456e-05' in the Treeview row font at 96 dpi.
-
-    Measured in a fresh, DPI-unaware subprocess. In this process the numbers can be
-    off: pyplot's TkAgg figure manager declares per-monitor DPI awareness when no Tk
-    mainloop is running, and some GUI tests create pyplot figures, after which Tk
-    reports physical-pixel widths.
-    """
-    out = subprocess.run(
-        [sys.executable, "-c", _MEASURE_AT_96_DPI],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    if out.returncode != 0:
-        pytest.skip(f"Tk unavailable in subprocess: {out.stderr.strip()[-200:]}")
-    return int(out.stdout.strip().splitlines()[-1])
-
-
-@pytest.mark.parametrize("scale", [1.25, 1.5, 1.75, 2.0])
-def test_scaled_result_column_fits_scientific_notation(sci_text_px_96, restore_scale, scale):
-    """The default 80 px results column must still hold '1.23456e-05' once scaled.
-
-    Text width grows linearly with the display scale (points follow `tk scaling`), so
-    the 96-dpi width times the scale stands in for a real high-dpi measurement.
-    """
-    gui._apply_ui_scale(_FakeRoot(96.0 * scale))
-    text_px_96 = sci_text_px_96
-    cell_padding = gui._px(8)
-    assert gui._px(80) >= text_px_96 * scale + cell_padding
+def test_float_column_width_handles_empty_and_large_columns(tk_root):
+    font = tkfont.nametofont("TkDefaultFont", root=tk_root)
+    assert gui._float_column_text_width(pd.Series([np.nan, np.inf]), font) == 0
+    # The widest value sits past the first 500 rows; the extremes still catch it.
+    values = pd.Series([0.5] * 2000 + [-1.23456e-05])
+    assert gui._float_column_text_width(values, font) == font.measure("-1.23456e-05")
 
 
 def test_dpi_awareness_is_noop_off_windows(monkeypatch):
