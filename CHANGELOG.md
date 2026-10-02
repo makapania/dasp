@@ -80,6 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Loading data no longer carries the previous dataset's exclusions, validation set or
+  Quality Check report into the new one** (review R004-R007, R037, R038). Every loader
+  (Import, Data Management, calibration transfer) installs data the same way. Loading
+  a file in replace mode, **including reloading the same file, clears the excluded
+  spectra and the validation set**; append keeps them. A load that fails puts the
+  previous dataset back whole, with its units and data type. Validation metrics are
+  computed on the run's own current spectra and wavelengths, without samples excluded
+  after the split. Clicking a spectrum and Quality Check "Mark for exclusion" now
+  exclude the right sample for numeric-looking and repeated IDs. A crash-resume now
+  also checks that the excluded samples match the interrupted run.
 - **Top-N subsets of sparse selectors no longer pad with unselected long wavelengths.**
   Asking CARS (and the CARS/UVE/FiPLS hybrids, SPA, VCPA-IRIV and GA) for more variables
   than it selected used to fill the gap with zero-score variables from the long end of the

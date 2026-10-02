@@ -180,6 +180,13 @@ class RunMetadata:
     # persisting the indices is cheaper and removes an entire class of
     # "user forgets to click Create Validation Set on resume" footguns.
     validation_indices: list[Any] | None = None
+    # The rest of the calibration-row choice: ``{"excluded": [labels],
+    # "active": [labels] or None}`` ("active" None = no Analysis Subset). None
+    # means the record predates this field or a label could not be stored, so
+    # the resume gate cannot check it. Reloading the same file clears the
+    # exclusions, so without this a resume could silently continue a study on
+    # a different calibration set.
+    calibration_rows: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _validate_persistence_mode(self.bayesian_persistence_mode)
@@ -240,7 +247,57 @@ class RunMetadata:
                     type(vi).__name__,
                 )
                 filtered["validation_indices"] = None
+        rows = filtered.get("calibration_rows")
+        if rows is not None and not _valid_calibration_rows(rows):
+            logger.warning(
+                "sidecar calibration_rows has unexpected shape; coercing to None "
+                "(exclusions can't be checked for this resume)"
+            )
+            filtered["calibration_rows"] = None
         return cls(**filtered)
+
+
+def _is_label(value: Any) -> bool:
+    return isinstance(value, (int, str)) and not isinstance(value, bool)
+
+
+def _valid_calibration_rows(rows: Any) -> bool:
+    if not isinstance(rows, dict):
+        return False
+    excluded = rows.get("excluded")
+    active = rows.get("active")
+    if not isinstance(excluded, list) or not all(_is_label(x) for x in excluded):
+        return False
+    return active is None or (isinstance(active, list) and all(_is_label(x) for x in active))
+
+
+def calibration_rows_record(excluded, active) -> dict[str, Any] | None:
+    """The calibration-row choice in a form the run record can store.
+
+    Args:
+        excluded: Labels the user excluded from the analysis.
+        active: Labels of the Analysis Subset, or None for all samples.
+
+    Returns:
+        ``{"excluded": [...], "active": [...] or None}``, or None when a label is
+        not an int or str (it could not be compared after a JSON round trip).
+    """
+
+    def _labels(raw):
+        out = []
+        for value in raw:
+            if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+                value = value.item()  # numpy scalar -> Python scalar
+            if not _is_label(value):
+                return None
+            out.append(value)
+        return sorted(out, key=lambda v: (isinstance(v, str), v))
+
+    excluded_list = _labels(excluded or ())
+    active_list = None if active is None else _labels(active)
+    if excluded_list is None or (active is not None and active_list is None):
+        return None
+    return {"excluded": excluded_list, "active": active_list}
 
 
 @dataclasses.dataclass
@@ -382,6 +439,7 @@ def start_run(
     bayesian_persistence_mode: PersistenceMode = "auto",
     gui_settings: dict[str, Any] | None = None,
     validation_indices: list[Any] | None = None,
+    calibration_rows: dict[str, Any] | None = None,
 ) -> RunMetadata:
     """Begin a new Optuna-persisted run. Idempotent within one search.
 
@@ -444,6 +502,11 @@ def start_run(
                 # mixed/str labels keep insertion order.
                 _coerce_validation_indices(validation_indices)
                 if validation_indices else None
+            ),
+            calibration_rows=(
+                calibration_rows
+                if calibration_rows is not None and _valid_calibration_rows(calibration_rows)
+                else None
             ),
         )
         _atomic_write_json(_sidecar_path(), meta.to_dict())

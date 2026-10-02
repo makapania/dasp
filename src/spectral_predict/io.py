@@ -347,9 +347,12 @@ def read_csv_dir(
     return df, metadata
 
 
-def _rename_duplicate_ids(index: pd.Index) -> tuple:
+def rename_duplicate_ids(index: pd.Index) -> tuple:
     """
     Rename duplicate IDs by adding .1, .2, etc. suffix.
+
+    The result is always unique: a suffix that is already an ID in the index
+    (``["A", "A.1", "A"]``) is skipped, so the second ``"A"`` becomes ``"A.2"``.
 
     Parameters
     ----------
@@ -370,26 +373,35 @@ def _rename_duplicate_ids(index: pd.Index) -> tuple:
 
     new_ids = []
     seen = {}
+    taken = set(index)  # every original ID, plus each suffix handed out
     rename_mapping = {}  # Track original -> [new names] for warning display
+    n_renamed = 0
 
     for idx in index:
         if idx in seen:
-            seen[idx] += 1
-            new_id = f"{idx}.{seen[idx]}"
+            suffix = seen[idx]
+            while True:
+                suffix += 1
+                new_id = f"{idx}.{suffix}"
+                if new_id not in taken:
+                    break
+            seen[idx] = suffix
+            taken.add(new_id)
             new_ids.append(new_id)
             rename_mapping[idx].append(new_id)
+            n_renamed += 1
         else:
             seen[idx] = 0
             new_ids.append(idx)
             rename_mapping[idx] = [idx]  # Start tracking this ID
 
-    # Count how many were renamed (exclude originals)
-    n_renamed = sum(1 for idx in new_ids if '.' in str(idx) and str(idx).rsplit('.', 1)[-1].isdigit())
-
     # Filter rename_mapping to only include IDs that had duplicates
     rename_mapping = {k: v for k, v in rename_mapping.items() if len(v) > 1}
 
     return pd.Index(new_ids), n_renamed, rename_mapping
+
+
+_rename_duplicate_ids = rename_duplicate_ids  # the combined-file readers' name
 
 
 def read_reference_csv(path, id_column):

@@ -775,3 +775,27 @@ Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loadi
   report whose sample index differs from the current X.
 - `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection` fails on main
   too (its fake Thread doesn't accept the `kwargs=` the launch has passed since #79). Not caused here.
+## 2026-10-02 - GUI dataset state, review round 1 (Codex BLOCK / GLM merge-with-fixes) follow-ups
+
+- **A crash-resume must check exclusions, not just the data fingerprint.** The fingerprint covers X/y,
+  and reloading the same file (replace) clears exclusions, so the gate accepted a resume on a different
+  calibration set. The run record now stores `calibration_rows` (`{"excluded": [...], "active": [...]|None}`,
+  via `run_state.calibration_rows_record`); `_reconcile_resume_calibration_rows` runs before the split
+  reconcile and asks (restore / start fresh / cancel). Records without the field resume with a log line.
+- **Data Management and calibration-transfer data keep their exact wavelength axis** (`exact_axis=True`),
+  preserving their behaviour before the install helper: Import's integer rounding would reject 0.48 cm^-1
+  FTIR axes and change resume fingerprints. `_exact_wavelength_axis` remembers the rule for later wavelength
+  Updates, appends and edits. Whether Import should keep rounding is still open.
+- **Rejected loads restore units/data type too** (`_DATASET_STATE_ATTRS/VARS`), and browse-time combined-file
+  detection writes `_combined_metadata_df_preview`, never `combined_metadata_df` (it ran before the snapshot).
+- **Target switch and Analysis Subset columns merge metadata stores by sample** (`_metadata_column`):
+  after Data Management data gets an appended combined file, `ref` and `combined_metadata_df` each hold
+  their own samples' values. Use `.infer_objects()`: a NaN-padded store makes numeric targets object dtype.
+- **Between-run validation consumers:** manual ensemble retrain uses the run's frozen holdout
+  (`training_data_cache["validation"]`, `_last_run_validation`); Tab 7 refit builds its own snapshot from the
+  same data as its calibration rows. Prediction-tab data loaded from the validation set keeps its own targets
+  (`prediction_actuals`). `_check_validation_axis` is called where it can fire (it was tautological in the
+  worker).
+- **Duplicate IDs:** `io.rename_duplicate_ids` now never produces a duplicate (`["A","A.1","A"]` gave two
+  "A.1"); `_install_dataset` also gives repeated labels a unique suffix. QC staleness uses a data
+  fingerprint (index, columns, values), so a baseline replace or wavelength change also refuses a stale report.

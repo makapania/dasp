@@ -47,10 +47,12 @@ def _spectra(ids, seed: int, offset: float = 0.0, step: float = 2.0):
     return X, y
 
 
-def _write_combined(path, ids, seed, offset=0.0, step=2.0):
+def _write_combined(path, ids, seed, offset=0.0, step=2.0, extra=None):
     X, y = _spectra(ids, seed, offset, step)
     df = X.copy()
     df.insert(0, "protein", y.to_numpy())
+    for name, values in (extra or {}).items():
+        df.insert(0, name, values)
     df.insert(0, "sample_id", list(ids))
     df.to_csv(path, index=False)
     return X, y
@@ -73,6 +75,13 @@ _STATE_ATTRS = (
     "data_sources",
     "source_group_names",
     "use_custom_group_names",
+    "_exact_wavelength_axis",
+    "_last_run_validation",
+    "training_data_cache",
+    "prediction_data",
+    "prediction_actuals",
+    "data_value_scale",
+    "combined_file_path",
 )
 _STATE_VARS = (
     "wavelength_min",
@@ -83,6 +92,12 @@ _STATE_VARS = (
     "combined_data_file",
     "spectral_data_path",
     "target_column",
+    "current_data_type",
+    "original_data_type",
+    "current_x_unit",
+    "original_x_unit",
+    "use_absorbance",
+    "pred_data_source",
 )
 
 
@@ -101,6 +116,7 @@ def clean_state(gui_app):
     gui_app._pending_validation_indices = None
     gui_app.combined_metadata_df = None
     gui_app.ref = None
+    gui_app._exact_wavelength_axis = False
     gui_app.wavelength_min.set("")
     gui_app.wavelength_max.set("")
     gui_app.validation_enabled.set(False)
@@ -296,9 +312,9 @@ def test_data_management_use_then_wavelength_update_keeps_b(clean_state, monkeyp
     app.wavelength_min.set("1020")
     app.wavelength_max.set("1100")
     app._update_wavelengths()
-    expected = X_b.set_axis(X_b.columns.astype(float).astype(int), axis=1)
-    expected = expected.loc[:, (expected.columns >= 1020) & (expected.columns <= 1100)]
-    np.testing.assert_allclose(app.X.to_numpy(), expected.to_numpy())
+    wl = X_b.columns.astype(float)
+    expected = X_b.loc[:, (wl >= 1020) & (wl <= 1100)]  # Data Management keeps its axis
+    pd.testing.assert_frame_equal(app.X, expected)
     np.testing.assert_allclose(app.y.to_numpy(), y_b.to_numpy())
 
     # Switching target reads B's metadata, not A's leftover combined metadata.
@@ -607,3 +623,448 @@ def test_dataset_replacement_drops_quality_check_report(qc_app):
     assert app._install_dataset(X_b, y_b, None, None, replot=False)
     assert app.outlier_report is None
     assert app.outlier_tree.get_children() == ()
+
+
+# ---------------------------------------------------------------------------
+# Review round 1
+# ---------------------------------------------------------------------------
+
+
+def _ftir_spectra(ids, seed: int):
+    """FTIR-like data on a 0.48 cm^-1 axis (collapses if rounded to integers)."""
+    rng = np.random.default_rng(seed)
+    y = pd.Series(rng.uniform(0, 10, len(ids)), index=pd.Index(ids))
+    columns = [round(4000.0 - 0.48 * i, 2) for i in range(N_WL)][::-1]
+    X = pd.DataFrame(
+        np.outer(y.to_numpy(), np.linspace(0.5, 1.5, N_WL)) + rng.normal(0, 0.2, (len(ids), N_WL)),
+        index=y.index,
+        columns=columns,
+    )
+    return X, y
+
+
+def _use_dm_source(app, monkeypatch, X, y, ref=None, name="B"):
+    source = DataSource(
+        source_id="b", name=name, path="b.csv", format_type="csv", X=X, y=y, ref=ref
+    )
+    monkeypatch.setattr(
+        app,
+        "data_source_manager",
+        SimpleNamespace(get_source=lambda sid: source, merged_dataset=None),
+    )
+    monkeypatch.setattr(
+        app,
+        "data_sources_tree",
+        SimpleNamespace(selection=lambda: ("item",), item=lambda item: {"text": "b"}),
+    )
+    monkeypatch.setattr(app, "_update_ensemble_controls_state", lambda: None)
+    app._use_for_analysis()
+
+
+def _start_and_resume(rs, X, y, **kwargs):
+    """A saved Bayesian run, claimed for resume as the startup 'Resume' answer does."""
+    from pathlib import Path
+
+    meta = rs.start_run(
+        label="t",
+        dataset_fingerprint=rs.fingerprint_dataset(X, y),
+        bayesian_persistence_mode="always",
+        **kwargs,
+    )
+    Path(meta.storage_path).write_bytes(b"SQLite format 3\x00")
+    rs._reset_for_tests()
+    assert rs.resume_run(meta.run_id) is not None
+    return meta
+
+
+# --- Item 1: resume keeps the run's calibration rows ------------------------
+
+
+@pytest.fixture
+def resumed_from_file(clean_state, worker_env, fake_thread, tmp_path):
+    app, rs = clean_state, worker_env
+    path = tmp_path / "a.csv"
+    _write_combined(path, [f"A{i}" for i in range(1, 31)], seed=1)
+    _load_combined(app, path)
+    excluded = app.X.index[2]
+    app.excluded_spectra = {excluded}
+    meta = _start_and_resume(rs, app.X, app.y, calibration_rows=app._calibration_rows_for_record())
+    _load_combined(app, path)  # reload the identical file: replace clears exclusions
+    assert app.excluded_spectra == set()
+    yield app, rs, meta, excluded
+    rs._reset_for_tests()
+
+
+def test_resume_after_reloading_same_data_preserves_excluded_calibration_rows(
+    resumed_from_file, monkeypatch
+):
+    app, rs, meta, excluded = resumed_from_file
+    with patch("tkinter.messagebox.askyesnocancel", return_value=True) as ask:
+        calls, _ = _run(app, monkeypatch)
+    assert ask.call_args[0][0] == "Excluded samples differ from the interrupted run"
+    assert app.excluded_spectra == {excluded}
+    assert calls and calls[0][2] == 29, "resumed on the run's own calibration rows"
+
+
+def test_resume_exclusion_mismatch_cancel_keeps_record(resumed_from_file):
+    app, rs, meta, _ = resumed_from_file
+    with patch("tkinter.messagebox.askyesnocancel", return_value=None):
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is False
+    assert rs.is_resuming() and rs.find_incomplete_run().run_id == meta.run_id
+    assert app.excluded_spectra == set()
+
+
+def test_resume_exclusions_match_needs_no_question(resumed_from_file):
+    app, rs, meta, excluded = resumed_from_file
+    app.excluded_spectra = {excluded}
+    with patch("tkinter.messagebox.askyesnocancel") as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert not ask.called
+
+
+def test_resume_of_record_without_calibration_rows_still_resumes(clean_state, worker_env):
+    app, rs = clean_state, worker_env
+    X, y = _spectra([f"S{i}" for i in range(1, 21)], seed=2)
+    assert app._install_dataset(X, y, None, None, replot=False)
+    _start_and_resume(rs, app.X, app.y)
+    assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+
+
+# --- Item 2: Data Management keeps its exact axis ---------------------------
+
+
+def test_data_management_use_preserves_subunit_wavelength_axis(clean_state, monkeypatch):
+    app = clean_state
+    X_b, y_b = _ftir_spectra([f"F{i}" for i in range(1, 21)], seed=3)
+    with patch("tkinter.messagebox.showerror") as err:
+        _use_dm_source(app, monkeypatch, X_b, y_b)
+    assert not err.called
+    pd.testing.assert_frame_equal(app.X, X_b)
+
+    app.wavelength_min.set("3990")
+    app.wavelength_max.set("3995")
+    with patch("tkinter.messagebox.showerror") as err:
+        app._update_wavelengths()
+    assert not err.called
+    wl = X_b.columns.astype(float)
+    pd.testing.assert_frame_equal(app.X, X_b.loc[:, (wl >= 3990) & (wl <= 3995)])
+
+
+def test_resume_data_management_preserves_fractional_wavelength_axis(
+    clean_state, worker_env, monkeypatch
+):
+    app, rs = clean_state, worker_env
+    X_b, y_b = _ftir_spectra([f"F{i}" for i in range(1, 21)], seed=3)
+    # The run was recorded on Data Management's exact axis, as before this branch.
+    _start_and_resume(rs, X_b, y_b)
+    _use_dm_source(app, monkeypatch, X_b, y_b)
+    with patch("tkinter.messagebox.askyesno", return_value=False) as ask:
+        assert app._confirm_resume_before_launch(["PLS"], "quick") is True
+    assert not ask.called, "no 'different data' question for the same data"
+
+
+# --- Items 3 and 4: a rejected load restores units and metadata -------------
+
+
+def test_rejected_import_restores_units_and_conversion_state(clean_state, tmp_path):
+    app = clean_state
+    _write_combined(tmp_path / "a.csv", [f"A{i}" for i in range(1, 31)], seed=1)
+    _load_combined(app, tmp_path / "a.csv")
+    app.current_data_type.set("absorbance")
+    app.original_data_type.set("absorbance")
+    app.current_x_unit.set("cm-1")
+    app.original_x_unit.set("cm-1")
+    app.data_value_scale = 100.0
+    app.data_has_been_converted = True
+    meta_a = app.combined_metadata_df
+    before = {v: getattr(app, v).get() for v in app._DATASET_STATE_VARS}
+
+    _write_combined(tmp_path / "b.csv", [f"B{i}" for i in range(1, 31)], seed=2, step=0.3)
+    with patch("tkinter.messagebox.showerror"):
+        _load_combined(app, tmp_path / "b.csv")
+
+    assert {v: getattr(app, v).get() for v in app._DATASET_STATE_VARS} == before
+    assert app.data_value_scale == 100.0 and app.data_has_been_converted is True
+    assert app.combined_metadata_df is meta_a
+
+
+def test_browsing_a_file_does_not_touch_loaded_metadata(clean_state, tmp_path):
+    app = clean_state
+    _write_combined(tmp_path / "a.csv", [f"A{i}" for i in range(1, 31)], seed=1)
+    _load_combined(app, tmp_path / "a.csv")
+    meta_a = app.combined_metadata_df
+    folder = tmp_path / "b"
+    folder.mkdir()
+    _write_combined(
+        folder / "b.csv",
+        [f"B{i}" for i in range(1, 31)],
+        seed=2,
+        step=0.3,
+        extra={"site": ["north"] * 30},
+    )
+    with patch("tkinter.filedialog.askdirectory", return_value=str(folder)):
+        app._browse_spectral_data()
+    assert app.combined_metadata_df is meta_a
+    with patch("tkinter.messagebox.showerror"):
+        app._load_and_plot_data()  # sub-integer axis: rejected
+    assert app.combined_metadata_df is meta_a
+    assert "site" not in app._get_available_target_columns()
+
+
+# --- Restore paths that stop before the install ------------------------------
+
+
+def _loaded_a(app, tmp_path):
+    _write_combined(tmp_path / "a.csv", [f"A{i}" for i in range(1, 31)], seed=1)
+    _load_combined(app, tmp_path / "a.csv")
+    _write_combined(tmp_path / "b.csv", [f"B{i}" for i in range(1, 21)], seed=2, offset=100.0)
+    return app.X, app.X_original, app.y, app.combined_metadata_df
+
+
+def _raise(exc):
+    def _fail(*args, **kwargs):
+        raise exc
+
+    return _fail
+
+
+def test_append_failure_restores_previous_dataset(clean_state, tmp_path, monkeypatch):
+    app = clean_state
+    X_a, X_orig_a, y_a, meta_a = _loaded_a(app, tmp_path)
+    monkeypatch.setattr(app, "_prompt_for_group_names", lambda: ("A", "B"))
+    monkeypatch.setattr(app, "_merge_spectral_data", _raise(ValueError("boom")))
+    with patch("tkinter.messagebox.showerror"):
+        _load_combined(app, tmp_path / "b.csv", append=True)
+    assert app.X is X_a and app.X_original is X_orig_a and app.y is y_a
+    assert app.combined_metadata_df is meta_a
+
+
+def test_x_y_misalignment_restores_previous_dataset(clean_state, tmp_path, monkeypatch):
+    import spectral_predict.io as io_module
+
+    app = clean_state
+    X_a, X_orig_a, y_a, meta_a = _loaded_a(app, tmp_path)
+    real = io_module.read_combined_csv
+
+    def misaligned(*args, **kwargs):
+        X, y, meta_df, meta = real(*args, **kwargs)
+        return X, y.set_axis([f"other{i}" for i in range(len(y))]), meta_df, meta
+
+    monkeypatch.setattr(io_module, "read_combined_csv", misaligned)
+    with patch("tkinter.messagebox.showerror") as err:
+        _load_combined(app, tmp_path / "b.csv")
+    assert err.call_args[0][0] == "Data Alignment Error"
+    assert app.X is X_a and app.X_original is X_orig_a and app.y is y_a
+    assert app.combined_metadata_df is meta_a
+
+
+def test_exception_before_install_restores_previous_dataset(clean_state, tmp_path, monkeypatch):
+    app = clean_state
+    X_a, X_orig_a, y_a, meta_a = _loaded_a(app, tmp_path)
+    monkeypatch.setattr(app, "_install_dataset", _raise(RuntimeError("boom")))
+    with patch("tkinter.messagebox.showerror") as err:
+        _load_combined(app, tmp_path / "b.csv")
+    assert err.called
+    assert app.X is X_a and app.X_original is X_orig_a and app.y is y_a
+    assert app.combined_metadata_df is meta_a
+
+
+def test_calibration_transfer_replace_installs_new_dataset(clean_state, monkeypatch):
+    app = clean_state
+    X_a, y_a = _spectra([f"A{i}" for i in range(1, 21)], seed=1)
+    assert app._install_dataset(X_a, y_a, None, None, replot=False)
+    app.excluded_spectra = {"A3"}
+    _split(app, ["A1", "A2", "A4"])
+    X_b, y_b = _ftir_spectra([f"T{i}" for i in range(1, 11)], seed=4)
+    saved = (
+        getattr(app, "transformed_spectra", None),
+        getattr(app, "export_metadata_context", None),
+    )
+    app.transformed_spectra = (np.asarray(X_b.columns, dtype=float), X_b.to_numpy())
+    app.export_metadata_context = {
+        "source_format": "smart_csv",
+        "specimen_ids": list(X_b.index),
+        "metadata_df": pd.DataFrame({"protein": y_b.to_numpy(), "site": "n"}),
+    }
+    monkeypatch.setattr(app, "_ct_select_y_column_dialog", lambda cols: "protein")
+    try:
+        app._ct_use_as_working_data()
+    finally:
+        app.transformed_spectra, app.export_metadata_context = saved
+
+    np.testing.assert_allclose(app.X.to_numpy(), X_b.to_numpy())
+    assert list(app.X.columns) == [float(c) for c in X_b.columns], "exact CT axis"
+    np.testing.assert_allclose(app.y.to_numpy(), y_b.to_numpy())
+    assert app.excluded_spectra == set() and app.validation_indices == set()
+    assert app.validation_X is None
+    assert list(app.combined_metadata_df.columns) == ["site"]
+
+
+# --- Item 5: targets merged by sample across metadata stores ---------------
+
+
+def test_data_management_append_target_switch_preserves_all_targets_and_subset_columns(
+    clean_state, tmp_path, monkeypatch
+):
+    app = clean_state
+    X_b, y_b = _spectra([f"B{i}" for i in range(1, 11)], seed=2)
+    ref_b = pd.DataFrame({"protein": y_b, "site": "north"}, index=X_b.index)
+    _use_dm_source(app, monkeypatch, X_b, y_b, ref=ref_b)
+    assert app.data_sources[0][0].startswith("Data Management")
+
+    monkeypatch.setattr(app, "_prompt_for_group_names", lambda: ("B", "C"))
+    _write_combined(tmp_path / "c.csv", [f"C{i}" for i in range(1, 11)], seed=3)
+    _load_combined(app, tmp_path / "c.csv", append=True)
+    assert len(app.X) == 20
+
+    app.target_column.set("protein")
+    app._on_target_column_changed()
+    assert not app.y.isna().any()
+    np.testing.assert_allclose(app.y.loc[X_b.index].to_numpy(), y_b.to_numpy())
+    site = app._get_column_series("site")
+    assert (site.loc[X_b.index] == "north").all()
+    assert {"protein", "site"} <= set(app._get_available_target_columns())
+
+
+# --- Item 6: prediction actuals travel with the prediction spectra ----------
+
+
+def test_validation_prediction_data_stays_aligned_after_exclusion_and_search(clean_state):
+    app = clean_state
+    _install_regression(app)
+    _split(app, ["S1", "S2", "S3", "S4", "S5"])
+    app.pred_data_source.set("validation")
+    app._load_prediction_data()
+    assert list(app.prediction_actuals.index) == list(app.prediction_data.index)
+
+    app.excluded_spectra = {"S2"}
+    app._refresh_validation_snapshot()  # what a launch does
+    assert "S2" not in app.validation_y.index
+    actual = app.prediction_actuals.loc[app.prediction_data.index]  # no KeyError
+    assert len(actual) == 5 and app._prediction_has_actuals()
+
+
+# --- Item 7: consumers between runs use matching validation data -----------
+
+
+def test_explore_exclusion_refreshes_validation_before_refinement(clean_state):
+    import contextlib
+    import io
+
+    app = clean_state
+    _install_regression(app)
+    _split(app, ["S1", "S2", "S3", "S4", "S5"])
+    app.excluded_spectra = {"S2"}  # after the split; self.validation_X still has S2
+    assert "S2" in app.validation_X.index
+    app.use_autoscale.set(False)
+    app.selected_model_config = {
+        "Model": "PLS",
+        "Task": "regression",
+        "Params": "{'n_components': 2}",
+        "LVs": 2,
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+    }
+    app._original_wavelength_order = [float(c) for c in app.X.columns]
+    app.refine_task_type.set("regression")
+    app.refine_model_type.set("PLS")
+    app.refine_preprocess.set("raw")
+    app.refine_folds.set(3)
+    app.refine_cv_strategy.set("kfold")
+    app.model_loaded_from_results = True
+    app.refine_hyperparams_modified = False
+    app.refined_model = None
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        app._run_refined_model_thread()
+    app.root.update()
+    out = buf.getvalue()
+    assert app.refined_model is not None, out[-3000:]
+    assert "Validation prediction successful (n=4)" in out, out[-3000:]
+
+
+# --- Items 8, 9, 11: other paths that change the data -----------------------
+
+
+def test_data_type_conversion_keeps_exclusions_out_of_validation(clean_state):
+    app = clean_state
+    _install_regression(app)
+    _split(app, ["S1", "S2", "S3", "S4"])
+    app.excluded_spectra = {"S2"}
+    app.type_confidence = 0.0
+    app._convert_and_replot()
+    assert list(app.validation_X.index) == ["S1", "S3", "S4"]
+    pd.testing.assert_frame_equal(app.validation_X, app.X.loc[["S1", "S3", "S4"]])
+
+
+class _StubSheet:
+    def __init__(self, headers, rows):
+        self._headers, self._rows = headers, rows
+
+    def get_sheet_data(self):
+        return self._rows
+
+    def headers(self):
+        return self._headers
+
+
+def test_data_viewer_edit_prunes_split_and_revert_restores_it(clean_state, monkeypatch):
+    app = clean_state
+    X, y = _install_regression(app, n=12)
+    _split(app, ["S1", "S2", "S3"])
+    app.excluded_spectra = {"S5"}
+    app.target_column.set("protein")
+    monkeypatch.setattr(app, "_populate_data_viewer", lambda *a, **k: None)
+    app._snapshot_data_viewer_state()
+    app.outlier_report = {"outlier_summary": pd.DataFrame()}
+
+    keep = [s for s in X.index if s not in ("S2", "S5")]  # rows deleted in the sheet
+    headers = ["Sample ID", "protein"] + [str(c) for c in app.X.columns]
+    rows = [[s, y[s]] + list(app.X.loc[s]) for s in keep]
+    monkeypatch.setattr(app, "data_viewer_sheet", _StubSheet(headers, rows))
+    app._apply_data_viewer_edits()
+
+    assert list(app.X.index) == keep
+    assert app.validation_indices == {"S1", "S3"} and app.excluded_spectra == set()
+    assert list(app.validation_X.index) == ["S1", "S3"]
+    assert app.outlier_report is None
+
+    app._revert_data_viewer()
+    assert app.validation_indices == {"S1", "S2", "S3"}
+    assert list(app.validation_X.index) == ["S1", "S2", "S3"]
+
+
+def test_quality_check_report_refused_after_baseline_replace(qc_app, monkeypatch):
+    app = qc_app
+    app._run_outlier_detection()
+    app.select_all_flagged.set(True)
+    app._auto_select_flagged()
+    monkeypatch.setattr(app, "_compute_corrected_spectra", lambda method: app.X.to_numpy() - 1)
+    app._replace_working_data("als")
+    with patch("tkinter.messagebox.showwarning") as warn:
+        app._mark_selected_for_exclusion()
+    assert warn.called and app.excluded_spectra == set()
+
+
+# --- Item 10: unique internal sample IDs ------------------------------------
+
+
+def test_duplicate_suffix_collision_keeps_qc_and_plot_sample_identity(clean_state, monkeypatch):
+    from spectral_predict.io import rename_duplicate_ids
+
+    new, n, _ = rename_duplicate_ids(pd.Index(["A", "A.1", "A"]))
+    assert list(new) == ["A", "A.1", "A.2"] and n == 1
+
+    app = clean_state
+    X, y = _spectra(["A", "A.1", "A.1", "B", "C", "D"], seed=7)
+    with patch("tkinter.messagebox.showwarning") as warn:
+        assert app._install_dataset(X, y, None, None, replot=False)
+    assert warn.called and app.X.index.is_unique
+    np.testing.assert_allclose(app.y.to_numpy(), y.to_numpy())
+
+    monkeypatch.setattr(app, "_create_or_update_annotation", lambda *a, **k: None)
+    line, _ = _line_for(app, app.X.index[2])
+    app._on_spectrum_click(SimpleNamespace(artist=line, canvas=SimpleNamespace(draw=lambda: None)))
+    assert app.X.index.isin(app.excluded_spectra).sum() == 1
