@@ -317,3 +317,40 @@ def test_saved_ensemble_with_subset_wrapper_predicts_full_width_numpy(gui_app, t
 
     preds = predict_with_model(model_dict, X.to_numpy())
     np.testing.assert_allclose(np.ravel(preds), ens.predict(Xs), rtol=1e-6)
+
+
+# --- Booster rows with round selection (fix/booster-early-stopping) ---------------------
+
+
+def test_ensemble_rebuild_of_catboost_auto_lr_row_is_the_row_model(gui_app):
+    """A CatBoost row with an automatic learning rate, fitted at n_estimators_fit and
+    truncated, rebuilds as exactly that model, and every ensemble refit (clone + fit)
+    repeats the fit-then-truncate procedure instead of fitting the selected count."""
+    from catboost import CatBoostRegressor
+
+    from spectral_predict.cv_utils import truncate_booster
+
+    X, y = _spectra()
+    Xs = X.copy()
+    Xs.columns = [str(c) for c in Xs.columns]
+    params = {"iterations": 9, "depth": 3, "random_state": 0, "thread_count": 1}
+    rows = pd.DataFrame([dict(
+        Model="CatBoost", Params=str(params), Preprocess="raw", Deriv=0, Window=17, Poly=2,
+        LVs=None, n_vars=N_WL, full_vars=N_WL, all_vars=",".join(str(w) for w in WAVELENGTHS),
+        RMSEcv=1.0, R2cv=0.5, n_estimators_selected=9, n_estimators_fit=40,
+        round_selection_truncated=True,
+    )])
+    with contextlib.redirect_stdout(io.StringIO()):
+        recon = gui_app._reconstruct_models_from_results(rows, Xs, y, "regression")
+    model = recon[0][0]
+
+    reference = CatBoostRegressor(**{**params, "iterations": 40}, verbose=0,
+                                  allow_writing_files=False).fit(Xs.to_numpy(), y)
+    truncate_booster(reference, 9)
+    expected = reference.predict(Xs.to_numpy())
+    np.testing.assert_allclose(np.ravel(model.predict(Xs)), expected, rtol=0, atol=1e-12)
+    refit = clone(model).fit(Xs, y)
+    np.testing.assert_allclose(np.ravel(refit.predict(Xs)), expected, rtol=0, atol=1e-12)
+    # A direct 9-round fit (automatic rate chosen for 9 rounds) is a different model.
+    direct = CatBoostRegressor(**params, verbose=0, allow_writing_files=False).fit(Xs.to_numpy(), y)
+    assert not np.allclose(direct.predict(Xs.to_numpy()), expected)

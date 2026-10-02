@@ -14,7 +14,7 @@ cross-validation.
 from __future__ import annotations
 
 import numpy as np
-from sklearn.base import clone, is_classifier
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin, clone, is_classifier
 from sklearn.model_selection import cross_validate, cross_val_predict, KFold, StratifiedKFold
 from sklearn.metrics import (
     mean_squared_error, r2_score, accuracy_score, roc_auc_score,
@@ -836,7 +836,10 @@ def round_truncation_from_row(row) -> Optional[tuple]:
     selected count (a direct fit at that count is identical unless a round-dependent
     default is in play, as with CatBoost's automatic learning rate).
     """
-    getter = row.get if hasattr(row, "get") else (lambda k, d=None: d)
+    if row is None:
+        return None
+    # Mapping / Series rows have .get; DataFrame.itertuples() rows are namedtuples.
+    getter = row.get if hasattr(row, "get") else (lambda k, d=None: getattr(row, k, d))
     if not _parse_bool(getter("round_selection_truncated", None)):
         return None
     fit_rounds = _parse_count(getter("n_estimators_fit", None))
@@ -876,6 +879,68 @@ def _parse_count(value) -> Optional[int]:
     if np.isnan(number) or number < 1 or number != int(number):
         return None
     return int(number)
+
+
+class _RoundTruncatedBoosterBase(BaseEstimator):
+    """Clone-safe "fit at ``fit_rounds``, then keep the first ``n_rounds``" booster.
+
+    A results row with round selection describes the scored configuration fitted at
+    its maximum round count and truncated (:func:`truncate_booster`). Code that clones
+    and refits base models (ensembles, per-fold refits) would otherwise refit the
+    stored count directly, which differs whenever a default depends on the round count
+    (CatBoost's automatic learning rate). Each ``fit`` here reproduces the procedure.
+
+    Args:
+        estimator: Unfitted booster (or Pipeline ending in one) with the row's params.
+        fit_rounds: Rounds to fit (the row's ``n_estimators_fit``).
+        n_rounds: Rounds to keep (the row's ``n_estimators_selected``).
+    """
+
+    def __init__(self, estimator=None, fit_rounds=None, n_rounds=None):
+        self.estimator = estimator
+        self.fit_rounds = fit_rounds
+        self.n_rounds = n_rounds
+
+    def fit(self, X, y, **fit_params):
+        est = sanitize_booster(clone(self.estimator))
+        set_booster_rounds(est, self.fit_rounds)
+        est.fit(X, y, **fit_params)
+        truncate_booster(est, self.n_rounds)
+        self.estimator_ = est
+        if hasattr(est, "classes_"):
+            self.classes_ = est.classes_
+        if hasattr(est, "n_features_in_"):
+            self.n_features_in_ = est.n_features_in_
+        return self
+
+    def predict(self, X):
+        return self.estimator_.predict(X)
+
+
+class RoundTruncatedRegressor(RegressorMixin, _RoundTruncatedBoosterBase):
+    """Regressor form of :class:`_RoundTruncatedBoosterBase`."""
+
+
+class RoundTruncatedClassifier(ClassifierMixin, _RoundTruncatedBoosterBase):
+    """Classifier form of :class:`_RoundTruncatedBoosterBase`."""
+
+    def predict_proba(self, X):
+        return self.estimator_.predict_proba(X)
+
+
+def round_truncated_from_row(estimator, row, task_type: str):
+    """Wrap ``estimator`` so every fit reproduces a truncated results row; else return it.
+
+    Args:
+        estimator: Unfitted booster built from the row's Params.
+        row: Results row (mapping / Series).
+        task_type: ``'regression'`` or ``'classification'``.
+    """
+    truncation = round_truncation_from_row(row)
+    if truncation is None or not is_boosting_model(_final_estimator(estimator)):
+        return estimator
+    cls = RoundTruncatedClassifier if task_type == "classification" else RoundTruncatedRegressor
+    return cls(estimator=estimator, fit_rounds=truncation[0], n_rounds=truncation[1])
 
 
 def strip_eval_only_params(model) -> None:

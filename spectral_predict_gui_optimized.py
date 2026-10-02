@@ -25031,12 +25031,22 @@ class SpectralPredictApp:
                     estimator_params.pop('max_n_components', None)
                     model = get_model(model_name, task_type=task_type)
 
-                    if estimator_params:
+                    if estimator_params and model_name == 'CatBoost':
+                        # CatBoost Params omit automatic defaults; build from them alone.
+                        from spectral_predict.models import catboost_from_row_params
+                        model = catboost_from_row_params(estimator_params, task_type)
+                    elif estimator_params:
                         try:
                             model.set_params(**estimator_params)
                         except Exception as e:
                             # Log but continue with base model
                             self._log_progress(f"    [WARN] Could not set params {estimator_params}: {e}")
+
+                    # Boosters from a round-selected row: every fit (full data and each
+                    # ensemble refit) is "fit at n_estimators_fit, truncate to the
+                    # selected count", exactly the row's model.
+                    from spectral_predict.cv_utils import round_truncated_from_row
+                    model = round_truncated_from_row(model, row, task_type)
 
                     steps.append(('model', model))
 
