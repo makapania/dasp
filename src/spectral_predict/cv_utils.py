@@ -628,8 +628,12 @@ def _get_model_from_pipeline(pipeline_or_model):
 # The fold's test rows are then predicted at every round count, the
 # predictions are pooled across folds, and the round count that minimises the
 # pooled RMSECV (regression) or maximises pooled accuracy (classification;
-# exact ties broken by pooled log-loss) is selected. All CV metrics are reported at that single count and the final
-# model is refit with it.
+# exact ties broken by pooled log-loss) is selected. All CV metrics are
+# reported at that single count. The final model
+# is the scored configuration truncated: fitted on all calibration data at the
+# same maximum round count, then cut to the selected count (truncate_booster),
+# so every round-dependent default (CatBoost's automatic learning rate and
+# leaf-estimation iterations) is the one the CV folds used.
 #
 # ``early_stopping_rounds`` keeps its meaning as a patience: the pooled curve
 # is scanned from round 1 and the scan stops once that many consecutive rounds
@@ -682,7 +686,8 @@ def booster_max_rounds(model) -> int:
     """Return the configured (maximum) number of boosting rounds of a booster.
 
     LightGBM round aliases (``num_iterations`` etc.) override ``n_estimators`` at
-    fit time, so they win here too.
+    fit time, so they win here too: ``num_iterations`` (LightGBM's main name) wins
+    over every other alias, as LightGBM resolves it.
 
     Args:
         model: An XGBoost, LightGBM or CatBoost estimator, or a Pipeline ending in one.
@@ -691,7 +696,8 @@ def booster_max_rounds(model) -> int:
         The round count the estimator will fit (its library default when unset).
 
     Raises:
-        ValueError: LightGBM round aliases with conflicting values.
+        ValueError: Conflicting values among LightGBM aliases other than
+            ``num_iterations`` (LightGBM's own resolution between them is not defined).
     """
     est = _get_model_from_pipeline(model)
     params = est.get_params()
@@ -740,17 +746,100 @@ def set_booster_rounds(model, n_rounds: int) -> None:
     if CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
         params = est.get_params()
         key = next((k for k in _CATBOOST_ROUND_KEYS if params.get(k) is not None), "iterations")
-        if params.get("learning_rate") is None:
-            warnings.warn(
-                "CatBoost has no explicit learning_rate; its automatic rate depends on the "
-                "round count, so a refit with a different round count is not a truncation "
-                "of the cross-validated models. Use apply_round_selection with the "
-                "cross-validation result, which pins the rate.",
-                stacklevel=2,
-            )
         est.set_params(**{key: n_rounds})
         return
     raise TypeError(f"{type(est).__name__} is not a supported boosting model")
+
+
+def _final_estimator(model):
+    """Innermost estimator: unwraps a TransformedTargetRegressor (fitted or not) and a
+    Pipeline's final step."""
+    inner = model
+    for _ in range(4):
+        if hasattr(inner, "regressor_"):
+            inner = inner.regressor_
+        elif hasattr(inner, "regressor") and hasattr(inner, "transformer"):
+            inner = inner.regressor
+        elif hasattr(inner, "steps"):
+            inner = inner.steps[-1][1]
+        else:
+            break
+    return inner
+
+
+def truncate_booster(model, n_rounds: int) -> None:
+    """Keep only the first ``n_rounds`` rounds of a FITTED booster, in place.
+
+    The final model of a round-selected booster is the scored configuration fitted on
+    all calibration data at the maximum round count and then truncated, so its
+    predictions equal that fit's staged predictions at ``n_rounds`` exactly and every
+    round-dependent default matches the CV folds. The truncated model pickles, and
+    its parameters report ``n_rounds``. Works through a Pipeline and a
+    TransformedTargetRegressor.
+
+    Args:
+        model: Fitted XGBoost, LightGBM or CatBoost estimator, or a wrapper of one.
+        n_rounds: Round count to keep.
+    """
+    est = _final_estimator(model)
+    k = int(n_rounds)
+    if isinstance(est, XGBOOST_MODELS):
+        booster = est.get_booster()
+        if booster.num_boosted_rounds() > k:
+            est._Booster = booster[:k]
+        est.set_params(n_estimators=k)
+    elif isinstance(est, LIGHTGBM_MODELS):
+        import lightgbm
+
+        if est.booster_.current_iteration() > k:
+            est._Booster = lightgbm.Booster(model_str=est.booster_.model_to_string(num_iteration=k))
+        updates = {a: k for a in _lgbm_round_aliases(est.get_params())}
+        updates["n_estimators"] = k
+        est.set_params(**updates)
+    elif CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS):
+        if est.tree_count_ > k:
+            est.shrink(ntree_end=k)
+        # CatBoost refuses set_params on a fitted model; record the count it now holds.
+        params = est.get_params()
+        key = next((a for a in _CATBOOST_ROUND_KEYS if params.get(a) is not None), "iterations")
+        est._init_params[key] = k
+    else:
+        raise TypeError(f"{type(est).__name__} is not a supported boosting model")
+
+
+def sanitize_booster(model):
+    """A clone of ``model`` with eval-only settings removed when it is a booster.
+
+    Boosters are never given an eval_set, whether or not round selection runs, so
+    settings that need one (early stopping) would make the fit fail.
+    """
+    if not is_boosting_model(_final_estimator(model)):
+        return model
+    model = clone(model)
+    strip_eval_only_params(model)
+    return model
+
+
+def round_truncation_from_row(row) -> Optional[tuple]:
+    """``(fit_rounds, selected_rounds)`` for a results row whose booster was fitted at
+    ``fit_rounds`` and truncated to ``selected_rounds``, else None.
+
+    Rebuilds reproduce such a row by fitting at ``fit_rounds`` and calling
+    :func:`truncate_booster` with ``selected_rounds``; the row's ``Params`` carry the
+    selected count (a direct fit at that count is identical unless a round-dependent
+    default is in play, as with CatBoost's automatic learning rate).
+    """
+    getter = row.get if hasattr(row, "get") else (lambda k, d=None: d)
+    flag = getter("round_selection_truncated", None)
+    fit_rounds = getter("n_estimators_fit", None)
+    selected = getter("n_estimators_selected", None)
+    try:
+        if not flag or fit_rounds is None or selected is None:
+            return None
+        fit_rounds, selected = int(fit_rounds), int(selected)
+    except (TypeError, ValueError):
+        return None
+    return fit_rounds, selected
 
 
 def strip_eval_only_params(model) -> None:
@@ -761,9 +850,10 @@ def strip_eval_only_params(model) -> None:
     CatBoost: overfitting-detector settings and ``use_best_model``.
 
     Args:
-        model: A booster or a Pipeline ending in one (anything else is left alone).
+        model: A booster, or a Pipeline / TransformedTargetRegressor wrapping one
+            (anything else is left alone).
     """
-    est = _get_model_from_pipeline(model)
+    est = _final_estimator(model)
     params = est.get_params()
     updates: Dict[str, Any] = {}
     if isinstance(est, XGBOOST_MODELS):
@@ -814,6 +904,12 @@ def round_selection_unsupported_reason(model) -> Optional[str]:
                 "XGBoost booster='dart' re-weights earlier trees as rounds are added, so "
                 "the first k rounds of a longer fit are not the k-round model"
             )
+        if (params.get("rate_drop") or 0) > 0 or params.get("one_drop"):
+            return (
+                "XGBoost tree dropout (rate_drop / one_drop) re-weights earlier trees as "
+                "rounds are added, so the first k rounds of a longer fit are not the "
+                "k-round model"
+            )
     elif isinstance(est, LIGHTGBM_MODELS):
         for key in _LGBM_BOOSTING_KEYS:
             if str(params.get(key) or "").lower() == "dart":
@@ -833,18 +929,6 @@ def round_selection_unsupported_reason(model) -> Optional[str]:
                 "the first k rounds of a longer fit are not the k-round model"
             )
     return None
-
-
-def _auto_params(final) -> Dict[str, Any]:
-    """Settings a fitted booster chose itself that a refit with fewer rounds would change.
-
-    CatBoost without an explicit learning_rate picks one from the round count (and
-    data size); returns ``{'learning_rate': <rate used>}`` so the refit can pin it.
-    """
-    if CATBOOST_AVAILABLE and isinstance(final, CATBOOST_MODELS):
-        if final.get_params().get("learning_rate") is None and hasattr(final, "learning_rate_"):
-            return {"learning_rate": float(final.learning_rate_)}
-    return {}
 
 
 def _catboost_staged_raw(model, X: np.ndarray) -> np.ndarray:
@@ -1196,9 +1280,6 @@ class BoostingRoundsCV:
         fold_models: Per fold, the fitted (pipeline) clone when ``keep_models`` was set;
             its booster holds ``max_rounds`` rounds, use :func:`booster_predict_at`.
         fit_times: Per fold fit time in seconds.
-        pinned_params: Settings the folds were fitted with that the final refit must
-            reuse (CatBoost's automatic learning rate); applied by
-            :func:`apply_round_selection`.
     """
 
     n_rounds: int
@@ -1211,29 +1292,6 @@ class BoostingRoundsCV:
     classes: Optional[np.ndarray] = None
     fold_models: Optional[list] = None
     fit_times: List[float] = field(default_factory=list)
-    pinned_params: Dict[str, Any] = field(default_factory=dict)
-
-
-def apply_round_selection(model, selection) -> None:
-    """Prepare a booster (or Pipeline) for its final fit with the CV-selected round count.
-
-    Sets the round count, pins any setting the folds were fitted with (CatBoost's
-    automatic learning rate) and removes eval-only settings, in place. This is the
-    one place a final fit gets its tree count.
-
-    Args:
-        model: Booster or Pipeline ending in one.
-        selection: A :class:`BoostingRoundsCV`, or a plain round count.
-    """
-    if isinstance(selection, BoostingRoundsCV):
-        n_rounds, pinned = selection.n_rounds, selection.pinned_params
-    else:
-        n_rounds, pinned = int(selection), {}
-    est = _get_model_from_pipeline(model)
-    strip_eval_only_params(est)
-    if pinned:
-        est.set_params(**pinned)
-    set_booster_rounds(est, n_rounds)
 
 
 def _fit_fold_full_rounds(
@@ -1292,28 +1350,6 @@ def _fit_fold_full_rounds(
     return model_clone, final, Xt_test, fitted_tt
 
 
-def pin_auto_params(model, X_train: np.ndarray, y_train: np.ndarray) -> Dict[str, Any]:
-    """Pin settings a booster would choose from its round count, before fold-parallel CV.
-
-    Only CatBoost without an explicit learning_rate needs this: one fit on the given
-    training rows reads the rate it chose, which is then set on ``model`` (in place)
-    so every fold and the final refit use the same rate. No-op otherwise.
-
-    Returns:
-        The pinned settings (empty when nothing needed pinning).
-    """
-    est = _get_model_from_pipeline(model)
-    if not (CATBOOST_AVAILABLE and isinstance(est, CATBOOST_MODELS)):
-        return {}
-    if est.get_params().get("learning_rate") is not None:
-        return {}
-    _, final, _, _ = _fit_fold_full_rounds(model, X_train, y_train, X_train[:1], None, False)
-    pinned = _auto_params(final)
-    if pinned:
-        est.set_params(**pinned)
-    return pinned
-
-
 def cross_val_boosting_rounds(
     model,
     X: np.ndarray,
@@ -1332,9 +1368,12 @@ def cross_val_boosting_rounds(
     eval_set; its test rows are predicted at every round count. The pooled
     curve (RMSECV for regressors; accuracy for classifiers, exact ties broken by
     pooled log-loss) picks the round count with :func:`select_n_rounds`, and
-    every fold's predictions are reported at that count. Changing only a test
-    fold's labels can change the selected count (it is a CV statistic, like the
-    PLS LV count) but never the fold's fitted model.
+    every fold's predictions are reported at that count. Each fold chooses its own
+    automatic defaults (e.g. CatBoost's learning rate) from its own training data;
+    nothing is shared between folds. Changing only a test fold's labels can change
+    the selected count (it is a CV statistic, like the PLS LV count) but never the
+    fold's fitted model. The final model: fit the same configuration on all data,
+    then :func:`truncate_booster` to the selected count.
 
     Args:
         model: Booster or Pipeline ending in one.
@@ -1380,7 +1419,6 @@ def cross_val_boosting_rounds(
     train_indices: List[np.ndarray] = []
     models: list = []
     fit_times: List[float] = []
-    pinned: Dict[str, Any] = {}
     for train_idx, test_idx in cv.split(X, y):
         sw_train = sample_weight[train_idx] if sample_weight is not None else None
         start = time.time()
@@ -1394,13 +1432,6 @@ def cross_val_boosting_rounds(
             target_transformer=None if is_clf else target_transformer,
         )
         fit_times.append(time.time() - start)
-        if not test_indices:
-            # CatBoost without a learning_rate chooses one from the round count: pin
-            # the first fold's choice for the remaining folds and the final refit.
-            pinned = _auto_params(final)
-            if pinned:
-                model = clone(model)
-                _get_model_from_pipeline(model).set_params(**pinned)
         staged, proba = _stage_fold(final, Xt_test, max_rounds, classes, fitted_tt)
         staged_out.append(staged)
         if is_clf:
@@ -1424,7 +1455,6 @@ def cross_val_boosting_rounds(
         classes=classes,
         fold_models=models if keep_models else None,
         fit_times=fit_times,
-        pinned_params=pinned,
     )
 
 
@@ -1641,6 +1671,7 @@ def cross_validate_with_early_stopping(
     import time
 
     scoring_dict = {"score": scoring} if isinstance(scoring, str) else dict(scoring)
+    model = sanitize_booster(model)
     if not uses_round_selection(model, early_stopping_rounds):
         if balanced_sample_weight:
             if return_estimator:
@@ -1758,6 +1789,7 @@ def cross_val_predict_with_early_stopping(
     Returns:
         Per-sample predictions, or ``(predictions, n_rounds)`` with ``return_n_rounds``.
     """
+    model = sanitize_booster(model)
     if not uses_round_selection(model, early_stopping_rounds):
         preds = cross_val_predict_pooled(
             model,

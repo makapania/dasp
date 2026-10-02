@@ -28,6 +28,7 @@ from .cv_utils import (
     cross_val_score_with_early_stopping,
     is_boosting_model,
     round_selection_unsupported_reason,
+    truncate_booster,
 )
 from sklearn.metrics import (
     r2_score, mean_absolute_error, balanced_accuracy_score,
@@ -2425,6 +2426,12 @@ def decode_solution(chromosome: np.ndarray, n_wavelengths: int, model_types: Opt
             # Get COMPLETE params (includes all defaults from get_model), minus
             # runtime-only kwargs that are not model identity.
             params_dict = strip_runtime_params(model.get_params())
+            # NaN defaults (XGBoost's missing=nan) are not literal_eval-able;
+            # drop them as grid search does (the estimator default is NaN anyway).
+            params_dict = {
+                k: v for k, v in params_dict.items()
+                if not (isinstance(v, float) and np.isnan(v))
+            }
         else:
             params_dict = nsga_overrides
     except (ImportError, ValueError):
@@ -2800,9 +2807,10 @@ def _booster_cv_metrics(
     rounds_key = "iterations" if model_type == "CatBoost" else "n_estimators"
     out: Dict[str, Any] = {
         "n_rounds": res.n_rounds,
+        # The final (calibration) model is fitted at fit_rounds and truncated to
+        # n_rounds; the stored Params report n_rounds under rounds_key.
+        "fit_rounds": res.max_rounds,
         "rounds_key": rounds_key,
-        # What the final (calibration) fit and the stored Params must use.
-        "param_overrides": {rounds_key: res.n_rounds, **res.pinned_params},
     }
     if task_type == "regression":
         # RMSEcv as the objective computes it: mean of per-fold RMSE.
@@ -2876,15 +2884,31 @@ def _booster_cv_metrics(
 
 
 def _with_selected_rounds(params_str: str, overrides: Dict[str, Any]) -> str:
-    """Write the CV-selected round count (and pinned settings) into a stored Params string."""
+    """Write the CV-selected round count into a stored Params string.
+
+    Raises:
+        ValueError: The Params string cannot be parsed; the selected count is never
+            dropped silently.
+    """
     try:
         params = ast.literal_eval(params_str) if params_str else {}
-    except (ValueError, SyntaxError):
-        return params_str
+    except (ValueError, SyntaxError) as exc:
+        raise ValueError(
+            f"Cannot record the selected round count in Params {params_str!r}"
+        ) from exc
     if not isinstance(params, dict):
-        return params_str
+        raise ValueError(f"Params is not a dict: {params_str!r}")
     params.update(overrides)
     return str(params)
+
+
+def _record_round_selection(row: Dict[str, Any], boost: Dict[str, Any]) -> None:
+    """Params carry the selected count; the row records the fit-then-truncate procedure."""
+    row["Params"] = _with_selected_rounds(row["Params"], {boost["rounds_key"]: boost["n_rounds"]})
+    row["Parameters"] = row["Params"]
+    row["n_estimators_selected"] = boost["n_rounds"]
+    row["n_estimators_fit"] = boost["fit_rounds"]
+    row["round_selection_truncated"] = True
 
 
 def _compute_display_rmse(
@@ -3649,7 +3673,7 @@ def _compute_calibration_metrics(
     model_types: List[str],
     task_type: str,
     imbalance_method: Optional[str] = None,
-    param_overrides: Optional[Dict[str, Any]] = None,
+    truncate_rounds: Optional[int] = None,
 ) -> Dict[str, float]:
     """
     Compute calibration (training set) metrics for a single NSGA-II solution.
@@ -3678,9 +3702,10 @@ def _compute_calibration_metrics(
         at fit time. Without this, the user-visible Accuracy / F1 / AUC etc.
         for CatBoost/XGBoost classifiers under class_weight described an
         UNWEIGHTED model (Codex HIGH on PR #38).
-    param_overrides : dict or None, default=None
-        Model parameters set before the fit; boosters pass the CV-selected round
-        count so the calibration metrics describe the stored model.
+    truncate_rounds : int or None, default=None
+        Boosters with round selection: the model is fitted at its configured
+        (maximum) round count and truncated to this count before predicting, so the
+        calibration metrics describe the stored model.
 
     Returns
     -------
@@ -3787,8 +3812,6 @@ def _compute_calibration_metrics(
             model = _build_model(model_type, model_param, task_type, 42, hyperparams)
 
         # Check if model was built successfully
-        if model is not None and param_overrides:
-            model.set_params(**param_overrides)
         if model is None:
             logger.error(f"_build_model returned None for {model_type} in _compute_calibration_metrics")
             if task_type == 'regression':
@@ -3828,6 +3851,9 @@ def _compute_calibration_metrics(
             model.fit(X_subset, y, sample_weight=_cal_sample_weight)
         else:
             model.fit(X_subset, y)
+
+        if truncate_rounds is not None and is_boosting_model(model):
+            truncate_booster(model, truncate_rounds)
 
         # Predict on training data
         y_pred = model.predict(X_subset)
@@ -3951,7 +3977,7 @@ def _apply_booster_selection_to_best_row(
         model_types,
         task_type,
         imbalance_method=result.get("imbalance_method"),
-        param_overrides=boost["param_overrides"],
+        truncate_rounds=boost["n_rounds"],
     )
     best_row.update({k: v for k, v in cal.items()})
     if task_type == "regression":
@@ -3977,9 +4003,8 @@ def _apply_booster_selection_to_best_row(
     params_str = decode_solution(
         chromosome, n_wavelengths, model_types, task_type, n_samples=len(y)
     )["model_params"]
-    best_row["Params"] = _with_selected_rounds(params_str, boost["param_overrides"])
-    best_row["Parameters"] = best_row["Params"]
-    best_row["n_estimators_selected"] = boost["n_rounds"]
+    best_row["Params"] = params_str
+    _record_round_selection(best_row, boost)
 
 
 def convert_nsga2_to_v1_format(
@@ -4089,14 +4114,14 @@ def convert_nsga2_to_v1_format(
                 imbalance_params=imbalance_params,
                 early_stopping_rounds=result.get('early_stopping_rounds'),
             )
-        _overrides = boost['param_overrides'] if boost is not None else None
+        _truncate = boost['n_rounds'] if boost is not None else None
 
         if task_type == 'regression':
             # Compute calibration metrics (training data)
             if X is not None and y is not None:
                 cal_metrics = _compute_calibration_metrics(
                     X, y, solution, n_wavelengths, model_types, task_type,
-                    param_overrides=_overrides,
+                    truncate_rounds=_truncate,
                 )
                 row['RMSE'] = cal_metrics.get('RMSE', np.nan)
                 row['R2'] = cal_metrics.get('R2', np.nan)
@@ -4157,7 +4182,7 @@ def convert_nsga2_to_v1_format(
                 cal_metrics = _compute_calibration_metrics(
                     X, y, solution, n_wavelengths, model_types, task_type,
                     imbalance_method=imbalance_method,
-                    param_overrides=_overrides,
+                    truncate_rounds=_truncate,
                 )
                 row['Accuracy'] = cal_metrics.get('Accuracy', np.nan)
                 row['ROC_AUC'] = cal_metrics.get('ROC_AUC', np.nan)
@@ -4231,9 +4256,7 @@ def convert_nsga2_to_v1_format(
         # Boosters: the stored Params carry the CV-selected round count, so Tab 7,
         # saved models and exports refit the model that was scored.
         if boost is not None:
-            row['Params'] = _with_selected_rounds(row['Params'], boost['param_overrides'])
-            row['Parameters'] = row['Params']
-            row['n_estimators_selected'] = boost['n_rounds']
+            _record_round_selection(row, boost)
 
         rows.append(row)
 
@@ -4283,7 +4306,11 @@ def convert_nsga2_to_v1_format(
                     'Variables': f"nsga2_{knee_sol.get('n_wavelengths', 0)}",
                     'full_vars': n_wavelengths,
                     'SubsetTag': 'nsga2_best',  # Mark as best from all evaluations
-                    'Imbalance': 'none',
+                    # Same imbalance metadata as the Pareto rows: the row was scored
+                    # with it, and rebuilds/exports must apply it.
+                    'Imbalance': _format_imbalance_display(result.get('imbalance_method')),
+                    'imbalance_method': result.get('imbalance_method'),
+                    'imbalance_params': result.get('imbalance_params'),
                     'early_stopping_rounds': result.get('early_stopping_rounds'),
                     'top_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', [])[:30], wavelengths) if knee_sol.get('selected_indices') else 'N/A',
                     'all_vars': _indices_to_wavelength_str(knee_sol.get('selected_indices', []), wavelengths) if knee_sol.get('selected_indices') else 'N/A',
@@ -4420,7 +4447,8 @@ def convert_nsga2_to_v1_format(
     # Preprocessing columns early (Deriv, Window, Poly, LVs, n_vars), metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                  'Poly', 'LVs', 'n_vars', 'Variables', 'full_vars', 'SubsetTag', 'Imbalance',
-                 'early_stopping_rounds', 'n_estimators_selected']
+                 'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit',
+                 'round_selection_truncated']
 
     # Performance metrics after Imbalance (calibration first, then CV, then NIR-specific)
     if task_type == 'regression':
@@ -4459,7 +4487,7 @@ def convert_nsga2_to_v1_format(
     # Convert integer columns to nullable Int64 to avoid float display (e.g., 1.0 -> 1)
     int_cols = ['Deriv', 'Window', 'Poly', 'LVs', 'n_vars', 'Rank', 'Folds',
                 'N_Calibration', 'N_Excluded', 'N_Validation', 'full_vars',
-                'early_stopping_rounds', 'n_estimators_selected']
+                'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit']
     for col in int_cols:
         if col in df.columns:
             df[col] = df[col].astype('Int64')

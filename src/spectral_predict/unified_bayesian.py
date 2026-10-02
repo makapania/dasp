@@ -50,12 +50,14 @@ from sklearn.model_selection import cross_val_predict
 # Import early stopping CV utilities
 from spectral_predict.cv_utils import (
     BOOSTING_ROUND_POLICY,
-    apply_round_selection,
+    booster_max_rounds,
     build_cv_splitter,
     cross_val_boosting_rounds,
     cross_val_predict_pooled,
     pool_boosting_predictions,
     round_selection_unsupported_reason,
+    strip_eval_only_params,
+    truncate_booster,
     uses_round_selection,
 )
 from sklearn.pipeline import Pipeline
@@ -1792,6 +1794,9 @@ def create_unified_objective(
 
             # Use the constructed pipeline as the model
             model = pipeline
+            # Boosters are never given an eval_set (with or without round
+            # selection): eval-only settings are removed for CV and final fit.
+            strip_eval_only_params(model)
 
             # Enable CV parallelism (safe - Bayesian trials are sequential)
             from spectral_predict.search import _frozen_needs_threading_fallback
@@ -2084,12 +2089,14 @@ def create_unified_objective(
             _final_fit_kwargs: Dict[str, Any] = {}
             if _balanced_sw is not None:
                 _final_fit_kwargs['model__sample_weight'] = _balanced_sw
-            if _rounds is not None:
-                # Refit with the CV-selected round count (and any setting the folds
-                # pinned) so the captured Params describe the scored model.
-                apply_round_selection(model, _rounds)
-                trial.set_user_attr('n_estimators_selected', int(n_rounds_selected))
             model.fit(X_final, y, **_final_fit_kwargs)
+            if _rounds is not None:
+                # The scored configuration fitted at its maximum round count, then
+                # truncated to the selected count: exactly what the CV curve was read
+                # from (round-dependent defaults included); Params report the count.
+                trial.set_user_attr('n_estimators_fit', int(booster_max_rounds(model)))
+                truncate_booster(model, n_rounds_selected)
+                trial.set_user_attr('n_estimators_selected', int(n_rounds_selected))
             captured_params = _capture_serializable_params(model)
             if captured_params:
                 trial.set_user_attr('model_params', str(captured_params))
@@ -3767,6 +3774,9 @@ def convert_study_to_dataframe(
                 else trial.user_attrs.get('early_stopping_rounds', None)
             ),
             'n_estimators_selected': trial.user_attrs.get('n_estimators_selected'),
+            # Final model fitted at n_estimators_fit rounds, truncated to the selected count.
+            'n_estimators_fit': trial.user_attrs.get('n_estimators_fit'),
+            'round_selection_truncated': trial.user_attrs.get('n_estimators_selected') is not None,
             'imbalance_method': imbalance_method,
             'imbalance_params': imbalance_params,
             # training_config mirrors search.py so model save/load can restore
@@ -3896,7 +3906,8 @@ def convert_study_to_dataframe(
         # Column order aligned with Grid Search: preprocessing cols early, top_vars/all_vars at end
         cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                 'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
-                'early_stopping_rounds', 'n_estimators_selected', 'trial_number', 'Folds', 'Optimization',
+                'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit',
+                'round_selection_truncated', 'trial_number', 'Folds', 'Optimization',
                 'imbalance_method', 'imbalance_params', 'baseline_method', 'baseline_params']
         if task_type == 'one_class':
             cols.extend([
@@ -3945,7 +3956,8 @@ def convert_study_to_dataframe(
     # Preprocessing columns early, metrics in middle, top_vars/all_vars at end
     base_cols = ['Rank', 'Task', 'Model', 'Params', 'Preprocess', 'Deriv', 'Window',
                  'Poly', 'LVs', 'n_vars', 'full_vars', 'SubsetTag', 'Imbalance',
-                 'early_stopping_rounds', 'n_estimators_selected']
+                 'early_stopping_rounds', 'n_estimators_selected', 'n_estimators_fit',
+                 'round_selection_truncated']
 
     # Performance metrics
     if task_type == 'regression':

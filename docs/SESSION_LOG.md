@@ -786,3 +786,22 @@ Gotchas worth knowing:
   - Changing a booster study's identity hid the old study from the env/legacy notice (it searched the new base only).
     The previous-policy base is recomputed (`previous_policy_study_base` study attr) and reported like an env change.
   - Tab 7's validation-curve diagnostic refits the model ~27 times on purpose; a fit-count test must exclude it.
+- **Review round 2 (Codex BLOCK; GLM MERGE) - redesign of the final booster model:**
+  - Pinning CatBoost's automatic learning rate from fold 1 leaked labels across folds when a resampler made fold
+    sizes label-dependent, and missed other round-dependent defaults (leaf_estimation_iterations changes with
+    iterations). Replaced by: every fold chooses its own defaults; the final model is the scored configuration
+    fitted on all data at the maximum R and TRUNCATED to k (`cv_utils.truncate_booster`). Truncation that pickles:
+    XGBoost `est._Booster = booster[:k]`; LightGBM `est._Booster = Booster(model_str=model_to_string(num_iteration=k))`;
+    CatBoost `shrink(ntree_end=k)` - CatBoost refuses set_params on a fitted model, so the count is written to
+    `_init_params`. All exact vs the R-fit's staged predictions at k (diff 0.0), also after pickling.
+  - Params carry the selected count k; rows add `n_estimators_fit` (R) and `round_selection_truncated`. Params stay
+    pure estimator params on purpose: Tab 7 and other consumers `set_params` every bare key, so flag keys there would
+    break them. Rebuilds use `cv_utils.round_truncation_from_row` (validation rebuild, Tab 7, export). Ensembles still
+    fit Params directly at k (exact except CatBoost with automatic defaults).
+  - A declined resume (old booster scoring, other environment/data) no longer completes the saved run when the
+    replacement finishes: `_resume_not_continued_run_id` keeps the record (PROJECT_STATUS §1 binding decision).
+  - NSGA-II XGBoost Params contained `'missing': nan` (not literal_eval-able), so the selected count was silently
+    dropped; NaN defaults are now omitted and `_with_selected_rounds` raises instead of ignoring.
+  - XGBoost supports dropout under gbtree (rate_drop / one_drop): prefix-unsafe like DART.
+  - The export's regression final-model template prints CCC with `_lins_ccc`, which only the CV section defines, so
+    a regression export without CV raises NameError (pre-existing, not fixed here).

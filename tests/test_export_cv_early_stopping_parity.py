@@ -165,6 +165,12 @@ def test_lightgbm_classification_export_matches_inapp():
     )
     # The exported final model is fitted with the selected round count.
     assert ns["model"].get_params()["n_estimators"] == res.n_rounds
+    # The exported final model is the full fit at the maximum, truncated (as in-app).
+    from spectral_predict.cv_utils import truncate_booster
+
+    inapp_final = LGBMClassifier(**params).fit(X, y)
+    truncate_booster(inapp_final, res.n_rounds)
+    np.testing.assert_array_equal(ns["model"].predict_proba(X), inapp_final.predict_proba(X))
 
 
 def test_lightgbm_regression_export_matches_inapp():
@@ -271,3 +277,79 @@ def test_export_fits_each_booster_fold_once(monkeypatch):
     X, y = _make_data()
     _exec_generated(_build_model_config(40), X, y)
     assert len(calls) == 5 + 1
+
+
+def test_export_regression_fits_each_booster_fold_once(monkeypatch):
+    from lightgbm import LGBMRegressor
+
+    calls = []
+    real_fit = LGBMRegressor.fit
+
+    def counting_fit(self, *args, **kwargs):
+        calls.append(1)
+        return real_fit(self, *args, **kwargs)
+
+    monkeypatch.setattr(LGBMRegressor, "fit", counting_fit)
+    X, y = _make_regression_data()
+    _exec_generated(_build_model_config(20, task_type="regression"), X, y)
+    assert len(calls) == 5 + 1
+
+
+def test_export_without_cv_reproduces_the_truncated_row():
+    """A row fitted at n_estimators_fit and truncated is reproduced by an export
+    without cross-validation: fit at the recorded maximum, truncate to the count."""
+    from catboost import CatBoostRegressor
+
+    from spectral_predict.cv_utils import truncate_booster
+
+    X, y = _make_regression_data()
+    params = {
+        "iterations": 9,
+        "depth": 3,
+        "random_state": 0,
+        "verbose": 0,
+        "thread_count": 1,
+        "allow_writing_files": False,
+    }
+    config = _build_model_config(None, params, model_name="CatBoost", task_type="regression")
+    config.update(n_estimators_selected=9, n_estimators_fit=40, round_selection_truncated=True)
+    opts = ExportOptions(
+        format="script",
+        include_data=True,
+        data_X=X,
+        data_y=y,
+        wavelengths=None,
+        include_visualization=False,
+        include_cross_validation=False,
+    )
+    script = CodeGenerator(config, opts).generate_script()
+    # Pre-existing gap: the regression final-model template prints CCC with
+    # _lins_ccc, which only the CV section defines.
+    ns: dict = {"_lins_ccc": lambda a, b: float("nan")}
+    exec(script, ns)
+    assert "'iterations': 40" in script  # fitted at the recorded maximum ...
+    assert ns["model"].tree_count_ == 9  # ... and truncated to the selected count
+    exported = dict(ns["model"].get_params())
+    exported["iterations"] = 40
+    reference = CatBoostRegressor(**exported).fit(X, y)
+    truncate_booster(reference, 9)
+    np.testing.assert_array_equal(ns["model"].predict(X), reference.predict(X))
+
+
+def test_export_lightgbm_alias_resolves_effective_round_count():
+    """Round 2 #7: an overriding LightGBM alias is resolved before aliases are dropped."""
+    from lightgbm import LGBMRegressor
+
+    X, y = _make_regression_data()
+    params = {
+        "n_estimators": 100,
+        "num_iterations": 7,
+        "boosting_type": "dart",
+        "random_state": 0,
+        "n_jobs": 1,
+        "verbosity": -1,
+    }
+    ns = _exec_generated(_build_model_config(None, params, task_type="regression"), X, y)
+    native = LGBMRegressor(**params).fit(X, y)
+    assert ns["model"].booster_.current_iteration() == 7
+    np.testing.assert_allclose(ns["model"].predict(X), native.predict(X))

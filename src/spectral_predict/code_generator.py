@@ -132,6 +132,16 @@ class CodeGenerator:
         except (TypeError, ValueError):
             _es_int = None
         self.early_stopping_rounds = _es_int if (_es_int and _es_int > 0) else None
+        # Boosters with round selection: the in-app final model was fitted at
+        # n_estimators_fit rounds and truncated to n_estimators_selected.
+        self.n_estimators_fit = None
+        self.n_estimators_selected = None
+        if model_config.get('round_selection_truncated'):
+            try:
+                self.n_estimators_fit = int(model_config.get('n_estimators_fit'))
+                self.n_estimators_selected = int(model_config.get('n_estimators_selected'))
+            except (TypeError, ValueError):
+                self.n_estimators_fit = self.n_estimators_selected = None
         self.imbalance_method = model_config.get('imbalance_method', None)
         self.inlier_class_label = model_config.get('inlier_class_label', '')
 
@@ -222,6 +232,9 @@ class CodeGenerator:
 
         # 8. Model instantiation
         sections.append(self._render_model())
+        if not self.options.include_cross_validation and self._is_booster_export():
+            # Round-count helpers (eval-only cleanup, final truncation).
+            sections.append(self._render_fit_fold_helper())
 
         # 9. Cross-validation
         if self.options.include_cross_validation:
@@ -997,12 +1010,37 @@ print(f"Using pre-processed embedded data: {X_processed.shape}")
                 # Don't write catboost_info/ into the cwd (fails when unwritable).
                 params_full.setdefault('allow_writing_files', False)
             if model_class.startswith('LightGBM'):
-                # LightGBM does not allow both n_estimators and num_iterations
-                if 'n_estimators' in params_full and 'num_iterations' in params_full:
-                    params_full.pop('num_iterations', None)
-                # Drop legacy aliases if present alongside n_estimators
-                if 'n_estimators' in params_full and 'num_boost_round' in params_full:
-                    params_full.pop('num_boost_round', None)
+                # LightGBM rejects several round aliases at once. An alias overrides
+                # n_estimators at fit time, so resolve the effective count the way
+                # LightGBM does (num_iterations wins) before dropping the aliases.
+                from spectral_predict.cv_utils import _LGBM_ROUND_ALIASES
+
+                _aliases = {
+                    k: params_full[k] for k in _LGBM_ROUND_ALIASES
+                    if params_full.get(k) is not None
+                }
+                if _aliases:
+                    if 'num_iterations' in _aliases:
+                        _effective = _aliases['num_iterations']
+                    elif len({int(v) for v in _aliases.values()}) == 1:
+                        _effective = next(iter(_aliases.values()))
+                    else:
+                        raise ValueError(f"Conflicting LightGBM round-count aliases: {_aliases}")
+                    for _alias in _aliases:
+                        params_full.pop(_alias, None)
+                    params_full['n_estimators'] = int(_effective)
+            if self.n_estimators_fit is not None and self._is_booster_export():
+                # Round selection: the final model is fitted at the scored (maximum)
+                # count and truncated to the selected one after the fit, as in-app.
+                if model_class.startswith('CatBoost'):
+                    _key = next(
+                        (k for k in ('iterations', 'n_estimators', 'num_boost_round', 'num_trees')
+                         if k in params_full),
+                        'iterations',
+                    )
+                    params_full[_key] = self.n_estimators_fit
+                else:
+                    params_full['n_estimators'] = self.n_estimators_fit
             if model_class.startswith('XGBoost'):
                 # XGBoost does not allow both n_estimators and num_boost_round
                 if 'n_estimators' in params_full and 'num_boost_round' in params_full:
@@ -1475,6 +1513,26 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
         )
         return code
 
+    def _is_booster_export(self) -> bool:
+        """True for XGBoost / LightGBM / CatBoost exports."""
+        return self._resolve_model_class_name().startswith(('XGBoost', 'LightGBM', 'CatBoost'))
+
+    def _render_final_round_truncation(self) -> str:
+        """Truncate the fitted final booster to the selected round count (in-app parity)."""
+        if not self._is_booster_export():
+            return ''
+        selected = self.n_estimators_selected
+        return f'''
+# Boosters: the final model is the scored configuration fitted at its maximum
+# round count, then truncated to the round count chosen from the pooled CV curve
+# (N_BOOST_ROUNDS from the cross-validation above, else the count recorded in
+# the results row) - exactly the in-app model.
+_selected_rounds = globals().get('N_BOOST_ROUNDS') or {selected!r}
+if _selected_rounds:
+    truncate_booster(model, _selected_rounds)
+    print(f"Final model truncated to {{_selected_rounds}} boosting rounds")
+'''
+
     def _render_fit_fold_helper(self) -> str:
         """Render the boosting-round selection helpers used by the exported CV.
 
@@ -1507,7 +1565,8 @@ model = Pipeline([('pls', pls), ('scaler', StandardScaler()), ('lr', lr)])
                 _cvu.set_booster_rounds,
                 _cvu.strip_eval_only_params,
                 _cvu.round_selection_unsupported_reason,
-                _cvu._auto_params,
+                _cvu._final_estimator,
+                _cvu.truncate_booster,
                 _cvu._catboost_staged_raw,
                 _cvu._catboost_staged,
                 _cvu.booster_staged_predict,
@@ -1592,8 +1651,10 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
 
     prepare_fold(X_train, y_train) -> (X_train, y_train, fit kwargs) applies the
     same in-fold resampling / weighting as the CV loop below. Each fold is fitted
-    once. Returns (count, per-fold predictions at that count) and sets the count
-    on model for the final fit; (None, None) when no selection applies.
+    once, at the maximum round count, choosing its own automatic defaults.
+    Returns (count, per-fold predictions at that count); the final model is then
+    fitted at the maximum and truncated (see TRAIN FINAL MODEL). (None, None) when
+    no selection applies.
     """
     final = _get_model_from_pipeline(model)
     if not patience or patience <= 0 or not is_boosting_model(final):
@@ -1606,14 +1667,12 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
     is_clf = task == 'classification'
     max_rounds = booster_max_rounds(model)
     classes = np.unique(y) if is_clf else None
-    prototype = model
-    pinned = {{}}
     staged_out, proba_out, test_out = [], [], []
     for train_idx, test_idx in cv.split(X, y):
         X_tr, y_tr, _fit_kw = X[train_idx], y[train_idx], {{}}
         if prepare_fold is not None:
             X_tr, y_tr, _fit_kw = prepare_fold(X_tr, y_tr)
-        fold_model = clone(prototype)
+        fold_model = clone(model)
         strip_eval_only_params(fold_model)
         fold_model.fit(X_tr, y_tr, **_fit_kw)
         X_te = X[test_idx]
@@ -1622,14 +1681,7 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
                 if step is None or step == 'passthrough' or hasattr(step, 'fit_resample'):
                     continue
                 X_te = step.transform(X_te)
-        fold_final = _get_model_from_pipeline(fold_model)
-        if not test_out:
-            # CatBoost without a learning_rate: pin the first fold's choice.
-            pinned = _auto_params(fold_final)
-            if pinned:
-                prototype = clone(model)
-                _get_model_from_pipeline(prototype).set_params(**pinned)
-        staged, proba = _stage_fold(fold_final, X_te, max_rounds, classes)
+        staged, proba = _stage_fold(_get_model_from_pipeline(fold_model), X_te, max_rounds, classes)
         staged_out.append(staged)
         if is_clf:
             proba_out.append(proba)
@@ -1637,14 +1689,14 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
     n_rounds, _ = _select_from_staged(
         staged_out, proba_out if is_clf else None, test_out, y, classes, patience
     )
-    # Final fit: the selected count (and any pinned setting) on model.
-    strip_eval_only_params(final)
-    if pinned:
-        final.set_params(**pinned)
-    set_booster_rounds(final, n_rounds)
     print(f"Boosting rounds: {{n_rounds}} of {{max_rounds}} "
           f"(one count for all folds, pooled CV curve, patience {{patience}})")
     return n_rounds, [s[n_rounds - 1] for s in staged_out]
+
+
+# Boosters are never given an eval_set: remove eval-only settings (early stopping)
+# for the CV and the final fit.
+strip_eval_only_params(model)
 '''
 
     def _render_cross_validation(self) -> str:
@@ -1685,7 +1737,11 @@ def _choose_boosting_rounds(model, X, y, cv, patience, task, prepare_fold=None):
         return get_metrics_template(self.task_type, self.cv_folds)
 
     def _render_final_model(self) -> str:
-        """Render final model training code."""
+        """Render final model training code (boosters: fit, then truncate)."""
+        return self._render_final_model_body() + self._render_final_round_truncation()
+
+    def _render_final_model_body(self) -> str:
+        """Render the final model fit."""
         if self.imbalance_method:
             return self._render_final_model_with_imbalance()
 

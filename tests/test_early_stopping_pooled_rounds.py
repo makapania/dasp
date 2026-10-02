@@ -368,6 +368,9 @@ def test_grid_row_records_selected_rounds_in_params():
         assert 1 <= k <= 60
         assert _rounds_param(row["Params"]) == k
         assert row["early_stopping_rounds"] == 10
+        # Final model: fitted at the maximum and truncated (redesign).
+        assert int(row["n_estimators_fit"]) == 60
+        assert row["round_selection_truncated"] is True or row["round_selection_truncated"] == 1
 
 
 def test_grid_row_without_round_selection_keeps_configured_rounds():
@@ -720,29 +723,104 @@ def test_invalid_configuration_grid_row_records_no_selection():
     assert _rounds_param(row["Params"]) == 20
 
 
-def test_catboost_automatic_learning_rate_is_pinned_for_the_refit():
-    """Item 3: CatBoost without learning_rate picks one from the round count; the folds'
-    rate is pinned so the k-round refit is the model the curve was read from."""
-    from catboost import CatBoostRegressor
+def _full_fit_cases():
+    """(id, task, estimator) including CatBoost with automatic round-dependent defaults."""
+    out = [
+        pytest.param(task, model, id=f"{name}-{task}")
+        for task in ("regression", "classification")
+        for name, model in _boosters(task)
+    ]
+    from catboost import CatBoostClassifier, CatBoostRegressor
 
-    X, y = _regression_data()
-    cv = KFold(4, shuffle=True, random_state=1)
-    model = CatBoostRegressor(
-        iterations=60, depth=3, random_seed=0, verbose=0, thread_count=1, allow_writing_files=False
+    out.append(
+        pytest.param(
+            "regression",
+            CatBoostRegressor(
+                iterations=60, random_seed=0, verbose=0, thread_count=1, allow_writing_files=False
+            ),
+            id="catboost-auto-lr-regression",
+        )
     )
-    res = cross_val_boosting_rounds(model, X, y, cv, patience=10)
-    assert set(res.pinned_params) == {"learning_rate"}
+    out.append(
+        pytest.param(
+            "classification",
+            CatBoostClassifier(
+                iterations=60, random_seed=0, verbose=0, thread_count=1, allow_writing_files=False
+            ),
+            id="catboost-auto-lr-classification",
+        )
+    )
+    return out
 
-    refit = clone(model)
-    from spectral_predict.cv_utils import apply_round_selection
 
-    apply_round_selection(refit, res)
-    assert refit.get_params()["learning_rate"] == res.pinned_params["learning_rate"]
+@pytest.mark.parametrize(("task", "model"), _full_fit_cases())
+def test_truncated_final_model_is_the_full_fit_at_the_selected_round(task, model, tmp_path):
+    """Redesign: the final model is the scored configuration fitted on all data at the
+    maximum round count and truncated, so its predictions equal that fit's staged
+    predictions at k exactly (also after pickling), whatever automatic defaults the
+    library chose (CatBoost's learning rate / leaf-estimation iterations)."""
+    import pickle
+
+    from spectral_predict.cv_utils import booster_predict_at, truncate_booster
+
+    X, y = _data(task)
+    k = 7
+    full = clone(model).fit(X, y)
+    method = "predict_proba" if task == "classification" else "predict"
+    expected = booster_predict_at(full, X, k, method=method)
+
+    truncated = clone(model).fit(X, y)
+    truncate_booster(truncated, k)
+    got = getattr(truncated, method)(X)
+    np.testing.assert_allclose(np.asarray(got).reshape(expected.shape), expected, rtol=0, atol=0)
+    params = truncated.get_params()
+    assert params.get("n_estimators", params.get("iterations")) == k
+
+    restored = pickle.loads(pickle.dumps(truncated))
     np.testing.assert_allclose(
-        cross_val_predict(refit, X, y, cv=cv),
-        pool_boosting_predictions(res, len(y)),
-        rtol=0,
-        atol=1e-12,
+        np.asarray(getattr(restored, method)(X)).reshape(expected.shape), expected, rtol=0, atol=0
+    )
+
+
+def test_catboost_auto_learning_rate_folds_are_independent_under_resampling():
+    """Redesign: each fold chooses CatBoost's automatic rate from its own training data,
+    so with a label-dependent resampler (RandomOverSampler) changing only one fold's
+    test labels still leaves that fold's model unchanged."""
+    from catboost import CatBoostClassifier
+    from imblearn.over_sampling import RandomOverSampler
+    from imblearn.pipeline import Pipeline as ImbPipeline
+
+    X, y = _classification_data()
+    y = y.copy()
+    y[:6] = 2
+    cv = _FixedSplits(StratifiedKFold(3, shuffle=True, random_state=0).split(X, y))
+    splits = list(cv.split(X, y))
+    _, test1 = splits[1]
+    y2 = y.copy()
+    y2[test1] = (y2[test1] + 1) % 3  # changes fold 0's TRAINING class counts, not its test
+    pipe = ImbPipeline(
+        [
+            ("imbalance", RandomOverSampler(random_state=0)),
+            (
+                "model",
+                CatBoostClassifier(
+                    iterations=40,
+                    random_seed=0,
+                    verbose=0,
+                    thread_count=1,
+                    allow_writing_files=False,
+                ),
+            ),
+        ]
+    )
+    res1 = cross_val_boosting_rounds(pipe, X, y, cv, patience=10, keep_models=True)
+    res2 = cross_val_boosting_rounds(pipe, X, y2, cv, patience=10, keep_models=True)
+    # Fold 1's training rows are identical in both runs: its model must be identical,
+    # although folds 0 and 2 (whose resampled training sizes changed) differ.
+    assert np.array_equal(res1.test_indices[1], test1)
+    np.testing.assert_array_equal(
+        booster_staged_predict(res1.fold_models[1].steps[-1][1], X[test1]),
+        booster_staged_predict(res2.fold_models[1].steps[-1][1], X[test1]),
     )
 
 
@@ -816,7 +894,7 @@ def test_eval_only_settings_are_removed_for_cv_and_final_fit():
     from xgboost import XGBRegressor
     from xgboost.callback import EarlyStopping, LearningRateScheduler
 
-    from spectral_predict.cv_utils import apply_round_selection
+    from spectral_predict.cv_utils import sanitize_booster, truncate_booster
 
     X, y = _regression_data()
     lr_schedule = LearningRateScheduler(lambda i: 0.1)
@@ -838,9 +916,9 @@ def test_eval_only_settings_are_removed_for_cv_and_final_fit():
     ]
     for model in models:
         res = cross_val_boosting_rounds(model, X, y, KFold(3), patience=5)
-        final = clone(model)
-        apply_round_selection(final, res)
+        final = sanitize_booster(model)
         final.fit(X, y)
+        truncate_booster(final, res.n_rounds)
         if isinstance(model, XGBRegressor):
             callbacks = final.get_params()["callbacks"]
             assert len(callbacks) == 1 and isinstance(callbacks[0], LearningRateScheduler)
@@ -901,9 +979,135 @@ def test_nsga2_calibration_and_knee_row_use_selected_rounds():
             X.shape[1],
             result["model_types"],
             "regression",
-            param_overrides=boost["param_overrides"],
+            truncate_rounds=boost["n_rounds"],
         )
         expected.append(cal["RMSE"])
     pareto_rows = df[df.get("Is_Best_Error", False) != True]  # noqa: E712
     for rmse in pareto_rows["RMSE"]:
         assert min(abs(rmse - e) for e in expected) < 1e-12
+
+
+# --- Review round 2 -------------------------------------------------------------------
+
+
+def test_xgboost_tree_dropout_is_prefix_unsafe():
+    """Round 2 #3: dropout under gbtree (rate_drop / one_drop) re-weights earlier trees."""
+    from xgboost import XGBRegressor
+
+    from spectral_predict.cv_utils import round_selection_unsupported_reason
+
+    assert round_selection_unsupported_reason(XGBRegressor(rate_drop=0.5))
+    assert round_selection_unsupported_reason(XGBRegressor(one_drop=1))
+    assert round_selection_unsupported_reason(XGBRegressor(skip_drop=0.5)) is None
+    assert round_selection_unsupported_reason(XGBRegressor()) is None
+
+
+def test_eval_only_settings_removed_when_selection_is_rejected():
+    """Round 2 #4: boosters are sanitized whether or not round selection runs."""
+    from lightgbm import LGBMRegressor
+    from xgboost import XGBRegressor
+
+    X, y = _regression_data()
+    for model in (
+        XGBRegressor(booster="dart", n_estimators=20, early_stopping_rounds=2, n_jobs=1),
+        LGBMRegressor(boosting_type="dart", n_estimators=20, early_stopping_round=2, verbose=-1),
+    ):
+        with pytest.warns(UserWarning, match="selection skipped"):
+            preds = cross_val_predict_with_early_stopping(
+                model, X, y, KFold(3), early_stopping_rounds=5
+            )
+        assert preds.shape == y.shape
+        with pytest.warns(UserWarning, match="selection skipped"):
+            out = cross_validate_with_early_stopping(model, X, y, KFold(3), early_stopping_rounds=5)
+        assert len(out["test_score"]) == 3
+
+
+def test_grid_rejected_selection_with_eval_only_settings_does_not_fail():
+    from lightgbm import LGBMRegressor
+
+    from spectral_predict.search import _run_single_config
+
+    X, y = _regression_data()
+    model = LGBMRegressor(boosting_type="dart", n_estimators=20, early_stopping_round=2, verbose=-1)
+    with pytest.warns(UserWarning, match="selection skipped"):
+        row = _run_single_config(
+            X,
+            y,
+            np.linspace(1000.0, 1100.0, X.shape[1]),
+            model,
+            "LightGBM",
+            {},
+            {"name": "raw", "deriv": 0, "window": 0, "polyorder": 0},
+            KFold(3, shuffle=True, random_state=0),
+            "regression",
+            False,
+            skip_preprocessing=True,
+            early_stopping_rounds=10,
+        )
+    assert np.isfinite(row["RMSEcv"])
+    assert row["round_selection_truncated"] is False
+
+
+def test_validation_rebuild_reproduces_fit_then_truncate(monkeypatch):
+    """Rebuilds of a truncated row fit at n_estimators_fit and truncate to the selected
+    count (round_truncation_from_row); a CatBoost row with an automatic learning rate
+    therefore rebuilds the reported model, not a direct fit at the selected count."""
+    from catboost import CatBoostRegressor
+
+    from spectral_predict.cv_utils import (
+        round_truncation_from_row,
+        set_booster_rounds,
+        truncate_booster,
+    )
+
+    row = {"n_estimators_selected": 9, "n_estimators_fit": 60, "round_selection_truncated": True}
+    assert round_truncation_from_row(row) == (60, 9)
+    assert round_truncation_from_row({"n_estimators_selected": 9}) is None
+    X, y = _regression_data()
+    base = dict(random_seed=0, verbose=0, thread_count=1, allow_writing_files=False)
+    reported = CatBoostRegressor(iterations=60, **base).fit(X, y)
+    truncate_booster(reported, 9)
+    rebuilt = CatBoostRegressor(iterations=9, **base)  # Params carry the selected count
+    set_booster_rounds(rebuilt, 60)
+    rebuilt.fit(X, y)
+    truncate_booster(rebuilt, 9)
+    np.testing.assert_array_equal(rebuilt.predict(X), reported.predict(X))
+    direct = CatBoostRegressor(iterations=9, **base).fit(X, y)
+    assert not np.allclose(direct.predict(X), reported.predict(X))
+
+
+@pytest.mark.parametrize("task", ["regression", "classification"])
+def test_nsga2_rows_record_truncation_and_parseable_params(task):
+    """Round 2 #2/#6 and GLM gaps: XGBoost Params parse (no 'missing': nan) and carry
+    the selected count; every row records the fit-then-truncate procedure; the
+    best-from-all row (classification too) carries the imbalance metadata."""
+    from spectral_predict.nsga2_search import convert_nsga2_to_v1_format, run_nsga2_search
+
+    X, y = _data(task)
+    imbalance = "class_weight" if task == "classification" else None
+    result = run_nsga2_search(
+        X=X,
+        y=y,
+        task_type=task,
+        population_size=6,
+        n_generations=2,
+        cv_folds=3,
+        min_wavelengths=5,
+        random_state=42,
+        verbose=0,
+        models=["XGBoost"],
+        early_stopping_rounds=10,
+        selection_bias=0.0,
+        imbalance_method=imbalance,
+    )
+    result["knee_solution"]["objectives"]["error"] = -1.0  # force the best-from-all row
+    result["knee_idx"] = -1
+    df = convert_nsga2_to_v1_format(result, X.shape[1], task, folds=3, X=X, y=y)
+    best = df[df.get("Is_Best_Error", False) == True]  # noqa: E712
+    assert len(best) == 1
+    for _, row in df.iterrows():
+        params = ast.literal_eval(row["Params"])
+        assert params["n_estimators"] == int(row["n_estimators_selected"])
+        assert int(row["n_estimators_fit"]) >= int(row["n_estimators_selected"])
+        assert bool(row["round_selection_truncated"])
+    assert best.iloc[0]["imbalance_method"] == imbalance

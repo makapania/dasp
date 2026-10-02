@@ -95,8 +95,10 @@ def test_tab7_refit_reproduces_grid_booster_row(gui_app):
 
     model, out = _refit(gui_app, X_df, y, row)
 
+    # Same maximum as the grid row (n_estimators_fit), same count; the final model is
+    # the full fit truncated to it.
     assert _n_estimators(model) == k
-    assert f"boosting rounds: {k} of {k}" in out
+    assert f"boosting rounds: {k} of {int(row['n_estimators_fit'])}" in out
     assert gui_app.refined_performance["r2_mean"] == pytest.approx(row["R2cv"], abs=1e-9)
 
 
@@ -146,3 +148,28 @@ def test_tab7_fits_each_booster_fold_once(gui_app, monkeypatch):
     monkeypatch.setattr(LGBMRegressor, "fit", counting_fit)
     _refit(gui_app, X_df, y, row)
     assert len(calls) == 3 + 1
+
+
+def test_tab7_rejected_selection_with_y_transform_does_not_crash(gui_app):
+    """Round 2 #5 / GLM: DART (selection rejected) plus a target transform wraps the
+    pipeline in a TransformedTargetRegressor; Tab 7 must not reach into .steps."""
+    X_df, y = _data()
+    y = y - y.min() + 1.0  # positive for Log
+    row = {
+        "Model": "LightGBM",
+        "Task": "regression",
+        "Preprocess": "raw",
+        "Deriv": 0,
+        "Window": 17,
+        "LVs": None,
+        "early_stopping_rounds": 10,
+        "Params": str(
+            {"n_estimators": 20, "boosting_type": "dart", "verbosity": -1, "random_state": 0}
+        ),
+    }
+    gui_app.refine_y_transform.set("Log")
+    try:
+        model, out = _refit(gui_app, X_df, y, row)
+    finally:
+        gui_app.refine_y_transform.set("None")
+    assert "selection skipped" in out

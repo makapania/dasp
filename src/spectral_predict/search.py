@@ -114,11 +114,13 @@ from .constants import RANDOM_STATE
 from .cv_utils import (
     _select_from_staged,
     _stage_fold,
-    apply_round_selection,
     booster_max_rounds,
     build_cv_splitter,
-    pin_auto_params,
+    round_truncation_from_row,
+    sanitize_booster,
+    set_booster_rounds,
     strip_eval_only_params,
+    truncate_booster,
     uses_round_selection,
 )
 
@@ -1184,8 +1186,17 @@ smoothing_polyorder, min_class_samples : optional (keyword-only)
                 imbalance_method=imbalance_method,
             )
 
+            # Boosters fitted at n_estimators_fit and truncated (round selection):
+            # rebuild the same way so the validated model is the reported one.
+            _truncation = round_truncation_from_row(row)
+            if _truncation is not None:
+                model = sanitize_booster(model)
+                set_booster_rounds(model, _truncation[0])
+
             # Fit on training data
             model.fit(X_train_final, y_train, **fit_kwargs)
+            if _truncation is not None:
+                truncate_booster(model, _truncation[1])
 
             # Predict on validation data
             y_pred = model.predict(X_val_final)
@@ -4386,11 +4397,10 @@ def _run_single_fold(
     """
     # Clone pipeline to avoid thread-safety issues
     pipe_clone = clone(pipe)
-    # Boosters with round selection: fitted at their maximum round count, never with
-    # an eval_set, so eval-only settings (early_stopping_rounds etc.) are removed.
+    # Boosters are never given an eval_set (with or without round selection), so
+    # eval-only settings (early_stopping_rounds etc.) are removed.
+    strip_eval_only_params(pipe_clone)
     select_rounds = uses_round_selection(pipe_clone, early_stopping_rounds, warn=False)
-    if select_rounds:
-        strip_eval_only_params(pipe_clone)
 
     # Split data
     X_train, X_test = X[train_idx], X[test_idx]
@@ -4930,14 +4940,13 @@ def _run_single_config(
     # Generators get consumed; we need the test indices for repeated-CV pooling.
     splits = list(cv_splitter.split(X, y))
 
-    # Boosters with round selection (R028): settings the booster would choose from
-    # its round count (CatBoost's automatic learning rate) are pinned before the
-    # fold-parallel CV, so every fold and the final refit share them. Configurations
-    # where selection is invalid (DART, gblinear, CatBoost shrinkage) are fitted at
-    # their configured round count instead, with one warning.
-    if uses_round_selection(pipe, early_stopping_rounds):
-        pipe = clone(pipe)
-        pin_auto_params(pipe, X[splits[0][0]], y[splits[0][0]])
+    # Boosters (R028): never given an eval_set, so eval-only settings are removed for
+    # the folds and the final fit alike. Each fold fits the maximum round count and
+    # chooses its own automatic defaults; configurations where round selection is
+    # invalid (DART, dropout, gblinear, CatBoost shrinkage) are fitted at their
+    # configured round count instead, with one warning.
+    pipe = sanitize_booster(pipe)
+    uses_round_selection(pipe, early_stopping_rounds)
 
     # Run CV (serial if n_jobs_cv=1 for reproducibility, parallel otherwise)
     if n_jobs_cv == 1:
@@ -5189,14 +5198,20 @@ def _run_single_config(
     cal_ber = None
     cal_logloss = None
 
+    n_rounds_fit = None
     try:
         # Refit the pipeline on full data to get final fitted parameters.
-        # Boosters are refit with the round count selected by CV, so the captured
-        # Params (n_estimators / iterations) describe the model that was scored.
+        # Boosters with round selection: the scored configuration is fitted at its
+        # maximum round count and truncated to the selected count, so the final model
+        # is exactly what the CV curve was read from (round-dependent defaults
+        # included) and the captured Params report the selected count.
+        n_rounds_fit = None
         if n_rounds_selected is not None:
             pipe = clone(pipe)
-            apply_round_selection(pipe, n_rounds_selected)
+            n_rounds_fit = booster_max_rounds(pipe)
         pipe.fit(X, y)
+        if n_rounds_selected is not None:
+            truncate_booster(pipe, n_rounds_selected)
 
         # Get the fitted model from pipeline for parameter capture
         # IMPORTANT: For PLS-DA and other multi-step pipelines without "model" step,
@@ -5420,6 +5435,10 @@ def _run_single_config(
             early_stopping_rounds if n_rounds_selected is not None else None
         ),
         "n_estimators_selected": n_rounds_selected,
+        # The final model was fitted at n_estimators_fit rounds and truncated to
+        # n_estimators_selected; rebuilds reproduce it (cv_utils.round_truncation_from_row).
+        "n_estimators_fit": n_rounds_fit,
+        "round_selection_truncated": n_rounds_selected is not None,
         # Store actual imbalance settings for Model Development tab to use
         # (imbalance_display is for UI, these are for exact pipeline reconstruction)
         "imbalance_method": imbalance_method,

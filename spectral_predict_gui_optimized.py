@@ -1507,6 +1507,8 @@ TOOLTIP_CONTENT = {
         'top_vars': 'top_vars (Top-Importance Wavelengths)\n\nComma-separated list of the most important wavelengths (display only; does NOT change the fit).\nN/A for models that don\'t expose feature importances.',
         'early_stopping_rounds': 'early_stopping_rounds (Boosting-Round Patience)\n\nXGBoost / LightGBM / CatBoost only. The number of boosting rounds is chosen once, from the pooled cross-validation curve (like the number of PLS latent variables): scanning from round 1, the scan stops after this many rounds without improvement in pooled RMSEcv (or accuracy) and keeps the best count. No fold is stopped on its own test samples.\nNone / blank for non-boosted models.',
         'n_estimators_selected': 'n_estimators_selected (Selected Boosting Rounds)\n\nXGBoost / LightGBM / CatBoost only. The one round count chosen from the pooled CV curve. Every *cv metric on the row is reported at this count, and Params (n_estimators / iterations) carries it, so Model Development, saved models and exports refit the same model.\nBlank for non-boosted models or when round selection was off.',
+        'n_estimators_fit': 'n_estimators_fit (Boosting Rounds Fitted)\n\nXGBoost / LightGBM / CatBoost with round selection only. The final model is fitted at this (maximum) round count, the one every CV fold used, and then truncated to n_estimators_selected, so it is exactly the model the CV curve was read from.\nBlank otherwise.',
+        'round_selection_truncated': 'round_selection_truncated (Fitted, Then Truncated)\n\nTrue when the final booster was fitted at n_estimators_fit rounds and truncated to n_estimators_selected. Model Development, validation and exports rebuild it the same way.',
         'trial_number': 'trial_number (Bayesian / TPE Trial Index)\n\nOptuna trial index inside the unified-Bayesian study.\nLow numbers = early in the search; the best trials usually appear later as TPE narrows in.',
         'Folds': 'Folds (Cross-Validation Fold Count)\n\nNumber of cross-validation folds used to compute the *cv metrics on this row.\nFor LOO this reports the effective sample count.',
         'Optimization': 'Optimization (Search Method)\n\nWhich search engine produced this row — e.g., "Unified Bayesian", "Grid", "NSGA-II".',
@@ -27342,6 +27344,29 @@ class SpectralPredictApp:
         if controller is None:
             controller = getattr(self, "search_controller", None)
         stopped = controller is not None and controller.is_end_requested()
+        not_continued = (
+            getattr(self, "_resume_not_continued_run_id", None) == analysis_run_id
+        )
+        if not_continued and not (n_model_errors or stopped):
+            # The resume was accepted, but some saved trials could not be continued
+            # (the backend declined them), so this run's success is a replacement,
+            # not the saved run resumed to completion. Keep its record: it stays
+            # offered until the user deletes it. Only the in-process claim is
+            # released, exactly as for a stopped run.
+            self._log_progress(
+                "[RUN] Part of the resumed run could not continue its saved trials, so "
+                "the saved run is kept: it is offered again until you delete it."
+            )
+            try:
+                from spectral_predict.run_state import clear_resume_state, get_active_run_id
+                if get_active_run_id() == analysis_run_id:
+                    clear_resume_state()
+            except Exception as _cr_err:
+                self._log_progress(
+                    f"[RUN] Could not release the resumed run's in-memory claim: {_cr_err}"
+                )
+            self._resume_not_continued_run_id = None
+            return
         if n_model_errors or stopped:
             why = (
                 f"{n_model_errors} model search(es) failed"
@@ -31263,11 +31288,20 @@ class SpectralPredictApp:
         if spec is None:
             return
         try:
-            from spectral_predict.run_state import get_storage_url, is_resuming
+            from spectral_predict.run_state import (
+                get_active_run_id, get_storage_url, is_resuming,
+            )
         except ImportError:
             return
         if not is_resuming():
             return
+        if info.get('resume_declined') or info.get('resume_check_failed'):
+            # Saved trials were NOT continued (different data, environment or
+            # scoring method). The replacement study finishing must not complete
+            # the saved run: it stays offered until the user deletes it
+            # (PROJECT_STATUS §1 binding decision). See
+            # _complete_run_state_after_search.
+            self._resume_not_continued_run_id = get_active_run_id()
         log_prefix, status, title, lead = spec
         message = info.get('message', '')
         self._log_progress(f"{log_prefix} {message}")
@@ -39693,10 +39727,13 @@ F1 Score:  {f1:.4f}
             from sklearn.metrics import accuracy_score, roc_auc_score, precision_score, recall_score, f1_score
             from sklearn.base import clone
             from spectral_predict.cv_utils import (
-                apply_round_selection,
                 cross_val_boosting_rounds,
                 is_boosting_model,
                 round_selection_unsupported_reason,
+                round_truncation_from_row,
+                set_booster_rounds,
+                strip_eval_only_params,
+                truncate_booster,
             )
 
             # Parse wavelength specification
@@ -41519,6 +41556,10 @@ F1 Score:  {f1:.4f}
                 print(f"y classes ({len(unique_classes)}): {unique_classes.tolist()}")
             print(f"{'='*80}\n")
 
+            # Boosters are never given an eval_set (with or without round selection):
+            # remove eval-only settings before any wrapping, for CV and final fit.
+            strip_eval_only_params(pipe)
+
             # Y-Transform: wrap pipeline with TransformedTargetRegressor if requested
             y_transform = getattr(self, 'refine_y_transform', tk.StringVar(value='None')).get()
             y_transform_active = (y_transform != 'None' and task_type == 'regression')
@@ -41574,7 +41615,14 @@ F1 Score:  {f1:.4f}
             all_cv_indices = []  # Store CV sample indices for specimen ID mapping
             X_raw = X_work  # For derivative+subset, this is preprocessed; for others, it's raw
 
-            final_model = pipe.steps[-1][1]
+            # The pipeline may be wrapped in a TransformedTargetRegressor (Y-transform).
+            _inner_pipe = (
+                pipe.regressor
+                if hasattr(pipe, 'regressor') and not hasattr(pipe, 'steps') else pipe
+            )
+            final_model = (
+                _inner_pipe.steps[-1][1] if hasattr(_inner_pipe, 'steps') else _inner_pipe
+            )
             use_early_stopping = (
                 early_stopping_rounds is not None and
                 early_stopping_rounds > 0 and
@@ -41583,7 +41631,9 @@ F1 Score:  {f1:.4f}
             # Boosters: choose ONE round count from the pooled CV curve (no fold sees
             # its own test y). Each fold is fitted once, at the maximum round count;
             # its CV predictions below are read at the selected count (no second fit).
-            # A row whose Params already carry the selected count reproduces it.
+            # The final model is fitted at the same maximum and truncated to it.
+            # A results row records its maximum (n_estimators_fit), so an unmodified
+            # row is reproduced exactly: same folds, same curve, same count.
             n_rounds_selected = None
             n_rounds_max = None
             _rounds = None
@@ -41595,6 +41645,13 @@ F1 Score:  {f1:.4f}
                     print(f"DEBUG: boosting-round selection skipped: {_rounds_skipped}")
                     use_early_stopping = False
             if use_early_stopping:
+                _row_truncation = (
+                    round_truncation_from_row(self.selected_model_config)
+                    if self.selected_model_config is not None
+                    and not self.refine_hyperparams_modified else None
+                )
+                if _row_truncation is not None:
+                    set_booster_rounds(pipe, _row_truncation[0])
                 _rounds_target_tf = None
                 if y_transform_active:
                     from spectral_predict.y_transform import YTransformWrapper
@@ -41607,10 +41664,8 @@ F1 Score:  {f1:.4f}
                 )
                 n_rounds_selected = _rounds.n_rounds
                 n_rounds_max = _rounds.max_rounds
-                # ── BOOSTING ROUND COUNT FOR THE FINAL FIT: set here, once. ──
-                # final_pipe = clone(pipe) below inherits it (with any pinned
-                # setting, e.g. CatBoost's automatic learning rate).
-                apply_round_selection(pipe, _rounds)
+                # The final fit keeps the maximum round count; it is truncated to
+                # n_rounds_selected right after final_pipe.fit (see below).
                 print(
                     f"DEBUG: {model_name} boosting rounds: {n_rounds_selected} of "
                     f"{n_rounds_max}, chosen from the pooled CV curve "
@@ -41666,10 +41721,10 @@ F1 Score:  {f1:.4f}
                     if hasattr(pipe_fold, 'predict_proba'):
                         y_proba = pipe_fold.predict_proba(X_test)
                         all_y_proba.append(y_proba)
-                    elif 'model' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
+                    elif 'model' in getattr(pipe_fold, 'named_steps', {}) and hasattr(pipe_fold.named_steps['model'], 'predict_proba'):
                         y_proba = pipe_fold.named_steps['model'].predict_proba(X_test)
                         all_y_proba.append(y_proba)
-                    elif 'lr' in pipe_fold.named_steps and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
+                    elif 'lr' in getattr(pipe_fold, 'named_steps', {}) and hasattr(pipe_fold.named_steps['lr'], 'predict_proba'):
                         # For PLS-DA, LogisticRegression is named 'lr'
                         y_proba = pipe_fold.named_steps['lr'].predict_proba(X_test)
                         all_y_proba.append(y_proba)
@@ -41948,6 +42003,11 @@ Configuration:
                     'balanced', y_array
                 )
             final_pipe.fit(X_raw, y_array, **_final_fit_kwargs)
+            # ── BOOSTING ROUND COUNT FOR THE FINAL MODEL: set here, once. ──
+            # Fitted at the maximum round count, truncated to the CV-selected count
+            # (works through a Pipeline and a TransformedTargetRegressor).
+            if n_rounds_selected is not None:
+                truncate_booster(final_pipe, n_rounds_selected)
 
             # --- Calibration metrics (predict on training data) ---
             cal_text = ""
@@ -42779,6 +42839,20 @@ External Validation Performance (n={n_val}):
                     # can flip predictions on borderline samples.
                     'early_stopping_rounds': (
                         self.selected_model_config.get('early_stopping_rounds')
+                        if self.selected_model_config else None
+                    ),
+                    # Boosters: fitted at n_estimators_fit, truncated to the selected
+                    # count; the export reproduces that procedure.
+                    'n_estimators_selected': (
+                        self.selected_model_config.get('n_estimators_selected')
+                        if self.selected_model_config else None
+                    ),
+                    'n_estimators_fit': (
+                        self.selected_model_config.get('n_estimators_fit')
+                        if self.selected_model_config else None
+                    ),
+                    'round_selection_truncated': (
+                        self.selected_model_config.get('round_selection_truncated')
                         if self.selected_model_config else None
                     ),
                     # T-36: autoscale flag — exported scripts must apply UV scaling after
