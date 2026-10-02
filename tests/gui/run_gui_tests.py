@@ -75,6 +75,8 @@ def run_interactive(args):
         print("(Running in headless mode - use --visible to see window)")
 
     app = SpectralPredictApp(root)
+    if not args.visible:
+        root.withdraw()  # the app re-shows the root at startup (zoomed)
     if hasattr(app, '_on_tier_changed'):
         app._on_tier_changed()
 
@@ -244,6 +246,7 @@ def run_smoke_test(args):
         root = tk.Tk()
         root.withdraw()
         app = SpectralPredictApp(root)
+        root.withdraw()  # the app re-shows the root at startup (zoomed)
         print("      [OK] App created successfully")
 
         # Test 2: Core modules import

@@ -779,3 +779,10 @@ and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before a
   the 34 comprehensive GUI tests (not timed here; `test_xgboost_via_gui` alone ~60 min on CI). The biggest remaining
   default-run costs are not marked slow: `test_wavelength_filtering_integration.py::TestScenario8Consistency` (2
   tests, 130 s) and five 24 s `test_t41_auto_rerun_preserves_study.py` tests.
+- **Visible "ASP ... (Not Responding)" windows during GUI tests:** withdrawing the root before
+  `SpectralPredictApp(root)` is undone by the app's own `root.state('zoomed')` in `__init__`; dialogs also call
+  `deiconify()` and every new Toplevel maps on creation. `tests/gui/conftest.py` now has a session autouse fixture
+  (off with `--visible`) that makes `Wm.state('normal'/'zoomed'/'iconic')` and `deiconify` no-ops, withdraws each new
+  Toplevel, tolerates `grab_set` on a withdrawn dialog, and re-withdraws after app startup and each reset. Verified by
+  polling MainWindowTitle of the pytest process: main showed the window, the branch showed none over the full default
+  GUI run (253 passed).

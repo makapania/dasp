@@ -56,6 +56,71 @@ def gui_visible(request):
     return request.config.getoption("--visible")
 
 
+def _toplevels(widget):
+    """Every Toplevel below ``widget`` (dialogs can be parented to any widget)."""
+    for child in widget.winfo_children():
+        if isinstance(child, tk.Toplevel):
+            yield child
+        yield from _toplevels(child)
+
+
+def _withdraw_all(root) -> None:
+    """Hide ``root`` and every Toplevel under it."""
+    for window in (root, *_toplevels(root)):
+        try:
+            window.withdraw()
+        except tk.TclError:
+            pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _keep_tk_windows_hidden(gui_visible):
+    """Headless runs: no app window or dialog may ever appear on screen.
+
+    Withdrawing the root before building the app is not enough: the app maximises
+    itself (``root.state('zoomed')``), dialogs ``deiconify()``, and a new Toplevel is
+    mapped as soon as it is created. A visible window that is busy in a test shows
+    up on the user's desktop as "ASP ... (Not Responding)". Applies to every root
+    built under tests/gui (session app, module-level apps). ``--visible`` disables it.
+    """
+    if gui_visible:
+        yield
+        return
+    mp = pytest.MonkeyPatch()
+    original_toplevel_init = tk.Toplevel.__init__
+    original_state = tk.Wm.wm_state
+    original_grab_set = tk.Misc.grab_set
+
+    def hidden_toplevel_init(self, *args, **kwargs):
+        original_toplevel_init(self, *args, **kwargs)
+        try:
+            self.withdraw()
+        except tk.TclError:
+            pass
+
+    def state_without_mapping(self, newstate=None):
+        if newstate in ("normal", "zoomed", "iconic"):
+            return None  # these would map the window
+        return original_state(self, newstate)
+
+    def grab_set_unmapped(self):
+        try:
+            return original_grab_set(self)
+        except tk.TclError:
+            return None  # "grab failed: window not viewable" on a withdrawn dialog
+
+    mp.setattr(tk.Toplevel, "__init__", hidden_toplevel_init)
+    for name in ("deiconify", "wm_deiconify"):
+        mp.setattr(tk.Wm, name, lambda self: None)
+    for name in ("state", "wm_state"):
+        mp.setattr(tk.Wm, name, state_without_mapping)
+    mp.setattr(tk.Misc, "grab_set", grab_set_unmapped)
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(scope="session")
 def session_app(gui_visible):
     """
@@ -73,6 +138,8 @@ def session_app(gui_visible):
         root.withdraw()
 
     app = SpectralPredictApp(root)
+    if not gui_visible:
+        _withdraw_all(root)  # belt and braces: startup re-shows the root (zoomed)
 
     # Initialize tier (required by app)
     if hasattr(app, '_on_tier_changed'):
@@ -298,7 +365,7 @@ def _suppress_dialogs():
 
 
 @pytest.fixture
-def gui_app(session_app):
+def gui_app(session_app, request):
     """
     Provide the session app with reset state for each test.
 
@@ -310,6 +377,8 @@ def gui_app(session_app):
     app, root = session_app
 
     unsettled = app._test_baseline.restore(app)
+    if not request.config.getoption("--visible"):
+        _withdraw_all(root)
     if unsettled:
         import warnings
 
