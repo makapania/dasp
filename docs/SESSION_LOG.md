@@ -742,3 +742,36 @@ not change mid-analysis); a holdout fixed before modelling. Real leakage = a tes
 producing that fold's score (booster early stopping on the test fold R028/R003/R022; ensemble base models trained on
 the scored fold R002/R021). Rule now in CLAUDE.md. Also: the 2026-09-28 reviews were Claude-only; Codex gpt-6-astra
 and GLM 5.3 cross-checks of all Wave 1+2 items were launched 2026-10-02 before any fix starts.
+
+## 2026-10-02 - GUI dataset state (R004-R007, R037, R038): one install path, validation from the run's own data
+
+Branch `fix/gui-dataset-state`. Gotchas worth knowing before touching data loading:
+- **Every loader goes through `_install_dataset(X_original, y, ref, metadata_df, mode=...)`.** Import
+  (`_load_and_plot_data`), Data Management Use/Merge & Use/filter/trim and calibration-transfer replace.
+  `mode="replace"` clears `excluded_spectra`, the validation split and the Quality Check report;
+  `"append"`/`"update"` keep exclusions and the holdout (pruned to labels still present). Assigning
+  `self.X`/`self.y` directly anywhere else re-opens R037: `_update_wavelengths` rebuilds X from
+  `X_original`, and `_on_target_column_changed` reindexes y to `X_original` from `combined_metadata_df`.
+- **Replace keeps the Validation checkbox while a crash-resume is pending** (`_pending_validation_indices`
+  or `run_state.is_resuming()`). Startup "Resume" restores `validation_enabled=True`; unticking it on the
+  data reload would make the launch gate's settings diff fire a restore dialog the user never caused.
+  The split itself is still cleared; the gate restores the run's own split.
+- **`_load_and_plot_data`'s readers assign `self.X_original/y/ref` piecemeal.** It now snapshots the
+  previous dataset first (`_capture_dataset_state`) and restores it on any stop before the install
+  (sub-integer axis, X/y misalignment, append failure, exception). Before, a sub-integer rejection left
+  new y next to old X (R038).
+- **`_wavelength_filtered` no longer rounds `X_original.columns` in place**; it returns a new frame.
+  Callers that relied on the reader's frame being mutated would now see unrounded columns.
+- **The worker builds its own validation set** (`_validation_snapshot(X_run, y_run, frozen validation
+  rows, frozen exclusions)`) and all five metric call sites (grid/Bayesian/NSGA-II/one-class/multiclass)
+  use it, never `self.validation_X`. `self.validation_X` is still refreshed (launch, wavelength filter,
+  baseline replace, target switch) for Tab 7/ensembles, but it is a convenience copy, not the source.
+  Samples excluded after the split are not scored. `search.check_validation_axes` makes the backend
+  raise on train/val width mismatch; equal-width axis identity can only be checked in the GUI (labels).
+- **Click exclusion:** plotted lines carry `_dasp_sample_label`/`_dasp_sample_pos` (`_tag_sample_artist`).
+  Never parse the gid back to an int: combined-file IDs are strings ('5', '007', '-3').
+- **Quality Check:** `generate_outlier_report` gets an array, so `Sample_Index` is a POSITION. The GUI
+  adds `Sample_Label`, keys tree rows by `outlier_row_<pos>` and maps iid -> label. Mark/unmark refuse a
+  report whose sample index differs from the current X.
+- `tests/gui/test_multiclass_gui.py::test_run_analysis_accepts_multiclass_engine_selection` fails on main
+  too (its fake Thread doesn't accept the `kwargs=` the launch has passed since #79). Not caused here.
